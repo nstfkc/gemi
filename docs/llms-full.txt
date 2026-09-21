@@ -3967,6 +3967,141 @@ val chat = rememberChat("https://example.com/api/support", threadId = threadId)
 val state by chat.collectState()
 ```
 
+## Using one agent across components
+
+A `ChatSession` is one conversation. Different components can show the same conversation by sharing that one session; each component that creates its own session gets a separate conversation. The generated types (`SupportAgent`) hold no state, so any number of sessions and components can use them.
+
+### One conversation, several components
+
+Create the session once, in the component that owns the screen, and hand it down. On iOS, `ChatSession` is `@Observable`, so it can go into the environment:
+
+```swift
+struct SupportScreen: View {
+  @State private var chat = ChatSession<SupportAgent>(endpoint: URL(string: "https://example.com/api/support")!)
+
+  var body: some View {
+    NavigationStack {
+      Transcript(messages: chat.messages)
+        .toolbar { StatusBadge(status: chat.status) }
+        .safeAreaInset(edge: .bottom) { Composer() }
+    }
+    .environment(chat)
+    .onDisappear { chat.close() }
+  }
+}
+
+/// Needs the session itself, to send: reads it from the environment.
+struct Composer: View {
+  @Environment(ChatSession<SupportAgent>.self) private var chat
+  @State private var draft = ""
+
+  var body: some View {
+    TextField("Message", text: $draft)
+      .disabled(chat.status == .awaitingInput)
+      .onSubmit {
+        let text = draft
+        draft = ""
+        Task { await chat.send(text) }
+      }
+  }
+}
+
+/// Only renders: takes a value.
+struct StatusBadge: View {
+  let status: ChatStatus
+
+  var body: some View {
+    if status == .streaming { ProgressView() }
+  }
+}
+
+struct Transcript: View {
+  let messages: [AgentMessage]
+
+  var body: some View {
+    List(messages) { Text($0.text) }
+  }
+}
+```
+
+On Android the session lives in a `ViewModel`, and every composable that gets that `ViewModel` gets the same session. Collect `state` once and pass it down:
+
+```kotlin
+@Composable
+fun SupportScreen(model: SupportChatViewModel = viewModel()) {
+  val state by model.chat.collectState()
+  Scaffold(
+    topBar = { StatusBadge(state.status) },
+    bottomBar = { Composer(enabled = state.status != ChatStatus.AwaitingInput, onSend = { model.send(ClientTurn(it)) }) },
+  ) { padding ->
+    Transcript(state.messages, Modifier.padding(padding))
+  }
+}
+
+@Composable
+fun StatusBadge(status: ChatStatus) {
+  if (status == ChatStatus.Streaming) CircularProgressIndicator()
+}
+```
+
+Hand children the values they render (`messages`, `status`, `pending`), and the session itself only to the ones that call it (`send`, `approve`, `stop`). The session changes as a whole: on iOS every view that reads it is re-rendered on every streamed frame, and on Android `state` is one value that changes on every frame. A child that takes plain values is skipped when its own values didn't change.
+
+### Across screens
+
+For a conversation that more than one destination shows (the chat, then a screen for the pending approvals, say), the session belongs to something that outlives each destination.
+
+On iOS, create it above the `NavigationStack` and put it in the environment there. Destinations pushed onto the stack and sheets presented from it read the same session.
+
+On Android, scope the `ViewModel` to the navigation graph that contains those destinations, rather than to each one:
+
+```kotlin
+composable("support/approvals") { entry ->
+  val graph = remember(entry) { navController.getBackStackEntry("support") }
+  val model: SupportChatViewModel = viewModel(graph)
+  ApprovalsScreen(model.chat)
+}
+```
+
+`viewModel(activity)` works too, when the whole activity is one conversation.
+
+### Same agent, separate conversations
+
+Give each conversation its own session. A list of threads keeps one session per thread id, or creates the session when a thread is opened:
+
+```kotlin
+@Composable
+fun ThreadScreen(threadId: String) {
+  // A new threadId is a new session; the old one is closed when it leaves.
+  val chat = rememberChat("https://example.com/api/support", threadId = threadId)
+  val state by chat.collectState()
+  Transcript(state.messages)
+}
+```
+
+```swift
+struct ThreadScreen: View {
+  let threadId: String
+  @State private var chat: ChatSession<SupportAgent>
+
+  init(threadId: String) {
+    self.threadId = threadId
+    _chat = State(initialValue: ChatSession(
+      endpoint: URL(string: "https://example.com/api/support")!, threadId: threadId))
+  }
+
+  var body: some View {
+    Transcript(messages: chat.messages)
+      .onDisappear { chat.close() }
+  }
+}
+```
+
+Put `.id(threadId)` on `ThreadScreen` where the same view is reused for another thread, so SwiftUI creates it (and its session) again.
+
+### Not two sessions for one conversation
+
+Each session keeps its own copy of the transcript, and only looks for a running run once, when it's created. So two live sessions on the same thread fall out of step: a turn sent from one never shows up in the other. When a conversation moves from one place to another — a preview to the full screen, or a screen rebuilt after the app was killed — close the first session. Then create the next one from the first one's `threadId`, `messages` and `cursor`, and it picks up the run where the first left off.
+
 ## Behaviour worth knowing
 
 These are the web hook's rules; the comments in `packages/gemi/ai/useChat.tsx` explain why each one exists.
