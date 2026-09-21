@@ -88,6 +88,15 @@ describe("Auth.guard", () => {
     expect(error).toBe(outage);
   });
 
+  test("guardSafe with no user throws AuthenticationError, like guard", async () => {
+    const fn = vi.fn(() => true);
+
+    const error = await inRequest(null, () => Auth.guardSafe(fn)).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
   test("guardSafe still answers false when the predicate throws", async () => {
     await expect(
       inRequest(user, () =>
