@@ -32,13 +32,16 @@ Scaffold a project with `create-gemi-app`:
 bunx create-gemi-app
 ```
 
-You'll be prompted for a project name (defaults to `my-app`). You can also pass it directly:
+You'll be prompted for a project name (defaults to `my-app`) and a template. You can also pass them directly:
 
 ```bash
-bunx create-gemi-app --project-name my-app
+bunx create-gemi-app --project-name my-app                        # saas-starter
+bunx create-gemi-app --project-name my-app --template agentic-saas
 ```
 
-The scaffolder downloads the **saas-starter** template, pins your `package.json` to the latest published `gemi` version, installs dependencies with Bun, and initializes a git repository. When it finishes, follow the printed steps:
+`--template` (`-t`) takes `saas-starter` or `agentic-saas`. With `--project-name` and no `--template`, or without a terminal, the template is **saas-starter**.
+
+The scaffolder downloads the template, pins your `package.json` to the latest published `gemi` version, installs dependencies with Bun, and initializes a git repository. When it finishes, follow the printed steps:
 
 ```bash
 cd my-app

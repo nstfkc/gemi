@@ -51,6 +51,10 @@ program.option("-t, --template <template>", "Template");
 program.action(async (options) => {
   let projectName = options.projectName;
   let template = options.template;
+  // Only a fully interactive run is asked for a template. `-p` alone has always
+  // meant saas-starter, and a select with no terminal behind it never resolves,
+  // so a CI run would exit 0 having scaffolded nothing.
+  const askForTemplate = !projectName && process.stdin.isTTY === true;
 
   if (!projectName) {
     const response = await prompts({
@@ -75,6 +79,10 @@ program.action(async (options) => {
       `Unknown template "${template}". Available: ${TEMPLATES.map((t) => t.value).join(", ")}`,
     );
     process.exit(1);
+  }
+
+  if (!template && !askForTemplate) {
+    template = "saas-starter";
   }
 
   if (!template) {
