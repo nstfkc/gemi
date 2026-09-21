@@ -45,7 +45,9 @@ export type NamedType =
       kind: "union";
       name: string;
       discriminant: string;
-      variants: { value: string; type: string }[];
+      /** A variant is a named type, or `json` when it could not be mapped —
+       *  a recursive one, say. */
+      variants: { value: string; type: TypeRef }[];
     };
 
 export type ToolModel = {

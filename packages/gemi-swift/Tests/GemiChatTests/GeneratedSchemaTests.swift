@@ -144,3 +144,32 @@ private func json(_ text: String) -> JSONObject {
     json: json(#"{"type":"output","value":{"sentiment":"negative","topics":["billing"]}}"#))
   #expect(Classifier.output(whole) == .init(sentiment: .negative, topics: ["billing"]))
 }
+
+@Test func aKeywordToolNarrowsAndItsKeywordKeysEncode() throws {
+  let part = ToolCallPart(
+    json: json(
+      #"{"type":"tool-call","toolCallId":"tc_10","name":"default","input":{"in":null,"for":"x"}}"#
+    ))
+  guard case .default(let call) = SupportAgent.toolCall(part) else {
+    Issue.record("expected .default")
+    return
+  }
+  #expect(call.input == SupportAgent.DefaultInput(in: nil, for: "x"))
+  // `in` is a required nullable, so the file writes its own `encode`.
+  #expect(try JSONValue(encoding: call.input!) == ["in": .null, "for": "x"])
+}
+
+@Test func aRecursiveTaggedUnionIsTypedOneLevelThenRawJSON() throws {
+  let node: JSONValue = [
+    "kind": "branch",
+    "children": [["kind": "leaf", "value": "a"], ["kind": "branch", "children": []]],
+  ]
+  let decoded = try node.decode(as: OddAgent.OddOutputNode.self)
+  guard case .branch(let branch) = decoded else {
+    Issue.record("expected .branch")
+    return
+  }
+  #expect(branch.children.first == .leaf(.init(kind: "leaf", value: "a")))
+  #expect(branch.children.last == .branch(["kind": "branch", "children": []]))
+  #expect(try JSONValue(encoding: decoded) == node)
+}
