@@ -14,7 +14,7 @@ import type { HttpRequest } from "../http/HttpRequest";
 import { ViewRouter } from "../http/ViewRouter";
 import { Kernel } from "../kernel";
 import { ServiceProvider } from "../support/ServiceProvider";
-import { Agent } from "./Agent";
+import { Agent, AgentTool } from "./Agent";
 import {
   AgentController,
   type AgentHookContext,
@@ -23,7 +23,9 @@ import {
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
-import type { AgentMessage } from "./types";
+import { s } from "./Schema";
+import { StubAgentRun } from "./store/stubAgentRun";
+import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
 
 /**
  * The controller's own hooks, driven through a real request to an agent route
@@ -107,9 +109,72 @@ class Chat extends AgentController {
   }
 }
 
+const refundOrder = AgentTool.create({
+  name: "refundOrder",
+  description: "Refund an order",
+  inputSchema: s.object({ orderId: s.string() }),
+  outputSchema: s.object({ refundId: s.string() }),
+  requiresApproval: true,
+  execute: async ({ orderId }) => ({ refundId: `rf_${orderId}` }),
+});
+
+/** A run that parks on an approval, with an audit write in front of it. */
+class Refunds extends AgentController {
+  agent = Agent.create({
+    name: "refunds",
+    provider: fakeProvider([
+      { type: "tool-call", toolCallId: "c1", name: "refundOrder", args: '{"orderId":"ord_1"}' },
+      finish(),
+    ]),
+    tools: [refundOrder],
+  }) as any;
+  liveRuns = liveRuns;
+  hookHoldMs = holdMs;
+
+  protected async onToolCall(_: unknown, ctx: AgentHookContext) {
+    // Slower than the run and every hook after it: the next frame's hook is
+    // queued behind this one, and is not called until it is done.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    log.push(`toolcall:${userOf(ctx)}`);
+  }
+
+  protected async onAwaitingInput(pending: PendingToolCall[], ctx: AgentHookContext) {
+    log.push(`awaiting:${pending.length}:${userOf(ctx)}`);
+  }
+}
+
+/** A run whose `result()` rejects: the one `onError` not off the event stream. */
+class Broken extends AgentController {
+  agent = {
+    name: "broken",
+    tools: [] as const,
+    skills: [] as const,
+    output: undefined,
+    provider: {},
+    stream: () => {
+      const run = new StubAgentRun("run_broken");
+      run.result = () => Promise.reject(new Error("store unreachable"));
+      // A stub that never emitted reads from a cursor it never reaches, and
+      // its frames would not end.
+      run.emit({ type: "run-start", runId: run.runId } as AgentStreamEvent);
+      run.finish();
+      return run;
+    },
+  } as any;
+  liveRuns = liveRuns;
+  hookHoldMs = holdMs;
+
+  protected async onError(error: { message: string }, ctx: AgentHookContext) {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    log.push(`error:${error.message}:${userOf(ctx)}`);
+  }
+}
+
 class Api extends ApiRouter {
   routes = {
     "/chat": this.agent(Chat).middleware({ stream: "auth" }),
+    "/refunds": this.agent(Refunds).middleware({ stream: "auth" }),
+    "/broken": this.agent(Broken).middleware({ stream: "auth" }),
   };
 }
 
@@ -134,9 +199,9 @@ class AppKernel extends Kernel {
 
 const app = new App({ kernel: AppKernel });
 
-function send(body: Record<string, unknown>) {
+function send(body: Record<string, unknown>, path = "/api/chat") {
   return app.fetch(
-    new Request("http://gemi.dev/api/chat", {
+    new Request(`http://gemi.dev${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: "access_token=tok-alice" },
       body: JSON.stringify(body),
@@ -202,7 +267,7 @@ describe("AgentController hooks, inside the request that started the run", () =>
     await tick();
 
     // `onError` fires off the event stream, not after the run, and here it is
-    // the last hook to finish: the request waits for it by itself.
+    // the last hook to finish: the request waits for it all the same.
     expect(log).toEqual([
       "message:user:1",
       "message:assistant:1",
@@ -256,5 +321,24 @@ describe("AgentController hooks, inside the request that started the run", () =>
 
     await until(() => ends().length === 1);
     expect(log).toEqual(["end:/api/chat"]);
+  });
+
+  test("an event hook queued behind a slower one still sees the user, and onRequestEnd waits for it", async () => {
+    await (await send({ text: "refund ord_1" }, "/api/refunds")).text();
+    await until(() => ends().length > 0);
+    await tick();
+
+    // `onAwaitingInput` is where an approver is notified, and it is not called
+    // until the audit write in `onToolCall` is done — by which time the run,
+    // and every hook after it, has long settled.
+    expect(log).toEqual(["toolcall:1", "awaiting:1:1", "end:/api/refunds"]);
+  });
+
+  test("an onError for a run whose result rejects sees the user, and onRequestEnd runs after it", async () => {
+    await (await send({ text: "hi" }, "/api/broken")).text();
+    await until(() => ends().length > 0);
+    await tick();
+
+    expect(log).toEqual(["error:store unreachable:1", "end:/api/broken"]);
   });
 });

@@ -174,8 +174,15 @@ export class MemoryLiveRuns implements LiveRuns {
   /**
    * Takes ownership of a run: starts buffering its frames and holds it until
    * `ttlMs` past the end.
+   *
+   * Settles once the run's last frame has been buffered and every `onEvent` it
+   * led to has settled, and never rejects. The hooks run on a chain of their
+   * own (see `pump`), so a frame's hook can be called well after the frame
+   * arrived — after the run, too — and whoever needs to wait for the app's
+   * code has only this to wait on: by the time a hook is called it is too late
+   * to start waiting for it.
    */
-  register(run: AgentRun, params: RegisterParams = {}): void {
+  register(run: AgentRun, params: RegisterParams = {}): Promise<void> {
     const entry: Entry = {
       run: run as AgentRun,
       threadId: params.threadId,
@@ -195,7 +202,7 @@ export class MemoryLiveRuns implements LiveRuns {
     if (params.clientRunId) {
       this.byClientRun.set(params.clientRunId, run.runId);
     }
-    void this.pump(entry, params);
+    return this.pump(entry, params);
   }
 
   /**
