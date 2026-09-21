@@ -32,6 +32,7 @@ public object SupportAgent :
     public data class Stats(val value: TypedToolCall<StatsInput, Nothing>) : ToolCall
     public data class Ping(val value: TypedToolCall<PingInput, Nothing>) : ToolCall
     public data class Ask(val value: TypedToolCall<AskInput, Nothing>) : ToolCall
+    public data class Default(val value: TypedToolCall<DefaultInput, Nothing>) : ToolCall
     public data class RefundOrder(val value: TypedToolCall<RefundOrderInput, Nothing>) : ToolCall
 
     /** A tool this file does not know — added since it was generated, or a
@@ -46,6 +47,7 @@ public object SupportAgent :
     public data class Stats(val value: TypedToolResult<StatsOutput>) : ToolResult
     public data class Ping(val value: TypedToolResult<JsonElement>) : ToolResult
     public data class Ask(val value: TypedToolResult<AskOutput>) : ToolResult
+    public data class Default(val value: TypedToolResult<DefaultOutput>) : ToolResult
     public data class RefundOrder(val value: TypedToolResult<RefundOrderOutput>) : ToolResult
 
     /** A tool this file does not know — added since it was generated, or a
@@ -60,6 +62,7 @@ public object SupportAgent :
     public data class Stats(val value: TypedPendingCall<StatsInput, StatsOutput>) : Pending
     public data class Ping(val value: TypedPendingCall<PingInput, JsonElement>) : Pending
     public data class Ask(val value: TypedPendingCall<AskInput, AskOutput>) : Pending
+    public data class Default(val value: TypedPendingCall<DefaultInput, DefaultOutput>) : Pending
     public data class RefundOrder(val value: TypedPendingCall<RefundOrderInput, RefundOrderOutput>) : Pending
 
     /** A tool this file does not know — added since it was generated, or a
@@ -75,6 +78,7 @@ public object SupportAgent :
       "stats" -> ToolCall.Stats(TypedToolCall(part, serializer<StatsInput>(), null))
       "ping" -> ToolCall.Ping(TypedToolCall(part, serializer<PingInput>(), null))
       "ask" -> ToolCall.Ask(TypedToolCall(part, serializer<AskInput>(), null))
+      "default" -> ToolCall.Default(TypedToolCall(part, serializer<DefaultInput>(), null))
       "refund_order" -> ToolCall.RefundOrder(TypedToolCall(part, serializer<RefundOrderInput>(), null))
       else -> ToolCall.Unknown(part)
     }
@@ -87,6 +91,7 @@ public object SupportAgent :
       "stats" -> TypedToolResult.of(part, serializer<StatsOutput>())?.let(ToolResult::Stats) ?: ToolResult.Unknown(part)
       "ping" -> TypedToolResult.of(part, serializer<JsonElement>())?.let(ToolResult::Ping) ?: ToolResult.Unknown(part)
       "ask" -> TypedToolResult.of(part, serializer<AskOutput>())?.let(ToolResult::Ask) ?: ToolResult.Unknown(part)
+      "default" -> TypedToolResult.of(part, serializer<DefaultOutput>())?.let(ToolResult::Default) ?: ToolResult.Unknown(part)
       "refund_order" -> TypedToolResult.of(part, serializer<RefundOrderOutput>())?.let(ToolResult::RefundOrder) ?: ToolResult.Unknown(part)
       else -> ToolResult.Unknown(part)
     }
@@ -99,6 +104,7 @@ public object SupportAgent :
       "stats" -> Pending.Stats(TypedPendingCall(call, serializer<StatsInput>(), serializer<StatsOutput>()))
       "ping" -> Pending.Ping(TypedPendingCall(call, serializer<PingInput>(), serializer<JsonElement>()))
       "ask" -> Pending.Ask(TypedPendingCall(call, serializer<AskInput>(), serializer<AskOutput>()))
+      "default" -> Pending.Default(TypedPendingCall(call, serializer<DefaultInput>(), serializer<DefaultOutput>()))
       "refund_order" -> Pending.RefundOrder(TypedPendingCall(call, serializer<RefundOrderInput>(), serializer<RefundOrderOutput>()))
       else -> Pending.Unknown(call)
     }
@@ -231,6 +237,17 @@ public object SupportAgent :
   @Serializable
   public data class AskOutput(
     public val answer: String,
+  )
+
+  @Serializable
+  public data class DefaultInput(
+    public val `in`: String?,
+    public val `for`: String,
+  )
+
+  @Serializable
+  public data class DefaultOutput(
+    public val level: Double,
   )
 
   @Serializable
