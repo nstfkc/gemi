@@ -51,3 +51,10 @@ declare module "gemi/client" {
   export interface I18nDictionary extends AppDictionary<typeof I18nComponents> {}
   export interface Features extends AppFeatureMap<typeof AppFeatures> {}
 }
+
+// The same table as `RPC`, minus the framework's `/auth` routes, for
+// `McpRouter.fromApiRoute` — see `McpRoutes` in `http/McpRouter.ts`. It lives
+// on `gemi/http` because that is what an app's MCP file imports.
+declare module "gemi/http" {
+  export interface McpRoutes extends AppRPC<Api> {}
+}
