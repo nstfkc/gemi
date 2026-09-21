@@ -13,6 +13,7 @@ public enum SupportAgent: AgentSchema {
     case stats(TypedToolCall<StatsInput, Never>)
     case ping(TypedToolCall<PingInput, Never>)
     case ask(TypedToolCall<AskInput, Never>)
+    case `default`(TypedToolCall<DefaultInput, Never>)
     case refundOrder(TypedToolCall<RefundOrderInput, Never>)
     /// A tool this file does not know — added since it was generated, or a
     /// skill — or a payload that no longer decodes.
@@ -26,6 +27,7 @@ public enum SupportAgent: AgentSchema {
     case stats(TypedToolResult<StatsOutput>)
     case ping(TypedToolResult<JSONValue>)
     case ask(TypedToolResult<AskOutput>)
+    case `default`(TypedToolResult<DefaultOutput>)
     case refundOrder(TypedToolResult<RefundOrderOutput>)
     /// A tool this file does not know — added since it was generated, or a
     /// skill — or a payload that no longer decodes.
@@ -39,6 +41,7 @@ public enum SupportAgent: AgentSchema {
     case stats(TypedPendingCall<StatsInput, StatsOutput>)
     case ping(TypedPendingCall<PingInput, JSONValue>)
     case ask(TypedPendingCall<AskInput, AskOutput>)
+    case `default`(TypedPendingCall<DefaultInput, DefaultOutput>)
     case refundOrder(TypedPendingCall<RefundOrderInput, RefundOrderOutput>)
     /// A tool this file does not know — added since it was generated, or a
     /// skill — or a payload that no longer decodes.
@@ -53,6 +56,7 @@ public enum SupportAgent: AgentSchema {
     case "stats": .stats(TypedToolCall(part))
     case "ping": .ping(TypedToolCall(part))
     case "ask": .ask(TypedToolCall(part))
+    case "default": .default(TypedToolCall(part))
     case "refund_order": .refundOrder(TypedToolCall(part))
     default: .unknown(part)
     }
@@ -66,6 +70,7 @@ public enum SupportAgent: AgentSchema {
     case "stats": TypedToolResult<StatsOutput>(part).map(ToolResult.stats) ?? .unknown(part)
     case "ping": TypedToolResult<JSONValue>(part).map(ToolResult.ping) ?? .unknown(part)
     case "ask": TypedToolResult<AskOutput>(part).map(ToolResult.ask) ?? .unknown(part)
+    case "default": TypedToolResult<DefaultOutput>(part).map(ToolResult.`default`) ?? .unknown(part)
     case "refund_order": TypedToolResult<RefundOrderOutput>(part).map(ToolResult.refundOrder) ?? .unknown(part)
     default: .unknown(part)
     }
@@ -79,6 +84,7 @@ public enum SupportAgent: AgentSchema {
     case "stats": .stats(TypedPendingCall(call))
     case "ping": .ping(TypedPendingCall(call))
     case "ask": .ask(TypedPendingCall(call))
+    case "default": .default(TypedPendingCall(call))
     case "refund_order": .refundOrder(TypedPendingCall(call))
     default: .unknown(call)
     }
@@ -204,10 +210,10 @@ public enum SupportAgent: AgentSchema {
 
     public func encode(to encoder: Encoder) throws {
       var container = encoder.container(keyedBy: CodingKeys.self)
-      try container.encode(amountCents, forKey: .amountCents)
-      try container.encode(currency, forKey: .currency)
-      try container.encode(reason, forKey: .reason)
-      try container.encodeIfPresent(metadata, forKey: .metadata)
+      try container.encode(self.amountCents, forKey: .amountCents)
+      try container.encode(self.currency, forKey: .currency)
+      try container.encode(self.reason, forKey: .reason)
+      try container.encodeIfPresent(self.metadata, forKey: .metadata)
     }
   }
 
@@ -322,6 +328,35 @@ public enum SupportAgent: AgentSchema {
 
     public init(answer: String) {
       self.answer = answer
+    }
+  }
+
+  public struct DefaultInput: Codable, Hashable, Sendable {
+    public var `in`: String?
+    public var `for`: String
+
+    public init(`in`: String? = nil, `for`: String) {
+      self.in = `in`
+      self.for = `for`
+    }
+
+    private enum CodingKeys: String, CodingKey {
+      case `in`
+      case `for`
+    }
+
+    public func encode(to encoder: Encoder) throws {
+      var container = encoder.container(keyedBy: CodingKeys.self)
+      try container.encode(self.in, forKey: .in)
+      try container.encode(self.for, forKey: .for)
+    }
+  }
+
+  public struct DefaultOutput: Codable, Hashable, Sendable {
+    public var level: Double
+
+    public init(level: Double) {
+      self.level = level
     }
   }
 

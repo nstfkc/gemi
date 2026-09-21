@@ -54,7 +54,7 @@ export function renderSwift(agent: AgentModel): string {
   for (const view of views) {
     emit();
     emit(`  public enum ${view.name}: Sendable, Hashable {`);
-    for (const tool of tools) emit(`    case ${tool.case}(${view.typed(tool)})`);
+    for (const tool of tools) emit(`    case ${escape(tool.case)}(${view.typed(tool)})`);
     emit("    /// A tool this file does not know — added since it was generated, or a");
     emit("    /// skill — or a payload that no longer decodes.");
     emit(`    case unknown(${view.raw})`);
@@ -72,7 +72,7 @@ export function renderSwift(agent: AgentModel): string {
       for (const tool of tools) {
         const typed = view.typed(tool).replace(/<.*>$/, "");
         const value = view.failable
-          ? `${view.typed(tool)}(${argument}).map(${view.name}.${tool.case}) ?? .unknown(${argument})`
+          ? `${view.typed(tool)}(${argument}).map(${view.name}.${escape(tool.case)}) ?? .unknown(${argument})`
           : `.${tool.case}(${typed}(${argument}))`;
         emit(`    case ${JSON.stringify(tool.name)}: ${value}`);
       }
@@ -181,7 +181,9 @@ function renderStruct(name: string, properties: Property[]): string[] {
     lines.push("    var container = encoder.container(keyedBy: CodingKeys.self)");
     for (const field of fields) {
       const method = field.optional ? "encodeIfPresent" : "encode";
-      lines.push(`    try container.${method}(${field.name}, forKey: .${field.name})`);
+      // `self.`, as in `init`: a keyword field is `in`, and a bare `in` is not
+      // an expression. After a dot it needs no backticks.
+      lines.push(`    try container.${method}(self.${field.name}, forKey: .${field.name})`);
     }
     lines.push("  }");
   }
@@ -207,12 +209,12 @@ function renderEnum(name: string, values: string[]): string[] {
 function renderUnion(
   name: string,
   discriminant: string,
-  variants: { value: string; type: string }[],
+  variants: { value: string; type: TypeRef }[],
 ): string[] {
   const names = caseIdentifiers(variants.map((variant) => variant.value));
   const lines = [`public enum ${name}: Codable, Hashable, Sendable {`];
   variants.forEach((variant, index) =>
-    lines.push(`  case ${escape(names[index]!)}(${variant.type})`),
+    lines.push(`  case ${escape(names[index]!)}(${swiftType(variant.type)})`),
   );
   lines.push("");
   lines.push("  private enum Discriminant: String, CodingKey {");
@@ -225,7 +227,7 @@ function renderUnion(
   lines.push("    switch value {");
   variants.forEach((variant, index) => {
     lines.push(
-      `    case ${JSON.stringify(variant.value)}: self = .${names[index]}(try ${variant.type}(from: decoder))`,
+      `    case ${JSON.stringify(variant.value)}: self = .${names[index]}(try ${swiftType(variant.type)}(from: decoder))`,
     );
   });
   lines.push("    default:");
