@@ -17,6 +17,7 @@ import {
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
+import { toResponsesInput } from "./providers/request";
 import { s } from "./Schema";
 import { StubAgentRun } from "./store/stubAgentRun";
 import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
@@ -1770,8 +1771,8 @@ describe("a file a tool showed the model, seen through the route", () => {
     );
     expect(storedInjected).toEqual([injected[0].message]);
 
-    // The bytes are still resolvable through the scope, under the id the model
-    // was never given but the tool was.
+    // The bytes are still resolvable through the scope, under the id the tool
+    // returned — and, since #500, the id the model is told beside the file.
     const attachmentId = (injected[0].message.content[0] as any).attachmentId;
     const file = await controller.handleFor("org:acme").file(attachmentId);
     expect(await file.text()).toBe("PNGDATA");
@@ -1795,6 +1796,158 @@ describe("a file a tool showed the model, seen through the route", () => {
       fileId: "file_1",
       messageId: injected[0].message.id,
       createdAt: injected[0].message.createdAt,
+    });
+  });
+});
+
+/**
+ * #500, from upload to tool. A user uploads a product image and asks for a
+ * product to be made from it; the tool takes the image by id. Before, the
+ * model saw the picture and had no id to give, and a storage-only upload could
+ * not be part of a turn at all.
+ */
+describe("a user's upload, named to the model and handed to a tool", () => {
+  function shop() {
+    const seen: string[] = [];
+    const createProduct = AgentTool.create({
+      name: "create_product",
+      description: "Creates a product from an image",
+      inputSchema: s.object({ imageId: s.string(), specsId: s.string() }),
+      outputSchema: s.object({ ok: s.boolean() }),
+      execute: async (input, ctx) => {
+        for (const id of [input.imageId, input.specsId]) {
+          const file = await ctx.attachments.file(id);
+          seen.push(`${file.name}:${await file.text()}`);
+        }
+        return { ok: true };
+      },
+    });
+    return { seen, createProduct };
+  }
+
+  test("both ids travel with the turn, the model is told them, and the tool resolves them", async () => {
+    const { seen, createProduct } = shop();
+    // The provider's script is filled in once the ids exist: it plays the
+    // model copying them out of the lines it was shown. The upload has to go
+    // through this same provider first, so the script cannot be written up
+    // front.
+    const provider = fakeProvider();
+    const scripts = (provider as any).scripts as ProviderEvent[][];
+    const agent = Agent.create({ name: "shop", provider, tools: [createProduct] });
+    const Chat = ScopedChat(agent);
+    class StorageFirst extends Chat {
+      attachmentDestination(file: File) {
+        return file.name.endsWith(".csv") ? ("storage" as const) : ("both" as const);
+      }
+    }
+    const controller = new StorageFirst();
+
+    const image = await controller.upload(uploadRequest(file("product.png", "image/png", "PNG")));
+    const specs = await controller.upload(uploadRequest(file("specs.csv", "text/csv", "a,b")));
+    expect(image.destination).toBe("both");
+    expect(specs.destination).toBe("storage");
+    expect(specs.fileId).toBeUndefined();
+
+    scripts.push(
+      [
+        {
+          type: "tool-call",
+          toolCallId: "c1",
+          name: "create_product",
+          args: JSON.stringify({ imageId: image.attachmentId, specsId: specs.attachmentId }),
+        },
+        finish(),
+      ],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+
+    const response = await controller.stream(
+      jsonRequest({
+        // The upload answers, passed on whole — `size` and `destination`
+        // included — which is what `sendMessage({ files: [await attach(f)] })`
+        // does.
+        turn: { text: "make a product from these", files: [image, specs] },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const events = await eventsOf(response);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+
+    // What the provider would be sent for the user's turn.
+    const input = toResponsesInput(provider.calls[0]!.messages, provider.capabilities);
+    const user = input.find((item) => item.role === "user")!;
+    expect(user.content).toEqual([
+      { type: "input_text", text: "make a product from these" },
+      {
+        type: "input_text",
+        text: `[attachment id="${image.attachmentId}" name="product.png" mimeType="image/png"]`,
+      },
+      { type: "input_image", file_id: image.fileId },
+      {
+        type: "input_text",
+        text: `[attachment id="${specs.attachmentId}" name="specs.csv" mimeType="text/csv" — its contents are not shown to you; a tool can read the file by this id]`,
+      },
+    ]);
+
+    // And the ids the model named resolve, in this scope, to the bytes.
+    expect(seen).toEqual(["product.png:PNG", "specs.csv:a,b"]);
+  });
+
+  describe("turn.files is the client's, and is checked before anything runs", () => {
+    async function send(files: unknown) {
+      const run = new StubAgentRun("run_files");
+      const { agent, calls } = stubAgent(run);
+      class Chat extends AgentController {
+        agent = agent;
+        liveRuns = new MemoryLiveRuns();
+      }
+      const response = await new Chat().stream(jsonRequest({ turn: { text: "hi", files } }));
+      run.finish();
+      return { response, calls };
+    }
+
+    test.each([
+      ["an entry that is not an object", ["gemi_att_1"], /turn.files\[0\] must be an object/],
+      ["a non-string fileId", [{ fileId: 42 }], /turn.files\[0\].fileId must be a string/],
+      [
+        "a non-string attachmentId",
+        [{ fileId: "file_1", attachmentId: { id: "gemi_att_1" } }],
+        /attachmentId must be a string/,
+      ],
+      ["a non-string name", [{ fileId: "file_1", name: ["a"] }], /name must be a string/],
+      [
+        "an attachmentId without the prefix",
+        [{ attachmentId: "att_1" }],
+        /not a gemi attachment id/,
+      ],
+      ["a gemi id in fileId", [{ fileId: "gemi_att_1" }], /put this one in `attachmentId`/],
+      ["neither id", [{ name: "a.png" }], /neither a `fileId` nor an `attachmentId`/],
+      ["an empty fileId and nothing else", [{ fileId: "" }], /neither/],
+    ])("%s is a 400, and no run starts", async (_label, files, message) => {
+      const { response, calls } = await send(files);
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe("invalid_request");
+      expect(body.error.message).toMatch(message);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("the known fields pass, unknown ones are dropped, and null reads as absent", async () => {
+      const { response, calls } = await send([
+        {
+          fileId: "file_1",
+          attachmentId: "gemi_att_1",
+          name: "a.png",
+          mimeType: "image/png",
+          size: 3,
+        },
+        { fileId: null, attachmentId: "gemi_att_2", downgraded: "no_scope" },
+      ]);
+      expect(response.status).toBe(200);
+      expect(calls[0]!.turn!.files).toStrictEqual([
+        { fileId: "file_1", attachmentId: "gemi_att_1", name: "a.png", mimeType: "image/png" },
+        { attachmentId: "gemi_att_2" },
+      ]);
     });
   });
 });

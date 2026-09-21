@@ -2536,8 +2536,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           fileId: shown.fileId,
           name: record.attachment.name,
           mimeType: record.attachment.mimeType,
-          // What marks this as a file the run injected rather than one the user
-          // attached. The pruning window reads it; see `historyForProvider`.
+          // Shown to the model beside the file (see `attachmentLine` in
+          // `providers/request.ts`), so a file one tool made can be the input
+          // of the next. Not what marks the part as injected — a user's upload
+          // carries one too; `historyForProvider` keys on the message id.
           attachmentId: record.attachment.id,
         },
       ],
@@ -2648,8 +2650,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     // Injected messages are named by the tool call that made them, and that
     // record is the test — not `attachmentId` on the part. A user's own upload
-    // can carry an `attachmentId` too: `useChat` spreads whatever the app puts
-    // in `turn.files` onto the user message, and `attach()` answers one.
+    // carries an `attachmentId` too: `ingestTurn` copies it from `turn.files`,
+    // and `useChat` spreads the entry onto its local user message.
     const injected = new Set<string>();
     for (const message of messages) {
       for (const part of message.content) {
@@ -2870,11 +2872,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         role: "user",
         content: [
           ...(turn.text ? [{ type: "text" as const, text: turn.text }] : []),
+          // Field by field rather than spread: an entry can carry whatever
+          // `attach()` answered (`downgraded`, `size`), and only these four
+          // mean anything on a `FilePart`. `attachmentId` is among them — it is
+          // what lets the model name this file to a tool — and an absent
+          // `fileId` is a storage-only upload, left out rather than written as
+          // `undefined`.
           ...(turn.files ?? []).map((file) => ({
             type: "file" as const,
-            fileId: file.fileId,
+            ...(file.fileId ? { fileId: file.fileId } : {}),
             name: file.name,
             mimeType: file.mimeType,
+            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
           })),
         ],
         createdAt: new Date().toISOString(),
