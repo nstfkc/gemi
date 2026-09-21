@@ -25,11 +25,16 @@ class CreateProductRequest extends HttpRequest<
 
 class RenameRequest extends HttpRequest<{ name: string; note?: string }, {}> {}
 
+class TouchRequest extends HttpRequest<{ note?: string }, {}> {}
+
 class ProductController extends Controller {
   create(req = new CreateProductRequest()) {
     return { id: 1, orgId: req.params.orgId };
   }
   rename(req = new RenameRequest()) {
+    return { ok: true };
+  }
+  touch(req = new TouchRequest()) {
     return { ok: true };
   }
 }
@@ -63,6 +68,7 @@ class Api extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/products/:id/name": this.put(ProductController, "rename"),
+    "/products/:id/touch": this.patch(ProductController, "touch"),
     "/health": this.get(() => ({ ok: true })),
   };
 }
@@ -93,6 +99,11 @@ describe("fromApiRoute", () => {
           description: "Delete an order",
           params: { orgId: () => "org_1", orderId: "input" },
           requiresApproval: true,
+        }),
+        // A body whose fields are all optional, or that has none, needs no schema.
+        "touch-product": this.fromApiRoute("PATCH", "/products/:id/touch", {
+          description: "Touch a product",
+          params: { id: "input" },
         }),
         health: this.fromApiRoute("GET", "/health", { description: "Health" }),
       };
@@ -144,6 +155,29 @@ describe("fromApiRoute", () => {
           description: "x",
           // @ts-expect-error `title` is a field the route would never read
           input: s.object({ name: s.string(), title: s.string() }),
+          params: { id: "input" },
+        }),
+        // @ts-expect-error `sku` and `quantity` are required, so a schema for them is too
+        noInput: this.fromApiRoute("POST", "/org/:orgId/orders", {
+          description: "x",
+          params: { orgId: "input" },
+        }),
+        // @ts-expect-error the JSON half of this body still requires `name` and `price`
+        noInputBesideFiles: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "x",
+          params: { orgId: "input" },
+          files: { image: "input" },
+        }),
+        optionalBodyExtraField: this.fromApiRoute("PATCH", "/products/:id/touch", {
+          description: "x",
+          // @ts-expect-error `title` is not a field of a body whose fields are all optional
+          input: s.object({ title: s.string() }),
+          params: { id: "input" },
+        }),
+        optionalBodyWrongType: this.fromApiRoute("PATCH", "/products/:id/touch", {
+          description: "x",
+          // @ts-expect-error `note` is a string
+          input: s.object({ note: s.number() }),
           params: { id: "input" },
         }),
         binaryInInput: this.fromApiRoute("POST", "/org/:orgId/products", {
