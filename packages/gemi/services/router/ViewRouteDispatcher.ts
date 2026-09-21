@@ -30,6 +30,8 @@ import { FeatureManager } from "../features/FeatureManager";
 import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
+import { isPolicyDeniedError } from "../../orm/errors";
+import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
@@ -160,6 +162,15 @@ export function assertNoReservedRoutePaths(routePaths: string[]) {
         `Mount it somewhere else.`,
     );
   }
+}
+
+/** A request breaker's `payload.view` as the page response it stands for. */
+function viewBreakResponse(view: Record<string, any>) {
+  const { status = 400, error } = view;
+  return new Response(error?.message, {
+    ...view,
+    status,
+  });
 }
 
 export class ViewRouteDispatcher {
@@ -1132,17 +1143,23 @@ export class ViewRouteDispatcher {
               status,
             });
           } else {
-            const { status = 400, error } = err.payload.view;
-            return new Response(error?.message, {
-              ...err.payload.view,
-              status,
-            });
+            return viewBreakResponse(err.payload.view);
           }
         }
         // `Query.instant` rethrows the entry's error object into this catch —
         // already reported when the rejection settled, so skip the duplicate.
         if (!reportedQueryErrors.has(err)) {
           this.hooks.onRequestFail(httpRequest, err);
+        }
+        // A loader or a middleware read a policied model it may not see. Left
+        // to throw, it became the server's 500, whose body in production is
+        // the error's stack and so the policy's message: a server error for
+        // what is a refusal. The developer keeps the reason through
+        // `onRequestFail` above and the log; the client gets the api's 403
+        // body on a `.json` navigation and a 403 page otherwise.
+        if (isPolicyDeniedError(err)) {
+          console.error(err);
+          return isViewDataRequest ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
         }
         throw err;
       }
