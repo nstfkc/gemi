@@ -14,6 +14,7 @@ import { app } from "../../foundation/app";
 import { markModelOriginated } from "../../http/modelOriginated";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
+import { isPolicyDeniedError } from "../../orm/errors";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -123,6 +124,28 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
   });
 }
 
+/**
+ * What a client gets when a policy refuses the request's ORM call.
+ *
+ * Not the error's message: that names the model and the operation, and for
+ * `no-user` it is a paragraph about `Model.asSystem` written for the app's
+ * developer. They get it in `onRequestFail` and the log instead.
+ *
+ * 403 for both reasons, `no-user` included. By the time a policy reads the
+ * user, a route guarded by `auth` has already answered 401 for a request
+ * without a session, so a `no-user` denial here is almost always a route that
+ * never asked to authenticate. A 401 would tell the client to sign in, which
+ * it may already have done: the route still would not read the session, and a
+ * client that redirects to login on 401 would loop. Nothing the client can
+ * send fixes it, which is what 403 says.
+ */
+function policyDeniedResponse() {
+  return new Response(JSON.stringify({ error: { message: "Forbidden" } }), {
+    status: 403,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export class ApiRouteDispatcher {
   static token = "router.api";
 
@@ -193,6 +216,11 @@ export class ApiRouteDispatcher {
       } else {
         this.onRequestFail(httpRequest, err);
         console.error(err);
+        // A middleware can load a policied model, a membership check say, and
+        // its denial is the same refusal as the handler's.
+        if (isPolicyDeniedError(err)) {
+          return policyDeniedResponse();
+        }
         throw err;
       }
     }
@@ -221,6 +249,12 @@ export class ApiRouteDispatcher {
       }
       this.onRequestFail(ctx.req, err);
       console.error(err);
+      // Answered here rather than in `server/`, so an in-process `dispatchAs`
+      // call gets the same 403 a client does. Left to throw, it became the
+      // server's 500 with the policy's message as its body.
+      if (isPolicyDeniedError(err)) {
+        return policyDeniedResponse();
+      }
       throw err;
     }
 
