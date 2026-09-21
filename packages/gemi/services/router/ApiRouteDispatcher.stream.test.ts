@@ -40,6 +40,8 @@ const ended: string[] = [];
 let store: Store | undefined;
 let destroyed = 0;
 let seen: unknown[] = [];
+/** Set by a test whose `onRequestEnd` is a sink that is down. */
+let endThrows = false;
 
 /** The request's store, with its `destroy()` counted. */
 function capture() {
@@ -159,6 +161,7 @@ class AppKernel extends Kernel {
         rootRouter: RootApiRouter,
         onRequestEnd: (req: HttpRequest) => {
           ended.push(new URL(req.rawRequest.url).pathname);
+          if (endThrows) throw new Error("log sink is down");
         },
       },
       view: {
@@ -178,6 +181,7 @@ beforeEach(() => {
   destroyed = 0;
   seen = [];
   innerCancelled = 0;
+  endThrows = false;
   release = () => {};
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -205,6 +209,36 @@ describe("a streaming response", () => {
     expect(ended).toEqual(["/api/stream"]);
     expect(destroyed).toBe(1);
     expect(store!.user).toBeUndefined();
+  });
+
+  test("whoever reads to the end finds onRequestEnd already run", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/stream", { headers: alice }));
+    const reader = res.body!.getReader();
+
+    let atDone: string[] | undefined;
+    while (atDone === undefined) {
+      const { done } = await reader.read();
+      // Checked in the same turn `done` arrives, before anything else runs.
+      if (done) atDone = [...ended];
+    }
+
+    expect(atDone).toEqual(["/api/stream"]);
+    // And only once: an end deferred from an earlier request cannot pass for it.
+    await tick();
+    expect(ended).toEqual(["/api/stream"]);
+  });
+
+  test("an onRequestEnd that throws does not break a body already read, and the store is still released", async () => {
+    endThrows = true;
+    const res = await app.fetch(new Request("http://gemi.dev/api/stream", { headers: alice }));
+
+    expect(await res.text()).toBe("chunk 0\nchunk 1\n");
+    expect(ended).toEqual(["/api/stream"]);
+    expect(destroyed).toBe(1);
+    expect(store!.user).toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "log sink is down" }),
+    );
   });
 
   test("a client that cancels ends the request once, and the handler's stream is cancelled", async () => {
