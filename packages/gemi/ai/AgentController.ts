@@ -1240,8 +1240,11 @@ function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: s
  * crash would come from: strings where strings go, the prefix on
  * `attachmentId`, at least one id. Unknown fields are dropped rather than
  * refused, since `attach()` answers more than a `FilePart` holds (`downgraded`)
- * and passing its answer on whole is the documented use. `null` reads as
- * absent, which is what a serializer that writes `undefined` as `null` means.
+ * and passing its answer on whole is the documented use. `null` and `""` read
+ * as absent, for every field: `null` is what a serializer that writes
+ * `undefined` as `null` means, and `""` is what a form field left blank sends.
+ * Neither can be an id, so refusing `attachmentId: ""` for its prefix would
+ * turn a blank into an error the entry's `fileId` does not deserve.
  */
 function toTurnFiles(raw: unknown[]): NonNullable<ClientTurn["files"]> | string {
   const files: NonNullable<ClientTurn["files"]> = [];
@@ -1253,7 +1256,7 @@ function toTurnFiles(raw: unknown[]): NonNullable<ClientTurn["files"]> | string 
     const fields: Record<string, string> = {};
     for (const key of ["fileId", "attachmentId", "name", "mimeType"] as const) {
       const value = (entry as Record<string, unknown>)[key];
-      if (value === undefined || value === null) continue;
+      if (value === undefined || value === null || value === "") continue;
       if (typeof value !== "string") {
         return `${where}.${key} must be a string.`;
       }
