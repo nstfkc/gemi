@@ -188,11 +188,11 @@ export interface ToolContext {
  * asks again, that turn's user message is appended *after* the still-open call
  * — so on the next re-entry "latest" is the answer turn, and a tool that read
  * "the image" would pick a different file, or none, on its second attempt. The
- * replay checks do not reliably catch that: `putMismatch` compares only the
- * media type, and a sub-run seeded with the file as a message part
- * fingerprints as `<file>` whichever file it was. The message that preceded
- * the call is in the history on every attempt and does not move, so every
- * attempt sees the same list.
+ * replay checks do not reliably catch that: `putMismatch` compares the media
+ * type and showModel, never the bytes, and a sub-run seeded with the file as
+ * a message part fingerprints as `<file>` whichever file it was. The message
+ * that preceded the call is in the history on every attempt and does not
+ * move, so every attempt sees the same list.
  *
  * ONE TURN, NOT THE THREAD. The whole thread is what "the image I sent earlier"
  * needs, and it is the wider thing to bind to: a tool that picks "the first
