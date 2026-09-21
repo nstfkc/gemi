@@ -230,6 +230,26 @@ This command walks `app/models`, imports every file, and asks the same question 
 
 It reports one thing: a class carrying policies the registered class does not. A typed view carrying its own narrowing, and an unpolicied class written against a model's schema, are both deliberately *not* reported — each is supposed to be absent from the declared modules, and exporting either would turn a working boot into `AmbiguousModelRegistrationError`. See [ORM → Your model class](./orm.md#your-model-class).
 
+## `gemi ai:generate-client`
+
+Writes an agent's tool and output types for the iOS or Android client.
+
+```bash
+gemi ai:generate-client app/agents/support.ts#supportAgent --out ios/App/Agents --platform swift
+gemi ai:generate-client app/agents/support.ts#supportAgent --out android/app/src/main/kotlin/com/example/agents \
+  --platform kotlin --package com.example.agents
+```
+
+- `<agent>` — the module and export holding the value `Agent.create` returned, as `<file>#<export>`. A bare file means its default export.
+- `--out <dir>` — where to write. The file is named after the export: `SupportAgent.swift`, `SupportAgent.kt`.
+- `--platform <swift|kotlin>` — which client to write for.
+- `--package <name>` — Kotlin only, and required there: the package the file declares.
+- `--name <name>` — name the generated type something other than the export.
+
+It reads the agent's TypeScript types with the compiler your app already has, and nothing is imported or run. So it works in CI without a database or secrets, and a tool's progress type comes out typed even though it has no schema. A shape with no faithful Swift or Kotlin spelling is left as raw JSON, and a `warning:` line names where it was.
+
+See [Mobile Clients](./mobile-clients.md) for what the generated file is for.
+
 ## `gemi ide:generate-api-manifest`
 
 Generates the API route manifest behind the Emacs integration in `packages/gemi/ide/emacs`, which lists your routes and jumps to the handler you pick.
@@ -265,6 +285,7 @@ Like `app:component-tree`, it loads the app from the kernel and prints the resol
 ## Related
 
 - [Commands](./commands.md) — writing the application commands `gemi run` runs.
+- [Mobile Clients](./mobile-clients.md) — the iOS and Android clients `gemi ai:generate-client` writes types for.
 - [Getting Started](./getting-started.md) — installing gemi and running your first commands.
 - [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
 - [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.
