@@ -63,6 +63,12 @@ class RootApiRouter extends ApiRouter {
       handled.push("/broken");
       return { ok: true };
     }).middleware(["breaks"]),
+    // Framework routes are mounted under `/__gemi__` and are kept out of the
+    // app's request hooks; one here lets the break path's exclusion be seen.
+    "/__gemi__/broken": this.get(() => {
+      handled.push("/__gemi__/broken");
+      return { ok: true };
+    }).middleware(["breaks"]),
   };
 }
 
@@ -132,5 +138,18 @@ describe("a middleware break", () => {
     expect(await res.json()).toEqual({ error: "teapot" });
     expect(handled).toEqual([]);
     expect(ended).toEqual(["/broken"]);
+  });
+
+  test("a /__gemi__ route that breaks fires neither onRequestStart nor onRequestEnd", async () => {
+    brokenStore = undefined;
+    const res = await app.fetch(new Request("http://gemi.dev/api/__gemi__/broken"));
+
+    expect(res.status).toBe(418);
+    expect(handled).toEqual([]);
+    // It did end: the store is destroyed even though the hooks stay silent.
+    expect(brokenStore).toBeDefined();
+    expect(brokenStore!.headers).toBeUndefined();
+    expect(started).toEqual([]);
+    expect(ended).toEqual([]);
   });
 });
