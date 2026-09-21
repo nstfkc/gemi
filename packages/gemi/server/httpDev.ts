@@ -11,6 +11,7 @@ import { renderErrorPage } from "./renderErrorPage";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { GEMI_EXTERNAL_SPECIFIERS } from "../internal/gemiExternals";
+import { isApiPath } from "../services/router/apiPath";
 
 // Run a Web `Request` through Vite's Connect middleware.
 // Resolves to a `Response` when Vite handles the request (module transforms,
@@ -306,7 +307,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
           vite.ssrFixStacktrace?.(err);
           sendErrorToClient(err);
 
-          if (pathname.startsWith("/api")) {
+          if (isApiPath(pathname)) {
             return new Response(JSON.stringify({ error: err?.message ?? String(err) }), {
               status: 500,
               headers: { "Content-Type": "application/json" },
