@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import type { HttpRequest } from "../../http/HttpRequest";
 import type { ApiRouter } from "../../http/ApiRouter";
+import type { McpRouter } from "../../http/McpRouter";
 import type { ViewRouter } from "../../http/ViewRouter";
 import type { StreamSummary } from "./ServerQueryStore";
 
@@ -56,10 +57,19 @@ export interface ViewRouteConfig {
   ) => void | Promise<void>;
 }
 
-// Config key: `route`. Covers both route dispatchers.
+// Config key: `route.mcp`. Optional: an app that exposes nothing to a model
+// declares nothing.
+export interface McpRouteConfig {
+  // The app's `McpRouter`, normally `app/http/routes/mcp.ts`. Resolved against
+  // the api routes at boot, so a stale reference fails the boot.
+  router: new () => McpRouter<any>;
+}
+
+// Config key: `route`. Covers both route dispatchers and the MCP registry.
 export interface RouteConfig {
   api: ApiRouteConfig;
   view: ViewRouteConfig;
+  mcp?: McpRouteConfig;
 }
 
 export function defineRouteConfig(config: RouteConfig): RouteConfig {
