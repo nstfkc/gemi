@@ -13,6 +13,7 @@ import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
 import { Middleware } from "../../http/Middleware";
+import { markModelOriginated } from "../../http/modelOriginated";
 import { clientIp, RateLimitMiddleware } from "../../http/RateLimitMiddleware";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
@@ -511,6 +512,24 @@ describe("dispatchAs", () => {
 
       expect(result).toBe(200);
       expect(limitKeys).toEqual(["direct:10.0.0.4", "model:10.0.0.4"]);
+    });
+
+    test("a nested call keeps the address of the request that started the chain", async () => {
+      const { result } = await fromAgent({}, async (_req, dispatcher) => {
+        // An initiator the dispatcher built, carrying a forwarding header it
+        // never would: the stored address has to win over the header, or a
+        // copied header would re-key every nested call.
+        const raw = new Request("http://gemi.dev/api/agent", {
+          method: "POST",
+          headers: { Cookie: "access_token=tok-alice", "X-Forwarded-For": "6.6.6.6" },
+        });
+        markModelOriginated(raw, "10.0.0.5");
+        const initiator = new HttpRequest<any, any>(raw);
+        return (await dispatcher.dispatchAs(initiator, "GET", "/limited-by-origin")).status;
+      });
+
+      expect(result).toBe(200);
+      expect(limitKeys).toEqual(["model:10.0.0.5"]);
     });
   });
 });
