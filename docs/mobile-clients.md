@@ -23,12 +23,12 @@ The frame handling isn't a rewrite that might drift from the web hook. Every cal
 **iOS.** Add the gemi repository as a Swift package and depend on the `GemiChat` product:
 
 ```swift
-.package(url: "https://github.com/nstfkc/gemi", exact: "0.63.0") // the gemi your server runs
+.package(url: "https://github.com/nstfkc/gemi", exact: "<version>") // the gemi your server runs
 ```
 
-The package is versioned by gemi's own release tags, so pin the one your server runs and the client speaks the same protocol. SwiftPM clones the whole repository to get it. It needs iOS 17 (for `@Observable`).
+The package is versioned by gemi's own release tags, so pin the one your server runs and the client speaks the same protocol. The first release to ship it is the one after 0.62.0; a server on 0.62.0 or earlier has no matching tag. SwiftPM clones the whole repository to get it. It needs iOS 17 (for `@Observable`).
 
-**Android.** The Kotlin client isn't published to Maven yet. Until it is, include it as a composite build from a checkout of the gemi repository:
+**Android.** The Kotlin client isn't published to Maven yet. Until it is, include it as a composite build from a checkout of the gemi repository, at the tag your server runs:
 
 ```kotlin
 // settings.gradle.kts
@@ -43,7 +43,11 @@ dependencies {
 }
 ```
 
-It needs `minSdk` 26 and the kotlinx.serialization Gradle plugin, which the generated types use. The included build finds the Android SDK through `ANDROID_HOME`; without it, only `gemi-chat` is included.
+It needs `minSdk` 26 and the kotlinx.serialization Gradle plugin, which the generated types use.
+
+`gemi-chat-compose` is an Android library, and Gradle allows one Android Gradle plugin version per build, so your app's AGP must match the one in `gemi/packages/gemi-kotlin/gradle/libs.versions.toml`. Otherwise the build fails with `Using multiple versions of the Android Gradle plugin ... is not allowed`. An app on another AGP can depend on `gemi-chat` alone, which is plain JVM, and copy `rememberChat` from `gemi-chat-compose` into the app; it's about thirty lines.
+
+The included build finds the Android SDK through `ANDROID_HOME`, or through a `local.properties` in `gemi/packages/gemi-kotlin/`; without either, only `gemi-chat` is included. Android Studio sets `sdk.dir` in your project's `local.properties` rather than `ANDROID_HOME`, so copy that file into `gemi/packages/gemi-kotlin/`, or the build fails with `Could not find dev.gemijs:gemi-chat-compose`.
 
 ## Generating the types
 
@@ -100,7 +104,7 @@ struct SupportView: View {
       if chat.status == .awaitingInput {
         ForEach(chat.typedPending, id: \.self) { pending in
           if case .charge(let call) = pending {
-            Button("Approve \(call.input?.amountCents ?? 0)¢") { chat.approve(call, true) }
+            Button("Approve \(call.input?.amountCents ?? 0, format: .number)¢") { chat.approve(call, true) }
           }
         }
       }
@@ -134,7 +138,7 @@ class SupportViewModel : ViewModel() {
   val chat = ChatSession(
     endpoint = "https://example.com/api/support",
     scope = viewModelScope,
-    headers = { mapOf("Authorization" to "Bearer ${tokens.current()}") },
+    headers = { mapOf("Authorization" to "Bearer ${Tokens.current()}") },
   )
 
   fun send(text: String) = viewModelScope.launch { chat.send(text) }
@@ -224,15 +228,15 @@ struct Transcript: View {
 }
 ```
 
-On Android the session lives in a `ViewModel`, and every composable that gets that `ViewModel` gets the same session. Collect `state` once and pass it down:
+On Android the session lives in a `ViewModel`, and every composable that gets that `ViewModel` gets the same session. Collect `state` once and pass it down (`Composer` and `Transcript` are your own composables, as on iOS):
 
 ```kotlin
 @Composable
-fun SupportScreen(model: SupportChatViewModel = viewModel()) {
+fun SupportScreen(model: SupportViewModel = viewModel()) {
   val state by model.chat.collectState()
   Scaffold(
     topBar = { StatusBadge(state.status) },
-    bottomBar = { Composer(enabled = state.status != ChatStatus.AwaitingInput, onSend = { model.send(ClientTurn(it)) }) },
+    bottomBar = { Composer(enabled = state.status != ChatStatus.AwaitingInput, onSend = { model.send(it) }) },
   ) { padding ->
     Transcript(state.messages, Modifier.padding(padding))
   }
@@ -257,7 +261,7 @@ On Android, scope the `ViewModel` to the navigation graph that contains those de
 ```kotlin
 composable("support/approvals") { entry ->
   val graph = remember(entry) { navController.getBackStackEntry("support") }
-  val model: SupportChatViewModel = viewModel(graph)
+  val model: SupportViewModel = viewModel(graph)
   ApprovalsScreen(model.chat)
 }
 ```
