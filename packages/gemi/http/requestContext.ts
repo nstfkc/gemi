@@ -108,6 +108,9 @@ class Store {
    * reason it exists: a client that disconnects has not stopped the run, and
    * its next tool call still reads the user who started it. Ignored once the
    * request has ended — there is nothing left to hold open.
+   *
+   * Only api routes honour this. A view request ends regardless, so work
+   * handed to its store — a run started in a view loader — finds no user.
    */
   waitUntil(work: PromiseLike<unknown>) {
     if (this.ended) {
