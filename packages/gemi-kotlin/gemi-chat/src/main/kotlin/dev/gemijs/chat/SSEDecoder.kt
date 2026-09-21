@@ -144,13 +144,20 @@ public class SSEFrameDecoder {
     const val LF = 0x0A
     const val CR = 0x0D
 
-    /** `Number(id)` as JavaScript reads it, for the ids a server sends. */
+    /** A decimal literal, as `Number` reads one: no `7f`, `1d` or hex float. */
+    val DECIMAL = Regex("""[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?""")
+
+    /**
+     * `Number(id)` as JavaScript reads it, for the decimal ids a server sends.
+     * An id past `Int` is no id at all and continues the count, where
+     * truncating it would wrap it negative and read as already applied.
+     */
     fun number(text: String): Int? {
       val trimmed = text.trim()
-      if (trimmed.isEmpty()) return null
-      val value = trimmed.toDoubleOrNull() ?: return null
-      if (!value.isFinite()) return null
-      return value.toLong().toInt()
+      if (!DECIMAL.matches(trimmed)) return null
+      val value = trimmed.toDouble()
+      if (value < Int.MIN_VALUE || value >= Int.MAX_VALUE + 1.0) return null
+      return value.toInt()
     }
   }
 }
