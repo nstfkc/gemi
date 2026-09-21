@@ -2646,10 +2646,25 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private historyForProvider(current: AgentMessage): AgentMessage[] {
     const messages = this.history.filter((message) => message !== current);
 
-    const shown: FilePart[] = [];
+    // Injected messages are named by the tool call that made them, and that
+    // record is the test — not `attachmentId` on the part. A user's own upload
+    // can carry an `attachmentId` too: `useChat` spreads whatever the app puts
+    // in `turn.files` onto the user message, and `attach()` answers one.
+    const injected = new Set<string>();
     for (const message of messages) {
       for (const part of message.content) {
-        if (part.type === "file" && part.attachmentId) shown.push(part);
+        if (part.type !== "tool-call") continue;
+        for (const record of part.attachments ?? []) {
+          if ("shown" in record && record.shown) injected.add(record.shown.messageId);
+        }
+      }
+    }
+
+    const shown: FilePart[] = [];
+    for (const message of messages) {
+      if (!injected.has(message.id)) continue;
+      for (const part of message.content) {
+        if (part.type === "file") shown.push(part);
       }
     }
     if (shown.length <= SHOWN_FILE_WINDOW) return messages;

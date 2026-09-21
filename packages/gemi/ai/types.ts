@@ -102,23 +102,16 @@ export type FilePart = {
   name?: string;
   mimeType?: string;
   /**
-   * gemi's attachment id, present on exactly one kind of file part: one the run
-   * injected itself for `ctx.attachments.put(blob, { showModel: true })`. A
-   * user's own upload does not carry it — `ClientTurn.files` has no field for
-   * one — so this is the marker that says "a tool made this and the model was
-   * shown it", and it is never sent to the provider.
+   * gemi's attachment id. The run sets it on a file part it injected itself for
+   * `ctx.attachments.put(blob, { showModel: true })`, so a UI can link the
+   * picture back to the attachment a tool can still fetch. It is never sent to
+   * the provider.
    *
-   * Two things read it. A UI can link the picture back to the attachment the
-   * tool can still fetch. And the run's own context pruning keys on it: history
-   * is resent whole on every step, so a three-iteration edit loop would pay for
-   * three images on every later call, and the window that stops that has to be
-   * able to tell a tool's product from a file the user attached and expects to
-   * stay attached. See `historyForProvider` in `Agent.ts`.
-   *
-   * In stateless mode the client carries this back like the rest of the
-   * history, so it is client-editable — and that is not a new hole. It decides
-   * how much of its own context a run keeps, nothing about who may read what;
-   * a client that strips it buys itself a larger bill.
+   * It is NOT the marker for "a tool made this". A user's own upload can carry
+   * one too — `useChat` spreads a `turn.files` entry onto the user message, and
+   * `attach()` answers an `attachmentId` — so the run's context pruning keys on
+   * the injected message's id, which the tool call's `attachments` record names.
+   * See `historyForProvider` in `Agent.ts`.
    */
   attachmentId?: string;
 };
