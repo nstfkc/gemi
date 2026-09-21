@@ -298,7 +298,8 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * this the request ends anyway: `onRequestEnd` runs, the user is released,
    * and the hook runs on without one. Thirty seconds is far past a healthy
    * write or notification, so a hook that reaches it is hung rather than slow.
-   * Raise it for a hook that is legitimately longer.
+   * Raise it for a hook that is legitimately longer; `Infinity` holds the
+   * request until the hooks are done, however long that is.
    */
   protected hookHoldMs = 30_000;
 
@@ -480,13 +481,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * for the old run to unwind, which is as long as its slowest tool in flight —
    * and that wait is the thing that puts `assistant1` before `user2`.
    *
-   * The wait is on `persistRun`, not on `run.result()`. `result()` settling is
-   * the transcript being final, not stored: `appendMessages` runs after it, and
-   * a `loadThread` in that gap reads a history the old answer is missing from,
-   * which is the original bug by a shorter route. It is also *only* that:
-   * `persistRun` settles once the transcript is stored and lets the app's
-   * hooks run on without it, so a slow `onMessage` is not a slow thread and a
-   * hung one is not a hung thread.
+   * The wait is on `persistRun`'s `stored`, not on `run.result()`. `result()`
+   * settling is the transcript being final, not stored: `appendMessages` runs
+   * after it, and a `loadThread` in that gap reads a history the old answer is
+   * missing from, which is the original bug by a shorter route. It is also
+   * *only* that: `stored` settles once the transcript is stored, and the app's
+   * hooks run on in `hooks`, which holds the old run's request and not the
+   * thread, so a slow `onMessage` is not a slow thread and a hung one is not a
+   * hung thread.
    *
    * The lock around it is what makes a *third* turn wait for the second rather
    * than for the first. Two turns arriving together both see the same live
@@ -1521,19 +1523,29 @@ export type AgentRouteRPC<T extends new () => AgentController<any>> = {
   output: unknown;
 };
 
+/** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 /**
  * Settles when `work` does or after `ms`, whichever is first, and never
  * rejects. For how long the request waits on the app's code, not for the code
  * itself, which runs on either way.
+ *
+ * An `ms` a timer cannot hold — `Infinity` is what "no bound" reads as — is
+ * no bound. Handed to `setTimeout` it would fire at once, and the request
+ * would end before the hooks it was raised for.
  */
 function within(work: Promise<void>, ms: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms);
-  });
   const settled = work.then(
     () => {},
     () => {},
   );
+  if (!(ms <= MAX_TIMEOUT_MS)) {
+    return settled;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
   return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
 }
