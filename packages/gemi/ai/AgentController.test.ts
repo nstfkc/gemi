@@ -1449,6 +1449,118 @@ describe("AgentController.instructions", () => {
   });
 });
 
+/**
+ * A controller that will not run a turn for just anyone (#542). A stateless
+ * turn is a general-purpose chat on the app's bill for any caller the route
+ * lets through, so both refusals have to land before the provider is called.
+ */
+describe("refusing a turn", () => {
+  test("requireThread answers 400 to a stateless turn, before anything runs", async () => {
+    const run = new StubAgentRun("run_stateless");
+    const { agent, calls } = stubAgent(run);
+    let instructed = false;
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected requireThread = true;
+      instructions() {
+        instructed = true;
+      }
+    }
+
+    const response = await new Chat().stream(jsonRequest({ text: "hi" }));
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("thread_required");
+    expect(calls).toHaveLength(0);
+    expect(instructed).toBe(false);
+    run.finish();
+  });
+
+  test("requireThread still runs a threaded turn", async () => {
+    const run = new StubAgentRun("run_threaded");
+    const { agent, calls } = stubAgent(run);
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = store;
+      protected requireThread = true;
+    }
+
+    await new Chat().stream(jsonRequest({ threadId, text: "hi" }));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.threadId).toBe(threadId);
+    run.finish();
+  });
+
+  test("authorizeTurn answers with the Response it returns, and nothing runs", async () => {
+    const run = new StubAgentRun("run_refused");
+    const { agent, calls } = stubAgent(run);
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const seen: Array<string | undefined> = [];
+    let loaded = false;
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = Object.assign(Object.create(store), {
+        loadThread: async (id: string) => {
+          loaded = true;
+          return store.loadThread(id);
+        },
+      });
+      protected authorizeTurn(_req: HttpRequest<any, any>, { threadId }: { threadId?: string }) {
+        seen.push(threadId);
+        return Response.json({ error: "not yours" }, { status: 403 });
+      }
+    }
+
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "hi" }));
+
+    expect(response.status).toBe(403);
+    expect(seen).toEqual([threadId]);
+    // Ahead of the load: a refused caller does not learn whether it exists.
+    expect(loaded).toBe(false);
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("an error authorizeTurn throws propagates, and nothing runs", async () => {
+    const run = new StubAgentRun("run_thrown");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeTurn() {
+        throw new Error("refused");
+      }
+    }
+
+    await expect(new Chat().stream(jsonRequest({ text: "hi" }))).rejects.toThrow("refused");
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("authorizeTurn returning nothing lets the turn run", async () => {
+    const run = new StubAgentRun("run_allowed");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeTurn() {}
+    }
+
+    await new Chat().stream(jsonRequest({ text: "hi" }));
+
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+});
+
 describe("the request body", () => {
   test("accepts a charset on the content type, which several clients send", async () => {
     const run = new StubAgentRun("run_y");
