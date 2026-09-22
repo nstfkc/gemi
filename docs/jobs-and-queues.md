@@ -1,6 +1,8 @@
 # Jobs & Queues
 
-Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
+Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's queue, and the request returns immediately.
+
+> **By default the queue lives in the server's memory, and a restart loses it.** Every job that is waiting, waiting out a retry, or halfway through `run` is gone when the process exits — a deploy, a scale-in, a crash — and no hook fires for any of them. See [Drivers](#drivers--where-queued-jobs-live) for what to do about it.
 
 You define jobs as classes extending `Job` (from `gemi/services`) in files under `app/jobs/`, and fire them with `Job.dispatch(...)`. The directory is read at boot, so there is no list to keep alongside it.
 
@@ -39,6 +41,7 @@ export class ProcessVideoJob extends Job {
 export class ProcessVideoJob extends Job {
   static name = "ProcessVideoJob";
   maxAttempts = 3; // retries before dead-lettering (default 3)
+  backoff = [1_000, 10_000]; // ms before each retry; the last repeats (default 0)
 
   async run(params: Params) { /* ... */ }
 
@@ -48,7 +51,9 @@ export class ProcessVideoJob extends Job {
 }
 ```
 
-Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dropped.
+Retry behavior: when `run` throws, `onFail` fires and the job is re-queued, `backoff` milliseconds later, until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dead-lettered — dropped, with the memory driver. A throw from `onSuccess` counts as a failed attempt; a throw from `onFail` or `onDeadletter` is logged and changes nothing.
+
+An attempt whose process died before it finished still counts. With a driver that outlives the process, the job is claimed again once its lease runs out, and a job whose last attempt was lost that way reaches `onDeadletter` — with an error saying so — without running again.
 
 ### Configurable fields
 
@@ -56,6 +61,7 @@ Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until
 | --- | --- | --- | --- |
 | `static name` | `string` | `"unset"` | Unique job identifier. Required. |
 | `maxAttempts` | `number` | `3` | Total attempts before dead-lettering. |
+| `backoff` | `number \| number[]` | `0` | Milliseconds before a retry. An array gives one per retry, its last entry repeating. |
 | `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
 
 ## Dispatching
@@ -66,10 +72,12 @@ Call the static `dispatch` method with exactly the arguments your `run` method t
 import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
 // Inside a controller — returns immediately; the job runs in the background.
-ProcessVideoJob.dispatch({ videoId: video.id });
+const jobId = await ProcessVideoJob.dispatch({ videoId: video.id });
 ```
 
-`dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
+`dispatch` enqueues the job and resolves to its id once the driver has recorded it — it does not wait for the job to run, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). Payload that JSON cannot carry throws synchronously, before anything is queued. With the default memory driver the promise never rejects, so leaving it unawaited is fine; with a driver that can fail to record a job, await it, or the failure is an unhandled rejection. See [Controllers](./controllers.md) for dispatching from request handlers.
+
+A job runs in the application it was registered with, and outside the request that dispatched it: `app()` resolves as usual, but the dispatching request's user, cookies and open transaction are not there. Pass what the job needs as arguments.
 
 ## Registering jobs — `app/jobs/`
 
@@ -119,6 +127,9 @@ export default defineQueueConfig({
 | `jobs` | `(new () => Job)[]` | *discovered* | All dispatchable job classes. Omit to discover them from `jobsDir`. A job that reaches neither is dispatched into nothing. |
 | `jobsDir` | `string` | `"app/jobs"` | Where to discover them. Relative to the project root, or absolute. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
+| `driver` | `"memory" \| QueueDriver \| () => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
+| `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
+| `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. |
 
 The slice is wired into the kernel by name:
 
@@ -165,6 +176,39 @@ import { discoverJobs } from "gemi/services";
 
 const jobs = await discoverJobs(); // every Job subclass under app/jobs
 ```
+
+### Drivers — where queued jobs live
+
+The `QueueManager` runs jobs; a **driver** keeps them. The default, `"memory"` (`MemoryQueueDriver`), keeps them in a `Map` in the server process. That is right for development and tests and wrong for anything you cannot afford to lose: **every waiting, retrying and running job disappears when the process exits**, silently. It also never leaves the process, so a job runs on the instance that dispatched it or not at all.
+
+A driver is any object implementing `QueueDriver` from `gemi/services`. It is claim-based, so it can be shared by several processes:
+
+| Method | What it promises |
+| --- | --- |
+| `enqueue({ name, args, delayMs? })` | Records a job, claimable after `delayMs`, and resolves to its id. |
+| `claim(limit, { visibilityTimeoutMs })` | Leases up to `limit` claimable jobs, oldest first, with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. |
+| `complete(job)` | Ends the claim; the job is never claimed again. |
+| `fail(job, { error, retryInMs })` | Ends the claim. A number makes the job claimable after that long; `null` dead-letters it for good. |
+| `heartbeat?(jobs, { visibilityTimeoutMs })` | Extends the leases of jobs still running. |
+| `subscribe?(wake)` | Calls `wake` when work may be claimable. Without it the queue polls every `pollInterval`. |
+
+`complete`, `fail` and `heartbeat` receive the claimed job rather than its id, so a driver can ignore a report from a claim whose lease already ran out and was handed to someone else. Durations cross the interface as relative milliseconds, so a driver shared between machines can measure them on one clock.
+
+Hand the driver to the slice as a function, so each application gets its own and nothing is opened by a process that only imports the config:
+
+```typescript
+// app/config/queue.ts
+import { defineQueueConfig } from "gemi/services";
+import { MyQueueDriver } from "@/app/queue/MyQueueDriver";
+
+export default defineQueueConfig({
+  driver: () => new MyQueueDriver(),
+});
+```
+
+### Stopping the queue
+
+`app(QueueManager).drain(timeoutMs)` stops claiming, waits up to `timeoutMs` for the jobs already running, and resolves to `{ unfinished }` — the ones still running at the deadline. Nothing is cancelled. `stop()` is `drain(0)`. After either, a dispatch is recorded by the driver but not run until `start()` is called; with the memory driver, whatever is still waiting when the process exits is lost.
 
 See [Project Structure](./project-structure.md) for the full kernel layout.
 

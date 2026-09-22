@@ -79,7 +79,15 @@ export type { LogEntry } from "./logging/types";
 
 // Queue
 export { QueueServiceProvider } from "./queue/QueueServiceProvider";
-export { QueueManager } from "./queue/QueueManager";
+export { QueueManager, type DrainResult } from "./queue/QueueManager";
+export { MemoryQueueDriver } from "./queue/MemoryQueueDriver";
+export type {
+  QueueDriver,
+  EnqueueJob,
+  ClaimOptions,
+  ClaimedJob,
+  JobFailure,
+} from "./queue/QueueDriver";
 export { Job } from "./queue/Job";
 
 // Events. `Event` shadows the DOM's global of the same name inside a module
