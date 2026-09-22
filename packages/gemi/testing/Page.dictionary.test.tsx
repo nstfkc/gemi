@@ -1,11 +1,12 @@
 /** @vitest-environment jsdom */
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { defineDictionary } from "../i18n/defineDictionary";
 import { __resetDictionaryRegistry } from "../i18n/dictionaryRegistry";
 import { useDictionary } from "../client/useDictionary";
 import { useLocale } from "../client/useLocale";
+import { useQuery } from "../client/useQuery";
 import { useTranslator } from "../client/useTranslator";
 import { Page } from "./Page";
 
@@ -38,6 +39,7 @@ function Greeter() {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   __resetDictionaryRegistry();
 });
 
@@ -110,5 +112,31 @@ describe("a useDictionary component under <Page>", () => {
 
     expect(screen.getByRole("heading").textContent).toBe("Merhaba Enes");
     expect(screen.getByTestId("legacy").textContent).toBe("Eski başlık");
+  });
+
+  test("commits once a query it suspends on after the dictionary resolves", async () => {
+    // Strings in hand are read without `use()`. Under `act`, even a fulfilled
+    // `use()` makes React park the render task as if it were waiting on that
+    // promise — so when the query then suspended by throwing, the retry never
+    // ran and the page stayed on its fallback (#542).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ total: 3 })),
+    );
+    function List() {
+      const t = useDictionary(greeting);
+      const { data } = useQuery("/items" as never);
+      const { total } = data as any as { total: number };
+      return <p>{t("greeting", { name: String(total) })}</p>;
+    }
+
+    render(
+      <Page fallback={<div>loading</div>}>
+        <List />
+      </Page>,
+    );
+
+    expect(screen.getByText("loading")).toBeDefined();
+    expect(await screen.findByText("Hello 3")).toBeDefined();
   });
 });
