@@ -131,9 +131,10 @@ What to check:
   `SIGKILL` (Cloud Run, Fly) cuts the drain off. Lower
   `GEMI_SHUTDOWN_TIMEOUT` and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit.
 - **A wrapper that works around the dropped exit code**, or that relays
-  signals to the server's process itself, can stop doing so. The server is now
-  in its own process group, so a wrapper that signalled the group no longer
-  reaches it — signal `gemi start` instead.
+  signals to the server's process itself, can stop doing so. Signalling the
+  process group still works: the copies of one signal that reach the server
+  within a second — directly and through `gemi start` — count as one shutdown.
+  Only a signal more than a second after the first skips the drain.
 - **An app that installed its own `SIGTERM` listener** now runs beside gemi's,
   which exits the process when the drain is done. Pass
   `handleSignals: false` to `new Server()` to keep only yours.

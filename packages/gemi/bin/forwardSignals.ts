@@ -5,16 +5,11 @@ type SpawnOptions = {
   env?: Record<string, string | undefined>;
 };
 
-// Which signal the child receives for each one this process does. `SIGHUP` is
-// translated rather than forwarded: the child runs in its own session (see
-// below), so closing the terminal no longer reaches it, and the server only
-// drains on `SIGTERM`/`SIGINT` — a forwarded `SIGHUP` would kill it outright,
-// which is the behaviour this file exists to remove.
-const FORWARDED = {
-  SIGTERM: "SIGTERM",
-  SIGINT: "SIGINT",
-  SIGHUP: "SIGTERM",
-} as const;
+// Only the two the server drains on. `SIGHUP` is left alone: a closed terminal
+// sends it to the whole foreground group, the server included, which ends as
+// it did before this relay existed — and under `nohup` both keep ignoring it,
+// which a listener here would override.
+const FORWARDED = ["SIGTERM", "SIGINT"] as const;
 
 /**
  * Spawns `cmd`, relays termination signals to it, and resolves with the exit
@@ -25,11 +20,14 @@ const FORWARDED = {
  * shutdown only from the `SIGKILL` at the end of the grace period, so there was
  * nothing for it to drain in (#48).
  *
- * The child is `detached` (its own session and process group) so that each
- * signal reaches it exactly once. Without it, a Ctrl+C in a terminal is
- * delivered to the whole foreground group — the child directly *and* through
- * this relay — and the server reads the second copy as "stop waiting, exit
- * now", so a Ctrl+C would never drain.
+ * The child stays in this process's group, so whatever signals the group — a
+ * terminal's Ctrl+C, a supervisor's group `SIGKILL` — still reaches it
+ * directly. A signal sent that way arrives twice, directly and through this
+ * relay; the server reads a repeat within a second of the first as the same
+ * shutdown (see `installShutdownSignals`), so it still drains once. Spawning it
+ * `detached` would avoid the duplicate only from this layer — not from
+ * `bun run` or systemd above it — and would orphan the server, port and all,
+ * whenever `gemi start` is killed without a chance to relay.
  */
 export async function spawnForwardingSignals(options: SpawnOptions): Promise<number> {
   const proc = Bun.spawn({
@@ -37,19 +35,18 @@ export async function spawnForwardingSignals(options: SpawnOptions): Promise<num
     env: options.env,
     stdout: "inherit",
     stderr: "inherit",
-    detached: true,
   });
 
-  const handlers = Object.entries(FORWARDED).map(([received, sent]) => {
+  const handlers = FORWARDED.map((signal) => {
     const handler = () => {
       // The child may already be gone — it exits on its own after a drain, and
       // a signal can land between that and `exited` resolving.
       try {
-        proc.kill(sent);
+        proc.kill(signal);
       } catch {}
     };
-    process.on(received, handler);
-    return [received, handler] as const;
+    process.on(signal, handler);
+    return [signal, handler] as const;
   });
 
   try {
