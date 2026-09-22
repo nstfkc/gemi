@@ -83,7 +83,7 @@ gemi start
 
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
-`start` relays `SIGTERM` and `SIGINT` to that process (and a `SIGHUP` as `SIGTERM`), waits for it, and exits with its exit code — `128 + n` if a signal ended it. The server drains in-flight requests before it exits; see [Graceful shutdown](./configuration.md#graceful-shutdown). The server runs in its own process group, so a Ctrl+C reaches it once, through `start`, rather than twice.
+`start` relays `SIGTERM` and `SIGINT` to that process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. The server drains in-flight requests before it exits; see [Graceful shutdown](./configuration.md#graceful-shutdown). The server stays in `start`'s process group, so a signal sent to the whole group — a Ctrl+C, or a supervisor's `SIGKILL` — reaches it directly as well.
 
 > **Gotcha:** the relay covers `start` and nothing above it. `bun run start` passes `SIGTERM` on to its script, but a wrapper script of your own between the platform and `gemi start` has to do the same, or the server never hears it.
 

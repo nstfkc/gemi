@@ -248,7 +248,9 @@ In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills t
 4. **Runs every provider's `shutdown()`**, in reverse registration order.
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
 
-A second signal skips the wait and exits at once, with `130` for `SIGINT` or `143` for `SIGTERM`.
+A second signal skips the wait and exits at once, with `130` for `SIGINT` or `143` for `SIGTERM` — if it arrives more than a second after the first. One shutdown often reaches the server several times within milliseconds (a Ctrl+C on `bun run start` arrives directly and through `gemi start`; systemd signals every process in the unit), and those copies are the same shutdown, not a request to skip it.
+
+Keep `GEMI_SHUTDOWN_DELAY` below `GEMI_SHUTDOWN_TIMEOUT`: the delay counts against the timeout, so a delay as long as the timeout leaves no time to drain. The server warns at startup when it does.
 
 | Variable | Default | What it bounds |
 | --- | --- | --- |

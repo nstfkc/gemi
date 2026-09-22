@@ -75,11 +75,21 @@ export type ShutdownSettings = {
 export function shutdownSettings(
   env: Record<string, string | undefined> = process.env,
 ): ShutdownSettings {
-  return {
+  const settings = {
     timeoutMs: seconds(env.GEMI_SHUTDOWN_TIMEOUT, 20),
     delayMs: seconds(env.GEMI_SHUTDOWN_DELAY, 0),
     providerTimeoutMs: seconds(env.GEMI_SHUTDOWN_PROVIDER_TIMEOUT, 5),
   };
+  // Warned, not clamped: the delay is sized to a probe, the timeout to the
+  // platform's grace period, and which one is wrong only the operator knows.
+  // Left alone, every shutdown spends the whole timeout in the delay and then
+  // abandons whatever is in flight without draining it.
+  if (settings.delayMs > 0 && settings.delayMs >= settings.timeoutMs) {
+    console.warn(
+      `[gemi] GEMI_SHUTDOWN_DELAY (${settings.delayMs / 1000}s) leaves no time to drain within GEMI_SHUTDOWN_TIMEOUT (${settings.timeoutMs / 1000}s); in-flight requests will be abandoned on every shutdown. Raise the timeout.`,
+    );
+  }
+  return settings;
 }
 
 function seconds(value: string | undefined, fallback: number): number {
@@ -205,24 +215,42 @@ export function closeConnectionWhileShuttingDown(res: Response): Response {
 const SIGNALS_INSTALLED = Symbol.for("gemi.server.signalsInstalled");
 
 /**
- * `SIGTERM` or `SIGINT` runs `stop` and exits with the code it resolves with.
- * A second signal of either kind exits at once with `128 + n` — an operator
- * pressing Ctrl+C again does not want to wait out the grace period. Without a
- * listener the first signal would do that too: the default action for both is
- * to terminate the process on the spot.
+ * A repeat of the first signal inside this window is the same shutdown
+ * delivered twice, not an operator asking to skip the drain. One shutdown
+ * routinely arrives more than once, milliseconds apart: Ctrl+C on
+ * `bun run start` reaches the server directly (the whole foreground group is
+ * signalled), and again through `gemi start`'s relay — twice over, since
+ * `bun run` forwards it to `gemi start` too. systemd's default
+ * `KillMode=control-group` and `tini -g` do the same to every process in the
+ * group. A person pressing Ctrl+C again is well outside a second.
  */
-export function installShutdownSignals(stop: () => Promise<number>) {
+const REPEAT_WINDOW_MS = 1000;
+
+/**
+ * `SIGTERM` or `SIGINT` runs `stop` and exits with the code it resolves with.
+ * Another signal of either kind, more than `repeatWindowMs` after the first,
+ * exits at once with `128 + n` — an operator pressing Ctrl+C again does not
+ * want to wait out the grace period. Without a listener the first signal would
+ * do that too: the default action for both is to terminate the process on the
+ * spot.
+ */
+export function installShutdownSignals(
+  stop: () => Promise<number>,
+  options: { repeatWindowMs?: number } = {},
+) {
   const global = globalThis as { [SIGNALS_INSTALLED]?: boolean };
   if (global[SIGNALS_INSTALLED]) return;
   global[SIGNALS_INSTALLED] = true;
 
-  let received = false;
+  const repeatWindowMs = options.repeatWindowMs ?? REPEAT_WINDOW_MS;
+  let receivedAt: number | undefined;
   const onSignal = (signal: "SIGTERM" | "SIGINT") => {
-    if (received) {
+    if (receivedAt !== undefined) {
+      if (Date.now() - receivedAt < repeatWindowMs) return;
       console.error(`[gemi] ${signal} received again; exiting without waiting for the drain.`);
       process.exit(128 + constants.signals[signal]);
     }
-    received = true;
+    receivedAt = Date.now();
     console.log(`[gemi] ${signal} received.`);
     stop().then(
       (code) => process.exit(code),
