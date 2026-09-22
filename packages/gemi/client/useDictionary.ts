@@ -55,15 +55,18 @@ export function useDictionary<const T extends DictionaryTranslations>(
   // did. Called on the handle rather than the registry so a dictionary declared
   // at module scope survives the registry being reset under it.
   //
-  // `use()` unconditionally, which is why `loadForRender` hands back a thenable
-  // even for strings it already has. Skipping the call when the strings are in
-  // hand looks free and is not (#494): React replays a component that suspended
-  // in `use()` once the thenable resolves, and only `use()` itself puts the
-  // mount hook dispatcher back — so a replay that took the synchronous path
-  // would run every later hook under the update dispatcher and throw "Update
-  // hook called on initial render" at the first `useState`. An already-resolved
-  // thenable does not suspend, so this costs nothing on the warm path.
-  const strings = use(dictionary.loadForRender(locale));
+  // `use()` on every thenable a render could have suspended on, including once
+  // it has resolved (#494): React replays a component that suspended in `use()`
+  // once the thenable resolves, and only `use()` itself puts the mount hook
+  // dispatcher back — so a replay that took the synchronous path would run
+  // every later hook under the update dispatcher and throw "Update hook called
+  // on initial render" at the first `useState`.
+  //
+  // Strings that were already in hand when their thenable was made skip it
+  // (#542): no render ever suspended on that thenable, and under `act` even a
+  // fulfilled `use()` makes a later thrown suspense (a `useQuery`) park forever.
+  const thenable = dictionary.loadForRender(locale);
+  const strings = thenable.inHand ?? use(thenable);
 
   // Reported from the render phase, and deliberately so: on the server the
   // strings have to reach the document before the segment that used them is
