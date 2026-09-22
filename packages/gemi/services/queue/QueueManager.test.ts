@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Job } from "./Job";
+import type { MemoryQueueDriver } from "./MemoryQueueDriver";
 import { QueueManager } from "./QueueManager";
 
 /**
@@ -13,10 +14,11 @@ import { QueueManager } from "./QueueManager";
  * registered" is now reachable by shipping a build without its source, and the
  * queue has to survive it.
  *
- * `next()` runs to completion synchronously on this path — nothing before the
- * unknown name is awaited — so `push()` is enough to drive it, and a
- * non-terminating one takes the test process down with it rather than timing
- * out politely.
+ * The worker loop claims from its driver, so a job runs a few microtasks after
+ * `push()` rather than inside it; `settle()` waits those out. A loop that
+ * recursed on an unresolvable entry used to take the test process down with
+ * it rather than time out politely, which is why these assert on the driver
+ * being empty and not only on the error line.
  */
 
 class SendWelcomeEmail extends Job {
@@ -35,35 +37,42 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const memory = (queue: QueueManager) => queue.driver as MemoryQueueDriver;
+
 describe("a dispatch nothing is registered under", () => {
-  test("is dropped, said out loud, and does not wedge the queue", () => {
+  test("is dropped, said out loud, and does not wedge the queue", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const queue = new QueueManager({ jobs: [] });
 
-    queue.push(SendWelcomeEmail, "[]");
+    await queue.push(SendWelcomeEmail, "[]");
+    await settle();
 
     // Drained, not left at the head. It used to stay: the delete lived inside
-    // the branch that resolved the name, so the queue never emptied, the
-    // `size === 0` return was never reached, and `next()` recursed on the same
-    // entry until the stack gave out — a stack overflow in place of the
-    // dropped job the docs describe.
-    expect(queue.queue.size).toBe(0);
-    expect(queue.isRunning).toBe(false);
+    // the branch that resolved the name, so the queue never emptied and the
+    // drain recursed on the same entry until the stack gave out — a stack
+    // overflow in place of the dropped job the docs describe. Now the claim is
+    // ended as a dead letter, so nothing is waiting and nothing is leased.
+    expect(memory(queue).waiting).toBe(0);
+    expect(memory(queue).leased).toBe(0);
+    expect(queue.running).toBe(0);
     expect(vi.mocked(error).mock.calls[0]![0]).toContain(
       'nothing is registered under the name "SendWelcomeEmail"',
     );
   });
 
-  test("does not stop the jobs behind it in the queue from running", () => {
+  test("does not stop the jobs behind it in the queue from running", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const queue = new QueueManager({ jobs: [ChargeCard], concurrency: 5 });
     const ran = vi.spyOn(ChargeCard.prototype, "run");
 
     queue.push(SendWelcomeEmail, "[]");
     queue.push(ChargeCard, "[]");
+    await settle();
 
     expect(ran).toHaveBeenCalledTimes(1);
-    expect(queue.queue.size).toBe(0);
+    expect(memory(queue).waiting).toBe(0);
   });
 });
 
@@ -178,13 +187,15 @@ describe("the readable view", () => {
 });
 
 describe("a dispatch that resolves", () => {
-  test("runs, and leaves the queue empty", () => {
+  test("runs, and leaves the queue empty", async () => {
     const queue = new QueueManager({ jobs: [ChargeCard] });
     const ran = vi.spyOn(ChargeCard.prototype, "run");
 
     queue.push(ChargeCard, "[]");
+    await settle();
 
     expect(ran).toHaveBeenCalledTimes(1);
-    expect(queue.queue.size).toBe(0);
+    expect(memory(queue).waiting).toBe(0);
+    expect(memory(queue).leased).toBe(0);
   });
 });
