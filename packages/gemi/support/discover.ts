@@ -8,8 +8,8 @@ import { join, relative } from "node:path";
  * ### Why it has to run the files
  *
  * A job that is written and not listed does not fail; it disappears.
- * `QueueManager.next` looks a dispatched name up in the map its config built and
- * skips what is not there, so the dispatch is simply lost. A cron drifts worse:
+ * `QueueManager.run` looks a dispatched name up in the map its config built and
+ * drops what is not there, so the dispatch is simply lost. A cron drifts worse:
  * nothing is waiting on a tick, so a job that never fires reports nothing to
  * anyone. What both come down to is that `app/config/queue.ts` naming every
  * `Job` subclass is the *only* thing putting those classes in the module graph —
