@@ -109,7 +109,11 @@ something relied on the reload for a script outside `/assets/`.
 
 A new, optional [asset base](docs/configuration.md#asset-base)
 (`GEMI_ASSET_BASE` or `assetBase` in `gemi.config.ts`) serves the client
-build from a CDN. Unset, every asset URL is what it was.
+build from a CDN. Unset, every asset URL is what it was — unless
+`gemi.config.ts` already sets an absolute `vite.base`: the document's client
+entry, `modulepreload` hints, loaders and navigation stylesheets now use that
+base too, where they used to be root-relative. Check that whatever sits in
+front of the app answers `<vite.base>assets/*`.
 
 ---
 
