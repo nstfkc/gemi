@@ -140,6 +140,51 @@ What to check:
   which exits the process when the drain is done. Pass
   `handleSignals: false` to `new Server()` to keep only yours.
 
+## The queue runs over a driver, and `Job.dispatch()` returns a promise
+
+Jobs are still kept in memory by default and **still lost when the process
+exits**. What changed is that the memory queue is now one `QueueDriver`
+among any an app supplies (`defineQueueConfig({ driver })`), and the manager
+around it changed shape to suit.
+
+**`Job.dispatch()` returns `Promise<string>`, the job's id, instead of
+`void`.** A call that ignores the result still compiles, and with the memory
+driver the promise never rejects. A lint rule such as
+`@typescript-eslint/no-floating-promises` will now flag an unawaited
+dispatch; await it, or mark it `void`. Arguments JSON cannot carry still throw
+synchronously, as before.
+
+**`QueueManager`'s internals are gone:** `queue`, `isRunning`,
+`activeRunningJobsCount`, `next()`, and `push()`'s third argument. `push()`
+returns a promise too. A test that read `app(QueueManager).queue.size` reads
+the driver instead:
+
+```ts
+import { MemoryQueueDriver } from "gemi/services";
+
+const driver = app(QueueManager).driver as MemoryQueueDriver;
+expect(driver.waiting + driver.leased).toBe(0);
+```
+
+A test that held the queue with `isRunning = true` calls `await
+queue.stop()`, and `queue.start()` to let it go.
+
+**A job no longer runs inside the request that dispatched it.** It used to
+run in the async context of whichever dispatch started the drain, so a job
+could read that request's user or open transaction — and every job drained
+behind it saw the same one, whoever dispatched it. It now runs in the
+application's context and no request's. A job that relied on the old
+behaviour takes what it needs as arguments.
+
+**Two things that used to wedge the queue no longer do:** a throw from
+`onFail` or `onDeadletter` is logged and the job's slot is freed, and a full
+queue wakes when a slot frees instead of polling once a second.
+
+New, and optional: `backoff` on a job (milliseconds before each retry),
+`visibilityTimeout` and `pollInterval` on the queue slice, and
+`drain(timeoutMs)` / `stop()` / `start()` on `QueueManager`. See
+[Jobs & Queues](docs/jobs-and-queues.md).
+
 ---
 
 # Upgrading from 0.55 to 0.56
