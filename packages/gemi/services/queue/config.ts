@@ -1,4 +1,5 @@
 import type { Job } from "./Job";
+import type { QueueDriver } from "./QueueDriver";
 
 // Config key: `queue`. Derived from `QueueServiceProvider`.
 export interface QueueConfig {
@@ -43,6 +44,38 @@ export interface QueueConfig {
   jobsDir?: string;
 
   concurrency?: number;
+
+  /**
+   * Where queued jobs are kept: `"memory"`, a `QueueDriver`, or a function
+   * returning one.
+   *
+   * `"memory"` is the default and keeps them in this process — so **a restart,
+   * a deploy or a crash loses every job that is waiting or running**, silently.
+   * See `MemoryQueueDriver`.
+   *
+   * A function is called once per application, when the queue is registered.
+   * Prefer it to an instance: a config module is imported by more than the
+   * server (tests building several applications, build tooling, a `worker`
+   * job's thread), and an instance created at import is shared by every
+   * application built from that config, or opened by a process that never
+   * runs a job.
+   */
+  driver?: "memory" | QueueDriver | (() => QueueDriver);
+
+  /**
+   * How long a claimed job is leased for, in milliseconds, before a driver
+   * that shares its storage between processes may hand it to another one. The
+   * manager heartbeats every job it is running at a third of this, so it bounds
+   * how long a dead process's jobs stay stuck, not how long a job may run. A
+   * job that blocks the event loop for longer than this can be run twice.
+   */
+  visibilityTimeout?: number;
+
+  /**
+   * How often, in milliseconds, to ask a driver without `subscribe` for work.
+   * The memory driver wakes the queue itself and is never polled.
+   */
+  pollInterval?: number;
 }
 
 export function defineQueueConfig(config: QueueConfig): QueueConfig {
@@ -54,5 +87,8 @@ export function queueConfigDefaults(): Required<QueueConfig> {
     jobs: [],
     jobsDir: "app/jobs",
     concurrency: 1,
+    driver: "memory",
+    visibilityTimeout: 5 * 60_000,
+    pollInterval: 1000,
   };
 }

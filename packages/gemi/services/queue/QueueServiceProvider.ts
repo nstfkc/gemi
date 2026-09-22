@@ -8,7 +8,10 @@ export class QueueServiceProvider extends ServiceProvider {
   register() {
     this.app.singleton(
       QueueManager,
-      () => new QueueManager(this.app.config.get<QueueConfig>("queue", {})),
+      () =>
+        new QueueManager(this.app.config.get<QueueConfig>("queue", {}), {
+          application: this.app,
+        }),
     );
   }
 
