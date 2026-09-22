@@ -64,7 +64,9 @@ function server(name: string, dialect: Dialect, url: string): Backend {
     name,
     dialect,
     async prepare() {
-      const table = `gemi_jobs_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      // Mixed case on purpose: Postgres folds an unquoted name, so a query
+      // that forgot to quote would miss the table `createTable` made.
+      const table = `GemiJobs_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const clients: SQL[] = [];
       const first = new SQL(url);
       clients.push(first);
@@ -77,7 +79,8 @@ function server(name: string, dialect: Dialect, url: string): Backend {
           return client;
         },
         async dispose() {
-          await first.unsafe(`DROP TABLE IF EXISTS ${table}`);
+          const quoted = dialect === "postgres" ? `"${table}"` : `\`${table}\``;
+          await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
           await Promise.all(clients.map((client) => client.close()));
         },
       };
@@ -316,11 +319,23 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
 });
 
 describe("DatabaseQueueDriver", () => {
-  test("refuses a table name it would have to quote", () => {
+  test("refuses a table name that is not a plain identifier", () => {
     const sql = new SQL(":memory:");
     expect(
       () => new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { table: "jobs; drop table x" }),
     ).toThrow("not a plain identifier");
+  });
+
+  test("a table named with a reserved word is quoted in every query, as createTable quotes it", async () => {
+    const sql = new SQL(":memory:");
+    const driver = new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { table: "order" });
+    await driver.createTable();
+    await driver.enqueue({ name: "A", args: "[]" });
+    const [claimed] = await driver.claim(1, { visibilityTimeoutMs: 1000 });
+    await driver.complete(claimed!);
+    expect(await driver.claim(1, { visibilityTimeoutMs: 1000 })).toEqual([]);
+    expect(await driver.prune(0)).toBe(0);
+    await sql.close();
   });
 
   test("createTable is idempotent", async () => {
