@@ -7745,6 +7745,10 @@ async function update() {
 > `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
 > role, so throw `InsufficientPermissionsError` when the identity is known and the action is
 > refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
+>
+> An app upgrading from 0.62, where it answered `401`, can keep that on API routes while its
+> shipped clients catch up: `InsufficientPermissionsError.apiStatus = 401`, set once at module
+> scope in `app/kernel/Kernel.ts`. See UPGRADE.md.
 
 ## Related
 

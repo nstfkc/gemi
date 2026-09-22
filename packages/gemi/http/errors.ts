@@ -26,6 +26,21 @@ export class AuthorizationError extends RequestBreakerError {
  * `AuthenticationError`, which stays 401.
  */
 export class InsufficientPermissionsError extends RequestBreakerError {
+  /**
+   * The status API routes answer with. Before 0.63 it was 401, and a shipped
+   * native client may still branch on that — it cannot be rolled forward in
+   * the same deploy as the server. Such an app sets this back to 401 once at
+   * boot, and removes the line when its clients handle 403:
+   *
+   * ```ts
+   * InsufficientPermissionsError.apiStatus = 401;
+   * ```
+   *
+   * View requests answer 403 either way; before 0.63 they fell through to the
+   * view dispatcher's 400 default, which no client could have relied on.
+   */
+  static apiStatus: 401 | 403 = 403;
+
   private error: string;
   constructor(error: string = "Insufficient permissions") {
     super(error);
@@ -33,7 +48,7 @@ export class InsufficientPermissionsError extends RequestBreakerError {
     this.error = error;
     this.payload = {
       api: {
-        status: 403,
+        status: InsufficientPermissionsError.apiStatus,
         data: { error: this.error },
       },
       // Without a status a view request would fall through to the

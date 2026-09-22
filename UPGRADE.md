@@ -1,3 +1,86 @@
+# Upgrading from 0.62 to 0.63
+
+No code has to change, but several responses do: a refusal now answers `403`,
+and an unhandled error in production answers a generic `500`. Nothing
+here fails to compile, and a server-side test suite only notices where it
+asserts on a status. **Check what your clients do with these responses before
+you deploy** — especially a shipped native client, which cannot be updated in
+the same deploy as the server.
+
+## `InsufficientPermissionsError` answers `403`, not `401` — breaking
+
+`Auth.guard()` throws it, and so does any middleware of yours that throws it
+directly.
+
+| | 0.62 | 0.63 |
+|---|---|---|
+| API route | `401` `{ error: "Insufficient permissions" }` | `403`, same body |
+| View request | `400` (the view dispatcher's default) | `403` |
+| `error.name` / `error.message` | `"AuthenticationError"` / `"Authentication error"` | `"InsufficientPermissionsError"` / the refusal, `"Insufficient permissions"` by default |
+
+`401` tells a client to re-authenticate, so a client that sends every `401` to
+sign-in looped a signed-in user without the role straight back to where they
+started. A request with no user still answers `401`: that is
+`AuthenticationError`, thrown by `Auth.user()` before the guard's predicate
+runs. `AuthorizationError` still answers `401` too.
+
+**Who breaks:** a client that branches on `401` for this refusal: one that
+refreshes or retries on `401` only, or one that shows "you don't have access"
+for a `401`. A test asserting `payload.api.status === 401` for it also breaks.
+Server code that catches the error by `name === "AuthenticationError"` now
+misses it; match on `instanceof InsufficientPermissionsError` instead.
+
+**Keeping `401` while your clients catch up.** Set the old status once, at
+module scope in `app/kernel/Kernel.ts`, and delete the line when every client
+you still support handles `403`:
+
+```ts
+import { InsufficientPermissionsError } from "gemi/http";
+
+InsufficientPermissionsError.apiStatus = 401;
+```
+
+That covers API routes only. A view request answers `403` either way, since no
+client could have depended on the `400` it replaced.
+
+## An error thrown by an `Auth.guard()` predicate is no longer a refusal
+
+In 0.62, `guard` caught anything the predicate threw and answered it as
+`InsufficientPermissionsError`, so a database outage reached the client as
+"you may not do this" and never reached `onRequestFail`. It now propagates as
+itself: a `500`, reported like any other failure.
+
+That includes a policy denial raised inside the predicate — a model read the
+policy refuses. It used to answer `401` through the guard; it is now a `500`,
+because `PolicyDeniedError` is a plain `Error`. Return `false` from the
+predicate for a refusal rather than letting a read inside it throw one.
+`Auth.guardSafe()` is unchanged: it still treats a throw as `false`.
+
+## A policy denial answers `403`, not `500`
+
+A `PolicyDeniedError` from a handler or middleware used to answer `500`, and
+the body carried the policy's message. On API routes it now answers `403`
+`{ error: { message: "Forbidden" } }`. From a view loader or view middleware,
+including a loader's `Query.instant` refused with `403`, it answers `403` too:
+the API body on a `.json` navigation, and a `403` page otherwise.
+`onRequestFail` still receives the original error, message included.
+
+A client or monitor that treated these `500`s as server faults and retried
+them now sees a refusal instead. A client that displayed the policy's message
+from the body no longer gets it.
+
+## In production, an unhandled error answers a generic `500`
+
+The body used to carry the error's text: `/api` answered the raw
+`err.message`, and a failed page render answered its stack trace as
+`text/plain`. `/api` now answers `{ error: "Internal Server Error" }`, and a
+page answers a generic HTML `500`. The error still goes to `console.error`,
+and `onException` now runs for `/api` failures as well, which it used to
+skip. A client that showed a server error's message to the user shows the
+generic one now. Development is unchanged.
+
+---
+
 # Upgrading from 0.55 to 0.56
 
 One change, and it is a deletion. **Do it as part of the upgrade** — leaving the
