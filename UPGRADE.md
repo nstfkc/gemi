@@ -169,6 +169,16 @@ expect(driver.waiting + driver.leased).toBe(0);
 A test that held the queue with `isRunning = true` calls `await
 queue.stop()`, and `queue.start()` to let it go.
 
+**A dispatched job no longer starts inside `dispatch()`.** An idle queue used
+to call the job's `run` synchronously, up to its first `await`, before
+`dispatch()` returned. It now starts once the driver has recorded the job and
+handed it back to the worker loop, a few microtasks later. A test that
+dispatches and then asserts straight away — `SomeJob.dispatch(x);
+expect(spy).toHaveBeenCalled()` — now fails; wait a macrotask first, for
+example `await new Promise((r) => setTimeout(r, 0))`, before asserting.
+Awaiting `dispatch()` happens to be enough with the memory driver today, but
+it only promises that the job was recorded, not that it has started.
+
 **A job no longer runs inside the request that dispatched it.** It used to
 run in the async context of whichever dispatch started the drain, so a job
 could read that request's user or open transaction — and every job drained
