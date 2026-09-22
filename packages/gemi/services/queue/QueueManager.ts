@@ -1,7 +1,10 @@
 import { AsyncResource } from "node:async_hooks";
 
 import type { Application } from "../../foundation/Application";
+import { DatabaseManager } from "../../database/DatabaseManager";
 import { kernelContext } from "../../kernel/context";
+import { isShuttingDown } from "../../server/shutdown";
+import { DatabaseQueueDriver } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
@@ -161,7 +164,7 @@ export class QueueManager {
   ) {
     this.config = withDefaults(queueConfigDefaults(), config);
     this.application = options.application;
-    this.driver = resolveDriver(this.config.driver);
+    this.driver = resolveDriver(this.config.driver, this.application);
     this.useJobs(this.config.jobs);
   }
 
@@ -287,6 +290,15 @@ export class QueueManager {
   push(job: new () => Job, args: string): Promise<string> {
     const id = this.driver.enqueue({ name: job.name, args });
     if (this.state === "idle") this.start();
+    // A driver without `subscribe` is only polled, so without this a job
+    // dispatched here would wait up to `pollInterval` in a queue with room.
+    // A spurious wake just claims nothing; a rejection is the caller's.
+    if (!this.driver.subscribe) {
+      id.then(
+        () => this.state === "running" && this.wake(),
+        () => {},
+      );
+    }
     return id;
   }
 
@@ -376,7 +388,13 @@ export class QueueManager {
 
   private async claimWhileRunning() {
     while (this.state === "running") {
-      const room = this.config.concurrency - this.inFlight.size;
+      // Once the server has been told to stop, nothing new is taken: a job
+      // claimed now would likely be cut off by the exit, and cost an attempt
+      // and a lease's wait. The jobs already running carry on, and the
+      // provider's `shutdown()` waits for them.
+      const room = isShuttingDown()
+        ? 0
+        : this.config.concurrency - this.inFlight.size;
 
       if (room > 0) {
         this.woken = false;
@@ -659,13 +677,30 @@ export function backoffFor(backoff: number | number[], attempt: number) {
   return Math.max(0, delay ?? 0);
 }
 
-function resolveDriver(driver: Required<QueueConfig>["driver"]): QueueDriver {
+function resolveDriver(
+  driver: Required<QueueConfig>["driver"],
+  application: Application | undefined,
+): QueueDriver {
   if (driver === "memory") return new MemoryQueueDriver();
-  if (typeof driver === "function") return driver();
+  if (driver === "database" || typeof driver === "function") {
+    // Only a manager built by hand has no application. A factory that takes
+    // one would otherwise fail on `undefined` with a TypeError that names
+    // neither the queue nor what is missing.
+    if (!application && (driver === "database" || driver.length > 0)) {
+      throw new Error(
+        `The queue driver needs the application it belongs to, and this ` +
+          `QueueManager was built without one. Pass { application }.`,
+      );
+    }
+    if (driver === "database") {
+      return new DatabaseQueueDriver(application!.make(DatabaseManager));
+    }
+    return driver(application!);
+  }
   if (typeof driver === "string") {
     throw new Error(
       `Unknown queue driver "${driver}". The queue slice's driver is ` +
-        `"memory", a QueueDriver, or a function returning one.`,
+        `"memory", "database", a QueueDriver, or a function returning one.`,
     );
   }
   return driver;

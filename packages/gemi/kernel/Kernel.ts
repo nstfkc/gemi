@@ -8,6 +8,7 @@ import { registeredNames } from "../orm/registry";
 import { Scheduler } from "../services/cron/Scheduler";
 import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
+import { startClaimingIfServing } from "../services/queue/QueueServiceProvider";
 import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
 import { runGlobalMiddleware } from "../services/router/globalMiddleware";
@@ -168,6 +169,8 @@ export class Kernel {
   async waitForBoot() {
     await this.app.boot();
     await this.bootServices();
+    // Last, once every job — queued listeners included — is registered.
+    startClaimingIfServing(this.app);
   }
 
   /**
