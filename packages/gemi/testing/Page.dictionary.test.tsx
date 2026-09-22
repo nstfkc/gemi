@@ -2,8 +2,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { defineDictionary } from "../i18n/defineDictionary";
-import { __resetDictionaryRegistry } from "../i18n/dictionaryRegistry";
+import { __gemi_dict__, defineDictionary } from "../i18n/defineDictionary";
+import { __resetDictionaryRegistry, preloadDictionaries } from "../i18n/dictionaryRegistry";
 import { useDictionary } from "../client/useDictionary";
 import { useLocale } from "../client/useLocale";
 import { useQuery } from "../client/useQuery";
@@ -137,6 +137,34 @@ describe("a useDictionary component under <Page>", () => {
     );
 
     expect(screen.getByText("loading")).toBeDefined();
+    expect(await screen.findByText("Hello 3")).toBeDefined();
+  });
+
+  test("a bundled dictionary warmed with preloadDictionaries commits the same way", async () => {
+    // A bundled dictionary loads its locale lazily. Warmed through the
+    // registry, its strings are in hand before the first render, which is
+    // what keeps `use()` out of it. See docs/testing.md.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ total: 3 })),
+    );
+    const bundled = __gemi_dict__("d_page_bundled", {
+      "en-US": async () => ({ default: { greeting: "Hello {{name}}" } }),
+    }) as unknown as typeof greeting;
+    await preloadDictionaries("en-US");
+    function List() {
+      const t = useDictionary(bundled);
+      const { data } = useQuery("/items" as never);
+      const { total } = data as any as { total: number };
+      return <p>{t("greeting", { name: String(total) })}</p>;
+    }
+
+    render(
+      <Page fallback={<div>loading</div>}>
+        <List />
+      </Page>,
+    );
+
     expect(await screen.findByText("Hello 3")).toBeDefined();
   });
 });

@@ -223,7 +223,10 @@ export function loadDictionary(
  * — as `useQuery` does — that task never runs again and the component never
  * commits. A thenable made from strings already in hand carries them as
  * `inHand`: nothing ever suspended on it, so there is nothing to replay, and
- * the hook reads them directly.
+ * the hook reads them directly. A thenable that *was* pending keeps going
+ * through `use()` for as long as it is cached, so under `act` the hang
+ * outlives its first render; tests warm with `preloadDictionaries` instead
+ * (docs/testing.md).
  *
  * **There is exactly one per (dictionary, locale).** React tracks the thenable
  * a component suspended on by position, and a later pass arriving at the same

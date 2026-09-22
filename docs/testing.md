@@ -144,6 +144,18 @@ test("greets in Turkish", () => {
 
 No `dictionaries`, no `translations`, and no dictionary name that can drift out of sync with the component. The import cost described above does not apply either — a `defineDictionary` module imports `gemi/client`, not `gemi/i18n`, so it never pulls the container in and works under a real-browser runner.
 
+**If your runner applies gemi's Vite transform**, a dictionary loads each locale lazily instead, and the first render to read it suspends. A test whose component then also suspends on an unseeded `useQuery` never commits under `act`. The same happens if an earlier render in the same file suspended on that dictionary, because the registry keeps the promise React tracked for the rest of the test file. Warm the dictionaries before rendering, not by rendering:
+
+```tsx
+import { preloadDictionaries } from "gemi/dictionary";
+
+beforeEach(async () => {
+  await preloadDictionaries("en-US");
+});
+```
+
+Strings loaded that way are read without React's `use()`, so they never hold up the render.
+
 Both APIs compose on one page, which is what a half-migrated app needs:
 
 ```tsx
