@@ -310,6 +310,46 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
   }
 
   /**
+   * Refuse a turn that arrives without a `threadId`, with a 400
+   * `thread_required`, before anything runs.
+   *
+   * A stateless turn is otherwise open to any caller the route's middleware
+   * lets through: the client carries the history, so the model runs, and is
+   * billed, as a general-purpose chat. An app whose tools resolve their subject
+   * from the thread can make them refuse such a turn, but the model has still
+   * been paid for by then.
+   *
+   * It governs `stream` only. `upload` can still reach the provider without a
+   * thread (a `provider` destination); refuse that in `authorizeRequest`.
+   */
+  protected requireThread = false;
+
+  /**
+   * Decides whether this caller may use this route, on every one of the four:
+   * `stream`, `attach`, `stop` and `upload` (#542). Throw a request breaker
+   * (`InsufficientPermissionsError`, say) to refuse; return to let it through.
+   *
+   * It runs before the route does any work of its own: on `stream`, ahead of
+   * the thread's lock and load, `instructions()` and the provider, so a refused
+   * turn is not charged for, waits behind no run and does not learn whether its
+   * thread exists; on `attach`, before a live run's frames are read.
+   *
+   * `threadId` is the one the client sent, taken on trust and not yet checked
+   * against the store — which is what makes this the place to check that the
+   * caller owns it. A thread-scoped app that checks it here on every route
+   * keeps a thread's live answer, its stop button and its attachments to its
+   * owner. It is `undefined` when the request names no thread: a stateless
+   * turn, an upload without one, a stop by `runId` or `clientRunId`.
+   */
+  protected authorizeRequest(
+    req: HttpRequest<any, any>,
+    params: { route: "stream" | "attach" | "stop" | "upload"; threadId?: string },
+  ): void | Promise<void> {
+    void req;
+    void params;
+  }
+
+  /**
    * `POST /<path>` — one route for every client turn. A first message, an
    * approval, an answer to a question and a client tool's result are all just
    * the next turn, so none of them gets an endpoint of its own.
@@ -330,6 +370,15 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     const turn = parsedTurn.turn;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
 
+    // Before `pendingTurns`, so a refused turn leaves nothing for `/stop` to
+    // find. It does not yield, unlike `authorizeRequest` below.
+    if (this.requireThread && !threadId) {
+      return jsonResponse(400, {
+        code: "thread_required",
+        message: "This agent takes a turn only on a thread: send a threadId.",
+      });
+    }
+
     // From here until `register`, the only thing `/stop` can find this turn by.
     // See `pendingTurns`.
     const pending = clientRunId ? { cancelled: false } : null;
@@ -345,8 +394,8 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // The `threadId` is the client's, and nothing here checks that this caller
     // owns it — `AgentStore` cannot, since it holds no user. A `threadId` is
     // therefore a capability and has to be unguessable (`createThread` mints a
-    // uuid) and, for anything that matters, checked: override `instructions()`
-    // or a `store` that scopes by `req.user`. The framework's job is to make
+    // uuid) and, for anything that matters, checked: override `authorizeRequest()`
+    // or give it a `store` that scopes by `req.user`. The framework's job is to make
     // sure the route is behind the router's middleware in the first place,
     // which `ApiRouter.agent()` now does.
     //
@@ -368,15 +417,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
           // than see it answered as an empty conversation and have this turn
           // persisted under the dead id.
           //
-          // That ordering is deliberate, and it costs something: the ownership
-          // check the comment above points at `instructions()` for has not run
-          // yet, so a caller holding a uuid learns whether it is live here
-          // without the app's say. `/attach` already answers a question of that
-          // shape to anyone with the id and never calls `instructions()`, and
-          // the id is unguessable — which is why the load stays above
-          // `instructions()`, whose own work (a database read, typically) would
-          // otherwise be spent on a thread that is gone. Move it below and that
-          // work is spent on every dead id instead.
+          // That ordering is deliberate. An ownership check belongs in
+          // `authorizeRequest()`, which has already run; one left in
+          // `instructions()` has not, so a caller holding a uuid learns whether
+          // it is live here without the app's say. The id is unguessable, so
+          // the load stays above `instructions()`, whose own work (a database
+          // read, typically) would otherwise be spent on a thread that is gone.
+          // Move it below and that work is spent on every dead id instead.
           return jsonResponse(404, {
             code: "thread_not_found",
             message: `Thread ${threadId} does not exist here, or has expired.`,
@@ -401,10 +448,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // nothing registered, so there is no run to end and nothing charged
         // for. Checked after the last `await` above, so that a stop landing
         // during it is not missed: from here to `register` nothing yields.
-        return jsonResponse(409, {
-          code: "stopped",
-          message: "The turn was stopped before it started.",
-        });
+        return stoppedBeforeStart();
       }
 
       const run = this.agent.stream({
@@ -454,6 +498,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     };
 
     try {
+      // After `pending` is registered, not before: the app's check is a yield —
+      // a database read, typically — and a stop pressed during it has to find
+      // this turn. Before the thread's lock, which ends the thread's previous
+      // run, so a refused or stopped turn does not end it either.
+      await this.authorizeRequest(req, { route: "stream", threadId });
+      if (pending?.cancelled) {
+        return stoppedBeforeStart();
+      }
       return threadId ? await this.withThread(threadId, start) : await start();
     } finally {
       if (pending && pendingTurns.get(clientRunId) === pending) {
@@ -551,6 +603,10 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       });
     }
 
+    // Before the lookup: a refused caller learns neither whether a run is live
+    // on the thread nor any frame of it.
+    await this.authorizeRequest(req, { route: "attach", threadId });
+
     // The store is not consulted. This route answers whether a run is in
     // flight here, and a run it finds was started on a thread `stream` had
     // already loaded; a miss is `no_live_run` whether or not the thread exists,
@@ -629,6 +685,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       return invalidRequest(parsed);
     }
     const body = parsed.body;
+
+    await this.authorizeRequest(req, {
+      route: "stop",
+      threadId: typeof body.threadId === "string" ? body.threadId : undefined,
+    });
 
     // Three handles, most specific first, because which ones the client has
     // depends on how far the run got. `runId` is the server's own and settles
@@ -859,6 +920,12 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // be looser: an invented id would otherwise be a scope, and an anonymous
     // caller could keep writing to storage by sending a fresh one each time.
     const threadField = form.get("threadId");
+    // The field as sent, before the store is asked about it, so a refused
+    // caller does not learn whether the thread exists.
+    await this.authorizeRequest(req, {
+      route: "upload",
+      threadId: typeof threadField === "string" && threadField.length > 0 ? threadField : undefined,
+    });
     const threadId =
       typeof threadField === "string" &&
       threadField.length > 0 &&
@@ -1395,6 +1462,14 @@ function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): n
 function searchParam(req: HttpRequest<any, any>, key: string): string | undefined {
   const value = req?.search?.get(key);
   return typeof value === "string" ? value : undefined;
+}
+
+/** A turn `/stop` ended while it waited, before anything ran or was charged. */
+function stoppedBeforeStart(): Response {
+  return jsonResponse(409, {
+    code: "stopped",
+    message: "The turn was stopped before it started.",
+  });
 }
 
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
