@@ -7,6 +7,12 @@ export type ServiceProviderConstructor = new (
 ) => ServiceProvider;
 
 /**
+ * What `Application.shutdown()` could not finish, by provider class name. Both
+ * empty means every provider's `shutdown()` resolved in time.
+ */
+export type ShutdownReport = { failed: string[]; timedOut: string[] };
+
+/**
  * Cross-copy brand. `dist/bin/gemi.js` bundles its own gemi while the app
  * resolves `gemi/*` to source, so `instanceof Application` is false for an
  * Application built by the other copy. `Symbol.for` is registry-global and
@@ -95,10 +101,85 @@ export class Application extends Container {
     this.booted = true;
   }
 
+  /**
+   * Runs every provider's `shutdown()`, in reverse registration order, and
+   * resolves with what did not finish cleanly. Never rejects: this runs on the
+   * way out of a process, and a throw here would skip the providers after the
+   * one that threw — the database pool closing is exactly the kind of thing
+   * that must not depend on the mail provider behaving.
+   *
+   * Reverse order because registration order is dependency order: a provider
+   * registered later may use an earlier one in its own `shutdown()` (the
+   * queue finishing its jobs against a database that is still open).
+   *
+   * The providers share one deadline rather than each getting `timeoutMs`,
+   * because the caller's budget is a platform's grace period, which bounds the
+   * whole exit — seventeen providers each allowed five seconds would add up to
+   * a `SIGKILL`. A provider that overruns is abandoned (its promise keeps
+   * running; the process is about to exit) and reported in `timedOut`; one
+   * reached after the deadline has passed is not called at all and reported
+   * the same way.
+   *
+   * Idempotent: a second call returns the first call's result.
+   */
+  shutdown(options: { timeoutMs?: number } = {}): Promise<ShutdownReport> {
+    this.shutdownPromise ??= this.shutdownProviders(options.timeoutMs ?? 5_000);
+    return this.shutdownPromise;
+  }
+
+  private shutdownPromise: Promise<ShutdownReport> | undefined;
+
+  private async shutdownProviders(timeoutMs: number): Promise<ShutdownReport> {
+    const report: ShutdownReport = { failed: [], timedOut: [] };
+    const deadline = Date.now() + timeoutMs;
+
+    for (const provider of [...this.providers].reverse()) {
+      const name = provider.constructor.name;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        console.error(
+          `[gemi] ${name}.shutdown() skipped: the provider shutdown deadline had passed.`,
+        );
+        report.timedOut.push(name);
+        continue;
+      }
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        // `.then` rather than a direct call, so a synchronous throw lands in
+        // the same `catch` as a rejection.
+        Promise.resolve()
+          .then(() => provider.shutdown())
+          .then(
+            () => "done" as const,
+            (error: unknown) => {
+              console.error(`[gemi] ${name}.shutdown() failed:`, error);
+              return "failed" as const;
+            },
+          ),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), remaining);
+        }),
+      ]);
+      clearTimeout(timer);
+
+      if (outcome === "failed") report.failed.push(name);
+      if (outcome === "timeout") {
+        console.error(
+          `[gemi] ${name}.shutdown() did not finish within the provider shutdown deadline; moving on.`,
+        );
+        report.timedOut.push(name);
+      }
+    }
+
+    return report;
+  }
+
   flush() {
     super.flush();
     this.instance(Repository, this.config);
     this.providers = [];
     this.booted = false;
+    this.shutdownPromise = undefined;
   }
 }
