@@ -122,6 +122,53 @@ describe("concurrency", () => {
     await settle();
     expect(queue.running).toBe(0);
   });
+
+  test("a job reclaimed while its first run is still going counts both runs, and the stale one ending leaves the new one tracked", async () => {
+    const { Gated, started, release } = gatedJob("Gated");
+    const memory = new MemoryQueueDriver();
+    // Heartbeats fail until the reclaim, standing in for a database blip that
+    // lets a live lease lapse.
+    let blip = true;
+    const driver: QueueDriver = {
+      enqueue: (job) => memory.enqueue(job),
+      claim: (limit, options) => memory.claim(limit, options),
+      complete: (job) => memory.complete(job),
+      fail: (job, failure) => memory.fail(job, failure),
+      heartbeat: (jobs, options) =>
+        blip ? Promise.resolve() : memory.heartbeat(jobs, options),
+      subscribe: (wake) => memory.subscribe(wake),
+    };
+    const queue = new QueueManager({
+      jobs: [Gated],
+      driver,
+      concurrency: 2,
+      visibilityTimeout: 60,
+    });
+
+    queue.push(Gated, JSON.stringify([1]));
+    await vi.waitFor(() => expect(started).toHaveLength(2), {
+      timeout: 1000,
+      interval: 5,
+    });
+    blip = false;
+
+    // Both runs are really running, so both hold a slot.
+    expect(queue.running).toBe(2);
+
+    // The stale first run ends. The second is still running, so it must stay
+    // counted and heartbeated; were it forgotten, its lease would lapse too
+    // and the job would be claimed a third time into the freed slot.
+    release();
+    await sleep(200);
+    expect(started).toHaveLength(2);
+    expect(queue.running).toBe(1);
+    const { unfinished } = await queue.stop();
+    expect(unfinished.map((job) => job.attempt)).toEqual([2]);
+
+    release();
+    await settle();
+    expect(queue.running).toBe(0);
+  });
 });
 
 describe("a job that always throws", () => {

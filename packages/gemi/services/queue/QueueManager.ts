@@ -116,6 +116,16 @@ export class QueueManager {
   readonly driver: QueueDriver;
 
   private readonly application: Application | undefined;
+  /**
+   * Keyed by claim, `id:attempt`, not by job id. A lease that lapses while
+   * its job is still running here — heartbeats failing through a database
+   * blip, or an event loop blocked past the visibility timeout — lets this
+   * same process claim the job again. Both runs are then really running, so
+   * both take a slot. Keyed by id alone, the second claim overwrote the first
+   * and the first one's `finally` then deleted it: the live run stopped being
+   * counted, drained or heartbeated, so its lease lapsed in turn and the job
+   * was claimed again into a slot that was never free.
+   */
   private readonly inFlight = new Map<
     string,
     { job: ClaimedJob; done: Promise<void> }
@@ -238,7 +248,7 @@ export class QueueManager {
    *
    * The registry is keyed by name, and a name is exactly what a dispatch
    * carries, so "is this job registered?" is a question with a silent wrong
-   * answer — `next()` drops an unknown name long after the caller moved on.
+   * answer — `run()` drops an unknown name long after the caller moved on.
    * This is where a test asks it out loud.
    *
    * It reports what came in, not what the registry accepted, so a name claimed
@@ -414,6 +424,7 @@ export class QueueManager {
   }
 
   private execute(claimed: ClaimedJob) {
+    const key = `${claimed.id}:${claimed.attempt}`;
     const attempt = () => this.run(claimed);
     const done = (
       this.application
@@ -429,10 +440,10 @@ export class QueueManager {
         );
       })
       .finally(() => {
-        this.inFlight.delete(claimed.id);
+        this.inFlight.delete(key);
         this.wake();
       });
-    this.inFlight.set(claimed.id, { job: claimed, done });
+    this.inFlight.set(key, { job: claimed, done });
     this.heartbeat();
   }
 
