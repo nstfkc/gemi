@@ -564,16 +564,28 @@ model SocialAccount {
 }
 ```
 
-and convert the empty placeholders to `NULL` in the same migration — a unique index cannot
-hold more than one `""` per provider, and treats `NULL`s as distinct:
+and convert the empty placeholders to `NULL` in the same migration. A unique index cannot
+hold more than one `""` per provider, but it treats `NULL`s as distinct, and every existing
+Google row holds `""`. The conversion has to run **after** the column becomes nullable and
+**before** the index is created, so the migration Prisma generates will not apply on its own.
+Create it with `prisma migrate dev --create-only`, edit it, and only then apply it. On
+Postgres the finished migration is:
 
 ```sql
+DROP INDEX "SocialAccount_username_provider_key";
+ALTER TABLE "SocialAccount" ALTER COLUMN "providerId" DROP NOT NULL;
+-- added by hand: between DROP NOT NULL and CREATE UNIQUE INDEX
 UPDATE "SocialAccount" SET "providerId" = NULL WHERE "providerId" = '';
+CREATE UNIQUE INDEX "SocialAccount_provider_providerId_key" ON "SocialAccount"("provider", "providerId");
 ```
 
-(`prisma migrate dev` generates the rest. On SQLite it redefines the table; the template's
-`20260922000000_social_account_provider_identity` migration does it with
-`NULLIF("providerId", '')` in the copy.) Do **not** fill legacy rows from names or emails: they
+Appending the `UPDATE` to the end of the file fails at `CREATE UNIQUE INDEX` as soon as there
+are two Google accounts. A development database often has only one, so the mistake passes
+locally and first fails at `migrate deploy`. On SQLite, Prisma redefines the table instead;
+write `NULLIF("providerId", '')` in place of `"providerId"` in its `INSERT ... SELECT`, as the
+template's `20260922000000_social_account_provider_identity` migration does.
+
+Do **not** fill legacy rows from names or emails: they
 are recorded with the real `providerId` by the callback itself, on each user's next sign-in,
 through the email match that already signs them in today.
 

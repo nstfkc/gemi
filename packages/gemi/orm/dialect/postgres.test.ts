@@ -201,6 +201,20 @@ describe("constraint violations", () => {
     });
   });
 
+  test("a quoted column holding a comma or a quote stays one column", () => {
+    expect(
+      postgres.constraintViolation({
+        ...violation,
+        detail: 'Key ("last, first", c, "say ""hi""")=(a, b, c, d) already exists.',
+        constraint: "t_key",
+      }),
+    ).toEqual({
+      kind: "unique",
+      columns: ["last, first", "c", 'say "hi"'],
+      constraint: "t_key",
+    });
+  });
+
   // The whole point of matching five characters rather than the `23` class:
   // these are integrity violations too, and reporting one as a duplicate key
   // sends the caller looking for a row that does not exist.
