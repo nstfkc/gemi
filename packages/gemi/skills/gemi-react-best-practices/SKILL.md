@@ -173,7 +173,7 @@ carried for free.
 ### 6. Services, Jobs & Commands (HIGH)
 
 - `service-static-token-and-name` - `static token` / `static name` survive minification; class names do not
-- `service-queue-is-in-memory` - The queue is in-process; enqueued work is lost on restart
+- `service-queue-is-in-memory` - The default queue is in-process; enqueued work is lost on restart
 - `service-lazy-not-module-scope` - Construct clients lazily — discovery imports every module
 
 ### 7. Client Components & Navigation (MEDIUM)

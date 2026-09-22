@@ -1,5 +1,11 @@
+import { AsyncResource } from "node:async_hooks";
+
+import type { Application } from "../../foundation/Application";
+import { kernelContext } from "../../kernel/context";
 import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
+import { MemoryQueueDriver } from "./MemoryQueueDriver";
+import type { ClaimOptions, ClaimedJob, QueueDriver } from "./QueueDriver";
 import { withDefaults } from "../../support/withDefaults";
 
 /**
@@ -9,12 +15,12 @@ import { withDefaults } from "../../support/withDefaults";
  * `postMessage` structured-clones its argument and a Promise is not cloneable,
  * so an un-awaited `dispatchJob` posted the pending promise, threw
  * `DataCloneError` inside this handler, and posted nothing at all. `runInWorker`
- * then never settled: `run` below never returned, `activeRunningJobsCount` was
+ * then never settled: `run` below never returned, its concurrency slot was
  * never decremented, and neither the retry path nor `onDeadletter` ever fired —
- * after `concurrency` such jobs the queue sits in `next()`'s one-second poll
- * forever, with no error anywhere. Any job whose `run` is `async` hit it, which
- * is every job that touches IO; a queued listener hits it unconditionally,
- * because the synthetic job's `run` awaits `handle`.
+ * after `concurrency` such jobs the queue sits at its limit forever, with no
+ * error anywhere. Any job whose `run` is `async` hit it, which is every job
+ * that touches IO; a queued listener hits it unconditionally, because the
+ * synthetic job's `run` awaits `handle`.
  *
  * The await earns two more things. A rejecting job now reaches the `catch` and
  * comes back as `{error}`, where the queue's ordinary retry-then-dead-letter
@@ -75,25 +81,66 @@ async function runInWorker(jobName: string, args: string) {
   });
 }
 
-type JobDefinition = {
-  class: string;
-  args: string;
-  createdAt: number;
-  retries: number;
+/**
+ * The async context every job runs in: the one this module was evaluated in,
+ * which is boot, outside any request.
+ *
+ * The worker loop is long-lived and started lazily, by the first dispatch, and
+ * an async function keeps the context it was started in across every `await`.
+ * Started from a request, it would run every later job — dispatched by any
+ * request at all — inside the first one's `RequestContext`, and with its ORM
+ * transaction handle if it had one open: one user's identity leaking into
+ * another's work. Captured here, where no request exists, and entered by `start()`, a job
+ * sees no request at all; the Application is entered separately, per job.
+ */
+const bootScope = new AsyncResource("gemi.queue");
+
+/** What `drain` could not wait out. */
+export type DrainResult = {
+  /**
+   * Jobs still running when the timeout elapsed. They keep running, and keep
+   * their leases, until they settle or the process exits; with a driver that
+   * outlives the process, an exit leaves them to be reclaimed once their lease
+   * runs out. Waiting jobs are not listed — they were never taken, and are
+   * wherever the driver keeps them.
+   */
+  unfinished: ClaimedJob[];
 };
 
 export class QueueManager {
   static token = "queue";
 
-  queue: Set<JobDefinition> = new Set();
-  activeRunningJobsCount = 0;
-  isRunning = false;
   jobs: Record<string, new () => Job> = {};
 
   readonly config: Required<QueueConfig>;
+  readonly driver: QueueDriver;
 
-  constructor(config: QueueConfig = {}) {
+  private readonly application: Application | undefined;
+  private readonly inFlight = new Map<
+    string,
+    { job: ClaimedJob; done: Promise<void> }
+  >();
+  private state: "idle" | "running" | "stopped" = "idle";
+  private looping = false;
+  private claiming: Promise<unknown> | undefined;
+  private woken = false;
+  private resume: (() => void) | undefined;
+  private unsubscribe: (() => void) | undefined;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+
+  /**
+   * `application` is entered around every job, so `app()` inside one resolves
+   * to it rather than to whichever application happens to be the static
+   * fallback. The provider always passes it; a manager built bare, as the unit
+   * tests do, runs jobs with no application entered.
+   */
+  constructor(
+    config: QueueConfig = {},
+    options: { application?: Application } = {},
+  ) {
     this.config = withDefaults(queueConfigDefaults(), config);
+    this.application = options.application;
+    this.driver = resolveDriver(this.config.driver);
     this.useJobs(this.config.jobs);
   }
 
@@ -210,90 +257,338 @@ export class QueueManager {
     }
   }
 
-  async next() {
-    if (!this.isRunning) {
-      this.isRunning = true;
+  /**
+   * Queues a job and resolves to its id once the driver has recorded it, then
+   * makes sure the worker loop is running — unless `drain` stopped it, in which
+   * case the job waits in the driver for whichever process claims next. With
+   * the memory driver that is nobody; see `drain`.
+   */
+  push(job: new () => Job, args: string): Promise<string> {
+    const id = this.driver.enqueue({ name: job.name, args });
+    if (this.state === "idle") this.start();
+    return id;
+  }
+
+  /**
+   * Starts claiming. Idempotent, and called by the first `push`, so an app
+   * does not need to; it is public for a process that should run jobs it
+   * never dispatched — ones a driver kept across a restart — and for resuming
+   * after `drain`.
+   */
+  start() {
+    if (this.state === "running") return;
+    this.state = "running";
+    this.unsubscribe = this.driver.subscribe?.(() => this.wake());
+    // A loop a `drain` has not yet seen off picks the new state up itself;
+    // starting a second would claim twice per wake.
+    if (this.looping) return this.wake();
+    bootScope.runInAsyncScope(() => void this.loop());
+  }
+
+  /**
+   * Stops claiming, waits up to `timeoutMs` for the jobs already running, and
+   * reports the ones that did not finish.
+   *
+   * Nothing is cancelled — a job has no way to be told — so an unfinished job
+   * keeps running after this resolves. What happens to it then is the
+   * driver's: the memory driver loses it with the process, along with every
+   * job still waiting; one that outlives the process lets another claim it
+   * once the lease runs out.
+   *
+   * A later `push` records its job but does not restart the loop. `start()`
+   * does.
+   */
+  async drain(timeoutMs = Infinity): Promise<DrainResult> {
+    this.state = "stopped";
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+    this.wake();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      if (timeoutMs !== Infinity) timer = setTimeout(resolve, timeoutMs);
+    });
+    // The claim in progress first, because what it returns is run: those jobs
+    // are leased to this process already, and handing them back would cost
+    // each of them an attempt it never made.
+    const settled = (async () => {
+      await this.claiming?.catch(() => {});
+      await Promise.allSettled([...this.inFlight.values()].map((e) => e.done));
+    })();
+    await Promise.race([settled, deadline]);
+    clearTimeout(timer);
+
+    return {
+      unfinished: [...this.inFlight.values()].map((e) => ({ ...e.job })),
+    };
+  }
+
+  /** `drain(0)`: stop claiming, and report what is running without waiting. */
+  stop(): Promise<DrainResult> {
+    return this.drain(0);
+  }
+
+  /** How many jobs this process is running right now. */
+  get running(): number {
+    return this.inFlight.size;
+  }
+
+  /**
+   * Claims while there is room, runs what it claims, and otherwise sleeps
+   * until something changes: a job finishing frees a slot, or the driver's
+   * `subscribe` says there is work. A driver without `subscribe` is polled
+   * every `pollInterval` instead. This replaces a one-second timer that
+   * spun while the queue was full.
+   *
+   * `woken` records a wake that arrived while a claim was in flight, when
+   * there was nothing yet to resume; without it that job would wait for the
+   * next unrelated wake.
+   */
+  private async loop() {
+    this.looping = true;
+    try {
+      await this.claimWhileRunning();
+    } finally {
+      this.looping = false;
     }
+  }
 
-    if (this.activeRunningJobsCount >= this.config.concurrency) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      return this.next();
-    }
+  private async claimWhileRunning() {
+    while (this.state === "running") {
+      const room = this.config.concurrency - this.inFlight.size;
 
-    const jobDefinition = this.queue.values().next().value as
-      | JobDefinition
-      | undefined;
+      if (room > 0) {
+        this.woken = false;
+        const claim = this.driver.claim(room, this.lease());
+        this.claiming = claim;
+        let claimed: ClaimedJob[] = [];
+        try {
+          claimed = await claim;
+        } catch (error) {
+          console.error(
+            `The queue could not claim jobs from its driver; it will try ` +
+              `again on the next wake.`,
+            error,
+          );
+        } finally {
+          this.claiming = undefined;
+        }
+        for (const job of claimed) this.execute(job);
 
-    if (jobDefinition) {
-      // Taken off the queue before anything decides what to do with it. The
-      // delete used to live inside the `if` below, so a name the registry could
-      // not resolve left the head in place, the `size === 0` check below was
-      // never reached, and `next()` recursed on the same entry until the stack
-      // gave out. An unregistered dispatch is meant to be a dropped job, not a
-      // crash — and discovery makes an empty registry newly reachable (a deploy
-      // that ships no source finds nothing to register), so the difference
-      // stopped being theoretical.
-      this.queue.delete(jobDefinition);
-
-      if (this.jobs[jobDefinition.class]) {
-        this.run(jobDefinition);
-      } else {
-        // The one place this is observable. A dispatch carries a name, the
-        // registry is keyed by name, and a name nobody registered matches
-        // nothing — which is exactly the silence #322 is about, except here it
-        // has already happened and the work is gone. Saying so is all that is
-        // left to do about it.
-        console.error(
-          `Dropped a queued job: nothing is registered under the name ` +
-            `"${jobDefinition.class}". If the class exists, it was not ` +
-            `discovered — check that it is under the queue slice's jobsDir ` +
-            `(app/jobs by default), or list it in app/config/queue.ts.`,
-        );
+        // A full batch may have left more behind; the next pass either claims
+        // it or, with no room left, sleeps until a slot frees.
+        if (claimed.length === room) continue;
+        if (this.woken && this.inFlight.size < this.config.concurrency) {
+          continue;
+        }
       }
-    }
 
-    if (this.queue.size === 0) {
-      this.isRunning = false;
+      await this.sleep();
+    }
+  }
+
+  private sleep() {
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (!this.driver.subscribe) {
+        // Unref'd: a polling queue alone should not hold the process open.
+        timer = setTimeout(() => this.wake(), this.config.pollInterval);
+        timer.unref?.();
+      }
+      this.resume = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+
+  private wake() {
+    this.woken = true;
+    const resume = this.resume;
+    this.resume = undefined;
+    resume?.();
+  }
+
+  private lease(): ClaimOptions {
+    return { visibilityTimeoutMs: this.config.visibilityTimeout };
+  }
+
+  private execute(claimed: ClaimedJob) {
+    const attempt = () => this.run(claimed);
+    const done = (
+      this.application
+        ? kernelContext.run(this.application, attempt)
+        : attempt()
+    )
+      .catch((error) => {
+        // Only the driver's own reports reach here. The claim was not ended,
+        // so its lease runs out and the job is claimed again.
+        console.error(
+          `The queue could not record the outcome of ${claimed.name}.`,
+          error,
+        );
+      })
+      .finally(() => {
+        this.inFlight.delete(claimed.id);
+        this.wake();
+      });
+    this.inFlight.set(claimed.id, { job: claimed, done });
+    this.heartbeat();
+  }
+
+  /**
+   * Keeps every running job's lease alive, at a third of the visibility
+   * timeout so one late tick does not lose it. Stops itself once nothing is
+   * running, and is unref'd, like the poll.
+   */
+  private heartbeat() {
+    const driver = this.driver;
+    if (!driver.heartbeat || this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(
+      () => {
+        if (this.inFlight.size === 0) {
+          clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = undefined;
+          return;
+        }
+        const jobs = [...this.inFlight.values()].map((e) => e.job);
+        driver.heartbeat!(jobs, this.lease()).catch((error) => {
+          console.error(`The queue could not extend its job leases.`, error);
+        });
+      },
+      Math.max(1, Math.floor(this.config.visibilityTimeout / 3)),
+    );
+    this.heartbeatTimer.unref?.();
+  }
+
+  /**
+   * One attempt at one claimed job, ending the claim either way.
+   *
+   * `onSuccess` is inside the `try`, as it always was, so a throw from it is a
+   * failed attempt and is retried. `onFail` and `onDeadletter` are not: a
+   * throw from either is logged and the claim still ends, where it used to
+   * escape the queue with the job's slot still counted as taken.
+   */
+  private async run(claimed: ClaimedJob) {
+    const Job = this.jobs[claimed.name];
+
+    if (!Job) {
+      // The one place this is observable. A dispatch carries a name, the
+      // registry is keyed by name, and a name nobody registered matches
+      // nothing — which is exactly the silence #322 is about, except here it
+      // has already happened and the work is gone. Saying so is all that is
+      // left to do about it. Dead-lettered, which for the memory driver is the
+      // drop it always was and for a durable one leaves a record to find.
+      console.error(
+        `Dropped a queued job: nothing is registered under the name ` +
+          `"${claimed.name}". If the class exists, it was not ` +
+          `discovered — check that it is under the queue slice's jobsDir ` +
+          `(app/jobs by default), or list it in app/config/queue.ts.`,
+      );
+      await this.driver.fail(claimed, {
+        error: `No job is registered under the name "${claimed.name}".`,
+        retryInMs: null,
+      });
       return;
     }
 
-    await this.next();
-  }
+    const job = new Job();
+    let args: any[];
+    try {
+      args = JSON.parse(claimed.args);
+    } catch (error) {
+      // Not something `Job.dispatch` writes, so a driver changed it. Left
+      // alone, the claim would never end and the job would be reclaimed,
+      // unparseable, forever.
+      console.error(
+        `Dropped a queued ${claimed.name}: its arguments are not JSON.`,
+        error,
+      );
+      await this.driver.fail(claimed, {
+        error: `The arguments are not JSON: ${String(error)}`,
+        retryInMs: null,
+      });
+      return;
+    }
 
-  private async run(jobDefinition: JobDefinition) {
-    const Job = this.jobs[jobDefinition.class];
-    const jobInstance = new Job();
-    const args: any[] = JSON.parse(jobDefinition.args);
-
-    this.activeRunningJobsCount++;
+    // Claimed past its last attempt: an earlier claim used that attempt up and
+    // never reported, which is what a process exiting mid-run looks like from
+    // here. Running it again would exceed `maxAttempts`, so it is dead-lettered
+    // unrun. `Math.max` keeps a `maxAttempts` below one meaning what it always
+    // did — one attempt.
+    if (claimed.attempt > Math.max(1, job.maxAttempts)) {
+      const error = new Error(
+        `${claimed.name} was claimed for attempt ${claimed.attempt} of ` +
+          `${job.maxAttempts}: an earlier attempt never finished, most likely ` +
+          `because the process running it exited. Dead-lettered without ` +
+          `running it again.`,
+      );
+      hook(`${claimed.name}.onDeadletter`, () =>
+        job.onDeadletter(error, ...args),
+      );
+      await this.driver.fail(claimed, {
+        error: error.message,
+        retryInMs: null,
+      });
+      return;
+    }
 
     try {
-      const result = await (jobInstance.worker
-        ? runInWorker(jobDefinition.class, jobDefinition.args)
-        : jobInstance.run(...args));
+      const result = await (job.worker
+        ? runInWorker(claimed.name, claimed.args)
+        : job.run(...args));
 
-      jobInstance.onSuccess(result, ...args);
+      job.onSuccess(result, ...args);
     } catch (err) {
-      jobInstance.onFail(err, ...args);
-      if (jobDefinition.retries >= jobInstance.maxAttempts - 1) {
-        jobInstance.onDeadletter(err, ...args);
+      const error = err as Error;
+      const recorded = String(error?.stack ?? error);
+      hook(`${claimed.name}.onFail`, () => job.onFail(error, ...args));
+
+      if (claimed.attempt >= job.maxAttempts) {
+        hook(`${claimed.name}.onDeadletter`, () =>
+          job.onDeadletter(error, ...args),
+        );
+        await this.driver.fail(claimed, { error: recorded, retryInMs: null });
       } else {
-        this.push(Job, jobDefinition.args, jobDefinition.retries + 1);
+        await this.driver.fail(claimed, {
+          error: recorded,
+          retryInMs: backoffFor(job.backoff, claimed.attempt),
+        });
       }
+      return;
     }
 
-    this.activeRunningJobsCount--;
+    await this.driver.complete(claimed);
   }
+}
 
-  push(job: new () => Job, args: string, retries = 0) {
-    this.queue.add({
-      class: job.name,
-      args,
-      createdAt: Date.now(),
-      retries,
-    });
-    if (!this.isRunning) {
-      this.next();
-    }
+function hook(name: string, fn: () => void) {
+  try {
+    fn();
+  } catch (error) {
+    console.error(`${name} threw; the job's claim was ended anyway.`, error);
   }
+}
+
+/**
+ * The delay before the retry that follows attempt `attempt`: the number
+ * itself, or the array's entry for that retry with its last entry repeated.
+ */
+export function backoffFor(backoff: number | number[], attempt: number) {
+  const delay = Array.isArray(backoff)
+    ? backoff[Math.min(attempt, backoff.length) - 1]
+    : backoff;
+  return Math.max(0, delay ?? 0);
+}
+
+function resolveDriver(driver: Required<QueueConfig>["driver"]): QueueDriver {
+  if (driver === "memory") return new MemoryQueueDriver();
+  if (typeof driver === "function") return driver();
+  if (typeof driver === "string") {
+    throw new Error(
+      `Unknown queue driver "${driver}". The queue slice's driver is ` +
+        `"memory", a QueueDriver, or a function returning one.`,
+    );
+  }
+  return driver;
 }
