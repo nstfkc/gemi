@@ -249,6 +249,31 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
           },
         );
       }
+      const errorResponse = (err: any): Response => {
+        // Errors thrown *while handling a request* (a controller throwing, a
+        // failing view import, ...) never hit the module-load hooks above,
+        // so surface them here: forward to the overlay for any already-open
+        // page, and render an error page for this response so a fresh load
+        // (which has no live HMR socket yet) still shows the failure.
+        console.error(err);
+        vite.ssrFixStacktrace?.(err);
+        sendErrorToClient(err);
+
+        if (isApiPath(pathname)) {
+          return new Response(JSON.stringify({ error: err?.message ?? String(err) }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        // This document has no live app (so no HttpReload listener to clear the
+        // overlay) — remember that, so recovery forces a full page reload.
+        globalThis.__gemiErrorPageServed = true;
+        return new Response(renderErrorPage(viteErrorPayload(err)), {
+          status: 500,
+          headers: { "Content-Type": "text/html" },
+        });
+      };
       const requestHandler = async (req: Request): Promise<Response> => {
         try {
           const handler = app.fetch.bind(app);
@@ -298,33 +323,17 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
             cssManifest: {},
           });
         } catch (err: any) {
-          // Errors thrown *while handling a request* (a controller throwing, a
-          // failing view import, ...) never hit the module-load hooks above,
-          // so surface them here: forward to the overlay for any already-open
-          // page, and render an error page for this response so a fresh load
-          // (which has no live HMR socket yet) still shows the failure.
-          console.error(err);
-          vite.ssrFixStacktrace?.(err);
-          sendErrorToClient(err);
-
-          if (isApiPath(pathname)) {
-            return new Response(JSON.stringify({ error: err?.message ?? String(err) }), {
-              status: 500,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
-
-          // This document has no live app (so no HttpReload listener to clear the
-          // overlay) — remember that, so recovery forces a full page reload.
-          globalThis.__gemiErrorPageServed = true;
-          return new Response(renderErrorPage(viteErrorPayload(err)), {
-            status: 500,
-            headers: { "Content-Type": "text/html" },
-          });
+          return errorResponse(err);
         }
       };
 
-      return await instrumentation(req, requestHandler);
+      // In front of Vite's middleware as well as the app, as `httpProd` puts
+      // the global middleware in front of its static files, so a check that
+      // passes here passes there. A throw from it is answered like one from a
+      // route.
+      return await instrumentation(req, (req) =>
+        app.withGlobalMiddleware(req, requestHandler, errorResponse),
+      );
     },
   });
 

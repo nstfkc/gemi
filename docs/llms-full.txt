@@ -2039,7 +2039,7 @@ than a middleware class — it has no alias to register.
 
 ## Registering middleware
 
-The `middleware` config slice holds a single field, `aliases` — `Record<string, MiddlewareClass>`. This is where DSL names become classes:
+The `middleware` config slice has two fields: `aliases` — `Record<string, MiddlewareClass>` — and `global`, a list that runs on every request (see [Global middleware](#global-middleware)). `aliases` is where DSL names become classes:
 
 ```typescript
 // app/config/middleware.ts
@@ -2084,6 +2084,65 @@ At boot, the framework's `MiddlewareServiceProvider` reads this slice and binds 
 > **Note:** `Middleware.configure(config)` returns a preconfigured subclass. Use it to register a middleware that needs static config (like `CorsMiddleware`'s allowed origins) under an alias.
 
 Because the alias map is app-owned, any DSL name your app uses must appear here — an unregistered alias is silently skipped. This also means aliases like `admin`, `org`, or `ai-quota` are **application-defined**, not framework built-ins.
+
+## Global middleware
+
+A route only gets the middleware its router lists, so a check the whole app needs — every document, every API route, every file — would have to be added to each router, and would still miss the static files: in production those are served from `dist/client` before the router runs. The `global` list covers both:
+
+```typescript
+// app/config/middleware.ts
+export default defineMiddlewareConfig({
+  aliases: {
+    "front-door": FrontDoorMiddleware,
+    // ...
+  },
+  global: ["front-door"],
+});
+```
+
+Entries are aliases (with `alias:param` arguments, as in a route's list) or middleware classes, and they run in order. They run once for every request the server receives, before anything else:
+
+- **Static files too.** `/assets/*`, `/favicon.ico`, `/robots.txt` and `/.well-known/*` in production, and everything Vite serves in development, so a check that passes in dev passes in prod.
+- **Before routing.** An `/api` path no route matches is refused before it would answer `404`, and framework routes (`/api/auth/*`, `/api/__gemi__/*`, image optimization) are covered like any other.
+- **Before route middleware.** A request that passes goes on to its route, which runs its own list as usual.
+
+A global middleware stops a request the same way a route middleware does: throw a `RequestBreakerError` subclass. The response is the one a route middleware's break would give for that url — the `api` payload as JSON under `/api`, the `.json` navigation body for client-side view data, and the `view` payload otherwise, static files included.
+
+```typescript
+import { Middleware, RequestBreakerError } from "gemi/http";
+
+class NotThroughFrontDoor extends RequestBreakerError {
+  constructor() {
+    super("Direct origin access");
+    this.payload = {
+      api: { status: 403, data: { error: "Forbidden" } },
+      view: { status: 403, error: { message: "Forbidden" } },
+    };
+  }
+}
+
+class FrontDoorMiddleware extends Middleware {
+  run() {
+    // Health probes reach the origin directly, without the header.
+    if (new URL(this.req.rawRequest.url).pathname === "/api/health") return;
+    if (this.req.headers.get("X-Azure-FDID") !== process.env.FRONT_DOOR_ID) {
+      throw new NotThroughFrontDoor();
+    }
+  }
+}
+```
+
+What a global middleware sees is not quite what a route middleware sees:
+
+- **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Anything else it puts on the context, a user or a locale, does not reach the route: the route runs in a fresh context of its own, as it always has.
+- **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
+
+A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.
+
+Some things are not requests the server receives, and the list does not run for them: an in-process `dispatchAs` from an MCP tool call, and a view's server-side `Query` — the request they were made from already passed it. The development server's `/refresh.js` and `/render-error.js` scripts are answered before it too; they are fixed strings with no production counterpart.
+
+> **Keep it cheap.** A global middleware runs on every asset request as well as every page and API call. A header comparison costs nothing; a database read per request is a database read per asset.
 
 ## Custom middleware
 
