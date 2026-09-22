@@ -137,7 +137,7 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
  * inherited `public, max-age=864000` would let a shared cache answer one
  * client's rejection to everyone for ten days.
  */
-function breakResponse(payload: {
+export function breakResponse(payload: {
   status?: number;
   data?: unknown;
   headers?: Record<string, string>;
@@ -148,6 +148,62 @@ function breakResponse(payload: {
     headers.set("Cache-Control", "no-store");
   }
   return new Response(JSON.stringify(data), { status, headers });
+}
+
+/**
+ * Copies request-context headers and cookies onto a Response a handler built
+ * itself, or a middleware's break or policy 403, without disturbing what that
+ * Response already set. Also what puts a global middleware's context on the
+ * response a request ends with (`globalMiddleware.ts`).
+ */
+export function mergeContextIntoResponse(
+  response: Response,
+  headers: Headers,
+  cookies: Set<string>,
+) {
+  // Built with forEach rather than spread: the browser tsconfig's lib set
+  // has DOM but not DOM.Iterable, so `Headers` has no [Symbol.iterator].
+  const entries: [string, string][] = [];
+  headers?.forEach((value, key) => entries.push([key, value]));
+  const setCookies = [
+    ...(typeof headers?.getSetCookie === "function" ? headers.getSetCookie() : []),
+    ...Array.from(cookies ?? []),
+  ];
+
+  if (entries.length === 0 && setCookies.length === 0) {
+    return response;
+  }
+
+  const apply = (target: Headers) => {
+    for (const [key, value] of entries) {
+      if (key.toLowerCase() === "set-cookie") {
+        continue;
+      }
+      if (!target.has(key)) {
+        target.set(key, value);
+      }
+    }
+    for (const cookie of setCookies) {
+      target.append("Set-Cookie", cookie);
+    }
+  };
+
+  try {
+    // Mutating in place keeps the original Response object, and with it a
+    // sized Blob body — rebuilding turns that into a stream, which costs the
+    // Content-Length that Bun only emits for known-length bodies.
+    apply(response.headers);
+    return response;
+  } catch {
+    // A Response from fetch() — this.proxy() routes — has immutable headers.
+    const merged = new Headers(response.headers);
+    apply(merged);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: merged,
+    });
+  }
 }
 
 export class ApiRouteDispatcher {
@@ -248,63 +304,6 @@ export class ApiRouteDispatcher {
     }
 
     return data;
-  }
-
-  /**
-   * Copies request-context headers and cookies onto a Response a handler built
-   * itself, or a middleware's break or policy 403, without disturbing what that
-   * Response already set.
-   */
-  private mergeContextIntoResponse(
-    response: Response,
-    headers: Headers,
-    cookies: Set<string>,
-  ) {
-    // Built with forEach rather than spread: the browser tsconfig's lib set
-    // has DOM but not DOM.Iterable, so `Headers` has no [Symbol.iterator].
-    const entries: [string, string][] = [];
-    headers?.forEach((value, key) => entries.push([key, value]));
-    const setCookies = [
-      ...(typeof headers?.getSetCookie === "function"
-        ? headers.getSetCookie()
-        : []),
-      ...Array.from(cookies ?? []),
-    ];
-
-    if (entries.length === 0 && setCookies.length === 0) {
-      return response;
-    }
-
-    const apply = (target: Headers) => {
-      for (const [key, value] of entries) {
-        if (key.toLowerCase() === "set-cookie") {
-          continue;
-        }
-        if (!target.has(key)) {
-          target.set(key, value);
-        }
-      }
-      for (const cookie of setCookies) {
-        target.append("Set-Cookie", cookie);
-      }
-    };
-
-    try {
-      // Mutating in place keeps the original Response object, and with it a
-      // sized Blob body — rebuilding turns that into a stream, which costs the
-      // Content-Length that Bun only emits for known-length bodies.
-      apply(response.headers);
-      return response;
-    } catch {
-      // A Response from fetch() — this.proxy() routes — has immutable headers.
-      const merged = new Headers(response.headers);
-      apply(merged);
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: merged,
-      });
-    }
   }
 
   /**
@@ -433,11 +432,7 @@ export class ApiRouteDispatcher {
           // reported an opaque CORS failure instead of the status, and a
           // Set-Cookie set before the break was lost. Merged before the end,
           // which destroys the context's headers and cookies.
-          const response = this.mergeContextIntoResponse(
-            middlewareResponse,
-            ctx.headers,
-            ctx.cookies,
-          );
+          const response = mergeContextIntoResponse(middlewareResponse, ctx.headers, ctx.cookies);
           await end();
           return response;
         }
@@ -452,7 +447,7 @@ export class ApiRouteDispatcher {
           // what the request context accumulated: headers set by middleware via
           // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
           // response's own headers win; the context only fills gaps.
-          const response = this.mergeContextIntoResponse(data, headers, cookies);
+          const response = mergeContextIntoResponse(data, headers, cookies);
           if (this.isOpenEndedBody(req, response)) {
             // Ended by its body rather than here: a streaming agent route
             // returns before any of its tools run, and ending now would destroy

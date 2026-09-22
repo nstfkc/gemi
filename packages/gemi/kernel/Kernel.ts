@@ -10,6 +10,7 @@ import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
 import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
+import { runGlobalMiddleware } from "../services/router/globalMiddleware";
 import { kernelContext } from "./context";
 import { frameworkProviders } from "./providers";
 
@@ -214,6 +215,11 @@ export class Kernel {
 
   queue(): QueueManager {
     return this.app.make(QueueManager);
+  }
+
+  /** The `global` middleware list for one request. Call it inside `run`. */
+  globalMiddleware(req: Request) {
+    return runGlobalMiddleware(req);
   }
 
   destroy() {

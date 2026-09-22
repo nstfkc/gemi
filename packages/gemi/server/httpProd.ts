@@ -219,7 +219,13 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         const ip = server.requestIP(req);
         if (ip) req.headers.set("x-forwarded-for", ip.address);
       }
-      const res = await instrumentation(req, requestHandler);
+      // The app's global middleware goes in front of the static handler as well
+      // as the router, so it can refuse `/assets/*` too.
+      const res = await instrumentation(req, (req) =>
+        app.withGlobalMiddleware(req, requestHandler, (err) =>
+          unhandledErrorResponse(err, new URL(req.url).pathname, app.onException),
+        ),
+      );
       // Applied at the very edge, after instrumentation, so every HTML response
       // goes through the same negotiation — including the ones an app's
       // instrumentation produced itself. Anything that isn't HTML comes back

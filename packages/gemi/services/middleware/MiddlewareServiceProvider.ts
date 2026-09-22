@@ -19,4 +19,10 @@ export class MiddlewareServiceProvider extends ServiceProvider {
         ),
     );
   }
+
+  boot() {
+    // At boot rather than on the first request, so a bad `global` entry stops
+    // `gemi start` instead of surfacing as a 500 on every request.
+    this.app.make(MiddlewareRegistry).assertGlobalMiddleware();
+  }
 }
