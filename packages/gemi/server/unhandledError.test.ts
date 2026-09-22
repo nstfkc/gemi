@@ -50,6 +50,11 @@ describe("unhandledErrorResponse (production)", () => {
     expect(res.headers.get("Content-Type")).toMatch(/^text\/html/);
   });
 
+  test("a page whose path only starts with /api answers with HTML", () => {
+    const res = unhandledErrorResponse(new Error("x"), "/apidocs");
+    expect(res.headers.get("Content-Type")).toMatch(/^text\/html/);
+  });
+
   test("/api answers with a generic JSON error", async () => {
     const res = unhandledErrorResponse(new Error("x"), "/api/orders");
     expect(res.headers.get("Content-Type")).toBe("application/json");

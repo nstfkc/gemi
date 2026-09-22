@@ -1,3 +1,5 @@
+import { isApiPath } from "../services/router/apiPath";
+
 // The production server's last resort: an error nothing on the way here turned
 // into a response. Request breakers (auth, 404s, 416s) are answered by the
 // dispatchers before this, so what arrives is a genuine failure — and its
@@ -54,7 +56,7 @@ export function unhandledErrorResponse(
     }
   }
 
-  if (pathname.startsWith("/api")) {
+  if (isApiPath(pathname)) {
     return new Response(JSON.stringify({ error: "Internal Server Error" }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
