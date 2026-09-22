@@ -195,6 +195,30 @@ New, and optional: `backoff` on a job (milliseconds before each retry),
 `drain(timeoutMs)` / `stop()` / `start()` on `QueueManager`. See
 [Jobs & Queues](docs/jobs-and-queues.md).
 
+## Jobs can be kept in the database, and a shutdown waits for running jobs
+
+**`driver: "database"` keeps jobs in a `gemi_jobs` table**, so a deploy, a
+scale-in or a crash no longer loses them. Nothing changes until you opt in.
+To opt in, add the table (the Prisma model is in
+[The database driver](docs/jobs-and-queues.md#the-database-driver)), set
+the driver, and make sure your jobs can safely run twice: the driver
+delivers at least once, not exactly once.
+
+A driver factory is now called with the application,
+`driver: (app) => …`. A factory that takes no argument works as before.
+
+What changes for every app, whatever the driver:
+
+- **A production server stops claiming jobs when it is told to stop.** Jobs
+  already running continue, and the queue provider's `shutdown()` waits for
+  them within `GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. A job still running then
+  makes the shutdown exit with code 1. That code used to be 0 whatever
+  happened to the job. If your jobs take longer than 5 seconds, raise the
+  timeout to fit the platform's grace period.
+- **A dispatch wakes a polling driver's queue at once.** Before, it waited up
+  to `pollInterval`. The memory driver was never polled, so apps that use it
+  see no difference.
+
 ---
 
 # Upgrading from 0.55 to 0.56

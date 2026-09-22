@@ -1,3 +1,4 @@
+import type { Application } from "../../foundation/Application";
 import type { Job } from "./Job";
 import type { QueueDriver } from "./QueueDriver";
 
@@ -46,21 +47,30 @@ export interface QueueConfig {
   concurrency?: number;
 
   /**
-   * Where queued jobs are kept: `"memory"`, a `QueueDriver`, or a function
-   * returning one.
+   * Where queued jobs are kept: `"memory"`, `"database"`, a `QueueDriver`, or
+   * a function returning one.
    *
    * `"memory"` is the default and keeps them in this process — so **a restart,
    * a deploy or a crash loses every job that is waiting or running**, silently.
    * See `MemoryQueueDriver`.
    *
-   * A function is called once per application, when the queue is registered.
+   * `"database"` keeps them in the `gemi_jobs` table of the default database
+   * connection, which has to exist. See `DatabaseQueueDriver`.
+   *
+   * A function is called once per application, when the queue is first
+   * resolved, with that application — so it can pick a named connection:
+   * `(app) => new DatabaseQueueDriver(app.make(DatabaseManager).connection("jobs"))`.
    * Prefer it to an instance: a config module is imported by more than the
    * server (tests building several applications, build tooling, a `worker`
    * job's thread), and an instance created at import is shared by every
    * application built from that config, or opened by a process that never
    * runs a job.
    */
-  driver?: "memory" | QueueDriver | (() => QueueDriver);
+  driver?:
+    | "memory"
+    | "database"
+    | QueueDriver
+    | ((application: Application) => QueueDriver);
 
   /**
    * How long a claimed job is leased for, in milliseconds, before a driver
