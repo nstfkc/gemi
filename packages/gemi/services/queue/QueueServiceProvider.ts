@@ -1,12 +1,10 @@
-import { isMainThread } from "node:worker_threads";
-
 import type { Application } from "../../foundation/Application";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { discoverJobs } from "../discovery";
 import { withDefaults } from "../../support/withDefaults";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
-import { QueueManager } from "./QueueManager";
+import { claimsInThisProcess, QueueManager } from "./QueueManager";
 
 export class QueueServiceProvider extends ServiceProvider {
   register() {
@@ -59,8 +57,10 @@ export class QueueServiceProvider extends ServiceProvider {
    * what bounds it, and a job still running at that deadline is abandoned
    * with the process. With the memory driver that job is lost; with one that
    * outlives the process it is claimed again elsewhere once its lease runs
-   * out. Claiming already stopped when the signal arrived, so the jobs here
-   * are only the ones that were running then.
+   * out. With such a driver claiming already stopped when the signal
+   * arrived, so the jobs here are only the ones that were running then; the
+   * memory driver kept claiming until now, so a job dispatched by a request
+   * still draining ran here too.
    */
   async shutdown() {
     // Resolving the manager now would build a driver only to stop it.
@@ -105,7 +105,7 @@ export function startClaimingIfServing(application: Application) {
   const driver = slice.driver ?? "memory";
   if (driver === "memory" || driver instanceof MemoryQueueDriver) return;
   if (process.env.NODE_ENV !== "production") return;
-  if (process.env.ROOT_DIR === undefined || !isMainThread) return;
+  if (!claimsInThisProcess()) return;
   if (!application.bound(QueueManager)) return;
   application.make(QueueManager).start();
 }

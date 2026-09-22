@@ -208,7 +208,9 @@ export default defineQueueConfig({
 
 ### The database driver
 
-`driver: "database"` keeps jobs in a `gemi_jobs` table of your database, so they outlive the process. A job dispatched before a deploy, a scale-in or a crash is still there afterwards, and whichever replica is up claims it. It works on SQLite, Postgres, and MySQL 8 or MariaDB 10.6+. It uses raw SQL, so it works on MySQL even though the ORM does not.
+`driver: "database"` keeps jobs in a `gemi_jobs` table of your database, so they outlive the process. A job dispatched before a deploy, a scale-in or a crash is still there afterwards, and whichever replica is up claims it. It is written for SQLite, Postgres, and MySQL 8 or MariaDB 10.6+, in raw SQL rather than through the ORM, which does not support MySQL.
+
+> **Only SQLite has been tested so far.** The driver's test suite has run on SQLite; its Postgres and MySQL claim paths are different SQL and have not been run against a real server yet. Try it on a staging database before relying on it in production there.
 
 ```typescript
 // app/config/queue.ts
@@ -267,6 +269,7 @@ How it works:
 - **Completed jobs** are deleted.
 - **Time.** All times are milliseconds since the epoch, read from the database's clock, so replicas with skewed clocks agree on when a lease ran out. In Postgres, `to_timestamp(available_at / 1000.0)` gives a readable date.
 - **Recovery on boot.** A production server with a durable driver starts claiming as soon as it boots, not at its first dispatch. That way a replica that serves no dispatches of its own still picks up what an earlier one left behind. Under `gemi dev`, the queue starts at the first dispatch, as before.
+- **Dispatching from outside a server.** A console command, a seed or a script that dispatches records the job and leaves it in the table for a server to claim. It does not start claiming itself, because it would take other replicas' jobs too and exit in the middle of running them.
 - **Polling.** Another process's dispatch cannot wake this one, so the queue asks the database for work every `pollInterval` (default one second). A dispatch from this process wakes its own queue immediately.
 
 A dispatch inside `Model.transaction` is not part of that transaction. The row is written on the pool, so it stays if the transaction rolls back, and the job may run before the transaction commits. Dispatch after the commit.
@@ -275,7 +278,7 @@ A dispatch inside `Model.transaction` is not part of that transaction. The row i
 
 `app(QueueManager).drain(timeoutMs)` stops claiming, waits up to `timeoutMs` for the jobs already running, and resolves to `{ unfinished }` — the ones still running at the deadline. Nothing is cancelled. `stop()` is `drain(0)`. After either, a dispatch is recorded by the driver but not run until `start()` is called; with the memory driver, whatever is still waiting when the process exits is lost.
 
-A production server told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)) stops claiming as soon as the signal arrives. Jobs already running continue while in-flight requests drain. The queue provider's `shutdown()` then waits for them, within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). If a job is still running at the deadline, it is abandoned when the process exits, and the shutdown exits with code 1. With the memory driver that job is lost. With the database driver its row stays claimed until the lease runs out, and then another replica retries it. That retry counts as a new attempt, and it starts only after `visibilityTimeout`. If your jobs regularly run longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period.
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), a queue with the database driver, or any other that outlives the process, stops claiming as soon as the signal arrives and leaves the waiting jobs to other replicas. The memory queue keeps claiming while in-flight requests drain, because no other process can run its jobs, so a job a draining request dispatches still runs. Either way, jobs already running continue, and the queue provider's `shutdown()` then stops claiming and waits for them, within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). If a job is still running at the deadline, it is abandoned when the process exits, and the shutdown exits with code 1. With the memory driver that job is lost. With the database driver its row stays claimed until the lease runs out, and then another replica retries it. That retry counts as a new attempt, and it starts only after `visibilityTimeout`. If your jobs regularly run longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period.
 
 See [Project Structure](./project-structure.md) for the full kernel layout.
 

@@ -209,12 +209,20 @@ A driver factory is now called with the application,
 
 What changes for every app, whatever the driver:
 
-- **A production server stops claiming jobs when it is told to stop.** Jobs
-  already running continue, and the queue provider's `shutdown()` waits for
-  them within `GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. A job still running then
+- **A production server told to stop now waits for its running jobs.** The
+  queue provider's `shutdown()` stops claiming and waits for them within
+  `GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. With the memory driver, jobs dispatched
+  while requests drain are still claimed and run before that. With a driver
+  that outlives the process, claiming stops as soon as the signal arrives,
+  and waiting jobs are left to other replicas. A job still running then
   makes the shutdown exit with code 1. That code used to be 0 whatever
   happened to the job. If your jobs take longer than 5 seconds, raise the
   timeout to fit the platform's grace period.
+- **With a custom durable driver, a dispatch outside a server no longer
+  runs jobs.** A console command, seed or script that dispatches records the
+  job and leaves it for a server. Before, it started claiming from the shared
+  driver and could exit in the middle of the jobs it took. The memory driver
+  is unchanged.
 - **A dispatch wakes a polling driver's queue at once.** Before, it waited up
   to `pollInterval`. The memory driver was never polled, so apps that use it
   see no difference.
