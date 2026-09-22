@@ -2213,7 +2213,7 @@ function suite(label: string, url?: string) {
 
       /**
        * A conflict on a **composite** unique, not only a single column.
-       * `SocialAccount` carries `@@unique([username, provider])` and is the
+       * `SocialAccount` carries `@@unique([provider, providerId])` and is the
        * only model in the template that can reach one.
        *
        * The untargeted `on conflict do nothing` is what makes this work: it
@@ -2241,10 +2241,10 @@ function suite(label: string, url?: string) {
           {
             data: [
               { ...base, provider: "github", providerId: "gh-1", username: "ada" },
-              // Same (username, provider) as the row above, different
-              // providerId — so only the composite constraint catches it.
-              { ...base, provider: "github", providerId: "gh-2", username: "ada" },
-              { ...base, provider: "gitlab", providerId: "gl-1", username: "ada" },
+              // Same (provider, providerId) as the row above, different
+              // username — so only the composite constraint catches it.
+              { ...base, provider: "github", providerId: "gh-1", username: "grace" },
+              { ...base, provider: "gitlab", providerId: "gh-1", username: "ada" },
             ],
             skipDuplicates: true,
           },
@@ -3966,14 +3966,14 @@ function suite(label: string, url?: string) {
 
       try {
         await SocialAccountModel.create({
-          data: { ...base, providerId: "gh-2" },
+          data: { ...base, username: "grace" },
         });
         expect.unreachable("expected a unique violation");
       } catch (error) {
         expect(error).toBeInstanceOf(UniqueConstraintError);
         expect((error as UniqueConstraintError).fields.sort()).toEqual([
           "provider",
-          "username",
+          "providerId",
         ]);
       }
     });

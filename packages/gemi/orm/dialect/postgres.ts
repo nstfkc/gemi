@@ -418,6 +418,12 @@ export class PostgresDialect implements SqlDialect {
           .split(",")
           .map((entry) => entry.trim())
           .filter((entry) => entry !== "")
+          // The detail quotes any column that is not all lowercase, as it
+          // would in SQL: `Key (provider, "providerId")=…`. Unquoted, or the
+          // column list names a field nobody declared.
+          .map((entry) =>
+            /^".*"$/s.test(entry) ? entry.slice(1, -1).replace(/""/g, '"') : entry,
+          )
       : [];
 
     return { kind: "unique", columns, constraint };

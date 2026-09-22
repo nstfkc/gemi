@@ -545,54 +545,72 @@ export class AuthController extends Controller {
     const { userProvider, config } = auth;
     const oauthProvider = config.oauthProviders[provider as string];
 
-    const { email, name } = await oauthProvider.onCallback(req);
+    const { email, name, username, providerId } =
+      await oauthProvider.onCallback(req);
 
-    if (!email) {
-      console.error(
-        "Authentication error: No email returned from OAuth provider callback",
-      );
-      return {
-        session: null,
-      };
-    }
-
-    let user = await userProvider.findUserByEmailAddress(email, false);
-
-    const locale = app(Translator).detectLocale(req);
+    // Who this is, in order of how much each answer can be trusted:
+    //
+    // 1. The provider identity, `(provider, providerId)`. A returning account
+    //    resolves here whatever has happened to its email or display name at
+    //    the provider since — and the local user's email is not touched, so a
+    //    provider-side change never moves the account to a different user.
+    // 2. Otherwise the email, exactly as before: an existing user is signed in,
+    //    and a new one is created. Either way the identity is linked, so the
+    //    next callback takes step 1.
+    //
+    // A provider that returns no `providerId` only ever takes step 2, and has
+    // no `SocialAccount` written — a row with no identity in it can never be
+    // resolved by one.
+    let user: User | null = providerId
+      ? await userProvider.findUserBySocialAccount(provider, providerId)
+      : null;
 
     let action: "signin" | "signup" = "signin";
 
     if (!user) {
-      action = "signup";
+      if (!email) {
+        console.error(
+          "Authentication error: No email returned from OAuth provider callback",
+        );
+        return {
+          session: null,
+        };
+      }
 
-      // Same shape as `signUp`: the user, the row that has to exist beside it,
-      // and `onUserCreated`, in one transaction. The social account in
-      // particular has a foreign key onto the user — created outside, a rolled
-      // back user would leave it pointing at nothing.
-      user = await userProvider.transaction(async () => {
-        const created = await userProvider.createUser({
+      const locale = app(Translator).detectLocale(req);
+
+      try {
+        const resolved = await this.linkOAuthAccount({
+          provider,
+          providerId,
           email,
           name,
+          username,
           locale,
-          emailVerifiedAt: new Date(),
         });
+        if (resolved) {
+          user = resolved.user;
+          action = resolved.action;
+        }
+      } catch (error) {
+        // A concurrent callback for the same identity can win the race to
+        // create the user or the link, and this one then fails on a unique
+        // constraint. Recover only by *resolving the identity again*: the
+        // error itself proves nothing — it could equally be a rolled-back
+        // `onUserCreated` or a dropped connection — so anything that does not
+        // now resolve is rethrown unchanged.
+        const winner = providerId
+          ? await userProvider.findUserBySocialAccount(provider, providerId)
+          : null;
+        if (!winner) throw error;
+        user = winner;
+      }
 
-        // TODO: fix missing fields
-        await userProvider.createSocialAccount({
-          provider,
-          userId: created.id,
-          email,
-          username: name,
-          providerId: "",
-          expiresAt: new Date(),
-          accessToken: "",
-          refreshToken: "",
-        });
-
-        await config.onUserCreated(created);
-
-        return created;
-      });
+      if (!user) {
+        return {
+          session: null,
+        };
+      }
     }
 
     const session = await auth.createOrUpdateSessionV2({
@@ -633,6 +651,107 @@ export class AuthController extends Controller {
     }
 
     return { session };
+  }
+
+  /**
+   * Step 2 of `oauthCallback`: an identity that resolved to nobody, matched by
+   * email. Returns null when the callback must be refused.
+   *
+   * Not a route — `protected` keeps it off the controller's public surface.
+   */
+  protected async linkOAuthAccount(args: {
+    provider: string;
+    providerId?: string;
+    email: string;
+    name?: string;
+    username?: string;
+    locale: string;
+  }): Promise<{ user: User; action: "signin" | "signup" } | null> {
+    const { provider, providerId, email, name, username, locale } = args;
+    const { userProvider, config } = app(AuthManager);
+
+    const socialAccount = (userId: number) => ({
+      provider,
+      userId,
+      email,
+      // The provider's handle where it has one (X). Google has none, and the
+      // display name is not one: it is neither unique nor stable, and it was
+      // what made two Google users called the same thing collide.
+      username,
+      providerId,
+      expiresAt: new Date(),
+      accessToken: "",
+      refreshToken: "",
+    });
+
+    const existing = await userProvider.findUserByEmailAddress(email, false);
+
+    if (existing) {
+      if (!providerId) return { user: existing, action: "signin" };
+
+      const accounts = await userProvider.findSocialAccounts(
+        existing.id,
+        provider,
+      );
+
+      // Linked since step 1 looked — a concurrent callback for this same
+      // account committed in between.
+      if (accounts.some((account) => account.providerId === providerId)) {
+        return { user: existing, action: "signin" };
+      }
+
+      // This user is already linked to a *different* account at this
+      // provider. The email matching is not enough to move the link: it is the
+      // same address, not the same account (a deleted and re-created Workspace
+      // user, an address that changed hands). Refuse, and leave it to the
+      // application to unlink the old row if re-linking is intended.
+      if (accounts.some((account) => account.providerId)) {
+        console.error(
+          `Authentication error: user ${existing.id} is already linked to a different ${provider} account`,
+        );
+        return null;
+      }
+
+      // A row from before identities were recorded. It was made for this user
+      // when they signed up through this provider by this email, so recording
+      // the identity on it grants nothing the email match did not already.
+      const legacy = accounts[0];
+      if (legacy) {
+        if (!(await userProvider.claimSocialAccount(legacy, providerId))) {
+          // Someone else claimed it between the read and the write. Throwing
+          // hands it to the caller's recovery, which signs in only if the
+          // claim was for this same identity.
+          throw new Error(`${provider} account link changed concurrently`);
+        }
+      } else {
+        await userProvider.createSocialAccount(socialAccount(existing.id));
+      }
+
+      return { user: existing, action: "signin" };
+    }
+
+    // Same shape as `signUp`: the user, the row that has to exist beside it,
+    // and `onUserCreated`, in one transaction. The social account in
+    // particular has a foreign key onto the user — created outside, a rolled
+    // back user would leave it pointing at nothing.
+    const user = await userProvider.transaction(async () => {
+      const created = await userProvider.createUser({
+        email,
+        name,
+        locale,
+        emailVerifiedAt: new Date(),
+      });
+
+      if (providerId) {
+        await userProvider.createSocialAccount(socialAccount(created.id));
+      }
+
+      await config.onUserCreated(created);
+
+      return created;
+    });
+
+    return { user, action: "signup" };
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {

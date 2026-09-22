@@ -483,8 +483,8 @@ describe("the read operations", () => {
 });
 
 describe("compound uniques", () => {
-  // The template's SocialAccount declares @@unique([username, provider]), which
-  // Prisma exposes as a single `username_provider` key holding both members.
+  // The template's SocialAccount declares @@unique([provider, providerId]), which
+  // Prisma exposes as a single `provider_providerId` key holding both members.
   const composite = {
     ...mapped,
     name: "SocialAccount",

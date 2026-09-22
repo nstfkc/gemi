@@ -1128,7 +1128,7 @@ export const SocialAccount = {
       "name": "providerId",
       "column": "providerId",
       "type": "String",
-      "nullable": false,
+      "nullable": true,
       "isId": false,
       "isUpdatedAt": false
     },
@@ -1197,8 +1197,8 @@ export const SocialAccount = {
   ],
   "uniques": [
     [
-      "username",
-      "provider"
+      "provider",
+      "providerId"
     ]
   ],
   "relations": {

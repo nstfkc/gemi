@@ -29,7 +29,7 @@ export interface RefusalOrigin {
 /**
  * Which declared unique key a `where` names — the `@id`, a single-field
  * `@unique`, or a composite `@@unique` in Prisma's compound form
- * (`{ username_provider: { username, provider } }`).
+ * (`{ provider_providerId: { provider, providerId } }`).
  *
  * Shared by every operation Prisma types with a `WhereUniqueInput`: the four
  * `findUnique*` reads, and — from iteration 4 — `update`, `delete` and

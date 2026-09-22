@@ -893,7 +893,7 @@ export const category: ModelSchema = {
  * `@@unique`.
  *
  * The template's only compound key is `SocialAccount`'s
- * `@@unique([username, provider])`, which is a different path — so a compound
+ * `@@unique([provider, providerId])`, which is a different path — so a compound
  * *primary* key had no coverage anywhere, and was unreachable by key at all.
  * See #80.
  */

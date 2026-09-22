@@ -134,8 +134,18 @@ model SocialAccount {
   user   User @relation(fields: [userId], references: [id])
 
   provider   String
-  providerId String
+  // The provider's stable account identifier — Google's `sub`, X's user id.
+  // This, together with `provider`, *is* the identity: the OAuth callback
+  // resolves a returning login by it before it looks at email, so a changed
+  // email or display name at the provider still reaches the same user.
+  //
+  // Nullable only for rows written before the callback recorded it (they hold
+  // `""` or, after migrating, `NULL`). The callback never writes an empty one,
+  // and claims a legacy row for the user it belongs to on their next sign-in.
+  // See "OAuth" in docs/authentication.md.
+  providerId String?
 
+  // Profile data as the provider reported it at link time — not identity.
   username String?
   email    String?
 
@@ -146,7 +156,9 @@ model SocialAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([username, provider])
+  // One local owner per provider identity. Also what makes two concurrent
+  // first sign-ins for the same account converge on one row instead of two.
+  @@unique([provider, providerId])
   @@index([userId])
 }
 

@@ -15,6 +15,7 @@ import type {
   Invitation,
   PasswordResetToken,
   SessionWithUser,
+  SocialAccount,
   UpdateSessionArgs,
   UpdateUserPasswordArgs,
   User,
@@ -36,7 +37,7 @@ import type {
  *
  * What the seam actually bought was reachable more cheaply. An application that
  * needs different behaviour subclasses this and overrides the methods it cares
- * about — the queries are twenty-two small independent methods, all funnelled
+ * about — the queries are twenty-five small independent methods, all funnelled
  * through `run`, precisely the shape that subclasses well. What it no longer
  * buys is a *different database*, and that is deliberate: an app on the ORM has
  * one.
@@ -444,6 +445,65 @@ export class UserProvider {
     return await this.run(() =>
       this.models.SocialAccount.create({ data: args }),
     );
+  }
+
+  /**
+   * The user a provider identity is linked to, or null.
+   *
+   * `findFirst` rather than `findUnique` on `provider_providerId`, so this
+   * works against a schema that has not yet moved its `@@unique` off
+   * `[username, provider]` — the lookup is the same either way; what the
+   * migration adds is the *constraint*. See "OAuth" in
+   * `docs/authentication.md`.
+   *
+   * An empty `providerId` never matches: legacy rows hold `""` or `NULL`, and
+   * neither is anybody's identity.
+   */
+  async findUserBySocialAccount(
+    provider: string,
+    providerId: string,
+  ): Promise<User | null> {
+    if (!providerId) return null;
+    const account: { user: User } | null = await this.run(() =>
+      this.models.SocialAccount.findFirst({
+        where: { provider, providerId },
+        include: { user: true },
+      }),
+    );
+    return account ? withoutPassword(account.user) : null;
+  }
+
+  async findSocialAccounts(
+    userId: number,
+    provider: string,
+  ): Promise<SocialAccount[]> {
+    return await this.run(() =>
+      this.models.SocialAccount.findMany({
+        where: { userId, provider },
+        orderBy: { id: "asc" },
+      }),
+    );
+  }
+
+  /**
+   * Records `providerId` on a row written before the callback stored one.
+   *
+   * Conditional on the row still holding the value it was read with, so two
+   * callbacks racing to claim the same legacy row cannot both succeed: the
+   * loser matches nothing and gets `false`. `updateMany`, because `update`
+   * raises on no match and the non-unique filter is the point.
+   */
+  async claimSocialAccount(
+    account: Pick<SocialAccount, "id" | "providerId">,
+    providerId: string,
+  ): Promise<boolean> {
+    const { count }: { count: number } = await this.run(() =>
+      this.models.SocialAccount.updateMany({
+        where: { id: account.id, providerId: account.providerId },
+        data: { providerId },
+      }),
+    );
+    return count === 1;
   }
 }
 

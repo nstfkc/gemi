@@ -1320,17 +1320,17 @@ function suite(label: string, url?: string) {
       },
     );
 
-    // The template's SocialAccount declares @@unique([username, provider]), so
+    // The template's SocialAccount declares @@unique([provider, providerId]), so
     // this is the only model that can exercise Prisma's joined compound key.
     // `compileWhere` had no branch for it and threw `UnknownFieldError`; the
     // compiler test that "covered" it used `.not.toThrow(/regex/)` and passed
     // on the wrong error.
     test("findUnique on a compound unique key", async () => {
       await differential.expectSame("SocialAccount", "findUnique", {
-        where: { username_provider: { username: "ada", provider: "github" } },
+        where: { provider_providerId: { provider: "github", providerId: "gh-1" } },
       });
       await differential.expectSame("SocialAccount", "findUnique", {
-        where: { username_provider: { username: "nobody", provider: "none" } },
+        where: { provider_providerId: { provider: "none", providerId: "nobody" } },
       });
     });
 

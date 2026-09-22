@@ -6647,7 +6647,7 @@ might lift next release.
 
 - **[Rows and entities](./orm-rows-and-entities.md)** — POJOs, `track` + `save`, and `wrap`.
 - **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider.
-  `UserProvider` (exported from `gemi/kernel`) implements all twenty-two methods of the auth
+  `UserProvider` (exported from `gemi/kernel`) implements all twenty-five methods of the auth
   persistence on this ORM, and is the only implementation: the adapter seam and the Prisma
   adapter are gone, and `AuthManager` constructs it directly. It resolves your models from the
   registry by name, so registering them at boot is what makes sign-in work.
@@ -7016,14 +7016,16 @@ It expects the following models (field names matter, they are queried directly):
 - **`PasswordResetToken`** — `token` (unique), `createdAt`, `user` relation.
 - **`MagicLinkToken`** — `email`, `token`, `pin`, with composite unique keys
   `token_email` and `pin_email`.
-- **`SocialAccount`** — `provider`, `providerId`, `userId`, `email`, `username`,
-  `accessToken`, `refreshToken`, `expiresAt` (created on first OAuth sign-up).
+- **`SocialAccount`** — `provider`, `providerId` (nullable), `userId`, `email`, `username`,
+  `accessToken`, `refreshToken`, `expiresAt`, with `@@unique([provider, providerId])` —
+  the link between a user and a provider account. See
+  [OAuth account identity](#oauth-account-identity).
 - **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
   optional invitation sign-up flow).
 
 ### Methods
 
-The twenty-two methods, all overridable:
+The twenty-five methods, all overridable:
 
 | Method | Purpose |
 | --- | --- |
@@ -7039,6 +7041,7 @@ The twenty-two methods, all overridable:
 | `createPasswordResetToken(args)` / `findPasswordResetToken(args)` / `deletePasswordResetToken(args)` | Password-reset token lifecycle. |
 | `createMagicLinkToken(args)` / `findUserMagicLinkToken(args)` / `deleteMagicLinkToken(email)` | Magic-link / PIN token lifecycle. |
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
+| `findUserBySocialAccount(provider, providerId)` / `findSocialAccounts(userId, provider)` / `claimSocialAccount(account, providerId)` | Resolve a provider identity to its user; list a user's links; record the identity on a legacy link. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
 One more method is not a query: `transaction(fn)` runs `fn` inside a transaction on the
@@ -7344,10 +7347,10 @@ and `HOST_NAME` from the environment by default. `XOAuthProvider` reads `X_CLIEN
 The framework mounts two view routes per provider automatically:
 
 - `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
-- `/auth/oauth/:provider/callback` — exchanges the code, resolves the user's email/name,
-  signs them in (or creates the account + a `SocialAccount` on first login, in one transaction
-  with [`onUserCreated`](#onusercreated)), sets the session cookie, and fires `onSignUp` (new) or
-  `onSignIn` (returning).
+- `/auth/oauth/:provider/callback` — exchanges the code, resolves the provider account to a
+  user (see [below](#oauth-account-identity)), signs them in (or creates the account + a
+  `SocialAccount` on first login, in one transaction with [`onUserCreated`](#onusercreated)),
+  sets the session cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
 
 > **Note:** `onSignUp`'s `verificationToken` is `""` on this path. A user arriving through
 > OAuth has `emailVerifiedAt` already set, so there is nothing to verify. To mail them a
@@ -7365,7 +7368,88 @@ A "Sign in with Google" button is just a link:
 
 To add your own provider, extend the abstract `OAuthProvider` (from `gemi/services`) and
 implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
-`{ email, name, username?, providerId? }`.
+`{ email, name, username?, providerId? }`. Return the provider's stable account id as
+`providerId` whenever it has one, and never build one from a name or an email.
+
+### OAuth account identity
+
+A provider account is identified by **`(provider, providerId)`** — for Google, `providerId`
+is the OpenID Connect `sub`, which Google keeps stable across email changes; for X, the user
+id. Display names and emails are profile data, stored on the `SocialAccount` as they were at
+link time, and never used as identity. The callback resolves an account in this order:
+
+1. **By identity.** If a `SocialAccount` holds this `(provider, providerId)`, its user is
+   signed in — whatever the provider now reports as the email or name. The local user's email
+   is not changed, and a provider-side email change never moves the account to another user,
+   even when the new address belongs to one.
+2. **By email**, for an identity not yet linked:
+   - No user with that email: the user and its `SocialAccount` are created in one
+     transaction with `onUserCreated`; `onSignUp` fires.
+   - A user with that email and no link at this provider: they are signed in and the link is
+     created; `onSignIn` fires.
+   - A user with that email whose link at this provider has an empty `providerId` (a
+     [legacy row](#migrating-existing-social-accounts)): the identity is recorded on that row.
+   - A user with that email **already linked to a different account at this provider**: the
+     callback is refused (`session: null`), nothing is written and no hook fires. The same
+     address is not the same account — a deleted and re-created Workspace user gets a new
+     `sub`. To allow re-linking, delete the old `SocialAccount` row.
+
+A callback is also refused when the provider returns no identity the callback can use: no
+email for an unknown identity, or — for `GoogleOAuthProvider` — a userinfo response with no
+`sub`, which it treats as a failed login rather than falling back to the email.
+
+A provider that returns no `providerId` at all (a custom one) keeps email-only behaviour:
+step 2 without a link, and no `SocialAccount` row, since a row with no identity in it can
+never be resolved by one.
+
+`@@unique([provider, providerId])` is what makes this safe under concurrency. Two callbacks
+racing to sign up or link the same account both try to write the same identity; one wins,
+the other fails on the constraint, and the loser then signs in **only if** the identity now
+resolves — the database error alone is never taken as proof of who the user is. Without the
+constraint the lookups still work, but a race can write two rows for one account.
+
+`username` is the provider's handle where it has one (X). Google has none, so it is left
+empty; it used to hold the display name.
+
+#### Migrating existing social accounts
+
+Before this, the callback wrote `providerId: ""` for every Google account, and the template
+declared `@@unique([username, provider])` — the display name — which made a second Google
+user with an existing user's name fail to sign up. Change the model to:
+
+```prisma
+model SocialAccount {
+  // ...
+  provider   String
+  providerId String?   // was: String
+
+  username String?
+  email    String?
+  // ...
+
+  @@unique([provider, providerId])   // was: @@unique([username, provider])
+  @@index([userId])
+}
+```
+
+and convert the empty placeholders to `NULL` in the same migration — a unique index cannot
+hold more than one `""` per provider, and treats `NULL`s as distinct:
+
+```sql
+UPDATE "SocialAccount" SET "providerId" = NULL WHERE "providerId" = '';
+```
+
+(`prisma migrate dev` generates the rest. On SQLite it redefines the table; the template's
+`20260922000000_social_account_provider_identity` migration does it with
+`NULLIF("providerId", '')` in the copy.) Do **not** fill legacy rows from names or emails: they
+are recorded with the real `providerId` by the callback itself, on each user's next sign-in,
+through the email match that already signs them in today.
+
+**Deployment order.** Apply the migration, then deploy the new framework version. The other
+order also works — the callback only ever writes a non-empty `providerId`, finds rows with
+`findFirst`, and leaves `username` empty for Google, so it runs against the old schema — but
+until the constraint exists, concurrent first sign-ins are not guarded. Applications that
+override `createSocialAccount` should check that it passes `providerId` through.
 
 ## The Auth facade
 
