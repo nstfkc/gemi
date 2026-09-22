@@ -81,6 +81,11 @@ export type { LogEntry } from "./logging/types";
 export { QueueServiceProvider } from "./queue/QueueServiceProvider";
 export { QueueManager, type DrainResult } from "./queue/QueueManager";
 export { MemoryQueueDriver } from "./queue/MemoryQueueDriver";
+export {
+  DatabaseQueueDriver,
+  type DatabaseQueueDriverOptions,
+  type DatabaseJobStatus,
+} from "./queue/DatabaseQueueDriver";
 export type {
   QueueDriver,
   EnqueueJob,

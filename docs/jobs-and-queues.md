@@ -2,7 +2,7 @@
 
 Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's queue, and the request returns immediately.
 
-> **By default the queue lives in the server's memory, and a restart loses it.** Every job that is waiting, waiting out a retry, or halfway through `run` is gone when the process exits — a deploy, a scale-in, a crash — and no hook fires for any of them. See [Drivers](#drivers--where-queued-jobs-live) for what to do about it.
+> **By default the queue lives in the server's memory, and a restart loses it.** Every job that is waiting, waiting out a retry, or halfway through `run` is gone when the process exits — a deploy, a scale-in, a crash — and no hook fires for any of them. [`driver: "database"`](#the-database-driver) keeps them in your database instead. See [Drivers](#drivers--where-queued-jobs-live).
 
 You define jobs as classes extending `Job` (from `gemi/services`) in files under `app/jobs/`, and fire them with `Job.dispatch(...)`. The directory is read at boot, so there is no list to keep alongside it.
 
@@ -51,7 +51,7 @@ export class ProcessVideoJob extends Job {
 }
 ```
 
-Retry behavior: when `run` throws, `onFail` fires and the job is re-queued, `backoff` milliseconds later, until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dead-lettered — dropped, with the memory driver. A throw from `onSuccess` counts as a failed attempt; a throw from `onFail` or `onDeadletter` is logged and changes nothing.
+Retry behavior: when `run` throws, `onFail` fires and the job is re-queued, `backoff` milliseconds later, until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dead-lettered — dropped by the memory driver, kept with its error by the database driver. A throw from `onSuccess` counts as a failed attempt; a throw from `onFail` or `onDeadletter` is logged and changes nothing.
 
 An attempt whose process died before it finished still counts. With a driver that outlives the process, the job is claimed again once its lease runs out, and a job whose last attempt was lost that way reaches `onDeadletter` — with an error saying so — without running again.
 
@@ -127,7 +127,7 @@ export default defineQueueConfig({
 | `jobs` | `(new () => Job)[]` | *discovered* | All dispatchable job classes. Omit to discover them from `jobsDir`. A job that reaches neither is dispatched into nothing. |
 | `jobsDir` | `string` | `"app/jobs"` | Where to discover them. Relative to the project root, or absolute. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
-| `driver` | `"memory" \| QueueDriver \| () => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
+| `driver` | `"memory" \| "database" \| QueueDriver \| (app) => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
 | `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
 | `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. Also the delay before retrying a claim that failed — for any driver, doubling per consecutive failure up to a minute. |
 
@@ -194,7 +194,7 @@ A driver is any object implementing `QueueDriver` from `gemi/services`. It is cl
 
 `complete`, `fail` and `heartbeat` receive the claimed job rather than its id, so a driver can ignore a report from a claim whose lease already ran out and was handed to someone else. Durations cross the interface as relative milliseconds, so a driver shared between machines can measure them on one clock.
 
-Hand the driver to the slice as a function, so each application gets its own and nothing is opened by a process that only imports the config:
+Hand the driver to the slice as a function, so each application gets its own and nothing is opened by a process that only imports the config. The function is called with the application:
 
 ```typescript
 // app/config/queue.ts
@@ -202,19 +202,86 @@ import { defineQueueConfig } from "gemi/services";
 import { MyQueueDriver } from "@/app/queue/MyQueueDriver";
 
 export default defineQueueConfig({
-  driver: () => new MyQueueDriver(),
+  driver: (app) => new MyQueueDriver(),
 });
 ```
+
+### The database driver
+
+`driver: "database"` keeps jobs in a `gemi_jobs` table of your database, so they outlive the process. A job dispatched before a deploy, a scale-in or a crash is still there afterwards, and whichever replica is up claims it. It works on SQLite, Postgres, and MySQL 8 or MariaDB 10.6+. It uses raw SQL, so it works on MySQL even though the ORM does not.
+
+```typescript
+// app/config/queue.ts
+import { defineQueueConfig } from "gemi/services";
+
+export default defineQueueConfig({
+  driver: "database", // the default connection's gemi_jobs table
+  concurrency: 20,
+});
+```
+
+The table is yours to create, like every other table. With Prisma, add this model to `schema.prisma` and run `prisma migrate dev`. Prisma then owns the table and will not drop it as unknown:
+
+```prisma
+model GemiJob {
+  id             String  @id
+  name           String
+  payload        String
+  status         String
+  attempts       Int     @default(0)
+  availableAt    BigInt  @map("available_at")
+  claimedAt      BigInt? @map("claimed_at")
+  leaseExpiresAt BigInt? @map("lease_expires_at")
+  lastError      String? @map("last_error")
+  createdAt      BigInt  @map("created_at")
+  updatedAt      BigInt  @map("updated_at")
+
+  @@index([status, availableAt])
+  @@index([status, leaseExpiresAt])
+  @@map("gemi_jobs")
+}
+```
+
+On MySQL, add `@db.LongText` to `payload` and `lastError`. Prisma's default there is `VARCHAR(191)`, which is too short for a job's arguments or a stack trace. Without Prisma, `await driver.createTable()` creates the same table and indexes if they do not exist.
+
+For another connection or table name, build the driver yourself:
+
+```typescript
+import { DatabaseManager } from "gemi/database";
+import { DatabaseQueueDriver, defineQueueConfig } from "gemi/services";
+
+export default defineQueueConfig({
+  driver: (app) =>
+    new DatabaseQueueDriver(app.make(DatabaseManager).connection("jobs"), { table: "jobs" }),
+});
+```
+
+**What it guarantees: at least once, not exactly once. Jobs must be idempotent.** A job runs again if its process dies after the work is done but before the row is removed. It can also run twice at the same time: if a process freezes, or cannot reach the database to renew its lease, for longer than `visibilityTimeout`, the lease runs out while the job is still running and another replica claims it.
+
+How it works:
+
+- **Claiming.** Each job is a row. Postgres and MySQL claim rows with `SELECT … FOR UPDATE SKIP LOCKED`, so replicas claiming at the same moment take different rows. SQLite runs one write at a time, so a single `UPDATE … RETURNING` claims atomically. Bun opens SQLite with no busy timeout, so several processes writing one SQLite file can fail with `SQLITE_BUSY`. Use Postgres or MySQL for more than one process.
+- **Leases.** A claim leases the job for `visibilityTimeout` (default five minutes). The queue renews the lease every third of that while the job runs. A job whose process died without finishing becomes claimable again when its lease runs out, and that is the whole of crash recovery. A lower `visibilityTimeout` retries such a job sooner, at the cost of more lease renewals.
+- **Retries.** The attempt count and the last error are stored in the row, so `maxAttempts` and `backoff` hold across restarts. An attempt whose process died counts too.
+- **Dead letters.** A job that used up its attempts stays in the table with `status = 'dead'` and its `last_error`. To run it again, set `status = 'pending'`, `attempts = 0` and `available_at` to now. `driver.prune(olderThanMs)` deletes dead rows older than that, for example from a cron job. Nothing else removes them.
+- **Completed jobs** are deleted.
+- **Time.** All times are milliseconds since the epoch, read from the database's clock, so replicas with skewed clocks agree on when a lease ran out. In Postgres, `to_timestamp(available_at / 1000.0)` gives a readable date.
+- **Recovery on boot.** A production server with a durable driver starts claiming as soon as it boots, not at its first dispatch. That way a replica that serves no dispatches of its own still picks up what an earlier one left behind. Under `gemi dev`, the queue starts at the first dispatch, as before.
+- **Polling.** Another process's dispatch cannot wake this one, so the queue asks the database for work every `pollInterval` (default one second). A dispatch from this process wakes its own queue immediately.
+
+A dispatch inside `Model.transaction` is not part of that transaction. The row is written on the pool, so it stays if the transaction rolls back, and the job may run before the transaction commits. Dispatch after the commit.
 
 ### Stopping the queue
 
 `app(QueueManager).drain(timeoutMs)` stops claiming, waits up to `timeoutMs` for the jobs already running, and resolves to `{ unfinished }` — the ones still running at the deadline. Nothing is cancelled. `stop()` is `drain(0)`. After either, a dispatch is recorded by the driver but not run until `start()` is called; with the memory driver, whatever is still waiting when the process exits is lost.
 
+A production server told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)) stops claiming as soon as the signal arrives. Jobs already running continue while in-flight requests drain. The queue provider's `shutdown()` then waits for them, within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). If a job is still running at the deadline, it is abandoned when the process exits, and the shutdown exits with code 1. With the memory driver that job is lost. With the database driver its row stays claimed until the lease runs out, and then another replica retries it. That retry counts as a new attempt, and it starts only after `visibilityTimeout`. If your jobs regularly run longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period.
+
 See [Project Structure](./project-structure.md) for the full kernel layout.
 
 > **Coming from Laravel:** the vocabulary is the same — a `ServiceProvider` registers bindings into the `Container`, config lives in `app/config`, and facades are static proxies to container-resolved services. Two things are deliberately different: job retry/failure behavior lives on the job class (`maxAttempts`, `onFail`, `onDeadletter`) rather than in a queue driver's config, and per-subsystem hooks across the framework (`filterRecipients`, `onLogCreated`, `detectLocale`, ...) are **config callbacks** in `app/config/*.ts` rather than macros you register from a provider's `boot()`. Use `boot()` only for wiring you cannot express as data — see `app/providers/AppServiceProvider.ts`.
 
-> **Note:** The queue is **in-process and in-memory** — jobs live in the running server's memory and are processed by that same process (or, for `worker` jobs, a Worker thread it spawns). Enqueued jobs do not survive a restart, and there is no cross-machine/distributed queue. Use jobs for best-effort background work (translations, image processing, notifications), not for work that must be durably guaranteed across restarts.
+> **Note:** Jobs always run inside a server process (or, for `worker` jobs, a Worker thread it spawns); there is no separate worker process. With the default memory driver the queue is also **in-memory**: enqueued jobs do not survive a restart, and a job runs on the instance that dispatched it. Use it for best-effort background work (translations, image processing, notifications). For work that must survive restarts, use the [database driver](#the-database-driver), and make the jobs idempotent.
 
 ## When to use a job
 
