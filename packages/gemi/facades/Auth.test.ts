@@ -126,3 +126,24 @@ describe("auth error names", () => {
     expect(new AuthorizationError().payload.api.status).toBe(401);
   });
 });
+
+describe("InsufficientPermissionsError.apiStatus", () => {
+  afterEach(() => {
+    InsufficientPermissionsError.apiStatus = 403;
+  });
+
+  test("lets an app with shipped clients keep answering 401 on API routes", () => {
+    // The pre-0.63 status, for an app whose native clients branch on it (#542).
+    InsufficientPermissionsError.apiStatus = 401;
+    const error = new InsufficientPermissionsError();
+    expect(error.payload.api.status).toBe(401);
+    // `payload.view` answers a full page load, which never answered 401, so
+    // the override leaves it alone. A `.json` navigation answers from
+    // `payload.api` and follows it; see InsufficientPermissions.status.test.ts.
+    expect(error.payload.view.status).toBe(403);
+  });
+
+  test("defaults to 403", () => {
+    expect(new InsufficientPermissionsError().payload.api.status).toBe(403);
+  });
+});

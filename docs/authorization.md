@@ -122,8 +122,10 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 `InsufficientPermissionsError` (403) when the predicate returns falsy. An error the predicate
 throws — a failed query, say — propagates as itself rather than becoming a 403. That includes
 a `PolicyDeniedError` from a policied model the predicate reads: it is not a request-breaker
-error, so it reaches `onRequestFail` and answers `500`. If a denial there should refuse the
-request, catch it in the predicate and return `false`.
+error, so it reaches `onRequestFail`, and then answers what any policy denial does — `403`
+`{ error: { message: "Forbidden" } }`, not the guard's `"Insufficient permissions"`. If a
+denial there is an expected refusal rather than something to report, catch it in the
+predicate and return `false`.
 
 ```typescript
 // in a controller
@@ -209,6 +211,11 @@ async function update() {
 > `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
 > role, so throw `InsufficientPermissionsError` when the identity is known and the action is
 > refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
+>
+> An app upgrading from 0.62, where it answered `401`, can keep that while its shipped clients
+> catch up: `InsufficientPermissionsError.apiStatus = 401`, set once at module scope in
+> `app/kernel/Kernel.ts`. It sets API routes and `.json` view navigations, which answer from
+> the same payload; a full page load answers `403` either way. See UPGRADE.md.
 
 ## Related
 
