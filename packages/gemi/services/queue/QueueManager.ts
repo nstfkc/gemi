@@ -1,4 +1,5 @@
 import { AsyncResource } from "node:async_hooks";
+import { isMainThread } from "node:worker_threads";
 
 import type { Application } from "../../foundation/Application";
 import { DatabaseManager } from "../../database/DatabaseManager";
@@ -285,11 +286,20 @@ export class QueueManager {
    * Queues a job and resolves to its id once the driver has recorded it, then
    * makes sure the worker loop is running — unless `drain` stopped it, in which
    * case the job waits in the driver for whichever process claims next. With
-   * the memory driver that is nobody; see `drain`.
+   * the memory driver that is nobody; see `drain`. A durable driver's job also
+   * waits there when this process is not a server.
    */
   push(job: new () => Job, args: string): Promise<string> {
     const id = this.driver.enqueue({ name: job.name, args });
-    if (this.state === "idle") this.start();
+    // A driver that outlives the process is shared with every other one, so
+    // a script or console command that dispatches would otherwise claim up to
+    // `concurrency` of the table's jobs — other replicas' included — and exit
+    // under them, costing each an attempt and a lease's wait. There the job
+    // waits in the driver for a server. A manager built by hand, with no
+    // application, is its caller's to run and keeps starting.
+    if (this.state === "idle" && (!this.durable || this.mayClaimHere())) {
+      this.start();
+    }
     // A driver without `subscribe` is only polled, so without this a job
     // dispatched here would wait up to `pollInterval` in a queue with room.
     // A spurious wake just claims nothing; a rejection is the caller's.
@@ -388,11 +398,14 @@ export class QueueManager {
 
   private async claimWhileRunning() {
     while (this.state === "running") {
-      // Once the server has been told to stop, nothing new is taken: a job
-      // claimed now would likely be cut off by the exit, and cost an attempt
-      // and a lease's wait. The jobs already running carry on, and the
-      // provider's `shutdown()` waits for them.
-      const room = isShuttingDown()
+      // Once the server has been told to stop, a driver that outlives the
+      // process gets nothing new taken from it: a job claimed now would likely
+      // be cut off by the exit, and cost an attempt and a lease's wait, when
+      // another replica can run it instead. The memory driver keeps claiming
+      // until the provider's `drain()` stops it, because nobody else can run
+      // its jobs — one waiting at the signal, or dispatched by a request
+      // still draining, is run here or not at all.
+      const room = this.durable && isShuttingDown()
         ? 0
         : this.config.concurrency - this.inFlight.size;
 
@@ -477,6 +490,16 @@ export class QueueManager {
     const resume = this.resume;
     this.resume = undefined;
     resume?.();
+  }
+
+  /** Whether the driver keeps jobs past this process: anything but memory. */
+  private get durable() {
+    return !(this.driver instanceof MemoryQueueDriver);
+  }
+
+  /** See `claimsInThisProcess`. A manager built by hand always may. */
+  private mayClaimHere() {
+    return !this.application || claimsInThisProcess();
   }
 
   private lease(): ClaimOptions {
@@ -670,6 +693,17 @@ function hook(name: string, fn: () => void) {
  * The delay before the retry that follows attempt `attempt`: the number
  * itself, or the array's entry for that retry with its last entry repeated.
  */
+/**
+ * Whether this process is a server's main thread, the only kind that should
+ * claim from a driver shared with other processes. `ROOT_DIR` is set only by
+ * a starting server, so a console command, a seed
+ * or a migration — which boot the same providers — is not one, and neither is
+ * a `worker` job's thread, which clones the application and exits after it.
+ */
+export function claimsInThisProcess() {
+  return process.env.ROOT_DIR !== undefined && isMainThread;
+}
+
 export function backoffFor(backoff: number | number[], attempt: number) {
   const delay = Array.isArray(backoff)
     ? backoff[Math.min(attempt, backoff.length) - 1]
