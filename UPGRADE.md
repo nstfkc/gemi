@@ -115,6 +115,29 @@ entry, `modulepreload` hints, loaders and navigation stylesheets now use that
 base too, where they used to be root-relative. Check that whatever sits in
 front of the app answers `<vite.base>assets/*`.
 
+## `SIGTERM` drains the server, and `gemi start` exits with its code
+
+`gemi start` used to ignore signals and exit `0` whatever its server did. Now
+it relays `SIGTERM` and `SIGINT` to the server, and the server stops accepting
+connections, lets in-flight requests finish, runs each provider's new
+`shutdown()` hook, and exits — within 25 seconds by default. `gemi start`
+exits with the server's code, so a crashed server is no longer reported as a
+clean exit. See
+[Graceful shutdown](docs/configuration.md#graceful-shutdown).
+
+What to check:
+
+- **A platform that allows less than 25 seconds** between `SIGTERM` and
+  `SIGKILL` (Cloud Run, Fly) cuts the drain off. Lower
+  `GEMI_SHUTDOWN_TIMEOUT` and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit.
+- **A wrapper that works around the dropped exit code**, or that relays
+  signals to the server's process itself, can stop doing so. The server is now
+  in its own process group, so a wrapper that signalled the group no longer
+  reaches it — signal `gemi start` instead.
+- **An app that installed its own `SIGTERM` listener** now runs beside gemi's,
+  which exits the process when the drain is done. Pass
+  `handleSignals: false` to `new Server()` to keep only yours.
+
 ---
 
 # Upgrading from 0.55 to 0.56

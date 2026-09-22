@@ -1035,6 +1035,81 @@ GEMI_COMPRESSION=off
 
 Any other value (or none) leaves compression on.
 
+## Graceful shutdown
+
+In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
+
+1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one.
+2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
+3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
+4. **Runs every provider's `shutdown()`**, in reverse registration order.
+5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
+
+A second signal skips the wait and exits at once, with `130` for `SIGINT` or `143` for `SIGTERM`.
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `GEMI_SHUTDOWN_TIMEOUT` | `20` | Seconds from the signal to the end of step 3, the delay included. Requests still running then are abandoned. |
+| `GEMI_SHUTDOWN_DELAY` | `0` | Seconds to keep serving with the health route answering `503`. |
+| `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` | `5` | Seconds shared by every provider's `shutdown()`. |
+
+The defaults add up to 25 seconds, under the 30 that Kubernetes, Azure Container Apps and ECS allow between `SIGTERM` and `SIGKILL`. On a platform with a shorter window — Cloud Run allows 10, Fly 5 — lower them to fit: a drain the platform cuts off with `SIGKILL` ends the same way as no drain at all.
+
+### Taking the instance out of rotation
+
+gemi has no health endpoint of its own, so "unhealthy" is whatever your health route says. Answer `503` while the server is draining:
+
+```typescript
+import { ApiRouter } from "gemi/http";
+import { isShuttingDown } from "gemi/server";
+
+export default class extends ApiRouter {
+  routes = {
+    "/health": this.get(() =>
+      isShuttingDown()
+        ? new Response(JSON.stringify({ status: "draining" }), { status: 503 })
+        : { status: "ok" },
+    ),
+  };
+}
+```
+
+Then set `GEMI_SHUTDOWN_DELAY` to at least your probe's interval times its failure threshold, and keep it inside `GEMI_SHUTDOWN_TIMEOUT`. Leave it at `0` where no probe watches the instance.
+
+### Cleaning up in a provider
+
+`ServiceProvider` has a `shutdown()` hook beside `register()` and `boot()`. It runs after the requests have drained, inside the application context, so a facade works there as it does in a request:
+
+```typescript
+import { ServiceProvider } from "gemi/support";
+
+export default class AppServiceProvider extends ServiceProvider {
+  async shutdown() {
+    await flushMetrics();
+  }
+}
+```
+
+Providers shut down in reverse registration order, so yours — registered after the framework's — runs while the framework's services are still up. A hook that throws is logged and the next one still runs; one that is still running when `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` is up is abandoned, and any provider not reached by then is skipped.
+
+### Handling the signals yourself
+
+`Server.start()` resolves with the `Bun.Server`, and `server.stop()` runs the same sequence without exiting the process. Pass `handleSignals: false` to keep gemi's listener off and wire it however you need:
+
+```typescript
+import { Server } from "gemi/server";
+import Kernel from "./kernel/Kernel";
+
+const server = new Server({ kernel: Kernel, handleSignals: false });
+await server.start();
+
+process.on("SIGTERM", async () => {
+  process.exit(await server.stop({ timeoutMs: 50_000 }));
+});
+```
+
+`gemi dev` installs no listener: `bun --hot` re-runs the server on every change, and a Ctrl+C in development stops at once.
+
 ## `app/preload.ts`
 
 `app/preload.ts` is an optional [Bun `--preload`](https://bun.sh/docs/runtime/bunfig#preload) script that runs **once, before the server starts**, for both `gemi dev` and `gemi start`. Use it for process-wide setup that must happen before any request is handled:
@@ -1170,6 +1245,10 @@ gemi start
 ```
 
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
+
+`start` relays `SIGTERM` and `SIGINT` to that process (and a `SIGHUP` as `SIGTERM`), waits for it, and exits with its exit code — `128 + n` if a signal ended it. The server drains in-flight requests before it exits; see [Graceful shutdown](./configuration.md#graceful-shutdown). The server runs in its own process group, so a Ctrl+C reaches it once, through `start`, rather than twice.
+
+> **Gotcha:** the relay covers `start` and nothing above it. `bun run start` passes `SIGTERM` on to its script, but a wrapper script of your own between the platform and `gemi start` has to do the same, or the server never hears it.
 
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
 

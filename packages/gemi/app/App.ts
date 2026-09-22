@@ -140,6 +140,11 @@ export class App {
     });
   }
 
+  /** Every provider's `shutdown()`; see `Kernel.shutdown`. */
+  public shutdown(options?: { timeoutMs?: number }) {
+    return this.kernel.shutdown(options);
+  }
+
   public destroy() {
     this.kernel.destroy();
   }
