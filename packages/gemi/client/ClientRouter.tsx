@@ -447,6 +447,7 @@ export const ClientRouter = (props: {
     pageData,
     cssManifest,
     modulePreloadManifest,
+    assetBase,
     breadcrumbs,
     i18n,
   } = useContext(ServerDataContext);
@@ -463,6 +464,7 @@ export const ClientRouter = (props: {
               <ClientRouterProvider
                 cssManifest={cssManifest}
                 modulePreloadManifest={modulePreloadManifest}
+                assetBase={assetBase}
                 searchParams={router.searchParams}
                 params={router.params}
                 pageData={pageData}

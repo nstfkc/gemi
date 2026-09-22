@@ -69,6 +69,8 @@ The command runs in three stages:
 
 Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
 
+`GEMI_ASSET_BASE` (or `assetBase` in `gemi.config.ts`) builds the client bundle to be served from a CDN; the base is recorded in `dist/client/.vite/gemi.json` for `gemi start` to read. See [Asset base](./configuration.md#asset-base).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
 
 ## `gemi start`

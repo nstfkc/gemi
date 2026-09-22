@@ -1,3 +1,5 @@
+import { DEFAULT_ASSET_BASE, assetUrl } from "../config/assetBase";
+
 /** The subset of a Vite manifest entry this module reads. */
 export interface ViteManifestChunk {
   file: string;
@@ -21,17 +23,20 @@ export const CLIENT_ENTRY_KEY = "app/client.tsx";
  * throwing here: this runs at boot, so a deref would take down API routes,
  * static assets and health checks over what is only a document concern, and
  * the dispatcher already renders a shell that simply does not hydrate.
+ *
+ * `assetBase` is the base the client build recorded — see `readBuiltAssetBase`.
  */
 export function createClientEntry(
   manifest: ViteManifest,
+  assetBase: string = DEFAULT_ASSET_BASE,
 ): { module: string; preload: string[] } | undefined {
   const file = manifest[CLIENT_ENTRY_KEY]?.file;
   if (!file) {
     return undefined;
   }
   return {
-    module: `/${file}`,
-    preload: collectModulePreloads(manifest, CLIENT_ENTRY_KEY),
+    module: assetUrl(file, assetBase),
+    preload: collectModulePreloads(manifest, CLIENT_ENTRY_KEY, assetBase),
   };
 }
 
@@ -48,7 +53,11 @@ export function createClientEntry(
  * asked to load lazily, and preloading them would download code the current
  * route may never render.
  */
-export function collectModulePreloads(manifest: ViteManifest, entryKey: string): string[] {
+export function collectModulePreloads(
+  manifest: ViteManifest,
+  entryKey: string,
+  assetBase: string = DEFAULT_ASSET_BASE,
+): string[] {
   const urls: string[] = [];
   // Chunk graphs are cyclic often enough (two chunks importing each other
   // through a shared module) that walking them without a visited set hangs.
@@ -59,7 +68,7 @@ export function collectModulePreloads(manifest: ViteManifest, entryKey: string):
     visited.add(key);
     const chunk = manifest[key];
     if (!chunk?.file) return;
-    urls.push(`/${chunk.file}`);
+    urls.push(assetUrl(chunk.file, assetBase));
     for (const imported of chunk.imports ?? []) {
       walk(imported);
     }

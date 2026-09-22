@@ -36,11 +36,13 @@ interface GemiConfig {
   bun?: {
     plugins?: BunPlugin[];      // applied at build time and at runtime
   };
+  assetBase?: string;           // where browsers fetch the client build from
 }
 ```
 
 - **`vite.plugins`** are appended to gemi's own Vite plugins for both the client bundle and the SSR view bundle. Any other key under `vite` is treated as a standard Vite `UserConfig` field and merged on top of gemi's base config.
 - **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
+- **`assetBase`** serves the client build from somewhere other than the app's own `/assets/` — see [Asset base](#asset-base).
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
@@ -110,6 +112,43 @@ react({ compiler: reactCompiler({ compilationMode: "annotation" }) })
 > **Note:** the oxc React Compiler integration is marked experimental upstream. It is a build-time transform with no runtime component beyond `react/compiler-runtime`, so dropping back to `react()` is a one-word revert.
 
 > **Note:** This is not the same file as `vite.config.mjs`. `gemi.config.ts` is gemi's own config (Vite **and** Bun plugins) consumed by the CLI, the runtime preload, and the gemi Vite plugin. `vite.config.mjs` is the standard Vite entry that loads the gemi Vite plugin. See [Vite config](#vite-config) below.
+
+### Asset base
+
+By default every URL gemi builds for the client bundle is root-relative — `/assets/client-DJhrQPW5.js` — and is served by the same server that rendered the page. So a page rendered by one release can only get its chunks from a server running that release. When two releases serve at once (a blue/green or weighted rollout, or several instances mid-deploy), a document from one can land its chunk requests on the other and miss.
+
+Set an asset base to fetch the bundle from somewhere several releases can coexist, typically a CDN or blob store with one directory per release:
+
+```bash
+GEMI_ASSET_BASE=https://cdn.example.com/$RELEASE/ gemi build
+```
+
+or in `gemi.config.ts`:
+
+```typescript
+export default defineConfig({
+  assetBase: `https://cdn.example.com/${process.env.RELEASE}/`,
+});
+```
+
+`GEMI_ASSET_BASE` wins when both are set. The value is an absolute URL or a path starting with `/`; a trailing `/` is added if you leave it off, and a relative base (`./`) fails the build. Then upload `dist/client` to that location as part of the deploy (skipping `dist/client/.vite`, which is build metadata), and keep the last few releases there.
+
+What it changes:
+
+- **The bundle.** It becomes Vite's `base` for the client and SSR view builds, so the dynamic imports, preload helper and CSS `url()`s inside the bundle resolve against it.
+- **The document.** The client entry, the `modulepreload` hints, the per-view loaders and the stylesheets a client-side navigation fetches all use it.
+
+The base is **read at build time only**. `gemi build` records the base the client bundle was built with in `dist/client/.vite/gemi.json`, and `gemi start` reads it from there — never from `GEMI_ASSET_BASE` at boot. That is what keeps the document and the bundle from disagreeing: the bundle already has the base baked in, and a variable set on the build job but not the container (or the reverse) would otherwise point the document one way and the bundle the other. Changing the base means rebuilding. It also means a `vite.base` set directly in `gemi.config.ts` is honoured the same way, since it is the resolved Vite value that is recorded; `assetBase` wins over it when both are set.
+
+The server still serves `dist/client` under `/assets/*` whatever the base is, so a CDN can pull from the app's origin instead of from an upload.
+
+> **Gotcha:** from another origin, the bundle is loaded through CORS: module scripts and `modulepreload` are always fetched in CORS mode, and a navigation's stylesheets are read with `fetch`. The CDN has to answer with `Access-Control-Allow-Origin` for your app's origin (or `*`), or the page will not hydrate.
+
+The base applies to `gemi build` only. `gemi dev` serves modules from Vite's dev server as always.
+
+### Missing chunks after a deploy
+
+A request for a JavaScript chunk under `/assets/` that is not in `dist/client` is answered with a tiny module that reloads the page, rather than a 404: it is almost always a document from the previous release asking for its own chunk, and reloading gets it this release's document. The stub is sent with `Cache-Control: no-store` so no browser or edge keeps it once the real chunk is back. Any other miss under `/assets/` — a source map, a stylesheet, an image — is a plain 404, and a `.js` path outside `/assets/` goes to your routes like any other request.
 
 ## Environment variables & `.env`
 

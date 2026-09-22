@@ -20,6 +20,15 @@ export interface GemiBunConfig {
 export interface GemiConfig {
   vite?: GemiViteConfig;
   bun?: GemiBunConfig;
+  /**
+   * Where browsers fetch the client build from, e.g.
+   * `https://cdn.example.com/<release>/` — an absolute URL or a path starting
+   * with `/`. Applied at build time to the bundle and recorded in
+   * `dist/client`, so the documents `gemi start` renders link the same base the
+   * bundle was built with. `GEMI_ASSET_BASE` overrides it. Unset, assets are
+   * root-relative (`/assets/...`), as they always were.
+   */
+  assetBase?: string;
 }
 
 // Identity helper that gives `gemi.config.ts` full type-checking and editor

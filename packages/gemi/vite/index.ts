@@ -2,6 +2,8 @@ import type { PluginOption } from "vite";
 import { loadGemiConfig } from "../config/load";
 import { isGemiExternal } from "../internal/gemiExternals";
 import { gemiDictionaryPlugin } from "./dictionaryPlugin";
+import { gemiAssetBasePlugin } from "./assetBasePlugin";
+import { resolveAssetBase } from "../config/assetBase";
 
 // Async so it can load `gemi.config.ts` before returning the plugin list. Both
 // consumers run under Bun (the CLI's `build()` and dev's `createServer`, spawned
@@ -13,6 +15,9 @@ const gemi = async (): Promise<PluginOption[]> => {
   const userConfig = await loadGemiConfig(process.cwd());
   const { plugins: userVitePlugins = [], ...userViteConfig } =
     userConfig.vite ?? {};
+  // Resolved here, before any build starts, so a malformed base fails the
+  // build instead of shipping a bundle the document cannot link.
+  const assetBase = resolveAssetBase(userConfig.assetBase);
 
   return [
     {
@@ -76,6 +81,9 @@ const gemi = async (): Promise<PluginOption[]> => {
       name: "gemi-plugin-user-config",
       config: () => userViteConfig,
     },
+    // After the app's `vite` config, so an explicit `assetBase` (or
+    // `GEMI_ASSET_BASE`) wins over a `vite.base` set there.
+    gemiAssetBasePlugin(assetBase),
     {
       name: "gemi-plugin-hot-reload",
       handleHotUpdate({ server, modules }) {

@@ -96,6 +96,21 @@ and `onException` now runs for `/api` failures as well, which it used to
 skip. A client that showed a server error's message to the user shows the
 generic one now. Development is unchanged.
 
+## A missing `.js` file reloads the page only under `/assets/`
+
+When a chunk a page asks for is missing from `dist/client`, `gemi start`
+answers with a module that reloads the page. It used to do that for any
+missing path containing `.js`, including `app.js.map` and anything outside
+`/assets/`. Now it does it only for a `.js` or `.mjs` file under `/assets/`,
+and sends `Cache-Control: no-store` so no browser or CDN caches the stub. A
+missing source map under `/assets/` answers `404`, and a missing `.js` path
+elsewhere goes to your routes like any other request. Nothing to change unless
+something relied on the reload for a script outside `/assets/`.
+
+A new, optional [asset base](docs/configuration.md#asset-base)
+(`GEMI_ASSET_BASE` or `assetBase` in `gemi.config.ts`) serves the client
+build from a CDN. Unset, every asset URL is what it was.
+
 ---
 
 # Upgrading from 0.55 to 0.56
