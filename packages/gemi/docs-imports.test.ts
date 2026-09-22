@@ -153,6 +153,7 @@ describe("documented gemi imports resolve", () => {
       "gemi/broadcasting",
       "gemi/client",
       "gemi/config",
+      "gemi/database",
       "gemi/dictionary",
       "gemi/email",
       "gemi/facades",

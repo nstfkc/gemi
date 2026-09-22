@@ -242,10 +242,10 @@ Any other value (or none) leaves compression on.
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
 
-1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one.
+1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. The queue stops claiming new jobs; the ones already running carry on.
 2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
 3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
-4. **Runs every provider's `shutdown()`**, in reverse registration order.
+4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue).
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
 
 The handler is installed before the application boots, so a signal that lands during a slow start-up — a pod replaced two seconds into its connection pool — drains the same way: there is no listener to close and nothing in flight, so it goes straight to the providers' `shutdown()` and exits. Without it the default action would kill the process outright, with nothing closed or flushed.
