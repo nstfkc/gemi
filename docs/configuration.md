@@ -242,7 +242,7 @@ Any other value (or none) leaves compression on.
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
 
-1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. The queue stops claiming new jobs; the ones already running carry on.
+1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. A queue whose driver outlives the process (such as `database`) stops claiming new jobs and leaves them to other replicas; the memory queue keeps claiming until step 4, since no other process can run its jobs. Jobs already running carry on.
 2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
 3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
 4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue).
