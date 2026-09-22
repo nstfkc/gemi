@@ -38,6 +38,7 @@ class FrontDoor extends Middleware {
       throw new NotThroughFrontDoor();
     }
     this.req.ctx().setHeaders("X-Gate", "front-door");
+    this.req.ctx().setCookie("visitor", "v-1");
   }
 }
 
@@ -137,6 +138,16 @@ describe("httpProd with a global middleware", () => {
     expect(await res.text()).toBe(ASSET);
     expect(res.headers.get("X-Gate")).toBe("front-door");
     expect(ran).toBe(1);
+  });
+
+  test("leaves the gate's cookie off an asset a shared cache may store", async () => {
+    const res = await get("/assets/app.js", THROUGH_FRONT_DOOR);
+
+    expect(res.headers.get("Cache-Control")).toContain("public");
+    expect(res.headers.get("Set-Cookie")).toBeNull();
+    // The api response is not publicly cacheable, so it keeps the cookie.
+    const api = await get("/api/ping", THROUGH_FRONT_DOOR);
+    expect(api.headers.get("Set-Cookie")).toContain("visitor=v-1");
   });
 
   test("refuses an api route, and runs once for one that passes", async () => {

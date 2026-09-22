@@ -206,7 +206,7 @@ class FrontDoorMiddleware extends Middleware {
 What a global middleware sees is not quite what a route middleware sees:
 
 - **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
-- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Anything else it puts on the context, a user or a locale, does not reach the route: the route runs in a fresh context of its own, as it always has.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. Anything else it puts on the context, a user or a locale, does not reach the route: the route runs in a fresh context of its own, as it always has.
 - **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
 
 A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.

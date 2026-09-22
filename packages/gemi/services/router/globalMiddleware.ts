@@ -16,9 +16,25 @@ export interface GlobalMiddlewareOutcome {
    * Puts the headers and cookies the global middleware set on the request
    * context onto the response the request ends with. The response's own
    * headers win; the context only fills gaps, as it does for route middleware.
+   * Cookies are left off a response a shared cache may store (see
+   * `sharedCacheable`).
    */
   apply(response: Response): Response;
 }
+
+/**
+ * Whether a shared cache may store this response: `public` or `s-maxage` in
+ * its Cache-Control, as the static `dist/client` files carry
+ * (`public, max-age=31536000`). A per-visitor cookie a global middleware set
+ * would otherwise be stored with the asset, and a CDN that caches responses
+ * with Set-Cookie would hand it to every visitor who gets that copy.
+ */
+function sharedCacheable(response: Response) {
+  const cacheControl = response.headers.get("Cache-Control")?.toLowerCase() ?? "";
+  return /(^|[\s,])(public|s-maxage)\b/.test(cacheControl);
+}
+
+const noCookies = new Set<string>();
 
 const passThrough: GlobalMiddlewareOutcome = {
   refusal: null,
@@ -58,7 +74,14 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
     const ctx = RequestContext.getStore();
     // Held past `destroy()` below, which only drops the store's references.
     const { headers, cookies } = ctx;
-    const apply = (response: Response) => mergeContextIntoResponse(response, headers, cookies);
+    const apply = (response: Response) => {
+      if (!sharedCacheable(response)) {
+        return mergeContextIntoResponse(response, headers, cookies);
+      }
+      const withoutCookies = new Headers(headers);
+      withoutCookies.delete("Set-Cookie");
+      return mergeContextIntoResponse(response, withoutCookies, noCookies);
+    };
 
     try {
       await registry.runGlobalMiddleware();
