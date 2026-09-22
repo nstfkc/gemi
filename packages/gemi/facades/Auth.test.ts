@@ -137,7 +137,9 @@ describe("InsufficientPermissionsError.apiStatus", () => {
     InsufficientPermissionsError.apiStatus = 401;
     const error = new InsufficientPermissionsError();
     expect(error.payload.api.status).toBe(401);
-    // A view request never answered 401, so the override leaves it alone.
+    // `payload.view` answers a full page load, which never answered 401, so
+    // the override leaves it alone. A `.json` navigation answers from
+    // `payload.api` and follows it; see InsufficientPermissions.status.test.ts.
     expect(error.payload.view.status).toBe(403);
   });
 

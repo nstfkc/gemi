@@ -27,17 +27,18 @@ export class AuthorizationError extends RequestBreakerError {
  */
 export class InsufficientPermissionsError extends RequestBreakerError {
   /**
-   * The status API routes answer with. Before 0.63 it was 401, and a shipped
-   * native client may still branch on that — it cannot be rolled forward in
-   * the same deploy as the server. Such an app sets this back to 401 once at
-   * boot, and removes the line when its clients handle 403:
+   * The status of `payload.api`, which answers API routes and `.json` view
+   * navigations alike. Before 0.63 it was 401, and a shipped native client may
+   * still branch on that — it cannot be rolled forward in the same deploy as
+   * the server. Such an app sets this back to 401 once at boot, and removes the
+   * line when its clients handle 403:
    *
    * ```ts
    * InsufficientPermissionsError.apiStatus = 401;
    * ```
    *
-   * View requests answer 403 either way; before 0.63 they fell through to the
-   * view dispatcher's 400 default, which no client could have relied on.
+   * A full page load answers 403 either way; before 0.63 it fell through to
+   * the view dispatcher's 400 default, which no client could have relied on.
    */
   static apiStatus: 401 | 403 = 403;
 

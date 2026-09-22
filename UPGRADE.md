@@ -15,20 +15,33 @@ directly.
 | | 0.62 | 0.63 |
 |---|---|---|
 | API route | `401` `{ error: "Insufficient permissions" }` | `403`, same body |
-| View request | `400` (the view dispatcher's default) | `403` |
+| View data (a `.json` navigation, from a loader or view middleware) | `401` `{ data: { error: "Insufficient permissions" } }` | `403`, same body |
+| Full page load (same place) | `400` (the view dispatcher's default) | `403` |
 | `error.name` / `error.message` | `"AuthenticationError"` / `"Authentication error"` | `"InsufficientPermissionsError"` / the refusal, `"Insufficient permissions"` by default |
+
+A `.json` navigation is how gemi's own client router fetches a view's data,
+and it answers from the same payload an API route does. So it changed the way
+the API did, not the way the page did.
 
 `401` tells a client to re-authenticate, so a client that sends every `401` to
 sign-in looped a signed-in user without the role straight back to where they
 started. A request with no user still answers `401`: that is
 `AuthenticationError`, thrown by `Auth.user()` before the guard's predicate
-runs. `AuthorizationError` still answers `401` too.
+runs.
+
+`AuthorizationError` still answers `401`, but its name and message changed the
+same way: it was also `"AuthenticationError"` / `"Authentication error"`, and
+it is now `"AuthorizationError"` with the refusal as its message (`"Not
+authorized"` by default).
 
 **Who breaks:** a client that branches on `401` for this refusal: one that
 refreshes or retries on `401` only, or one that shows "you don't have access"
-for a `401`. A test asserting `payload.api.status === 401` for it also breaks.
-Server code that catches the error by `name === "AuthenticationError"` now
-misses it; match on `instanceof InsufficientPermissionsError` instead.
+for a `401`. That includes a native client that fetches `.json` view data. A
+test asserting `payload.api.status === 401` for it also breaks. Server code,
+an `onRequestFail` or `onException` hook, or a log filter that matched
+`name === "AuthenticationError"` to catch every auth refusal now misses both
+`InsufficientPermissionsError` and `AuthorizationError`. Match on
+`instanceof` for each class instead.
 
 **Keeping `401` while your clients catch up.** Set the old status once, at
 module scope in `app/kernel/Kernel.ts`, and delete the line when every client
@@ -40,8 +53,9 @@ import { InsufficientPermissionsError } from "gemi/http";
 InsufficientPermissionsError.apiStatus = 401;
 ```
 
-That covers API routes only. A view request answers `403` either way, since no
-client could have depended on the `400` it replaced.
+That restores `401` everywhere it used to be: API routes and `.json` view
+navigations. A full page load answers `403` either way, since no client could
+have depended on the `400` it replaced.
 
 ## An error thrown by an `Auth.guard()` predicate is no longer a refusal
 
@@ -50,11 +64,14 @@ In 0.62, `guard` caught anything the predicate threw and answered it as
 "you may not do this" and never reached `onRequestFail`. It now propagates as
 itself: a `500`, reported like any other failure.
 
-That includes a policy denial raised inside the predicate — a model read the
-policy refuses. It used to answer `401` through the guard; it is now a `500`,
-because `PolicyDeniedError` is a plain `Error`. Return `false` from the
-predicate for a refusal rather than letting a read inside it throw one.
-`Auth.guardSafe()` is unchanged: it still treats a throw as `false`.
+A policy denial raised inside the predicate — a model read the policy refuses —
+propagates the same way, and so reaches `onRequestFail` now. It is then
+answered like any other policy denial (next section): it goes from `401`
+`"Insufficient permissions"` to `403` `{ error: { message: "Forbidden" } }`,
+and `apiStatus` does not bring the `401` back. If that denial is an expected
+refusal rather than something to report, return `false` from the predicate
+instead of letting the read throw. `Auth.guardSafe()` is unchanged: it still
+treats a throw as `false`.
 
 ## A policy denial answers `403`, not `500`
 
