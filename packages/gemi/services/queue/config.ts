@@ -9,7 +9,7 @@ export interface QueueConfig {
    * ### Why "or nothing" is the point
    *
    * A dispatch that names a job the `QueueManager` has never heard of does not
-   * fail — `next()` looks the name up in this list, and what is not there is
+   * fail — `run()` looks the name up in this list, and what is not there is
    * dropped with a line on stderr and nothing else. `Job.dispatch` has already
    * returned by then, so nothing upstream can be told. The list is therefore a
    * second spelling of `app/jobs`, kept in step by hand, and the cost of the
