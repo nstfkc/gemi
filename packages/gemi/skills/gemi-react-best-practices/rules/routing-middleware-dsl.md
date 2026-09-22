@@ -51,6 +51,11 @@ class AdminAuthViewRouter extends ViewRouter {
 }
 ```
 
+**A check the whole origin needs goes in `global`, not in every router.** The
+`global` list in `app/config/middleware.ts` runs on every request — static files
+included, which no router sees — before routing and before route middleware, and
+a route cannot cancel it with `-name`.
+
 **Rate-limit buckets are per client IP *and* route path**, so `/api/search` and
 `/api/upload` hold separate budgets — a shared limit needs a configured `key`
 function, and a budget outside a route uses the `RateLimiter` facade

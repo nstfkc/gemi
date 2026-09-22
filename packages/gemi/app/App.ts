@@ -47,13 +47,59 @@ export class App {
     return this.kernel.viewRoutes().routeManifest;
   }
 
+  // Requests `withGlobalMiddleware` already ran the global middleware for, so
+  // `fetch` inside it does not run the list a second time. Keyed by the Request
+  // object: the servers hand `fetch` the same one they gated.
+  private globallyGated = new WeakSet<Request>();
+
+  /**
+   * Runs the `global` middleware list, then `next` — what the servers put in
+   * front of everything they serve, so the list covers static files, which
+   * never reach `fetch`, as well as routes. A refusal is answered without
+   * calling `next`. A global middleware that throws something other than a
+   * break is answered by `onError` rather than by `next`, since a gate that
+   * failed must not let a static file through.
+   */
+  public async withGlobalMiddleware(
+    req: Request,
+    next: (req: Request) => Promise<Response>,
+    onError: (err: unknown) => Response | Promise<Response>,
+  ): Promise<Response> {
+    let outcome: Awaited<ReturnType<Kernel["globalMiddleware"]>>;
+    try {
+      outcome = await this.kernel.run.call(this.kernel, () => this.kernel.globalMiddleware(req));
+    } catch (err) {
+      return await onError(err);
+    }
+    if (outcome.refusal) {
+      return outcome.refusal;
+    }
+    this.globallyGated.add(req);
+    return outcome.apply(await next(req));
+  }
+
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {
-      if (isApiPath(url.pathname)) {
-        return await this.kernel.apiRoutes().handleApiRequest(req);
+      // Run here too for a caller that is not one of the servers, a test or an
+      // app's own `Bun.serve`, so the list is not skipped by calling `fetch`.
+      const outcome = this.globallyGated.has(req) ? null : await this.kernel.globalMiddleware(req);
+      if (outcome?.refusal) {
+        return outcome.refusal;
       }
-      return await this.kernel.viewRoutes().handleViewRequest(req);
+      const result = isApiPath(url.pathname)
+        ? await this.kernel.apiRoutes().handleApiRequest(req)
+        : await this.kernel.viewRoutes().handleViewRequest(req);
+      if (!outcome) {
+        return result;
+      }
+      // A document comes back as a render function the server calls with its
+      // manifests, and the Response only exists once it has.
+      if (typeof result === "function") {
+        const render = result as (...args: any[]) => Promise<Response>;
+        return (async (...args: any[]) => outcome.apply(await render(...args))) as any;
+      }
+      return outcome.apply(result);
     });
   }
 

@@ -166,10 +166,22 @@ export function assertNoReservedRoutePaths(routePaths: string[]) {
 }
 
 /** A request breaker's `payload.view` as the page response it stands for. */
-function viewBreakResponse(view: Record<string, any>) {
+export function viewBreakResponse(view: Record<string, any>) {
   const { status = 400, error } = view;
   return new Response(error?.message, {
     ...view,
+    status,
+  });
+}
+
+/**
+ * The same break for a `.json` navigation, from its `payload.api`: the client
+ * router reads `data` and `directive` out of the body.
+ */
+export function viewDataBreakResponse(api: Record<string, any>) {
+  const { status = 400, data, directive, headers } = api;
+  return new Response(JSON.stringify({ data, directive }), {
+    headers,
     status,
   });
 }
@@ -1161,11 +1173,7 @@ export class ViewRouteDispatcher {
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
           if (isViewDataRequest) {
-            const { status = 400, data, directive, headers } = err.payload.api;
-            return new Response(JSON.stringify({ data, directive }), {
-              headers,
-              status,
-            });
+            return viewDataBreakResponse(err.payload.api);
           } else {
             return viewBreakResponse(err.payload.view);
           }
