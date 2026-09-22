@@ -17,7 +17,7 @@ writeFileSync(
   child,
   `
   let first = true;
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  for (const signal of ["SIGTERM", "SIGINT"]) {
     process.on(signal, () => {
       console.log("child got " + signal);
       if (first) setTimeout(() => process.exit(7), 300);
@@ -39,9 +39,42 @@ writeFileSync(
 `,
 );
 
-async function run(send: (pid: number) => void) {
+// The server's side, through the real `installShutdownSignals`: it prints each
+// shutdown it starts and exits 0 once that one finishes, so a copy of the
+// signal read as "exit now" shows as a 130 with no "drained".
+const server = join(dir, "server.ts");
+writeFileSync(
+  server,
+  `
+  import { installShutdownSignals } from ${JSON.stringify(join(import.meta.dirname, "../server/shutdown.ts"))};
+  installShutdownSignals(async () => {
+    console.log("draining");
+    await Bun.sleep(300);
+    console.log("drained");
+    return 0;
+  });
+  console.log("child ready");
+  setInterval(() => {}, 1000);
+`,
+);
+writeFileSync(
+  join(dir, "server-parent.ts"),
+  `
+  import { spawnForwardingSignals } from ${JSON.stringify(join(import.meta.dirname, "forwardSignals.ts"))};
+  process.exit(await spawnForwardingSignals({ cmd: ["bun", ${JSON.stringify(server)}] }));
+`,
+);
+// `bun run start`, the shape the docs recommend. `bun run` forwards a signal to
+// its script as well, so one Ctrl+C reaches the server three times.
+writeFileSync(
+  join(dir, "package.json"),
+  JSON.stringify({ name: "forward-signals-test", scripts: { start: "bun server-parent.ts" } }),
+);
+
+async function run(send: (pid: number) => void, cmd = ["bun", parent]) {
   const proc = Bun.spawn({
-    cmd: ["bun", parent],
+    cmd,
+    cwd: dir,
     stdout: "pipe",
     stderr: "inherit",
     // Its own process group, so `-pid` below reaches the parent and anything
@@ -65,7 +98,13 @@ async function run(send: (pid: number) => void) {
 
   const code = await proc.exited;
   await read;
-  return { code, lines: output.trim().split("\n") };
+  return {
+    code,
+    lines: output
+      .trim()
+      .split("\n")
+      .filter((line) => !line.startsWith("[gemi]")),
+  };
 }
 
 describe("spawnForwardingSignals", () => {
@@ -83,21 +122,30 @@ describe("spawnForwardingSignals", () => {
     expect(code).toBe(7);
   });
 
-  test("relays SIGHUP as SIGTERM, since the server only drains on that", async () => {
-    const { code, lines } = await run((pid) => process.kill(pid, "SIGHUP"));
-
-    expect(lines).toEqual(["child ready", "child got SIGTERM", "parent exiting 7"]);
-    expect(code).toBe(7);
-  });
-
-  // A terminal's Ctrl+C signals the whole foreground group. Were the child in
-  // the parent's group it would get this SIGINT twice — directly and through
-  // the relay — and the server treats a second signal as "exit now".
-  test("a signal to the parent's whole process group reaches the child once", async () => {
+  // The child stays in the parent's group, so a supervisor's group SIGKILL
+  // still reaches it. The cost is that a group signal arrives twice.
+  test("a signal to the whole process group reaches the child directly too", async () => {
     const { lines } = await run((pid) => process.kill(-pid, "SIGINT"));
 
-    expect(lines.filter((line) => line.startsWith("child got"))).toEqual(["child got SIGINT"]);
+    expect(lines.filter((line) => line.startsWith("child got"))).toEqual([
+      "child got SIGINT",
+      "child got SIGINT",
+    ]);
   });
+
+  // Every copy of one Ctrl+C or one systemd stop lands within milliseconds,
+  // and none of them may read as the "exit now" second signal.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    test(`a group ${signal} through \`bun run start\` drains once and exits 0`, async () => {
+      const { code, lines } = await run(
+        (pid) => process.kill(-pid, signal),
+        ["bun", "run", "start"],
+      );
+
+      expect(lines).toEqual(["child ready", "draining", "drained"]);
+      expect(code).toBe(0);
+    });
+  }
 });
 
 describe("exitCodeOf", () => {

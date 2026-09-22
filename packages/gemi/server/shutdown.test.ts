@@ -279,10 +279,29 @@ describe("shutdownSettings", () => {
     });
     expect(warn).toHaveBeenCalledTimes(2);
   });
+
+  // `drain` would sleep the whole timeout away and abandon every request.
+  test("warns when the delay leaves no time to drain, and keeps both as set", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect(shutdownSettings({ GEMI_SHUTDOWN_DELAY: "30" })).toEqual({
+      timeoutMs: 20_000,
+      delayMs: 30_000,
+      providerTimeoutMs: 5_000,
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("GEMI_SHUTDOWN_DELAY");
+
+    warn.mockClear();
+    shutdownSettings({ GEMI_SHUTDOWN_DELAY: "5" });
+    shutdownSettings({ GEMI_SHUTDOWN_TIMEOUT: "0" });
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
 
 // The signal handling proper exits the process, so it runs in a child: a
-// script that installs it around a `stop` taking 400ms and exiting 0.
+// script that installs it around a `stop` taking 400ms and exiting 0, with the
+// repeat window cut to 150ms so a deliberate second signal fits inside `stop`.
 describe("installShutdownSignals", () => {
   const dir = mkdtempSync(join(tmpdir(), "gemi-shutdown-signals-"));
   const script = join(dir, "server.ts");
@@ -291,11 +310,14 @@ describe("installShutdownSignals", () => {
     `
     import { installShutdownSignals } from ${JSON.stringify(join(import.meta.dirname, "shutdown.ts"))};
     let stops = 0;
-    installShutdownSignals(async () => {
-      console.log("stop " + ++stops);
-      await Bun.sleep(400);
-      return 0;
-    });
+    installShutdownSignals(
+      async () => {
+        console.log("stop " + ++stops);
+        await Bun.sleep(400);
+        return 0;
+      },
+      { repeatWindowMs: 150 },
+    );
     // Twice, as a second Server in the same process would: still one listener.
     installShutdownSignals(async () => {
       console.log("second listener ran");
@@ -306,7 +328,7 @@ describe("installShutdownSignals", () => {
   `,
   );
 
-  async function run(signals: NodeJS.Signals[]) {
+  async function run(signals: NodeJS.Signals[], gapMs = 50) {
     const proc = Bun.spawn({ cmd: ["bun", script], stdout: "pipe", stderr: "ignore" });
     const decoder = new TextDecoder();
     let output = "";
@@ -316,9 +338,9 @@ describe("installShutdownSignals", () => {
     while (!output.includes("ready")) await Bun.sleep(20);
 
     const started = Date.now();
-    for (const signal of signals) {
+    for (const [i, signal] of signals.entries()) {
+      if (i > 0) await Bun.sleep(gapMs);
       proc.kill(signal);
-      await Bun.sleep(50);
     }
     const code = await proc.exited;
     await read;
@@ -340,8 +362,18 @@ describe("installShutdownSignals", () => {
     expect(elapsed).toBeGreaterThanOrEqual(400);
   });
 
-  test("a second signal exits at once with 128 + n", async () => {
-    const { code, elapsed, lines } = await run(["SIGTERM", "SIGINT"]);
+  // One shutdown delivered more than once — directly and through a relay —
+  // must still drain, whichever of the two signals each copy is.
+  test("a repeat inside the window is the same shutdown, not a force", async () => {
+    const { code, elapsed, lines } = await run(["SIGTERM", "SIGTERM", "SIGINT"], 20);
+
+    expect(lines).toEqual(["ready", "stop 1"]);
+    expect(code).toBe(0);
+    expect(elapsed).toBeGreaterThanOrEqual(400);
+  });
+
+  test("a second signal after the window exits at once with 128 + n", async () => {
+    const { code, elapsed, lines } = await run(["SIGTERM", "SIGINT"], 200);
 
     expect(lines).toEqual(["ready", "stop 1"]);
     expect(code).toBe(130);
