@@ -1,5 +1,5 @@
 import { Application } from "../foundation/Application";
-import type { ServiceProviderConstructor } from "../foundation/Application";
+import type { ServiceProviderConstructor, ShutdownReport } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
 import type { ConfigItems } from "../support/Repository";
 import type { Service, ServiceConstructor } from "../support/Service";
@@ -183,6 +183,16 @@ export class Kernel {
       await service.boot();
     }
     this.servicesBooted = true;
+  }
+
+  /**
+   * Every provider's `shutdown()`, in reverse registration order, inside the
+   * application context — so a hook may use the facades, as a cron tick or a
+   * request would. See `Application.shutdown` for the deadline and the
+   * report. Idempotent.
+   */
+  shutdown(options?: { timeoutMs?: number }): Promise<ShutdownReport> {
+    return this.run(() => this.app.shutdown(options));
   }
 
   run<T>(cb: () => T) {

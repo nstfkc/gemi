@@ -1,21 +1,46 @@
 import { App } from "../app";
 import { Kernel } from "../kernel";
 import { projectRoot } from "../support/discover";
+import {
+  closeConnectionWhileShuttingDown,
+  drain,
+  installShutdownSignals,
+  shutdownSettings,
+  type ShutdownSettings,
+} from "./shutdown";
 import { Instrumentation } from "./types";
 import { watchEnv } from "./watchEnv";
 
 export class Server {
   private app: App;
   private instrumentation: Instrumentation;
+  private handleSignals: boolean;
+  private server: Bun.Server<unknown> | undefined;
+  private stopping: Promise<number> | undefined;
 
-  constructor(params: { kernel: new () => Kernel; instrumentation?: Instrumentation }) {
+  constructor(params: {
+    kernel: new () => Kernel;
+    instrumentation?: Instrumentation;
+    /**
+     * Drain on `SIGTERM`/`SIGINT` and exit — production only. `false` leaves
+     * the signals to the app, which can call `stop()` itself.
+     */
+    handleSignals?: boolean;
+  }) {
     this.app = new App({ kernel: params.kernel });
-    this.instrumentation =
+    this.handleSignals = params.handleSignals ?? true;
+    const instrumentation =
       params.instrumentation ??
       ((req: Request, next: (req: Request) => Promise<Response>) => next(req));
+    this.instrumentation = async (req, next) =>
+      closeConnectionWhileShuttingDown(await instrumentation(req, next));
   }
 
-  async start() {
+  /**
+   * Boots the application and starts listening. Resolves with the `Bun.Server`
+   * once it is accepting requests.
+   */
+  async start(): Promise<Bun.Server<unknown>> {
     // Before the boot, not after: `httpDev`/`httpProd` set this too, but they
     // are imported below — after every provider's `boot()` has run — so a
     // service that resolves a path during boot used to read `undefined`
@@ -37,15 +62,41 @@ export class Server {
     // Vite (dev-only) and `httpProd` reads the built `dist/` manifests — neither
     // should load in the other environment.
     if (process.env.NODE_ENV === "production") {
+      // Before listening, so a signal that lands between the two is drained
+      // rather than killing the process with the default action.
+      if (this.handleSignals) installShutdownSignals(() => this.stop());
       const { httpProd } = await import("./httpProd.js");
-      await httpProd(this.app, this.instrumentation.bind(this));
+      this.server = await httpProd(this.app, this.instrumentation.bind(this));
     } else {
       // Dev only: reload `.env` into process.env on change so config edits take
       // effect without restarting the dev server (Bun reads `.env` only at
-      // startup, even under `--hot`).
+      // startup, even under `--hot`). No signal handling here: `bun --hot`
+      // re-runs this on every reload, and a Ctrl+C in development should stop
+      // the server now, not after a drain.
       watchEnv();
       const { httpDev } = await import("./httpDev.js");
-      await httpDev(this.app, this.instrumentation.bind(this));
+      this.server = await httpDev(this.app, this.instrumentation.bind(this));
     }
+    return this.server;
+  }
+
+  /**
+   * Stops the server gracefully and resolves with the exit code it earned: 0
+   * when the in-flight requests drained and every provider shut down in time,
+   * 1 otherwise. Does not exit the process — the signal handler does that.
+   *
+   * The order is `drain` in `./shutdown`: `isShuttingDown()` turns true, the
+   * listener closes, in-flight requests finish under the grace period, then
+   * every provider's `shutdown()` runs in reverse registration order.
+   * Idempotent: a second call returns the first call's promise. Settings
+   * default to the `GEMI_SHUTDOWN_*` environment variables.
+   */
+  stop(settings: Partial<ShutdownSettings> = {}): Promise<number> {
+    this.stopping ??= drain({
+      server: this.server,
+      shutdownProviders: (options) => this.app.shutdown(options),
+      settings: { ...shutdownSettings(), ...settings },
+    });
+    return this.stopping;
   }
 }

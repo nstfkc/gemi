@@ -14,6 +14,7 @@ import { ApiManifestGenerator } from "./ide/generateApiManifest";
 import { reportUpdate } from "./update-check";
 import { runUpgrade } from "./upgrade";
 import { SKILL_NAME, installSkill } from "./install-skill";
+import { spawnForwardingSignals } from "./forwardSignals";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
 // gemi's own runtime plugin) before the server entry runs — so it executes
@@ -160,7 +161,11 @@ program.command("start").action(async () => {
   // same as the `dev` command.
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
-  const proc = Bun.spawn({
+  //
+  // The server is a child of this process, so a platform's SIGTERM — sent to
+  // whatever it started, never below it — has to be relayed, and the child's
+  // exit code with it. `spawnForwardingSignals` does both (#48).
+  const code = await spawnForwardingSignals({
     cmd: [
       "bun",
       // The built `server.mjs` is a thin bootstrap: `packages: "external"` keeps
@@ -176,11 +181,9 @@ program.command("start").action(async () => {
       ...appPreloadArgs(appDir),
       `${rootDir}/dist/server/server.mjs`,
     ],
-    stdout: "inherit",
-    stderr: "inherit",
     env: { ...process.env, NODE_ENV: "production" },
   });
-  await proc.exited;
+  process.exit(code);
 });
 
 // Everything after the command's name belongs to the command, including its
