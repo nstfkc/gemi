@@ -8,7 +8,8 @@ import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./mo
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
-import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
+import { staticAssetMiss } from "./staticAssetMiss";
+import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
@@ -29,6 +30,10 @@ const distDir = join(rootDir, "dist");
 export async function httpProd(app: App, instrumentation: Instrumentation) {
   const manifest = await import(`${distDir}/client/.vite/manifest.json`);
   const serverManifest = await import(`${distDir}/server/.vite/manifest.json`);
+  // What the client build was built with, not `GEMI_ASSET_BASE` as it reads
+  // now — see `readBuiltAssetBase`. Every URL below that names a chunk goes
+  // through it, so the document links exactly what the bundle imports.
+  const assetBase = await readBuiltAssetBase(`${distDir}/client`);
 
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
@@ -66,10 +71,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       cssManifest[fileName] = clientFile?.css;
     }
     if (clientFile) {
-      templates.push(template(fileName, `/${clientFile?.file}`));
+      templates.push(template(fileName, assetUrl(clientFile?.file, assetBase)));
       modulePreloadManifest[fileName] = collectModulePreloads(
         manifest,
         `app/views/${fileName}.tsx`,
+        assetBase,
       );
     }
   }
@@ -79,7 +85,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // Booted from the bootstrap script rather than through React's
   // `bootstrapModules`, which would preload it at `fetchPriority="low"` — see
   // `clientEntry` in `ViewRouteDispatcher`.
-  const clientEntry = createClientEntry(manifest);
+  const clientEntry = createClientEntry(manifest, assetBase);
   if (!clientEntry) {
     // Loudly, but without dying: this is boot, and an incomplete `dist/` must
     // not cost the API routes and static assets too.
@@ -112,33 +118,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
       const distPath = `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`;
+      // Served from here whatever the asset base is: a CDN in front of the
+      // app uses this origin as the source it fills from.
       const doesExist = await exists(distPath);
 
-      if (!doesExist && url.pathname.includes(".js")) {
-        return new Response(
-          `if(caches){caches?.delete("${distPath}")}window.location.reload();export {}`,
-          {
-            headers: { "Content-Type": "application/javascript" },
-          },
-        );
-      }
-
       if (!doesExist) {
-        // `/assets` is reserved for build output (the router rejects routes
-        // there at boot), so a miss is a miss — 404 without paying for an SSR
-        // render.
-        if (
-          pathname === RESERVED_ROUTE_PREFIX ||
-          pathname.startsWith(`${RESERVED_ROUTE_PREFIX}/`)
-        ) {
-          return new Response("Not found", { status: 404 });
-        }
-
-        // Anywhere else the pattern above matched on extension alone, so this
-        // may well be an app route — a file route like
-        // `this.file(() => Bun.file(...))` mounted at `/files/logo.svg` lands
-        // here too. Hand it to the app rather than 404ing on its behalf.
-        return await handleWithApp(req, pathname);
+        return staticAssetMiss(pathname, distPath) ?? (await handleWithApp(req, pathname));
       }
 
       // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
@@ -208,6 +193,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           viewModules,
           ogMap,
           cssManifest,
+          assetBase,
         });
       }
     } catch (err) {

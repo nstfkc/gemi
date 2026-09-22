@@ -39,6 +39,8 @@ export interface ServerDataContextValue {
   cssManifest: Record<string, string[]>;
   /** Built chunk URLs per view name, for warming a navigation's imports. */
   modulePreloadManifest: Record<string, string[]>;
+  /** The client build's asset base, when it is not `/`. */
+  assetBase?: string;
   meta: any;
   appId: string;
 }

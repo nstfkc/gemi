@@ -69,6 +69,8 @@ interface ClientRouterProviderProps {
   routeManifest: Record<string, string[]>;
   cssManifest: Record<string, string[]>;
   modulePreloadManifest: Record<string, string[]>;
+  /** The client build's asset base; `/` when the payload carries none. */
+  assetBase?: string;
   pageData: Record<string, unknown>;
   currentPath: string;
   urlLocaleSegment: string | null;
@@ -91,6 +93,7 @@ export const ClientRouterProvider = (
     routeManifest,
     cssManifest,
     modulePreloadManifest,
+    assetBase = "/",
     pageData,
     params,
     searchParams,
@@ -272,7 +275,7 @@ export const ClientRouterProvider = (
     }
 
     async function fetchCSS(path: string) {
-      const response = await fetch(`/${path}`);
+      const response = await fetch(`${assetBase}${path}`);
       const content = response.text();
       return {
         content,

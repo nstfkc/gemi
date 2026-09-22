@@ -459,6 +459,12 @@ export class ViewRouteDispatcher {
        * route's chain is preloaded.
        */
       modulePreloadManifest?: Record<string, string[]>;
+      /**
+       * The prefix the client build was built with. `cssManifest` carries
+       * manifest paths, not URLs — they double as the `id` of the `<style>`
+       * each one is inlined into — so the client needs the base to fetch one.
+       */
+      assetBase?: string;
     }) => {
       const {
         bootstrapModules = [],
@@ -470,6 +476,7 @@ export class ViewRouteDispatcher {
         viewModules,
         clientEntry,
         modulePreloadManifest,
+        assetBase,
       } = params;
 
       // `clientEntry` and `bootstrapModules` are two spellings of the same job,
@@ -555,6 +562,11 @@ export class ViewRouteDispatcher {
       // shell head carries — shipped like `cssManifest` and warmed by
       // `preloadRouteModules` (#352).
       result.data["modulePreloadManifest"] = modulePreloadManifest ?? {};
+      // Only when there is one: the client's default is the root-relative `/`,
+      // and a payload without the key is the one every app shipped before it.
+      if (assetBase && assetBase !== "/") {
+        result.data["assetBase"] = assetBase;
+      }
 
       // Hydration reaches each route segment through `window.loaders`, i.e. an
       // `import()` the browser cannot see until the entry has run — and it

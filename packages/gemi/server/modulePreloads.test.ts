@@ -92,3 +92,34 @@ describe("createClientEntry", () => {
     expect(createClientEntry(withoutEntry)).toBeUndefined();
   });
 });
+
+describe("with an asset base", () => {
+  const base = "https://cdn.example.com/r42/";
+
+  test("prefixes the client entry and every chunk it preloads", () => {
+    expect(createClientEntry(manifest, base)).toEqual({
+      module: "https://cdn.example.com/r42/assets/client-DJhrQPW5.js",
+      preload: [
+        "https://cdn.example.com/r42/assets/client-DJhrQPW5.js",
+        "https://cdn.example.com/r42/assets/jsx-runtime-DGeXAQPT.js",
+        "https://cdn.example.com/r42/assets/client-Dqbo_yR2.js",
+      ],
+    });
+  });
+
+  test("prefixes a view's preload chain", () => {
+    expect(collectModulePreloads(manifest, "app/views/AppLayout.tsx", base)).toEqual([
+      "https://cdn.example.com/r42/assets/AppLayout-CRSTVHPB.js",
+      "https://cdn.example.com/r42/assets/jsx-runtime-DGeXAQPT.js",
+      "https://cdn.example.com/r42/assets/nav-XhWF0QgQ.js",
+      "https://cdn.example.com/r42/assets/icons-BrEMyRB_.js",
+    ]);
+  });
+
+  test("`/` gives the root-relative URLs every build has always had", () => {
+    // The default is not a separate code path: an app that never set a base
+    // gets exactly the strings it got before the base existed.
+    expect(createClientEntry(manifest, "/")).toEqual(createClientEntry(manifest));
+    expect(createClientEntry(manifest, "/")?.module).toBe("/assets/client-DJhrQPW5.js");
+  });
+});

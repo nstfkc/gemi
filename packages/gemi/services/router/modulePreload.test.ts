@@ -203,4 +203,24 @@ describe("route module preloads", () => {
     expect(html).toContain(`"modulePreloadManifest":`);
     expect(html).toContain(`"/assets/Home.js"`);
   });
+
+  test("ships the asset base for fetching a navigation's CSS", async () => {
+    const html = await fetchDocument("/app", {
+      ...prodParams,
+      assetBase: "https://cdn.example.com/r42/",
+    });
+
+    // `cssManifest` holds manifest paths, which double as `<style>` ids, so
+    // the client prefixes them itself — with the base the bundle was built
+    // with, or it fetches the stylesheet from the wrong release.
+    expect(html).toContain(`"assetBase":"https://cdn.example.com/r42/"`);
+  });
+
+  test("leaves the asset base out of the payload when it is `/`", async () => {
+    // A default build ships the payload it shipped before the base existed.
+    expect(await fetchDocument("/app", { ...prodParams, assetBase: "/" })).not.toContain(
+      `"assetBase"`,
+    );
+    expect(await fetchDocument("/app")).not.toContain(`"assetBase"`);
+  });
 });
