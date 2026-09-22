@@ -1631,7 +1631,7 @@ export type SocialAccountScalars = {
   id: number;
   userId: number;
   provider: string;
-  providerId: string;
+  providerId: string | null;
   username: string | null;
   email: string | null;
   accessToken: string;
@@ -1645,7 +1645,7 @@ export type SocialAccountCreateScalars = {
   id?: number;
   userId?: number;
   provider: string;
-  providerId: string;
+  providerId?: string | null;
   username?: string | null;
   email?: string | null;
   accessToken: string;
@@ -1659,7 +1659,7 @@ export type SocialAccountRelations = {
   user: { kind: "one"; nullable: false; target: UserTypes };
 };
 
-export type SocialAccountUnique = { id: number } | { username_provider: { username: string; provider: string } };
+export type SocialAccountUnique = { id: number } | { provider_providerId: { provider: string; providerId: string } };
 
 export interface SocialAccountTypes extends ModelTypeInfo {
   scalars: SocialAccountScalars;

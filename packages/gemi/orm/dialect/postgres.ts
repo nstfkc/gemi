@@ -413,11 +413,17 @@ export class PostgresDialect implements SqlDialect {
 
     const detail = typeof source.detail === "string" ? source.detail : "";
     const listed = /\((.+?)\)=/.exec(detail);
+    // The detail quotes any column that is not all lowercase, as it would in
+    // SQL: `Key (provider, "providerId")=…`. Tokenised rather than split on
+    // `,`, since a quoted name can hold a comma; then unquoted, or the column
+    // list names a field nobody declared.
     const columns = listed
-      ? listed[1]
-          .split(",")
+      ? (listed[1].match(/"(?:[^"]|"")*"|[^,]+/g) ?? [])
           .map((entry) => entry.trim())
           .filter((entry) => entry !== "")
+          .map((entry) =>
+            /^".*"$/s.test(entry) ? entry.slice(1, -1).replace(/""/g, '"') : entry,
+          )
       : [];
 
     return { kind: "unique", columns, constraint };

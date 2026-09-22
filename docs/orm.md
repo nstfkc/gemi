@@ -2508,7 +2508,7 @@ might lift next release.
 
 - **[Rows and entities](./orm-rows-and-entities.md)** — POJOs, `track` + `save`, and `wrap`.
 - **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider.
-  `UserProvider` (exported from `gemi/kernel`) implements all twenty-two methods of the auth
+  `UserProvider` (exported from `gemi/kernel`) implements all twenty-five methods of the auth
   persistence on this ORM, and is the only implementation: the adapter seam and the Prisma
   adapter are gone, and `AuthManager` constructs it directly. It resolves your models from the
   registry by name, so registering them at boot is what makes sign-in work.

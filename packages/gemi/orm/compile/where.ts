@@ -358,8 +358,8 @@ function readOperators(
 
 
 /**
- * `{ username_provider: { username, provider } }` -> `username = ? and
- * provider = ?`.
+ * `{ provider_providerId: { provider, providerId } }` -> `provider = ? and
+ * providerId = ?`.
  *
  * Returns `null` when `key` names no declared composite unique, so the caller
  * can fall through to reporting an unknown field.
@@ -380,7 +380,7 @@ function compileCompoundKey(
   // the other.
   //
   // Invisible until now because the template's only compound key is
-  // `SocialAccount`'s `@@unique([username, provider])`. A compound `@@id` — a
+  // `SocialAccount`'s `@@unique([provider, providerId])`. A compound `@@id` — a
   // join table, or any tenant-scoped `@@id([tenantId, id])` — was unreachable
   // by key at all.
   const members = uniqueKeys(schema).find(

@@ -76,6 +76,19 @@ export class GoogleOAuthProvider extends OAuthProvider {
 
     const user = await userresponse.json();
 
+    // `sub` is the account's identity — Google documents it as stable across
+    // email changes and never reused. `name` is display data and `email` can
+    // change hands, so neither is returned as `providerId`. Without a `sub` the
+    // response is not a user (an error body, a revoked token): return nothing,
+    // which the callback refuses, rather than an email with no identity behind it.
+    if (typeof user.sub !== "string" || user.sub === "") {
+      console.error(
+        "Google OAuth error: sub not found in user info response",
+        user,
+      );
+      return {};
+    }
+
     if (!user.email) {
       console.error(
         "Google OAuth error: email not found in user info response",
@@ -83,6 +96,6 @@ export class GoogleOAuthProvider extends OAuthProvider {
       );
     }
 
-    return { name: user.name, email: user.email };
+    return { providerId: user.sub, name: user.name, email: user.email };
   }
 }
