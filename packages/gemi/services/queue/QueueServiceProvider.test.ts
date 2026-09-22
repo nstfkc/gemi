@@ -107,17 +107,86 @@ describe("the provider's shutdown", () => {
   });
 });
 
-test("once the server is shutting down, a dispatch is recorded and not claimed", async () => {
-  const { Gated, started } = gated();
-  const queue = new QueueManager({ jobs: [Gated] });
+describe("once the server is shutting down", () => {
+  test("a durable driver's dispatch is recorded and not claimed, for another replica to run", async () => {
+    const { Gated, started } = gated();
+    const kept = new MemoryQueueDriver();
+    const queue = new QueueManager({ jobs: [Gated], driver: bind(kept) });
 
-  markShuttingDown();
-  await queue.push(Gated, "[1]");
-  await sleep(10);
+    markShuttingDown();
+    await queue.push(Gated, "[1]");
+    await sleep(10);
 
-  expect(started).toEqual([]);
-  expect((queue.driver as MemoryQueueDriver).waiting).toBe(1);
-  await queue.stop();
+    expect(started).toEqual([]);
+    expect(kept.waiting).toBe(1);
+    await queue.stop();
+  });
+
+  test("the memory driver keeps claiming until the provider drains it, and the drain waits for what it claimed", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { Gated, started, release } = gated();
+    const application = await makeApp({ jobs: [Gated], concurrency: 1 });
+    const queue = application.make(QueueManager);
+    await queue.push(Gated, "[1]");
+    await queue.push(Gated, "[2]");
+    await sleep(0);
+
+    // The signal: requests still draining can dispatch, and nobody but this
+    // process can run a memory job.
+    markShuttingDown();
+    await queue.push(Gated, "[3]");
+    release();
+    await sleep(10);
+    expect(started).toEqual([1, 2]);
+
+    let finished = false;
+    const shutdown = application.shutdown({ timeoutMs: 2_000 }).then((report) => {
+      finished = true;
+      return report;
+    });
+    await sleep(20);
+    expect(finished).toBe(false);
+
+    release();
+    expect(await shutdown).toEqual({ failed: [], timedOut: [] });
+    // Draining stopped the loop, so the dispatch that was still waiting when
+    // the provider shut down is lost with the process — the memory driver's
+    // documented limit, not a new one.
+    expect(started).toEqual([1, 2]);
+  });
+});
+
+describe("a dispatch with a durable driver", () => {
+  test("from a process that is not a server records the job and claims nothing", async () => {
+    delete process.env.ROOT_DIR;
+    const { Gated, started } = gated();
+    const kept = new MemoryQueueDriver();
+    await kept.enqueue({ name: "Gated", args: "[0]" });
+    const application = await makeApp({ jobs: [Gated], driver: () => bind(kept) });
+    const queue = application.make(QueueManager);
+
+    await queue.push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([]);
+    expect(kept.waiting).toBe(2);
+    await queue.stop();
+  });
+
+  test("from a server, development included, starts claiming", async () => {
+    process.env.ROOT_DIR = "/srv/app";
+    const { Gated, started, release } = gated();
+    const kept = new MemoryQueueDriver();
+    const application = await makeApp({ jobs: [Gated], driver: () => bind(kept) });
+    const queue = application.make(QueueManager);
+
+    await queue.push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([1]);
+    release();
+    await queue.stop();
+  });
 });
 
 describe("claiming at boot", () => {
