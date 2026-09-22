@@ -3,6 +3,7 @@ process.env.SECRET ??= "agent-controller-test-secret";
 import { describe, expect, test } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
+import { InsufficientPermissionsError } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, type AgentStreamParams } from "./Agent";
@@ -1497,12 +1498,12 @@ describe("refusing a turn", () => {
     run.finish();
   });
 
-  test("authorizeTurn answers with the Response it returns, and nothing runs", async () => {
+  test("authorizeRequest refuses a turn by throwing, before the thread is loaded", async () => {
     const run = new StubAgentRun("run_refused");
     const { agent, calls } = stubAgent(run);
     const store = new MemoryAgentStore();
     const { threadId } = await store.createThread({});
-    const seen: Array<string | undefined> = [];
+    const seen: unknown[] = [];
     let loaded = false;
     class Chat extends AgentController {
       agent = agent;
@@ -1513,50 +1514,117 @@ describe("refusing a turn", () => {
           return store.loadThread(id);
         },
       });
-      protected authorizeTurn(_req: HttpRequest<any, any>, { threadId }: { threadId?: string }) {
-        seen.push(threadId);
-        return Response.json({ error: "not yours" }, { status: 403 });
+      protected async authorizeRequest(_req: HttpRequest<any, any>, params: unknown) {
+        seen.push(params);
+        throw new InsufficientPermissionsError();
       }
     }
 
-    const response = await new Chat().stream(jsonRequest({ threadId, text: "hi" }));
+    await expect(new Chat().stream(jsonRequest({ threadId, text: "hi" }))).rejects.toBeInstanceOf(
+      InsufficientPermissionsError,
+    );
 
-    expect(response.status).toBe(403);
-    expect(seen).toEqual([threadId]);
+    expect(seen).toEqual([{ route: "stream", threadId }]);
     // Ahead of the load: a refused caller does not learn whether it exists.
     expect(loaded).toBe(false);
     expect(calls).toHaveLength(0);
     run.finish();
   });
 
-  test("an error authorizeTurn throws propagates, and nothing runs", async () => {
-    const run = new StubAgentRun("run_thrown");
-    const { agent, calls } = stubAgent(run);
-    class Chat extends AgentController {
-      agent = agent;
-      liveRuns = new MemoryLiveRuns();
-      protected async authorizeTurn() {
-        throw new Error("refused");
-      }
-    }
-
-    await expect(new Chat().stream(jsonRequest({ text: "hi" }))).rejects.toThrow("refused");
-    expect(calls).toHaveLength(0);
-    run.finish();
-  });
-
-  test("authorizeTurn returning nothing lets the turn run", async () => {
+  test("authorizeRequest returning lets the turn run", async () => {
     const run = new StubAgentRun("run_allowed");
     const { agent, calls } = stubAgent(run);
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
-      protected async authorizeTurn() {}
+      protected async authorizeRequest() {}
     }
 
     await new Chat().stream(jsonRequest({ text: "hi" }));
 
     expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("a stop pressed while authorizeRequest waits ends the turn before it runs", async () => {
+    // The app's check is a yield — a database read — and the turn's only
+    // handle during it is its `clientRunId`. `/stop` has to find it there, or
+    // it answers for nothing and the turn then runs unwatched.
+    const run = new StubAgentRun("run_waiting");
+    const { agent, calls } = stubAgent(run);
+    let release!: () => void;
+    const checked = new Promise<void>((resolve) => (release = resolve));
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeRequest(_req: HttpRequest<any, any>, { route }: { route: string }) {
+        if (route === "stream") await checked;
+      }
+    }
+    const controller = new Chat();
+
+    const turn = controller.stream(jsonRequest({ clientRunId: "waiting", text: "hi" }));
+    await settle();
+    expect(await controller.stop(jsonRequest({ clientRunId: "waiting" }))).toEqual({
+      stopped: true,
+    });
+    release();
+
+    const response = await turn;
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("stopped");
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("attach, stop and upload are refused by it too, before they touch a run or the store", async () => {
+    const run = new StubAgentRun("run_owned");
+    const { agent } = stubAgent(run);
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const seen: unknown[] = [];
+    let refuse = false;
+    let loaded = false;
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = Object.assign(Object.create(store), {
+        loadThread: async (id: string) => {
+          loaded = true;
+          return store.loadThread(id);
+        },
+      });
+      protected async authorizeRequest(_req: HttpRequest<any, any>, params: unknown) {
+        seen.push(params);
+        if (refuse) throw new InsufficientPermissionsError();
+      }
+    }
+    const controller = new Chat();
+    await controller.stream(jsonRequest({ threadId, text: "hi" }));
+    seen.length = 0;
+    loaded = false;
+    refuse = true;
+
+    // The owner's run is live, and none of these reach it.
+    await expect(controller.attach(jsonRequest({ threadId }))).rejects.toBeInstanceOf(
+      InsufficientPermissionsError,
+    );
+    await expect(controller.stop(jsonRequest({ threadId }))).rejects.toBeInstanceOf(
+      InsufficientPermissionsError,
+    );
+    const form = new FormData();
+    form.set("threadId", threadId);
+    await expect(
+      controller.upload(uploadRequest(new File(["x"], "a.txt", { type: "text/plain" }), form)),
+    ).rejects.toBeInstanceOf(InsufficientPermissionsError);
+
+    expect(seen).toEqual([
+      { route: "attach", threadId },
+      { route: "stop", threadId },
+      { route: "upload", threadId },
+    ]);
+    expect(loaded).toBe(false);
+    expect(run.stopped).toBe(false);
     run.finish();
   });
 });
