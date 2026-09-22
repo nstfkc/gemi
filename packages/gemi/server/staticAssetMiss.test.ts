@@ -43,6 +43,9 @@ describe("a miss that only looks like a chunk", () => {
   });
 
   test("JSON under /assets is a 404, not a reload", () => {
+    // The helper's contract only: `gemi start` never asks it about `.json`,
+    // since `json` is not in httpProd's staticFilePattern, and such a request
+    // goes to the app before a miss can happen.
     const res = staticAssetMiss("/assets/data.json", distPath);
 
     expect(res?.status).toBe(404);
