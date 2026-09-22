@@ -287,9 +287,15 @@ export class DatabaseQueueDriver implements QueueDriver {
     )`;
   }
 
-  /** The table name, already checked to be a plain identifier. */
+  /**
+   * The table name, already checked to be a plain identifier, and quoted the
+   * way `createTable` quotes it. Unquoted, Postgres folds `GemiJobs` to
+   * `gemijobs` and misses the table `createTable` (or a Prisma model without
+   * `@@map`) made, and a reserved word such as `order` is a syntax error.
+   */
   private name(q: SQL) {
-    return q.unsafe(this.table);
+    const mysql = this.dialect === "mysql" || this.dialect === "mariadb";
+    return q.unsafe(mysql ? `\`${this.table}\`` : `"${this.table}"`);
   }
 
   /** The database's clock, in epoch milliseconds. */
