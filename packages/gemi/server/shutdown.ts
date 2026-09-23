@@ -44,7 +44,9 @@ export type ShutdownSettings = {
   /**
    * From the signal to the end of the request drain, in milliseconds — the
    * delay below included. Requests still in flight when it runs out are
-   * abandoned. `GEMI_SHUTDOWN_TIMEOUT`, in seconds; default 20.
+   * abandoned. `GEMI_SHUTDOWN_TIMEOUT`, in seconds; default 20. `0` means
+   * "close the listener and do not wait": a shutdown with nothing in flight is
+   * still a clean one.
    */
   timeoutMs: number;
   /**
@@ -57,6 +59,7 @@ export type ShutdownSettings = {
   /**
    * The shared deadline for every provider's `shutdown()`, in milliseconds,
    * after the drain. `GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, in seconds; default 5.
+   * `0` skips the hooks — deliberately, so it is not reported as a failure.
    */
   providerTimeoutMs: number;
 };
@@ -152,7 +155,14 @@ export async function drain(params: {
       await sleep(Math.min(settings.delayMs, deadline - Date.now()));
     }
     const stopped = server.stop();
-    drained = await settlesWithin(stopped, deadline - Date.now());
+    // No time left to wait — a `GEMI_SHUTDOWN_TIMEOUT` of 0, or a delay that
+    // spent all of it — is "do not wait for what is in flight", and that is
+    // only a failure when something *is* in flight. Reading it as one made
+    // every clean shutdown log an abandonment and exit 1 for the operator who
+    // zeroed the budget to fit a 5s grace period, with nothing to abandon.
+    const remaining = deadline - Date.now();
+    drained =
+      remaining > 0 ? await settlesWithin(stopped, remaining) : server.pendingRequests === 0;
     if (!drained) {
       console.error(
         `[gemi] Shutdown grace period elapsed with ${server.pendingRequests} request(s) still in flight; abandoning them.`,
@@ -168,6 +178,9 @@ export async function drain(params: {
 }
 
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  // `drain` decides for itself what a budget that is already spent means, so
+  // this is only a guard: a race against `setTimeout(0)` is a coin toss, and
+  // "did not settle within no time at all" is the honest answer to it.
   if (ms <= 0) return false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const result = await Promise.race([

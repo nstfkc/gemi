@@ -129,7 +129,8 @@ What to check:
 
 - **A platform that allows less than 25 seconds** between `SIGTERM` and
   `SIGKILL` (Cloud Run, Fly) cuts the drain off. Lower
-  `GEMI_SHUTDOWN_TIMEOUT` and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit.
+  `GEMI_SHUTDOWN_TIMEOUT` and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit. Either
+  may be `0`, which skips that phase rather than reporting it as a failure.
 - **A wrapper that works around the dropped exit code**, or that relays
   signals to the server's process itself, can stop doing so. Signalling the
   process group still works: the copies of one signal that reach the server

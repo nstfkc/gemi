@@ -54,6 +54,33 @@ export class Server {
     // skip work that only a server should do at boot.
     process.env.ROOT_DIR = projectRoot();
 
+    // Read once, ahead of the boot, so the signal handling below and the mode
+    // that starts after the boot cannot disagree: whatever a provider's
+    // `boot()` does to the environment, this process is the server it was
+    // started as.
+    const production = process.env.NODE_ENV === "production";
+
+    if (production) {
+      // Before the boot, not just before listening: the whole start-up is a
+      // window in which a signal can arrive, and the slow part of it is the
+      // boot — a connection pool, the config, the dictionaries. A rolling
+      // update that `SIGTERM`s a pod two seconds in finds no listener
+      // installed, and the default action for both signals is to kill the
+      // process on the spot: no provider's `shutdown()`, no pool closed,
+      // nothing flushed. Installing here makes that a drain like any other.
+      // `stop()` handles a server that does not exist yet (nothing to close,
+      // requests cannot be in flight) and `Application.shutdown` calls the
+      // hooks of providers that registered but never booted, swallowing
+      // whatever they throw — half a boot is exactly when a hook is most
+      // likely to trip over something it expected `boot()` to have made.
+      if (this.handleSignals) installShutdownSignals(() => this.stop());
+      // Read now, so a bad value is warned about while the operator is
+      // watching the deploy, not first at the shutdown it spoils — and so a
+      // signal during the boot drains on the configured budget rather than on
+      // whatever `stop()` reads at the time.
+      this.settings = shutdownSettings();
+    }
+
     // Phase two of the boot. `new App({ kernel })` already ran every provider's
     // synchronous `register()`; this awaits their `boot()` before the first
     // request is served.
@@ -62,13 +89,7 @@ export class Server {
     // Dynamic import so each mode only pulls in its own code: `httpDev` drags in
     // Vite (dev-only) and `httpProd` reads the built `dist/` manifests — neither
     // should load in the other environment.
-    if (process.env.NODE_ENV === "production") {
-      // Before listening, so a signal that lands between the two is drained
-      // rather than killing the process with the default action.
-      if (this.handleSignals) installShutdownSignals(() => this.stop());
-      // Read now, so a bad value is warned about while the operator is
-      // watching the deploy, not first at the shutdown it spoils.
-      this.settings = shutdownSettings();
+    if (production) {
       const { httpProd } = await import("./httpProd.js");
       this.server = await httpProd(this.app, this.instrumentation.bind(this));
     } else {
