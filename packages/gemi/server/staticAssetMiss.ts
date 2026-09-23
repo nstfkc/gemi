@@ -31,18 +31,24 @@ export function isBuildChunkPath(pathname: string): boolean {
  * under that chunk's URL. Cached — by the browser or by an edge in front of
  * the origin — it would outlive the deploy that caused it and answer the
  * request after the real chunk is back.
+ *
+ * The body is only the reload. An earlier version opened with
+ * `if(caches){caches?.delete(distPath)}`, which was wrong three times over:
+ * `CacheStorage.delete` takes a cache *name*, not a URL, so a filesystem path
+ * matched nothing; that path told anyone who asked for a missing chunk where
+ * the server keeps its files; and `caches` is `[SecureContext]`, so on a
+ * plain-http origin the bare identifier is not defined at all and reading it
+ * threw a `ReferenceError` before the reload below could run — the recovery
+ * failing exactly where it was needed.
  */
-export function staticAssetMiss(pathname: string, distPath: string): Response | undefined {
+export function staticAssetMiss(pathname: string): Response | undefined {
   if (isBuildChunkPath(pathname)) {
-    return new Response(
-      `if(caches){caches?.delete("${distPath}")}window.location.reload();export {}`,
-      {
-        headers: {
-          "Content-Type": "application/javascript",
-          "Cache-Control": "no-store",
-        },
+    return new Response(`window.location.reload();export {}`, {
+      headers: {
+        "Content-Type": "application/javascript",
+        "Cache-Control": "no-store",
       },
-    );
+    });
   }
 
   // `/assets` is reserved for build output (the router rejects routes there

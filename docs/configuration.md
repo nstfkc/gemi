@@ -150,6 +150,8 @@ The base applies to `gemi build` only. `gemi dev` serves modules from Vite's dev
 
 A request for a JavaScript chunk under `/assets/` that is not in `dist/client` is answered with a tiny module that reloads the page, rather than a 404: it is almost always a document from the previous release asking for its own chunk, and reloading gets it this release's document. The stub is sent with `Cache-Control: no-store` so no browser or edge keeps it once the real chunk is back. Any other miss under `/assets/` — a source map, a stylesheet, an image — is a plain 404, and a `.js` path outside `/assets/` goes to your routes like any other request.
 
+**This recovery does not apply once you set an asset base.** With a base, every chunk URL in the document points at the CDN, so a missing chunk is a request the origin never sees and the CDN answers with its own 404 — the lazy `import()` rejects and the page stays broken where it stood. Keep the last few releases' `assets/` on the CDN rather than pruning on deploy, which is what the immutable, content-hashed filenames are for.
+
 ## Environment variables & `.env`
 
 gemi reads configuration from the environment (`process.env`), following Bun's `.env` conventions. Secrets like `DATABASE_URL`, `SECRET`, `RESEND_API_KEY`, and your S3/OAuth credentials all live in `.env`. The scaffolded template ships a `.env.example` you copy to `.env`:

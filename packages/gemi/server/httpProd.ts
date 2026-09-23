@@ -102,8 +102,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
+  // `mjs` alongside `js`: a build configured to emit `.mjs` chunks writes them
+  // into `assets/` like any other, and without it the origin never treated one
+  // as a file — it went to the app and came back as an SSR-rendered 404, and
+  // `staticAssetMiss`'s `.m?js` branch could never be reached.
   const staticFilePattern = new URLPattern({
-    pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
+    pathname: "/*.:filetype(png|txt|js|mjs|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
   });
 
   async function requestHandler(req: Request) {
@@ -123,7 +127,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       const doesExist = await exists(distPath);
 
       if (!doesExist) {
-        return staticAssetMiss(pathname, distPath) ?? (await handleWithApp(req, pathname));
+        return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
       }
 
       // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
