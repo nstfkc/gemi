@@ -289,7 +289,20 @@ export class QueueManager {
    * the memory driver that is nobody; see `drain`. A durable driver's job also
    * waits there when this process is not a server.
    */
-  push(job: new () => Job, args: string): Promise<string> {
+  push(
+    job: new () => Job,
+    args: string,
+    options: {
+      /**
+       * Whether a driver that cannot record the job is reported from here.
+       * On by default, because the usual caller is a fire-and-forget
+       * `Job.dispatch(...)` whose promise nobody reads. A caller with
+       * something better to say — `EventManager`, which knows the event and
+       * the listener — turns it off and says that instead.
+       */
+      reportFailure?: boolean;
+    } = {},
+  ): Promise<string> {
     const id = this.driver.enqueue({ name: job.name, args });
     // A driver that outlives the process is shared with every other one, so
     // a script or console command that dispatches would otherwise claim up to
@@ -304,24 +317,26 @@ export class QueueManager {
     // dispatched here would wait up to `pollInterval` in a queue with room.
     // A spurious wake just claims nothing.
     //
-    // The rejection is always reported, whatever the driver does, because a
-    // dispatch that was never recorded is the one thing a queue must not lose
-    // quietly. It used to depend on both: a polled driver got an empty arm,
-    // which marks `id` handled — and `id` is what `push` returns — so a
-    // fire-and-forget `SendReceiptJob.dispatch(...)` whose INSERT failed (a
-    // failover, a pool timeout, a table not migrated yet) produced no
-    // unhandled rejection and no line anywhere, and the job simply never ran.
-    // A subscribing driver got no arm at all, so the same failure surfaced as
-    // an unhandled rejection instead. A caller that awaits still gets the
-    // rejection and can still decide what to do about it.
+    // The rejection is reported here unless the caller says it will do it
+    // itself, and whatever the driver is. It used to depend on both, and was
+    // lost either way: a polled driver got an empty rejection arm, which marks
+    // `id` handled — and `id` is what `push` returns — so a fire-and-forget
+    // `SendReceiptJob.dispatch(...)` whose INSERT failed (a failover, a pool
+    // timeout, a table not migrated yet) produced no unhandled rejection and
+    // no line anywhere, and the job simply never ran. A subscribing driver got
+    // no arm at all, so the same failure surfaced as a bare unhandled
+    // rejection. A caller that awaits still gets the rejection either way and
+    // can still decide what to do about it.
     id.then(
       () => !this.driver.subscribe && this.state === "running" && this.wake(),
-      (error: unknown) =>
+      (error: unknown) => {
+        if (options.reportFailure === false) return;
         console.error(
           `[gemi] The queue driver could not record ${job.name}, so it did ` +
             `not run and will not be retried.`,
           error,
-        ),
+        );
+      },
     );
     return id;
   }

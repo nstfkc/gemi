@@ -464,8 +464,11 @@ export class EventManager {
     // cannot record the job rejects later — unawaited, so without the `catch`
     // that rejection would be an unhandled one.
     try {
+      // `reportFailure: false`: the queue's own line would say only which job
+      // could not be recorded, and `failed` names the event, the listener and
+      // what it means for the listeners after it.
       app(QueueManager)
-        .push(job, JSON.stringify([eventName, args]))
+        .push(job, JSON.stringify([eventName, args]), { reportFailure: false })
         .catch(failed);
     } catch (error) {
       failed(error);
