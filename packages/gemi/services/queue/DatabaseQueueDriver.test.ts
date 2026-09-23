@@ -173,7 +173,13 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
   const managers: QueueManager[] = [];
 
   afterEach(async () => {
-    await Promise.all(managers.splice(0).map((manager) => manager.stop()));
+    // `drain`, not `stop`: `stop()` is `drain(0)`, which stops claiming and
+    // returns without waiting for what is already in flight. The table is
+    // dropped a line later, so a claim or a `complete` still on its way to
+    // the server came back as `Table … doesn't exist` — an unhandled
+    // rejection with no test to attach it to, which failed the run about a
+    // third of the time whatever the assertions said.
+    await Promise.all(managers.splice(0).map((manager) => manager.drain(5_000)));
     await dispose?.();
     dispose = undefined;
   });
