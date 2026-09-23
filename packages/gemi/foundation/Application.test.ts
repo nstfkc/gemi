@@ -241,6 +241,26 @@ describe("Application.shutdown", () => {
     error.mockRestore();
   });
 
+  // `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0`, from an operator with five seconds of
+  // grace period to spend elsewhere. Every shutdown of that server is clean; it
+  // simply has no provider phase.
+  it("skips the hooks without reporting a failure when no time is budgeted", async () => {
+    const calls: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const application = new Application();
+    application.registerMany(recorder(calls));
+
+    const report = await application.shutdown({ timeoutMs: 0 });
+
+    expect(report).toEqual({ failed: [], timedOut: [] });
+    expect(calls).toEqual([]);
+    expect(error).not.toHaveBeenCalled();
+    expect(log.mock.calls[0][0]).toContain("Skipping 3 provider shutdown hook(s)");
+    log.mockRestore();
+    error.mockRestore();
+  });
+
   it("shuts down at most once", async () => {
     const calls: string[] = [];
     const application = new Application();

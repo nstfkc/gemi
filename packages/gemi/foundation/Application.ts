@@ -118,7 +118,9 @@ export class Application extends Container {
    * a `SIGKILL`. A provider that overruns is abandoned (its promise keeps
    * running; the process is about to exit) and reported in `timedOut`; one
    * reached after the deadline has passed is not called at all and reported
-   * the same way.
+   * the same way. A `timeoutMs` of 0 is different in kind: nothing is called,
+   * nothing is reported, and the shutdown stays clean — the caller has said
+   * there is no time for this phase, which is a decision, not a fault.
    *
    * Idempotent: a second call returns the first call's result.
    */
@@ -131,6 +133,23 @@ export class Application extends Container {
 
   private async shutdownProviders(timeoutMs: number): Promise<ShutdownReport> {
     const report: ShutdownReport = { failed: [], timedOut: [] };
+
+    // A budget of zero is "skip this phase", not "every provider failed". An
+    // operator fitting the shutdown into a five-second grace period says so by
+    // setting `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0`, and reading it as a deadline
+    // that had already passed reported their own configuration back to them as
+    // a fault: a `console.error` per provider, every provider in `timedOut`,
+    // and a non-zero exit on every otherwise clean shutdown. One line saying
+    // what was skipped is the whole of it.
+    if (timeoutMs <= 0) {
+      if (this.providers.length > 0) {
+        console.log(
+          `[gemi] Skipping ${this.providers.length} provider shutdown hook(s): no time is budgeted for them.`,
+        );
+      }
+      return report;
+    }
+
     const deadline = Date.now() + timeoutMs;
 
     for (const provider of [...this.providers].reverse()) {

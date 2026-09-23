@@ -38,13 +38,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// The two requests the ordering test holds in flight at once. What it asserts
+// is that `/slow` finishes before `/stream`'s last chunk, so the gap between
+// the two — not either duration — is what a stalled worker has to eat through
+// before the assertion inverts. 100ms against 6 × 80ms leaves ~380ms of it;
+// the 300ms against 6 × 60ms it used to be left 60ms, which is well inside a
+// scheduling hiccup when vitest runs several files in parallel.
+const SLOW_MS = 100;
+const CHUNK_MS = 80;
+
 function serve() {
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const { pathname } = new URL(req.url);
       if (pathname === "/slow") {
-        await Bun.sleep(300);
+        await Bun.sleep(SLOW_MS);
         events.push("slow finished");
         return new Response("slow");
       }
@@ -53,7 +62,7 @@ function serve() {
         return new Response(
           new ReadableStream({
             async pull(controller) {
-              await Bun.sleep(60);
+              await Bun.sleep(CHUNK_MS);
               if (chunk++ < 5) return controller.enqueue(new TextEncoder().encode(`${chunk};`));
               events.push("stream finished");
               controller.close();
@@ -163,13 +172,18 @@ describe("drain", () => {
     expect(code).toBe(1);
   });
 
+  // A whole second of delay for a loopback round trip that takes a millisecond:
+  // the assertion below is "the listener was still open", and it only means
+  // that while the request beats the delay. At 200ms a CI worker that stalls
+  // mid-fetch turns a real guarantee into a failed `fetch`, and the second
+  // costs one slow test rather than a rerun.
   test("keeps serving through the delay, with the flag already up", async () => {
     const { url, stoppable } = serve();
 
     const draining = drain({
       server: stoppable,
       shutdownProviders: providers(),
-      settings: settings({ delayMs: 200 }),
+      settings: settings({ delayMs: 1_000 }),
     });
 
     expect(isShuttingDown()).toBe(true);
@@ -208,7 +222,11 @@ describe("drain", () => {
     expect([failed, timedOut]).toEqual([1, 1]);
   });
 
-  test("with no server yet — a signal during boot — still shuts providers down", async () => {
+  // What `Server.stop()` passes when the signal beat the listener into
+  // existence. That this is what a signal during the boot actually reaches —
+  // that the handler is installed before the boot is awaited — is
+  // `Server.test.ts`; here it is only that `drain` copes with no server.
+  test("with no server — nothing was listening yet — still shuts providers down", async () => {
     const code = await drain({
       server: undefined,
       shutdownProviders: providers(),
@@ -217,6 +235,43 @@ describe("drain", () => {
 
     expect(events).toEqual(["providers"]);
     expect(code).toBe(0);
+  });
+
+  // `GEMI_SHUTDOWN_TIMEOUT=0` on a platform with a grace period too short to
+  // spend on a drain. It means "do not wait", and a shutdown with nothing in
+  // flight has nothing to abandon, so it is still a clean one.
+  test("a zero timeout does not wait for the drain, and is not a failure by itself", async () => {
+    const { stoppable } = serve();
+
+    const code = await drain({
+      server: stoppable,
+      shutdownProviders: providers(),
+      settings: settings({ timeoutMs: 0 }),
+    });
+
+    expect(events).toEqual(["stop() shuttingDown=true", "providers"]);
+    expect(code).toBe(0);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  test("a zero timeout still reports a request it abandoned", async () => {
+    const { url, stoppable } = serve();
+
+    void fetch(`${url}/forever`).catch(() => {});
+    await Bun.sleep(30);
+
+    const code = await drain({
+      server: stoppable,
+      shutdownProviders: providers(),
+      settings: settings({ timeoutMs: 0 }),
+    });
+
+    expect(events).toEqual([
+      "stop() shuttingDown=true",
+      "stop(force) shuttingDown=true",
+      "providers",
+    ]);
+    expect(code).toBe(1);
   });
 });
 
@@ -300,8 +355,11 @@ describe("shutdownSettings", () => {
 });
 
 // The signal handling proper exits the process, so it runs in a child: a
-// script that installs it around a `stop` taking 400ms and exiting 0, with the
-// repeat window cut to 150ms so a deliberate second signal fits inside `stop`.
+// script that installs it around a `stop` of its own, with both durations —
+// how long the drain takes and how wide the repeat window is — chosen per test
+// through the environment. Each test then asks for margins its own assertion
+// can survive a stalled CI worker with, rather than every test sharing one set
+// and the tightest of them deciding how often the suite lies.
 describe("installShutdownSignals", () => {
   const dir = mkdtempSync(join(tmpdir(), "gemi-shutdown-signals-"));
   const script = join(dir, "server.ts");
@@ -313,10 +371,10 @@ describe("installShutdownSignals", () => {
     installShutdownSignals(
       async () => {
         console.log("stop " + ++stops);
-        await Bun.sleep(400);
+        await Bun.sleep(Number(process.env.GEMI_TEST_STOP_MS));
         return 0;
       },
-      { repeatWindowMs: 150 },
+      { repeatWindowMs: Number(process.env.GEMI_TEST_REPEAT_WINDOW_MS) },
     );
     // Twice, as a second Server in the same process would: still one listener.
     installShutdownSignals(async () => {
@@ -328,8 +386,25 @@ describe("installShutdownSignals", () => {
   `,
   );
 
-  async function run(signals: NodeJS.Signals[], gapMs = 50) {
-    const proc = Bun.spawn({ cmd: ["bun", script], stdout: "pipe", stderr: "ignore" });
+  // 400ms of drain: long enough that a process which waited for it and one
+  // which did not are never confused, short enough to pay per test.
+  const STOP_MS = 400;
+
+  async function run(
+    signals: NodeJS.Signals[],
+    options: { gapMs?: number; stopMs?: number; repeatWindowMs?: number } = {},
+  ) {
+    const { gapMs = 50, stopMs = STOP_MS, repeatWindowMs = 150 } = options;
+    const proc = Bun.spawn({
+      cmd: ["bun", script],
+      env: {
+        ...process.env,
+        GEMI_TEST_STOP_MS: String(stopMs),
+        GEMI_TEST_REPEAT_WINDOW_MS: String(repeatWindowMs),
+      },
+      stdout: "pipe",
+      stderr: "ignore",
+    });
     const decoder = new TextDecoder();
     let output = "";
     const read = (async () => {
@@ -359,24 +434,38 @@ describe("installShutdownSignals", () => {
 
     expect(lines).toEqual(["ready", "stop 1"]);
     expect(code).toBe(0);
-    expect(elapsed).toBeGreaterThanOrEqual(400);
+    expect(elapsed).toBeGreaterThanOrEqual(STOP_MS);
   });
 
   // One shutdown delivered more than once — directly and through a relay —
-  // must still drain, whichever of the two signals each copy is.
+  // must still drain, whichever of the two signals each copy is. A two-second
+  // window for copies sent 20ms apart: the production default is a second, and
+  // the assertion is about the copies being one shutdown, not about where the
+  // boundary sits, so the margin is free.
   test("a repeat inside the window is the same shutdown, not a force", async () => {
-    const { code, elapsed, lines } = await run(["SIGTERM", "SIGTERM", "SIGINT"], 20);
+    const { code, elapsed, lines } = await run(["SIGTERM", "SIGTERM", "SIGINT"], {
+      gapMs: 20,
+      repeatWindowMs: 2_000,
+    });
 
     expect(lines).toEqual(["ready", "stop 1"]);
     expect(code).toBe(0);
-    expect(elapsed).toBeGreaterThanOrEqual(400);
+    expect(elapsed).toBeGreaterThanOrEqual(STOP_MS);
   });
 
+  // The other side of the boundary, with margins both ways: the second signal
+  // is sent at 400ms against a 150ms window (a stall only pushes it further
+  // out), and the drain it skips would take five seconds, so "exited at once"
+  // is anything short of three.
   test("a second signal after the window exits at once with 128 + n", async () => {
-    const { code, elapsed, lines } = await run(["SIGTERM", "SIGINT"], 200);
+    const { code, elapsed, lines } = await run(["SIGTERM", "SIGINT"], {
+      gapMs: 400,
+      stopMs: 5_000,
+      repeatWindowMs: 150,
+    });
 
     expect(lines).toEqual(["ready", "stop 1"]);
     expect(code).toBe(130);
-    expect(elapsed).toBeLessThan(400);
+    expect(elapsed).toBeLessThan(3_000);
   });
 });
