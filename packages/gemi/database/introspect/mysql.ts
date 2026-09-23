@@ -24,11 +24,17 @@ const COLUMNS = `
 
 // A primary key is the constraint named `PRIMARY`; a foreign key is any usage
 // row with a referenced table. Unique keys appear here too and match neither.
+//
+// A key may point into another database, which this read does not list. Such a
+// parent is qualified with its schema, so it cannot be mistaken for a table of
+// the same bare name in this one.
 const KEYS = `
   select k.CONSTRAINT_NAME as name,
          k.TABLE_NAME as table_name,
          k.COLUMN_NAME as column_name,
-         k.REFERENCED_TABLE_NAME as referenced_table,
+         case when k.REFERENCED_TABLE_SCHEMA <> database()
+              then concat(k.REFERENCED_TABLE_SCHEMA, '.', k.REFERENCED_TABLE_NAME)
+              else k.REFERENCED_TABLE_NAME end as referenced_table,
          k.REFERENCED_COLUMN_NAME as referenced_column,
          r.DELETE_RULE as on_delete,
          r.UPDATE_RULE as on_update

@@ -15,6 +15,9 @@ test("DB.schema() loads the introspection module on first use, not with the faca
   const { DB } = await import("../facades");
   const { Application } = await import("../foundation/Application");
   const { DatabaseManager } = await import("./DatabaseManager");
+  // The `gemi/database` barrel too: it re-exports the introspection types, and
+  // every app reaches it on the boot path through `defineDatabaseConfig`.
+  await import("./index");
   expect(loads).toBe(0);
 
   const dir = mkdtempSync(join(tmpdir(), "gemi-introspect-lazy-"));

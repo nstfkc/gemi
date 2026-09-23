@@ -24,7 +24,9 @@ const COLUMNS = `
          a.attname as name,
          format_type(a.atttypid, a.atttypmod) as type,
          not a.attnotnull as nullable,
-         pg_get_expr(d.adbin, d.adrelid) as column_default
+         -- A generated column keeps its expression in pg_attrdef too, but it is
+         -- not a default: MySQL and SQLite report none for one, and so does this.
+         case when a.attgenerated = '' then pg_get_expr(d.adbin, d.adrelid) end as column_default
   from pg_attribute a
   join pg_class c on c.oid = a.attrelid
   join pg_namespace n on n.oid = c.relnamespace
@@ -38,12 +40,18 @@ const COLUMNS = `
 // One row per column of every primary and foreign key. `unnest` over the two
 // key arrays pairs each local column with the one it references, and pads the
 // primary key's missing `confkey` with nulls.
+//
+// A key may point into another schema, which this read does not list. Such a
+// parent is qualified with its schema, so it cannot be mistaken for a table of
+// the same bare name in this one.
 const KEYS = `
   select con.contype::text as kind,
          con.conname as name,
          c.relname as table_name,
          a.attname as column_name,
-         rc.relname as referenced_table,
+         case when rn.nspname <> current_schema()
+              then rn.nspname || '.' || rc.relname
+              else rc.relname end as referenced_table,
          ra.attname as referenced_column,
          con.confdeltype::text as on_delete,
          con.confupdtype::text as on_update
@@ -54,6 +62,7 @@ const KEYS = `
     with ordinality as k(attnum, refattnum, position)
   join pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.attnum
   left join pg_class rc on rc.oid = con.confrelid
+  left join pg_namespace rn on rn.oid = rc.relnamespace
   left join pg_attribute ra on ra.attrelid = con.confrelid and ra.attnum = k.refattnum
   where n.nspname = current_schema()
     and con.contype in ('p', 'f')

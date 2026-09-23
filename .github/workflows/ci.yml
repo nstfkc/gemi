@@ -515,10 +515,14 @@ jobs:
         working-directory: packages/gemi
 
       # `DB.schema()` reads a different catalog per dialect, and the servers
-      # are already here.
+      # are already here. The filter selects nothing at all if the URLs go
+      # missing, which would read as a pass, so the suite is told to fail
+      # instead of skipping when it cannot reach them.
       - name: Schema introspection on Postgres and MySQL
         run: bun --bun vitest run database/introspect.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
+        env:
+          CI_DATABASE_SERVERS_REQUIRED: "1"
 
   # The iOS client. `swift test` at the root builds GemiChat and replays the
   # TypeScript reducer's recorded cases (`packages/gemi/ai/client/__fixtures__`)

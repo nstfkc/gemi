@@ -2317,10 +2317,21 @@ const post = tables.find((t) => t.name === "Post")
   from Prisma and is never checked against the database. Comparing the two is how you find drift.
 - **Types are in the database's own spelling**, such as `character varying(255)`, `int` or
   `INTEGER`. They are not mapped to TypeScript or Prisma types. Defaults are reported the same way:
-  SQLite and Postgres give the SQL expression, and MySQL gives the bare value.
-- **Only base tables are listed.** Views are left out, and so are SQLite's `sqlite_*` tables. On
-  Postgres the listing is limited to `current_schema()`, and on MySQL to `database()`. Migration
-  tables such as `_prisma_migrations` are real tables, so they are included.
+  SQLite and Postgres give the SQL expression, MySQL gives the bare value, and MariaDB gives the
+  SQL literal — `'untitled'` and `current_timestamp()` where MySQL says `untitled` and
+  `CURRENT_TIMESTAMP`. A column with no default is `null` on all four.
+- **A generated column is listed like any other**, since a plain `select *` returns it. Its
+  expression is not reported as a default.
+- **`nullable` is what the table enforces, not what the DDL reads like.** SQLite is the one that
+  differs: only a sole `integer primary key` — the rowid — refuses a null, and any other key column
+  there accepts one and is reported nullable. That is drift worth seeing rather than hiding.
+- **Only base tables are listed.** Views are left out, and so are SQLite's `sqlite_*` tables, its
+  virtual tables and the shadow tables behind them. On Postgres the listing is limited to
+  `current_schema()`, and on MySQL to `database()`. Migration tables such as `_prisma_migrations`
+  are real tables, so they are included.
+- **A key pointing outside that scope names its parent qualified**, as `other_schema.Thing`, so it
+  cannot be mistaken for a table of the same bare name in scope. Every unqualified
+  `referencedTable` is a table the same read lists.
 - **It works on MySQL and MariaDB**, where `DB.query` does not yet.
 - **The code loads on first call.** An app that never calls it never loads it.
 - **It joins the ambient transaction.** A table created earlier in the same transaction is included.
