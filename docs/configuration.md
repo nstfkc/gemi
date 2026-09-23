@@ -248,6 +248,8 @@ In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills t
 4. **Runs every provider's `shutdown()`**, in reverse registration order.
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
 
+The handler is installed before the application boots, so a signal that lands during a slow start-up — a pod replaced two seconds into its connection pool — drains the same way: there is no listener to close and nothing in flight, so it goes straight to the providers' `shutdown()` and exits. Without it the default action would kill the process outright, with nothing closed or flushed.
+
 A second signal skips the wait and exits at once, with `130` for `SIGINT` or `143` for `SIGTERM` — if it arrives more than a second after the first. One shutdown often reaches the server several times within milliseconds (a Ctrl+C on `bun run start` arrives directly and through `gemi start`; systemd signals every process in the unit), and those copies are the same shutdown, not a request to skip it.
 
 Keep `GEMI_SHUTDOWN_DELAY` below `GEMI_SHUTDOWN_TIMEOUT`: the delay counts against the timeout, so a delay as long as the timeout leaves no time to drain. The server warns at startup when it does.
@@ -259,6 +261,8 @@ Keep `GEMI_SHUTDOWN_DELAY` below `GEMI_SHUTDOWN_TIMEOUT`: the delay counts again
 | `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` | `5` | Seconds shared by every provider's `shutdown()`. |
 
 The defaults add up to 25 seconds, under the 30 that Kubernetes, Azure Container Apps and ECS allow between `SIGTERM` and `SIGKILL`. On a platform with a shorter window — Cloud Run allows 10, Fly 5 — lower them to fit: a drain the platform cuts off with `SIGKILL` ends the same way as no drain at all.
+
+`0` is a valid budget for either timeout, and means "skip this phase", not "this phase failed". `GEMI_SHUTDOWN_TIMEOUT=0` closes the listener without waiting for what is in flight — a request still running is still abandoned, and that still exits `1` — and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0` skips the `shutdown()` hooks altogether. Neither turns an otherwise clean shutdown into a non-zero exit.
 
 ### Taking the instance out of rotation
 
