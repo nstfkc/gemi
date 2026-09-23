@@ -138,16 +138,21 @@ describe("concurrency", () => {
         blip ? Promise.resolve() : memory.heartbeat(jobs, options),
       subscribe: (wake) => memory.subscribe(wake),
     };
+    // A whole lease is 300ms and the manager beats every 100ms, so the second
+    // run survives an event loop stalled for two missed beats. At the 60ms
+    // this used to use, one 60ms stall anywhere in the window below lapsed a
+    // lease that is supposed to be held and the job was claimed a third time —
+    // a flake, not a finding.
     const queue = new QueueManager({
       jobs: [Gated],
       driver,
       concurrency: 2,
-      visibilityTimeout: 60,
+      visibilityTimeout: 300,
     });
 
     queue.push(Gated, JSON.stringify([1]));
     await vi.waitFor(() => expect(started).toHaveLength(2), {
-      timeout: 1000,
+      timeout: 3000,
       interval: 5,
     });
     blip = false;
@@ -159,7 +164,9 @@ describe("concurrency", () => {
     // counted and heartbeated; were it forgotten, its lease would lapse too
     // and the job would be claimed a third time into the freed slot.
     release();
-    await sleep(200);
+    // Longer than a whole lease, so an unheartbeated second run really would
+    // be claimed again inside this window.
+    await sleep(450);
     expect(started).toHaveLength(2);
     expect(queue.running).toBe(1);
     const { unfinished } = await queue.stop();
@@ -343,6 +350,82 @@ describe("waking", () => {
 
     // More than the first claim: it got there by polling.
     expect(claim.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  test("a claim that rejects is retried on a timer, even on a subscribing driver", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const memory = new MemoryQueueDriver();
+    let blip = false;
+    const driver: QueueDriver = {
+      enqueue: (job) => memory.enqueue(job),
+      claim: (limit, options) => {
+        if (blip) {
+          blip = false;
+          return Promise.reject(new Error("connection reset"));
+        }
+        return memory.claim(limit, options);
+      },
+      complete: (job) => memory.complete(job),
+      fail: (job, failure) => memory.fail(job, failure),
+      subscribe: (wake) => memory.subscribe(wake),
+    };
+    const queue = new QueueManager({
+      jobs: [Noop],
+      driver,
+      pollInterval: 20,
+    });
+    const ran = vi.spyOn(Noop.prototype, "run");
+
+    queue.start();
+    await settle();
+
+    // The shape a LISTEN/NOTIFY driver has: the only wake this worker will
+    // ever get for this job is the enqueue's, and the claim that wake prompted
+    // is the one that dies. The worker is idle, so no in-flight job's `wake`
+    // is coming either — without a timer the job waits for an unrelated
+    // enqueue that a quiet queue may never see.
+    blip = true;
+    await memory.enqueue({ name: "Noop", args: "[]" });
+
+    await vi.waitFor(() => expect(ran).toHaveBeenCalledTimes(1), {
+      timeout: 1000,
+    });
+    await queue.stop();
+  });
+});
+
+describe("a job that cannot be constructed", () => {
+  test("is dead-lettered on its first claim, not reclaimed once per lease forever", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    class Unbuildable extends Job {
+      static name = "Unbuildable";
+      // What `private mailer = app(Mailer)` does when nothing is bound: the
+      // throw is the instance's, so there is never an instance.
+      broken = (() => {
+        throw new Error("app(Mailer) is not bound");
+      })();
+      run() {}
+    }
+    const memory = new MemoryQueueDriver();
+    const claim = vi.spyOn(memory, "claim");
+    const queue = new QueueManager({
+      jobs: [Unbuildable],
+      driver: memory,
+      visibilityTimeout: 30,
+    });
+
+    queue.push(Unbuildable, "[]");
+    await sleep(300);
+    await queue.stop();
+
+    // Nothing waiting and nothing leased: the claim was ended. Left to the
+    // generic `could not record the outcome` path it never is, and the job is
+    // reclaimed every 30ms — the reviewer measured thirteen claims in 400ms —
+    // climbing past `maxAttempts` without ever reaching the guard, because
+    // that guard needs the instance that cannot be built.
+    expect(memory.waiting).toBe(0);
+    expect(memory.leased).toBe(0);
+    expect(claim.mock.calls.length).toBeLessThan(5);
   });
 });
 
