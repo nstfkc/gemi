@@ -6,6 +6,18 @@ import { queueConfigDefaults, type QueueConfig } from "./config";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import { claimsInThisProcess, QueueManager } from "./QueueManager";
 
+/**
+ * How far inside the provider deadline the drain stops, so there is time left
+ * to write the list of jobs it abandoned before `Application` stops waiting
+ * for this provider and the process exits. A tenth of the budget, capped, so
+ * that a deadline of a few milliseconds still spends most of itself waiting
+ * rather than handing the whole of it to the margin.
+ */
+const REPORT_MARGIN_MS = 100;
+
+const reportMargin = (timeoutMs: number) =>
+  Math.min(REPORT_MARGIN_MS, Math.floor(timeoutMs / 10));
+
 export class QueueServiceProvider extends ServiceProvider {
   register() {
     this.app.singleton(
@@ -53,16 +65,22 @@ export class QueueServiceProvider extends ServiceProvider {
    * out of a server told to stop. Runs after the request drain, and before the
    * database provider's, so the jobs still have their connection.
    *
-   * Waits without a timeout of its own: the provider shutdown deadline is
-   * what bounds it, and a job still running at that deadline is abandoned
-   * with the process. With the memory driver that job is lost; with one that
-   * outlives the process it is claimed again elsewhere once its lease runs
-   * out. With such a driver claiming already stopped when the signal
-   * arrived, so the jobs here are only the ones that were running then; the
-   * memory driver kept claiming until now, so a job dispatched by a request
-   * still draining ran here too.
+   * A job still running at the deadline is abandoned with the process. With
+   * the memory driver that job is lost; with one that outlives the process it
+   * is claimed again elsewhere once its lease runs out. With such a driver
+   * claiming already stopped when the signal arrived, so the jobs here are
+   * only the ones that were running then; the memory driver kept claiming
+   * until now, so a job dispatched by a request still draining ran here too.
+   *
+   * The drain is bounded by a little less than what is left of the shared
+   * provider deadline, so that this is the thing that names the jobs it gave
+   * up on. Draining without a timeout of its own read better but could not
+   * work: `drain()` then resolves only once every job has finished, by which
+   * point nothing is unfinished and the list below is always empty — and the
+   * operator who needed it got `Application`'s generic "did not finish within
+   * the provider shutdown deadline" instead, which names no job at all.
    */
-  async shutdown() {
+  async shutdown(options?: { timeoutMs: number }) {
     // Resolving the manager now would build a driver only to stop it.
     if (!this.app.resolved(QueueManager)) return;
     const queue = this.app.make(QueueManager);
@@ -71,7 +89,10 @@ export class QueueServiceProvider extends ServiceProvider {
         `[gemi] Shutting down: waiting for ${queue.running} running queued job(s).`,
       );
     }
-    const { unfinished } = await queue.drain();
+    const budget = options?.timeoutMs;
+    const { unfinished } = await queue.drain(
+      budget === undefined ? Infinity : Math.max(0, budget - reportMargin(budget)),
+    );
     if (unfinished.length > 0) {
       console.error(
         `[gemi] Queued jobs still running at shutdown: ` +
