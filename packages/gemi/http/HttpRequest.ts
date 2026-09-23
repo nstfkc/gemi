@@ -2,7 +2,9 @@ import { parseCookieHeader } from "./getCookies";
 import { isModelOriginated } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
+import { requestDomain } from "./requestDomain";
 import { ValidationError } from "./Router";
+import type { ResolvedDomain } from "../services/router/DomainResolver";
 
 class Input<T> {
   constructor(private data: T) {}
@@ -177,6 +179,14 @@ export class HttpRequest<
   schema: any = {};
   routePath: string;
   params: Params;
+  /**
+   * The `route.domains` group this request was routed by — `domain.params`
+   * holds a `:param` subdomain's value, or what `custom.resolve` returned for
+   * a custom domain. `null` when the app declares no `route.domains`.
+   *
+   * Kept apart from `params`, which are the path's alone.
+   */
+  domain: ResolvedDomain | null;
 
   constructor(
     req?: Request,
@@ -190,11 +200,13 @@ export class HttpRequest<
       this.rawRequest = _req.rawRequest;
       this.kind = _req.kind;
       this.routePath = _req.routePath;
+      this.domain = _req.domain ?? null;
     } else {
       this.params = params;
       this.rawRequest = req;
       this.routePath = routePath;
       this.kind = kind ?? "api";
+      this.domain = requestDomain(req);
     }
 
     this.headers = this.rawRequest.headers;

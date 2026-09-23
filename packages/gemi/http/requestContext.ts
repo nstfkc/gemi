@@ -155,8 +155,12 @@ class Store {
     this.cookies.add(createCookie(name, value, options));
   }
 
-  deleteCookie(name: string) {
-    this.cookies.add(createCookie(name, "", { maxAge: -1 }));
+  /**
+   * A cookie set with a `domain` or `path` is only cleared by a deletion that
+   * names the same ones.
+   */
+  deleteCookie(name: string, options: Pick<CreateCookieOptions, "domain" | "path"> = {}) {
+    this.cookies.add(createCookie(name, "", { ...options, maxAge: -1 }));
   }
 
   setHeaders(name: string, value: string) {

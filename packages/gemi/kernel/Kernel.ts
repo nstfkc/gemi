@@ -11,6 +11,7 @@ import { QueueManager } from "../services/queue/QueueManager";
 import { startClaimingIfServing } from "../services/queue/QueueServiceProvider";
 import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
+import { DomainRouter } from "../services/router/DomainRouter";
 import { runGlobalMiddleware } from "../services/router/globalMiddleware";
 import { kernelContext } from "./context";
 import { frameworkProviders } from "./providers";
@@ -220,6 +221,10 @@ export class Kernel {
 
   viewRoutes(): ViewRouteDispatcher {
     return this.app.make(ViewRouteDispatcher);
+  }
+
+  domains(): DomainRouter {
+    return this.app.make(DomainRouter);
   }
 
   broadcast(): BroadcastManager {

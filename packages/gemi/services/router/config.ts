@@ -65,11 +65,88 @@ export interface McpRouteConfig {
   router: new () => McpRouter<any>;
 }
 
+// The routers one host group serves. Either may be left out, in which case the
+// group serves the root `api` / `view` config for that side — the usual case
+// for tenant subdomains, which run the same app with different data.
+export interface DomainGroupRouters {
+  api?: Partial<ApiRouteConfig> & Pick<ApiRouteConfig, "rootRouter">;
+  view?: Partial<ViewRouteConfig> & Pick<ViewRouteConfig, "rootRouter">;
+}
+
+export interface DomainGroupConfig extends DomainGroupRouters {
+  /**
+   * The label(s) in front of `domains.root`. A fixed subdomain (`"admin"`,
+   * `"eu.admin"`) matches exactly; a param subdomain (`":tenant"`) matches any
+   * single label and hands it to the request as `req.domain.params.tenant`.
+   * Fixed subdomains are tried before param ones.
+   */
+  subdomain: string;
+
+  /**
+   * For a param subdomain: whether the value names something that exists. A
+   * `false` answers the request with a 404 before any route runs, and keeps the
+   * ask endpoint from approving a certificate for it.
+   */
+  exists?: (
+    params: Record<string, string>,
+    req: Request,
+  ) => boolean | Promise<boolean>;
+}
+
+export interface CustomDomainConfig {
+  /**
+   * The `subdomain` of the group a resolved custom host is served as — so
+   * `app.acme.com` runs exactly what `acme.example.com` does.
+   */
+  group: string;
+
+  /**
+   * Maps a host outside `domains.root` to the params of `group`, or `null`
+   * when the host is not one the app knows. Usually a database lookup;
+   * answers are cached for `cacheTtlMs`.
+   */
+  resolve: (
+    host: string,
+  ) => Record<string, string> | null | Promise<Record<string, string> | null>;
+
+  /** How long a `resolve` answer, hit or miss, is reused. Defaults to 60s; `0` disables. */
+  cacheTtlMs?: number;
+
+  /**
+   * Serves every host `resolve` returned `null` for, instead of a 404. The ask
+   * endpoint never approves a host on the strength of this group alone.
+   */
+  fallback?: DomainGroupRouters;
+}
+
+// Config key: `route.domains`. Optional: without it every host is served by
+// the root routers, exactly as before.
+export interface DomainsConfig {
+  /**
+   * The apex the subdomains hang off, e.g. `"example.com"` — `"localhost"` in
+   * development, where `acme.localhost` resolves to loopback. Compared against
+   * the request's hostname, so the port does not matter.
+   */
+  root: string;
+
+  /**
+   * Read the host from `X-Forwarded-Host` rather than the request URL. Only
+   * set it behind a proxy that overwrites the header, or a client picks its
+   * own host.
+   */
+  trustProxy?: boolean;
+
+  groups?: DomainGroupConfig[];
+
+  custom?: CustomDomainConfig;
+}
+
 // Config key: `route`. Covers both route dispatchers and the MCP registry.
 export interface RouteConfig {
   api: ApiRouteConfig;
   view: ViewRouteConfig;
   mcp?: McpRouteConfig;
+  domains?: DomainsConfig;
 }
 
 export function defineRouteConfig(config: RouteConfig): RouteConfig {

@@ -4,6 +4,10 @@ import { HttpRequest } from "../http";
 import { authConfigDefaults, type AuthConfig } from "./config";
 import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
+import { app } from "../foundation/app";
+import type { CreateCookieOptions } from "../http/requestContext";
+import { DomainRouter } from "../services/router/DomainRouter";
+import { normalizeHost } from "../services/router/DomainResolver";
 
 export class AuthManager {
   static token = "auth";
@@ -43,6 +47,33 @@ export class AuthManager {
     return this.provider;
   }
 
+  /** How `access_token` is written for `req` — every write goes through here. */
+  accessTokenCookieOptions(req: HttpRequest<any, any>, expires: Date): CreateCookieOptions {
+    return {
+      expires,
+      secure: !new URL(req.rawRequest.url).origin.includes("localhost"),
+      httpOnly: true,
+      domain: this.cookieDomain(req),
+    };
+  }
+
+  /** `config.cookieDomain` when `req`'s host falls under it, else nothing. */
+  cookieDomain(req: HttpRequest<any, any>): string | undefined {
+    const setting = this.config.cookieDomain;
+    if (!setting) {
+      return undefined;
+    }
+    const domain =
+      setting === "root" ? app(DomainRouter).resolver?.root : normalizeHost(setting);
+    if (!domain) {
+      throw new Error(
+        '`auth.cookieDomain` is "root", but `route.domains` is not configured.',
+      );
+    }
+    const host = req.domain?.host ?? normalizeHost(new URL(req.rawRequest.url).host);
+    return host === domain || host?.endsWith(`.${domain}`) ? domain : undefined;
+  }
+
   async getSession(token: string, userAgent: string) {
     const session = await this.userProvider.findSession({
       token,
@@ -70,12 +101,13 @@ export class AuthManager {
       }
       const session = await this.createOrUpdateSession({ email, id: user.id });
       const req = new HttpRequest();
-      const url = new URL(req.rawRequest.url);
-      req.ctx().setCookie("access_token", session.token, {
-        expires: session.expiresAt,
-        secure: !url.origin.includes("localhost"),
-        httpOnly: true,
-      });
+      req
+        .ctx()
+        .setCookie(
+          "access_token",
+          session.token,
+          this.accessTokenCookieOptions(req, session.expiresAt),
+        );
       if (session?.user) {
         session.user["extension"] = await this.config.extendSession(
           session.user,

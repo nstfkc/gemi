@@ -116,12 +116,13 @@ export class AuthController extends Controller {
     await userProvider.deleteMagicLinkToken(email);
     const session = await auth.createOrUpdateSession({ email });
 
-    const url = new URL(req.rawRequest.url);
-    req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     await auth.config.onSignIn(session, req.search.toJSON());
 
@@ -153,12 +154,13 @@ export class AuthController extends Controller {
 
     const session = await auth.createOrUpdateSessionV2({ email });
 
-    const url = new URL(req.rawRequest.url);
-    req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     await auth.config.onSignIn(session, req.search.toJSON());
 
@@ -188,12 +190,13 @@ export class AuthController extends Controller {
 
     const session = await auth.createOrUpdateSession({ email });
 
-    const url = new URL(req.rawRequest.url);
-    req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     await auth.config.onSignIn(session, req.search.toJSON());
 
@@ -201,7 +204,6 @@ export class AuthController extends Controller {
   }
 
   async signInV2(req = new SignInRequest()) {
-    const url = new URL(req.rawRequest.url);
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -235,11 +237,13 @@ export class AuthController extends Controller {
       id: user.id,
     });
 
-    req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     await auth.config.onSignIn(user, req.search.toJSON());
 
@@ -282,12 +286,13 @@ export class AuthController extends Controller {
       id: user.id,
     });
 
-    const url = new URL(req.rawRequest.url);
-    req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     await auth.config.onSignIn(user, req.search.toJSON());
 
@@ -398,12 +403,21 @@ export class AuthController extends Controller {
 
     await userProvider.deleteSession({ token });
 
-    const url = new URL(req.rawRequest.url);
-    req.ctx().setCookie("access_token", "", {
-      expires: new Date(0),
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        "",
+        app(AuthManager).accessTokenCookieOptions(req, new Date(0)),
+      );
+    // A cookie set before `cookieDomain` was turned on is scoped to the host
+    // alone, and the one above does not clear it.
+    if (app(AuthManager).cookieDomain(req)) {
+      req.ctx().setCookie("access_token", "", {
+        ...app(AuthManager).accessTokenCookieOptions(req, new Date(0)),
+        domain: undefined,
+      });
+    }
 
     await config.onSignOut(user);
 
@@ -618,13 +632,13 @@ export class AuthController extends Controller {
       id: user.id,
     });
 
-    const url = new URL(req.rawRequest.url);
-
-    req.ctx().setCookie("access_token", session.token, {
-      secure: !url.origin.includes("localhost"),
-      httpOnly: true,
-      expires: session.expiresAt,
-    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
 
     if (action === "signup") {
       // `""`, and not a token, deliberately.

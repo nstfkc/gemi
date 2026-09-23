@@ -114,3 +114,18 @@ describe("Link data-pending", () => {
     expect(html).toContain('data-pending="false"');
   });
 });
+
+describe("Link to another host", () => {
+  test("renders the absolute URL as a plain anchor, outside the router", () => {
+    // No router providers at all: an external link must not need them.
+    const html = renderToString(
+      <Link href="http://admin.gemi.dev:5173/users/7" className="x">
+        Admin
+      </Link>,
+    );
+
+    expect(html).toBe(
+      '<a data-active="false" href="http://admin.gemi.dev:5173/users/7" class="x">Admin</a>',
+    );
+  });
+});

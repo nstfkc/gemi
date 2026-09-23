@@ -39,8 +39,30 @@ export class App {
     return this.kernel.viewRoutes().componentTree;
   }
 
+  // Every host group's views, not just the root's: the servers load these
+  // modules up front, and a view only an `admin.` group routes to still has
+  // to be among them.
   public getFlatComponentTree() {
-    return this.kernel.viewRoutes().flatComponentTree;
+    const views = new Set<string>();
+    for (const dispatcher of this.kernel.domains().viewDispatchers()) {
+      for (const view of dispatcher.flatComponentTree) {
+        views.add(view);
+      }
+    }
+    return Array.from(views);
+  }
+
+  /**
+   * The hosts the dev server's Vite may answer: the `route.domains` root and
+   * its subdomains, or any host when custom domains are on, since those are
+   * only known to the app's resolver.
+   */
+  public devAllowedHosts(): true | string[] {
+    const domains = this.kernel.domains();
+    if (!domains.resolver) {
+      return [];
+    }
+    return domains.acceptsCustomDomains ? true : [`.${domains.resolver.root}`];
   }
 
   public getRouteManifest() {
@@ -87,9 +109,18 @@ export class App {
       if (outcome?.refusal) {
         return outcome.refusal;
       }
+      const domains = this.kernel.domains();
+      const dispatchers = (await domains.ask(req)) ?? (await domains.route(req));
+      if (dispatchers instanceof Response) {
+        return outcome ? outcome.apply(dispatchers) : dispatchers;
+      }
+      if (!dispatchers) {
+        const unknown = new Response("Unknown host", { status: 404 });
+        return outcome ? outcome.apply(unknown) : unknown;
+      }
       const result = isApiPath(url.pathname)
-        ? await this.kernel.apiRoutes().handleApiRequest(req)
-        : await this.kernel.viewRoutes().handleViewRequest(req);
+        ? await dispatchers.api.handleApiRequest(req)
+        : await dispatchers.view.handleViewRequest(req);
       if (!outcome) {
         return result;
       }
