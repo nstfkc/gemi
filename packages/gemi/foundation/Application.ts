@@ -168,7 +168,10 @@ export class Application extends Container {
         // `.then` rather than a direct call, so a synchronous throw lands in
         // the same `catch` as a rejection.
         Promise.resolve()
-          .then(() => provider.shutdown())
+          // With what is left of the shared deadline, so a provider that waits
+          // on something can bound its own wait and report what it abandoned
+          // rather than being cut off mid-wait by the race below.
+          .then(() => provider.shutdown({ timeoutMs: remaining }))
           .then(
             () => "done" as const,
             (error: unknown) => {

@@ -199,3 +199,33 @@ describe("a dispatch that resolves", () => {
     expect(memory(queue).leased).toBe(0);
   });
 });
+
+describe("a dispatch the driver cannot record", () => {
+  test("is said out loud, even when its caller discarded the promise", async () => {
+    // `push` attaches a wake handler to the very promise it returns, which
+    // marks that promise handled. With an empty rejection arm, a
+    // fire-and-forget `ChargeCard.dispatch(...)` whose INSERT failed produced
+    // no unhandled rejection and no log: the job never ran and nothing said
+    // so, in a driver whose whole purpose is not losing jobs quietly.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+    const boom = new Error("connection reset by peer");
+    vi.spyOn(queue.driver, "enqueue").mockRejectedValue(boom);
+
+    // Discarded exactly the way an app's `Job.dispatch(...)` discards it.
+    void queue.push(ChargeCard, "[]");
+    await settle();
+
+    const logged = error.mock.calls.flat();
+    expect(logged.join(" ")).toContain("could not record ChargeCard");
+    expect(logged).toContain(boom);
+  });
+
+  test("still rejects for a caller that awaits it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+    vi.spyOn(queue.driver, "enqueue").mockRejectedValue(new Error("nope"));
+
+    await expect(queue.push(ChargeCard, "[]")).rejects.toThrow("nope");
+  });
+});
