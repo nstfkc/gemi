@@ -83,7 +83,7 @@ describe("the provider's shutdown", () => {
     expect((queue.driver as MemoryQueueDriver).waiting).toBe(1);
   });
 
-  test("a job outrunning the deadline is reported, and the provider timed out", async () => {
+  test("a job outrunning the deadline is named by the queue, not just timed out", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { Gated } = gated();
@@ -93,8 +93,16 @@ describe("the provider's shutdown", () => {
 
     const report = await application.shutdown({ timeoutMs: 50 });
 
-    expect(report.timedOut).toEqual(["QueueServiceProvider"]);
-    expect(error.mock.calls.flat().join(" ")).toContain("QueueServiceProvider.shutdown()");
+    // The point of the log is telling the operator *which* job was abandoned.
+    // Draining without a bound could never do that: `drain()` would resolve
+    // only once every job had finished, so nothing was ever unfinished, and
+    // all the operator got was `Application`'s generic "did not finish within
+    // the provider shutdown deadline", which names nothing. The provider now
+    // bounds its own drain inside the deadline and reports.
+    const logged = error.mock.calls.flat().join(" ");
+    expect(logged).toContain("Queued jobs still running at shutdown");
+    expect(logged).toContain("Gated");
+    expect(report.timedOut).toEqual([]);
   });
 
   test("does not build a queue nothing used", async () => {
