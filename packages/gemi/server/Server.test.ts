@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { App } from "../app";
 import { Application } from "../foundation/Application";
@@ -105,4 +108,64 @@ describe("Server.start", () => {
       vi.unstubAllEnvs();
     }
   });
+});
+
+// The signal handling exits the process, so this runs in a child: a production
+// `Server` whose boot never finishes — the pod whose connection pool is still
+// connecting — signalled while it is still in there. What it proves is the
+// ordering inside `start()`: the handler has to be installed *before* the
+// boot is awaited, or the signal hits the default action and kills the process
+// with nothing shut down. Nothing is stubbed but `waitForBoot`, which stands in
+// for a boot slow enough to be signalled mid-way.
+describe("a signal during the boot", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gemi-boot-signal-"));
+  const script = join(dir, "server.ts");
+  const from = (...parts: string[]) => JSON.stringify(join(import.meta.dirname, "..", ...parts));
+  writeFileSync(
+    script,
+    `
+    import { App } from ${from("app", "index.ts")};
+    import { Kernel } from ${from("kernel", "index.ts")};
+    import { ServiceProvider } from ${from("support", "ServiceProvider.ts")};
+    import { Server } from ${from("server", "Server.ts")};
+
+    class Pool extends ServiceProvider {
+      shutdown() {
+        console.log("pool closed");
+      }
+    }
+    class TestKernel extends Kernel {
+      protected providers = [Pool];
+    }
+
+    // The boot that is still going when the signal lands.
+    App.prototype.waitForBoot = () => new Promise(() => {});
+    void new Server({ kernel: TestKernel }).start();
+    console.log("booting");
+    setInterval(() => {}, 1000);
+  `,
+  );
+
+  test("drains the providers and exits with the drain's code, though nothing is listening yet", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", script],
+      env: { ...process.env, NODE_ENV: "production" },
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const decoder = new TextDecoder();
+    let output = "";
+    const read = (async () => {
+      for await (const chunk of proc.stdout) output += decoder.decode(chunk);
+    })();
+    while (!output.includes("booting")) await Bun.sleep(20);
+
+    proc.kill("SIGTERM");
+    const code = await proc.exited;
+    await read;
+
+    // Without the handler the default action ends the process at 128 + 15.
+    expect(code).toBe(0);
+    expect(output).toContain("pool closed");
+  }, 20_000);
 });
