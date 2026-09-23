@@ -49,11 +49,18 @@ export interface QueueDriver {
   enqueue(job: EnqueueJob): Promise<string>;
 
   /**
-   * Leases up to `limit` claimable jobs, oldest first, each for
-   * `visibilityTimeoutMs`, and returns them with `attempt` already incremented.
-   * A job is claimable when it is waiting and due, or when its previous lease
-   * has run out. Two concurrent calls — from this process or another — are never
-   * handed the same job.
+   * Leases up to `limit` claimable jobs, each for `visibilityTimeoutMs`, and
+   * returns them with `attempt` already incremented. A job is claimable when
+   * it is waiting and due, or when its previous lease has run out. Two
+   * concurrent calls — from this process or another — are never handed the same
+   * job.
+   *
+   * Oldest first, and *oldest* means the time a job became claimable, not the
+   * time it was enqueued: a job's due moment, which is its `createdAt` plus
+   * `delayMs` and then the end of each retry's backoff. The two only differ
+   * once a delay or a retry is in play, and then they differ a lot — ordering
+   * by creation time lets a job that asked to wait five minutes jump the queue
+   * ahead of everything enqueued while it waited. The contract suite pins it.
    */
   claim(limit: number, options: ClaimOptions): Promise<ClaimedJob[]>;
 
