@@ -30,8 +30,24 @@ type Backend = {
   name: string;
   dialect: Dialect;
   /** A fresh, empty database for one test: `connect` opens clients to it. */
-  prepare(): Promise<{ connect(): SQL; table: string; dispose(): Promise<void> }>;
+  prepare(): Promise<{
+    connect(): SQL;
+    table: string;
+    /** `table`, quoted the way the driver quotes it. */
+    quoted: string;
+    dispose(): Promise<void>;
+  }>;
 };
+
+/**
+ * The table name as the driver's `name()` writes it. A test that reads the
+ * table directly has to quote it the same way, or a mixed-case name is folded
+ * by Postgres and the row it is asserting on is in a table it cannot find.
+ */
+function quoteTable(dialect: Dialect, table: string) {
+  const mysql = dialect === "mysql" || dialect === "mariadb";
+  return mysql ? `\`${table}\`` : `"${table}"`;
+}
 
 const sqlite: Backend = {
   name: "sqlite",
@@ -46,6 +62,7 @@ const sqlite: Backend = {
     await new DatabaseQueueDriver({ sql: first, dialect: "sqlite" }, { table }).createTable();
     return {
       table,
+      quoted: quoteTable("sqlite", table),
       connect() {
         const client = new SQL(url);
         clients.push(client);
@@ -67,19 +84,20 @@ function server(name: string, dialect: Dialect, url: string): Backend {
       // Mixed case on purpose: Postgres folds an unquoted name, so a query
       // that forgot to quote would miss the table `createTable` made.
       const table = `GemiJobs_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const quoted = quoteTable(dialect, table);
       const clients: SQL[] = [];
       const first = new SQL(url);
       clients.push(first);
       await new DatabaseQueueDriver({ sql: first, dialect }, { table }).createTable();
       return {
         table,
+        quoted,
         connect() {
           const client = new SQL(url);
           clients.push(client);
           return client;
         },
         async dispose() {
-          const quoted = dialect === "postgres" ? `"${table}"` : `\`${table}\``;
           await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
           await Promise.all(clients.map((client) => client.close()));
         },
@@ -167,7 +185,7 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
       new DatabaseQueueDriver({ sql: db.connect(), dialect: backend.dialect }, { table: db.table });
     const reader = db.connect();
     const rows = async () =>
-      (await reader.unsafe(`SELECT * FROM ${db.table} ORDER BY created_at, id`)) as Array<
+      (await reader.unsafe(`SELECT * FROM ${db.quoted} ORDER BY created_at, id`)) as Array<
         Record<string, unknown>
       >;
     return { driver, rows };
