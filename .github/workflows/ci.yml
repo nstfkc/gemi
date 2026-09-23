@@ -514,6 +514,12 @@ jobs:
         run: bun --bun vitest run services/queue/DatabaseQueueDriver.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
 
+      # `DB.schema()` reads a different catalog per dialect, and the servers
+      # are already here.
+      - name: Schema introspection on Postgres and MySQL
+        run: bun --bun vitest run database/introspect.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+
   # The iOS client. `swift test` at the root builds GemiChat and replays the
   # TypeScript reducer's recorded cases (`packages/gemi/ai/client/__fixtures__`)
   # through its port, and compiles the checked-in `ai:generate-client` output

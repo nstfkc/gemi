@@ -2296,6 +2296,35 @@ The direction is the awkward one: a `DB.sql` write inside a transaction rolls ba
 development on SQLite and survives the rollback in production on Postgres. `DB.query` and
 `DB.execute` join the transaction on both.
 
+### Reading the live schema
+
+`DB.schema()` reads the schema back out of the database's own catalog: every table, its columns
+and their types, its primary key, and its foreign keys.
+
+```ts
+const { dialect, tables } = await DB.schema()
+const post = tables.find((t) => t.name === "Post")
+// post.columns     [{ name: "id", type: "text", nullable: false, default: null }, …]
+// post.primaryKey  ["id"]
+// post.relations   [{ name: "Post_authorId_fkey", columns: ["authorId"],
+//                     referencedTable: "User", referencedColumns: ["id"],
+//                     onDelete: "CASCADE", onUpdate: "CASCADE" }]
+```
+
+`DB.connection(name).schema()` reads another connection's schema.
+
+- **This is what the database says, not what the models say.** The generated `ModelSchema` comes
+  from Prisma and is never checked against the database. Comparing the two is how you find drift.
+- **Types are in the database's own spelling**, such as `character varying(255)`, `int` or
+  `INTEGER`. They are not mapped to TypeScript or Prisma types. Defaults are reported the same way:
+  SQLite and Postgres give the SQL expression, and MySQL gives the bare value.
+- **Only base tables are listed.** Views are left out, and so are SQLite's `sqlite_*` tables. On
+  Postgres the listing is limited to `current_schema()`, and on MySQL to `database()`. Migration
+  tables such as `_prisma_migrations` are real tables, so they are included.
+- **It works on MySQL and MariaDB**, where `DB.query` does not yet.
+- **The code loads on first call.** An app that never calls it never loads it.
+- **It joins the ambient transaction.** A table created earlier in the same transaction is included.
+
 ## Enums
 
 A Prisma `enum` is a **string** at runtime, on both dialects, exactly as it is through Prisma:
