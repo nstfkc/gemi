@@ -57,9 +57,15 @@ export class MiddlewareRegistry {
     }
   }
 
-  /** The `global` list, run the way a route's list is. */
+  /**
+   * The `global` list, run the way a route's list is.
+   *
+   * It does not re-check the list: `MiddlewareServiceProvider.boot` has
+   * already thrown on a bad entry, a boot failure stops `gemi start`, and the
+   * config is not written to afterwards. This runs on every request the server
+   * takes, static files included, so the check belongs at boot and only there.
+   */
   public runGlobalMiddleware() {
-    this.assertGlobalMiddleware();
     return this.runMiddleware(this.config.global);
   }
 
