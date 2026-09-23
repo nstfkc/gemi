@@ -95,6 +95,15 @@ async function runInWorker(jobName: string, args: string) {
  */
 const bootScope = new AsyncResource("gemi.queue");
 
+/**
+ * The longest the loop waits between retries while `claim` keeps rejecting.
+ *
+ * Long enough that a database which is properly down is not asked once a
+ * second by every worker process for as long as it stays down, short enough
+ * that the queue is claiming again within a minute of it coming back.
+ */
+const maxClaimBackoff = 60_000;
+
 /** What `drain` could not wait out. */
 export type DrainResult = {
   /**
@@ -134,6 +143,8 @@ export class QueueManager {
   private looping = false;
   private claiming: Promise<unknown> | undefined;
   private woken = false;
+  /** Consecutive `claim` rejections; see `sleep`. Cleared by a claim that returns. */
+  private claimFailures = 0;
   private resume: (() => void) | undefined;
   private unsubscribe: (() => void) | undefined;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -374,10 +385,12 @@ export class QueueManager {
         let claimed: ClaimedJob[] = [];
         try {
           claimed = await claim;
+          this.claimFailures = 0;
         } catch (error) {
+          this.claimFailures++;
           console.error(
             `The queue could not claim jobs from its driver; it will try ` +
-              `again on the next wake.`,
+              `again in ${this.retryDelay()}ms.`,
             error,
           );
         } finally {
@@ -397,12 +410,35 @@ export class QueueManager {
     }
   }
 
+  /**
+   * Waits for the next thing worth waking for: a slot freeing, a `subscribe`
+   * driver saying there is work, or the poll timer a driver without
+   * `subscribe` gets.
+   *
+   * A claim that rejected arms a timer whatever the driver does, and that is
+   * the whole reason this is not just the `subscribe` test. The wake that
+   * prompted the lost claim has already been consumed, so a driver that only
+   * speaks up on an enqueue — LISTEN/NOTIFY, say — has nothing left to
+   * announce: an idle worker whose one claim died on a connection reset would
+   * sit there, with every job already waiting, until some unrelated process
+   * enqueued again. On a busy worker an in-flight job's `wake` covers it; an
+   * idle one has nothing to be rescued by.
+   *
+   * The delay doubles per consecutive failure so that storage which is
+   * properly down is not asked once a `pollInterval` for as long as it stays
+   * down, and the first claim that returns clears the count.
+   */
   private sleep() {
     return new Promise<void>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      if (!this.driver.subscribe) {
+      const delay = this.claimFailures > 0
+        ? this.retryDelay()
+        : this.driver.subscribe
+          ? undefined
+          : this.config.pollInterval;
+      if (delay !== undefined) {
         // Unref'd: a polling queue alone should not hold the process open.
-        timer = setTimeout(() => this.wake(), this.config.pollInterval);
+        timer = setTimeout(() => this.wake(), delay);
         timer.unref?.();
       }
       this.resume = () => {
@@ -410,6 +446,12 @@ export class QueueManager {
         resolve();
       };
     });
+  }
+
+  /** `pollInterval`, doubled once per consecutive claim failure, capped. */
+  private retryDelay() {
+    const doublings = Math.min(Math.max(0, this.claimFailures - 1), 30);
+    return Math.min(this.config.pollInterval * 2 ** doublings, maxClaimBackoff);
   }
 
   private wake() {
@@ -503,7 +545,32 @@ export class QueueManager {
       return;
     }
 
-    const job = new Job();
+    let job: InstanceType<typeof Job>;
+    try {
+      job = new Job();
+    } catch (error) {
+      // A constructor or a class field that throws — `private mailer =
+      // app(Mailer)` with nothing bound, say. Every other failure in here is
+      // reported against the instance, and this one has no instance to report
+      // against, which is exactly why it has to be caught here rather than
+      // left to the generic path: that path never ends the claim, so the lease
+      // lapses, the job is claimed again, and the constructor throws again,
+      // once per visibility timeout, forever. The `maxAttempts` guard below
+      // would normally stop that, and it cannot — answering "how many attempts
+      // does this job get?" needs the instance that cannot be built. So it is
+      // dead-lettered unrun, like a job whose arguments are not JSON: no
+      // attempt of it can ever do anything but this.
+      console.error(
+        `Dropped a queued ${claimed.name}: it could not be constructed.`,
+        error,
+      );
+      await this.driver.fail(claimed, {
+        error: `The job could not be constructed: ${String(error)}`,
+        retryInMs: null,
+      });
+      return;
+    }
+
     let args: any[];
     try {
       args = JSON.parse(claimed.args);

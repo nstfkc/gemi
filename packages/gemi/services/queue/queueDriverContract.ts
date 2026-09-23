@@ -170,6 +170,29 @@ export function queueDriverContract(
     );
 
     test(
+      "order is by when a job became claimable, not by when it was enqueued",
+      withDriver(async (driver) => {
+        // The one case where the two readings of "oldest first" disagree, and
+        // the reason the interface says which it means. `delayed` was recorded
+        // first but was not claimable until later, so `immediate` — which has
+        // actually been waiting — goes first. A driver ordering by creation
+        // time gets the opposite answer, and a job asked to wait five minutes
+        // then jumps ahead of everything enqueued during those five minutes.
+        const delayed = await driver.enqueue({
+          name: "A",
+          args: "[]",
+          delayMs: SHORT,
+        });
+        const immediate = await driver.enqueue({ name: "B", args: "[]" });
+
+        await sleep(SHORT * 2);
+
+        const claimed = await driver.claim(10, LEASE);
+        expect(claimed.map((job) => job.id)).toEqual([immediate, delayed]);
+      }),
+    );
+
+    test(
       "a lease that runs out makes the job claimable again, and counts the lost attempt",
       withDriver(async (driver) => {
         const id = await driver.enqueue({ name: "A", args: "[]" });
@@ -192,9 +215,21 @@ export function queueDriverContract(
         await sleep(SHORT * 2);
         const [current] = await driver.claim(1, { visibilityTimeoutMs: SHORT });
 
-        // The slow first claimer finishes late. Neither report may end the
+        // The slow first claimer finishes late. No report of its may end the
         // claim that now holds the job, or two processes would each believe
         // the other's outcome.
+        //
+        // The retry is checked first, and while the second lease is at its
+        // freshest, because it is the branch a driver is likeliest to get
+        // wrong: the other two delete the row, and an author who puts the
+        // attempt check on the delete and not on the update that sends a row
+        // back to waiting passes every other test here. In production that
+        // driver re-opens a job another worker is running right now — two live
+        // runs at one attempt, which is the whole of what `attempt` is for. So
+        // the second claim must still be exclusive afterwards.
+        await driver.fail(stale!, { error: "late", retryInMs: 0 });
+        expect(await driver.claim(1, LEASE)).toEqual([]);
+
         await driver.complete(stale!);
         await driver.fail(stale!, { error: "late", retryInMs: null });
         await sleep(SHORT * 2);
