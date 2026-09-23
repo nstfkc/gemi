@@ -169,5 +169,10 @@ describe("httpProd with a global middleware", () => {
 
     expect(res.status).toBe(404);
     expect(ran).toBe(1);
+    // Not just the status: the gate's headers have to survive the whole way
+    // out through a streamed document, which is a different path from the
+    // asset above (a Response that already exists). Checked by dropping
+    // `outcome.apply` in `App.fetch` — this assertion is what fails.
+    expect(res.headers.get("X-Gate")).toBe("front-door");
   });
 });
