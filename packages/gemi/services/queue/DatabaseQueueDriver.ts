@@ -49,9 +49,11 @@ type Row = {
  * different rows and none waits on another. Postgres does it in one statement
  * (a locking CTE feeding an `UPDATE … RETURNING`); MySQL has no `RETURNING`
  * and refuses a `LIMIT` inside `IN (…)`, so there it is a `SELECT … FOR
- * UPDATE SKIP LOCKED` and one `UPDATE` per row in a transaction. SQLite has
- * no row locks and needs none: it runs one write at a time, so a single
- * `UPDATE … RETURNING` is atomic. MariaDB needs 10.6 for `SKIP LOCKED`.
+ * UPDATE SKIP LOCKED` and one `UPDATE` per row in a transaction, at READ
+ * COMMITTED and in two passes — see `claimLocking`, where both are load
+ * bearing rather than tidying. SQLite has no row locks and needs none: it
+ * runs one write at a time, so a single `UPDATE … RETURNING` is atomic.
+ * MariaDB needs 10.6 for `SKIP LOCKED`.
  *
  * ### Time
  *
@@ -253,17 +255,79 @@ export class DatabaseQueueDriver implements QueueDriver {
   /**
    * MySQL and MariaDB: lock, then update. The rows stay locked until the
    * transaction commits, so the attempt counted here is the one written.
+   *
+   * Two selects rather than one, because the `OR` in `claimable` leaves MySQL
+   * no index to walk: it scans the whole table and sorts it (`type: ALL`,
+   * `Using filesort`), and `LIMIT` is applied only after the sort, so InnoDB
+   * locks every candidate row rather than the handful being claimed. A second
+   * claimer's `SKIP LOCKED` then skips the entire table and claims nothing —
+   * the opposite of what `SKIP LOCKED` is here for, and enough to serialise
+   * every replica onto one claimer. Fixing `status` to a single value in each
+   * pass lets its index supply both the filter and the order, so only the rows
+   * actually handed out are locked. The two passes cannot overlap, because a
+   * row's `status` is in exactly one of them.
    */
   private async claimLocking(limit: number, options: ClaimOptions): Promise<Row[]> {
-    return await this.sql.begin(async (tx) => {
+    // A connection of our own, so the isolation level below is this claim's
+    // and not the pool's. MySQL will not change it inside an open
+    // transaction, and `begin` opens one at once, so it is set just before.
+    const connection = await this.sql.reserve();
+    const [isolation] = (await connection`
+      SELECT @@transaction_isolation AS level
+    `) as Array<{ level: string }>;
+    // REPEATABLE READ — MySQL's default — locks the gaps a range scan passes
+    // over, not just the rows it returns. The two passes below read different
+    // indexes, so two claimers take those gap locks in opposite orders and
+    // deadlock, even when the second pass matches no row at all. READ
+    // COMMITTED takes no gap locks, which is what `SKIP LOCKED` wants: each
+    // claimer locks the rows it is taking and nothing else.
+    await connection`SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED`;
+    try {
+      return await this.claimLockingOn(connection, limit, options);
+    } finally {
+      // The connection goes back to the pool the application shares, so it
+      // goes back as it came. `@@transaction_isolation` reads back with a
+      // hyphen and `SET` wants a space.
+      const previous = isolation?.level?.replaceAll("-", " ");
+      if (previous && /^[A-Z ]+$/.test(previous)) {
+        await connection.unsafe(`SET SESSION TRANSACTION ISOLATION LEVEL ${previous}`);
+      }
+      connection.release();
+    }
+  }
+
+  private async claimLockingOn(
+    connection: SQL,
+    limit: number,
+    options: ClaimOptions,
+  ): Promise<Row[]> {
+    return await connection.begin(async (tx) => {
       const table = this.name(tx);
+      const columns = tx.unsafe("id, name, payload, attempts, available_at, created_at");
+
+      // Waiting and due, oldest first, along the (status, available_at) index.
       const rows: Row[] = await tx`
-        SELECT id, name, payload, attempts, available_at, created_at FROM ${table}
-        WHERE ${this.claimable(tx)}
+        SELECT ${columns} FROM ${table}
+        WHERE status = 'pending' AND available_at <= ${this.now(tx)}
         ORDER BY available_at, id
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
       `;
+
+      // Only then the leases that ran out, longest-expired first, along the
+      // (status, lease_expires_at) index. `claim` sorts what both passes
+      // return by `available_at` before handing it to the manager.
+      if (rows.length < limit) {
+        const expired: Row[] = await tx`
+          SELECT ${columns} FROM ${table}
+          WHERE status = 'claimed' AND lease_expires_at <= ${this.now(tx)}
+          ORDER BY lease_expires_at, id
+          LIMIT ${limit - rows.length}
+          FOR UPDATE SKIP LOCKED
+        `;
+        rows.push(...expired);
+      }
+
       for (const row of rows) {
         const now = this.now(tx);
         await tx`
