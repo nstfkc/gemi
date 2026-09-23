@@ -300,15 +300,29 @@ export class QueueManager {
     if (this.state === "idle" && (!this.durable || this.mayClaimHere())) {
       this.start();
     }
-    // A driver without `subscribe` is only polled, so without this a job
+    // A driver without `subscribe` is only polled, so without the wake a job
     // dispatched here would wait up to `pollInterval` in a queue with room.
-    // A spurious wake just claims nothing; a rejection is the caller's.
-    if (!this.driver.subscribe) {
-      id.then(
-        () => this.state === "running" && this.wake(),
-        () => {},
-      );
-    }
+    // A spurious wake just claims nothing.
+    //
+    // The rejection is always reported, whatever the driver does, because a
+    // dispatch that was never recorded is the one thing a queue must not lose
+    // quietly. It used to depend on both: a polled driver got an empty arm,
+    // which marks `id` handled — and `id` is what `push` returns — so a
+    // fire-and-forget `SendReceiptJob.dispatch(...)` whose INSERT failed (a
+    // failover, a pool timeout, a table not migrated yet) produced no
+    // unhandled rejection and no line anywhere, and the job simply never ran.
+    // A subscribing driver got no arm at all, so the same failure surfaced as
+    // an unhandled rejection instead. A caller that awaits still gets the
+    // rejection and can still decide what to do about it.
+    id.then(
+      () => !this.driver.subscribe && this.state === "running" && this.wake(),
+      (error: unknown) =>
+        console.error(
+          `[gemi] The queue driver could not record ${job.name}, so it did ` +
+            `not run and will not be retried.`,
+          error,
+        ),
+    );
     return id;
   }
 
