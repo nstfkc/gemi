@@ -74,6 +74,12 @@ export interface QueueConfig {
   /**
    * How often, in milliseconds, to ask a driver without `subscribe` for work.
    * The memory driver wakes the queue itself and is never polled.
+   *
+   * It is also how long the queue waits before retrying a `claim` that
+   * rejected — for every driver, `subscribe` or not, because the wake that
+   * prompted the lost claim is spent and a subscribing driver has no reason to
+   * send another. That delay doubles per consecutive failure, up to a minute,
+   * so storage that is down is not asked this often for as long as it is down.
    */
   pollInterval?: number;
 }

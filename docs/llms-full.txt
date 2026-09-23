@@ -9902,7 +9902,7 @@ export default defineQueueConfig({
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
 | `driver` | `"memory" \| QueueDriver \| () => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
 | `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
-| `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. |
+| `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. Also the delay before retrying a claim that failed — for any driver, doubling per consecutive failure up to a minute. |
 
 The slice is wired into the kernel by name:
 
@@ -9959,7 +9959,7 @@ A driver is any object implementing `QueueDriver` from `gemi/services`. It is cl
 | Method | What it promises |
 | --- | --- |
 | `enqueue({ name, args, delayMs? })` | Records a job, claimable after `delayMs`, and resolves to its id. |
-| `claim(limit, { visibilityTimeoutMs })` | Leases up to `limit` claimable jobs, oldest first, with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. |
+| `claim(limit, { visibilityTimeoutMs })` | Leases up to `limit` claimable jobs, oldest first — by the moment each became claimable, not the moment it was enqueued — with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. |
 | `complete(job)` | Ends the claim; the job is never claimed again. |
 | `fail(job, { error, retryInMs })` | Ends the claim. A number makes the job claimable after that long; `null` dead-letters it for good. |
 | `heartbeat?(jobs, { visibilityTimeoutMs })` | Extends the leases of jobs still running. |
