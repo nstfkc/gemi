@@ -190,6 +190,41 @@ program.command("start").action(async () => {
   process.exit(code);
 });
 
+program
+  .command("queue:work")
+  .description(
+    "Boot the app and run queued jobs, without serving HTTP, so job capacity " +
+      "scales apart from web traffic. Needs a queue driver every process can " +
+      "reach, such as \"database\". Drains on SIGTERM/SIGINT like `gemi start`",
+  )
+  .action(async () => {
+    const rootDir = path.resolve(process.cwd());
+    const appDir = path.join(rootDir, "app");
+
+    // From the application's gemi, never this binary's, as `gemi run` does.
+    let entry: string;
+    try {
+      entry = Bun.resolveSync("gemi/queue/work", rootDir);
+    } catch {
+      console.error(
+        `Could not resolve \`gemi/queue/work\` from ${rootDir}. Run this from ` +
+          `the root of a gemi project, on a version of gemi that has it.`,
+      );
+      process.exit(1);
+    }
+
+    // Relayed like `gemi start`, so a platform's SIGTERM reaches the worker
+    // and it drains its jobs. NODE_ENV is passed through, as `gemi run` does:
+    // one worker runs beside `gemi dev` from source, another in production.
+    // The scheduler is off unless GEMI_NO_SCHEDULE says otherwise, so adding
+    // workers does not add copies of every cron job.
+    const code = await spawnForwardingSignals({
+      cmd: ["bun", "--preload", "gemi/bun/preload", ...appPreloadArgs(appDir), entry],
+      env: { GEMI_NO_SCHEDULE: "1", ...process.env },
+    });
+    process.exit(code);
+  });
+
 // Everything after the command's name belongs to the command, including its
 // flags. Two commander settings do that, and both are load-bearing:
 //
