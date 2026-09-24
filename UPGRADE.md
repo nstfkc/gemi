@@ -115,6 +115,19 @@ entry, `modulepreload` hints, loaders and navigation stylesheets now use that
 base too, where they used to be root-relative. Check that whatever sits in
 front of the app answers `<vite.base>assets/*`.
 
+## Everything under `/assets/` is served from `dist/client`
+
+`gemi start` used to decide what was a file by an allowlist of extensions, so
+a `.woff2`, `.gif` or `.json` Vite emitted into `assets/` went to your routes
+instead and came back as a rendered 404 page. Now every path under `/assets/`
+is served from `dist/client` whatever its extension, and a miss there answers a
+plain `404` without reaching your routes. Root-level public files are still
+recognised by extension; the list gained `gif`, `xml`, `webmanifest`, `woff`,
+`woff2`, `otf`, `webm`, `mp4`, `mp3` and `pdf`, and a path with one of those
+extensions that has no file behind it still goes to your routes. Nothing to
+change unless a route of yours answers a path with one of those extensions
+*and* `public/` has a file at the same path: the file now wins.
+
 ## `SIGTERM` drains the server, and `gemi start` exits with its code
 
 `gemi start` used to ignore signals and exit `0` whatever its server did. Now

@@ -16,6 +16,14 @@ export function isBuildChunkPath(pathname: string): boolean {
 }
 
 /**
+ * `/assets` or anything under it — the prefix the router refuses to mount a
+ * route on at boot, so nothing there is ever the app's to answer.
+ */
+export function isReservedAssetPath(pathname: string): boolean {
+  return pathname === RESERVED_ROUTE_PREFIX || pathname.startsWith(`${RESERVED_ROUTE_PREFIX}/`);
+}
+
+/**
  * The answer to a static-looking request with no file behind it in
  * `dist/client`, or `undefined` to hand the request to the app.
  *
@@ -53,11 +61,11 @@ export function staticAssetMiss(pathname: string): Response | undefined {
 
   // `/assets` is reserved for build output (the router rejects routes there
   // at boot), so a miss is a miss — 404 without paying for an SSR render.
-  if (pathname === RESERVED_ROUTE_PREFIX || pathname.startsWith(`${RESERVED_ROUTE_PREFIX}/`)) {
+  if (isReservedAssetPath(pathname)) {
     return new Response("Not found", { status: 404 });
   }
 
-  // Anywhere else the static-file pattern matched on extension alone, so this
+  // Anywhere else the public-file pattern matched on extension alone, so this
   // may well be an app route — a file route like
   // `this.file(() => Bun.file(...))` mounted at `/files/logo.svg` lands here
   // too. The app answers it rather than a 404 on its behalf.
