@@ -146,6 +146,25 @@ function configuresMemory(application: Application) {
 }
 
 /**
+ * Whether the queue's jobs live only in this process, for the warning below.
+ * The config says so for `"memory"` or a `MemoryQueueDriver`, but a factory
+ * only says once it has run, so for one the manager is built — which is the
+ * same driver `durable` and `push()` go by. A factory that throws here is
+ * left to throw at the first dispatch, as it would have without the switch,
+ * rather than failing the boot over a warning.
+ */
+function keepsJobsInProcess(application: Application) {
+  if (configuresMemory(application)) return true;
+  const driver = application.config.get<QueueConfig>("queue", {}).driver;
+  if (typeof driver !== "function" || !application.bound(QueueManager)) return false;
+  try {
+    return !application.make(QueueManager).durable;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Says so at boot when a server's `GEMI_QUEUE_CLAIM` will not do what it
  * reads as. Only in a server's main thread: a console command or a `worker`
  * job's thread shares the server's environment and claims nothing anyway.
@@ -162,7 +181,7 @@ function warnAboutClaimSwitch(application: Application) {
   if (value === undefined || isQueueWorker()) return;
   if (process.env.ROOT_DIR === undefined || !isMainThread) return;
   if (claimingTurnedOff()) {
-    if (!configuresMemory(application)) return;
+    if (!keepsJobsInProcess(application)) return;
     console.warn(
       `[gemi] GEMI_QUEUE_CLAIM=off is ignored: the memory queue driver keeps ` +
         `jobs in the process that dispatched them, so no worker could run ` +

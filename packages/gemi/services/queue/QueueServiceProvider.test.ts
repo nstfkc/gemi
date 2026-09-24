@@ -255,6 +255,7 @@ describe("GEMI_QUEUE_CLAIM=off, for a web process beside workers", () => {
 
   test("a production server claims nothing at boot or on a dispatch, and records the job", async () => {
     serving();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { Gated, started } = gated();
     const kept = new MemoryQueueDriver();
     await kept.enqueue({ name: "Gated", args: "[0]" });
@@ -266,6 +267,7 @@ describe("GEMI_QUEUE_CLAIM=off, for a web process beside workers", () => {
 
     expect(started).toEqual([]);
     expect(kept.waiting).toBe(2);
+    expect(warn).not.toHaveBeenCalled();
     await application.make(QueueManager).stop();
   });
 
@@ -321,6 +323,39 @@ describe("GEMI_QUEUE_CLAIM=off, for a web process beside workers", () => {
     expect(warn.mock.calls.flat().join(" ")).toContain("GEMI_QUEUE_CLAIM=off is ignored");
     release();
     await application.make(QueueManager).stop();
+  });
+
+  test("is ignored, loudly, for a memory driver a factory returns", async () => {
+    serving();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { Gated, started, release } = gated();
+    const application = await makeApp({
+      jobs: [Gated],
+      driver: () => new MemoryQueueDriver(),
+    });
+
+    startClaimingIfServing(application);
+    await application.make(QueueManager).push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([1]);
+    expect(warn.mock.calls.flat().join(" ")).toContain("GEMI_QUEUE_CLAIM=off is ignored");
+    release();
+    await application.make(QueueManager).stop();
+  });
+
+  test("says nothing, and still boots, when the driver factory throws", async () => {
+    serving();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const application = await makeApp({
+      jobs: [],
+      driver: () => {
+        throw new Error("no broker");
+      },
+    });
+
+    expect(() => startClaimingIfServing(application)).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   test("says nothing in a process that is not a server", async () => {
