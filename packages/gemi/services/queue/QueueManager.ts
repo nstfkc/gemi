@@ -185,7 +185,9 @@ export class QueueManager {
    * The consequence worth knowing: anything that constructs an application and
    * skips phase two sees an empty registry, and every dispatch against an empty
    * registry is dropped — loudly on stderr, but after `Job.dispatch` has already
-   * returned, so no caller finds out. An app that lists its jobs explicitly is
+   * returned, so no caller finds out. On a durable driver not even that is
+   * immediate: the job is left for another replica, and the stderr line comes
+   * only once `unknownJobGrace` has passed. An app that lists its jobs explicitly is
    * unaffected, because that list is already in place by the end of `register()`.
    */
   useJobs(jobs: Array<new () => Job>) {
@@ -613,7 +615,11 @@ export class QueueManager {
       // from `createdAt` because that is all a claim carries; it is the
       // driver's clock against this one, and the skew is seconds against a
       // window of minutes. A driver that does filter only hands out an unknown
-      // name once it has waited out the same window, so it lands below.
+      // name once it has waited out the same window, so it normally lands
+      // below; with this clock a few seconds behind the driver's, one handed
+      // out right at the boundary is released instead, and — its window now
+      // restarting from the release — waits one more `unknownJobGrace`. Late,
+      // not lost, so no slack is subtracted for it.
       const age = Date.now() - claimed.createdAt;
       if (this.durable && age < this.config.unknownJobGrace) {
         // Once per name: with a driver that cannot filter, every poll can
