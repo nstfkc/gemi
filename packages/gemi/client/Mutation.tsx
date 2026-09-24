@@ -158,10 +158,14 @@ export function Form<
   );
 
   const handleSubmit = async (e: FormEvent) => {
+    // Before the guards, not after: returning early without preventing the
+    // default let the browser submit the form itself. A second click while a
+    // slow submit was still in flight navigated the page away and took the
+    // request with it.
+    e.preventDefault();
     if (loading) {
       return;
     }
-    e.preventDefault();
     if (!formRef.current) {
       return;
     }
