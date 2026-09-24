@@ -615,6 +615,31 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     );
   });
 
+  test("a dead job retried through the queue runs again with all its attempts, without waiting out the poll", async () => {
+    const { driver, rows } = await database();
+    let broken = true;
+    const runs: number[] = [];
+    class Flaky extends Job {
+      static name = "Flaky";
+      maxAttempts = 2;
+      run() {
+        runs.push(Date.now());
+        if (broken) throw new Error("smtp is down");
+      }
+    }
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = worker(driver(), [Flaky], { pollInterval: 60_000 });
+    const id = await queue.push(Flaky, "[]");
+    await until(async () => (await rows())[0]?.status === "dead");
+    expect(runs).toHaveLength(2);
+
+    broken = false;
+    expect(await queue.retryDead(id)).toBe(true);
+
+    await until(() => runs.length === 3, 1_000);
+    await until(async () => (await rows()).length === 0);
+  });
+
   test("a dispatch is claimed without waiting out the poll interval", async () => {
     const { driver } = await database();
     const runs: Array<{ n: number; worker: string }> = [];
