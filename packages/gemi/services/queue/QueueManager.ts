@@ -377,9 +377,7 @@ export class QueueManager {
     // under them, costing each an attempt and a lease's wait. There the job
     // waits in the driver for a server. A manager built by hand, with no
     // application, is its caller's to run and keeps starting.
-    if (this.state === "idle" && (!this.durable || this.mayClaimHere())) {
-      this.start();
-    }
+    this.startIfIdle();
     // A driver without `subscribe` is only polled, so without the wake a job
     // dispatched here would wait up to `pollInterval` in a queue with room.
     // A spurious wake just claims nothing.
@@ -420,6 +418,53 @@ export class QueueManager {
       },
     );
     return id;
+  }
+
+  /**
+   * Runs a dead-lettered job again, from attempt 1 with its whole
+   * `maxAttempts`, and resolves to whether a dead job was found under `id`.
+   * `false` for an id that is waiting, running, finished or unknown: only a
+   * dead job is brought back, so this cannot restart one that is running
+   * somewhere.
+   *
+   * The job is claimed the way a dispatch's is. On a server it is run here as
+   * soon as there is room; from a console command it waits in the driver for
+   * a server, which with a polling driver means up to `pollInterval`.
+   *
+   * Refused for a driver without `retryDead`. The memory driver keeps nothing
+   * of a dead job, so there is no id it could bring back, and resolving
+   * `false` would read as "no such job" to someone holding an id they just saw
+   * in a log.
+   */
+  async retryDead(id: string): Promise<boolean> {
+    if (!this.driver.retryDead) {
+      throw new Error(
+        `This queue's driver keeps nothing of a dead-lettered job, so there ` +
+          `is nothing to retry. The database driver keeps them.`,
+      );
+    }
+    const found = await this.driver.retryDead(id);
+    if (found) this.claimSoon();
+    return found;
+  }
+
+  /**
+   * Starts the loop unless `drain` stopped it or this process should leave a
+   * shared driver's jobs to a server — the rule `push` explains.
+   */
+  private startIfIdle() {
+    if (this.state === "idle" && (!this.durable || this.mayClaimHere())) {
+      this.start();
+    }
+  }
+
+  /**
+   * For a job the driver has just made claimable: start the loop, or wake a
+   * running one that only polls, as `push` does for a dispatch.
+   */
+  private claimSoon() {
+    this.startIfIdle();
+    if (!this.driver.subscribe && this.state === "running") this.wake();
   }
 
   /**
