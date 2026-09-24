@@ -109,6 +109,21 @@ const bootScope = new AsyncResource("gemi.queue");
  */
 const maxClaimBackoff = 60_000;
 
+declare global {
+  /**
+   * The queue loop a `gemi dev` server is running over a driver that outlives
+   * the process, kept where a `bun --hot` reload cannot lose it. A reload
+   * re-evaluates every module and boots a new application, but the previous
+   * application's loop is a live closure and keeps claiming — from the same
+   * table, with the code it was loaded with. This is how the next
+   * application finds it to stop it; see `startClaimingIfServing`.
+   *
+   * Typed by what is called on it, not as `QueueManager`: after a reload the
+   * one held here is an instance of the previous module graph's class.
+   */
+  var __gemiDevQueue: { stop(): Promise<unknown> } | undefined;
+}
+
 /** What `drain` could not wait out. */
 export type DrainResult = {
   /**
@@ -476,6 +491,12 @@ export class QueueManager {
   start() {
     if (this.state === "running") return;
     this.state = "running";
+    // Only a development server's loop over a shared driver: a memory queue
+    // is only ever fed by its own application, and a hand-built manager or a
+    // test's is its caller's to stop.
+    if (this.durable && this.application && this.mayClaimHere() && !isProduction()) {
+      globalThis.__gemiDevQueue = this;
+    }
     this.unsubscribe = this.driver.subscribe?.(() => this.wake());
     // A loop a `drain` has not yet seen off picks the new state up itself;
     // starting a second would claim twice per wake.
@@ -498,6 +519,7 @@ export class QueueManager {
    */
   async drain(timeoutMs = Infinity): Promise<DrainResult> {
     this.state = "stopped";
+    if (globalThis.__gemiDevQueue === this) globalThis.__gemiDevQueue = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.wake();
@@ -905,6 +927,10 @@ function hook(name: string, fn: () => void) {
  * or a migration — which boot the same providers — is not one, and neither is
  * a `worker` job's thread, which clones the application and exits after it.
  */
+function isProduction() {
+  return process.env.NODE_ENV === "production";
+}
+
 export function claimsInThisProcess() {
   return process.env.ROOT_DIR !== undefined && isMainThread;
 }
