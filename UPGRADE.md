@@ -303,6 +303,10 @@ What changes for every app, whatever the driver:
   `driver: "database"` this is the app's default connection, so the ORM's
   writes wait too. Pass `{ busyTimeout: 0 }` to the driver to keep the old
   behaviour.
+- **Under `gemi dev`, a save hands the database queue to the new code.**
+  Before, the loop from before the save kept claiming rows with the old
+  code, one more loop per save, until `gemi dev` was restarted. Now the
+  reloaded application stops it and claims in its place.
 
 ## A shutdown stops the cron schedule and waits for running ticks
 
