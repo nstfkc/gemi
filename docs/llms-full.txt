@@ -11852,7 +11852,11 @@ export default class extends Kernel {
 Configuration fields:
 
 - **`defaultLocale`** — fallback locale (default `"en-US"`).
-- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). A requested locale outside this list falls back to `defaultLocale`. Leaving it empty switches locale detection off entirely.
+- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). Leaving it empty switches locale detection off entirely.
+
+  A URL whose locale prefix is not on this list, but which maps onto one that is, is **redirected** to that locale's URL: `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about`. An exact match wins, ignoring case; otherwise a locale of the same language is used, preferring `defaultLocale`. A prefix that maps onto nothing falls back to `defaultLocale` and is rendered where it is, without a redirect.
+
+  A first path segment that is a real route is never treated as a locale, even when it is shaped like one — `/de-luxe` and `/en-suite` are pages, not `de` and `en`. The redirect is `302` and uncacheable, since the locale is negotiated per visitor.
 - **`detectLocale(req)`** — resolve the locale for a request. Return a locale string or `null` to fall back to gemi's own detection. A typical implementation reads the `i18n-locale` cookie, then the `x-locale`/`accept-language` headers.
 - **`onLocaleChange(locale)`** — hook called when the active locale changes.
 - **`prefetch`**, **`components`** — deprecated; see [Legacy dictionaries](#legacy-dictionaries).

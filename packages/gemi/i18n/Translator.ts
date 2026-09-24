@@ -1,6 +1,7 @@
 import type { HttpRequest } from "../http/HttpRequest";
 import type { Dictionary } from "./Dictionary";
 import type { TranslationConfig } from "./config";
+import { resolveLocale } from "./resolveLocale";
 
 export class Translator {
   static token = "translator";
@@ -63,26 +64,26 @@ export class Translator {
   detectLocale(req: HttpRequest<any, any>) {
     const fallbackLocale =
       this.config.defaultLocale ?? this.config.supportedLocales[0] ?? "en-US";
-    const detectedLocale = this.config.detectLocale(req);
-    if (this.config.supportedLocales.includes(detectedLocale)) {
+    const resolve = (tag: string | null | undefined) =>
+      resolveLocale(tag, this.config.supportedLocales, this.config.defaultLocale);
+
+    const detectedLocale = resolve(this.config.detectLocale(req));
+    if (detectedLocale) {
       return detectedLocale;
     }
 
-    const previousLocale = req.cookies.get("i18n-locale");
-    const locale =
-      previousLocale ?? (req.headers.get("accept-language") || fallbackLocale);
-
-    const [_locale] = locale.split(",");
-
-    if (this.config.supportedLocales.includes(_locale)) {
-      return _locale;
+    const previousLocale = resolve(req.cookies.get("i18n-locale"));
+    if (previousLocale) {
+      return previousLocale;
     }
 
-    if (_locale.length === 2) {
-      for (const supportedLocale of this.config.supportedLocales) {
-        if (supportedLocale.startsWith(_locale)) {
-          return supportedLocale;
-        }
+    // Entries are in the browser's preference order; the first one the app can
+    // serve, even by language alone (`de-AT` → `de-DE`), wins.
+    const acceptLanguage = req.headers.get("accept-language") ?? "";
+    for (const entry of acceptLanguage.split(",")) {
+      const locale = resolve(entry);
+      if (locale) {
+        return locale;
       }
     }
 

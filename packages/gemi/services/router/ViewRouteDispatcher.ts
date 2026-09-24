@@ -19,6 +19,7 @@ import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { Translator } from "../../i18n/Translator";
+import { resolveLocale } from "../../i18n/resolveLocale";
 import { preloadDictionaries } from "../../i18n/dictionaryRegistry";
 import { createDictionarySink } from "../../i18n/dictionarySink";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
@@ -799,6 +800,38 @@ export class ViewRouteDispatcher {
     } else {
       urlLocaleSegment = maybeLocale;
       urlLocale = maybeLocale;
+    }
+
+    // A first path segment is not necessarily a locale, and the shapes overlap:
+    // `de-luxe` is a language `de` with a legal 4-letter subtag, `en-suite` the
+    // same for `en`. No tightening of the tag pattern separates them, so route
+    // existence is the signal — a path the app actually serves is served, and
+    // only one it does not is read as a locale that needs redirecting. Without
+    // this, `/de-luxe` answered `302 /de-DE` and the page was gone.
+    const pathIsARoute =
+      urlLocale === null && matchViewRoute(this.flatViewRoutes, urlPathname) !== null;
+
+    if (translator.isLocaleAware && !isOgRequest && urlLocale === null && !pathIsARoute) {
+      // A locale prefix the app doesn't serve verbatim but can map onto one it
+      // does — `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about` —
+      // is sent to that locale's URL rather than rendered as an unknown path.
+      const resolvedLocale = resolveLocale(
+        maybeLocale,
+        translator.supportedLocales,
+        translator.defaultLocale,
+      );
+      if (resolvedLocale) {
+        // `rest` is the path after the locale segment; `.json` is re-appended
+        // so a route-data request lands on the data it asked for.
+        const restPath = rest.length ? `/${rest.join("/")}` : "";
+        return new Response("", {
+          status: 302,
+          headers: {
+            "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+            Location: `/${resolvedLocale}${restPath}${isViewDataRequest ? ".json" : ""}${url.search}`,
+          },
+        });
+      }
     }
 
     if (translator.isLocaleAware && !isOgRequest) {
