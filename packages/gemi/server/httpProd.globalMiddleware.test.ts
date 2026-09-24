@@ -62,7 +62,14 @@ class AppKernel extends Kernel {
 const ASSET = "console.log('app');\n";
 const THROUGH_FRONT_DOOR = { "x-azure-fdid": "fd-1" };
 
+// Build output Vite writes under `assets/` with an extension the old
+// allowlist left out, and a root-level public font.
+const FONT = "wOF2-font-bytes";
+const GIF = "GIF89a-bytes";
+const JSON_ASSET = '{"answer":42}';
+
 let projectDir: string;
+let app: App;
 let server: { port: number; stop: (force?: boolean) => unknown };
 const savedEnv = { ...process.env };
 
@@ -74,7 +81,12 @@ beforeAll(async () => {
   await mkdir(join(dist, "server/.vite"), { recursive: true });
   await writeFile(join(dist, "client/.vite/manifest.json"), "{}");
   await writeFile(join(dist, "client/assets/app.js"), ASSET);
-  const app = new App({ kernel: AppKernel });
+  await writeFile(join(dist, "client/assets/font-abc123.woff2"), FONT);
+  await writeFile(join(dist, "client/assets/spinner-abc123.gif"), GIF);
+  await writeFile(join(dist, "client/assets/data-abc123.json"), JSON_ASSET);
+  await mkdir(join(dist, "client/fonts"), { recursive: true });
+  await writeFile(join(dist, "client/fonts/brand.woff2"), FONT);
+  app = new App({ kernel: AppKernel });
   // A server chunk per view `httpProd` imports at startup: the 404 and the
   // views the framework mounts itself.
   const serverManifest: Record<string, { file: string }> = {};
@@ -174,5 +186,85 @@ describe("httpProd with a global middleware", () => {
     // asset above (a Response that already exists). Checked by dropping
     // `outcome.apply` in `App.fetch` — this assertion is what fails.
     expect(res.headers.get("X-Gate")).toBe("front-door");
+  });
+});
+
+describe("httpProd's static handler", () => {
+  const LONG_LIVED = "public, max-age=31536000, must-revalidate";
+
+  // `httpProd` looks `app.fetch` up per request, so this spy sees every
+  // request the static handler hands to the app. One spy cleared before
+  // each test: with a spy created per test, a failing test's calls showed up
+  // on the next test's spy, so one failure read as three.
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  beforeAll(() => {
+    fetchSpy = vi.spyOn(app, "fetch");
+  });
+  beforeEach(() => {
+    fetchSpy.mockClear();
+  });
+  afterAll(() => {
+    fetchSpy.mockRestore();
+  });
+
+  // `woff2` and `gif` are on the root-level extension list as well, so the
+  // JSON here and the misses below are what hold `/assets` to being a file
+  // whatever its extension.
+  test.each([
+    ["/assets/font-abc123.woff2", FONT],
+    ["/assets/spinner-abc123.gif", GIF],
+    ["/assets/data-abc123.json", JSON_ASSET],
+  ])("serves %s from dist/client, cached long-term", async (path, body) => {
+    const res = await get(path, THROUGH_FRONT_DOOR);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(body);
+    expect(res.headers.get("Cache-Control")).toBe(LONG_LIVED);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("answers a missing file under /assets with a 404 of its own, whatever its extension", async () => {
+    for (const path of ["/assets/gone-abc123.woff2", "/assets/gone.unknownext", "/assets/gone"]) {
+      const res = await get(path, THROUGH_FRONT_DOOR);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).toBe("Not found");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("answers /assets itself with a 404, not the directory", async () => {
+    // `dist/client/assets` exists, so an existence check alone would stream
+    // a directory as a 200.
+
+    for (const path of ["/assets", "/assets/"]) {
+      const res = await get(path, THROUGH_FRONT_DOOR);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).toBe("Not found");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("still answers a missing chunk with the reload stub", async () => {
+    const res = await get("/assets/gone-abc123.js", THROUGH_FRONT_DOOR);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.location.reload()");
+  });
+
+  test("serves a font outside /assets by its extension", async () => {
+    const res = await get("/fonts/brand.woff2", THROUGH_FRONT_DOOR);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(FONT);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("hands a missing file outside /assets, and view data, to the app", async () => {
+    // A root-level extension may be an app route, and `.json` outside
+    // /assets is how the client router fetches a view's data.
+    await get("/fonts/gone.woff2", THROUGH_FRONT_DOOR);
+    await get("/dashboard.json", THROUGH_FRONT_DOOR);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { isBuildChunkPath, staticAssetMiss } from "./staticAssetMiss";
+import { isBuildChunkPath, isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
 
 /**
  * What `httpProd` answers when a static-looking request has no file behind it
@@ -54,9 +54,8 @@ describe("a miss that only looks like a chunk", () => {
   });
 
   test("JSON under /assets is a 404, not a reload", () => {
-    // The helper's contract only: `gemi start` never asks it about `.json`,
-    // since `json` is not in httpProd's staticFilePattern, and such a request
-    // goes to the app before a miss can happen.
+    // A JSON import Vite emitted, gone after a deploy: `gemi start` sends
+    // every path under /assets here on a miss, whatever its extension.
     const res = staticAssetMiss("/assets/data.json");
 
     expect(res?.status).toBe(404);
@@ -72,6 +71,13 @@ describe("a miss that only looks like a chunk", () => {
   test("any other miss under /assets is a 404", () => {
     expect(staticAssetMiss("/assets/lazy-abc.css")?.status).toBe(404);
     expect(staticAssetMiss("/assets")?.status).toBe(404);
+  });
+
+  test("recognises /assets and only what is under it as reserved", () => {
+    expect(isReservedAssetPath("/assets")).toBe(true);
+    expect(isReservedAssetPath("/assets/font-abc.woff2")).toBe(true);
+    expect(isReservedAssetPath("/assetsfoo/a.woff2")).toBe(false);
+    expect(isReservedAssetPath("/docs/assets/a.woff2")).toBe(false);
   });
 
   test("any other miss outside /assets goes to the app", () => {
