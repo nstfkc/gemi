@@ -50,7 +50,7 @@ class UserRegistered extends Event {
 function listener(
   name: string,
   handle: (event: any) => void | Promise<void>,
-  fields: Partial<Pick<Listener, "queued" | "maxAttempts" | "worker">> = {},
+  fields: Partial<Pick<Listener, "queued" | "maxAttempts" | "backoff" | "worker">> = {},
 ) {
   return {
     [name]: class extends Listener {
@@ -59,6 +59,7 @@ function listener(
 
       queued = fields.queued ?? true;
       maxAttempts = fields.maxAttempts ?? 3;
+      backoff = fields.backoff ?? 0;
       worker = fields.worker ?? false;
 
       handle(received: UserRegistered) {
@@ -330,6 +331,33 @@ describe("a queued listener that always throws", () => {
   });
 });
 
+describe("a queued listener with a backoff", () => {
+  test("waits it out before the retry, as a job with that backoff would", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const attempts: number[] = [];
+
+    const application = await makeApp([
+      listener(
+        "SendWelcomeEmail",
+        () => {
+          attempts.push(Date.now());
+          if (attempts.length === 1) throw new Error("smtp is down");
+        },
+        { backoff: 200 },
+      ),
+    ]);
+
+    await kernelContext.run(application, () =>
+      UserRegistered.dispatchAndWait(7, "ada@example.com"),
+    );
+    await vi.waitFor(() => expect(attempts).toHaveLength(2), { timeout: 2_000 });
+
+    // Without the forward the synthetic job keeps `Job`'s default of 0 and
+    // the retry is claimed as soon as the failure frees its slot.
+    expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(180);
+  });
+});
+
 describe("a payload naming an event this process does not know", () => {
   test("dead-letters with the name in the message, off the queue", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -434,6 +462,12 @@ describe("the synthetic job", () => {
     const Cpu = listener("ResizeAvatar", () => {}, { worker: true });
 
     expect(new (jobForListener(Cpu, new Cpu()))().worker).toBe(true);
+  });
+
+  test("forwards the listener's backoff", () => {
+    const Patient = listener("SendWelcomeEmail", () => {}, { backoff: [1_000, 5_000] });
+
+    expect(new (jobForListener(Patient, new Patient()))().backoff).toEqual([1_000, 5_000]);
   });
 
   test("is refused when the listener's name is the implicit class binding", () => {
