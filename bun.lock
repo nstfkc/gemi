@@ -32,7 +32,7 @@
     },
     "packages/gemi": {
       "name": "gemi",
-      "version": "0.63.0-rc.1",
+      "version": "0.63.0",
       "bin": {
         "gemi": "./dist/bin/gemi.js",
         "gemi-orm-generator": "./dist/bin/orm-generator.js",
