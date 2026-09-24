@@ -238,6 +238,12 @@ running at the deadline is named in the log, `Cron jobs still running at
 shutdown: …`. If your cron jobs take longer than 5 seconds, raise the timeout
 to fit the platform's grace period.
 
+The cron drain runs before the queue drain and both come out of that one
+timeout. Before, the queue had all of it; now a long-running tick can leave the
+queue almost nothing, so its running jobs are abandoned (and, with the memory
+driver, its pending ones lost). Budget for the longest tick plus the longest
+job.
+
 `Scheduler` gains `drain(timeoutMs)` and `running`. See
 [Stopping the schedule](docs/cron.md#stopping-the-schedule).
 
