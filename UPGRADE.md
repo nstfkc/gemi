@@ -296,6 +296,13 @@ What changes for every app, whatever the driver:
 - **A dispatch wakes a polling driver's queue at once.** Before, it waited up
   to `pollInterval`. The memory driver was never polled, so apps that use it
   see no difference.
+- **The database driver gives a SQLite connection a one-second busy
+  timeout** if it has none. Before, a write that met another process's lock
+  on the file failed at once with `SQLITE_BUSY`. Now it waits up to a
+  second, and the process is blocked while it waits. With
+  `driver: "database"` this is the app's default connection, so the ORM's
+  writes wait too. Pass `{ busyTimeout: 0 }` to the driver to keep the old
+  behaviour.
 
 ## A shutdown stops the cron schedule and waits for running ticks
 
