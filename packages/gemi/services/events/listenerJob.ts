@@ -34,7 +34,7 @@ export function listenerJobName(listenerName: string): string {
  * Builds the `Job` subclass that runs one queued listener.
  *
  * `instance` is the listener the caller already constructed to read `queued`
- * off; the three fields that decide where the work runs are read from that one
+ * off; the fields that decide how and where the work runs are read from that one
  * instance rather than from a fresh one per attempt, so a listener's
  * constructor runs once at boot instead of once per retry.
  *
@@ -53,11 +53,13 @@ export function jobForListener(
   refuseImplicitName(listener);
 
   const attempts = instance.maxAttempts;
+  const delays = instance.backoff;
   const inWorker = instance.worker;
   const boundTo = listener.event.name;
 
   const job = class extends Job {
     maxAttempts = attempts;
+    backoff = delays;
     worker = inWorker;
 
     async run(...payload: unknown[]) {

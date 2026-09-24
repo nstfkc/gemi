@@ -90,6 +90,7 @@ There is no `static events = [A, B]`, deliberately. A listener bound to two even
 | `handle` | method | — | The side effect. May be `async`. Required. |
 | `queued` | `boolean` | `false` | Run on the queue instead of inline. A [context boundary](#queued-listeners), not a performance dial. |
 | `maxAttempts` | `number` | `3` | Attempts before dead-lettering, counting the first. Ignored unless `queued`. |
+| `backoff` | `number \| number[]` | `0` | Milliseconds before a retry, as on a job: an array gives one per retry, its last entry repeating. Ignored unless `queued`. |
 | `worker` | `boolean` | `false` | Run `handle` in a Worker thread with its own cloned app. Ignored unless `queued`. |
 
 ## Dispatching
@@ -124,7 +125,7 @@ That is not politeness, it is the point. Listeners are independent side effects,
 
 A listener that must not fail silently should handle its own errors — retry, log to your own sink, or dispatch a [job](./jobs-and-queues.md) that can be retried and dead-lettered.
 
-All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts` and then dead-lettered.
+All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts`, `backoff` apart, and then dead-lettered.
 
 ## When nothing is listening
 
@@ -138,7 +139,7 @@ That single line is the whole early-warning system here, because four different 
 
 ## Queued listeners
 
-`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, dead-lettering and worker threads coming from there rather than from anything events add:
+`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, `backoff`, dead-lettering and worker threads coming from there rather than from anything events add:
 
 ```typescript
 // app/listeners/SendWelcomeEmail.ts
