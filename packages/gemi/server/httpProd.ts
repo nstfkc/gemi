@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { compressResponse } from "./compression";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
@@ -22,6 +22,25 @@ const rootDir = projectRoot();
 
 const appDir = join(rootDir, "app");
 const distDir = join(rootDir, "dist");
+
+const clientDir = join(distDir, "client");
+
+// The file in `dist/client` a static-looking pathname names, or `null` when
+// it names nothing there. The pathname is still percent-encoded, and Vite
+// writes files whose names need encoding (a public `my font.woff2`), so it is
+// decoded first. Decoding also turns `%2F` into a separator, which the URL
+// parser's own `..` normalization never saw — so the resolved path is checked
+// to still be inside `dist/client`. A malformed escape is a miss, not a 500.
+function clientFilePath(pathname: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const path = resolve(clientDir, "." + decoded.replace("/assets/assets", "/assets"));
+  return path.startsWith(clientDir + sep) ? path : null;
+}
 
 async function isFile(path: string) {
   try {
@@ -126,6 +145,10 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   //   put a filesystem lookup in front of every navigation and let a public
   //   file shadow a view's data. `mjs` is here because a build configured to
   //   emit `.mjs` chunks is served the same way as `.js`.
+  // - `/manifest.json`, the one root-level JSON file an app is expected to
+  //   ship (a PWA manifest in `public/`). Only when the file exists: a miss
+  //   goes to the app, so a view at `/manifest` keeps its data URL unless the
+  //   app also ships the file — and then the file wins.
   const publicFilePattern = new URLPattern({
     pathname:
       "/*.:filetype(png|jpg|jpeg|gif|svg|avif|webp|ico|css|js|mjs|map|txt|xml|webmanifest|woff|woff2|ttf|otf|webm|mp4|mp3|pdf)",
@@ -137,19 +160,18 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     const isFileRequest =
       isReservedAssetPath(pathname) ||
       pathname.startsWith("/.well-known") ||
+      pathname === "/manifest.json" ||
       publicFilePattern.test({ pathname });
 
     const isApi = isApiPath(pathname);
 
     if (isFileRequest && !isApi) {
-      const url = new URL(req.url);
-      const filePath = req.url.replace(url.origin, "").split("?")[0];
-      const distPath = `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`;
+      const distPath = clientFilePath(pathname);
       // Served from here whatever the asset base is: a CDN in front of the
       // app uses this origin as the source it fills from. A file, not merely
       // a path that exists: `/assets` itself is `dist/client/assets`, a
       // directory, and streaming one would answer 200 and then fail mid-body.
-      if (!(await isFile(distPath))) {
+      if (!distPath || !(await isFile(distPath))) {
         return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
       }
 
