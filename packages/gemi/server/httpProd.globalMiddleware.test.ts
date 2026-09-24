@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createElement } from "react";
@@ -67,6 +67,7 @@ const THROUGH_FRONT_DOOR = { "x-azure-fdid": "fd-1" };
 const FONT = "wOF2-font-bytes";
 const GIF = "GIF89a-bytes";
 const JSON_ASSET = '{"answer":42}';
+const MANIFEST = '{"name":"app"}';
 
 let projectDir: string;
 let app: App;
@@ -86,6 +87,10 @@ beforeAll(async () => {
   await writeFile(join(dist, "client/assets/data-abc123.json"), JSON_ASSET);
   await mkdir(join(dist, "client/fonts"), { recursive: true });
   await writeFile(join(dist, "client/fonts/brand.woff2"), FONT);
+  await writeFile(join(dist, "client/assets/my font-abc123.woff2"), FONT);
+  await writeFile(join(dist, "client/manifest.json"), MANIFEST);
+  // Outside `dist/client`: what a traversal out of it would reach.
+  await writeFile(join(dist, "secret.txt"), "secret");
   app = new App({ kernel: AppKernel });
   // A server chunk per view `httpProd` imports at startup: the 404 and the
   // views the framework mounts itself.
@@ -257,6 +262,38 @@ describe("httpProd's static handler", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(FONT);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("serves a file whose name is percent-encoded in the URL", async () => {
+    const res = await get("/assets/my%20font-abc123.woff2", THROUGH_FRONT_DOOR);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(FONT);
+  });
+
+  test("never serves a file outside dist/client through an encoded separator", async () => {
+    // `%2F` is not a separator to the URL parser, so its `..` normalization
+    // leaves these alone; decoded, they climb out of `dist/client`.
+    for (const path of ["/assets/..%2F..%2Fsecret.txt", "/..%2Fsecret.txt", "/assets/%E0%A4%A.txt"]) {
+      const res = await get(path, THROUGH_FRONT_DOOR);
+      expect(await res.text(), path).not.toBe("secret");
+    }
+  });
+
+  test("serves /manifest.json when the app ships one, and hands it to the app when not", async () => {
+    const res = await get("/manifest.json", THROUGH_FRONT_DOOR);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(MANIFEST);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const file = join(projectDir, "dist/client/manifest.json");
+    await rename(file, file + ".away");
+    try {
+      await get("/manifest.json", THROUGH_FRONT_DOOR);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await rename(file + ".away", file);
+    }
   });
 
   test("hands a missing file outside /assets, and view data, to the app", async () => {
