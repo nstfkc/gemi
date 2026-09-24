@@ -2,7 +2,7 @@ import { AuthApiRouter } from "../../auth/routes";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { I18nRouter } from "../../i18n/I18nRouter";
-import { RequestContext } from "../../http/requestContext";
+import { type CarriedContext, RequestContext } from "../../http/requestContext";
 import { ImageOptimizationRouter } from "../image-optimization/ImageManager";
 import { LoggingRouter } from "../logging/LoggingRouter";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
@@ -391,7 +391,7 @@ export class ApiRouteDispatcher {
     );
   }
 
-  async handleApiRequest(req: Request) {
+  async handleApiRequest(req: Request, carried?: CarriedContext | null) {
     const { params, path } = this.getRouteHandlerAndParams(req);
 
     const routeHandler = this.flatRoutes[path];
@@ -492,7 +492,7 @@ export class ApiRouteDispatcher {
         }
         throw err;
       }
-    });
+    }, carried);
   }
 
   /**
