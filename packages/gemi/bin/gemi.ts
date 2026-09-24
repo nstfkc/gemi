@@ -29,7 +29,11 @@ program.command("dev").action(async () => {
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
   process.env.NODE_ENV = "development";
-  Bun.spawn({
+  // Relayed like `start`'s, so a dev container or process manager that stops
+  // `gemi dev` with `SIGTERM` stops the dev server too, instead of leaving it
+  // orphaned on its port (#566). There is no drain behind it: `Server` installs
+  // none in development, where a Ctrl+C should stop the server now.
+  const exited = spawnForwardingSignals({
     cmd: [
       "bun",
       "--hot",
@@ -45,8 +49,6 @@ program.command("dev").action(async () => {
       ...appPreloadArgs(appDir),
       `${path.join(appDir, "server.ts")}`,
     ],
-    stdout: "inherit",
-    stderr: "inherit",
   });
 
   // Deliberately not awaited: the dev server is already starting, and a version
@@ -54,6 +56,8 @@ program.command("dev").action(async () => {
   // moment later, or never — `reportUpdate` swallows every failure, so being
   // offline costs nothing but silence. `GEMI_NO_UPDATE_CHECK=1` turns it off.
   void reportUpdate({ rootDir });
+
+  process.exit(await exited);
 });
 
 program.command("build").action(async () => {
@@ -240,7 +244,11 @@ program
       process.exit(1);
     }
 
-    const proc = Bun.spawn({
+    // Relayed like `start`'s (#566): a `SIGTERM` to `gemi run` reaches the
+    // command, which gets the chance to clean up that a long backfill needs,
+    // and `gemi run` waits for it rather than exiting underneath it. A command
+    // ended by a signal now exits `128 + n` instead of 1.
+    const code = await spawnForwardingSignals({
       cmd: [
         "bun",
         // The same two preloads as `dev` and `start`, in the same order and for
@@ -254,8 +262,6 @@ program
         ...(name === undefined ? [] : [name]),
         ...args,
       ],
-      stdout: "inherit",
-      stderr: "inherit",
       // Explicit: `Bun.spawn` ignores stdin by default, and a destructive
       // command that asks for confirmation would read EOF and take the default.
       stdin: "inherit",
@@ -265,9 +271,7 @@ program
       // child's first line.
       env: { ...process.env, GEMI_NO_SCHEDULE: "1" },
     });
-
-    await proc.exited;
-    process.exit(proc.exitCode ?? 1);
+    process.exit(code);
   });
 
 program
