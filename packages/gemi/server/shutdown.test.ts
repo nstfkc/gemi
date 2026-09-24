@@ -1,4 +1,5 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -8,6 +9,7 @@ import {
   isShuttingDown,
   markShuttingDown,
   resetShuttingDown,
+  serveForShutdown,
   shutdownSettings,
   type ShutdownSettings,
   type Stoppable,
@@ -302,6 +304,128 @@ describe("closeConnectionWhileShuttingDown", () => {
     expect(closed.status).toBe(201);
     expect(closed.headers.get("Connection")).toBe("close");
     expect(await closed.text()).toBe("body");
+  });
+});
+
+/**
+ * One TCP connection, kept alive, with requests written down it by hand —
+ * `fetch` pools its own connections and may open a fresh one, which the closed
+ * listener would refuse and the test would pass for the wrong reason.
+ */
+async function keptAliveConnection(port: number) {
+  const socket = connect(port, "127.0.0.1");
+  await new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  let buffer = "";
+  socket.on("data", (chunk) => (buffer += chunk.toString()));
+  return {
+    // Resolves with the head and body of one response, read by its
+    // `Content-Length`: enough for the short bodies these tests send.
+    async get(path: string): Promise<{ head: string; body: string }> {
+      buffer = "";
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\n\r\n`);
+      for (;;) {
+        const end = buffer.indexOf("\r\n\r\n");
+        const length = end === -1 ? NaN : Number(/content-length: (\d+)/i.exec(buffer)?.[1]);
+        if (buffer.length >= end + 4 + length) {
+          return { head: buffer.slice(0, end), body: buffer.slice(end + 4, end + 4 + length) };
+        }
+        if (socket.destroyed) throw new Error(`connection closed after ${JSON.stringify(buffer)}`);
+        await Bun.sleep(10);
+      }
+    },
+    close: () => socket.destroy(),
+  };
+}
+
+// Item 3 of #566. `server.stop()` closes the listener but not a kept-alive
+// connection that is idle at the time, so a client that ignores the drain's
+// `Connection: close` can still deliver a request while the providers shut
+// down. Against a real `Bun.serve`, with a provider hook held open so the
+// request lands squarely in that window.
+describe("serveForShutdown", () => {
+  function serveThroughShutdown() {
+    const reached: string[] = [];
+    const respond = serveForShutdown(async (req, next) => {
+      reached.push(`instrumentation ${new URL(req.url).pathname}`);
+      return next(req);
+    });
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) =>
+        respond(req, async (req) => {
+          reached.push(`app ${new URL(req.url).pathname}`);
+          return new Response("ok");
+        }),
+    });
+    servers.push(server);
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const shutdownProviders = async () => {
+      events.push("providers");
+      await held;
+      return { failed: [], timedOut: [] };
+    };
+    return { server, reached, shutdownProviders, release };
+  }
+
+  async function untilProvidersRun() {
+    while (!events.includes("providers")) await Bun.sleep(10);
+  }
+
+  // The premise, so this file notices a Bun that starts closing them: then the
+  // refusal below is never reached, and can go.
+  test("a kept-alive connection outlives the drain, and a request down it is served", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response("served") });
+    servers.push(server);
+    const connection = await keptAliveConnection(server.port);
+    await connection.get("/");
+
+    await server.stop();
+    const after = await connection.get("/");
+
+    expect(after.head).toMatch(/^HTTP\/1\.1 200/);
+    expect(after.body).toBe("served");
+    connection.close();
+  });
+
+  test("refuses a request down it once the drain is over, before the app or its instrumentation", async () => {
+    const { server, reached, shutdownProviders, release } = serveThroughShutdown();
+    const connection = await keptAliveConnection(server.port);
+    expect((await connection.get("/before")).body).toBe("ok");
+
+    const draining = drain({ server, shutdownProviders, settings: settings() });
+    await untilProvidersRun();
+    // Twice: Bun does not close the socket after a `Connection: close`
+    // response, so a client that ignores it can keep sending.
+    const refused = [await connection.get("/after"), await connection.get("/again")];
+    release();
+
+    for (const { head } of refused) {
+      expect(head).toMatch(/^HTTP\/1\.1 503/);
+      expect(head).toMatch(/^connection: close$/im);
+    }
+    expect(reached).toEqual(["instrumentation /before", "app /before"]);
+    expect(await draining).toBe(0);
+    connection.close();
+  });
+
+  test("serves with Connection: close while the requests drain, and refuses nothing yet", async () => {
+    const { server, reached, shutdownProviders, release } = serveThroughShutdown();
+    const connection = await keptAliveConnection(server.port);
+    release();
+
+    markShuttingDown();
+    const during = await connection.get("/during");
+    await drain({ server, shutdownProviders, settings: settings() });
+
+    expect(during.head).toMatch(/^HTTP\/1\.1 200/);
+    expect(during.head).toMatch(/^connection: close$/im);
+    expect(reached).toEqual(["instrumentation /during", "app /during"]);
+    connection.close();
   });
 });
 
