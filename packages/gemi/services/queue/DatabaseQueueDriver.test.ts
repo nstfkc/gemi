@@ -127,6 +127,7 @@ for (const backend of backends) {
       return driver;
     },
     (driver) => disposers.get(driver)?.(),
+    { claimsByName: true },
   );
 }
 
@@ -326,6 +327,88 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     await until(() => runs.length === 2);
     expect(runs.map((run) => run.n)).toEqual([1, 2]);
     await until(async () => (await rows()).length === 0);
+  });
+
+  // A blue/green ramp: both releases claim from one table, and only the new
+  // one has `NewReleaseJob`. `maxAttempts = 1` is what makes the tests bite —
+  // an old replica that spent even one attempt on it would leave the new one
+  // nothing to run, and it would be dead-lettered unrun.
+  function newReleaseJob(runs: string[]) {
+    return class NewReleaseJob extends Job {
+      static name = "NewReleaseJob";
+      maxAttempts = 1;
+      run() {
+        runs.push("new");
+      }
+    };
+  }
+
+  test("an old replica leaves a job only the new release has, and the new one runs it", async () => {
+    const { driver, rows } = await database();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runs: string[] = [];
+    await driver().enqueue({ name: "NewReleaseJob", args: "[]" });
+
+    const old = worker(driver(), [recorder("RecordRun", "old", [])]);
+    old.start();
+    // Many polls' worth. Before, the first one dead-lettered the job.
+    await sleep(200);
+    const [waiting] = await rows();
+    expect(waiting).toMatchObject({ status: "pending" });
+    expect(Number(waiting!.attempts)).toBe(0);
+    // Filtered in the claim, so the old replica never even saw it.
+    expect(error).not.toHaveBeenCalled();
+
+    worker(driver(), [newReleaseJob(runs)]).start();
+    await until(() => runs.length === 1);
+    await until(async () => (await rows()).length === 0);
+  });
+
+  test("a driver that cannot filter by name gives the job back without spending its attempt", async () => {
+    const { driver, rows } = await database();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const runs: string[] = [];
+    await driver().enqueue({ name: "NewReleaseJob", args: "[]" });
+
+    // The database driver with `registered` stripped: the path a third-party
+    // driver without name filtering takes, where the manager does the work.
+    const inner = driver();
+    const unfiltered: QueueDriver = {
+      enqueue: (job) => inner.enqueue(job),
+      claim: (limit, { visibilityTimeoutMs }) => inner.claim(limit, { visibilityTimeoutMs }),
+      complete: (job) => inner.complete(job),
+      fail: (job, failure) => inner.fail(job, failure),
+      release: (job, release) => inner.release(job, release),
+      heartbeat: (jobs, options) => inner.heartbeat(jobs, options),
+    };
+    const released = vi.spyOn(inner, "release");
+    const old = worker(unfiltered, [recorder("RecordRun", "old", [])]);
+    old.start();
+    await until(() => released.mock.calls.length >= 3);
+    // Out of the race before the new release starts: this is about what three
+    // refusals cost the job, not about who wins it. Through `fail` they cost
+    // three attempts, and the new replica would dead-letter it unrun.
+    await old.drain(5_000);
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: "pending", last_error: null });
+    expect(Number(row!.attempts)).toBe(0);
+
+    worker(driver(), [newReleaseJob(runs)]).start();
+    await until(() => runs.length === 1);
+    await until(async () => (await rows()).length === 0);
+  });
+
+  test("past the grace window a name nobody registered is dead-lettered, and the row says why", async () => {
+    const { driver, rows } = await database();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await driver().enqueue({ name: "RemovedJob", args: "[]" });
+
+    worker(driver(), [recorder("RecordRun", "any", [])], { unknownJobGrace: 150 }).start();
+
+    await until(async () => (await rows())[0]?.status === "dead");
+    const [dead] = await rows();
+    expect(Number(dead!.attempts)).toBe(1);
+    expect(String(dead!.last_error)).toContain('No job is registered under the name "RemovedJob"');
   });
 
   test("a dispatch is claimed without waiting out the poll interval", async () => {

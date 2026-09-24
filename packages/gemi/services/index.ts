@@ -92,6 +92,7 @@ export type {
   ClaimOptions,
   ClaimedJob,
   JobFailure,
+  JobRelease,
 } from "./queue/QueueDriver";
 export { Job } from "./queue/Job";
 
