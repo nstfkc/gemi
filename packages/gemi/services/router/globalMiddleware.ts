@@ -59,7 +59,10 @@ const passThrough: GlobalMiddlewareOutcome = {
  * dispatcher opens a fresh one, as it always has. Two things cross over.
  * Headers and cookies reach the response through `apply`, and the user is
  * `carried` into the route's context, so a gate that looked the user up does
- * not make `auth` or `Auth.user()` look them up again. The rest stays behind:
+ * not make `auth` or `Auth.user()` look them up again. Both trust a user they
+ * find on the context without checking it against a session (`auth` checks only
+ * that a token is present), so whatever a global middleware sets is treated as
+ * authenticated by the route. The rest stays behind:
  * the locale, because the dispatchers decide it for the route, from its url,
  * and the feature evaluations, made against a request with no route and maybe
  * before a user was known.
