@@ -1,7 +1,7 @@
 import { app } from "../../foundation/app";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { HttpRequest } from "../../http/HttpRequest";
-import { RequestContext } from "../../http/requestContext";
+import { type CarriedContext, RequestContext } from "../../http/requestContext";
 import { isPolicyDeniedError } from "../../orm/errors";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { breakResponse, mergeContextIntoResponse } from "./ApiRouteDispatcher";
@@ -20,6 +20,11 @@ export interface GlobalMiddlewareOutcome {
    * `sharedCacheable`).
    */
   apply(response: Response): Response;
+  /**
+   * The user the list left on its context, for the route's context to start
+   * from. `null` when there is no list, or it refused.
+   */
+  carried: CarriedContext | null;
 }
 
 /**
@@ -39,6 +44,7 @@ const noCookies = new Set<string>();
 const passThrough: GlobalMiddlewareOutcome = {
   refusal: null,
   apply: (response) => response,
+  carried: null,
 };
 
 /**
@@ -50,9 +56,13 @@ const passThrough: GlobalMiddlewareOutcome = {
  * `HttpRequest` a global middleware gets has no params and an empty
  * `routePath`, and its `kind` is read off the url the way `App.fetch` picks a
  * dispatcher. The scope is not the one the route later runs in: the route's
- * dispatcher opens a fresh one, as it always has, so a user or locale a global
- * middleware puts on the context is not seen by the route. Headers and cookies
- * are the exception, and reach the response through `apply`.
+ * dispatcher opens a fresh one, as it always has. Two things cross over.
+ * Headers and cookies reach the response through `apply`, and the user is
+ * `carried` into the route's context, so a gate that looked the user up does
+ * not make `auth` or `Auth.user()` look them up again. The rest stays behind:
+ * the locale, because the dispatchers decide it for the route, from its url,
+ * and the feature evaluations, made against a request with no route and maybe
+ * before a user was known.
  *
  * A break answers the way the same break from a route middleware would for
  * that url: the api's JSON for `/api`, the `.json` navigation's body for view
@@ -85,7 +95,7 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
 
     try {
       await registry.runGlobalMiddleware();
-      return { refusal: null, apply };
+      return { refusal: null, apply, carried: { user: ctx.user } };
     } catch (err) {
       const isViewData = !isApi && pathname.endsWith(".json");
       if (err?.kind === GEMI_REQUEST_BREAKER_ERROR) {
@@ -94,13 +104,13 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
           : isViewData
             ? viewDataBreakResponse(err.payload.api)
             : viewBreakResponse(err.payload.view);
-        return { refusal: apply(refusal), apply };
+        return { refusal: apply(refusal), apply, carried: null };
       }
       if (isPolicyDeniedError(err)) {
         console.error(err);
         const refusal =
           isApi || isViewData ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
-        return { refusal: apply(refusal), apply };
+        return { refusal: apply(refusal), apply, carried: null };
       }
       throw err;
     } finally {

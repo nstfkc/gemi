@@ -7,6 +7,7 @@ import { ApiRouter } from "../http/ApiRouter";
 import { RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
 import { Middleware } from "../http/Middleware";
+import { RequestContext } from "../http/requestContext";
 import { ViewRouter } from "../http/ViewRouter";
 import { Kernel } from "../kernel";
 
@@ -271,5 +272,89 @@ describe("the global list at boot", () => {
 
     expect(res.status).toBe(200);
     expect(ran).toEqual(["tag:", "route"]);
+  });
+});
+
+describe("what the route's context starts from", () => {
+  const seen: Array<{ user: unknown; locale: string | null }> = [];
+
+  /** Resolves the visitor once, the way an auth or tenant gate would. */
+  class Identify extends Middleware {
+    run() {
+      const ctx = this.req.ctx();
+      ctx.setUser({ id: "u-1" });
+      ctx.setLocale("fr");
+    }
+  }
+
+  const record = () => {
+    const ctx = RequestContext.getStore();
+    seen.push({ user: ctx.user, locale: ctx.locale });
+    return { ok: true };
+  };
+
+  const identifying = new App({
+    kernel: class extends Kernel {
+      config = {
+        middleware: { aliases: { identify: Identify }, global: ["identify"] },
+        route: {
+          api: {
+            rootRouter: class extends ApiRouter {
+              routes = { "/whoami": this.get(record) };
+            },
+          },
+          view: {
+            root: createRoot(() => createElement("div")),
+            rootRouter: class extends ViewRouter {
+              routes = { "/": this.view("Home", record) };
+            },
+          },
+        },
+      };
+    },
+  });
+  const identifyingKernel = (identifying as any).kernel as Kernel;
+
+  beforeEach(() => {
+    seen.length = 0;
+  });
+
+  test("carries the user into an api route, and not the locale", async () => {
+    const res = await identifying.fetch(new Request("http://gemi.dev/api/whoami"));
+
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([{ user: { id: "u-1" }, locale: null }]);
+  });
+
+  test("carries the user into a view route's data", async () => {
+    const res = await identifying.fetch(new Request("http://gemi.dev/.json"));
+
+    expect(res.status).toBe(200);
+    // The view router's own detection, not the "fr" the list chose.
+    expect(seen).toEqual([{ user: { id: "u-1" }, locale: "en-US" }]);
+  });
+
+  test("carries it the same way when the server gated the request first", async () => {
+    const res = await identifying.withGlobalMiddleware(
+      new Request("http://gemi.dev/api/whoami"),
+      (r) => identifying.fetch(r),
+      () => {
+        throw new Error("unreachable");
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([{ user: { id: "u-1" }, locale: null }]);
+  });
+
+  test("an in-process dispatchAs starts from nothing, as a client's request would", async () => {
+    const initiator = new HttpRequest(new Request("http://gemi.dev/api/agent"), {});
+    await identifying.waitForBoot();
+    const res = await identifyingKernel.run(() =>
+      identifyingKernel.apiRoutes().dispatchAs(initiator, "GET", "/whoami"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([{ user: null, locale: null }]);
   });
 });

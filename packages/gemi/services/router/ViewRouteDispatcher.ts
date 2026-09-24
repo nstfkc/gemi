@@ -1,6 +1,6 @@
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
-import { ensureSessionId, RequestContext } from "../../http/requestContext";
+import { type CarriedContext, ensureSessionId, RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import {
   createFlatViewRoutes,
@@ -785,7 +785,7 @@ export class ViewRouteDispatcher {
     };
   }
 
-  async handleViewRequest(req: Request) {
+  async handleViewRequest(req: Request, carried?: CarriedContext | null) {
     const url = new URL(req.url);
     const isViewDataRequest = url.pathname.endsWith(".json");
     const isOgRequest = url.pathname.endsWith(".og");
@@ -1223,6 +1223,6 @@ export class ViewRouteDispatcher {
         }
         throw err;
       }
-    });
+    }, carried);
   }
 }
