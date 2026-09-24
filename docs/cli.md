@@ -91,6 +91,20 @@ It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=produ
 
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
 
+## `gemi queue:work`
+
+Runs queued jobs without serving HTTP, so job capacity can be scaled apart from web traffic.
+
+```bash
+NODE_ENV=production gemi queue:work
+```
+
+It launches a fresh Bun process with the same runtime preloads as `start`, boots the application, and claims from the queue until it gets `SIGTERM` or `SIGINT`. `queue:work` relays both, as `start` does. The worker then stops claiming, waits for the jobs it is running, runs every provider's `shutdown()`, and exits `0`, or `1` if a job was still running or a provider failed. `queue:work` exits with the same code.
+
+The queue has to use a driver every process can reach, such as `"database"`. On the memory driver the command refuses to start and exits `1`, because a worker never sees a job dispatched in another process. Set `GEMI_QUEUE_CLAIM=off` on the web process to leave all jobs to workers. See [Worker processes](./jobs-and-queues.md#worker-processes--gemi-queuework) for the topology and the shutdown budgets.
+
+> **Gotcha:** as with `gemi run`, `NODE_ENV` is inherited rather than forced, and the cron scheduler is off (`GEMI_NO_SCHEDULE=1`) unless the environment sets `GEMI_NO_SCHEDULE` itself.
+
 ## `gemi run`
 
 Runs one of your application's [commands](./commands.md) — a seeder, a backfill, a report — inside your booted app.
