@@ -916,6 +916,10 @@ function hook(name: string, fn: () => void) {
   }
 }
 
+function isProduction() {
+  return process.env.NODE_ENV === "production";
+}
+
 /**
  * The delay before the retry that follows attempt `attempt`: the number
  * itself, or the array's entry for that retry with its last entry repeated.
@@ -927,10 +931,6 @@ function hook(name: string, fn: () => void) {
  * or a migration — which boot the same providers — is not one, and neither is
  * a `worker` job's thread, which clones the application and exits after it.
  */
-function isProduction() {
-  return process.env.NODE_ENV === "production";
-}
-
 export function claimsInThisProcess() {
   return process.env.ROOT_DIR !== undefined && isMainThread;
 }
