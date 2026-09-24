@@ -12,6 +12,12 @@ import type { QueueDriver } from "./QueueDriver";
  * backed by a database truncates in its factory, or hands out a fresh table.
  * `cleanup`, when given, runs after each test with that driver.
  *
+ * `features.claimsByName` says the driver honours `ClaimOptions.registered`,
+ * and runs the tests that pin what that means. A driver that leaves it out
+ * must still accept the option; the suite passes it to every claim it makes
+ * outside those tests, with `A`, `B` and `C` registered, so ignoring it
+ * correctly is covered too.
+ *
  * Not a `*.test.ts` file, so vitest never runs it on its own, and not exported
  * from `gemi/services`, because it imports vitest.
  *
@@ -24,8 +30,12 @@ export function queueDriverContract(
   name: string,
   create: () => QueueDriver | Promise<QueueDriver>,
   cleanup?: (driver: QueueDriver) => void | Promise<void>,
+  features: { claimsByName?: boolean } = {},
 ) {
-  const LEASE = { visibilityTimeoutMs: 60_000 };
+  // Every name the ordinary tests enqueue is registered, so a driver that
+  // filters by name behaves in them exactly as one that does not.
+  const registered = { names: ["A", "B", "C"], graceMs: 60_000 };
+  const LEASE = { visibilityTimeoutMs: 60_000, registered };
   const SHORT = 150;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -104,7 +114,7 @@ export function queueDriverContract(
       "complete ends the job for good",
       withDriver(async (driver) => {
         await driver.enqueue({ name: "A", args: "[]" });
-        const [job] = await driver.claim(1, { visibilityTimeoutMs: SHORT });
+        const [job] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
 
         await driver.complete(job!);
         await sleep(SHORT * 2);
@@ -145,7 +155,7 @@ export function queueDriverContract(
       "fail with retryInMs null dead-letters: never claimed again",
       withDriver(async (driver) => {
         await driver.enqueue({ name: "A", args: "[]" });
-        const [job] = await driver.claim(1, { visibilityTimeoutMs: SHORT });
+        const [job] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
 
         await driver.fail(job!, { error: "boom", retryInMs: null });
         await sleep(SHORT * 2);
@@ -196,7 +206,7 @@ export function queueDriverContract(
       "a lease that runs out makes the job claimable again, and counts the lost attempt",
       withDriver(async (driver) => {
         const id = await driver.enqueue({ name: "A", args: "[]" });
-        await driver.claim(1, { visibilityTimeoutMs: SHORT });
+        await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
 
         await sleep(SHORT * 2);
         const [again] = await driver.claim(1, LEASE);
@@ -211,9 +221,9 @@ export function queueDriverContract(
       "a report from a claim whose lease was re-issued is ignored",
       withDriver(async (driver) => {
         await driver.enqueue({ name: "A", args: "[]" });
-        const [stale] = await driver.claim(1, { visibilityTimeoutMs: SHORT });
+        const [stale] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
         await sleep(SHORT * 2);
-        const [current] = await driver.claim(1, { visibilityTimeoutMs: SHORT });
+        const [current] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
 
         // The slow first claimer finishes late. No report of its may end the
         // claim that now holds the job, or two processes would each believe
@@ -240,11 +250,166 @@ export function queueDriverContract(
     );
 
     test(
+      "release makes the job claimable again after the delay, without counting the claim",
+      withDriver(async (driver) => {
+        const id = await driver.enqueue({ name: "A", args: "[7]" });
+        const [job] = await driver.claim(1, LEASE);
+
+        await driver.release(job!, { retryInMs: SHORT });
+
+        expect(await driver.claim(1, LEASE)).toEqual([]);
+        await sleep(SHORT * 2);
+
+        // Attempt 1 again: the claim that was given back never ran it, so a
+        // job allowed one attempt still has it.
+        const [again] = await driver.claim(1, LEASE);
+        expect(again).toMatchObject({ id, name: "A", args: "[7]", attempt: 1 });
+
+        // And the count moves on from there, rather than having been reset.
+        await driver.fail(again!, { error: "boom", retryInMs: 0 });
+        const [third] = await driver.claim(1, LEASE);
+        expect(third).toMatchObject({ id, attempt: 2 });
+      }),
+    );
+
+    test(
+      "release with retryInMs 0 is claimable at once",
+      withDriver(async (driver) => {
+        await driver.enqueue({ name: "A", args: "[]" });
+        const [job] = await driver.claim(1, LEASE);
+
+        await driver.release(job!, { retryInMs: 0 });
+
+        expect(await driver.claim(1, LEASE)).toMatchObject([{ attempt: 1 }]);
+      }),
+    );
+
+    test(
+      "a release from a claim whose lease was re-issued is ignored",
+      withDriver(async (driver) => {
+        await driver.enqueue({ name: "A", args: "[]" });
+        const [stale] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
+        await sleep(SHORT * 2);
+        const [current] = await driver.claim(1, LEASE);
+
+        // Honoured, it would re-open a job another worker is running and take
+        // back an attempt that worker is making.
+        await driver.release(stale!, { retryInMs: 0 });
+
+        expect(await driver.claim(1, LEASE)).toEqual([]);
+        await driver.fail(current!, { error: "boom", retryInMs: 0 });
+        expect(await driver.claim(1, LEASE)).toMatchObject([{ attempt: 3 }]);
+      }),
+    );
+
+    if (features.claimsByName) {
+      test(
+        "claim leaves a job under a name it was not given, and it does not use up the limit",
+        withDriver(async (driver) => {
+          // The unknown one first, so a driver that applied the limit before
+          // the filter would hand back one job instead of two.
+          const unknown = await driver.enqueue({ name: "NewRelease", args: "[]" });
+          const a = await driver.enqueue({ name: "A", args: "[]" });
+          const b = await driver.enqueue({ name: "B", args: "[]" });
+          const only = { names: ["A", "B"], graceMs: 60_000 };
+
+          const claimed = await driver.claim(2, { visibilityTimeoutMs: 60_000, registered: only });
+          expect(claimed.map((job) => job.id)).toEqual([a, b]);
+          expect(await driver.claim(2, { visibilityTimeoutMs: 60_000, registered: only })).toEqual(
+            [],
+          );
+
+          // A process that knows the name takes it, as its first attempt.
+          const [taken] = await driver.claim(1, {
+            visibilityTimeoutMs: 60_000,
+            registered: { names: ["NewRelease"], graceMs: 60_000 },
+          });
+          expect(taken).toMatchObject({ id: unknown, attempt: 1 });
+        }),
+      );
+
+      test(
+        "an empty registry claims nothing inside the grace window",
+        withDriver(async (driver) => {
+          await driver.enqueue({ name: "A", args: "[]" });
+
+          expect(
+            await driver.claim(1, {
+              visibilityTimeoutMs: 60_000,
+              registered: { names: [], graceMs: 60_000 },
+            }),
+          ).toEqual([]);
+        }),
+      );
+
+      test(
+        "a job under an unknown name is handed out once it has been claimable for the grace window",
+        withDriver(async (driver) => {
+          const id = await driver.enqueue({ name: "Removed", args: "[]" });
+          const lease = {
+            visibilityTimeoutMs: 60_000,
+            registered: { names: ["A"], graceMs: SHORT },
+          };
+
+          expect(await driver.claim(1, lease)).toEqual([]);
+          await sleep(SHORT * 2);
+
+          // Past the window the name is taken to be gone, and the claimer gets
+          // it so that it can be dead-lettered rather than wait forever.
+          expect(await driver.claim(1, lease)).toMatchObject([{ id, attempt: 1 }]);
+        }),
+      );
+
+      test(
+        "the grace window runs from when a job became claimable, not from when it was enqueued",
+        withDriver(async (driver) => {
+          // Delayed past the window. Due now, it has been waiting for no time
+          // at all, and a replica that knows the name may be about to take it.
+          await driver.enqueue({ name: "Delayed", args: "[]", delayMs: SHORT * 2 });
+          await sleep(SHORT * 3);
+          const lease = {
+            visibilityTimeoutMs: 60_000,
+            registered: { names: ["A"], graceMs: SHORT * 2 },
+          };
+
+          expect(await driver.claim(1, lease)).toEqual([]);
+          await sleep(SHORT * 3);
+          expect(await driver.claim(1, lease)).toHaveLength(1);
+        }),
+      );
+
+      test(
+        "a lapsed lease under an unknown name waits out the grace window from the lapse",
+        withDriver(async (driver) => {
+          const id = await driver.enqueue({ name: "NewRelease", args: "[]" });
+          // A replica that knew the name claimed it and died.
+          await driver.claim(1, {
+            visibilityTimeoutMs: SHORT,
+            registered: { names: ["NewRelease"], graceMs: 60_000 },
+          });
+          await sleep(SHORT * 2);
+
+          const old = {
+            visibilityTimeoutMs: 60_000,
+            registered: { names: ["A"], graceMs: 60_000 },
+          };
+          expect(await driver.claim(1, old)).toEqual([]);
+
+          const [again] = await driver.claim(1, {
+            visibilityTimeoutMs: 60_000,
+            registered: { names: ["NewRelease"], graceMs: 60_000 },
+          });
+          expect(again).toMatchObject({ id, attempt: 2 });
+        }),
+      );
+    }
+
+    test(
       "heartbeat extends a lease, when the driver has one",
       withDriver(async (driver) => {
         if (!driver.heartbeat) return;
         await driver.enqueue({ name: "A", args: "[]" });
-        const short = { visibilityTimeoutMs: SHORT * 2 };
+        const short = { visibilityTimeoutMs: SHORT * 2, registered };
         const [job] = await driver.claim(1, short);
 
         // Kept alive past two whole lease lengths, by beats inside each.

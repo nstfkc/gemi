@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Job } from "./Job";
 import type { MemoryQueueDriver } from "./MemoryQueueDriver";
+import type { ClaimOptions, ClaimedJob, QueueDriver } from "./QueueDriver";
 import { QueueManager } from "./QueueManager";
 
 /**
@@ -73,6 +74,101 @@ describe("a dispatch nothing is registered under", () => {
 
     expect(ran).toHaveBeenCalledTimes(1);
     expect(memory(queue).waiting).toBe(0);
+  });
+});
+
+/**
+ * A driver shared with other processes, that hands out whatever the test says
+ * and records every report. Not a `MemoryQueueDriver`, so the manager treats it
+ * as durable; and it ignores `registered`, as a driver that cannot filter by
+ * name does, so every unknown name reaches the manager.
+ */
+function sharedDriver(claims: ClaimedJob[][]) {
+  const reports: Array<[string, ClaimedJob, unknown]> = [];
+  const options: ClaimOptions[] = [];
+  const driver: QueueDriver = {
+    enqueue: async () => "id",
+    claim: async (_limit, claimOptions) => {
+      options.push(claimOptions);
+      return claims.shift() ?? [];
+    },
+    complete: async (job) => void reports.push(["complete", job, undefined]),
+    fail: async (job, failure) => void reports.push(["fail", job, failure]),
+    release: async (job, release) => void reports.push(["release", job, release]),
+  };
+  return { driver, reports, options };
+}
+
+describe("a job nothing is registered under, on a driver other processes share", () => {
+  // During a blue/green ramp both releases claim from one table, and a name
+  // this replica lacks is usually one the other release has. Dead-lettered
+  // here, it was lost for good although a replica a moment away could run it.
+  test("is given back without spending an attempt, while it is inside the grace window", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fresh = {
+      id: "j1",
+      name: "NewReleaseJob",
+      args: "[]",
+      attempt: 1,
+      createdAt: Date.now(),
+    };
+    const { driver, reports } = sharedDriver([[fresh], [{ ...fresh }]]);
+    const queue = new QueueManager({ driver, jobs: [ChargeCard], pollInterval: 5 });
+
+    queue.start();
+    await vi.waitFor(() => expect(reports).toHaveLength(2));
+    await queue.stop();
+
+    expect(reports.map(([kind]) => kind)).toEqual(["release", "release"]);
+    const { retryInMs } = reports[0]![2] as { retryInMs: number };
+    expect(retryInMs).toBeGreaterThanOrEqual(5);
+    expect(retryInMs).toBeLessThanOrEqual(10);
+    // Once per name, not once per claim: a driver that cannot filter hands the
+    // same job back every poll, and a line each time would bury the rest.
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0]![0])).toContain('Left a queued "NewReleaseJob"');
+  });
+
+  test("is dead-lettered once the grace window has passed since its dispatch", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { driver, reports } = sharedDriver([
+      [{ id: "j1", name: "RemovedJob", args: "[]", attempt: 1, createdAt: Date.now() - 1_000 }],
+    ]);
+    const queue = new QueueManager({
+      driver,
+      jobs: [ChargeCard],
+      pollInterval: 5,
+      unknownJobGrace: 500,
+    });
+
+    queue.start();
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    await queue.stop();
+
+    expect(reports[0]![0]).toBe("fail");
+    expect(reports[0]![2]).toMatchObject({ retryInMs: null });
+    expect(String(error.mock.calls[0]![0])).toContain(
+      'nothing is registered under the name "RemovedJob"',
+    );
+  });
+
+  test("tells the driver which names it can run, and the grace window", async () => {
+    const { driver, options } = sharedDriver([]);
+    const queue = new QueueManager({
+      driver,
+      jobs: [ChargeCard, SendWelcomeEmail],
+      pollInterval: 5,
+      unknownJobGrace: 1234,
+    });
+
+    queue.start();
+    await vi.waitFor(() => expect(options.length).toBeGreaterThan(0));
+    await queue.stop();
+
+    expect(options[0]!.registered).toEqual({
+      names: ["ChargeCard", "SendWelcomeEmail"],
+      graceMs: 1234,
+    });
   });
 });
 
