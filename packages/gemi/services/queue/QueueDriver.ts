@@ -118,6 +118,16 @@ export interface QueueDriver {
   heartbeat?(jobs: ClaimedJob[], options: ClaimOptions): Promise<void>;
 
   /**
+   * Makes a dead-lettered job waiting again, claimable at once as attempt 1,
+   * and resolves to whether there was one under `id`. A job that is waiting
+   * or claimed is left alone and resolves `false`: resetting a claimed job's
+   * attempts would let its current holder's report be refused as stale while
+   * another process ran it again. Optional: a driver that keeps nothing of a
+   * dead job — the memory driver — has nothing to bring back.
+   */
+  retryDead?(id: string): Promise<boolean>;
+
+  /**
    * Calls `wake` whenever a job may have become claimable, and returns the
    * unsubscribe. Optional: a driver without it is polled every
    * `pollInterval` instead. A spurious wake is harmless — the manager claims

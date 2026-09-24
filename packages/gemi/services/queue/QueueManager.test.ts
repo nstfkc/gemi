@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Job } from "./Job";
-import type { MemoryQueueDriver } from "./MemoryQueueDriver";
+import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import type { ClaimOptions, ClaimedJob, QueueDriver } from "./QueueDriver";
 import { QueueManager } from "./QueueManager";
 
@@ -323,5 +323,15 @@ describe("a dispatch the driver cannot record", () => {
     vi.spyOn(queue.driver, "enqueue").mockRejectedValue(new Error("nope"));
 
     await expect(queue.push(ChargeCard, "[]")).rejects.toThrow("nope");
+  });
+});
+
+describe("retryDead", () => {
+  test("is refused, not answered false, by a driver that keeps nothing of a dead job", async () => {
+    const queue = new QueueManager({ driver: new MemoryQueueDriver() });
+
+    await expect(queue.retryDead("an-id-from-a-log")).rejects.toThrow(
+      "keeps nothing of a dead-lettered job",
+    );
   });
 });
