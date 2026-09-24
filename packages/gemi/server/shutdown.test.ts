@@ -356,7 +356,10 @@ describe("serveForShutdown", () => {
       port: 0,
       fetch: (req) =>
         respond(req, async (req) => {
-          reached.push(`app ${new URL(req.url).pathname}`);
+          const path = new URL(req.url).pathname;
+          reached.push(`app ${path}`);
+          // Outlasts any drain budget, so the drain times out on it.
+          if (path === "/slow") await new Promise(() => {});
           return new Response("ok");
         }),
     });
@@ -411,6 +414,31 @@ describe("serveForShutdown", () => {
     expect(reached).toEqual(["instrumentation /before", "app /before"]);
     expect(await draining).toBe(0);
     connection.close();
+  });
+
+  // The flag is set on the timed-out path too: providers are shut down after a
+  // drain that gave up, just as after one that finished.
+  test("refuses a request down it after a drain that timed out, while the providers shut down", async () => {
+    const { server, reached, shutdownProviders, release } = serveThroughShutdown();
+    const idle = await keptAliveConnection(server.port);
+    expect((await idle.get("/before")).body).toBe("ok");
+    const busy = await keptAliveConnection(server.port);
+    // Never answered: the abandoning `stop(true)` may cut it off.
+    busy.get("/slow").catch(() => {});
+    while (!reached.includes("app /slow")) await Bun.sleep(10);
+
+    const draining = drain({ server, shutdownProviders, settings: settings({ timeoutMs: 100 }) });
+    await untilProvidersRun();
+    const refused = await idle.get("/after");
+    release();
+
+    expect(refused.head).toMatch(/^HTTP\/1\.1 503/);
+    expect(reached).not.toContain("instrumentation /after");
+    expect(reached).not.toContain("app /after");
+    // 1: the drain gave up on `/slow`.
+    expect(await draining).toBe(1);
+    idle.close();
+    busy.close();
   });
 
   test("serves with Connection: close while the requests drain, and refuses nothing yet", async () => {

@@ -111,7 +111,7 @@ Like `dev` and `start`, it launches a fresh Bun process with the same two runtim
 
 > **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
 
-`run` relays `SIGTERM` and `SIGINT` to the command's process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. A long-running command that listens for `SIGTERM` (`process.on("SIGTERM", ...)`) gets to finish its batch or record where it stopped; one that does not is ended by the signal, as before.
+`run` relays `SIGTERM` and `SIGINT` to the command's process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. A long-running command that listens for `SIGTERM` (`process.on("SIGTERM", ...)`) gets to finish its batch or record where it stopped; one that does not is ended by the signal, as before. A signal sent to the whole process group — a Ctrl+C in a terminal — reaches the command twice, directly and through the relay, so a handler should be idempotent: one that reads a second `SIGINT` as "force quit" would skip its cleanup on a single Ctrl+C.
 
 ## `gemi upgrade`
 
