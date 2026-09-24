@@ -298,6 +298,22 @@ describe("a gemi dev reload", () => {
     expect(application.resolved(QueueManager)).toBe(false);
   });
 
+  test("a loop stopped before the save is not started again by the reload", async () => {
+    developing();
+    const ran: string[] = [];
+    const kept = new MemoryQueueDriver();
+    const before = await generation(kept, "before the save", ran);
+    await before.queue().push(before.Report, "[]");
+    await vi.waitFor(() => expect(ran).toHaveLength(1));
+    await before.queue().stop();
+
+    const after = await generation(kept, "after the save", ran);
+    startClaimingIfServing(after.application);
+
+    expect(after.application.resolved(QueueManager)).toBe(false);
+    expect(globalThis.__gemiDevQueue).toBeUndefined();
+  });
+
   test("a second boot of one application leaves its own loop running", async () => {
     developing();
     const ran: string[] = [];
