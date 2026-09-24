@@ -49,6 +49,27 @@ export interface QueueDriver {
   enqueue(job: EnqueueJob): Promise<string>;
 
   /**
+   * Whether an `enqueue` made now, from the caller's async context, would be
+   * written inside the ORM transaction that context has open — so that the
+   * job commits with the transaction's rows, rolls back with them, and no
+   * claimer anywhere can see it before the commit. Optional, and `false` when
+   * absent.
+   *
+   * The manager asks before every dispatch. A driver that answers `true` is
+   * handed the job at once and is trusted to have joined; for any other, a
+   * dispatch inside a transaction is held by the manager and enqueued after
+   * the commit, and dropped if the transaction rolls back. The second is
+   * weaker in one way only: a process that dies between the commit and the
+   * enqueue loses the job.
+   *
+   * Answer `true` only when every claim — this process's included — reads
+   * through a different connection than the transaction's. A driver whose
+   * claims share the transaction's connection would see the uncommitted job
+   * and could run it before the commit, which is the thing being prevented.
+   */
+  joinsTransaction?(): boolean;
+
+  /**
    * Leases up to `limit` claimable jobs, each for `visibilityTimeoutMs`, and
    * returns them with `attempt` already incremented. A job is claimable when
    * it is waiting and due, or when its previous lease has run out. Two
@@ -112,6 +133,14 @@ export type EnqueueJob = {
   /** The `run` arguments, as the JSON string `Job.dispatch` serialised. */
   args: string;
   delayMs?: number;
+  /**
+   * The id to record the job under, which `enqueue` then resolves to. Given
+   * only for a dispatch the manager held until a transaction committed: that
+   * dispatch has already resolved, inside the transaction, to the id the job
+   * was going to have, and a driver that picked its own would make that id
+   * name nothing. Absent, the driver chooses.
+   */
+  id?: string;
 };
 
 export type ClaimOptions = {

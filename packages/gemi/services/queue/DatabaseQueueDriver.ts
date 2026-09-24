@@ -1,7 +1,8 @@
-import type { SQL } from "bun";
+import type { SQL, TransactionSQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
+import { currentConnectionName, currentTransaction } from "../../orm/context";
 import type {
   ClaimOptions,
   ClaimedJob,
@@ -75,21 +76,31 @@ type Row = {
  * on when a lease ran out. Integers rather than timestamp columns so the same
  * arithmetic works in all three dialects.
  *
+ * ### Transactions
+ *
+ * On Postgres and MySQL, a dispatch inside an ORM transaction on this
+ * driver's own connection is written on that transaction: the row commits
+ * with the data it describes or not at all, and no claimer — each reads
+ * through a pooled connection of its own — sees it before the commit. See
+ * `transaction` below for why SQLite is left out, and why a driver built from
+ * a bare client never joins.
+ *
  * ### What it does not do
  *
  * It has no `subscribe`: another process's dispatch cannot wake this one, so
  * the queue polls every `pollInterval` (and wakes itself for its own
- * dispatches). A dispatch inside an open ORM transaction is not part of it —
- * the row is written on the pool and stays if the transaction rolls back, and
- * the job can run before the transaction commits. Dispatch after the commit.
+ * dispatches).
  */
 export class DatabaseQueueDriver implements QueueDriver {
   readonly table: string;
   private readonly sql: SQL;
   private readonly dialect: Dialect;
+  /** The connection's name, when it came with one; see `transaction`. */
+  private readonly connection: string | undefined;
 
   constructor(
-    connection: Pick<DatabaseConnection, "sql" | "dialect">,
+    connection: Pick<DatabaseConnection, "sql" | "dialect"> &
+      Partial<Pick<DatabaseConnection, "name">>,
     options: DatabaseQueueDriverOptions = {},
   ) {
     const table = options.table ?? "gemi_jobs";
@@ -102,6 +113,7 @@ export class DatabaseQueueDriver implements QueueDriver {
     this.table = table;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
+    this.connection = connection.name;
   }
 
   /**
@@ -118,9 +130,11 @@ export class DatabaseQueueDriver implements QueueDriver {
     }
   }
 
-  async enqueue({ name, args, delayMs = 0 }: EnqueueJob): Promise<string> {
-    const q = this.sql;
-    const id = Bun.randomUUIDv7();
+  async enqueue({ name, args, delayMs = 0, id = Bun.randomUUIDv7() }: EnqueueJob): Promise<string> {
+    // Read here, at the call, and never kept: Bun's handle stays callable
+    // after its transaction ends and then runs on the pool, so a stored one
+    // would write outside any transaction and succeed.
+    const q = this.transaction() ?? this.sql;
     const now = this.now(q);
     await q`
       INSERT INTO ${this.name(q)}
@@ -129,6 +143,36 @@ export class DatabaseQueueDriver implements QueueDriver {
         (${id}, ${name}, ${args}, 'pending', 0, ${now} + ${this.ms(q, delayMs)}, ${now}, ${now})
     `;
     return id;
+  }
+
+  joinsTransaction(): boolean {
+    return this.transaction() !== undefined;
+  }
+
+  /**
+   * The open ORM transaction, when an `enqueue` should be written on it.
+   *
+   * Only one on this driver's own connection, matched by name as the ORM and
+   * the `DB` facade match it: the transaction's handle does not say which
+   * pool it came from. A driver built from a bare `{ sql, dialect }` has no
+   * name to match, so it never joins, and the manager holds its dispatches
+   * until the commit instead. Guessing "default" there would write a job
+   * into whichever database the default connection is, which need not be the
+   * one this driver's table is in.
+   *
+   * Never on SQLite. Bun gives a SQLite client one connection, and a
+   * statement on the pool while a transaction is open runs *inside* that
+   * transaction — measured on Bun 1.3.14: it sees the transaction's
+   * uncommitted rows. The queue claims through the pool, so a job row
+   * written on the transaction would be visible to this process's own claim
+   * before the commit, and run before the data it describes exists — or
+   * whether or not it ever does. Held until the commit, it cannot.
+   */
+  private transaction(): TransactionSQL | undefined {
+    if (this.dialect === "sqlite" || this.connection === undefined) return undefined;
+    const tx = currentTransaction();
+    if (tx === undefined || currentConnectionName() !== this.connection) return undefined;
+    return tx;
   }
 
   async claim(limit: number, options: ClaimOptions): Promise<ClaimedJob[]> {

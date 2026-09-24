@@ -248,6 +248,33 @@ lower, and like `fail` it ignores a stale claim. `claim` may also honour
 `registered: { names, graceMs }`. A driver that ignores it still works; the
 queue then releases the jobs it cannot run.
 
+**A dispatch inside a transaction waits for the commit.** `Job.dispatch()`
+inside `Model.transaction` or `DB.transaction` used to record the job at
+once, so it survived a rollback and could run before the commit, reading
+rows that were not there yet. Now the database driver on Postgres or MySQL
+writes the job's row on the transaction, and every other driver's dispatch
+is held and recorded just after the commit. A rollback drops the job either
+way, and so does a savepoint that rolls back. `dispatch()` still resolves
+inside the transaction, to the job's id. Two things to check:
+
+- A test that dispatches inside a transaction and asserts the job ran
+  before the transaction returned now fails. Assert after it.
+- With the database driver on Postgres or MySQL, a job row that cannot be
+  written now rejects the awaited `dispatch()` inside the transaction and
+  rolls the transaction back. Before, the transaction committed and the job
+  was lost with a line on stderr.
+
+A queued listener is pushed the same way, so it no longer needs
+`static afterCommit` to wait for the commit. See
+[Dispatching inside a transaction](docs/jobs-and-queues.md#dispatching-inside-a-transaction).
+
+**A `QueueDriver` of your own must honour `enqueue({ id })`**, if you
+wrote one against a 0.63 release candidate: when `id` is given, record the
+job under it and resolve to it. The queue passes one for a dispatch it held
+until a commit. A driver can also add `joinsTransaction()`, returning `true`
+when its `enqueue` will write into the caller's open ORM transaction; the
+queue then hands it the job inside the transaction instead of holding it.
+
 What changes for every app, whatever the driver:
 
 - **A production server told to stop now waits for its running jobs.** The
