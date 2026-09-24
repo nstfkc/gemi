@@ -665,3 +665,90 @@ describe("DatabaseQueueDriver", () => {
     expect(statement).toContain("INDEX `gemi_jobs_status_available_at_idx`");
   });
 });
+
+describe("DatabaseQueueDriver on a SQLite file another process is writing", () => {
+  /**
+   * A second process holding the file's write lock for `ms`. Resolves once it
+   * has the lock, to a promise of its exit. A process and not a second client here: Bun runs SQLite on the
+   * JavaScript thread, so a lock held from this one could never be released
+   * while a statement of ours sat waiting on it.
+   */
+  async function lockFor(path: string, ms: number) {
+    const holder = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `const { Database } = require("bun:sqlite");
+         const db = new Database(${JSON.stringify(path)});
+         db.run("BEGIN IMMEDIATE");
+         db.run("CREATE TABLE held (x INTEGER)");
+         console.log("locked");
+         Bun.sleepSync(${ms});
+         db.run("COMMIT");`,
+      ],
+      { stdout: "pipe" },
+    );
+    const { value } = await holder.stdout.getReader().read();
+    if (!new TextDecoder().decode(value).includes("locked")) {
+      throw new Error("the lock holder exited without taking the lock");
+    }
+    return { released: holder.exited };
+  }
+
+  async function file() {
+    const dir = mkdtempSync(join(tmpdir(), "gemi-queue-busy-"));
+    const path = join(dir, "jobs.db");
+    const sql = new SQL(`sqlite://${path}`);
+    return {
+      path,
+      sql,
+      async dispose() {
+        await sql.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test("waits out the other process's write instead of failing with SQLITE_BUSY", async () => {
+    const db = await file();
+    try {
+      const driver = new DatabaseQueueDriver({ sql: db.sql, dialect: "sqlite" });
+      await driver.createTable();
+      const { released } = await lockFor(db.path, 300);
+
+      // Bun opens SQLite with busy_timeout 0, so without the driver's own
+      // this INSERT is refused the moment it finds the lock taken.
+      await driver.enqueue({ name: "A", args: "[]" });
+
+      await released;
+      expect(await driver.claim(1, { visibilityTimeoutMs: 1000 })).toHaveLength(1);
+    } finally {
+      await db.dispose();
+    }
+  });
+
+  test("leaves a connection whose busy timeout was already set, and busyTimeout 0 leaves any", async () => {
+    const db = await file();
+    try {
+      await db.sql.unsafe("PRAGMA busy_timeout = 250");
+      await new DatabaseQueueDriver({ sql: db.sql, dialect: "sqlite" }).createTable();
+      expect([...(await db.sql.unsafe("PRAGMA busy_timeout"))]).toEqual([{ timeout: 250 }]);
+
+      await db.sql.unsafe("PRAGMA busy_timeout = 0");
+      await new DatabaseQueueDriver(
+        { sql: db.sql, dialect: "sqlite" },
+        { busyTimeout: 0 },
+      ).createTable();
+      expect([...(await db.sql.unsafe("PRAGMA busy_timeout"))]).toEqual([{ timeout: 0 }]);
+    } finally {
+      await db.dispose();
+    }
+  });
+
+  test("refuses a busyTimeout that is not a whole, non-negative number", () => {
+    const sql = new SQL(":memory:");
+    expect(() => new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { busyTimeout: -1 })).toThrow(
+      "busyTimeout",
+    );
+  });
+});
