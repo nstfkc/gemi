@@ -1,4 +1,4 @@
-import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
+import { isReservedAssetPath, RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
 
 /**
  * A JavaScript module under `/assets/` — the only shape a client build chunk
@@ -17,11 +17,10 @@ export function isBuildChunkPath(pathname: string): boolean {
 
 /**
  * `/assets` or anything under it — the prefix the router refuses to mount a
- * route on at boot, so nothing there is ever the app's to answer.
+ * route on at boot, so nothing there is ever the app's to answer. Defined
+ * beside that check so the two cannot drift apart.
  */
-export function isReservedAssetPath(pathname: string): boolean {
-  return pathname === RESERVED_ROUTE_PREFIX || pathname.startsWith(`${RESERVED_ROUTE_PREFIX}/`);
-}
+export { isReservedAssetPath };
 
 /**
  * The answer to a static-looking request with no file behind it in

@@ -150,10 +150,17 @@ async function getTtfFont(
  */
 export const RESERVED_ROUTE_PREFIX = "/assets";
 
+/**
+ * `/assets` or anything under it. The boot-time route check and the production
+ * static handler both ask this, so a route the router accepts is never one the
+ * static handler answers from `dist/client` instead.
+ */
+export function isReservedAssetPath(path: string): boolean {
+  return path === RESERVED_ROUTE_PREFIX || path.startsWith(`${RESERVED_ROUTE_PREFIX}/`);
+}
+
 export function assertNoReservedRoutePaths(routePaths: string[]) {
-  const reserved = routePaths.filter(
-    (path) => path === RESERVED_ROUTE_PREFIX || path.startsWith(`${RESERVED_ROUTE_PREFIX}/`),
-  );
+  const reserved = routePaths.filter(isReservedAssetPath);
 
   if (reserved.length > 0) {
     const many = reserved.length > 1;
