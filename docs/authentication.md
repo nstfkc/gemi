@@ -76,7 +76,7 @@ a binding into the container, and a facade resolves it.**
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
-| `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an absolute URL for sign-in hosted elsewhere. |
+| `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
@@ -793,11 +793,19 @@ middleware's parameter:
 "/admin": this.view("Admin").middleware(["auth:/admin/sign-in"]),
 ```
 
+The middleware parameter is a **path only**. Alias arguments are split on `:` and `,`, so
+`"auth:https://sso.example/login"` would arrive as the bare word `https` — that is refused
+rather than redirected to. Put a sign-in page on another origin in `signInPath`, where the
+whole URL survives.
+
 ### Returning to the intended page
 
 The redirect carries the page that was asked for, as `?redirect=`:
 `/invoices?page=2` is sent to `/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2`. The locale
-segment is left off, since `useNavigate` adds the current one back. After sign-in, send the
+segment is left off, since `useNavigate` adds the current one back. When `signInPath` is on
+**another origin**, only the path is carried and the query string is dropped: a protected
+page reached with a single-use token (`?invite=`, `?token=`) would otherwise hand it to that
+origin, and to its logs and `Referer`. After sign-in, send the
 user there:
 
 ```tsx

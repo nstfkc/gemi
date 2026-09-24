@@ -50,6 +50,44 @@ describe("the intended URL across the OAuth round trip", () => {
     expect(cookie).toContain("HttpOnly");
   });
 
+  /**
+   * `origin.includes("localhost")` read the `Host` header, so a deployment
+   * that does not pin it let `localhost.evil.example` drop `Secure`. The
+   * scheme the client addressed is the thing that decides it.
+   */
+  test("the cookie is Secure by the scheme, not by the host's name", async () => {
+    const secureOf = async (url: string, headers: Record<string, string> = {}) => {
+      const req = new HttpRequest(new Request(url, { headers }), { provider: "google" }, "view");
+      const { cookies } = await RequestContext.run(req, async () => {
+        await new AuthController().oauthRedirect();
+        return { cookies: [...RequestContext.getStore().cookies] };
+      });
+      return cookies.find((c) => c.startsWith("intended_url="))?.includes("Secure");
+    };
+
+    const query = "?redirect=%2Finvoices";
+    expect(await secureOf(`http://localhost/auth/oauth/google${query}`)).toBe(false);
+    expect(await secureOf(`https://app.example/auth/oauth/google${query}`)).toBe(true);
+    // Not local at all, whatever the name says.
+    expect(await secureOf(`https://localhost.evil.example/auth/oauth/google${query}`)).toBe(true);
+    // Behind a proxy that terminated TLS and reached the app over plain http.
+    expect(
+      await secureOf(`http://app.example/auth/oauth/google${query}`, {
+        "x-forwarded-proto": "https",
+      }),
+    ).toBe(true);
+  });
+
+  test("the redirect step ignores a target that composes into a protocol-relative URL", async () => {
+    const { cookies } = await inRequest(
+      "http://localhost/auth/oauth/google?redirect=%2F..%2F%2Fevil.example",
+      "",
+      () => new AuthController().oauthRedirect(),
+    );
+
+    expect(cookies.some((c) => c.startsWith("intended_url="))).toBe(false);
+  });
+
   test("the redirect step ignores an off-origin target", async () => {
     const { cookies } = await inRequest(
       "http://localhost/auth/oauth/google?redirect=https%3A%2F%2Fevil.example",

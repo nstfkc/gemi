@@ -9,7 +9,7 @@ import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
-import { INTENDED_URL_PARAM, safeRedirectPath } from "../utils/intendedUrl";
+import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
@@ -547,7 +547,10 @@ export class AuthController extends Controller {
       req.ctx().setCookie(INTENDED_URL_COOKIE, encodeURIComponent(intended), {
         httpOnly: true,
         sameSite: "Lax",
-        secure: !new URL(req.rawRequest.url).origin.includes("localhost"),
+        // By the scheme the client addressed, not by whether the host reads
+        // as local: `localhost.evil.example` is not local, and a browser
+        // drops a `Secure` cookie from a plain-http origin anyway.
+        secure: isSecureRequest(req.rawRequest),
         maxAge: 60 * 10,
       });
     }
