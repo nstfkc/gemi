@@ -399,6 +399,17 @@ export class DatabaseQueueDriver implements QueueDriver {
    * The list is spliced in as one parameter per name, because `name IN ()` is
    * a syntax error in all three dialects; an empty registry matches no name
    * and leaves only the grace window.
+   *
+   * No index covers `name`, on purpose. On MySQL 8.4 the claim keeps walking
+   * `(status, available_at)` and filters names as it goes, and a
+   * `(status, name, available_at)` index is not chosen even when it exists:
+   * it cannot hand back rows in `available_at` order across several names. A
+   * head of rows with names this replica does not know costs only the scan,
+   * not locks, because `claimLocking` claims at READ COMMITTED. Measured with
+   * 2,000 unknown rows ahead of the rest: 10 record locks held for a claim of
+   * 5, and a second replica that knows those names took them meanwhile. At
+   * REPEATABLE READ the same claim held 4,014, and the second replica skipped
+   * every one of them.
    */
   private runnable(q: SQL, options: ClaimOptions, since: "available_at" | "lease_expires_at") {
     const registered = options.registered;
