@@ -307,7 +307,8 @@ export class QueueManager {
    * makes sure the worker loop is running — unless `drain` stopped it, in which
    * case the job waits in the driver for whichever process claims next. With
    * the memory driver that is nobody; see `drain`. A durable driver's job also
-   * waits there when this process is not a server.
+   * waits there when this process does not claim: it is not a server, or it is
+   * one started with `GEMI_QUEUE_CLAIM=off`; see `claimsInThisProcess`.
    *
    * Inside an open ORM transaction the job belongs to the transaction. A
    * driver that can write it on the transaction does (`joinsTransaction`);
@@ -390,8 +391,8 @@ export class QueueManager {
     // a script or console command that dispatches would otherwise claim up to
     // `concurrency` of the table's jobs — other replicas' included — and exit
     // under them, costing each an attempt and a lease's wait. There the job
-    // waits in the driver for a server. A manager built by hand, with no
-    // application, is its caller's to run and keeps starting.
+    // waits in the driver for a server or a worker. A manager built by hand,
+    // with no application, is its caller's to run and keeps starting.
     this.startIfIdle();
     // A driver without `subscribe` is only polled, so without the wake a job
     // dispatched here would wait up to `pollInterval` in a queue with room.
@@ -444,7 +445,8 @@ export class QueueManager {
    *
    * The job is claimed the way a dispatch's is. On a server it is run here as
    * soon as there is room; from a console command it waits in the driver for
-   * a server, which with a polling driver means up to `pollInterval`.
+   * a server or a worker, which with a polling driver means up to
+   * `pollInterval`.
    *
    * Refused for a driver without `retryDead`. The memory driver keeps nothing
    * of a dead job, so there is no id it could bring back, and resolving
@@ -675,8 +677,11 @@ export class QueueManager {
     resume?.();
   }
 
-  /** Whether the driver keeps jobs past this process: anything but memory. */
-  private get durable() {
+  /**
+   * Whether the driver keeps jobs past this process: anything but memory.
+   * Only such a queue can be fed by one process and drained by another.
+   */
+  get durable() {
     return !(this.driver instanceof MemoryQueueDriver);
   }
 
@@ -921,20 +926,53 @@ function isProduction() {
 }
 
 /**
+ * Whether this process should claim from a driver shared with other
+ * processes: a `gemi queue:work` worker, or a server's main thread unless
+ * `GEMI_QUEUE_CLAIM=off` hands its jobs to workers. `ROOT_DIR` is set only by
+ * a starting server or worker, so a console command, a seed
+ * or a migration — which boot the same providers — is not one, and neither is
+ * a `worker` job's thread, which clones the application and exits after it.
+ *
+ * A worker claims whatever `GEMI_QUEUE_CLAIM` says, because the variable is
+ * for the web process, and a deploy that sets it once for every container
+ * would otherwise leave nothing claiming at all.
+ */
+export function claimsInThisProcess() {
+  if (!isMainThread) return false;
+  if (isQueueWorker()) return true;
+  return process.env.ROOT_DIR !== undefined && !claimingTurnedOff();
+}
+
+/**
+ * `GEMI_QUEUE_CLAIM=off` (any case): this server dispatches into a shared
+ * driver and leaves the claiming to `gemi queue:work` processes. Anything else
+ * claims, as before. An environment variable rather than a config field for
+ * the reason `GEMI_NO_SCHEDULE` is one: the web and the worker run the same
+ * build with the same config, and only the process knows which it is.
+ */
+export function claimingTurnedOff(env: Record<string, string | undefined> = process.env) {
+  return (env.GEMI_QUEUE_CLAIM ?? "").trim().toLowerCase() === "off";
+}
+
+// On `globalThis` under a registry symbol, like the shutdown flag, so the mark
+// the worker entry sets is the one this module reads if two copies of it are
+// loaded. Not an environment variable: a job that spawns a child process
+// would hand it on, and the child, a script, would start claiming.
+const QUEUE_WORKER = Symbol.for("gemi.queue.worker");
+
+/** Marks this process as a `gemi queue:work` worker; see `claimsInThisProcess`. */
+export function markQueueWorker(worker = true) {
+  (globalThis as { [QUEUE_WORKER]?: boolean })[QUEUE_WORKER] = worker;
+}
+
+export function isQueueWorker(): boolean {
+  return (globalThis as { [QUEUE_WORKER]?: boolean })[QUEUE_WORKER] === true;
+}
+
+/**
  * The delay before the retry that follows attempt `attempt`: the number
  * itself, or the array's entry for that retry with its last entry repeated.
  */
-/**
- * Whether this process is a server's main thread, the only kind that should
- * claim from a driver shared with other processes. `ROOT_DIR` is set only by
- * a starting server, so a console command, a seed
- * or a migration — which boot the same providers — is not one, and neither is
- * a `worker` job's thread, which clones the application and exits after it.
- */
-export function claimsInThisProcess() {
-  return process.env.ROOT_DIR !== undefined && isMainThread;
-}
-
 export function backoffFor(backoff: number | number[], attempt: number) {
   const delay = Array.isArray(backoff)
     ? backoff[Math.min(attempt, backoff.length) - 1]
