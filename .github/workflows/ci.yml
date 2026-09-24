@@ -459,3 +459,140 @@ jobs:
       - name: Differential and policy suites
         run: bun --bun vitest run app/models --no-file-parallelism -t postgres
         working-directory: templates/saas-starter
+
+  # The database queue driver's claim is different SQL per dialect — a locking
+  # CTE on Postgres, a `SELECT … FOR UPDATE SKIP LOCKED` transaction on MySQL —
+  # and the `sqlite` job only runs the SQLite one. Its Postgres and MySQL suites
+  # run when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, which nothing else
+  # does. A job of its own rather than a step in `postgres`: it needs neither
+  # Prisma nor the template, and it needs a MySQL server that job does not
+  # have. `-t` keeps the SQLite half, which `sqlite` already runs, out of it.
+  queue-databases:
+    name: queue-databases
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gemi_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: gemi_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/gemi_test
+      TEST_MYSQL_URL: mysql://root:mysql@127.0.0.1:3306/gemi_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Queue driver on Postgres and MySQL
+        run: bun --bun vitest run services/queue/DatabaseQueueDriver.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+
+      # `DB.schema()` reads a different catalog per dialect, and the servers
+      # are already here. The filter selects nothing at all if the URLs go
+      # missing, which would read as a pass, so the suite is told to fail
+      # instead of skipping when it cannot reach them.
+      - name: Schema introspection on Postgres and MySQL
+        run: bun --bun vitest run database/introspect.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          CI_DATABASE_SERVERS_REQUIRED: "1"
+
+  # The iOS client. `swift test` at the root builds GemiChat and replays the
+  # TypeScript reducer's recorded cases (`packages/gemi/ai/client/__fixtures__`)
+  # through its port, and compiles the checked-in `ai:generate-client` output
+  # against it. The `check` job fails when either of those drifts from the
+  # TypeScript that produces them; this one fails when the Swift stops agreeing.
+  #
+  # macOS because GemiChat imports Foundation's networking, which the Linux
+  # toolchain spells differently; `macos-15` for a Swift 6 toolchain.
+  #
+  # The end-to-end tests talk to a real `AgentController` with a scripted model
+  # (`packages/gemi-swift/e2e/server.ts`), which is what holds the client to
+  # what the server accepts rather than to what the web hook is read as
+  # sending. They skip without `GEMI_E2E_URL`, so the server is started first.
+  swift:
+    name: swift
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          # Unpinned it reads the root `packageManager`, a Bun too old to install.
+          bun-version: 1.3.14
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Start the end-to-end server
+        run: |
+          bun packages/gemi-swift/e2e/server.ts 47123 > e2e-server.log 2>&1 &
+          for _ in $(seq 1 50); do grep -q ready e2e-server.log && exit 0; sleep 0.2; done
+          cat e2e-server.log; exit 1
+      - name: Swift tests
+        run: swift test
+        env:
+          GEMI_E2E_URL: http://127.0.0.1:47123
+      - name: End-to-end server log
+        if: failure()
+        run: cat e2e-server.log
+
+  # The Android client. `gemi-chat` replays the same recorded reducer and
+  # decoder cases the Swift client does, and its end-to-end tests talk to the
+  # same scripted `AgentController` (`packages/gemi-swift/e2e/server.ts`).
+  # `gemi-chat-compose` is only built: it is a thin wrapper, and the runner's
+  # preinstalled Android SDK (`ANDROID_HOME`) is what includes it at all.
+  kotlin:
+    name: kotlin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          # Unpinned it reads the root `packageManager`, a Bun too old to install.
+          bun-version: 1.3.14
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Start the end-to-end server
+        run: |
+          bun packages/gemi-swift/e2e/server.ts 47123 > e2e-server.log 2>&1 &
+          for _ in $(seq 1 50); do grep -q ready e2e-server.log && exit 0; sleep 0.2; done
+          cat e2e-server.log; exit 1
+      - name: Kotlin tests and the Compose build
+        run: ./gradlew :gemi-chat:test :gemi-chat-compose:assembleRelease
+        working-directory: packages/gemi-kotlin
+        env:
+          GEMI_E2E_URL: http://127.0.0.1:47123
+      - name: End-to-end server log
+        if: failure()
+        run: cat e2e-server.log

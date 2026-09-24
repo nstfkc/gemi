@@ -2029,7 +2029,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | --- | --- |
 | `RecordNotFoundError` | An `…OrThrow` operation matched nothing. |
 | `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. It is gemi's own error and carries no Prisma `code` — see below if a `"P2002"` check is what you have today. |
-| `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. |
+| `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. Uncaught in an api route, it answers 403 `{ "error": { "message": "Forbidden" } }` for both reasons; the message, written for you rather than the client, goes to `onRequestFail` and the log. |
 | `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
 | `InvalidPolicyEntryError` | A `$policies` entry that cannot run — a factory nobody called, a policy class whose constructor throws, or an entry whose keys are none of `before` / `scope` / `onCreate` / `onUpdate` / `redact`. Names the class and the index. Raised wherever the entry is first read: by `registerModels` and `gemi check models` at boot, and on the first query through a class neither of those was given. |
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
@@ -2045,6 +2045,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
 | `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
 | `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
+| `TransactionDependencyError` | A statement issued on the transaction for you, without your awaiting it, failed — today, a job the database queue driver wrote on it ([Jobs & Queues](./jobs-and-queues.md#dispatching-inside-a-transaction)) — so the transaction rolled back instead of committing. The statement's own error is its `cause`. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
 | `MalformedRelationError` / `MissingModelSchemaError` / `UnregisteredRelationTargetError` | The generated artifact and the registry disagree — the same family as the two above, and the same fix. |
@@ -2296,6 +2297,46 @@ The direction is the awkward one: a `DB.sql` write inside a transaction rolls ba
 development on SQLite and survives the rollback in production on Postgres. `DB.query` and
 `DB.execute` join the transaction on both.
 
+### Reading the live schema
+
+`DB.schema()` reads the schema back out of the database's own catalog: every table, its columns
+and their types, its primary key, and its foreign keys.
+
+```ts
+const { dialect, tables } = await DB.schema()
+const post = tables.find((t) => t.name === "Post")
+// post.columns     [{ name: "id", type: "text", nullable: false, default: null }, …]
+// post.primaryKey  ["id"]
+// post.relations   [{ name: "Post_authorId_fkey", columns: ["authorId"],
+//                     referencedTable: "User", referencedColumns: ["id"],
+//                     onDelete: "CASCADE", onUpdate: "CASCADE" }]
+```
+
+`DB.connection(name).schema()` reads another connection's schema.
+
+- **This is what the database says, not what the models say.** The generated `ModelSchema` comes
+  from Prisma and is never checked against the database. Comparing the two is how you find drift.
+- **Types are in the database's own spelling**, such as `character varying(255)`, `int` or
+  `INTEGER`. They are not mapped to TypeScript or Prisma types. Defaults are reported the same way:
+  SQLite and Postgres give the SQL expression, MySQL gives the bare value, and MariaDB gives the
+  SQL literal — `'untitled'` and `current_timestamp()` where MySQL says `untitled` and
+  `CURRENT_TIMESTAMP`. A column with no default is `null` on all four.
+- **A generated column is listed like any other**, since a plain `select *` returns it. Its
+  expression is not reported as a default.
+- **`nullable` is what the table enforces, not what the DDL reads like.** SQLite is the one that
+  differs: only a sole `integer primary key` — the rowid — refuses a null, and any other key column
+  there accepts one and is reported nullable. That is drift worth seeing rather than hiding.
+- **Only base tables are listed.** Views are left out, and so are SQLite's `sqlite_*` tables, its
+  virtual tables and the shadow tables behind them. On Postgres the listing is limited to
+  `current_schema()`, and on MySQL to `database()`. Migration tables such as `_prisma_migrations`
+  are real tables, so they are included.
+- **A key pointing outside that scope names its parent qualified**, as `other_schema.Thing`, so it
+  cannot be mistaken for a table of the same bare name in scope. Every unqualified
+  `referencedTable` is a table the same read lists.
+- **It works on MySQL and MariaDB**, where `DB.query` does not yet.
+- **The code loads on first call.** An app that never calls it never loads it.
+- **It joins the ambient transaction.** A table created earlier in the same transaction is included.
+
 ## Enums
 
 A Prisma `enum` is a **string** at runtime, on both dialects, exactly as it is through Prisma:
@@ -2508,7 +2549,7 @@ might lift next release.
 
 - **[Rows and entities](./orm-rows-and-entities.md)** — POJOs, `track` + `save`, and `wrap`.
 - **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider.
-  `UserProvider` (exported from `gemi/kernel`) implements all twenty-two methods of the auth
+  `UserProvider` (exported from `gemi/kernel`) implements all twenty-five methods of the auth
   persistence on this ORM, and is the only implementation: the adapter seam and the Prisma
   adapter are gone, and `AuthManager` constructs it directly. It resolves your models from the
   registry by name, so registering them at boot is what makes sign-in work.

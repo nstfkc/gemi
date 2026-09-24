@@ -1,5 +1,7 @@
 import type { WebSocketHandler } from "bun";
 import type { Kernel } from "../kernel";
+import type { CarriedContext } from "../http/requestContext";
+import { isApiPath } from "../services/router/apiPath";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -38,21 +40,101 @@ export class App {
     return this.kernel.viewRoutes().componentTree;
   }
 
+  // Every host group's views, not just the root's: the servers load these
+  // modules up front, and a view only an `admin.` group routes to still has
+  // to be among them.
   public getFlatComponentTree() {
-    return this.kernel.viewRoutes().flatComponentTree;
+    const views = new Set<string>();
+    for (const dispatcher of this.kernel.domains().viewDispatchers()) {
+      for (const view of dispatcher.flatComponentTree) {
+        views.add(view);
+      }
+    }
+    return Array.from(views);
+  }
+
+  /**
+   * The hosts the dev server's Vite may answer: the `route.domains` root and
+   * its subdomains, or any host when custom domains are on, since those are
+   * only known to the app's resolver.
+   */
+  public devAllowedHosts(): true | string[] {
+    const domains = this.kernel.domains();
+    if (!domains.resolver) {
+      return [];
+    }
+    return domains.acceptsCustomDomains ? true : [`.${domains.resolver.root}`];
   }
 
   public getRouteManifest() {
     return this.kernel.viewRoutes().routeManifest;
   }
 
+  // Requests `withGlobalMiddleware` already ran the global middleware for, so
+  // `fetch` inside it does not run the list a second time, and can still hand
+  // the route what the list carried. Keyed by the Request object: the servers
+  // hand `fetch` the same one they gated.
+  private globallyGated = new WeakMap<Request, CarriedContext | null>();
+
+  /**
+   * Runs the `global` middleware list, then `next` — what the servers put in
+   * front of everything they serve, so the list covers static files, which
+   * never reach `fetch`, as well as routes. A refusal is answered without
+   * calling `next`. A global middleware that throws something other than a
+   * break is answered by `onError` rather than by `next`, since a gate that
+   * failed must not let a static file through.
+   */
+  public async withGlobalMiddleware(
+    req: Request,
+    next: (req: Request) => Promise<Response>,
+    onError: (err: unknown) => Response | Promise<Response>,
+  ): Promise<Response> {
+    let outcome: Awaited<ReturnType<Kernel["globalMiddleware"]>>;
+    try {
+      outcome = await this.kernel.run.call(this.kernel, () => this.kernel.globalMiddleware(req));
+    } catch (err) {
+      return await onError(err);
+    }
+    if (outcome.refusal) {
+      return outcome.refusal;
+    }
+    this.globallyGated.set(req, outcome.carried);
+    return outcome.apply(await next(req));
+  }
+
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {
-      if (url.pathname.startsWith("/api")) {
-        return await this.kernel.apiRoutes().handleApiRequest(req);
+      // Run here too for a caller that is not one of the servers, a test or an
+      // app's own `Bun.serve`, so the list is not skipped by calling `fetch`.
+      const gated = this.globallyGated.has(req);
+      const outcome = gated ? null : await this.kernel.globalMiddleware(req);
+      const carried = gated ? this.globallyGated.get(req) : outcome.carried;
+      if (outcome?.refusal) {
+        return outcome.refusal;
       }
-      return await this.kernel.viewRoutes().handleViewRequest(req);
+      const domains = this.kernel.domains();
+      const dispatchers = (await domains.ask(req)) ?? (await domains.route(req));
+      if (dispatchers instanceof Response) {
+        return outcome ? outcome.apply(dispatchers) : dispatchers;
+      }
+      if (!dispatchers) {
+        const unknown = new Response("Unknown host", { status: 404 });
+        return outcome ? outcome.apply(unknown) : unknown;
+      }
+      const result = isApiPath(url.pathname)
+        ? await dispatchers.api.handleApiRequest(req, carried)
+        : await dispatchers.view.handleViewRequest(req, carried);
+      if (!outcome) {
+        return result;
+      }
+      // A document comes back as a render function the server calls with its
+      // manifests, and the Response only exists once it has.
+      if (typeof result === "function") {
+        const render = result as (...args: any[]) => Promise<Response>;
+        return (async (...args: any[]) => outcome.apply(await render(...args))) as any;
+      }
+      return outcome.apply(result);
     });
   }
 
@@ -91,6 +173,11 @@ export class App {
     return kernelRun(() => {
       return this.kernel.queue().dispatchJob(jobName, args);
     });
+  }
+
+  /** Every provider's `shutdown()`; see `Kernel.shutdown`. */
+  public shutdown(options?: { timeoutMs?: number }) {
+    return this.kernel.shutdown(options);
   }
 
   public destroy() {

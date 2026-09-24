@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Application } from "../../foundation/Application";
 import { kernelContext } from "../../kernel/context";
+import { withTransaction } from "../../orm/context";
 import { Repository } from "../../support/Repository";
+import { MemoryQueueDriver } from "../queue/MemoryQueueDriver";
 import { QueueManager } from "../queue/QueueManager";
+import type { QueueConfig } from "../queue/config";
 import { QueueServiceProvider } from "../queue/QueueServiceProvider";
 import { Event } from "./Event";
 import { EventManager } from "./EventManager";
@@ -23,11 +26,10 @@ import { Listener, type ListenerClass } from "./Listener";
  * author thought it was sync is a side effect that has not happened yet when
  * the response goes out.
  *
- * The queue drains in process: `push` starts the drain itself unless one is
- * already running, so a job is often *finished* by the time `push` returns.
- * Tests that need to observe the queued-but-not-yet-run state therefore claim
- * the queue as busy first, which is the state a real queue is in whenever
- * anything else is running.
+ * The queue drains in process: the first `push` starts the worker loop, so a
+ * job is often *finished* a tick after `push` returns. Tests that need to
+ * observe the queued-but-not-yet-run state therefore stop the queue first and
+ * start it again afterwards.
  */
 
 class UserRegistered extends Event {
@@ -48,7 +50,7 @@ class UserRegistered extends Event {
 function listener(
   name: string,
   handle: (event: any) => void | Promise<void>,
-  fields: Partial<Pick<Listener, "queued" | "maxAttempts" | "worker">> = {},
+  fields: Partial<Pick<Listener, "queued" | "maxAttempts" | "backoff" | "worker">> = {},
 ) {
   return {
     [name]: class extends Listener {
@@ -57,6 +59,7 @@ function listener(
 
       queued = fields.queued ?? true;
       maxAttempts = fields.maxAttempts ?? 3;
+      backoff = fields.backoff ?? 0;
       worker = fields.worker ?? false;
 
       handle(received: UserRegistered) {
@@ -70,16 +73,17 @@ function listener(
  * A booted application holding the queue and the events provider, with both
  * registries declared rather than discovered.
  *
- * `concurrency: 5` for the reason `QueueManager.test.ts` uses it: a retry is
- * pushed from inside the failing job's own `catch`, before the active count has
- * been decremented, so a concurrency of 1 sends the queue into a one-second
- * timer between attempts.
+ * `concurrency: 5` is left from when a retry pushed from inside the failing
+ * job's `catch` found its own slot still taken and slept a second; a finished
+ * attempt now frees its slot before the retry is claimed, so it no longer
+ * matters, and changing it would only churn the tests below. `queue` is merged
+ * over it.
  */
-async function makeApp(listeners: ListenerClass[]) {
+async function makeApp(listeners: ListenerClass[], queue: QueueConfig = {}) {
   const application = new Application(
     new Repository({
       events: { listeners },
-      queue: { jobs: [], concurrency: 5 },
+      queue: { jobs: [], concurrency: 5, ...queue },
     }),
   );
   application.registerMany([QueueServiceProvider, EventServiceProvider]);
@@ -104,6 +108,15 @@ const consoleLines = (spy: { mock: { calls: unknown[][] } }) =>
 const deadletterLine = (spy: { mock: { calls: unknown[][] } }) =>
   consoleLines(spy).find((line) => line.includes("dead-lettered"));
 
+/**
+ * Jobs the memory driver holds, waiting or claimed — zero means nothing was
+ * pushed, or everything pushed has ended.
+ */
+const held = (queue: QueueManager) => {
+  const driver = queue.driver as MemoryQueueDriver;
+  return driver.waiting + driver.leased;
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -117,25 +130,25 @@ describe("a dispatch with one sync listener and one queued", () => {
     ]);
     const queue = application.make(QueueManager);
 
-    // Held, so the entry is observable between being pushed and being run.
-    queue.isRunning = true;
+    // Stopped, so the entry is observable between being pushed and being run.
+    await queue.stop();
 
     await kernelContext.run(application, () =>
       UserRegistered.dispatchAndWait(7, "ada@example.com"),
     );
 
     expect(ran).toEqual(["sync"]);
-    expect(queue.queue.size).toBe(1);
+    expect(held(queue)).toBe(1);
 
-    // Driven inside the application, because that is what the job needs to
-    // rebuild the event: a drain resolves the `EventManager` out of whatever
-    // context it runs in, and a queued listener carries no application with it.
-    queue.isRunning = false;
-    await kernelContext.run(application, () => queue.next());
+    // Started outside the application on purpose. The job needs one to
+    // rebuild the event — it resolves the `EventManager` through `app()` — and
+    // a queued listener carries none with it, so this passes only because the
+    // manager enters the application it was registered in around every job.
+    queue.start();
     await tick();
 
     expect(ran).toEqual(["sync", "queued"]);
-    expect(queue.queue.size).toBe(0);
+    expect(held(queue)).toBe(0);
   });
 
   test("the queued listener is registered with the queue under a listener: name", async () => {
@@ -151,6 +164,55 @@ describe("a dispatch with one sync listener and one queued", () => {
     expect(
       application.make(QueueManager).registeredJobs.map((job) => job.name),
     ).toEqual(["listener:SendWelcomeEmail"]);
+  });
+});
+
+// #563: the queue holds any dispatch made inside a transaction until the
+// commit, and a queued listener's push is one — so it needs no `afterCommit`.
+describe("a queued listener on an event dispatched inside a transaction", () => {
+  const pool = () => {
+    const handle: any = {};
+    return { begin: (fn: (tx: any) => Promise<unknown>) => Promise.resolve().then(() => fn(handle)) } as any;
+  };
+
+  test("is recorded at the commit, while the sync one runs at once", async () => {
+    const ran: string[] = [];
+    const application = await makeApp([
+      listener("WriteAuditRow", () => void ran.push("sync"), { queued: false }),
+      listener("SendWelcomeEmail", () => void ran.push("queued")),
+    ]);
+    const queue = application.make(QueueManager);
+
+    await kernelContext.run(application, () =>
+      withTransaction(pool(), async () => {
+        await UserRegistered.dispatchAndWait(7, "ada@example.com");
+        await tick();
+        expect(ran).toEqual(["sync"]);
+        expect(held(queue)).toBe(0);
+      }),
+    );
+
+    await tick();
+    expect(ran).toEqual(["sync", "queued"]);
+  });
+
+  test("is never recorded when the transaction rolls back", async () => {
+    const ran: string[] = [];
+    const application = await makeApp([listener("SendWelcomeEmail", () => void ran.push("queued"))]);
+    const queue = application.make(QueueManager);
+
+    await expect(
+      kernelContext.run(application, () =>
+        withTransaction(pool(), async () => {
+          await UserRegistered.dispatchAndWait(7, "ada@example.com");
+          throw new Error("billing declined");
+        }),
+      ),
+    ).rejects.toThrow("billing declined");
+
+    await tick();
+    expect(ran).toEqual([]);
+    expect(held(queue)).toBe(0);
   });
 });
 
@@ -257,7 +319,7 @@ describe("a queued listener that always throws", () => {
     // Two, not the queue's default of three: `maxAttempts` is read off the
     // listener and forwarded to the job it is registered as.
     expect(attempts).toBe(2);
-    expect(application.make(QueueManager).queue.size).toBe(0);
+    expect(held(application.make(QueueManager))).toBe(0);
 
     // `dispatchAndWait` resolved before the first attempt failed, so this line
     // is the entire signal that a side effect stopped happening. It names the
@@ -266,6 +328,33 @@ describe("a queued listener that always throws", () => {
     expect(deadletterLine(error)).toContain("SendWelcomeEmail");
     expect(deadletterLine(error)).toContain("UserRegistered");
     expect(deadletterLine(error)).toContain("smtp is down");
+  });
+});
+
+describe("a queued listener with a backoff", () => {
+  test("waits it out before the retry, as a job with that backoff would", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const attempts: number[] = [];
+
+    const application = await makeApp([
+      listener(
+        "SendWelcomeEmail",
+        () => {
+          attempts.push(Date.now());
+          if (attempts.length === 1) throw new Error("smtp is down");
+        },
+        { backoff: 200 },
+      ),
+    ]);
+
+    await kernelContext.run(application, () =>
+      UserRegistered.dispatchAndWait(7, "ada@example.com"),
+    );
+    await vi.waitFor(() => expect(attempts).toHaveLength(2), { timeout: 2_000 });
+
+    // Without the forward the synthetic job keeps `Job`'s default of 0 and
+    // the retry is claimed as soon as the failure frees its slot.
+    expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(180);
   });
 });
 
@@ -293,6 +382,30 @@ describe("a payload naming an event this process does not know", () => {
     expect(deadletterLine(error)).toContain(
       'Cannot rebuild the event "OrderPaid"',
     );
+  });
+});
+
+describe("a driver that cannot record the job", () => {
+  test("is one listener's problem, reported, and not an unhandled rejection", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const driver = new MemoryQueueDriver();
+    vi.spyOn(driver, "enqueue").mockRejectedValue(new Error("db is down"));
+    const application = await makeApp(
+      [listener("SendWelcomeEmail", () => {})],
+      { driver },
+    );
+
+    // `push` rejects after `dispatchAndWait` has moved on, so nothing above
+    // the manager's own `catch` is left to hear about it.
+    await kernelContext.run(application, () =>
+      UserRegistered.dispatchAndWait(7, "ada@example.com"),
+    );
+    await tick();
+
+    expect(vi.mocked(error).mock.calls[0]![0]).toContain(
+      "could not be queued for UserRegistered",
+    );
+    expect(String(vi.mocked(error).mock.calls[0]![1])).toContain("db is down");
   });
 });
 
@@ -349,6 +462,12 @@ describe("the synthetic job", () => {
     const Cpu = listener("ResizeAvatar", () => {}, { worker: true });
 
     expect(new (jobForListener(Cpu, new Cpu()))().worker).toBe(true);
+  });
+
+  test("forwards the listener's backoff", () => {
+    const Patient = listener("SendWelcomeEmail", () => {}, { backoff: [1_000, 5_000] });
+
+    expect(new (jobForListener(Patient, new Patient()))().backoff).toEqual([1_000, 5_000]);
   });
 
   test("is refused when the listener's name is the implicit class binding", () => {
@@ -413,7 +532,7 @@ describe("an event dispatched straight at the manager", () => {
     await tick();
 
     expect(ran).toEqual([]);
-    expect(application.make(QueueManager).queue.size).toBe(0);
+    expect(held(application.make(QueueManager))).toBe(0);
     expect(vi.mocked(error).mock.calls[0]![0]).toContain("SendWelcomeEmail");
     expect(vi.mocked(error).mock.calls[0]![0]).toContain(
       "without its constructor arguments",

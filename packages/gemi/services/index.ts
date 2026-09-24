@@ -61,6 +61,17 @@ export type {
   StreamQuerySummary,
 } from "./router/ServerQueryStore";
 
+// MCP: an app's exposed routes as tools. v1 is in-process only; the
+// `AgentTool` projection, `toAgentTools`, is exported from `gemi/ai`.
+export {
+  McpRegistry,
+  McpToolError,
+  type McpCaller,
+  type McpToolAnnotations,
+  type McpToolDescriptor,
+  type McpToolFilter,
+} from "./mcp/McpRegistry";
+
 // Logging
 export { LogServiceProvider } from "./logging/LogServiceProvider";
 export { LogManager } from "./logging/LogManager";
@@ -68,7 +79,21 @@ export type { LogEntry } from "./logging/types";
 
 // Queue
 export { QueueServiceProvider } from "./queue/QueueServiceProvider";
-export { QueueManager } from "./queue/QueueManager";
+export { QueueManager, type DrainResult } from "./queue/QueueManager";
+export { MemoryQueueDriver } from "./queue/MemoryQueueDriver";
+export {
+  DatabaseQueueDriver,
+  type DatabaseQueueDriverOptions,
+  type DatabaseJobStatus,
+} from "./queue/DatabaseQueueDriver";
+export type {
+  QueueDriver,
+  EnqueueJob,
+  ClaimOptions,
+  ClaimedJob,
+  JobFailure,
+  JobRelease,
+} from "./queue/QueueDriver";
 export { Job } from "./queue/Job";
 
 // Events. `Event` shadows the DOM's global of the same name inside a module
@@ -205,6 +230,7 @@ export {
   viewRouteConfigDefaults,
   type RouteConfig,
   type ApiRouteConfig,
+  type McpRouteConfig,
   type ViewRouteConfig,
 } from "./router/config";
 export {

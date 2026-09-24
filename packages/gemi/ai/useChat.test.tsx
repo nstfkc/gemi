@@ -177,6 +177,24 @@ describe("routes", () => {
 });
 
 describe("sendMessage", () => {
+  /** #500. `attach()`'s answer is meant to be passed on whole; both ids go. */
+  test("an attach() answer sent as a file carries both ids to the server", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ fileId: "f_1", attachmentId: "gemi_att_1" })),
+    );
+
+    await act(async () => {
+      const upload = await box.api.attach(new File(["x"], "p.png", { type: "image/png" }));
+      await box.api.sendMessage({ text: "make a product", files: [upload] });
+    });
+
+    expect(bodyOf(1).turn).toEqual({
+      text: "make a product",
+      files: [{ fileId: "f_1", attachmentId: "gemi_att_1", name: "p.png", mimeType: "image/png" }],
+    });
+  });
+
   test("shows the user's turn before the server has said anything", async () => {
     // A never-resolving request: the point is what the UI does while it waits.
     fetchMock.mockImplementation(() => new Promise(() => {}));
@@ -694,6 +712,52 @@ describe("regenerate", () => {
     // The user turn is re-sent, not duplicated.
     expect(box.api.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+  });
+
+  /** #500. The model is told a file's `attachmentId` only because the turn
+   *  carried it, so a regenerated turn that dropped it would answer the same
+   *  question without the id a tool needs. */
+  test("re-sends a file's attachmentId, and a storage-only file without a fileId", async () => {
+    const { box } = mount({
+      attach: false,
+      initialMessages: [
+        {
+          id: "u1",
+          role: "user",
+          content: [
+            { type: "text", text: "make a product" },
+            {
+              type: "file",
+              fileId: "f_1",
+              attachmentId: "gemi_att_1",
+              name: "p.png",
+              mimeType: "image/png",
+            },
+            { type: "file", attachmentId: "gemi_att_2", name: "s.csv", mimeType: "text/csv" },
+          ],
+          createdAt: "",
+        },
+        {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "no" }],
+          createdAt: "",
+          finishReason: "stop",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(bodyOf(0).turn).toStrictEqual({
+      text: "make a product",
+      files: [
+        { fileId: "f_1", attachmentId: "gemi_att_1", name: "p.png", mimeType: "image/png" },
+        { attachmentId: "gemi_att_2", name: "s.csv", mimeType: "text/csv" },
+      ],
+    });
   });
 
   test("nothing to regenerate is a no-op", async () => {

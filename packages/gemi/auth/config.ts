@@ -7,10 +7,33 @@ import { SignUpRequest } from "./requests";
 export interface AuthConfig {
   basePath?: string;
   verifyEmail?: boolean;
+  /**
+   * Where a signed-in user goes when there is no intended URL to return to —
+   * the fallback of `Auth.intendedUrl()` and of the OAuth callback's
+   * `redirectTo`.
+   */
   redirectPath?: string;
+  /**
+   * The sign-in page `AuthenticationMiddleware` (and `Auth.user()`) sends a
+   * signed-out view request to. The page that was asked for rides along as
+   * `?redirect=`, for `useIntendedUrl()` / `Auth.intendedUrl()` to return to.
+   * A path, or an absolute URL for sign-in hosted elsewhere. One route can
+   * override it with `"auth:/other/sign-in"`.
+   */
+  signInPath?: string;
 
   sessionExpiresInHours?: number;
   sessionAbsoluteExpiresInHours?: number;
+
+  /**
+   * Shares the session cookie across subdomains. `"root"` is
+   * `route.domains.root`; a hostname names the domain outright. Applied only
+   * to a request whose host is that domain or one of its subdomains — on a
+   * custom domain the browser would refuse it, so a custom domain keeps its
+   * own session and its users sign in there. `null`, the default, scopes the
+   * cookie to the host that set it.
+   */
+  cookieDomain?: "root" | (string & {}) | null;
 
   signUpRequest?: new () => HttpRequest<any, any>;
   oauthProviders?: Record<string, OAuthProvider>;
@@ -114,9 +137,11 @@ export function authConfigDefaults(
     basePath: "/auth",
     verifyEmail: true,
     redirectPath: "/dashboard",
+    signInPath: "/auth/sign-in",
 
     sessionExpiresInHours: 24,
     sessionAbsoluteExpiresInHours: 24 * 7 * 4,
+    cookieDomain: null,
 
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},

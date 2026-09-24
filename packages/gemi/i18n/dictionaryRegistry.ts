@@ -27,6 +27,12 @@ export type { LocaleStrings };
 export type RenderThenable = Promise<LocaleStrings> & {
   /** Set when the load failed and this settled on no strings instead. */
   degraded?: boolean;
+  /**
+   * The strings, when they were already in hand as this thenable was made. No
+   * render can have suspended on such a thenable, so none can be replayed on
+   * it either, and `useDictionary` reads these without calling `use()`.
+   */
+  inHand?: LocaleStrings;
 };
 
 export interface RegisteredDictionary {
@@ -209,7 +215,18 @@ export function loadDictionary(
  * the update dispatcher against an empty hook list, and the next `useState`
  * throws "Update hook called on initial render". A thenable pre-tagged
  * `fulfilled` costs nothing — React reads it synchronously, no suspend, no
- * microtask hop — and keeps `use()` on every path.
+ * microtask hop — and keeps `use()` on every path that can be replayed.
+ *
+ * **But only those paths call `use()` (#542).** Under `act`, any `use()` call
+ * flags the render as waiting on a promise, fulfilled or not, and `act` then
+ * parks the render task. When the same component really suspends by *throwing*
+ * — as `useQuery` does — that task never runs again and the component never
+ * commits. A thenable made from strings already in hand carries them as
+ * `inHand`: nothing ever suspended on it, so there is nothing to replay, and
+ * the hook reads them directly. A thenable that *was* pending keeps going
+ * through `use()` for as long as it is cached, so under `act` the hang
+ * outlives its first render; tests warm with `preloadDictionaries` instead
+ * (docs/testing.md).
  *
  * **There is exactly one per (dictionary, locale).** React tracks the thenable
  * a component suspended on by position, and a later pass arriving at the same
@@ -236,14 +253,16 @@ export function loadDictionaryForRender(
   }
 
   if (already) {
-    return remember(key, resolvedThenable(already));
+    // Not `inHand` when it replaces a degraded thenable: a render may have
+    // suspended on that one, and its replay has to reach `use()` again.
+    return remember(key, resolvedThenable(already, !cached));
   }
 
   const result = loadDictionary(id, locale);
   // The untransformed path holds every locale in memory and answers
   // synchronously. It still goes out as a thenable — see above.
   if (!(result instanceof Promise)) {
-    return remember(key, resolvedThenable(result));
+    return remember(key, resolvedThenable(result, true));
   }
 
   const safe: RenderThenable = result.then(
@@ -276,10 +295,14 @@ function remember(key: string, thenable: RenderThenable): RenderThenable {
  * replaces existed to avoid. The properties are absent from `Promise`, and so
  * from `RenderThenable`, because nothing here reads them back; React does.
  */
-function resolvedThenable(strings: LocaleStrings): RenderThenable {
+function resolvedThenable(
+  strings: LocaleStrings,
+  inHand: boolean,
+): RenderThenable {
   return Object.assign(Promise.resolve(strings), {
     status: "fulfilled",
     value: strings,
+    inHand: inHand ? strings : undefined,
   });
 }
 

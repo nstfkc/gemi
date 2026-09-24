@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { Application } from "../../foundation/Application";
+import { Repository } from "../../support/Repository";
 import { CronJob } from "./CronJob";
+import { ScheduleServiceProvider } from "./ScheduleServiceProvider";
 import { Scheduler, runTick } from "./Scheduler";
 
 /**
@@ -48,6 +51,21 @@ function scheduled(
   jobs: Array<new () => CronJob>,
   run?: <T>(cb: () => T | Promise<T>) => Promise<T> | T,
 ) {
+  const { ticks, handles, tick } = stubCron();
+
+  const scheduler = new Scheduler({ jobs, jobsDir: "app/cron" });
+  scheduler.start(run);
+
+  return { scheduler, handles, registered: ticks.length, tick };
+}
+
+/**
+ * The `Bun.cron` stub on its own, for a test that starts the scheduler through
+ * the provider rather than by hand. The stub's `stop()` only records the call:
+ * a callback fired after it is the tick Bun had already dispatched, and the
+ * scheduler is what has to refuse it.
+ */
+function stubCron() {
   const ticks: Array<() => unknown> = [];
   // Handles that remember being stopped, because "which schedule is still
   // running" is a question one of the tests below is entirely about.
@@ -67,13 +85,9 @@ function scheduled(
     return handle;
   }) as unknown as typeof Bun.cron);
 
-  const scheduler = new Scheduler({ jobs, jobsDir: "app/cron" });
-  scheduler.start(run);
-
   return {
-    scheduler,
+    ticks,
     handles,
-    registered: ticks.length,
     tick: async (index = 0) => {
       await ticks[index]!();
     },
@@ -471,5 +485,167 @@ describe("what a directory can hand the scheduler", () => {
     const message = vi.mocked(error).mock.calls[0]![0] as string;
     expect(message).toContain("AlertingCronJob");
     expect(message).toContain("base class");
+  });
+});
+
+/**
+ * A job whose `callback` waits until the test lets it go, so a tick can be
+ * caught mid-run. Records every hook, and how many ticks got as far as
+ * `callback`.
+ */
+function held() {
+  const calls: string[] = [];
+  const gates: Array<() => void> = [];
+  class Held extends CronJob {
+    name = "Held";
+    cron = "@daily";
+    onTick() {
+      calls.push("onTick");
+    }
+    callback() {
+      calls.push("callback");
+      return new Promise<void>((resolve) => gates.push(resolve));
+    }
+    onComplete() {
+      calls.push("onComplete");
+    }
+  }
+  return { Held, calls, release: () => gates.shift()!() };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("draining the schedule", () => {
+  test("a tick already running is awaited, and one due meanwhile does not start", async () => {
+    const { Held, calls, release } = held();
+    const { scheduler, handles, tick } = scheduled([Held]);
+
+    const first = tick();
+    await sleep(0);
+    expect(scheduler.running).toBe(1);
+
+    let drained = false;
+    const drain = scheduler.drain().then((result) => {
+      drained = true;
+      return result;
+    });
+    expect(handles[0]!.stopped).toBe(true);
+
+    // The next tick falls due while the drain waits. Bun would not fire a
+    // stopped handle, but the stub does — this is the callback it had already
+    // dispatched, and the scheduler has to turn it away itself. Not awaited:
+    // a tick that did start would wait on its gate forever.
+    void tick();
+    await sleep(10);
+    expect(drained).toBe(false);
+    expect(calls).toEqual(["onTick", "callback"]);
+
+    release();
+    await first;
+    expect(await drain).toEqual({ unfinished: [] });
+    expect(calls).toEqual(["onTick", "callback", "onComplete"]);
+    expect(scheduler.running).toBe(0);
+  });
+
+  test("a tick that outlives the timeout is reported by name, and keeps running", async () => {
+    const { Held, calls, release } = held();
+    const { scheduler, tick } = scheduled([Held]);
+
+    void tick();
+    await sleep(0);
+    const { unfinished } = await scheduler.drain(20);
+
+    expect(unfinished.map((t) => t.name)).toEqual(["Held"]);
+    expect(unfinished[0]!.startedAt).toBeInstanceOf(Date);
+    // Nothing was cancelled: the tick finishes on its own once it can.
+    release();
+    await sleep(0);
+    expect(calls).toEqual(["onTick", "callback", "onComplete"]);
+    expect(scheduler.running).toBe(0);
+  });
+
+  test("a start() after a drain schedules again, and its ticks run", async () => {
+    const calls: string[] = [];
+    const { scheduler, tick } = scheduled([recorder(calls)]);
+
+    await scheduler.drain();
+    await tick(0);
+    expect(calls).toEqual([]);
+
+    // Without clearing the flag, start() would register fresh handles whose
+    // every callback returns early — a schedule that looks live and never runs.
+    scheduler.start();
+    await tick(1);
+    expect(calls).toEqual(["onTick", "callback", "onComplete"]);
+  });
+});
+
+describe("the provider's shutdown", () => {
+  /**
+   * A bare `Application` with the schedule provider and nothing else — no
+   * kernel, no database — because that is what the app suites boot, and a
+   * shutdown path that resolves something unbound would throw there and
+   * nowhere a `packages/gemi` test looked.
+   */
+  async function makeApp(jobs: Array<new () => CronJob>) {
+    const cron = stubCron();
+    const application = new Application(new Repository({ schedule: { jobs } }));
+    application.registerMany([ScheduleServiceProvider]);
+    await application.boot();
+    return { application, ...cron };
+  }
+
+  test("stops the schedule and waits for the running tick", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { Held, calls, release } = held();
+    const { application, handles, tick } = await makeApp([Held]);
+
+    void tick();
+    await sleep(0);
+    let finished = false;
+    const shutdown = application.shutdown({ timeoutMs: 2_000 }).then((report) => {
+      finished = true;
+      return report;
+    });
+    await sleep(20);
+    expect(finished).toBe(false);
+    expect(handles[0]!.stopped).toBe(true);
+
+    release();
+    expect(await shutdown).toEqual({ failed: [], timedOut: [] });
+    expect(calls).toEqual(["onTick", "callback", "onComplete"]);
+  });
+
+  test("a tick outliving the deadline is named by the scheduler, not just timed out", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { Held, release } = held();
+    const { application, tick } = await makeApp([Held]);
+
+    void tick();
+    await sleep(0);
+    const report = await application.shutdown({ timeoutMs: 50 });
+
+    // Without a bound of its own the drain would be cut off by
+    // `Application`'s race, whose message names the provider and no job.
+    const logged = error.mock.calls.flat().join(" ");
+    expect(logged).toContain("Cron jobs still running at shutdown");
+    expect(logged).toContain("Held");
+    expect(report.timedOut).toEqual([]);
+    release();
+  });
+
+  test("with nothing running, returns at once and says nothing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { Held } = held();
+    const { application } = await makeApp([Held]);
+
+    expect(await application.shutdown({ timeoutMs: 1_000 })).toEqual({
+      failed: [],
+      timedOut: [],
+    });
+    expect(log).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
   });
 });

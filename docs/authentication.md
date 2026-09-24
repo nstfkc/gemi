@@ -75,7 +75,9 @@ a binding into the container, and a facade resolves it.**
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
-| `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
+| `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
+| `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
+| `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
@@ -148,14 +150,16 @@ It expects the following models (field names matter, they are queried directly):
 - **`PasswordResetToken`** — `token` (unique), `createdAt`, `user` relation.
 - **`MagicLinkToken`** — `email`, `token`, `pin`, with composite unique keys
   `token_email` and `pin_email`.
-- **`SocialAccount`** — `provider`, `providerId`, `userId`, `email`, `username`,
-  `accessToken`, `refreshToken`, `expiresAt` (created on first OAuth sign-up).
+- **`SocialAccount`** — `provider`, `providerId` (nullable), `userId`, `email`, `username`,
+  `accessToken`, `refreshToken`, `expiresAt`, with `@@unique([provider, providerId])` —
+  the link between a user and a provider account. See
+  [OAuth account identity](#oauth-account-identity).
 - **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
   optional invitation sign-up flow).
 
 ### Methods
 
-The twenty-two methods, all overridable:
+The twenty-five methods, all overridable:
 
 | Method | Purpose |
 | --- | --- |
@@ -171,6 +175,7 @@ The twenty-two methods, all overridable:
 | `createPasswordResetToken(args)` / `findPasswordResetToken(args)` / `deletePasswordResetToken(args)` | Password-reset token lifecycle. |
 | `createMagicLinkToken(args)` / `findUserMagicLinkToken(args)` / `deleteMagicLinkToken(email)` | Magic-link / PIN token lifecycle. |
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
+| `findUserBySocialAccount(provider, providerId)` / `findSocialAccounts(userId, provider)` / `claimSocialAccount(account, providerId)` | Resolve a provider identity to its user; list a user's links; record the identity on a legacy link. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
 One more method is not a query: `transaction(fn)` runs `fn` inside a transaction on the
@@ -476,10 +481,10 @@ and `HOST_NAME` from the environment by default. `XOAuthProvider` reads `X_CLIEN
 The framework mounts two view routes per provider automatically:
 
 - `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
-- `/auth/oauth/:provider/callback` — exchanges the code, resolves the user's email/name,
-  signs them in (or creates the account + a `SocialAccount` on first login, in one transaction
-  with [`onUserCreated`](#onusercreated)), sets the session cookie, and fires `onSignUp` (new) or
-  `onSignIn` (returning).
+- `/auth/oauth/:provider/callback` — exchanges the code, resolves the provider account to a
+  user (see [below](#oauth-account-identity)), signs them in (or creates the account + a
+  `SocialAccount` on first login, in one transaction with [`onUserCreated`](#onusercreated)),
+  sets the session cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
 
 > **Note:** `onSignUp`'s `verificationToken` is `""` on this path. A user arriving through
 > OAuth has `emailVerifiedAt` already set, so there is nothing to verify. To mail them a
@@ -497,7 +502,100 @@ A "Sign in with Google" button is just a link:
 
 To add your own provider, extend the abstract `OAuthProvider` (from `gemi/services`) and
 implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
-`{ email, name, username?, providerId? }`.
+`{ email, name, username?, providerId? }`. Return the provider's stable account id as
+`providerId` whenever it has one, and never build one from a name or an email.
+
+### OAuth account identity
+
+A provider account is identified by **`(provider, providerId)`** — for Google, `providerId`
+is the OpenID Connect `sub`, which Google keeps stable across email changes; for X, the user
+id. Display names and emails are profile data, stored on the `SocialAccount` as they were at
+link time, and never used as identity. The callback resolves an account in this order:
+
+1. **By identity.** If a `SocialAccount` holds this `(provider, providerId)`, its user is
+   signed in — whatever the provider now reports as the email or name. The local user's email
+   is not changed, and a provider-side email change never moves the account to another user,
+   even when the new address belongs to one.
+2. **By email**, for an identity not yet linked:
+   - No user with that email: the user and its `SocialAccount` are created in one
+     transaction with `onUserCreated`; `onSignUp` fires.
+   - A user with that email and no link at this provider: they are signed in and the link is
+     created; `onSignIn` fires.
+   - A user with that email whose link at this provider has an empty `providerId` (a
+     [legacy row](#migrating-existing-social-accounts)): the identity is recorded on that row.
+   - A user with that email **already linked to a different account at this provider**: the
+     callback is refused (`session: null`), nothing is written and no hook fires. The same
+     address is not the same account — a deleted and re-created Workspace user gets a new
+     `sub`. To allow re-linking, delete the old `SocialAccount` row.
+
+A callback is also refused when the provider returns no identity the callback can use: no
+email for an unknown identity, or — for `GoogleOAuthProvider` — a userinfo response with no
+`sub`, which it treats as a failed login rather than falling back to the email.
+
+A provider that returns no `providerId` at all (a custom one) keeps email-only behaviour:
+step 2 without a link, and no `SocialAccount` row, since a row with no identity in it can
+never be resolved by one.
+
+`@@unique([provider, providerId])` is what makes this safe under concurrency. Two callbacks
+racing to sign up or link the same account both try to write the same identity; one wins,
+the other fails on the constraint, and the loser then signs in **only if** the identity now
+resolves — the database error alone is never taken as proof of who the user is. Without the
+constraint the lookups still work, but a race can write two rows for one account.
+
+`username` is the provider's handle where it has one (X). Google has none, so it is left
+empty; it used to hold the display name.
+
+#### Migrating existing social accounts
+
+Before this, the callback wrote `providerId: ""` for every Google account, and the template
+declared `@@unique([username, provider])` — the display name — which made a second Google
+user with an existing user's name fail to sign up. Change the model to:
+
+```prisma
+model SocialAccount {
+  // ...
+  provider   String
+  providerId String?   // was: String
+
+  username String?
+  email    String?
+  // ...
+
+  @@unique([provider, providerId])   // was: @@unique([username, provider])
+  @@index([userId])
+}
+```
+
+and convert the empty placeholders to `NULL` in the same migration. A unique index cannot
+hold more than one `""` per provider, but it treats `NULL`s as distinct, and every existing
+Google row holds `""`. The conversion has to run **after** the column becomes nullable and
+**before** the index is created, so the migration Prisma generates will not apply on its own.
+Create it with `prisma migrate dev --create-only`, edit it, and only then apply it. On
+Postgres the finished migration is:
+
+```sql
+DROP INDEX "SocialAccount_username_provider_key";
+ALTER TABLE "SocialAccount" ALTER COLUMN "providerId" DROP NOT NULL;
+-- added by hand: between DROP NOT NULL and CREATE UNIQUE INDEX
+UPDATE "SocialAccount" SET "providerId" = NULL WHERE "providerId" = '';
+CREATE UNIQUE INDEX "SocialAccount_provider_providerId_key" ON "SocialAccount"("provider", "providerId");
+```
+
+Appending the `UPDATE` to the end of the file fails at `CREATE UNIQUE INDEX` as soon as there
+are two Google accounts. A development database often has only one, so the mistake passes
+locally and first fails at `migrate deploy`. On SQLite, Prisma redefines the table instead;
+write `NULLIF("providerId", '')` in place of `"providerId"` in its `INSERT ... SELECT`, as the
+template's `20260922000000_social_account_provider_identity` migration does.
+
+Do **not** fill legacy rows from names or emails: they
+are recorded with the real `providerId` by the callback itself, on each user's next sign-in,
+through the email match that already signs them in today.
+
+**Deployment order.** Apply the migration, then deploy the new framework version. The other
+order also works — the callback only ever writes a non-empty `providerId`, finds rows with
+`findFirst`, and leaves `username` empty for Google, so it runs against the old schema — but
+until the constraint exists, concurrent first sign-ins are not guarded. Applications that
+override `createSocialAccount` should check that it passes `providerId` through.
 
 ## The Auth facade
 
@@ -509,8 +607,9 @@ current user and session.
 | Method | Returns | Description |
 | --- | --- | --- |
 | `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
-| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws. |
-| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing. |
+| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
+| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
+| `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
 
@@ -540,8 +639,9 @@ That is the same call the static methods make internally — `getFacadeRoot()` i
 which doubles as its own container token.
 
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
-> that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
-> use `Auth.guardSafe(...)` instead of wrapping `Auth.user()` in a try/catch.
+> that's fine (the framework turns it into a 401 / redirect). So do `Auth.guard(...)` and
+> `Auth.guardSafe(...)`, which call it first: `guardSafe` returns `false` only for a signed-in
+> user the predicate refuses. On a route that may have no session, catch `AuthenticationError`.
 
 See [Authorization](./authorization.md) for role checks.
 
@@ -559,6 +659,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
 
@@ -670,7 +771,95 @@ export default class extends Kernel {
 this.get(DashboardController, "index").middleware(["auth"]);
 ```
 
-Requests without a valid `access_token` are rejected with an `AuthenticationError`
-(401 for API routes, a redirect to `/auth/sign-in` for views). See
-[Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
-and [Authorization](./authorization.md) for role enforcement.
+Requests without a valid `access_token` are rejected with an `AuthenticationError`:
+a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
+a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
+view's loader refuses the same way. See [Middleware](./middleware.md) for the full DSL
+(`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
+role enforcement.
+
+The sign-in page is set once in the auth config:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  signInPath: "/login",
+});
+```
+
+A route that needs a different one — an admin area with its own sign-in — names it as the
+middleware's parameter:
+
+```typescript
+"/admin": this.view("Admin").middleware(["auth:/admin/sign-in"]),
+```
+
+The middleware parameter is a **path only**. Alias arguments are split on `:` and `,`, so
+`"auth:https://sso.example/login"` would arrive as the bare word `https` — that is refused
+rather than redirected to. Put a sign-in page on another origin in `signInPath`, where the
+whole URL survives.
+
+### Returning to the intended page
+
+The redirect carries the page that was asked for, as `?redirect=`:
+`/invoices?page=2` is sent to `/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2`. The locale
+segment is left off, since `useNavigate` adds the current one back. When `signInPath` is on
+**another origin**, only the path is carried and the query string is dropped: a protected
+page reached with a single-use token (`?invite=`, `?token=`) would otherwise hand it to that
+origin, and to its logs and `Referer`. After sign-in, send the
+user there:
+
+```tsx
+import { Form, useIntendedUrl, useNavigate } from "gemi/client";
+
+function SignIn() {
+  const { push } = useNavigate();
+  const intended = useIntendedUrl("/dashboard");
+  return (
+    <Form method="POST" action="/auth/sign-in-v2" onSuccess={() => push(intended)}>
+      {/* ... */}
+    </Form>
+  );
+}
+```
+
+On the server, `Auth.intendedUrl()` reads the same parameter from the current request —
+for example in the sign-in page's loader, to send an already-signed-in visitor on:
+
+```typescript
+"/sign-in": this.view("auth/SignIn", async () => {
+  const user = await Auth.user().catch(() => null);
+  if (user) {
+    // `as any`: the target is a runtime path, not a typed route.
+    Redirect.to(Auth.intendedUrl() as any);
+  }
+  return {};
+}),
+```
+
+Both accept only a path on this origin and fall back otherwise. The parameter is part of a
+URL anyone can send a user, so passing it on unchecked would be an open redirect:
+`?redirect=https://evil.example` must not sign a user in and hand them to a look-alike.
+Read it through these two helpers rather than off `useSearchParams()` directly.
+
+**OAuth.** The provider round trip drops the query string, so forward the parameter onto the
+OAuth link and the framework keeps it for the callback in a short-lived cookie:
+
+```tsx
+const intended = useIntendedUrl();
+<a href={`/auth/oauth/google?redirect=${encodeURIComponent(intended)}`}>Sign in with Google</a>
+```
+
+The callback view (`auth/OauthCallback`) then receives `redirectTo` next to `session`: the
+forwarded page, or `redirectPath` when there was none.
+
+```tsx
+export default function OauthCallback({ session, redirectTo }) {
+  if (session) return <Redirect action="replace" href={redirectTo} />;
+  // ...
+}
+```
+
+A **magic link** is opened from an email, not from the sign-in page, so it carries no
+`?redirect=` unless your `onMagicLinkCreated` / `onSignUp` hook puts one on the link it
+mails; when it does, `useIntendedUrl()` in the `auth/MagicLinkSignIn` view reads it.

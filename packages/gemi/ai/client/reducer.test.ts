@@ -1,6 +1,14 @@
 import { describe, expect, test } from "vitest";
+import { join } from "node:path";
 import type { AgentMessage, AgentStreamFrame, NestedRun } from "../types";
-import { applyFrame, initialChatState, markAborted, type ChatState } from "./reducer";
+import { recordReducer } from "./conformance";
+import type { ChatState } from "./reducer";
+
+// Every call below is recorded into `__fixtures__/reducer.json`, which the
+// Swift and Kotlin clients replay — see `conformance.ts`.
+const { applyFrame, initialChatState, markAborted } = recordReducer(
+  join(import.meta.dirname, "__fixtures__/reducer.json"),
+);
 
 const NOW = "2026-09-02T00:00:00.000Z";
 

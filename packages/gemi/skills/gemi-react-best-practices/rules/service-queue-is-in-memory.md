@@ -7,10 +7,19 @@ tags: service, jobs, queue, durability
 
 ## The Queue Is In-Process and In-Memory — Do Not Trust It With Durable Work
 
-Jobs live in the server process's memory. **Enqueued jobs do not survive a restart**,
-and there is no cross-machine queue — a job dispatched on one instance runs on that
-instance or not at all. Use jobs for best-effort work: warming a cache, sending a
-non-critical email, kicking off media processing that the user can retry.
+With the default `"memory"` driver, jobs live in the server process's memory.
+**Enqueued jobs do not survive a restart**, and there is no cross-machine queue — a
+job dispatched on one instance runs on that instance or not at all. Use jobs for
+best-effort work: warming a cache, sending a non-critical email, kicking off media
+processing that the user can retry.
+
+The queue slice's `driver` changes this. `driver: "database"` keeps jobs in a
+`gemi_jobs` table, where they survive a restart and any replica can claim them. Any
+other `QueueDriver` backed by storage that outlives the process does the same. Check
+`app/config/queue.ts` before relying on either answer; absent a `driver`, it is memory.
+A durable driver delivers **at least once**: a job can run again after a crash, or
+twice at once if its lease runs out while it is still running. Make such jobs
+idempotent.
 
 Anything that must not be lost needs a durable record: write the row first, then let
 the job (or a cron sweep) act on it, so a restart leaves work to pick up rather than

@@ -5,6 +5,7 @@ import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import {
   type Attachment,
+  ATTACHMENT_ID_PREFIX,
   type AttachmentDestination,
   attachmentObjectName,
   type AttachmentScope,
@@ -283,10 +284,69 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    */
   attachmentStorage: AttachmentStorage = Storage;
 
+  /**
+   * How long the request that started a run is held open for its hooks, in
+   * milliseconds, once the run has settled. The run itself is not bounded
+   * here — the request is held for as long as it runs — only the app's code
+   * still going after it, from `onMessage` to an `onAwaitingInput` queued
+   * behind a slow `onToolCall`.
+   *
+   * The hooks read the user from that request (`ctx.req.ctx().user`,
+   * `Auth.user()`, a policied query), so the request stays open until they are
+   * done; but a hook that never settles — a `fetch` with no timeout — would
+   * then hold the store, the user and `onRequestEnd` forever, one per turn. Past
+   * this the request ends anyway: `onRequestEnd` runs, the user is released,
+   * and the hook runs on without one. Thirty seconds is far past a healthy
+   * write or notification, so a hook that reaches it is hung rather than slow.
+   * Raise it for a hook that is legitimately longer; `Infinity` holds the
+   * request until the hooks are done, however long that is.
+   */
+  protected hookHoldMs = 30_000;
+
   /** Appended to the agent's static instructions for this request — the user's
    *  name, tenant, today's date. */
   instructions(req: HttpRequest<any, any>): string | Promise<string> | void {
     void req;
+  }
+
+  /**
+   * Refuse a turn that arrives without a `threadId`, with a 400
+   * `thread_required`, before anything runs.
+   *
+   * A stateless turn is otherwise open to any caller the route's middleware
+   * lets through: the client carries the history, so the model runs, and is
+   * billed, as a general-purpose chat. An app whose tools resolve their subject
+   * from the thread can make them refuse such a turn, but the model has still
+   * been paid for by then.
+   *
+   * It governs `stream` only. `upload` can still reach the provider without a
+   * thread (a `provider` destination); refuse that in `authorizeRequest`.
+   */
+  protected requireThread = false;
+
+  /**
+   * Decides whether this caller may use this route, on every one of the four:
+   * `stream`, `attach`, `stop` and `upload` (#542). Throw a request breaker
+   * (`InsufficientPermissionsError`, say) to refuse; return to let it through.
+   *
+   * It runs before the route does any work of its own: on `stream`, ahead of
+   * the thread's lock and load, `instructions()` and the provider, so a refused
+   * turn is not charged for, waits behind no run and does not learn whether its
+   * thread exists; on `attach`, before a live run's frames are read.
+   *
+   * `threadId` is the one the client sent, taken on trust and not yet checked
+   * against the store — which is what makes this the place to check that the
+   * caller owns it. A thread-scoped app that checks it here on every route
+   * keeps a thread's live answer, its stop button and its attachments to its
+   * owner. It is `undefined` when the request names no thread: a stateless
+   * turn, an upload without one, a stop by `runId` or `clientRunId`.
+   */
+  protected authorizeRequest(
+    req: HttpRequest<any, any>,
+    params: { route: "stream" | "attach" | "stop" | "upload"; threadId?: string },
+  ): void | Promise<void> {
+    void req;
+    void params;
   }
 
   /**
@@ -303,8 +363,21 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     }
     const body = parsed.body;
     const threadId = typeof body.threadId === "string" ? body.threadId : undefined;
-    const turn = toClientTurn(body);
+    const parsedTurn = toClientTurn(body);
+    if (parsedTurn.error) {
+      return invalidRequest({ body: {}, error: parsedTurn.error });
+    }
+    const turn = parsedTurn.turn;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
+
+    // Before `pendingTurns`, so a refused turn leaves nothing for `/stop` to
+    // find. It does not yield, unlike `authorizeRequest` below.
+    if (this.requireThread && !threadId) {
+      return jsonResponse(400, {
+        code: "thread_required",
+        message: "This agent takes a turn only on a thread: send a threadId.",
+      });
+    }
 
     // From here until `register`, the only thing `/stop` can find this turn by.
     // See `pendingTurns`.
@@ -321,8 +394,8 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // The `threadId` is the client's, and nothing here checks that this caller
     // owns it — `AgentStore` cannot, since it holds no user. A `threadId` is
     // therefore a capability and has to be unguessable (`createThread` mints a
-    // uuid) and, for anything that matters, checked: override `instructions()`
-    // or a `store` that scopes by `req.user`. The framework's job is to make
+    // uuid) and, for anything that matters, checked: override `authorizeRequest()`
+    // or give it a `store` that scopes by `req.user`. The framework's job is to make
     // sure the route is behind the router's middleware in the first place,
     // which `ApiRouter.agent()` now does.
     //
@@ -344,15 +417,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
           // than see it answered as an empty conversation and have this turn
           // persisted under the dead id.
           //
-          // That ordering is deliberate, and it costs something: the ownership
-          // check the comment above points at `instructions()` for has not run
-          // yet, so a caller holding a uuid learns whether it is live here
-          // without the app's say. `/attach` already answers a question of that
-          // shape to anyone with the id and never calls `instructions()`, and
-          // the id is unguessable — which is why the load stays above
-          // `instructions()`, whose own work (a database read, typically) would
-          // otherwise be spent on a thread that is gone. Move it below and that
-          // work is spent on every dead id instead.
+          // That ordering is deliberate. An ownership check belongs in
+          // `authorizeRequest()`, which has already run; one left in
+          // `instructions()` has not, so a caller holding a uuid learns whether
+          // it is live here without the app's say. The id is unguessable, so
+          // the load stays above `instructions()`, whose own work (a database
+          // read, typically) would otherwise be spent on a thread that is gone.
+          // Move it below and that work is spent on every dead id instead.
           return jsonResponse(404, {
             code: "thread_not_found",
             message: `Thread ${threadId} does not exist here, or has expired.`,
@@ -377,10 +448,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // nothing registered, so there is no run to end and nothing charged
         // for. Checked after the last `await` above, so that a stop landing
         // during it is not missed: from here to `register` nothing yields.
-        return jsonResponse(409, {
-          code: "stopped",
-          message: "The turn was stopped before it started.",
-        });
+        return stoppedBeforeStart();
       }
 
       const run = this.agent.stream({
@@ -405,7 +473,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       // process rather than by this request, which is the property `/attach`
       // depends on and the reason a dropped connection no longer cancels
       // anything.
-      this.liveRuns.register(run, {
+      const eventHooks = this.liveRuns.register(run, {
         threadId,
         // The client's handle on a run it started, which is the only one that
         // exists before `run-start` reaches it. See `RegisterParams`.
@@ -415,13 +483,29 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       });
 
       // Kept, not just fired: the next turn on this thread has to know when
-      // this one's transcript is in the store. See `withThread`.
-      persisted.set(run, this.persistRun(run, ctx));
+      // this one's transcript is in the store. See `withThread`. The request
+      // waits for more than the thread does — the hooks as well — so that
+      // `onMessage` still finds the user who sent the message; the thread
+      // waits only for the store, so a slow hook is not a slow next turn.
+      const { stored, hooks } = this.persistRun(run, ctx, eventHooks);
+      persisted.set(run, stored);
+      // Registered now, while the request is certainly open: `waitUntil` is
+      // ignored once it has ended, and the run settling can end it before a
+      // single hook has been called.
+      req.ctx?.()?.waitUntil(hooks);
 
       return run.toResponse();
     };
 
     try {
+      // After `pending` is registered, not before: the app's check is a yield —
+      // a database read, typically — and a stop pressed during it has to find
+      // this turn. Before the thread's lock, which ends the thread's previous
+      // run, so a refused or stopped turn does not end it either.
+      await this.authorizeRequest(req, { route: "stream", threadId });
+      if (pending?.cancelled) {
+        return stoppedBeforeStart();
+      }
       return threadId ? await this.withThread(threadId, start) : await start();
     } finally {
       if (pending && pendingTurns.get(clientRunId) === pending) {
@@ -449,13 +533,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * for the old run to unwind, which is as long as its slowest tool in flight —
    * and that wait is the thing that puts `assistant1` before `user2`.
    *
-   * The wait is on `persistRun`, not on `run.result()`. `result()` settling is
-   * the transcript being final, not stored: `appendMessages` runs after it, and
-   * a `loadThread` in that gap reads a history the old answer is missing from,
-   * which is the original bug by a shorter route. It is also *only* that:
-   * `persistRun` settles once the transcript is stored and lets the app's
-   * hooks run on without it, so a slow `onMessage` is not a slow thread and a
-   * hung one is not a hung thread.
+   * The wait is on `persistRun`'s `stored`, not on `run.result()`. `result()`
+   * settling is the transcript being final, not stored: `appendMessages` runs
+   * after it, and a `loadThread` in that gap reads a history the old answer is
+   * missing from, which is the original bug by a shorter route. It is also
+   * *only* that: `stored` settles once the transcript is stored, and the app's
+   * hooks run on in `hooks`, which holds the old run's request and not the
+   * thread, so a slow `onMessage` is not a slow thread and a hung one is not a
+   * hung thread.
    *
    * The lock around it is what makes a *third* turn wait for the second rather
    * than for the first. Two turns arriving together both see the same live
@@ -517,6 +602,10 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         message: "attach needs a threadId: it is the handle that survives a refresh.",
       });
     }
+
+    // Before the lookup: a refused caller learns neither whether a run is live
+    // on the thread nor any frame of it.
+    await this.authorizeRequest(req, { route: "attach", threadId });
 
     // The store is not consulted. This route answers whether a run is in
     // flight here, and a run it finds was started on a thread `stream` had
@@ -596,6 +685,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       return invalidRequest(parsed);
     }
     const body = parsed.body;
+
+    await this.authorizeRequest(req, {
+      route: "stop",
+      threadId: typeof body.threadId === "string" ? body.threadId : undefined,
+    });
 
     // Three handles, most specific first, because which ones the client has
     // depends on how far the run got. `runId` is the server's own and settles
@@ -826,6 +920,12 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // be looser: an invented id would otherwise be a scope, and an anonymous
     // caller could keep writing to storage by sending a fresh one each time.
     const threadField = form.get("threadId");
+    // The field as sent, before the store is asked about it, so a refused
+    // caller does not learn whether the thread exists.
+    await this.authorizeRequest(req, {
+      route: "upload",
+      threadId: typeof threadField === "string" && threadField.length > 0 ? threadField : undefined,
+    });
     const threadId =
       typeof threadField === "string" &&
       threadField.length > 0 &&
@@ -911,6 +1011,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * Protected, not private: these exist to be overridden. `onMessage` fires for
    * every completed message, user and assistant alike, and is the intended
    * persistence point for an app that is not using `store`.
+   *
+   * Every hook runs inside the request that started the run, which is held
+   * open for them — after the run, and after a client that left — so
+   * `ctx.req.ctx().user` is the user who sent the turn. See `hookHoldMs` for
+   * how long a hook that does not finish keeps it.
    */
   protected onMessage(message: AgentMessage, ctx: AgentHookContext): void | Promise<void> {
     void message;
@@ -1007,43 +1112,74 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * a finished one does: `stop()` finalizes the transcript, so by the time this
    * resolves there is a valid history to store.
    *
-   * Settles when the transcript is in the store, not when the app is done with
-   * it. The next turn on this thread waits on this (see `withThread`), and the
-   * hooks are the app's: an `onMessage` that writes to something slow would
-   * make every later turn wait for it, once per message of the old run, and
-   * one that never settles — which `safely` cannot catch — would hold the
-   * thread, and every turn queued on it, behind an open connection each. So
-   * the hooks run on after this on their own, reported the same way.
+   * `stored` settles when the transcript is in the store, not when the app is
+   * done with it. The next turn on this thread waits on that (see
+   * `withThread`), and the hooks are the app's: an `onMessage` that writes to
+   * something slow would make every later turn wait for it, once per message
+   * of the old run, and one that never settles — which `safely` cannot catch —
+   * would hold the thread, and every turn queued on it, behind an open
+   * connection each. So the hooks run on after it on their own, reported the
+   * same way.
+   *
+   * `hooks` settles once they have too, and every event-stream hook the run
+   * led to (`eventHooks`), or after `hookHoldMs` of them, and is what the
+   * request that started the run is held open for. Separate from
+   * `stored` for the reason above, and it has to exist from the start: by the
+   * time the hooks are called the run has settled, and the request with it,
+   * unless something was already holding it. Neither rejects.
    */
-  private async persistRun(run: AgentRun, ctx: AgentHookContext): Promise<void> {
-    let result: AgentRunResult<ToolShapes, unknown>;
-    try {
-      result = await run.result();
-    } catch (err) {
-      void this.safely(() =>
-        this.onError(
-          {
-            code: "unknown",
-            message: err instanceof Error ? err.message : String(err),
-            retryable: false,
-          },
-          ctx,
-        ),
-      );
-      return;
-    }
+  private persistRun(
+    run: AgentRun,
+    ctx: AgentHookContext,
+    eventHooks: Promise<void>,
+  ): { stored: Promise<void>; hooks: Promise<void> } {
+    // Assigned before `stored` settles, on every path, so `hooks` below reads
+    // the chain this run actually started.
+    let notified: Promise<void> = Promise.resolve();
 
-    const messages = result.messages as AgentMessage[];
-
-    if (ctx.threadId && messages.length > 0) {
+    const stored = (async () => {
+      let result: AgentRunResult<ToolShapes, unknown>;
       try {
-        await this.store.appendMessages(ctx.threadId, messages);
+        result = await run.result();
       } catch (err) {
-        this.reportHookFailure(err);
+        notified = this.safely(() =>
+          this.onError(
+            {
+              code: "unknown",
+              message: err instanceof Error ? err.message : String(err),
+              retryable: false,
+            },
+            ctx,
+          ),
+        );
+        return;
       }
-    }
 
-    void this.notifyRun(result, messages, ctx);
+      const messages = result.messages as AgentMessage[];
+
+      if (ctx.threadId && messages.length > 0) {
+        try {
+          await this.store.appendMessages(ctx.threadId, messages);
+        } catch (err) {
+          this.reportHookFailure(err);
+        }
+      }
+
+      notified = this.notifyRun(result, messages, ctx);
+    })();
+
+    // The bound starts once the run has settled, not with the run: a long run
+    // is not a hung hook. `eventHooks` is in it because the event-stream hooks
+    // are chained (see `MemoryLiveRuns.register`): an `onAwaitingInput` queued
+    // behind a slow `onToolCall` is called after the run, and after every hook
+    // above, and has nothing else to hold the request for it.
+    const hooks = stored.then(() =>
+      within(
+        Promise.all([notified, eventHooks]).then(() => {}),
+        this.hookHoldMs,
+      ),
+    );
+    return { stored, hooks };
   }
 
   /** The hooks on a finished run, in order. Never rejects: see `safely`. */
@@ -1193,23 +1329,88 @@ function invalidRequest(parsed: ParsedBody): Response {
  * `{ text, files, toolResults }` — the second is what a hand-written `fetch`
  * writes, and refusing it buys nothing.
  *
- * Returns `undefined` for an empty turn, which is a real request: reattaching
- * to a conversation and letting the model continue is a turn with nothing in
- * it.
+ * `turn` is `undefined` for an empty turn, which is a real request:
+ * reattaching to a conversation and letting the model continue is a turn with
+ * nothing in it. `error` is a turn that is refused with a 400 before anything
+ * runs — see `toTurnFiles`.
  */
-function toClientTurn(body: Record<string, any>): ClientTurn | undefined {
+function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: string } {
   const source = body.turn && typeof body.turn === "object" ? body.turn : body;
   const turn: ClientTurn = {};
   if (typeof source.text === "string") {
     turn.text = source.text;
   }
   if (Array.isArray(source.files)) {
-    turn.files = source.files;
+    const files = toTurnFiles(source.files);
+    if (typeof files === "string") {
+      return { error: files };
+    }
+    turn.files = files;
   }
   if (Array.isArray(source.toolResults)) {
     turn.toolResults = source.toolResults;
   }
-  return Object.keys(turn).length > 0 ? turn : undefined;
+  return Object.keys(turn).length > 0 ? { turn } : {};
+}
+
+/**
+ * `turn.files`, checked field by field, or the sentence refusing it.
+ *
+ * REFUSED, NOT FILTERED. Every entry becomes a `FilePart` in a user message,
+ * and on a thread that message is stored before the provider sees it. An entry
+ * the request builder cannot send — no id at all, or a gemi id in `fileId` —
+ * then throws from `toResponsesInput` on this turn and on every turn after it,
+ * because every later turn re-sends the history: one bad upload bricks the
+ * thread. Dropping the entry instead is quieter and worse — the model answers
+ * about a file it was never given, with nothing saying so. A 400 here is the
+ * one place the client can still do something about it.
+ *
+ * Scoping is what makes a foreign `attachmentId` harmless (`ScopedAttachments`
+ * answers the same not-found for another tenant's id as for an invented one),
+ * so the id is not signed or looked up here. What this checks is the shape a
+ * crash would come from: strings where strings go, the prefix on
+ * `attachmentId`, at least one id. Unknown fields are dropped rather than
+ * refused, since `attach()` answers more than a `FilePart` holds (`downgraded`)
+ * and passing its answer on whole is the documented use. `null` and `""` read
+ * as absent, for every field: `null` is what a serializer that writes
+ * `undefined` as `null` means, and `""` is what a form field left blank sends.
+ * Neither can be an id, so refusing `attachmentId: ""` for its prefix would
+ * turn a blank into an error the entry's `fileId` does not deserve.
+ */
+function toTurnFiles(raw: unknown[]): NonNullable<ClientTurn["files"]> | string {
+  const files: NonNullable<ClientTurn["files"]> = [];
+  for (const [index, entry] of raw.entries()) {
+    const where = `turn.files[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return `${where} must be an object.`;
+    }
+    const fields: Record<string, string> = {};
+    for (const key of ["fileId", "attachmentId", "name", "mimeType"] as const) {
+      const value = (entry as Record<string, unknown>)[key];
+      if (value === undefined || value === null || value === "") continue;
+      if (typeof value !== "string") {
+        return `${where}.${key} must be a string.`;
+      }
+      fields[key] = value;
+    }
+    const { fileId, attachmentId, name, mimeType } = fields;
+    if (fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
+      return `${where}.fileId holds a gemi attachment id (${fileId}). \`fileId\` is the provider's id from the upload response; put this one in \`attachmentId\`.`;
+    }
+    if (attachmentId !== undefined && !attachmentId.startsWith(ATTACHMENT_ID_PREFIX)) {
+      return `${where}.attachmentId is not a gemi attachment id: it must start with "${ATTACHMENT_ID_PREFIX}".`;
+    }
+    if (!fileId && !attachmentId) {
+      return `${where} has neither a \`fileId\` nor an \`attachmentId\`. Send the ids the upload response answered.`;
+    }
+    files.push({
+      ...(fileId ? { fileId } : {}),
+      ...(attachmentId ? { attachmentId } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(mimeType !== undefined ? { mimeType } : {}),
+    });
+  }
+  return files;
 }
 
 /**
@@ -1261,6 +1462,14 @@ function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): n
 function searchParam(req: HttpRequest<any, any>, key: string): string | undefined {
   const value = req?.search?.get(key);
   return typeof value === "string" ? value : undefined;
+}
+
+/** A turn `/stop` ended while it waited, before anything ran or was charged. */
+function stoppedBeforeStart(): Response {
+  return jsonResponse(409, {
+    code: "stopped",
+    message: "The turn was stopped before it started.",
+  });
 }
 
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
@@ -1388,3 +1597,30 @@ export type AgentRouteRPC<T extends new () => AgentController<any>> = {
     : ToolShapes;
   output: unknown;
 };
+
+/** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * Settles when `work` does or after `ms`, whichever is first, and never
+ * rejects. For how long the request waits on the app's code, not for the code
+ * itself, which runs on either way.
+ *
+ * An `ms` a timer cannot hold — `Infinity` is what "no bound" reads as — is
+ * no bound. Handed to `setTimeout` it would fire at once, and the request
+ * would end before the hooks it was raised for.
+ */
+function within(work: Promise<void>, ms: number): Promise<void> {
+  const settled = work.then(
+    () => {},
+    () => {},
+  );
+  if (!(ms <= MAX_TIMEOUT_MS)) {
+    return settled;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+}

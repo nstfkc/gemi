@@ -5,6 +5,17 @@ import { discoverCronJobs } from "../discovery";
 import { scheduleConfigDefaults, type ScheduleConfig } from "./config";
 import { Scheduler } from "./Scheduler";
 
+/**
+ * How far inside the provider deadline the drain stops, so there is time left
+ * to name the ticks it abandoned before `Application` stops waiting for this
+ * provider. The same margin as the queue's drain, for the same reason: a
+ * tenth of the budget, capped, so a deadline of a few milliseconds still
+ * spends most of itself waiting.
+ */
+const REPORT_MARGIN_MS = 100;
+
+const reportMargin = (timeoutMs: number) => Math.min(REPORT_MARGIN_MS, Math.floor(timeoutMs / 10));
+
 export class ScheduleServiceProvider extends ServiceProvider {
   register() {
     this.app.singleton(
@@ -73,5 +84,42 @@ export class ScheduleServiceProvider extends ServiceProvider {
 
     const app = this.app;
     scheduler.start((cb) => kernelContext.run(app, cb));
+  }
+
+  /**
+   * Stops the schedule and waits for the ticks already running, on the way out
+   * of a server told to stop.
+   *
+   * Stopping first is the point. Without it `Bun.cron` kept firing for the
+   * whole drain window, starting ticks the process was about to exit under,
+   * and a tick already running when the process exited was cut off halfway
+   * through its `callback` — on a platform that recycles replicas on every
+   * release, that is every release.
+   *
+   * The wait is bounded a little inside what is left of the shared provider
+   * deadline, like the queue's, so that this is what names the ticks it gave
+   * up on rather than `Application`'s generic "did not finish within the
+   * provider shutdown deadline", which names no job at all.
+   */
+  async shutdown(options?: { timeoutMs: number }) {
+    // `boot()` always resolves it; this is for an application that shuts down
+    // without having booted, where building a scheduler would be pointless.
+    if (!this.app.resolved(Scheduler)) return;
+    const scheduler = this.app.make(Scheduler);
+    if (scheduler.running > 0) {
+      console.log(`[gemi] Shutting down: waiting for ${scheduler.running} running cron tick(s).`);
+    }
+    const budget = options?.timeoutMs;
+    const { unfinished } = await scheduler.drain(
+      budget === undefined ? Infinity : Math.max(0, budget - reportMargin(budget)),
+    );
+    if (unfinished.length > 0) {
+      console.error(
+        `[gemi] Cron jobs still running at shutdown: ` +
+          unfinished
+            .map((tick) => `${tick.name} (started ${tick.startedAt.toISOString()})`)
+            .join(", "),
+      );
+    }
   }
 }

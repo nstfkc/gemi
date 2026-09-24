@@ -88,7 +88,14 @@ export type {
   ToolEntry,
   ToolExecute,
   ToolShapesOf,
+  ToolTurn,
 } from "./Agent";
+
+// --- an app's API routes as tools ------------------------------------------
+//
+// The registry itself is `McpRegistry` in `gemi/services`; this is its one v1
+// projection, here because an agent's tools are declared beside the agent.
+export { toAgentTools } from "../services/mcp/toAgentTools";
 
 // --- providers ------------------------------------------------------------
 export { AgentProvider, AzureOpenAIProvider, OpenAIProvider } from "./AgentProvider";

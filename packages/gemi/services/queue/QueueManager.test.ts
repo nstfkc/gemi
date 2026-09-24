@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Job } from "./Job";
+import { MemoryQueueDriver } from "./MemoryQueueDriver";
+import type { ClaimOptions, ClaimedJob, QueueDriver } from "./QueueDriver";
 import { QueueManager } from "./QueueManager";
 
 /**
@@ -13,10 +15,11 @@ import { QueueManager } from "./QueueManager";
  * registered" is now reachable by shipping a build without its source, and the
  * queue has to survive it.
  *
- * `next()` runs to completion synchronously on this path — nothing before the
- * unknown name is awaited — so `push()` is enough to drive it, and a
- * non-terminating one takes the test process down with it rather than timing
- * out politely.
+ * The worker loop claims from its driver, so a job runs a few microtasks after
+ * `push()` rather than inside it; `settle()` waits those out. A loop that
+ * recursed on an unresolvable entry used to take the test process down with
+ * it rather than time out politely, which is why these assert on the driver
+ * being empty and not only on the error line.
  */
 
 class SendWelcomeEmail extends Job {
@@ -35,35 +38,137 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const memory = (queue: QueueManager) => queue.driver as MemoryQueueDriver;
+
 describe("a dispatch nothing is registered under", () => {
-  test("is dropped, said out loud, and does not wedge the queue", () => {
+  test("is dropped, said out loud, and does not wedge the queue", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const queue = new QueueManager({ jobs: [] });
 
-    queue.push(SendWelcomeEmail, "[]");
+    await queue.push(SendWelcomeEmail, "[]");
+    await settle();
 
     // Drained, not left at the head. It used to stay: the delete lived inside
-    // the branch that resolved the name, so the queue never emptied, the
-    // `size === 0` return was never reached, and `next()` recursed on the same
-    // entry until the stack gave out — a stack overflow in place of the
-    // dropped job the docs describe.
-    expect(queue.queue.size).toBe(0);
-    expect(queue.isRunning).toBe(false);
+    // the branch that resolved the name, so the queue never emptied and the
+    // drain recursed on the same entry until the stack gave out — a stack
+    // overflow in place of the dropped job the docs describe. Now the claim is
+    // ended as a dead letter, so nothing is waiting and nothing is leased.
+    expect(memory(queue).waiting).toBe(0);
+    expect(memory(queue).leased).toBe(0);
+    expect(queue.running).toBe(0);
     expect(vi.mocked(error).mock.calls[0]![0]).toContain(
       'nothing is registered under the name "SendWelcomeEmail"',
     );
   });
 
-  test("does not stop the jobs behind it in the queue from running", () => {
+  test("does not stop the jobs behind it in the queue from running", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const queue = new QueueManager({ jobs: [ChargeCard], concurrency: 5 });
     const ran = vi.spyOn(ChargeCard.prototype, "run");
 
     queue.push(SendWelcomeEmail, "[]");
     queue.push(ChargeCard, "[]");
+    await settle();
 
     expect(ran).toHaveBeenCalledTimes(1);
-    expect(queue.queue.size).toBe(0);
+    expect(memory(queue).waiting).toBe(0);
+  });
+});
+
+/**
+ * A driver shared with other processes, that hands out whatever the test says
+ * and records every report. Not a `MemoryQueueDriver`, so the manager treats it
+ * as durable; and it ignores `registered`, as a driver that cannot filter by
+ * name does, so every unknown name reaches the manager.
+ */
+function sharedDriver(claims: ClaimedJob[][]) {
+  const reports: Array<[string, ClaimedJob, unknown]> = [];
+  const options: ClaimOptions[] = [];
+  const driver: QueueDriver = {
+    enqueue: async () => "id",
+    claim: async (_limit, claimOptions) => {
+      options.push(claimOptions);
+      return claims.shift() ?? [];
+    },
+    complete: async (job) => void reports.push(["complete", job, undefined]),
+    fail: async (job, failure) => void reports.push(["fail", job, failure]),
+    release: async (job, release) => void reports.push(["release", job, release]),
+  };
+  return { driver, reports, options };
+}
+
+describe("a job nothing is registered under, on a driver other processes share", () => {
+  // During a blue/green ramp both releases claim from one table, and a name
+  // this replica lacks is usually one the other release has. Dead-lettered
+  // here, it was lost for good although a replica a moment away could run it.
+  test("is given back without spending an attempt, while it is inside the grace window", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fresh = {
+      id: "j1",
+      name: "NewReleaseJob",
+      args: "[]",
+      attempt: 1,
+      createdAt: Date.now(),
+    };
+    const { driver, reports } = sharedDriver([[fresh], [{ ...fresh }]]);
+    const queue = new QueueManager({ driver, jobs: [ChargeCard], pollInterval: 5 });
+
+    queue.start();
+    await vi.waitFor(() => expect(reports).toHaveLength(2));
+    await queue.stop();
+
+    expect(reports.map(([kind]) => kind)).toEqual(["release", "release"]);
+    const { retryInMs } = reports[0]![2] as { retryInMs: number };
+    expect(retryInMs).toBeGreaterThanOrEqual(5);
+    expect(retryInMs).toBeLessThanOrEqual(10);
+    // Once per name, not once per claim: a driver that cannot filter hands the
+    // same job back every poll, and a line each time would bury the rest.
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0]![0])).toContain('Left a queued "NewReleaseJob"');
+  });
+
+  test("is dead-lettered once the grace window has passed since its dispatch", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { driver, reports } = sharedDriver([
+      [{ id: "j1", name: "RemovedJob", args: "[]", attempt: 1, createdAt: Date.now() - 1_000 }],
+    ]);
+    const queue = new QueueManager({
+      driver,
+      jobs: [ChargeCard],
+      pollInterval: 5,
+      unknownJobGrace: 500,
+    });
+
+    queue.start();
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    await queue.stop();
+
+    expect(reports[0]![0]).toBe("fail");
+    expect(reports[0]![2]).toMatchObject({ retryInMs: null });
+    expect(String(error.mock.calls[0]![0])).toContain(
+      'nothing is registered under the name "RemovedJob"',
+    );
+  });
+
+  test("tells the driver which names it can run, and the grace window", async () => {
+    const { driver, options } = sharedDriver([]);
+    const queue = new QueueManager({
+      driver,
+      jobs: [ChargeCard, SendWelcomeEmail],
+      pollInterval: 5,
+      unknownJobGrace: 1234,
+    });
+
+    queue.start();
+    await vi.waitFor(() => expect(options.length).toBeGreaterThan(0));
+    await queue.stop();
+
+    expect(options[0]!.registered).toEqual({
+      names: ["ChargeCard", "SendWelcomeEmail"],
+      graceMs: 1234,
+    });
   });
 });
 
@@ -178,13 +283,55 @@ describe("the readable view", () => {
 });
 
 describe("a dispatch that resolves", () => {
-  test("runs, and leaves the queue empty", () => {
+  test("runs, and leaves the queue empty", async () => {
     const queue = new QueueManager({ jobs: [ChargeCard] });
     const ran = vi.spyOn(ChargeCard.prototype, "run");
 
     queue.push(ChargeCard, "[]");
+    await settle();
 
     expect(ran).toHaveBeenCalledTimes(1);
-    expect(queue.queue.size).toBe(0);
+    expect(memory(queue).waiting).toBe(0);
+    expect(memory(queue).leased).toBe(0);
+  });
+});
+
+describe("a dispatch the driver cannot record", () => {
+  test("is said out loud, even when its caller discarded the promise", async () => {
+    // `push` attaches a wake handler to the very promise it returns, which
+    // marks that promise handled. With an empty rejection arm, a
+    // fire-and-forget `ChargeCard.dispatch(...)` whose INSERT failed produced
+    // no unhandled rejection and no log: the job never ran and nothing said
+    // so, in a driver whose whole purpose is not losing jobs quietly.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+    const boom = new Error("connection reset by peer");
+    vi.spyOn(queue.driver, "enqueue").mockRejectedValue(boom);
+
+    // Discarded exactly the way an app's `Job.dispatch(...)` discards it.
+    void queue.push(ChargeCard, "[]");
+    await settle();
+
+    const logged = error.mock.calls.flat();
+    expect(logged.join(" ")).toContain("could not record ChargeCard");
+    expect(logged).toContain(boom);
+  });
+
+  test("still rejects for a caller that awaits it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+    vi.spyOn(queue.driver, "enqueue").mockRejectedValue(new Error("nope"));
+
+    await expect(queue.push(ChargeCard, "[]")).rejects.toThrow("nope");
+  });
+});
+
+describe("retryDead", () => {
+  test("is refused, not answered false, by a driver that keeps nothing of a dead job", async () => {
+    const queue = new QueueManager({ driver: new MemoryQueueDriver() });
+
+    await expect(queue.retryDead("an-id-from-a-log")).rejects.toThrow(
+      "keeps nothing of a dead-lettered job",
+    );
   });
 });

@@ -22,3 +22,10 @@ export {
   MissingDatabaseUrlError,
   type Dialect,
 } from "./dialect";
+// Types only: the module itself is loaded on demand by `DB.schema()`.
+export type {
+  DatabaseColumn,
+  DatabaseRelation,
+  DatabaseSchema,
+  DatabaseTable,
+} from "./introspect/types";

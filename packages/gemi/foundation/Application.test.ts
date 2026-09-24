@@ -142,6 +142,138 @@ describe("Application", () => {
   });
 });
 
+describe("Application.shutdown", () => {
+  // Class names are what the report and the log carry, so each provider is a
+  // named class rather than one built in a loop.
+  function recorder(calls: string[]) {
+    class One extends ServiceProvider {
+      shutdown() {
+        calls.push("One");
+      }
+    }
+    class Two extends ServiceProvider {
+      async shutdown() {
+        await Bun.sleep(5);
+        calls.push("Two");
+      }
+    }
+    class Three extends ServiceProvider {
+      shutdown() {
+        calls.push("Three");
+      }
+    }
+    return [One, Two, Three];
+  }
+
+  it("runs every provider's shutdown() in reverse registration order, each awaited", async () => {
+    const calls: string[] = [];
+    const application = new Application();
+    application.registerMany(recorder(calls));
+
+    const report = await application.shutdown();
+
+    expect(calls).toEqual(["Three", "Two", "One"]);
+    expect(report).toEqual({ failed: [], timedOut: [] });
+  });
+
+  it("logs a provider that throws or rejects, and still shuts the rest down", async () => {
+    const calls: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    class Throws extends ServiceProvider {
+      shutdown() {
+        throw new Error("sync boom");
+      }
+    }
+    class Rejects extends ServiceProvider {
+      async shutdown() {
+        throw new Error("async boom");
+      }
+    }
+    const [One, , Three] = recorder(calls);
+    const application = new Application();
+    application.registerMany([One, Throws, Rejects, Three]);
+
+    const report = await application.shutdown();
+
+    expect(calls).toEqual(["Three", "One"]);
+    expect(report).toEqual({ failed: ["Rejects", "Throws"], timedOut: [] });
+    expect(error.mock.calls.map((call) => call[0])).toEqual([
+      "[gemi] Rejects.shutdown() failed:",
+      "[gemi] Throws.shutdown() failed:",
+    ]);
+    error.mockRestore();
+  });
+
+  it("abandons a provider that overruns the shared deadline, and skips any reached after it", async () => {
+    const calls: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    class Hangs extends ServiceProvider {
+      shutdown() {
+        calls.push("Hangs");
+        return new Promise<void>(() => {});
+      }
+    }
+    class Slow extends ServiceProvider {
+      async shutdown() {
+        calls.push("Slow");
+        await Bun.sleep(60);
+      }
+    }
+    const [One] = recorder(calls);
+
+    // Hangs has the whole 100ms and uses it; nothing is left for One.
+    const first = new Application();
+    first.registerMany([One, Hangs]);
+    const started = Date.now();
+    expect(await first.shutdown({ timeoutMs: 100 })).toEqual({
+      failed: [],
+      timedOut: ["Hangs", "One"],
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(calls).toEqual(["Hangs"]);
+
+    // Slow finishes inside the deadline, so the next still runs in what is left.
+    calls.length = 0;
+    const second = new Application();
+    second.registerMany([One, Slow]);
+    expect(await second.shutdown({ timeoutMs: 1_000 })).toEqual({ failed: [], timedOut: [] });
+    expect(calls).toEqual(["Slow", "One"]);
+    error.mockRestore();
+  });
+
+  // `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0`, from an operator with five seconds of
+  // grace period to spend elsewhere. Every shutdown of that server is clean; it
+  // simply has no provider phase.
+  it("skips the hooks without reporting a failure when no time is budgeted", async () => {
+    const calls: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const application = new Application();
+    application.registerMany(recorder(calls));
+
+    const report = await application.shutdown({ timeoutMs: 0 });
+
+    expect(report).toEqual({ failed: [], timedOut: [] });
+    expect(calls).toEqual([]);
+    expect(error).not.toHaveBeenCalled();
+    expect(log.mock.calls[0][0]).toContain("Skipping 3 provider shutdown hook(s)");
+    log.mockRestore();
+    error.mockRestore();
+  });
+
+  it("shuts down at most once", async () => {
+    const calls: string[] = [];
+    const application = new Application();
+    application.registerMany(recorder(calls));
+
+    const [first, second] = await Promise.all([application.shutdown(), application.shutdown()]);
+    await application.shutdown();
+
+    expect(calls).toEqual(["Three", "Two", "One"]);
+    expect(second).toBe(first);
+  });
+});
+
 describe("app()", () => {
   afterEach(() => {
     Application.setInstance(undefined);

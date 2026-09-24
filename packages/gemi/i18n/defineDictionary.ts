@@ -30,8 +30,10 @@ export interface DictionaryHandle<
    * `load`, but as the exact thing React's `use()` wants: never rejecting, so
    * a failed locale chunk degrades the component to rendering keys instead of
    * unmounting it into an error boundary; and always a thenable, even when the
-   * strings are already in memory, so the caller's `use()` is never
-   * conditional. `loadDictionaryForRender` has the whole reasoning.
+   * strings are already in memory. The caller skips `use()` only for a
+   * thenable built from strings already in hand, which carries them as
+   * `inHand`; every thenable a render could have suspended on still goes
+   * through it. `loadDictionaryForRender` has the whole reasoning.
    */
   loadForRender(locale: string): RenderThenable;
   get(locale: string): LocaleStrings | undefined;

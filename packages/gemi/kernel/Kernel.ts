@@ -1,5 +1,5 @@
 import { Application } from "../foundation/Application";
-import type { ServiceProviderConstructor } from "../foundation/Application";
+import type { ServiceProviderConstructor, ShutdownReport } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
 import type { ConfigItems } from "../support/Repository";
 import type { Service, ServiceConstructor } from "../support/Service";
@@ -8,8 +8,11 @@ import { registeredNames } from "../orm/registry";
 import { Scheduler } from "../services/cron/Scheduler";
 import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
+import { startClaimingIfServing } from "../services/queue/QueueServiceProvider";
 import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
+import { DomainRouter } from "../services/router/DomainRouter";
+import { runGlobalMiddleware } from "../services/router/globalMiddleware";
 import { kernelContext } from "./context";
 import { frameworkProviders } from "./providers";
 
@@ -167,6 +170,8 @@ export class Kernel {
   async waitForBoot() {
     await this.app.boot();
     await this.bootServices();
+    // Last, once every job — queued listeners included — is registered.
+    startClaimingIfServing(this.app);
   }
 
   /**
@@ -182,6 +187,16 @@ export class Kernel {
       await service.boot();
     }
     this.servicesBooted = true;
+  }
+
+  /**
+   * Every provider's `shutdown()`, in reverse registration order, inside the
+   * application context — so a hook may use the facades, as a cron tick or a
+   * request would. See `Application.shutdown` for the deadline and the
+   * report. Idempotent.
+   */
+  shutdown(options?: { timeoutMs?: number }): Promise<ShutdownReport> {
+    return this.run(() => this.app.shutdown(options));
   }
 
   run<T>(cb: () => T) {
@@ -208,12 +223,21 @@ export class Kernel {
     return this.app.make(ViewRouteDispatcher);
   }
 
+  domains(): DomainRouter {
+    return this.app.make(DomainRouter);
+  }
+
   broadcast(): BroadcastManager {
     return this.app.make(BroadcastManager);
   }
 
   queue(): QueueManager {
     return this.app.make(QueueManager);
+  }
+
+  /** The `global` middleware list for one request. Call it inside `run`. */
+  globalMiddleware(req: Request) {
+    return runGlobalMiddleware(req);
   }
 
   destroy() {

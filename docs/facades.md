@@ -76,8 +76,8 @@ const mail = app(MailManager); // typed MailManager
 `Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
 - `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
-- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
-- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing.
+- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
+- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`.
 - `Auth.authenticate(email)` — creates a session for the given email.
 - `Auth.createMagicLink(email)` — issues a magic-link token.
 
@@ -195,6 +195,7 @@ See [Broadcasting](./broadcasting.md) for defining channels and the client `useS
 
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
 - `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+- `Url.forDomain(target, path, params?)` — a fully-qualified URL on another `route.domains` host (`{ subdomain: "acme" }` or `{ host }`). See [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
 ```typescript
 import { Url } from "gemi/facades";
@@ -203,7 +204,7 @@ Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
 ```
 
-> **Note:** `Url` resolves nothing from the container — `Url.absolute` reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md).
+> **Note:** `Url.absolute` resolves nothing from the container — it reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md). `Url.forDomain` reads `route.domains`.
 
 ## Log
 

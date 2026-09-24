@@ -45,7 +45,8 @@ await Storage.put(`receipts/${order.publicId}.pdf`, pdf);
 ```
 
 **Deferred work belongs in a Job**, not in the callback. `Job.dispatch(...)` from
-`app/jobs` enqueues and returns `void`, so the request path never waits on it.
+`app/jobs` enqueues and resolves to the job's id, not its result, so the request
+path never waits on the work.
 
 One caveat from `CLAUDE.md`: the queue runs in-process, and the cron
 scheduler does not start under `gemi run`. A **command** that dispatches a Job may

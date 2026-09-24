@@ -357,6 +357,23 @@ export class PolicyDeniedError extends Error {
 }
 
 /**
+ * The api dispatcher's test for a denial it should answer with a 403. It
+ * matches the name as well as the class for the reason
+ * `isUniqueConstraintError` does: a second copy of `gemi/orm` throws an error
+ * that is not `instanceof` this class, and a denial that failed the test would
+ * go back to being a 500 that carries the policy's message.
+ */
+export function isPolicyDeniedError(error: unknown): error is PolicyDeniedError {
+  if (error instanceof PolicyDeniedError) return true;
+
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "PolicyDeniedError"
+  );
+}
+
+/**
  * Thrown when an `update` writes to a column its own policy's `scope` selects on,
  * and the policy has no `onUpdate` saying what that should mean.
  *

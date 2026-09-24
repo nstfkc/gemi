@@ -4,6 +4,7 @@ import { Application } from "../../foundation/Application";
 import { kernelContext } from "../../kernel/context";
 import { currentTransaction, withTransaction } from "../../orm/context";
 import { Repository } from "../../support/Repository";
+import type { MemoryQueueDriver } from "../queue/MemoryQueueDriver";
 import { QueueManager } from "../queue/QueueManager";
 import { QueueServiceProvider } from "../queue/QueueServiceProvider";
 import { Event } from "./Event";
@@ -105,6 +106,15 @@ function fakePool() {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Jobs the memory driver holds, waiting or claimed — zero means nothing was
+ * pushed, or everything pushed has ended.
+ */
+const held = (queue: QueueManager) => {
+  const driver = queue.driver as MemoryQueueDriver;
+  return driver.waiting + driver.leased;
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -316,7 +326,7 @@ describe("a queued listener under afterCommit", () => {
       withTransaction(fakePool(), async () => {
         UserRegistered.dispatch(7, "ada@example.com");
         await tick();
-        expect(queue.queue.size).toBe(0);
+        expect(held(queue)).toBe(0);
         expect(ran).toEqual([]);
       }),
     );
@@ -347,7 +357,7 @@ describe("a queued listener under afterCommit", () => {
     ).rejects.toThrow("billing declined");
     await tick();
 
-    expect(queue.queue.size).toBe(0);
+    expect(held(queue)).toBe(0);
     expect(ran).toEqual([]);
   });
 });

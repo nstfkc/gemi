@@ -39,6 +39,15 @@ export function createCookie(
 
 const requestContext = new AsyncLocalStorage<Store>();
 
+/**
+ * What a route's request context takes over from the global middleware list's
+ * (see `runGlobalMiddleware`): the user, so one the list resolved is not
+ * looked up a second time.
+ */
+export interface CarriedContext {
+  user: any;
+}
+
 class Store {
   cookies: Set<string> = new Set();
   headers: Headers = new Headers();
@@ -89,7 +98,55 @@ class Store {
   /** Bucket memo, shared across every flag evaluated for this request. */
   featureBuckets: Map<string, number> | null = null;
 
+  /**
+   * What `waitUntil` was handed and has not settled yet. Public only because
+   * `req.ctx()`'s declared type spells this class out, which a private field
+   * cannot be part of; nothing outside the store should touch either.
+   */
+  pendingWork = new Set<Promise<void>>();
+  ended = false;
+
   constructor(public req: HttpRequest) {}
+
+  /**
+   * Keeps this request open until `work` settles: the api router holds
+   * `onRequestEnd` and `destroy()` back until then, so code in `work` still
+   * finds `user`, headers and cookies here.
+   *
+   * For work that outlives the response on purpose. An agent run is the
+   * reason it exists: a client that disconnects has not stopped the run, and
+   * its next tool call still reads the user who started it. Ignored once the
+   * request has ended — there is nothing left to hold open.
+   *
+   * Only api routes honour this. A view request ends regardless, so work
+   * handed to its store — a run started in a view loader — finds no user.
+   */
+  waitUntil(work: PromiseLike<unknown>) {
+    if (this.ended) {
+      return;
+    }
+    const settled = Promise.resolve(work).then(
+      () => {},
+      () => {},
+    );
+    this.pendingWork.add(settled);
+    void settled.then(() => this.pendingWork.delete(settled));
+  }
+
+  /** Whether anything handed to `waitUntil` is still running. */
+  hasPendingWork() {
+    return this.pendingWork.size > 0;
+  }
+
+  /**
+   * Settles once everything handed to `waitUntil` has, including work added
+   * while waiting — a run can start another before it ends.
+   */
+  async whenIdle() {
+    while (this.pendingWork.size > 0) {
+      await Promise.all(Array.from(this.pendingWork));
+    }
+  }
 
   setLocale(locale: string) {
     this.locale = locale;
@@ -107,8 +164,12 @@ class Store {
     this.cookies.add(createCookie(name, value, options));
   }
 
-  deleteCookie(name: string) {
-    this.cookies.add(createCookie(name, "", { maxAge: -1 }));
+  /**
+   * A cookie set with a `domain` or `path` is only cleared by a deletion that
+   * names the same ones.
+   */
+  deleteCookie(name: string, options: Pick<CreateCookieOptions, "domain" | "path"> = {}) {
+    this.cookies.add(createCookie(name, "", { ...options, maxAge: -1 }));
   }
 
   setHeaders(name: string, value: string) {
@@ -124,6 +185,7 @@ class Store {
   }
 
   destroy() {
+    this.ended = true;
     delete this.cookies;
     delete this.headers;
     this.serverQueries = null;
@@ -219,8 +281,20 @@ export class RequestContext {
     requestContext.getStore().req = req;
   }
 
-  static run<T>(httpRequest: HttpRequest, fn: () => T): T {
-    return requestContext.run(new Store(httpRequest), fn);
+  /**
+   * Opens a fresh request scope. `carried` seeds it with what the global
+   * middleware list resolved for the same request; nothing else crosses over.
+   */
+  static run<T>(
+    httpRequest: HttpRequest,
+    fn: () => T,
+    carried?: CarriedContext | null,
+  ): T {
+    const store = new Store(httpRequest);
+    if (carried) {
+      store.user = carried.user;
+    }
+    return requestContext.run(store, fn);
   }
 
   /**
@@ -232,5 +306,14 @@ export class RequestContext {
    */
   static runWith<T>(store: Store, fn: () => T): T {
     return requestContext.run(store, fn);
+  }
+
+  /**
+   * Runs `fn` outside any request scope, as the server's own `fetch` handler
+   * is. For a request dispatched from inside another one, which must start from
+   * where a client's request would, not from its initiator's store.
+   */
+  static exit<T>(fn: () => T): T {
+    return requestContext.exit(fn);
   }
 }

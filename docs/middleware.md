@@ -53,7 +53,7 @@ The following middleware classes ship with the framework and are exported from `
 
 ### `auth` → `AuthenticationMiddleware`
 
-Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to `/auth/sign-in` for view routes. See [Authentication](./authentication.md).
+Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
 
 ### `cache:...` → `CacheMiddleware`
 
@@ -110,7 +110,7 @@ than a middleware class — it has no alias to register.
 
 ## Registering middleware
 
-The `middleware` config slice holds a single field, `aliases` — `Record<string, MiddlewareClass>`. This is where DSL names become classes:
+The `middleware` config slice has two fields: `aliases` — `Record<string, MiddlewareClass>` — and `global`, a list that runs on every request (see [Global middleware](#global-middleware)). `aliases` is where DSL names become classes:
 
 ```typescript
 // app/config/middleware.ts
@@ -155,6 +155,68 @@ At boot, the framework's `MiddlewareServiceProvider` reads this slice and binds 
 > **Note:** `Middleware.configure(config)` returns a preconfigured subclass. Use it to register a middleware that needs static config (like `CorsMiddleware`'s allowed origins) under an alias.
 
 Because the alias map is app-owned, any DSL name your app uses must appear here — an unregistered alias is silently skipped. This also means aliases like `admin`, `org`, or `ai-quota` are **application-defined**, not framework built-ins.
+
+## Global middleware
+
+A route only gets the middleware its router lists, so a check the whole app needs — every document, every API route, every file — would have to be added to each router, and would still miss the static files: in production those are served from `dist/client` before the router runs. The `global` list covers both:
+
+```typescript
+// app/config/middleware.ts
+export default defineMiddlewareConfig({
+  aliases: {
+    "front-door": FrontDoorMiddleware,
+    // ...
+  },
+  global: ["front-door"],
+});
+```
+
+Entries are aliases (with `alias:param` arguments, as in a route's list) or middleware classes, and they run in order. They run once per request, before routing, static files and route middleware — and inside your app's `instrumentation`:
+
+- **Static files too.** `/assets/*`, `/favicon.ico`, `/robots.txt` and `/.well-known/*` in production, and everything Vite serves in development, so a check that passes in dev passes in prod.
+- **Before routing.** An `/api` path no route matches is refused before it would answer `404`, and framework routes (`/api/auth/*`, `/api/__gemi__/*`, image optimization) are covered like any other.
+- **Before route middleware.** A request that passes goes on to its route, which runs its own list as usual.
+- **Inside `instrumentation`.** The list runs within your app's `instrumentation`, so a span wraps the gate rather than starting after it. The consequence is that an `instrumentation` that answers a request without calling `next` — a maintenance-mode short circuit, a cached response — skips the global list along with everything else.
+
+A global middleware stops a request the same way a route middleware does: throw a `RequestBreakerError` subclass. The response is the one a route middleware's break would give for that url — the `api` payload as JSON under `/api`, the `.json` navigation body for client-side view data, and the `view` payload otherwise, static files included.
+
+```typescript
+import { Middleware, RequestBreakerError } from "gemi/http";
+
+class NotThroughFrontDoor extends RequestBreakerError {
+  constructor() {
+    super("Direct origin access");
+    this.payload = {
+      api: { status: 403, data: { error: "Forbidden" } },
+      view: { status: 403, error: { message: "Forbidden" } },
+    };
+  }
+}
+
+class FrontDoorMiddleware extends Middleware {
+  run() {
+    // Health probes reach the origin directly, without the header.
+    if (new URL(this.req.rawRequest.url).pathname === "/api/health") return;
+    if (this.req.headers.get("X-Azure-FDID") !== process.env.FRONT_DOOR_ID) {
+      throw new NotThroughFrontDoor();
+    }
+  }
+}
+```
+
+What a global middleware sees is not quite what a route middleware sees:
+
+- **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` then checks only that an `access_token` cookie or header is present, not that it belongs to a session, and `Auth.user()` returns the user without a token at all. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
+- **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
+
+A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.
+
+Some things are not requests the server receives, and the list does not run for them: an in-process `dispatchAs` from an MCP tool call, and a view's server-side `Query` — the request they were made from already passed it.
+
+In development the list also covers the dev server's own `/refresh.js` and `/render-error.js` scripts, so a gate that refuses a request without a header refuses those too, and an exemption by path has to name them as well. What it cannot cover is Vite's HMR websocket: Vite serves that from a server of its own, on port `24678` by default, and its connections never reach gemi. A request-level gate in `gemi dev` is therefore not a gate on everything the dev process answers; don't expose `gemi dev` where only such a gate stands between it and the network.
+
+> **Keep it cheap.** A global middleware runs on every asset request as well as every page and API call. A header comparison costs nothing; a database read per request is a database read per asset.
 
 ## Custom middleware
 

@@ -33,6 +33,11 @@ import { Link } from "gemi/client";
 - `active` — force the active state.
 - `prefetch` — warm the target route before it is clicked; see below.
 
+An absolute `http(s)://` `href`, such as a URL on another subdomain from
+`useDomain().url(...)`, renders a plain anchor that the browser loads in full.
+`useNavigate` treats an absolute URL the same way. See
+[Subdomains & Custom Domains](./domains.md#linking-across-hosts).
+
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
 

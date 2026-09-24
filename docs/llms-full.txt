@@ -46,6 +46,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
 - **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
+- **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 
 ### Data
 - **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
@@ -832,11 +833,13 @@ interface GemiConfig {
   bun?: {
     plugins?: BunPlugin[];      // applied at build time and at runtime
   };
+  assetBase?: string;           // where browsers fetch the client build from
 }
 ```
 
 - **`vite.plugins`** are appended to gemi's own Vite plugins for both the client bundle and the SSR view bundle. Any other key under `vite` is treated as a standard Vite `UserConfig` field and merged on top of gemi's base config.
 - **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
+- **`assetBase`** serves the client build from somewhere other than the app's own `/assets/` — see [Asset base](#asset-base).
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
@@ -906,6 +909,47 @@ react({ compiler: reactCompiler({ compilationMode: "annotation" }) })
 > **Note:** the oxc React Compiler integration is marked experimental upstream. It is a build-time transform with no runtime component beyond `react/compiler-runtime`, so dropping back to `react()` is a one-word revert.
 
 > **Note:** This is not the same file as `vite.config.mjs`. `gemi.config.ts` is gemi's own config (Vite **and** Bun plugins) consumed by the CLI, the runtime preload, and the gemi Vite plugin. `vite.config.mjs` is the standard Vite entry that loads the gemi Vite plugin. See [Vite config](#vite-config) below.
+
+### Asset base
+
+By default every URL gemi builds for the client bundle is root-relative — `/assets/client-DJhrQPW5.js` — and is served by the same server that rendered the page. So a page rendered by one release can only get its chunks from a server running that release. When two releases serve at once (a blue/green or weighted rollout, or several instances mid-deploy), a document from one can land its chunk requests on the other and miss.
+
+Set an asset base to fetch the bundle from somewhere several releases can coexist, typically a CDN or blob store with one directory per release:
+
+```bash
+GEMI_ASSET_BASE=https://cdn.example.com/$RELEASE/ gemi build
+```
+
+or in `gemi.config.ts`:
+
+```typescript
+export default defineConfig({
+  assetBase: `https://cdn.example.com/${process.env.RELEASE}/`,
+});
+```
+
+`GEMI_ASSET_BASE` wins when both are set. The value is an absolute URL or a path starting with `/`; a trailing `/` is added if you leave it off, and a relative base (`./`) fails the build. Then upload `dist/client` to that location as part of the deploy (skipping `dist/client/.vite`, which is build metadata), and keep the last few releases there.
+
+What it changes:
+
+- **The bundle.** It becomes Vite's `base` for the client and SSR view builds, so the dynamic imports, preload helper and CSS `url()`s inside the bundle resolve against it.
+- **The document.** The client entry, the `modulepreload` hints, the per-view loaders and the stylesheets a client-side navigation fetches all use it.
+
+The base is **read at build time only**. `gemi build` records the base the client bundle was built with in `dist/client/.vite/gemi.json`, and `gemi start` reads it from there — never from `GEMI_ASSET_BASE` at boot. That is what keeps the document and the bundle from disagreeing: the bundle already has the base baked in, and a variable set on the build job but not the container (or the reverse) would otherwise point the document one way and the bundle the other. Changing the base means rebuilding. It also means a `vite.base` set directly in `gemi.config.ts` is honoured the same way, since it is the resolved Vite value that is recorded; `assetBase` wins over it when both are set.
+
+The server still serves `dist/client` under `/assets/*` whatever the base is, and only there: it does not serve the base's own path. With a base of `https://cdn.example.com/r42/`, the document asks for `https://cdn.example.com/r42/assets/client-abc.js`, so something in front has to answer `<base>assets/*` — an upload to that path, or a CDN or proxy that maps it onto the origin's `/assets/*`. A CDN pulling from the app's origin works only if it strips the base's path (`/r42`) first; forwarded as-is, `/r42/assets/client-abc.js` is not a file `gemi start` has and goes to your routes, and the page does not hydrate. The same goes for a path base such as `/static/` with nothing in front of the app.
+
+> **Gotcha:** from another origin, the bundle is loaded through CORS: module scripts and `modulepreload` are always fetched in CORS mode, and a navigation's stylesheets are read with `fetch`. The CDN has to answer with `Access-Control-Allow-Origin` for your app's origin (or `*`), or the page will not hydrate.
+
+The base applies to `gemi build` only. `gemi dev` serves modules from Vite's dev server as always.
+
+### Missing chunks after a deploy
+
+A request for a JavaScript chunk under `/assets/` that is not in `dist/client` is answered with a tiny module that reloads the page, rather than a 404: it is almost always a document from the previous release asking for its own chunk, and reloading gets it this release's document. The stub is sent with `Cache-Control: no-store` so no browser or edge keeps it once the real chunk is back. Any other miss under `/assets/` — a source map, a stylesheet, an image, a font — is a plain 404, and a `.js` path outside `/assets/` goes to your routes like any other request.
+
+Every path under `/assets/` is answered from `dist/client`, whatever its extension, and never reaches your routes (global middleware still runs in front of it): the router refuses to mount a route there, so there is nothing of yours to answer it. Outside `/assets/`, a root-level public file (`/favicon.ico`, `/robots.txt`, `/fonts/brand.woff2`, …) is served when its extension is one of `png`, `jpg`, `jpeg`, `gif`, `svg`, `avif`, `webp`, `ico`, `css`, `js`, `mjs`, `map`, `txt`, `xml`, `webmanifest`, `woff`, `woff2`, `ttf`, `otf`, `webm`, `mp4`, `mp3` or `pdf`, and goes to your routes when no such file exists. `.json` is not on that list, because `/<path>.json` is how the client router fetches a view's data. The one exception is `/manifest.json`: it is served when your build has one (a PWA manifest in `public/`), and goes to your routes when it does not.
+
+**This recovery does not apply once you set an asset base.** With a base, every chunk URL in the document points at the CDN, so a missing chunk is a request the origin never sees and the CDN answers with its own 404 — the lazy `import()` rejects and the page stays broken where it stood. Keep the last few releases' `assets/` on the CDN rather than pruning on deploy, which is what the immutable, content-hashed filenames are for.
 
 ## Environment variables & `.env`
 
@@ -993,6 +1037,89 @@ GEMI_COMPRESSION=off
 
 Any other value (or none) leaves compression on.
 
+## Graceful shutdown
+
+In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
+
+1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. A queue whose driver outlives the process (such as `database`) stops claiming new jobs and leaves them to other replicas; the memory queue keeps claiming until step 4, since no other process can run its jobs. Jobs already running carry on.
+2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
+3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
+4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule). The scheduler is registered after the queue, so it runs first, and whatever time its ticks take comes out of what the queue has left. Closing the listener does not close a kept-alive connection that was idle at the time, so a client that ignored `Connection: close` can still send a request down it; from this step on, such a request is answered `503` with `Connection: close` and reaches neither your routes nor your instrumentation.
+5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
+
+A [`gemi queue:work`](./jobs-and-queues.md#worker-processes--gemi-queuework) worker drains the same way, with its running jobs in place of requests in step 3 and no delay in step 2.
+
+The handler is installed before the application boots, so a signal that lands during a slow start-up — a pod replaced two seconds into its connection pool — drains the same way: there is no listener to close and nothing in flight, so it goes straight to the providers' `shutdown()` and exits. Without it the default action would kill the process outright, with nothing closed or flushed.
+
+A second signal skips the wait and exits at once, with `130` for `SIGINT` or `143` for `SIGTERM` — if it arrives more than a second after the first. One shutdown often reaches the server several times within milliseconds (a Ctrl+C on `bun run start` arrives directly and through `gemi start`; systemd signals every process in the unit), and those copies are the same shutdown, not a request to skip it.
+
+Keep `GEMI_SHUTDOWN_DELAY` below `GEMI_SHUTDOWN_TIMEOUT`: the delay counts against the timeout, so a delay as long as the timeout leaves no time to drain. The server warns at startup when it does.
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `GEMI_SHUTDOWN_TIMEOUT` | `20` | Seconds from the signal to the end of step 3, the delay included. Requests still running then are abandoned. |
+| `GEMI_SHUTDOWN_DELAY` | `0` | Seconds to keep serving with the health route answering `503`. |
+| `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` | `5` | Seconds shared by every provider's `shutdown()`. |
+
+The defaults add up to 25 seconds, under the 30 that Kubernetes, Azure Container Apps and ECS allow between `SIGTERM` and `SIGKILL`. On a platform with a shorter window — Cloud Run allows 10, Fly 5 — lower them to fit: a drain the platform cuts off with `SIGKILL` ends the same way as no drain at all.
+
+`0` is a valid budget for either timeout, and means "skip this phase", not "this phase failed". `GEMI_SHUTDOWN_TIMEOUT=0` closes the listener without waiting for what is in flight — a request still running is still abandoned, and that still exits `1` — and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0` skips the `shutdown()` hooks altogether. Neither turns an otherwise clean shutdown into a non-zero exit.
+
+### Taking the instance out of rotation
+
+gemi has no health endpoint of its own, so "unhealthy" is whatever your health route says. Answer `503` while the server is draining:
+
+```typescript
+import { ApiRouter } from "gemi/http";
+import { isShuttingDown } from "gemi/server";
+
+export default class extends ApiRouter {
+  routes = {
+    "/health": this.get(() =>
+      isShuttingDown()
+        ? new Response(JSON.stringify({ status: "draining" }), { status: 503 })
+        : { status: "ok" },
+    ),
+  };
+}
+```
+
+Then set `GEMI_SHUTDOWN_DELAY` to at least your probe's interval times its failure threshold, and keep it inside `GEMI_SHUTDOWN_TIMEOUT`. Leave it at `0` where no probe watches the instance.
+
+### Cleaning up in a provider
+
+`ServiceProvider` has a `shutdown()` hook beside `register()` and `boot()`. It runs after the requests have drained, inside the application context, so a facade works there as it does in a request:
+
+```typescript
+import { ServiceProvider } from "gemi/support";
+
+export default class AppServiceProvider extends ServiceProvider {
+  async shutdown() {
+    await flushMetrics();
+  }
+}
+```
+
+Providers shut down in reverse registration order, so yours — registered after the framework's — runs while the framework's services are still up. A hook that throws is logged and the next one still runs; one that is still running when `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` is up is abandoned, and any provider not reached by then is skipped.
+
+### Handling the signals yourself
+
+`Server.start()` resolves with the `Bun.Server`, and `server.stop()` runs the same sequence without exiting the process. Pass `handleSignals: false` to keep gemi's listener off and wire it however you need:
+
+```typescript
+import { Server } from "gemi/server";
+import Kernel from "./kernel/Kernel";
+
+const server = new Server({ kernel: Kernel, handleSignals: false });
+await server.start();
+
+process.on("SIGTERM", async () => {
+  process.exit(await server.stop({ timeoutMs: 50_000 }));
+});
+```
+
+`gemi dev` installs no listener: `bun --hot` re-runs the server on every change, and a Ctrl+C in development stops at once.
+
 ## `app/preload.ts`
 
 `app/preload.ts` is an optional [Bun `--preload`](https://bun.sh/docs/runtime/bunfig#preload) script that runs **once, before the server starts**, for both `gemi dev` and `gemi start`. Use it for process-wide setup that must happen before any request is handled:
@@ -1075,6 +1202,8 @@ It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, r
 
 In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
 
+`dev` relays `SIGTERM` and `SIGINT` to the dev server and exits with its exit code, as [`start`](#gemi-start) does, so a dev container or process manager that stops `gemi dev` stops the server too rather than leaving it on its port. There is no drain in development: the signal stops the server at once.
+
 ### The update notice
 
 `dev` also asks npm whether a newer gemi has been published, and prints a line if one has:
@@ -1115,6 +1244,8 @@ The command runs in three stages:
 
 Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
 
+`GEMI_ASSET_BASE` (or `assetBase` in `gemi.config.ts`) builds the client bundle to be served from a CDN; the base is recorded in `dist/client/.vite/gemi.json` for `gemi start` to read. See [Asset base](./configuration.md#asset-base).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
 
 ## `gemi start`
@@ -1127,7 +1258,25 @@ gemi start
 
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
+`start` relays `SIGTERM` and `SIGINT` to that process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. The server drains in-flight requests before it exits; see [Graceful shutdown](./configuration.md#graceful-shutdown). The server stays in `start`'s process group, so a signal sent to the whole group — a Ctrl+C, or a supervisor's `SIGKILL` — reaches it directly as well.
+
+> **Gotcha:** the relay covers `start` and nothing above it. `bun run start` passes `SIGTERM` on to its script, but a wrapper script of your own between the platform and `gemi start` has to do the same, or the server never hears it.
+
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi queue:work`
+
+Runs queued jobs without serving HTTP, so job capacity can be scaled apart from web traffic.
+
+```bash
+NODE_ENV=production gemi queue:work
+```
+
+It launches a fresh Bun process with the same runtime preloads as `start`, boots the application, and claims from the queue until it gets `SIGTERM` or `SIGINT`. `queue:work` relays both, as `start` does. The worker then stops claiming, waits for the jobs it is running, runs every provider's `shutdown()`, and exits `0`, or `1` if a job was still running or a provider failed. `queue:work` exits with the same code.
+
+The queue has to use a driver every process can reach, such as `"database"`. On the memory driver the command refuses to start and exits `1`, because a worker never sees a job dispatched in another process. Set `GEMI_QUEUE_CLAIM=off` on the web process to leave all jobs to workers. See [Worker processes](./jobs-and-queues.md#worker-processes--gemi-queuework) for the topology and the shutdown budgets.
+
+> **Gotcha:** as with `gemi run`, `NODE_ENV` is inherited rather than forced, and the cron scheduler is off (`GEMI_NO_SCHEDULE=1`) unless the environment sets `GEMI_NO_SCHEDULE` itself.
 
 ## `gemi run`
 
@@ -1148,6 +1297,8 @@ Like `dev` and `start`, it launches a fresh Bun process with the same two runtim
 > **Gotcha:** the cron scheduler does not start under `gemi run`, so a long-running command cannot fire your whole schedule in a process nobody is watching. Jobs are still discovered and `app(Scheduler).jobs` still answers honestly. The command sets `GEMI_NO_SCHEDULE=1` on the process it spawns, which also works as a general "boot this app but do not schedule anything" switch.
 
 > **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
+
+`run` relays `SIGTERM` and `SIGINT` to the command's process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. A long-running command that listens for `SIGTERM` (`process.on("SIGTERM", ...)`) gets to finish its batch or record where it stopped; one that does not is ended by the signal, as before. A signal sent to the whole process group — a Ctrl+C in a terminal — reaches the command twice, directly and through the relay, so a handler should be idempotent: one that reads a second `SIGINT` as "force quit" would skip its cleanup on a single Ctrl+C.
 
 ## `gemi upgrade`
 
@@ -1276,6 +1427,26 @@ This command walks `app/models`, imports every file, and asks the same question 
 
 It reports one thing: a class carrying policies the registered class does not. A typed view carrying its own narrowing, and an unpolicied class written against a model's schema, are both deliberately *not* reported — each is supposed to be absent from the declared modules, and exporting either would turn a working boot into `AmbiguousModelRegistrationError`. See [ORM → Your model class](./orm.md#your-model-class).
 
+## `gemi ai:generate-client`
+
+Writes an agent's tool and output types for the iOS or Android client.
+
+```bash
+gemi ai:generate-client app/agents/support.ts#supportAgent --out ios/App/Agents --platform swift
+gemi ai:generate-client app/agents/support.ts#supportAgent --out android/app/src/main/kotlin/com/example/agents \
+  --platform kotlin --package com.example.agents
+```
+
+- `<agent>` — the module and export holding the value `Agent.create` returned, as `<file>#<export>`. A bare file means its default export.
+- `--out <dir>` — where to write. The file is named after the generated type: `--name` if given, else the export (`SupportAgent.swift`, `SupportAgent.kt`). `export default supportAgent` counts as `supportAgent`; an anonymous default export is named after the file (`support.ts` gives `Support.swift`).
+- `--platform <swift|kotlin>` — which client to write for.
+- `--package <name>` — Kotlin only, and required there: the package the file declares.
+- `--name <name>` — name the generated type something other than the export.
+
+It reads the agent's TypeScript types with the compiler your app already has, and nothing is imported or run. So it works in CI without a database or secrets, and a tool's progress type comes out typed even though it has no schema. A shape with no faithful Swift or Kotlin spelling is left as raw JSON, and a `warning:` line names where it was.
+
+See [Mobile Clients](./mobile-clients.md) for what the generated file is for.
+
 ## `gemi ide:generate-api-manifest`
 
 Generates the API route manifest behind the Emacs integration in `packages/gemi/ide/emacs`, which lists your routes and jumps to the handler you pick.
@@ -1311,6 +1482,7 @@ Like `app:component-tree`, it loads the app from the kernel and prints the resol
 ## Related
 
 - [Commands](./commands.md) — writing the application commands `gemi run` runs.
+- [Mobile Clients](./mobile-clients.md) — the iOS and Android clients `gemi ai:generate-client` writes types for.
 - [Getting Started](./getting-started.md) — installing gemi and running your first commands.
 - [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
 - [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.
@@ -1663,10 +1835,227 @@ export default class extends ViewRouter {
 
 ## See also
 
+- [Subdomains & Custom Domains](./domains.md) — routing by host: `admin.example.com`, `:tenant` subdomains, and custom domains.
 - [Controllers](./controllers.md) — writing `Controller` / `ResourceController` classes and using `HttpRequest`.
 - [Middleware](./middleware.md) — the middleware DSL and built-in middleware.
 - [Views & Layouts](./views-and-layouts.md) — authoring the React components that routes render.
 - [Data Fetching](./data-fetching.md) — consuming these routes from the client.
+
+---
+
+## Subdomains & Custom Domains
+
+By default, gemi routes on the path only: every host reaching the server is served by the same root routers. Declaring `route.domains` makes the host part of routing too. It gives an app:
+
+- **Fixed subdomains** with their own routers. For example, `admin.example.com` can run a different api and different views from `example.com`.
+- **A param subdomain**, such as `acme.example.com`. It runs the same app on every tenant's host, and the handler reads the tenant from `req.domain.params`.
+- **Custom domains.** A resolver maps a host the app does not own, such as `app.acme.com`, onto a tenant. That host is then served exactly as `acme.example.com` would be. A catch-all group can serve the hosts the resolver does not know.
+- **An endpoint for on-demand TLS.** A proxy such as Caddy asks it before issuing a certificate for a new custom domain.
+
+Route keys stay path-only, and routers do not change. Each host group simply has its own root routers.
+
+## Declaring domains
+
+`domains` sits next to `api` and `view` in `app/config/route.ts`:
+
+```typescript
+import { createRoot } from "gemi/client";
+import { defineRouteConfig } from "gemi/services";
+
+import RootApiRouter from "@/app/http/routes/api";
+import RootViewRouter from "@/app/http/routes/view";
+import AdminApiRouter from "@/app/http/routes/admin/api";
+import AdminViewRouter from "@/app/http/routes/admin/view";
+import RootLayout from "@/app/views/RootLayout";
+import { Organization } from "@/app/models";
+
+export default defineRouteConfig({
+  api: { rootRouter: RootApiRouter },
+  view: { rootRouter: RootViewRouter, root: createRoot(RootLayout) },
+  domains: {
+    root: process.env.ROOT_DOMAIN ?? "localhost",
+    groups: [
+      // A site of its own: its own api and its own views.
+      { subdomain: "admin", api: { rootRouter: AdminApiRouter }, view: { rootRouter: AdminViewRouter } },
+      // The app itself, once per tenant. No routers given, so it runs the root ones.
+      {
+        subdomain: ":tenant",
+        exists: async ({ tenant }) => (await Organization.count({ where: { slug: tenant } })) > 0,
+      },
+    ],
+    custom: {
+      group: ":tenant",
+      resolve: async (host) => {
+        const org = await Organization.findFirst({ where: { customDomain: host } });
+        return org ? { tenant: org.slug } : null;
+      },
+    },
+  },
+});
+```
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
+| `trustProxy` | `boolean` (default `false`) | Read the host from `X-Forwarded-Host`. Only set it behind a proxy that overwrites the header, or a client picks its own host. The **scheme** is read from `X-Forwarded-Proto` either way, so a cross-host link on a page served through a TLS-terminating proxy comes out `https://` without this. |
+| `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
+| `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
+| `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
+| `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
+| `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
+| `custom.cacheTtlMs` | `number` (default `60000`) | How long a `resolve` answer is reused. Both hits and misses are cached. `0` disables the cache. |
+| `custom.fallback` | `{ api?, view? }` | Serves every host `resolve` returned `null` for, instead of a `404`. |
+| `ask` | `{ secret: string }` | Turns on the on-demand TLS endpoint below. Left out, that path is not served at all. |
+
+A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
+path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
+that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, and `ask` on an app whose
+param group has no `exists`.
+
+## How a host is matched
+
+1. `root` itself is served by the root routers.
+2. A subdomain of `root` is tried against the fixed subdomains first, as an exact match that may span several labels. After that it is tried against the param subdomain, which matches exactly **one** label and must pass `exists`.
+3. Any other host goes to `custom.resolve`. A hit is served as `custom.group` with the params it returned. A miss goes to `custom.fallback` if there is one.
+4. Whatever is left gets a `404` with the body `Unknown host`. The same happens to a subdomain of `root` that nothing matches: `a.b.example.com`, or an `exists` that said no.
+
+> **Note:** with `route.domains` declared, **every** request needs a known host, including a load
+> balancer's health check sent to the server's IP address. Point health checks at the root host,
+> or answer them from a global middleware, which runs before host matching.
+
+## Reading the domain in a handler
+
+`req.domain` holds what the host said. `domain.params` is kept apart from `req.params`, which only ever holds the path's params:
+
+```typescript
+export class ProjectController extends Controller {
+  async index(req = new HttpRequest()) {
+    const tenant = req.domain?.params.tenant; // "acme" on acme.example.com and on app.acme.com
+    return Project.findMany({ where: { organization: { slug: tenant } } });
+  }
+}
+```
+
+| Field | Value |
+| --- | --- |
+| `host` | The hostname, lowercased and without the port. |
+| `group` | `""` for the root, the group's `subdomain` (`"admin"`, `":tenant"`) otherwise, and `"*"` for the fallback. |
+| `params` | The param subdomain's value, or what `custom.resolve` returned. |
+| `custom` | `true` for a host outside `root`. |
+
+`req.domain` is `null` when the app declares no `route.domains`. A server-side query from a view runs against the api of the page's own group. A tool call an agent makes during a request carries the same domain as that request.
+
+In a view, `useDomain()` returns the same fields:
+
+```tsx
+import { useDomain } from "gemi/client";
+
+export default function Header() {
+  const { params, custom } = useDomain();
+  return <h1>{params.tenant}</h1>;
+}
+```
+
+## Linking across hosts
+
+The client router handles paths on the current host only. To link to another host, build an absolute URL. `Link` and `useNavigate` treat an absolute URL as a full page load, not a client-side navigation:
+
+```tsx
+import { Link, useDomain } from "gemi/client";
+
+export default function AdminLink() {
+  const { url } = useDomain();
+  return <Link href={url({ subdomain: "admin" }, "/users")}>Admin</Link>;
+}
+```
+
+`url(target, path)` keeps the protocol and port of the current page. `target` is `{ subdomain }`, or `{ host }` for a custom domain. On the server, `Url.forDomain` does the same, with typed params:
+
+```typescript
+import { Url } from "gemi/facades";
+
+Url.forDomain({ subdomain: "acme" }, "/projects/:id", { id: project.id });
+// "https://acme.example.com/projects/42"
+```
+
+Outside a request, in a job or an email, `Url.forDomain` takes the protocol from `HOST_NAME`.
+
+## Sessions across subdomains
+
+By default, the session cookie belongs to the host that set it, so signing in on `acme.example.com` does not sign anyone in on `admin.example.com`. Set `cookieDomain` in `app/config/auth.ts` to share it:
+
+```typescript
+export default defineAuthConfig({
+  cookieDomain: "root", // or a hostname, e.g. "example.com"
+});
+```
+
+The cookie is scoped to the domain only on a request whose host is that domain or one of its subdomains. A browser refuses a cookie for another site's domain, so a **custom domain keeps its own session**, and users sign in on that host. Signing out clears both the shared cookie and any host-only cookie set before `cookieDomain` was turned on.
+
+Worth knowing before turning it on: a browser sends a cookie scoped to `example.com` to **every** host under it, including ones the app does not serve. If `status.example.com`, `blog.example.com` or `docs.example.com` are hosted by someone else, they receive `access_token` on every request. Put third-party subdomains on a separate domain, or scope the cookie to a hostname rather than `"root"`.
+
+The cookie is marked `Secure` when the request came in over `https` — through `X-Forwarded-Proto` if a proxy terminated TLS. Browsers drop a `Secure` cookie from a plain-http origin, so signing in over http works only on `localhost` and on the loopback roots below.
+
+## On-demand TLS for custom domains
+
+`GET /__gemi__/domains/ask?domain=<host>` answers `200` when the app serves that host in its own right, and `404` otherwise. "In its own right" means the host is the root, a declared subdomain, a param subdomain that passes `exists`, or a custom domain that `custom.resolve` accepts. A host only the fallback would serve gets a `404`, so the endpoint never approves certificates for arbitrary hosts.
+
+**It is off until you configure it, and it needs a secret.** The question it answers is "is this host a tenant of yours", asked with no session, and each one costs your app an `exists` or `resolve` call. Served openly it enumerates your tenant slugs and tells anyone which companies are your customers.
+
+```ts
+domains: {
+  root: "example.com",
+  groups: [{ subdomain: ":tenant", exists: async ({ tenant }) => …  }],
+  custom: { group: ":tenant", resolve: async (host) => … },
+  ask: { secret: process.env.GEMI_DOMAIN_ASK_SECRET! },
+}
+```
+
+The proxy passes the secret as `?secret=`. It is compared in constant time, and anything else — a wrong secret, no secret, or `ask` left out — falls through to ordinary routing, so the path answers exactly what any other unrouted path does and cannot be found by probing for it.
+
+`ask` requires the param group to have an `exists`. Without one every label under the root matches, so the endpoint would approve a certificate for every name anyone connects with, and a scripted walk would spend the certificate authority's rate limit for your whole domain — after which no real tenant can get one either.
+
+The endpoint is answered before host matching, so the proxy can call it on any host, `localhost` included. It does run after global middleware. With Caddy:
+
+```
+{
+  on_demand_tls {
+    ask http://localhost:5173/__gemi__/domains/ask?secret={env.GEMI_DOMAIN_ASK_SECRET}
+  }
+}
+
+https:// {
+  tls {
+    on_demand
+  }
+  reverse_proxy localhost:5173
+}
+```
+
+Caddy appends `&domain=<host>` to whatever URL you give it, so the secret goes in the configured URL. Caddy also keeps the original `Host` when it proxies, so `trustProxy` is not needed here — set it behind a proxy that rewrites `Host` and sends `X-Forwarded-Host` instead.
+
+A host served only by `custom.fallback` is never approved, by design. Under on-demand TLS that means the fallback is reachable only over plaintext or with a certificate you already hold.
+
+`custom.resolve` answers are cached for `cacheTtlMs`, and the cache evicts least-recently-used, so a burst of unknown hosts cannot flush your real customers out of it. Concurrent requests for the same cold host share one `resolve` call. `DomainResolver.forget(host)` drops one answer early — call it when a customer changes their domain, rather than waiting out the TTL.
+
+## Development
+
+`*.localhost` resolves to the loopback address in Chrome and Firefox, so with `root: "localhost"`, `acme.localhost:5173` and `admin.localhost:5173` work with no setup. For a custom domain, add an `/etc/hosts` entry (`127.0.0.1 app.acme.test`). The dev server lets the root, its subdomains and, when `custom` is set, any host through Vite's host check.
+
+Browsers differ on accepting a cookie scoped to `localhost` itself. To test a shared session across subdomains, use a root that resolves to loopback with its subdomains, such as `lvh.me`. That works over plain http because the session cookie is marked `Secure` by the request's scheme, not by whether the host is named `localhost`.
+
+## Limits
+
+- Typed routes cover the root routers. A group that runs the root routers, the usual tenant setup, is fully typed. A group with routers of its own, like `admin` above, has untyped `useQuery` and `Link` paths for now.
+- The MCP router is served on the root group's api.
+- `Url.absolute` keeps using `HOST_NAME`, because an OAuth redirect URI has to be one fixed host.
+
+## See also
+
+- [Routing](./routing.md): the routers each group runs.
+- [Authentication](./authentication.md): `cookieDomain` and the session cookie.
+- [Navigation](./navigation.md): `Link` and `useNavigate`.
+- [Middleware](./middleware.md): global middleware, which runs before host matching.
 
 ---
 
@@ -1850,7 +2239,7 @@ The following are exported from `gemi/http` and thrown by [middleware](./middlew
 | --- | --- | --- |
 | `AuthenticationError` | 401 | No/invalid session. On a view request it redirects to `/auth/sign-in`. |
 | `AuthorizationError` | 401 | Authenticated but not allowed. |
-| `InsufficientPermissionsError` | 401 | Authenticated, lacks a specific permission. |
+| `InsufficientPermissionsError` | 403 | Authenticated, lacks a specific permission. Thrown by `Auth.guard`. |
 | `RequestBreakerError` | (custom) | Base class — extend it to define your own throw-to-respond errors with `api`/`view` payloads. |
 
 ## See also
@@ -1917,7 +2306,7 @@ The following middleware classes ship with the framework and are exported from `
 
 ### `auth` → `AuthenticationMiddleware`
 
-Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to `/auth/sign-in` for view routes. See [Authentication](./authentication.md).
+Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
 
 ### `cache:...` → `CacheMiddleware`
 
@@ -1974,7 +2363,7 @@ than a middleware class — it has no alias to register.
 
 ## Registering middleware
 
-The `middleware` config slice holds a single field, `aliases` — `Record<string, MiddlewareClass>`. This is where DSL names become classes:
+The `middleware` config slice has two fields: `aliases` — `Record<string, MiddlewareClass>` — and `global`, a list that runs on every request (see [Global middleware](#global-middleware)). `aliases` is where DSL names become classes:
 
 ```typescript
 // app/config/middleware.ts
@@ -2019,6 +2408,68 @@ At boot, the framework's `MiddlewareServiceProvider` reads this slice and binds 
 > **Note:** `Middleware.configure(config)` returns a preconfigured subclass. Use it to register a middleware that needs static config (like `CorsMiddleware`'s allowed origins) under an alias.
 
 Because the alias map is app-owned, any DSL name your app uses must appear here — an unregistered alias is silently skipped. This also means aliases like `admin`, `org`, or `ai-quota` are **application-defined**, not framework built-ins.
+
+## Global middleware
+
+A route only gets the middleware its router lists, so a check the whole app needs — every document, every API route, every file — would have to be added to each router, and would still miss the static files: in production those are served from `dist/client` before the router runs. The `global` list covers both:
+
+```typescript
+// app/config/middleware.ts
+export default defineMiddlewareConfig({
+  aliases: {
+    "front-door": FrontDoorMiddleware,
+    // ...
+  },
+  global: ["front-door"],
+});
+```
+
+Entries are aliases (with `alias:param` arguments, as in a route's list) or middleware classes, and they run in order. They run once per request, before routing, static files and route middleware — and inside your app's `instrumentation`:
+
+- **Static files too.** `/assets/*`, `/favicon.ico`, `/robots.txt` and `/.well-known/*` in production, and everything Vite serves in development, so a check that passes in dev passes in prod.
+- **Before routing.** An `/api` path no route matches is refused before it would answer `404`, and framework routes (`/api/auth/*`, `/api/__gemi__/*`, image optimization) are covered like any other.
+- **Before route middleware.** A request that passes goes on to its route, which runs its own list as usual.
+- **Inside `instrumentation`.** The list runs within your app's `instrumentation`, so a span wraps the gate rather than starting after it. The consequence is that an `instrumentation` that answers a request without calling `next` — a maintenance-mode short circuit, a cached response — skips the global list along with everything else.
+
+A global middleware stops a request the same way a route middleware does: throw a `RequestBreakerError` subclass. The response is the one a route middleware's break would give for that url — the `api` payload as JSON under `/api`, the `.json` navigation body for client-side view data, and the `view` payload otherwise, static files included.
+
+```typescript
+import { Middleware, RequestBreakerError } from "gemi/http";
+
+class NotThroughFrontDoor extends RequestBreakerError {
+  constructor() {
+    super("Direct origin access");
+    this.payload = {
+      api: { status: 403, data: { error: "Forbidden" } },
+      view: { status: 403, error: { message: "Forbidden" } },
+    };
+  }
+}
+
+class FrontDoorMiddleware extends Middleware {
+  run() {
+    // Health probes reach the origin directly, without the header.
+    if (new URL(this.req.rawRequest.url).pathname === "/api/health") return;
+    if (this.req.headers.get("X-Azure-FDID") !== process.env.FRONT_DOOR_ID) {
+      throw new NotThroughFrontDoor();
+    }
+  }
+}
+```
+
+What a global middleware sees is not quite what a route middleware sees:
+
+- **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` then checks only that an `access_token` cookie or header is present, not that it belongs to a session, and `Auth.user()` returns the user without a token at all. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
+- **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
+
+A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.
+
+Some things are not requests the server receives, and the list does not run for them: an in-process `dispatchAs` from an MCP tool call, and a view's server-side `Query` — the request they were made from already passed it.
+
+In development the list also covers the dev server's own `/refresh.js` and `/render-error.js` scripts, so a gate that refuses a request without a header refuses those too, and an exemption by path has to name them as well. What it cannot cover is Vite's HMR websocket: Vite serves that from a server of its own, on port `24678` by default, and its connections never reach gemi. A request-level gate in `gemi dev` is therefore not a gate on everything the dev process answers; don't expose `gemi dev` where only such a gate stands between it and the network.
+
+> **Keep it cheap.** A global middleware runs on every asset request as well as every page and API call. A header comparison costs nothing; a database read per request is a database read per asset.
 
 ## Custom middleware
 
@@ -3269,6 +3720,11 @@ import { Link } from "gemi/client";
 - `active` — force the active state.
 - `prefetch` — warm the target route before it is clicked; see below.
 
+An absolute `http(s)://` `href`, such as a URL on another subdomain from
+`useDomain().url(...)`, renders a plain anchor that the browser loads in full.
+`useNavigate` treats an absolute URL the same way. See
+[Subdomains & Custom Domains](./domains.md#linking-across-hosts).
+
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
 
@@ -3618,6 +4074,7 @@ test("renders the organisation's messages", () => {
 | `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
 | `user` | `null` | `useUser()`. |
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `domain` | `null` | `useDomain()` — the `route.domains` group the page is served under. `{ host }` is the only required field: `group` defaults to the apex, `root` to the host minus its first label, and `origin` to `https://` on that host, so `domain={{ host: "acme.example.com", params: { tenant: "acme" } }}` is usually enough. Left out, `useDomain()` reads empty and `url()` throws, exactly as in an app with no `route.domains`. |
 | `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
 | `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
@@ -3715,6 +4172,18 @@ test("greets in Turkish", () => {
 
 No `dictionaries`, no `translations`, and no dictionary name that can drift out of sync with the component. The import cost described above does not apply either — a `defineDictionary` module imports `gemi/client`, not `gemi/i18n`, so it never pulls the container in and works under a real-browser runner.
 
+**If your runner applies gemi's Vite transform**, a dictionary loads each locale lazily instead, and the first render to read it suspends. A test whose component then also suspends on an unseeded `useQuery` never commits under `act`. The same happens if an earlier render in the same file suspended on that dictionary, because the registry keeps the promise React tracked for the rest of the test file. Warm the dictionaries before rendering, not by rendering:
+
+```tsx
+import { preloadDictionaries } from "gemi/dictionary";
+
+beforeEach(async () => {
+  await preloadDictionaries("en-US");
+});
+```
+
+Strings loaded that way are read without React's `use()`, so they never hold up the render.
+
 Both APIs compose on one page, which is what a half-migrated app needs:
 
 ```tsx
@@ -3773,6 +4242,333 @@ Under `bun test`, preload `happy-dom` — no gemi-specific configuration is requ
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
+
+---
+
+## Mobile Clients
+
+An agent mounted with `this.agent(...)` in an `ApiRouter` is what `useChat` talks to in the browser. The same route serves native apps: **GemiChat** for iOS (Swift) and **`dev.gemijs.chat`** for Android (Kotlin) are ports of `useChat`, and `gemi ai:generate-client` writes the agent's tool and output types for either one.
+
+Nothing on the server changes. A mobile client sends the same requests as the web hook, to the same four routes: `POST /api/<path>` to stream a turn, and `/stop`, `/attach` and `/files` under it.
+
+## What you get
+
+Each client is a `ChatSession` with the web hook's behaviour:
+
+- `send` (text, files, and answers to pending calls)
+- `stop`
+- `regenerate`
+- `approve` and `answer`
+- `upload`
+- reattaching to a run still going on a thread
+- the `status` / `pending` / `error` / `cursor` state that a chat screen renders
+
+The frame handling isn't a rewrite that might drift from the web hook. Every call the TypeScript reducer's tests make is recorded in `packages/gemi/ai/client/__fixtures__`, and both native reducers are tested against that recording.
+
+## Installing
+
+**iOS.** Add the gemi repository as a Swift package and depend on the `GemiChat` product:
+
+```swift
+.package(url: "https://github.com/nstfkc/gemi", exact: "<version>") // the gemi your server runs
+```
+
+The package is versioned by gemi's own release tags, so pin the one your server runs and the client speaks the same protocol. The first release to ship it is the one after 0.62.0; a server on 0.62.0 or earlier has no matching tag. SwiftPM clones the whole repository to get it. It needs iOS 17 (for `@Observable`).
+
+**Android.** The Kotlin client isn't published to Maven yet. Until it is, include it as a composite build from a checkout of the gemi repository, at the tag your server runs:
+
+```kotlin
+// settings.gradle.kts
+includeBuild("../gemi/packages/gemi-kotlin")
+```
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+  implementation("dev.gemijs:gemi-chat")
+  implementation("dev.gemijs:gemi-chat-compose") // rememberChat, for Compose
+}
+```
+
+It needs `minSdk` 26 and the kotlinx.serialization Gradle plugin, which the generated types use.
+
+`gemi-chat-compose` is an Android library, and Gradle allows one Android Gradle plugin version per build, so your app's AGP must match the one in `gemi/packages/gemi-kotlin/gradle/libs.versions.toml`. Otherwise the build fails with `Using multiple versions of the Android Gradle plugin ... is not allowed`. An app on another AGP can depend on `gemi-chat` alone, which is plain JVM, and copy `rememberChat` from `gemi-chat-compose` into the app; it's about thirty lines.
+
+The included build finds the Android SDK through `ANDROID_HOME`, or through a `local.properties` in `gemi/packages/gemi-kotlin/`; without either, only `gemi-chat` is included. Android Studio sets `sdk.dir` in your project's `local.properties` rather than `ANDROID_HOME`, so copy that file into `gemi/packages/gemi-kotlin/`, or the build fails with `Could not find dev.gemijs:gemi-chat-compose`.
+
+## Generating the types
+
+Point the command at the agent (the value `Agent.create` returned, as `<file>#<export>`) and say where to write:
+
+```bash
+gemi ai:generate-client app/agents/support.ts#supportAgent --out ios/App/Agents --platform swift
+gemi ai:generate-client app/agents/support.ts#supportAgent --out android/app/src/main/kotlin/com/example/agents \
+  --platform kotlin --package com.example.agents
+```
+
+Each command writes one file named after the export (`SupportAgent.swift` / `SupportAgent.kt`). It contains every tool's input, output and progress type, plus the agent's structured output. The typed views to read a transcript through are in the same file. Type names match across the two platforms.
+
+The command reads your agent's **TypeScript types** and never imports or runs your app. That means CI can run it without a database or secrets. It also means a tool's progress is typed: progress has no schema, it's whatever the tool's generator yields, and only the types know it. Every type comes from the same `ToolShapesOf` that types `useChat`.
+
+A shape with no faithful Swift or Kotlin spelling stays raw JSON (`JSONValue` / `JsonElement`), and the command prints a warning naming where it was:
+
+| TypeScript | Generated |
+| --- | --- |
+| `string`, `number`, `boolean` | `String`, `Double`, `Bool` / `Boolean` |
+| an object | a struct / `@Serializable data class` |
+| a union of string literals | an enum with the wire values |
+| a union of objects with one string-literal member in common | a discriminated enum / sealed interface |
+| `T \| null` vs. `key?: T` | kept apart: a required nullable key is written as `null`, an optional one is left out |
+| `Record<string, T>`, `T[]` | a dictionary / map, an array / list |
+| `unknown` (a tool with no output schema and an untyped return) | raw JSON, silently |
+| `Date`, a tuple, a union without a string discriminant, a recursive type | raw JSON, with a warning |
+
+Regenerate whenever the agent's tools change. A tool the file doesn't know about isn't an error: it shows up as `.unknown` / `Unknown` in every typed view. The same goes for skills, which reach the client as tools, and for a payload that no longer decodes.
+
+## iOS
+
+```swift
+import GemiChat
+import SwiftUI
+
+struct SupportView: View {
+  @State private var chat = ChatSession<SupportAgent>(
+    endpoint: URL(string: "https://example.com/api/support")!,
+    headers: { ["Authorization": "Bearer \(try await Tokens.current())"] }
+  )
+  @State private var draft = ""
+
+  var body: some View {
+    List(chat.messages) { message in
+      Text(message.text)
+      ForEach(chat.toolCalls(in: message), id: \.self) { call in
+        if case .bash(let bash) = call {
+          ForEach(bash.progress, id: \.self) { Text(verbatim: "\($0)") }
+        }
+      }
+    }
+    .safeAreaInset(edge: .bottom) {
+      if chat.status == .awaitingInput {
+        ForEach(chat.typedPending, id: \.self) { pending in
+          if case .charge(let call) = pending {
+            Button("Approve \(call.input?.amountCents ?? 0, format: .number)¢") { chat.approve(call, true) }
+          }
+        }
+      }
+      TextField("Message", text: $draft).onSubmit {
+        let text = draft
+        draft = ""
+        Task { await chat.send(text) }
+      }
+    }
+    .onDisappear { chat.close() }
+  }
+}
+```
+
+`ChatSession` is `@MainActor` and `@Observable`, so a SwiftUI view re-renders as frames arrive. `messages` is the transcript as the server sent it. `toolCalls(in:)`, `toolResults(in:)`, `typedPending` and `output(of:)` read it through the generated types.
+
+For a fuller screen — every content part, typed progress and results, approvals and questions, uploads, persistence, structured output and the untyped session — see [`packages/gemi-swift/Examples/SupportChatExample.swift`](https://github.com/nstfkc/gemi/blob/main/packages/gemi-swift/Examples/SupportChatExample.swift).
+
+A question tool's answer is typed by the tool's output schema, so an answer of the wrong shape doesn't compile:
+
+```swift
+if case .ask(let call) = chat.typedPending.first {
+  chat.answer(call, with: .init(answer: "The March order"))
+}
+```
+
+## Android
+
+```kotlin
+class SupportViewModel : ViewModel() {
+  val chat = ChatSession(
+    endpoint = "https://example.com/api/support",
+    scope = viewModelScope,
+    headers = { mapOf("Authorization" to "Bearer ${Tokens.current()}") },
+  )
+
+  fun send(text: String) = viewModelScope.launch { chat.send(text) }
+}
+
+@Composable
+fun SupportScreen(model: SupportViewModel = viewModel()) {
+  val state by model.chat.state.collectAsState()
+  LazyColumn {
+    items(state.messages) { message -> Text(message.text) }
+  }
+  if (state.status == ChatStatus.AwaitingInput) {
+    state.pending.map(SupportAgent::pending).forEach { pending ->
+      if (pending is SupportAgent.Pending.Charge) {
+        Button(onClick = { model.chat.approve(pending.value, true) }) { Text("Approve") }
+      }
+    }
+  }
+}
+```
+
+`state` is a `StateFlow<ChatUiState>` holding everything a chat screen renders. The typed views are functions of the generated object: `SupportAgent.toolCall(part)`, `SupportAgent.pending(call)`, `SupportAgent.output(part)`. `ChatSession` itself isn't generic.
+
+The Kotlin twin of the Swift example, with the same screen in Compose and a `ViewModel`, is [`packages/gemi-kotlin/examples/SupportChatExample.kt`](https://github.com/nstfkc/gemi/blob/main/packages/gemi-kotlin/examples/SupportChatExample.kt).
+
+The session is confined to the thread `scope` dispatches to, as a UI is; `viewModelScope` is the main thread. A `ViewModel` keeps the conversation through a configuration change. For a screen that doesn't need that, `rememberChat` from `gemi-chat-compose` ties a session to the composable instead:
+
+```kotlin
+val chat = rememberChat("https://example.com/api/support", threadId = threadId)
+val state by chat.collectState()
+```
+
+## Using one agent across components
+
+A `ChatSession` is one conversation. Different components can show the same conversation by sharing that one session; each component that creates its own session gets a separate conversation. The generated types (`SupportAgent`) hold no state, so any number of sessions and components can use them.
+
+### One conversation, several components
+
+Create the session once, in the component that owns the screen, and hand it down. On iOS, `ChatSession` is `@Observable`, so it can go into the environment:
+
+```swift
+struct SupportScreen: View {
+  @State private var chat = ChatSession<SupportAgent>(endpoint: URL(string: "https://example.com/api/support")!)
+
+  var body: some View {
+    NavigationStack {
+      Transcript(messages: chat.messages)
+        .toolbar { StatusBadge(status: chat.status) }
+        .safeAreaInset(edge: .bottom) { Composer() }
+    }
+    .environment(chat)
+    .onDisappear { chat.close() }
+  }
+}
+
+/// Needs the session itself, to send: reads it from the environment.
+struct Composer: View {
+  @Environment(ChatSession<SupportAgent>.self) private var chat
+  @State private var draft = ""
+
+  var body: some View {
+    TextField("Message", text: $draft)
+      .disabled(chat.status == .awaitingInput)
+      .onSubmit {
+        let text = draft
+        draft = ""
+        Task { await chat.send(text) }
+      }
+  }
+}
+
+/// Only renders: takes a value.
+struct StatusBadge: View {
+  let status: ChatStatus
+
+  var body: some View {
+    if status == .streaming { ProgressView() }
+  }
+}
+
+struct Transcript: View {
+  let messages: [AgentMessage]
+
+  var body: some View {
+    List(messages) { Text($0.text) }
+  }
+}
+```
+
+On Android the session lives in a `ViewModel`, and every composable that gets that `ViewModel` gets the same session. Collect `state` once and pass it down (`Composer` and `Transcript` are your own composables, as on iOS):
+
+```kotlin
+@Composable
+fun SupportScreen(model: SupportViewModel = viewModel()) {
+  val state by model.chat.collectState()
+  Scaffold(
+    topBar = { StatusBadge(state.status) },
+    bottomBar = { Composer(enabled = state.status != ChatStatus.AwaitingInput, onSend = { model.send(it) }) },
+  ) { padding ->
+    Transcript(state.messages, Modifier.padding(padding))
+  }
+}
+
+@Composable
+fun StatusBadge(status: ChatStatus) {
+  if (status == ChatStatus.Streaming) CircularProgressIndicator()
+}
+```
+
+Hand children the values they render (`messages`, `status`, `pending`), and the session itself only to the ones that call it (`send`, `approve`, `stop`). The session changes as a whole: on iOS every view that reads it is re-rendered on every streamed frame, and on Android `state` is one value that changes on every frame. A child that takes plain values is skipped when its own values didn't change.
+
+### Across screens
+
+For a conversation that more than one destination shows (the chat, then a screen for the pending approvals, say), the session belongs to something that outlives each destination.
+
+On iOS, create it above the `NavigationStack` and put it in the environment there. Destinations pushed onto the stack and sheets presented from it read the same session.
+
+On Android, scope the `ViewModel` to the navigation graph that contains those destinations, rather than to each one:
+
+```kotlin
+composable("support/approvals") { entry ->
+  val graph = remember(entry) { navController.getBackStackEntry("support") }
+  val model: SupportViewModel = viewModel(graph)
+  ApprovalsScreen(model.chat)
+}
+```
+
+`viewModel(activity)` works too, when the whole activity is one conversation.
+
+### Same agent, separate conversations
+
+Give each conversation its own session. A list of threads keeps one session per thread id, or creates the session when a thread is opened:
+
+```kotlin
+@Composable
+fun ThreadScreen(threadId: String) {
+  // A new threadId is a new session; the old one is closed when it leaves.
+  val chat = rememberChat("https://example.com/api/support", threadId = threadId)
+  val state by chat.collectState()
+  Transcript(state.messages)
+}
+```
+
+```swift
+struct ThreadScreen: View {
+  let threadId: String
+  @State private var chat: ChatSession<SupportAgent>
+
+  init(threadId: String) {
+    self.threadId = threadId
+    _chat = State(initialValue: ChatSession(
+      endpoint: URL(string: "https://example.com/api/support")!, threadId: threadId))
+  }
+
+  var body: some View {
+    Transcript(messages: chat.messages)
+      .onDisappear { chat.close() }
+  }
+}
+```
+
+Put `.id(threadId)` on `ThreadScreen` where the same view is reused for another thread, so SwiftUI creates it (and its session) again.
+
+### Not two sessions for one conversation
+
+Each session keeps its own copy of the transcript, and only looks for a running run once, when it's created. So two live sessions on the same thread fall out of step: a turn sent from one never shows up in the other. When a conversation moves from one place to another — a preview to the full screen, or a screen rebuilt after the app was killed — close the first session. Then create the next one from the first one's `threadId`, `messages` and `cursor`, and it picks up the run where the first left off.
+
+## Behaviour worth knowing
+
+These are the web hook's rules; the comments in `packages/gemi/ai/useChat.tsx` explain why each one exists.
+
+- **Stateless by default.** Without a `threadId` the session keeps the history and posts it with every turn. It leaves out tool progress logs, which the server never reads. With a `threadId` (minted by an app route that calls `store.createThread`), the server keeps the history.
+- **Persist `messages` and `cursor` together.** Pass both back as `initialMessages` and `cursor` when the screen is rebuilt. A session on a thread then attaches to a run still going and asks only for the frames it hasn't seen. Restoring one without the other is how an answer ends up printed twice.
+- **Answers given together go out as one turn.** A turn that leaves a pending call unanswered refuses it. So `approve`/`answer` calls made in one go — a loop over `pending` — are coalesced into a single request.
+- **`stop()` ends the run. `close()` doesn't.** `stop()` marks the turn aborted at once and tells the server, which ends the generation and any tool in flight. `close()` only drops the connection, like a React unmount; the run finishes on the server, and a later session on the thread attaches to it. Call `close()` when the screen goes away.
+- **`onAttachMiss`** fires when the attach probe finds no run. Behind a load balancer that's ambiguous, because the run may be alive on another instance. Re-reading the thread and calling `setMessages` shows the answer anyway.
+- **An upload has two ids, and either can be missing.** `upload` returns a `ChatUpload`. Its `fileId` is the provider's: put `upload.file` in a turn's `files` to show the model the file. Its `attachmentId` is gemi's: the handle a tool fetches the bytes by. A file the server kept but never sent to the provider has no `fileId`, so `file` is `nil`/`null`, not a turn carrying an empty id. An upload the server had no scope to keep has no `attachmentId`, and `downgraded` says so.
+- **Authentication** is whatever your routes' middleware checks. Mobile apps usually send a bearer token, so pass it in `headers`, which is asked for before every request.
+
+## Related
+
+- [CLI → `gemi ai:generate-client`](./cli.md#gemi-aigenerate-client) — the command's flags.
+- [Data Fetching](./data-fetching.md) — the RPC layer `useChat` shares with `useQuery`.
 
 ---
 
@@ -5807,7 +6603,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | --- | --- |
 | `RecordNotFoundError` | An `…OrThrow` operation matched nothing. |
 | `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. It is gemi's own error and carries no Prisma `code` — see below if a `"P2002"` check is what you have today. |
-| `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. |
+| `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. Uncaught in an api route, it answers 403 `{ "error": { "message": "Forbidden" } }` for both reasons; the message, written for you rather than the client, goes to `onRequestFail` and the log. |
 | `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
 | `InvalidPolicyEntryError` | A `$policies` entry that cannot run — a factory nobody called, a policy class whose constructor throws, or an entry whose keys are none of `before` / `scope` / `onCreate` / `onUpdate` / `redact`. Names the class and the index. Raised wherever the entry is first read: by `registerModels` and `gemi check models` at boot, and on the first query through a class neither of those was given. |
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
@@ -5823,6 +6619,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
 | `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
 | `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
+| `TransactionDependencyError` | A statement issued on the transaction for you, without your awaiting it, failed — today, a job the database queue driver wrote on it ([Jobs & Queues](./jobs-and-queues.md#dispatching-inside-a-transaction)) — so the transaction rolled back instead of committing. The statement's own error is its `cause`. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
 | `MalformedRelationError` / `MissingModelSchemaError` / `UnregisteredRelationTargetError` | The generated artifact and the registry disagree — the same family as the two above, and the same fix. |
@@ -6074,6 +6871,46 @@ The direction is the awkward one: a `DB.sql` write inside a transaction rolls ba
 development on SQLite and survives the rollback in production on Postgres. `DB.query` and
 `DB.execute` join the transaction on both.
 
+### Reading the live schema
+
+`DB.schema()` reads the schema back out of the database's own catalog: every table, its columns
+and their types, its primary key, and its foreign keys.
+
+```ts
+const { dialect, tables } = await DB.schema()
+const post = tables.find((t) => t.name === "Post")
+// post.columns     [{ name: "id", type: "text", nullable: false, default: null }, …]
+// post.primaryKey  ["id"]
+// post.relations   [{ name: "Post_authorId_fkey", columns: ["authorId"],
+//                     referencedTable: "User", referencedColumns: ["id"],
+//                     onDelete: "CASCADE", onUpdate: "CASCADE" }]
+```
+
+`DB.connection(name).schema()` reads another connection's schema.
+
+- **This is what the database says, not what the models say.** The generated `ModelSchema` comes
+  from Prisma and is never checked against the database. Comparing the two is how you find drift.
+- **Types are in the database's own spelling**, such as `character varying(255)`, `int` or
+  `INTEGER`. They are not mapped to TypeScript or Prisma types. Defaults are reported the same way:
+  SQLite and Postgres give the SQL expression, MySQL gives the bare value, and MariaDB gives the
+  SQL literal — `'untitled'` and `current_timestamp()` where MySQL says `untitled` and
+  `CURRENT_TIMESTAMP`. A column with no default is `null` on all four.
+- **A generated column is listed like any other**, since a plain `select *` returns it. Its
+  expression is not reported as a default.
+- **`nullable` is what the table enforces, not what the DDL reads like.** SQLite is the one that
+  differs: only a sole `integer primary key` — the rowid — refuses a null, and any other key column
+  there accepts one and is reported nullable. That is drift worth seeing rather than hiding.
+- **Only base tables are listed.** Views are left out, and so are SQLite's `sqlite_*` tables, its
+  virtual tables and the shadow tables behind them. On Postgres the listing is limited to
+  `current_schema()`, and on MySQL to `database()`. Migration tables such as `_prisma_migrations`
+  are real tables, so they are included.
+- **A key pointing outside that scope names its parent qualified**, as `other_schema.Thing`, so it
+  cannot be mistaken for a table of the same bare name in scope. Every unqualified
+  `referencedTable` is a table the same read lists.
+- **It works on MySQL and MariaDB**, where `DB.query` does not yet.
+- **The code loads on first call.** An app that never calls it never loads it.
+- **It joins the ambient transaction.** A table created earlier in the same transaction is included.
+
 ## Enums
 
 A Prisma `enum` is a **string** at runtime, on both dialects, exactly as it is through Prisma:
@@ -6286,7 +7123,7 @@ might lift next release.
 
 - **[Rows and entities](./orm-rows-and-entities.md)** — POJOs, `track` + `save`, and `wrap`.
 - **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider.
-  `UserProvider` (exported from `gemi/kernel`) implements all twenty-two methods of the auth
+  `UserProvider` (exported from `gemi/kernel`) implements all twenty-five methods of the auth
   persistence on this ORM, and is the only implementation: the adapter seam and the Prisma
   adapter are gone, and `AuthManager` constructs it directly. It resolves your models from the
   registry by name, so registering them at boot is what makes sign-in work.
@@ -6582,7 +7419,9 @@ a binding into the container, and a facade resolves it.**
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
-| `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
+| `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
+| `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
+| `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
@@ -6655,14 +7494,16 @@ It expects the following models (field names matter, they are queried directly):
 - **`PasswordResetToken`** — `token` (unique), `createdAt`, `user` relation.
 - **`MagicLinkToken`** — `email`, `token`, `pin`, with composite unique keys
   `token_email` and `pin_email`.
-- **`SocialAccount`** — `provider`, `providerId`, `userId`, `email`, `username`,
-  `accessToken`, `refreshToken`, `expiresAt` (created on first OAuth sign-up).
+- **`SocialAccount`** — `provider`, `providerId` (nullable), `userId`, `email`, `username`,
+  `accessToken`, `refreshToken`, `expiresAt`, with `@@unique([provider, providerId])` —
+  the link between a user and a provider account. See
+  [OAuth account identity](#oauth-account-identity).
 - **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
   optional invitation sign-up flow).
 
 ### Methods
 
-The twenty-two methods, all overridable:
+The twenty-five methods, all overridable:
 
 | Method | Purpose |
 | --- | --- |
@@ -6678,6 +7519,7 @@ The twenty-two methods, all overridable:
 | `createPasswordResetToken(args)` / `findPasswordResetToken(args)` / `deletePasswordResetToken(args)` | Password-reset token lifecycle. |
 | `createMagicLinkToken(args)` / `findUserMagicLinkToken(args)` / `deleteMagicLinkToken(email)` | Magic-link / PIN token lifecycle. |
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
+| `findUserBySocialAccount(provider, providerId)` / `findSocialAccounts(userId, provider)` / `claimSocialAccount(account, providerId)` | Resolve a provider identity to its user; list a user's links; record the identity on a legacy link. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
 One more method is not a query: `transaction(fn)` runs `fn` inside a transaction on the
@@ -6983,10 +7825,10 @@ and `HOST_NAME` from the environment by default. `XOAuthProvider` reads `X_CLIEN
 The framework mounts two view routes per provider automatically:
 
 - `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
-- `/auth/oauth/:provider/callback` — exchanges the code, resolves the user's email/name,
-  signs them in (or creates the account + a `SocialAccount` on first login, in one transaction
-  with [`onUserCreated`](#onusercreated)), sets the session cookie, and fires `onSignUp` (new) or
-  `onSignIn` (returning).
+- `/auth/oauth/:provider/callback` — exchanges the code, resolves the provider account to a
+  user (see [below](#oauth-account-identity)), signs them in (or creates the account + a
+  `SocialAccount` on first login, in one transaction with [`onUserCreated`](#onusercreated)),
+  sets the session cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
 
 > **Note:** `onSignUp`'s `verificationToken` is `""` on this path. A user arriving through
 > OAuth has `emailVerifiedAt` already set, so there is nothing to verify. To mail them a
@@ -7004,7 +7846,100 @@ A "Sign in with Google" button is just a link:
 
 To add your own provider, extend the abstract `OAuthProvider` (from `gemi/services`) and
 implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
-`{ email, name, username?, providerId? }`.
+`{ email, name, username?, providerId? }`. Return the provider's stable account id as
+`providerId` whenever it has one, and never build one from a name or an email.
+
+### OAuth account identity
+
+A provider account is identified by **`(provider, providerId)`** — for Google, `providerId`
+is the OpenID Connect `sub`, which Google keeps stable across email changes; for X, the user
+id. Display names and emails are profile data, stored on the `SocialAccount` as they were at
+link time, and never used as identity. The callback resolves an account in this order:
+
+1. **By identity.** If a `SocialAccount` holds this `(provider, providerId)`, its user is
+   signed in — whatever the provider now reports as the email or name. The local user's email
+   is not changed, and a provider-side email change never moves the account to another user,
+   even when the new address belongs to one.
+2. **By email**, for an identity not yet linked:
+   - No user with that email: the user and its `SocialAccount` are created in one
+     transaction with `onUserCreated`; `onSignUp` fires.
+   - A user with that email and no link at this provider: they are signed in and the link is
+     created; `onSignIn` fires.
+   - A user with that email whose link at this provider has an empty `providerId` (a
+     [legacy row](#migrating-existing-social-accounts)): the identity is recorded on that row.
+   - A user with that email **already linked to a different account at this provider**: the
+     callback is refused (`session: null`), nothing is written and no hook fires. The same
+     address is not the same account — a deleted and re-created Workspace user gets a new
+     `sub`. To allow re-linking, delete the old `SocialAccount` row.
+
+A callback is also refused when the provider returns no identity the callback can use: no
+email for an unknown identity, or — for `GoogleOAuthProvider` — a userinfo response with no
+`sub`, which it treats as a failed login rather than falling back to the email.
+
+A provider that returns no `providerId` at all (a custom one) keeps email-only behaviour:
+step 2 without a link, and no `SocialAccount` row, since a row with no identity in it can
+never be resolved by one.
+
+`@@unique([provider, providerId])` is what makes this safe under concurrency. Two callbacks
+racing to sign up or link the same account both try to write the same identity; one wins,
+the other fails on the constraint, and the loser then signs in **only if** the identity now
+resolves — the database error alone is never taken as proof of who the user is. Without the
+constraint the lookups still work, but a race can write two rows for one account.
+
+`username` is the provider's handle where it has one (X). Google has none, so it is left
+empty; it used to hold the display name.
+
+#### Migrating existing social accounts
+
+Before this, the callback wrote `providerId: ""` for every Google account, and the template
+declared `@@unique([username, provider])` — the display name — which made a second Google
+user with an existing user's name fail to sign up. Change the model to:
+
+```prisma
+model SocialAccount {
+  // ...
+  provider   String
+  providerId String?   // was: String
+
+  username String?
+  email    String?
+  // ...
+
+  @@unique([provider, providerId])   // was: @@unique([username, provider])
+  @@index([userId])
+}
+```
+
+and convert the empty placeholders to `NULL` in the same migration. A unique index cannot
+hold more than one `""` per provider, but it treats `NULL`s as distinct, and every existing
+Google row holds `""`. The conversion has to run **after** the column becomes nullable and
+**before** the index is created, so the migration Prisma generates will not apply on its own.
+Create it with `prisma migrate dev --create-only`, edit it, and only then apply it. On
+Postgres the finished migration is:
+
+```sql
+DROP INDEX "SocialAccount_username_provider_key";
+ALTER TABLE "SocialAccount" ALTER COLUMN "providerId" DROP NOT NULL;
+-- added by hand: between DROP NOT NULL and CREATE UNIQUE INDEX
+UPDATE "SocialAccount" SET "providerId" = NULL WHERE "providerId" = '';
+CREATE UNIQUE INDEX "SocialAccount_provider_providerId_key" ON "SocialAccount"("provider", "providerId");
+```
+
+Appending the `UPDATE` to the end of the file fails at `CREATE UNIQUE INDEX` as soon as there
+are two Google accounts. A development database often has only one, so the mistake passes
+locally and first fails at `migrate deploy`. On SQLite, Prisma redefines the table instead;
+write `NULLIF("providerId", '')` in place of `"providerId"` in its `INSERT ... SELECT`, as the
+template's `20260922000000_social_account_provider_identity` migration does.
+
+Do **not** fill legacy rows from names or emails: they
+are recorded with the real `providerId` by the callback itself, on each user's next sign-in,
+through the email match that already signs them in today.
+
+**Deployment order.** Apply the migration, then deploy the new framework version. The other
+order also works — the callback only ever writes a non-empty `providerId`, finds rows with
+`findFirst`, and leaves `username` empty for Google, so it runs against the old schema — but
+until the constraint exists, concurrent first sign-ins are not guarded. Applications that
+override `createSocialAccount` should check that it passes `providerId` through.
 
 ## The Auth facade
 
@@ -7016,8 +7951,9 @@ current user and session.
 | Method | Returns | Description |
 | --- | --- | --- |
 | `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
-| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws. |
-| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing. |
+| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
+| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
+| `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
 
@@ -7047,8 +7983,9 @@ That is the same call the static methods make internally — `getFacadeRoot()` i
 which doubles as its own container token.
 
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
-> that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
-> use `Auth.guardSafe(...)` instead of wrapping `Auth.user()` in a try/catch.
+> that's fine (the framework turns it into a 401 / redirect). So do `Auth.guard(...)` and
+> `Auth.guardSafe(...)`, which call it first: `guardSafe` returns `false` only for a signed-in
+> user the predicate refuses. On a route that may have no session, catch `AuthenticationError`.
 
 See [Authorization](./authorization.md) for role checks.
 
@@ -7066,6 +8003,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
 
@@ -7177,10 +8115,98 @@ export default class extends Kernel {
 this.get(DashboardController, "index").middleware(["auth"]);
 ```
 
-Requests without a valid `access_token` are rejected with an `AuthenticationError`
-(401 for API routes, a redirect to `/auth/sign-in` for views). See
-[Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
-and [Authorization](./authorization.md) for role enforcement.
+Requests without a valid `access_token` are rejected with an `AuthenticationError`:
+a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
+a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
+view's loader refuses the same way. See [Middleware](./middleware.md) for the full DSL
+(`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
+role enforcement.
+
+The sign-in page is set once in the auth config:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  signInPath: "/login",
+});
+```
+
+A route that needs a different one — an admin area with its own sign-in — names it as the
+middleware's parameter:
+
+```typescript
+"/admin": this.view("Admin").middleware(["auth:/admin/sign-in"]),
+```
+
+The middleware parameter is a **path only**. Alias arguments are split on `:` and `,`, so
+`"auth:https://sso.example/login"` would arrive as the bare word `https` — that is refused
+rather than redirected to. Put a sign-in page on another origin in `signInPath`, where the
+whole URL survives.
+
+### Returning to the intended page
+
+The redirect carries the page that was asked for, as `?redirect=`:
+`/invoices?page=2` is sent to `/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2`. The locale
+segment is left off, since `useNavigate` adds the current one back. When `signInPath` is on
+**another origin**, only the path is carried and the query string is dropped: a protected
+page reached with a single-use token (`?invite=`, `?token=`) would otherwise hand it to that
+origin, and to its logs and `Referer`. After sign-in, send the
+user there:
+
+```tsx
+import { Form, useIntendedUrl, useNavigate } from "gemi/client";
+
+function SignIn() {
+  const { push } = useNavigate();
+  const intended = useIntendedUrl("/dashboard");
+  return (
+    <Form method="POST" action="/auth/sign-in-v2" onSuccess={() => push(intended)}>
+      {/* ... */}
+    </Form>
+  );
+}
+```
+
+On the server, `Auth.intendedUrl()` reads the same parameter from the current request —
+for example in the sign-in page's loader, to send an already-signed-in visitor on:
+
+```typescript
+"/sign-in": this.view("auth/SignIn", async () => {
+  const user = await Auth.user().catch(() => null);
+  if (user) {
+    // `as any`: the target is a runtime path, not a typed route.
+    Redirect.to(Auth.intendedUrl() as any);
+  }
+  return {};
+}),
+```
+
+Both accept only a path on this origin and fall back otherwise. The parameter is part of a
+URL anyone can send a user, so passing it on unchecked would be an open redirect:
+`?redirect=https://evil.example` must not sign a user in and hand them to a look-alike.
+Read it through these two helpers rather than off `useSearchParams()` directly.
+
+**OAuth.** The provider round trip drops the query string, so forward the parameter onto the
+OAuth link and the framework keeps it for the callback in a short-lived cookie:
+
+```tsx
+const intended = useIntendedUrl();
+<a href={`/auth/oauth/google?redirect=${encodeURIComponent(intended)}`}>Sign in with Google</a>
+```
+
+The callback view (`auth/OauthCallback`) then receives `redirectTo` next to `session`: the
+forwarded page, or `redirectPath` when there was none.
+
+```tsx
+export default function OauthCallback({ session, redirectTo }) {
+  if (session) return <Redirect action="replace" href={redirectTo} />;
+  // ...
+}
+```
+
+A **magic link** is opened from an email, not from the sign-in page, so it carries no
+`?redirect=` unless your `onMagicLinkCreated` / `onSignUp` hook puts one on the link it
+mails; when it does, `useIntendedUrl()` in the `auth/MagicLinkSignIn` view reads it.
 
 ---
 
@@ -7305,7 +8331,13 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 ```
 
 `Auth.guard` takes `(user: User) => boolean | Promise<boolean>` and throws
-`InsufficientPermissionsError` when the predicate returns falsy or throws.
+`InsufficientPermissionsError` (403) when the predicate returns falsy. An error the predicate
+throws — a failed query, say — propagates as itself rather than becoming a 403. That includes
+a `PolicyDeniedError` from a policied model the predicate reads: it is not a request-breaker
+error, so it reaches `onRequestFail`, and then answers what any policy denial does — `403`
+`{ error: { message: "Forbidden" } }`, not the guard's `"Insufficient permissions"`. If a
+denial there is an expected refusal rather than something to report, catch it in the
+predicate and return `false`.
 
 ```typescript
 // in a controller
@@ -7364,7 +8396,7 @@ don't construct them yourself; they are thrown for you by the middleware / facad
 | --- | --- | --- |
 | `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
 | `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `401` `{ error }` (default `"Insufficient permissions"`) | (none) |
+| `InsufficientPermissionsError` | `403` `{ error }` (default `"Insufficient permissions"`) | `403` |
 
 - **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
   `Auth.user()` when there is no session. For view routes it redirects to the sign-in page
@@ -7386,10 +8418,16 @@ async function update() {
 }
 ```
 
-> **Note:** All three currently produce a `401` on API routes. Choose the type by intent —
-> `AuthenticationError` when identity is missing (and you want the view redirect),
-> `AuthorizationError` / `InsufficientPermissionsError` when the identity is known but the
-> action is refused.
+> **Note:** `InsufficientPermissionsError` answers `403`; `AuthenticationError` and
+> `AuthorizationError` answer `401`. A client that treats a
+> `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
+> role, so throw `InsufficientPermissionsError` when the identity is known and the action is
+> refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
+>
+> An app upgrading from 0.62, where it answered `401`, can keep that while its shipped clients
+> catch up: `InsufficientPermissionsError.apiStatus = 401`, set once at module scope in
+> `app/kernel/Kernel.ts`. It sets API routes and `.json` view navigations, which answer from
+> the same payload; a full page load answers `403` either way. See UPGRADE.md.
 
 ## Related
 
@@ -8013,8 +9051,8 @@ const mail = app(MailManager); // typed MailManager
 `Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
 - `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
-- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
-- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing.
+- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
+- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`.
 - `Auth.authenticate(email)` — creates a session for the given email.
 - `Auth.createMagicLink(email)` — issues a magic-link token.
 
@@ -8132,6 +9170,7 @@ See [Broadcasting](./broadcasting.md) for defining channels and the client `useS
 
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
 - `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+- `Url.forDomain(target, path, params?)` — a fully-qualified URL on another `route.domains` host (`{ subdomain: "acme" }` or `{ host }`). See [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
 ```typescript
 import { Url } from "gemi/facades";
@@ -8140,7 +9179,7 @@ Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
 ```
 
-> **Note:** `Url` resolves nothing from the container — `Url.absolute` reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md).
+> **Note:** `Url.absolute` resolves nothing from the container — it reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md). `Url.forDomain` reads `route.domains`.
 
 ## Log
 
@@ -9115,7 +10154,9 @@ You can also set default `attachments` on the class if every send should carry t
 
 ## Jobs & Queues
 
-Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
+Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's queue, and the request returns immediately.
+
+> **By default the queue lives in the server's memory, and a restart loses it.** Every job that is waiting, waiting out a retry, or halfway through `run` is gone when the process exits — a deploy, a scale-in, a crash — and no hook fires for any of them. [`driver: "database"`](#the-database-driver) keeps them in your database instead. See [Drivers](#drivers--where-queued-jobs-live).
 
 You define jobs as classes extending `Job` (from `gemi/services`) in files under `app/jobs/`, and fire them with `Job.dispatch(...)`. The directory is read at boot, so there is no list to keep alongside it.
 
@@ -9154,6 +10195,7 @@ export class ProcessVideoJob extends Job {
 export class ProcessVideoJob extends Job {
   static name = "ProcessVideoJob";
   maxAttempts = 3; // retries before dead-lettering (default 3)
+  backoff = [1_000, 10_000]; // ms before each retry; the last repeats (default 0)
 
   async run(params: Params) { /* ... */ }
 
@@ -9163,7 +10205,9 @@ export class ProcessVideoJob extends Job {
 }
 ```
 
-Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dropped.
+Retry behavior: when `run` throws, `onFail` fires and the job is re-queued, `backoff` milliseconds later, until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dead-lettered — dropped by the memory driver, kept with its error by the database driver. A throw from `onSuccess` counts as a failed attempt; a throw from `onFail` or `onDeadletter` is logged and changes nothing.
+
+An attempt whose process died before it finished still counts. With a driver that outlives the process, the job is claimed again once its lease runs out, and a job whose last attempt was lost that way reaches `onDeadletter` — with an error saying so — without running again.
 
 ### Configurable fields
 
@@ -9171,6 +10215,7 @@ Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until
 | --- | --- | --- | --- |
 | `static name` | `string` | `"unset"` | Unique job identifier. Required. |
 | `maxAttempts` | `number` | `3` | Total attempts before dead-lettering. |
+| `backoff` | `number \| number[]` | `0` | Milliseconds before a retry. An array gives one per retry, its last entry repeating. |
 | `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
 
 ## Dispatching
@@ -9181,10 +10226,38 @@ Call the static `dispatch` method with exactly the arguments your `run` method t
 import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
 // Inside a controller — returns immediately; the job runs in the background.
-ProcessVideoJob.dispatch({ videoId: video.id });
+const jobId = await ProcessVideoJob.dispatch({ videoId: video.id });
 ```
 
-`dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
+`dispatch` enqueues the job and resolves to its id once the driver has recorded it — it does not wait for the job to run, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). Payload that JSON cannot carry throws synchronously, before anything is queued. With the default memory driver the promise never rejects, so leaving it unawaited is fine; with a driver that can fail to record a job, await it, or the failure is an unhandled rejection. Inside a transaction, a job the database driver cannot record fails the transaction whether you await it or not — see [Dispatching inside a transaction](#dispatching-inside-a-transaction). See [Controllers](./controllers.md) for dispatching from request handlers.
+
+A job runs in the application it was registered with, and outside the request that dispatched it: `app()` resolves as usual, but the dispatching request's user, cookies and open transaction are not there. Pass what the job needs as arguments.
+
+### Dispatching inside a transaction
+
+A dispatch inside `Model.transaction` or `DB.transaction` belongs to that transaction. The job is recorded when the transaction commits, and never if it rolls back, so it cannot run before the rows it was dispatched about exist, or when they never will:
+
+```typescript
+await Model.transaction(async () => {
+  const order = await Order.create(input);
+  await SendReceiptJob.dispatch({ orderId: order.id }); // recorded with the order
+  await Billing.charge(order);                          // throws: no order, no job
+});
+```
+
+How depends on the driver:
+
+- **The database driver on Postgres or MySQL**, when the transaction is on the driver's own connection, writes the job's row on the transaction. The row commits with the order or not at all, and no replica can claim it before the commit.
+- **Every other case** — the memory driver, the database driver on SQLite, the database driver on a connection other than the transaction's, and a driver of your own that does not say it can join (`joinsTransaction`) — holds the dispatch and enqueues it right after the commit. If the process dies between the commit and the enqueue, the job is lost.
+
+Either way `dispatch()` resolves inside the transaction, to the id the job has or will have, so awaiting it there is fine. What differs is what a failure looks like:
+
+- **Written on the transaction**, a job the database cannot record fails the transaction and rolls back its rows — whether or not you awaited `dispatch()`, and whether or not you caught its rejection. A queued listener's dispatch is never awaited, and on Postgres the failed statement has already aborted the transaction, so the commit waits for the job's row and rolls back if it failed rather than committing nothing and reporting success. Awaited and not caught, the transaction rejects with the database's error; otherwise with `TransactionDependencyError` from `gemi/orm`, whose `cause` is that error. Inside a savepoint only the savepoint rolls back, and catching its rejection keeps the rest of the transaction.
+- **Held until the commit**, a job the driver cannot record fails after the transaction has committed. The rows stay, and the failure is only a line on stderr: `The queue driver could not record …, which was held until its transaction committed`.
+
+A held dispatch inside a savepoint that rolls back is dropped with it, and one inside a savepoint that commits waits for the outer transaction, as [`afterCommit` events](./events.md#savepoints) do. The transaction's own promise resolves only after its held dispatches are recorded.
+
+Only a transaction opened through gemi counts. One opened with Bun's `sql.begin` directly is invisible to the queue, and a dispatch inside it is recorded at once, on the pool.
 
 ## Registering jobs — `app/jobs/`
 
@@ -9234,6 +10307,10 @@ export default defineQueueConfig({
 | `jobs` | `(new () => Job)[]` | *discovered* | All dispatchable job classes. Omit to discover them from `jobsDir`. A job that reaches neither is dispatched into nothing. |
 | `jobsDir` | `string` | `"app/jobs"` | Where to discover them. Relative to the project root, or absolute. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
+| `driver` | `"memory" \| "database" \| QueueDriver \| (app) => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
+| `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
+| `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. Also the delay before retrying a claim that failed — for any driver, doubling per consecutive failure up to a minute. |
+| `unknownJobGrace` | `number` | `3600000` | Milliseconds a job under a name this replica has no class for is left for another replica before it is dead-lettered. Only for a driver other processes share; see [Deploys and unknown job names](#deploys-and-unknown-job-names). The memory driver dead-letters an unknown name at once. |
 
 The slice is wired into the kernel by name:
 
@@ -9281,11 +10358,159 @@ import { discoverJobs } from "gemi/services";
 const jobs = await discoverJobs(); // every Job subclass under app/jobs
 ```
 
+### Drivers — where queued jobs live
+
+The `QueueManager` runs jobs; a **driver** keeps them. The default, `"memory"` (`MemoryQueueDriver`), keeps them in a `Map` in the server process. That is right for development and tests and wrong for anything you cannot afford to lose: **every waiting, retrying and running job disappears when the process exits**, silently. It also never leaves the process, so a job runs on the instance that dispatched it or not at all.
+
+A driver is any object implementing `QueueDriver` from `gemi/services`. It is claim-based, so it can be shared by several processes:
+
+| Method | What it promises |
+| --- | --- |
+| `enqueue({ name, args, delayMs?, id? })` | Records a job, claimable after `delayMs`, and resolves to its id. When `id` is given, the job is recorded under it: the queue passes one for a dispatch it held until a transaction committed, because that dispatch has already resolved to it. |
+| `joinsTransaction?()` | Whether an `enqueue` made now would be written inside the caller's open ORM transaction. Answer `true` only if no claimer, this process's included, can see the job before the commit. Without it, the queue holds a dispatch made inside a transaction until the commit. |
+| `claim(limit, { visibilityTimeoutMs, registered? })` | Leases up to `limit` claimable jobs, oldest first — by the moment each became claimable, not the moment it was enqueued — with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. `registered` is `{ names, graceMs }`: a driver that can should skip a job under a name not in `names` until it has been claimable for `graceMs`. Ignoring it is allowed. |
+| `complete(job)` | Ends the claim; the job is never claimed again. |
+| `fail(job, { error, retryInMs })` | Ends the claim. A number makes the job claimable after that long; `null` dead-letters it for good. |
+| `release(job, { retryInMs })` | Ends the claim without counting it: the job is claimable again after `retryInMs`, with `attempt` back where it was before the claim. |
+| `heartbeat?(jobs, { visibilityTimeoutMs })` | Extends the leases of jobs still running. |
+| `subscribe?(wake)` | Calls `wake` when work may be claimable. Without it the queue polls every `pollInterval`. |
+| `retryDead?(id)` | Makes a dead-lettered job claimable again as attempt 1 and resolves `true`, or resolves `false` if `id` is not dead. Without it, `QueueManager.retryDead` is refused. |
+
+`complete`, `fail`, `release` and `heartbeat` receive the claimed job rather than its id, so a driver can ignore a report from a claim whose lease already ran out and was handed to someone else. Durations cross the interface as relative milliseconds, so a driver shared between machines can measure them on one clock.
+
+Hand the driver to the slice as a function, so each application gets its own and nothing is opened by a process that only imports the config. The function is called with the application:
+
+```typescript
+// app/config/queue.ts
+import { defineQueueConfig } from "gemi/services";
+import { MyQueueDriver } from "@/app/queue/MyQueueDriver";
+
+export default defineQueueConfig({
+  driver: (app) => new MyQueueDriver(),
+});
+```
+
+### The database driver
+
+`driver: "database"` keeps jobs in a `gemi_jobs` table of your database, so they outlive the process. A job dispatched before a deploy, a scale-in or a crash is still there afterwards, and whichever replica is up claims it. It is written for SQLite, Postgres, and MySQL 8 or MariaDB 10.6+, in raw SQL rather than through the ORM, which does not support MySQL.
+
+> **Tested on SQLite, Postgres 16 and MySQL 8.4.** CI runs the driver's whole suite — the contract, two workers over one database, lease recovery, dead letters — against each of the three on every push. MariaDB shares MySQL's path but is not run in CI, so try that one on a staging database first.
+
+```typescript
+// app/config/queue.ts
+import { defineQueueConfig } from "gemi/services";
+
+export default defineQueueConfig({
+  driver: "database", // the default connection's gemi_jobs table
+  concurrency: 20,
+});
+```
+
+The table is yours to create, like every other table. With Prisma, add this model to `schema.prisma` and run `prisma migrate dev`. Prisma then owns the table and will not drop it as unknown:
+
+```prisma
+model GemiJob {
+  id             String  @id
+  name           String
+  payload        String
+  status         String
+  attempts       Int     @default(0)
+  availableAt    BigInt  @map("available_at")
+  claimedAt      BigInt? @map("claimed_at")
+  leaseExpiresAt BigInt? @map("lease_expires_at")
+  lastError      String? @map("last_error")
+  createdAt      BigInt  @map("created_at")
+  updatedAt      BigInt  @map("updated_at")
+
+  @@index([status, availableAt])
+  @@index([status, leaseExpiresAt])
+  @@map("gemi_jobs")
+}
+```
+
+On MySQL, add `@db.LongText` to `payload` and `lastError`. Prisma's default there is `VARCHAR(191)`, which is too short for a job's arguments or a stack trace. Without Prisma, `await driver.createTable()` creates the same table and indexes if they do not exist.
+
+For another connection or table name, build the driver yourself:
+
+```typescript
+import { DatabaseManager } from "gemi/database";
+import { DatabaseQueueDriver, defineQueueConfig } from "gemi/services";
+
+export default defineQueueConfig({
+  driver: (app) =>
+    new DatabaseQueueDriver(app.make(DatabaseManager).connection("jobs"), { table: "jobs" }),
+});
+```
+
+**What it guarantees: at least once, not exactly once. Jobs must be idempotent.** A job runs again if its process dies after the work is done but before the row is removed. It can also run twice at the same time: if a process freezes, or cannot reach the database to renew its lease, for longer than `visibilityTimeout`, the lease runs out while the job is still running and another replica claims it.
+
+How it works:
+
+- **Claiming.** Each job is a row. Postgres and MySQL claim rows with `SELECT … FOR UPDATE SKIP LOCKED`, so replicas claiming at the same moment take different rows. On MySQL the claim runs at READ COMMITTED on a connection of its own, because MySQL's default REPEATABLE READ locks the gaps a range scan passes over as well as the rows it returns, and claimers then block or deadlock on each other instead of skipping past. The connection's isolation level is put back before it returns to the pool. SQLite runs one write at a time, so a single `UPDATE … RETURNING` claims atomically.
+- **SQLite and a second process.** Bun opens SQLite with a busy timeout of 0, so a write that finds another process holding the file's lock fails at once with `SQLITE_BUSY`. The driver raises that to one second the first time it touches a SQLite connection, so `gemi dev` and a script or seed dispatching into the same file wait for each other instead. The setting belongs to the connection, so with `driver: "database"` it applies to the app's default connection too. A connection you already gave a busy timeout keeps it, and `new DatabaseQueueDriver(connection, { busyTimeout })` picks another value (`0` leaves the connection alone). Bun waits for the lock on the JavaScript thread, so the process serves nothing else while it waits. That is why the default is short. For more than one server, use Postgres or MySQL.
+- **Leases.** A claim leases the job for `visibilityTimeout` (default five minutes). The queue renews the lease every third of that while the job runs. A job whose process died without finishing becomes claimable again when its lease runs out, and that is the whole of crash recovery. A lower `visibilityTimeout` retries such a job sooner, at the cost of more lease renewals.
+- **Retries.** The attempt count and the last error are stored in the row, so `maxAttempts` and `backoff` hold across restarts. An attempt whose process died counts too.
+- **Dead letters.** A job that used up its attempts stays in the table with `status = 'dead'` and its `last_error`. `app(QueueManager).retryDead(id)` runs it again from attempt 1, with all its `maxAttempts`, and resolves `false` if `id` is not a dead job — one that is waiting, running or gone is left alone. There is no `gemi` command for it yet; a [console command](./commands.md) of your own is a few lines around that call. From a console command the job waits for a server or a worker to claim it, up to `pollInterval`. `driver.prune(olderThanMs)` deletes dead rows older than that, for example from a cron job. Nothing else removes them.
+- **Completed jobs** are deleted.
+- **Time.** All times are milliseconds since the epoch, read from the database's clock, so replicas with skewed clocks agree on when a lease ran out. In Postgres, `to_timestamp(available_at / 1000.0)` gives a readable date.
+- **Recovery on boot.** A production server with a durable driver starts claiming as soon as it boots, not at its first dispatch. That way a replica that serves no dispatches of its own still picks up what an earlier one left behind. Under `gemi dev`, the queue starts at the first dispatch, as before. A [worker](#worker-processes--gemi-queuework) claims from its boot in both.
+- **`gemi dev` and a shared table.** `gemi dev` runs `bun --hot`, which boots a new application in the same process on every save. If the queue was claiming from the table before the save, the new application stops the old loop and starts its own, so jobs claimed after the save run the new code. A job that was already running finishes on the code it started with. If nothing had been dispatched yet, nothing starts. A memory queue is not handed over: only the application that owns it can dispatch into it, so it keeps running until it has finished what it holds.
+- **Dispatching from outside a server.** A console command, a seed or a script that dispatches records the job and leaves it in the table for a server or a worker to claim. It does not start claiming itself, because it would take other replicas' jobs too and exit in the middle of running them.
+- **Unknown job names.** A replica only claims jobs whose names it has a class for, until they have waited out `unknownJobGrace`. See [Deploys and unknown job names](#deploys-and-unknown-job-names).
+- **Polling.** Another process's dispatch cannot wake this one, so the queue asks the database for work every `pollInterval` (default one second). A dispatch from this process wakes its own queue immediately.
+- **Transactions.** On Postgres and MySQL, a dispatch inside a transaction on the driver's own connection writes its row on that transaction. On SQLite the queue holds it until the commit instead: Bun gives a SQLite client one connection, so the queue's own claim would run inside the open transaction and see the job before the commit. A driver built from a bare `{ sql, dialect }`, with no connection name, cannot tell which transaction is its own, and never joins one. See [Dispatching inside a transaction](#dispatching-inside-a-transaction).
+
+### Deploys and unknown job names
+
+During a blue/green or weighted rollout, both releases serve at once and claim from one `gemi_jobs` table. A job class that only the new release has — or one the new release deleted or renamed — then has a name that half the replicas do not know.
+
+A replica never runs a job it has no class for, and with a driver other processes share it no longer dead-letters one at first sight either:
+
+- **The database driver does not claim it.** Its claim is `WHERE name IN (…)` the replica's registered jobs, so the job waits for a replica that has the class, and the replica that does not never sees it.
+- **A driver that cannot filter by name** hands it out anyway. The queue gives it back without spending an attempt — `release`, not `fail` — and logs one line per name: `Left a queued "…" for another replica`. It is claimable again after one to two `pollInterval`s, so other replicas get their turn at it.
+- **After `unknownJobGrace`** (one hour by default) the name is taken to be gone rather than deployed elsewhere, and the job is dead-lettered with `No job is registered under the name "…"` as its `last_error`. The database driver measures the hour from when the job became claimable. A driver that cannot filter measures it from the dispatch, so a job delayed by longer than the window is dead-lettered by the first replica that does not know it.
+
+Set `unknownJobGrace` longer than your slowest rollout, and longer than you would take to roll one back. A rollback within the window finds the other release's jobs still waiting. `Infinity` never dead-letters an unknown name, and leaves such jobs in the table until you remove them.
+
+The memory driver is unchanged: nothing else can run its jobs, so an unknown name is dead-lettered at once, with a line on stderr.
+
+The same rules apply to a single replica. A job class that discovery missed (a file outside `jobsDir`, say) used to be dead-lettered at once with a `No job is registered` line on stderr. With the database driver it now shows up as rows left `pending` under that name, with no output, until `unknownJobGrace` has passed. If dispatches seem to vanish, look for those rows.
+
+### Stopping the queue
+
+`app(QueueManager).drain(timeoutMs)` stops claiming, waits up to `timeoutMs` for the jobs already running, and resolves to `{ unfinished }` — the ones still running at the deadline. Nothing is cancelled. `stop()` is `drain(0)`. After either, a dispatch is recorded by the driver but not run until `start()` is called; with the memory driver, whatever is still waiting when the process exits is lost.
+
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), a queue with the database driver, or any other that outlives the process, stops claiming as soon as the signal arrives and leaves the waiting jobs to other replicas. The memory queue keeps claiming while in-flight requests drain, because no other process can run its jobs, so a job a draining request dispatches still runs. Either way, jobs already running continue, and the queue provider's `shutdown()` then stops claiming and waits for them, within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). If a job is still running at the deadline, it is abandoned when the process exits, and the shutdown exits with code 1. With the memory driver that job is lost. With the database driver its row stays claimed until the lease runs out, and then another replica retries it. That retry counts as a new attempt, and it starts only after `visibilityTimeout`. If your jobs regularly run longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period.
+
+### Worker processes — `gemi queue:work`
+
+By default every server process runs jobs as well as requests, so job capacity grows only with web replicas, and jobs share an event loop and memory with the requests. `gemi queue:work` boots the application and claims from the queue without serving HTTP, so the two can be scaled on their own signals: web replicas on request traffic, workers on queue depth.
+
+```bash
+gemi queue:work                        # beside gemi dev, from source
+NODE_ENV=production gemi queue:work    # in a deployment
+```
+
+A deployment that splits web and worker runs the same build with the same config, and differs in two settings:
+
+| Process | Command | Environment |
+| --- | --- | --- |
+| Web | `gemi start` | `GEMI_QUEUE_CLAIM=off` |
+| Worker | `gemi queue:work` | `NODE_ENV=production` |
+
+- **`GEMI_QUEUE_CLAIM=off` on the web process** stops it claiming: a dispatch from a request is recorded and left for a worker, and nothing is claimed at boot. The value is `off`, in any case. Unset or `on` claims as before, and any other value claims and warns at boot, because `false` or `0` reads as off and is not. A worker ignores the variable, so it is safe to set once for every container. Without it, web processes keep running jobs too, alongside the workers, which is also a valid setup.
+- **The driver has to be one every process can reach**, such as `"database"`. With the memory driver a worker is pointless: a dispatch never leaves the process that made it, so a worker never sees a job. `gemi queue:work` refuses to start on the memory driver and exits `1`. A server ignores `GEMI_QUEUE_CLAIM=off` on the memory driver, with a warning at boot, because nothing else could run its jobs.
+- **Each worker claims up to `concurrency` jobs at once**, so total job capacity is workers × `concurrency`. Pick `visibilityTimeout` and `concurrency` for the worker; the web process no longer uses them when it does not claim.
+- **The cron scheduler does not start in a worker**, so adding workers does not add a copy of every cron job. `gemi queue:work` sets `GEMI_NO_SCHEDULE=1` unless the environment already sets it; set `GEMI_NO_SCHEDULE=0` to run the schedule in a worker instead.
+- **`NODE_ENV` is inherited**, as for `gemi run`, not forced to production as for `gemi start`. Set `NODE_ENV=production` in the worker's deployment. A `worker = true` job loads `dist/server/bootstrap.mjs` in production, so the worker needs the same `gemi build` output as the server.
+
+`SIGTERM` or `SIGINT` drains a worker the way it drains a server (see [Graceful shutdown](./configuration.md#graceful-shutdown)). The worker stops claiming at once and leaves waiting jobs to other workers. It waits up to `GEMI_SHUTDOWN_TIMEOUT` (20 seconds) for the jobs it is running, where a server waits for its requests, and then runs every provider's `shutdown()` within `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` (5 seconds). In that step the queue waits for any job still running and names it. The exit code is `0` if no job was left running and every provider finished in time, and `1` otherwise. `GEMI_SHUTDOWN_DELAY` is not used, because no load balancer routes to a worker. A job cut off by the exit is retried once its lease runs out, as it is for a server.
+
 See [Project Structure](./project-structure.md) for the full kernel layout.
 
 > **Coming from Laravel:** the vocabulary is the same — a `ServiceProvider` registers bindings into the `Container`, config lives in `app/config`, and facades are static proxies to container-resolved services. Two things are deliberately different: job retry/failure behavior lives on the job class (`maxAttempts`, `onFail`, `onDeadletter`) rather than in a queue driver's config, and per-subsystem hooks across the framework (`filterRecipients`, `onLogCreated`, `detectLocale`, ...) are **config callbacks** in `app/config/*.ts` rather than macros you register from a provider's `boot()`. Use `boot()` only for wiring you cannot express as data — see `app/providers/AppServiceProvider.ts`.
 
-> **Note:** The queue is **in-process and in-memory** — jobs live in the running server's memory and are processed by that same process (or, for `worker` jobs, a Worker thread it spawns). Enqueued jobs do not survive a restart, and there is no cross-machine/distributed queue. Use jobs for best-effort background work (translations, image processing, notifications), not for work that must be durably guaranteed across restarts.
+> **Note:** With the default memory driver the queue is **in-memory**: enqueued jobs do not survive a restart, and a job runs in the server process that dispatched it (or, for `worker` jobs, a Worker thread it spawns). Use it for best-effort background work (translations, image processing, notifications). For work that must survive restarts, or to run jobs in [worker processes](#worker-processes--gemi-queuework) of their own, use the [database driver](#the-database-driver), and make the jobs idempotent.
 
 ## When to use a job
 
@@ -9604,6 +10829,20 @@ const jobs = await discoverCronJobs(); // every CronJob subclass under app/cron
 ```
 
 > **Note:** Cron jobs run **in-process** in the server. Every running server instance registers and fires its own schedule, so if you run multiple replicas, a job scheduled `@daily` fires once per replica per day. For work that must run exactly once across a fleet, add your own coordination (e.g. an advisory lock) inside `callback`.
+
+### Stopping the schedule
+
+`app(Scheduler).stop()` stops every schedule, so no new tick starts; a tick already running is left to finish. `drain(timeoutMs)` stops the same way, then waits up to `timeoutMs` for the running ticks and resolves to `{ unfinished }` — each tick still running at the deadline, as `{ name, startedAt }`. Nothing is cancelled. `start()` schedules again. `running` is how many ticks are in progress.
+
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), the schedule keeps running while in-flight requests drain. The scheduler provider's `shutdown()` then stops it — so a tick that falls due from then on does not start — and waits for the running ticks within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). A tick still running at the deadline is abandoned when the process exits, and named in the log:
+
+```
+[gemi] Cron jobs still running at shutdown: NightlyReport (started 2026-09-24T02:00:00.000Z)
+```
+
+The cron drain and the [queue drain](./jobs-and-queues.md#stopping-the-queue) share that one deadline, and the cron drain goes first — deliberately, since a tick may dispatch jobs the queue should then wait for. A tick that runs long therefore spends the queue's time: with the default 5 seconds and a tick that needs 30, the queue is left about 100 milliseconds (or is skipped outright) for its own running jobs, and with the memory driver whatever is still pending is lost. Size `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` for the longest tick *plus* the longest job, or move long cron work onto the queue as below.
+
+An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
 
 ## Cron jobs vs. queued jobs
 
@@ -10025,6 +11264,7 @@ There is no `static events = [A, B]`, deliberately. A listener bound to two even
 | `handle` | method | — | The side effect. May be `async`. Required. |
 | `queued` | `boolean` | `false` | Run on the queue instead of inline. A [context boundary](#queued-listeners), not a performance dial. |
 | `maxAttempts` | `number` | `3` | Attempts before dead-lettering, counting the first. Ignored unless `queued`. |
+| `backoff` | `number \| number[]` | `0` | Milliseconds before a retry, as on a job: an array gives one per retry, its last entry repeating. Ignored unless `queued`. |
 | `worker` | `boolean` | `false` | Run `handle` in a Worker thread with its own cloned app. Ignored unless `queued`. |
 
 ## Dispatching
@@ -10059,7 +11299,7 @@ That is not politeness, it is the point. Listeners are independent side effects,
 
 A listener that must not fail silently should handle its own errors — retry, log to your own sink, or dispatch a [job](./jobs-and-queues.md) that can be retried and dead-lettered.
 
-All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts` and then dead-lettered.
+All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts`, `backoff` apart, and then dead-lettered.
 
 ## When nothing is listening
 
@@ -10073,7 +11313,7 @@ That single line is the whole early-warning system here, because four different 
 
 ## Queued listeners
 
-`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, dead-lettering and worker threads coming from there rather than from anything events add:
+`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, `backoff`, dead-lettering and worker threads coming from there rather than from anything events add:
 
 ```typescript
 // app/listeners/SendWelcomeEmail.ts
@@ -10173,6 +11413,8 @@ export class UserRegistered extends Event {
 | `false` (default) | either | The listeners run now. |
 | `true` | no | The listeners run now — there is nothing to wait for. |
 | `true` | yes | The listeners run when that transaction commits, and not at all if it rolls back. |
+
+A **queued** listener on an event without `afterCommit` is pushed at the dispatch, and the queue then treats it as it treats [any dispatch inside a transaction](./jobs-and-queues.md#dispatching-inside-a-transaction): its job is recorded with the commit and dropped by a rollback. So a queued listener never runs before the commit either way. `afterCommit` is what holds back the **sync** ones.
 
 It is a property of the **event**, not of the listener: whether a side effect is allowed to happen before the write is durable is a fact about what happened, and every listener bound to it agrees. Both kinds are deferred together — a sync listener runs after the commit, and a queued one is *pushed* after the commit. Pushing early would be running early, because the queue drains in-process and often starts from the push itself.
 
@@ -10723,7 +11965,11 @@ export default class extends Kernel {
 Configuration fields:
 
 - **`defaultLocale`** — fallback locale (default `"en-US"`).
-- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). A requested locale outside this list falls back to `defaultLocale`. Leaving it empty switches locale detection off entirely.
+- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). Leaving it empty switches locale detection off entirely.
+
+  A URL whose locale prefix is not on this list, but which maps onto one that is, is **redirected** to that locale's URL: `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about`. An exact match wins, ignoring case; otherwise a locale of the same language is used, preferring `defaultLocale`. A prefix that maps onto nothing falls back to `defaultLocale` and is rendered where it is, without a redirect.
+
+  A first path segment that is a real route is never treated as a locale, even when it is shaped like one — `/de-luxe` and `/en-suite` are pages, not `de` and `en`. The redirect is `302` and uncacheable, since the locale is negotiated per visitor.
 - **`detectLocale(req)`** — resolve the locale for a request. Return a locale string or `null` to fall back to gemi's own detection. A typical implementation reads the `i18n-locale` cookie, then the `x-locale`/`accept-language` headers.
 - **`onLocaleChange(locale)`** — hook called when the active locale changes.
 - **`prefetch`**, **`components`** — deprecated; see [Legacy dictionaries](#legacy-dictionaries).

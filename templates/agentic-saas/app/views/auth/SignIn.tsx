@@ -1,10 +1,12 @@
-import { Form, Link, useNavigate, ValidationErrors } from "gemi/client";
+import { Form, Link, useIntendedUrl, useNavigate, ValidationErrors } from "gemi/client";
 import { LifeBuoyIcon } from "lucide-react";
 import { Button } from "@/app/views/components/ui/button";
 import { Input } from "@/app/views/components/ui/input";
 
 export default function SignIn() {
   const { push } = useNavigate();
+  // The page the `auth` middleware turned the visitor away from, if any.
+  const intended = useIntendedUrl("/chat");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-6 py-12 text-foreground">
@@ -21,7 +23,7 @@ export default function SignIn() {
         <Form
           method="POST"
           action="/auth/sign-in-v2"
-          onSuccess={() => push("/chat")}
+          onSuccess={() => push(intended)}
           className="flex flex-col gap-5 rounded-xl border border-border bg-card p-6 text-card-foreground shadow-xs"
         >
           <div className="flex flex-col gap-2">

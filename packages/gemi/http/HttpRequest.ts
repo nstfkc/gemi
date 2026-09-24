@@ -1,6 +1,10 @@
+import { parseCookieHeader } from "./getCookies";
+import { isModelOriginated } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
+import { requestDomain } from "./requestDomain";
 import { ValidationError } from "./Router";
+import type { ResolvedDomain } from "../services/router/DomainResolver";
 
 class Input<T> {
   constructor(private data: T) {}
@@ -175,6 +179,14 @@ export class HttpRequest<
   schema: any = {};
   routePath: string;
   params: Params;
+  /**
+   * The `route.domains` group this request was routed by — `domain.params`
+   * holds a `:param` subdomain's value, or what `custom.resolve` returned for
+   * a custom domain. `null` when the app declares no `route.domains`.
+   *
+   * Kept apart from `params`, which are the path's alone.
+   */
+  domain: ResolvedDomain | null;
 
   constructor(
     req?: Request,
@@ -188,24 +200,18 @@ export class HttpRequest<
       this.rawRequest = _req.rawRequest;
       this.kind = _req.kind;
       this.routePath = _req.routePath;
+      this.domain = _req.domain ?? null;
     } else {
       this.params = params;
       this.rawRequest = req;
       this.routePath = routePath;
       this.kind = kind ?? "api";
+      this.domain = requestDomain(req);
     }
 
     this.headers = this.rawRequest.headers;
 
-    const cookie = this.rawRequest.headers.get("Cookie");
-    const cookies = new Map();
-    if (cookie) {
-      const cookieArray = cookie.split(";");
-      for (const c of cookieArray) {
-        const [key, value] = c.split("=");
-        cookies.set(key.trim(), value.trim());
-      }
-    }
+    const cookies = parseCookieHeader(this.rawRequest.headers.get("Cookie"));
     const url = new URL(this.rawRequest.url);
     const map = new Map<string, string | string[]>();
     for (const [key, value] of url.searchParams) {
@@ -232,6 +238,17 @@ export class HttpRequest<
 
   ctx() {
     return RequestContext.getStore();
+  }
+
+  /**
+   * Whether the framework dispatched this request in-process for a model — a
+   * tool call — rather than a client sending it. Readable in `onRequestStart`,
+   * in middleware and in the handler alike.
+   *
+   * No header or cookie can make this true; see `http/modelOriginated.ts`.
+   */
+  isModelOriginated(): boolean {
+    return isModelOriginated(this.rawRequest);
   }
 
   /**

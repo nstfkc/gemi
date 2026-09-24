@@ -423,7 +423,7 @@ export class EventManager {
   /**
    * Hands one queued listener to the queue, as `[eventName, args]`.
    *
-   * Nothing is awaited: `push` returns as soon as the entry is on the queue,
+   * Nothing is awaited: `push` is not waited on even to record the entry,
    * which is the whole of what `queued = true` buys. The event instance the
    * sync listeners share does not go with it — only the name and the arguments
    * do, so nothing that was resolved from the request's context can be smuggled
@@ -452,15 +452,26 @@ export class EventManager {
       return;
     }
 
-    try {
-      app(QueueManager).push(job, JSON.stringify([eventName, args]));
-    } catch (error) {
+    const failed = (error: unknown) =>
       console.error(
         `The listener ${listener.name} could not be queued for ${eventName}, ` +
           `so it did not run and will not be retried. The listeners after it ` +
           `still ran.`,
         error,
       );
+
+    // Both halves: the two failures above throw here, and a driver that
+    // cannot record the job rejects later — unawaited, so without the `catch`
+    // that rejection would be an unhandled one.
+    try {
+      // `reportFailure: false`: the queue's own line would say only which job
+      // could not be recorded, and `failed` names the event, the listener and
+      // what it means for the listeners after it.
+      app(QueueManager)
+        .push(job, JSON.stringify([eventName, args]), { reportFailure: false })
+        .catch(failed);
+    } catch (error) {
+      failed(error);
     }
   }
 

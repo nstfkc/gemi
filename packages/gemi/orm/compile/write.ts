@@ -974,7 +974,7 @@ function describe(value: unknown): string {
 /**
  * Reads one key field out of a `where`, in either of the two forms Prisma
  * accepts: named directly, or inside the compound object a composite
- * `@@unique` is addressed through (`{ username_provider: { username, ... } }`).
+ * `@@unique` is addressed through (`{ provider_providerId: { provider, ... } }`).
  */
 function whereValue(key: string[], field: string): (args: any) => unknown {
   const compound = key.length > 1 ? key.join("_") : undefined;

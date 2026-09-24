@@ -4,7 +4,8 @@ import { RequestContext } from "../../http/requestContext";
 import { kernelContext } from "../../kernel/context";
 import { applyParams } from "../../utils/applyParams";
 import { app } from "../../foundation/app";
-import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
+import { requestDomain, setRequestDomain } from "../../http/requestDomain";
+import { DomainRouter } from "./DomainRouter";
 import type { ServerQueryFetcher } from "./ServerQueryStore";
 
 /**
@@ -31,11 +32,17 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
     const newReq = new Request(`${origin}/${pathnameWithSearch}`, {
       headers: req.headers,
     });
+    const domain = requestDomain(req);
+    if (domain) {
+      setRequestDomain(newReq, domain);
+    }
     const httpRequest = new HttpRequest(newReq, params);
     return kernelContext.run(kernelStore, () =>
       RequestContext.run(httpRequest, async () => {
         try {
-          const data = await app(ApiRouteDispatcher).getRouteData(patternPath);
+          // The api of the page's own host group — on `admin.` that is the
+          // admin api, which may not share a single route with the root's.
+          const data = await app(DomainRouter).dispatchers(domain).api.getRouteData(patternPath);
           // A handler that broke (`RequestBreakerError`) comes back as an
           // error `Response`, not a throw. Surface it as the same
           // `QueryError` the browser's fetch would produce — otherwise the

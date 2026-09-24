@@ -1,3 +1,359 @@
+# Upgrading from 0.62 to 0.63
+
+No code has to change, but several responses do: a refusal now answers `403`,
+and an unhandled error in production answers a generic `500`. Nothing
+here fails to compile, and a server-side test suite only notices where it
+asserts on a status. **Check what your clients do with these responses before
+you deploy** — especially a shipped native client, which cannot be updated in
+the same deploy as the server.
+
+## `InsufficientPermissionsError` answers `403`, not `401` — breaking
+
+`Auth.guard()` throws it, and so does any middleware of yours that throws it
+directly.
+
+| | 0.62 | 0.63 |
+|---|---|---|
+| API route | `401` `{ error: "Insufficient permissions" }` | `403`, same body |
+| View data (a `.json` navigation, from a loader or view middleware) | `401` `{ data: { error: "Insufficient permissions" } }` | `403`, same body |
+| Full page load (same place) | `400` (the view dispatcher's default) | `403` |
+| `error.name` / `error.message` | `"AuthenticationError"` / `"Authentication error"` | `"InsufficientPermissionsError"` / the refusal, `"Insufficient permissions"` by default |
+
+A `.json` navigation is how gemi's own client router fetches a view's data,
+and it answers from the same payload an API route does. So it changed the way
+the API did, not the way the page did.
+
+`401` tells a client to re-authenticate, so a client that sends every `401` to
+sign-in looped a signed-in user without the role straight back to where they
+started. A request with no user still answers `401`: that is
+`AuthenticationError`, thrown by `Auth.user()` before the guard's predicate
+runs.
+
+`AuthorizationError` still answers `401`, but its name and message changed the
+same way: it was also `"AuthenticationError"` / `"Authentication error"`, and
+it is now `"AuthorizationError"` with the refusal as its message (`"Not
+authorized"` by default).
+
+**Who breaks:** a client that branches on `401` for this refusal: one that
+refreshes or retries on `401` only, or one that shows "you don't have access"
+for a `401`. That includes a native client that fetches `.json` view data. A
+test asserting `payload.api.status === 401` for it also breaks. Server code,
+an `onRequestFail` or `onException` hook, or a log filter that matched
+`name === "AuthenticationError"` to catch every auth refusal now misses both
+`InsufficientPermissionsError` and `AuthorizationError`. Match on
+`instanceof` for each class instead.
+
+**Keeping `401` while your clients catch up.** Set the old status once, at
+module scope in `app/kernel/Kernel.ts`, and delete the line when every client
+you still support handles `403`:
+
+```ts
+import { InsufficientPermissionsError } from "gemi/http";
+
+InsufficientPermissionsError.apiStatus = 401;
+```
+
+That restores `401` everywhere it used to be: API routes and `.json` view
+navigations. A full page load answers `403` either way, since no client could
+have depended on the `400` it replaced.
+
+## An error thrown by an `Auth.guard()` predicate is no longer a refusal
+
+In 0.62, `guard` caught anything the predicate threw and answered it as
+`InsufficientPermissionsError`, so a database outage reached the client as
+"you may not do this" and never reached `onRequestFail`. It now propagates as
+itself: a `500`, reported like any other failure.
+
+A policy denial raised inside the predicate — a model read the policy refuses —
+propagates the same way, and so reaches `onRequestFail` now. It is then
+answered like any other policy denial (next section): it goes from `401`
+`"Insufficient permissions"` to `403` `{ error: { message: "Forbidden" } }`,
+and `apiStatus` does not bring the `401` back. If that denial is an expected
+refusal rather than something to report, return `false` from the predicate
+instead of letting the read throw. `Auth.guardSafe()` is unchanged: it still
+treats a throw as `false`.
+
+## A policy denial answers `403`, not `500`
+
+A `PolicyDeniedError` from a handler or middleware used to answer `500`, and
+the body carried the policy's message. On API routes it now answers `403`
+`{ error: { message: "Forbidden" } }`. From a view loader or view middleware,
+including a loader's `Query.instant` refused with `403`, it answers `403` too:
+the API body on a `.json` navigation, and a `403` page otherwise.
+`onRequestFail` still receives the original error, message included.
+
+A client or monitor that treated these `500`s as server faults and retried
+them now sees a refusal instead. A client that displayed the policy's message
+from the body no longer gets it.
+
+## In production, an unhandled error answers a generic `500`
+
+The body used to carry the error's text: `/api` answered the raw
+`err.message`, and a failed page render answered its stack trace as
+`text/plain`. `/api` now answers `{ error: "Internal Server Error" }`, and a
+page answers a generic HTML `500`. The error still goes to `console.error`,
+and `onException` now runs for `/api` failures as well, which it used to
+skip. A client that showed a server error's message to the user shows the
+generic one now. Development is unchanged.
+
+## A missing `.js` file reloads the page only under `/assets/`
+
+When a chunk a page asks for is missing from `dist/client`, `gemi start`
+answers with a module that reloads the page. It used to do that for any
+missing path containing `.js`, including `app.js.map` and anything outside
+`/assets/`. Now it does it only for a `.js` or `.mjs` file under `/assets/`,
+and sends `Cache-Control: no-store` so no browser or CDN caches the stub. A
+missing source map under `/assets/` answers `404`, and a missing `.js` path
+elsewhere goes to your routes like any other request. Nothing to change unless
+something relied on the reload for a script outside `/assets/`.
+
+A new, optional [asset base](docs/configuration.md#asset-base)
+(`GEMI_ASSET_BASE` or `assetBase` in `gemi.config.ts`) serves the client
+build from a CDN. Unset, every asset URL is what it was — unless
+`gemi.config.ts` already sets an absolute `vite.base`: the document's client
+entry, `modulepreload` hints, loaders and navigation stylesheets now use that
+base too, where they used to be root-relative. Check that whatever sits in
+front of the app answers `<vite.base>assets/*`.
+
+## Everything under `/assets/` is served from `dist/client`
+
+`gemi start` used to decide what was a file by an allowlist of extensions, so
+a `.woff2`, `.gif` or `.json` Vite emitted into `assets/` went to your routes
+instead and came back as a rendered 404 page. Now every path under `/assets/`
+is served from `dist/client` whatever its extension, and a miss there answers a
+plain `404` without reaching your routes. Root-level public files are still
+recognised by extension; the list gained `gif`, `xml`, `webmanifest`, `woff`,
+`woff2`, `otf`, `webm`, `mp4`, `mp3` and `pdf`, and a path with one of those
+extensions that has no file behind it still goes to your routes. Nothing to
+change unless a route of yours answers a path with one of those extensions
+*and* `public/` has a file at the same path: the file now wins.
+
+## `SIGTERM` drains the server, and `gemi start` exits with its code
+
+`gemi start` used to ignore signals and exit `0` whatever its server did. Now
+it relays `SIGTERM` and `SIGINT` to the server, and the server stops accepting
+connections, lets in-flight requests finish, runs each provider's new
+`shutdown()` hook, and exits — within 25 seconds by default. `gemi start`
+exits with the server's code, so a crashed server is no longer reported as a
+clean exit. See
+[Graceful shutdown](docs/configuration.md#graceful-shutdown).
+
+What to check:
+
+- **A platform that allows less than 25 seconds** between `SIGTERM` and
+  `SIGKILL` (Cloud Run, Fly) cuts the drain off. Lower
+  `GEMI_SHUTDOWN_TIMEOUT` and `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit. Either
+  may be `0`, which skips that phase rather than reporting it as a failure.
+- **A wrapper that works around the dropped exit code**, or that relays
+  signals to the server's process itself, can stop doing so. Signalling the
+  process group still works: the copies of one signal that reach the server
+  within a second — directly and through `gemi start` — count as one shutdown.
+  Only a signal more than a second after the first skips the drain.
+- **An app that installed its own `SIGTERM` listener** now runs beside gemi's,
+  which exits the process when the drain is done. Pass
+  `handleSignals: false` to `new Server()` to keep only yours.
+- **`gemi dev` and `gemi run` relay the same two signals** to what they
+  spawn, and wait for it. A `SIGTERM` to either used to end the CLI alone,
+  leaving the dev server on its port or the command running unwatched. A
+  command ended by a signal now makes `gemi run` exit `128 + n` (`143` for
+  `SIGTERM`) where it exited `1`; a script that tests for exactly `1` should
+  test for non-zero.
+- **A request that arrives after the drain is answered `503`.** Bun leaves a
+  kept-alive connection open after the listener closes, so a client that
+  ignores `Connection: close` could still reach your routes while the
+  providers shut down. Such a request now gets `503` with `Connection: close`
+  and never reaches the app or its instrumentation.
+
+## The queue runs over a driver, and `Job.dispatch()` returns a promise
+
+Jobs are still kept in memory by default and **still lost when the process
+exits**. What changed is that the memory queue is now one `QueueDriver`
+among any an app supplies (`defineQueueConfig({ driver })`), and the manager
+around it changed shape to suit.
+
+**`Job.dispatch()` returns `Promise<string>`, the job's id, instead of
+`void`.** A call that ignores the result still compiles, and with the memory
+driver the promise never rejects. A lint rule such as
+`@typescript-eslint/no-floating-promises` will now flag an unawaited
+dispatch; await it, or mark it `void`. Arguments JSON cannot carry still throw
+synchronously, as before.
+
+**`QueueManager`'s internals are gone:** `queue`, `isRunning`,
+`activeRunningJobsCount`, `next()`, and `push()`'s third argument. `push()`
+returns a promise too. A test that read `app(QueueManager).queue.size` reads
+the driver instead:
+
+```ts
+import { MemoryQueueDriver } from "gemi/services";
+
+const driver = app(QueueManager).driver as MemoryQueueDriver;
+expect(driver.waiting + driver.leased).toBe(0);
+```
+
+A test that held the queue with `isRunning = true` calls `await
+queue.stop()`, and `queue.start()` to let it go.
+
+**A dispatched job no longer starts inside `dispatch()`.** An idle queue used
+to call the job's `run` synchronously, up to its first `await`, before
+`dispatch()` returned. It now starts once the driver has recorded the job and
+handed it back to the worker loop, a few microtasks later. A test that
+dispatches and then asserts straight away — `SomeJob.dispatch(x);
+expect(spy).toHaveBeenCalled()` — now fails; wait a macrotask first, for
+example `await new Promise((r) => setTimeout(r, 0))`, before asserting.
+Awaiting `dispatch()` happens to be enough with the memory driver today, but
+it only promises that the job was recorded, not that it has started.
+
+**A job no longer runs inside the request that dispatched it.** It used to
+run in the async context of whichever dispatch started the drain, so a job
+could read that request's user or open transaction — and every job drained
+behind it saw the same one, whoever dispatched it. It now runs in the
+application's context and no request's. A job that relied on the old
+behaviour takes what it needs as arguments.
+
+**Two things that used to wedge the queue no longer do:** a throw from
+`onFail` or `onDeadletter` is logged and the job's slot is freed, and a full
+queue wakes when a slot frees instead of polling once a second.
+
+New, and optional: `backoff` on a job (milliseconds before each retry),
+`visibilityTimeout` and `pollInterval` on the queue slice, and
+`drain(timeoutMs)` / `stop()` / `start()` on `QueueManager`. See
+[Jobs & Queues](docs/jobs-and-queues.md).
+
+## Jobs can be kept in the database, and a shutdown waits for running jobs
+
+**`driver: "database"` keeps jobs in a `gemi_jobs` table**, so a deploy, a
+scale-in or a crash no longer loses them. Nothing changes until you opt in.
+To opt in, add the table (the Prisma model is in
+[The database driver](docs/jobs-and-queues.md#the-database-driver)), set
+the driver, and make sure your jobs can safely run twice: the driver
+delivers at least once, not exactly once.
+
+A driver factory is now called with the application,
+`driver: (app) => …`. A factory that takes no argument works as before.
+
+**A replica leaves a job it has no class for to the replicas that have
+it.** During a blue/green rollout both releases claim from one table, so a
+job only the new release has used to be dead-lettered by whichever old
+replica claimed it first. The database driver now claims only the names a
+replica has registered. A job under any other name is claimed and
+dead-lettered only after `unknownJobGrace`, one hour by default, when the
+name is taken to be gone. With the memory driver an unknown name is still
+dropped at once. See
+[Deploys and unknown job names](docs/jobs-and-queues.md#deploys-and-unknown-job-names).
+
+**A `QueueDriver` of your own needs a `release(job, { retryInMs })`**, if
+you wrote one against a 0.63 release candidate. It ends a claim without
+counting it: the job becomes claimable after `retryInMs` with `attempt` one
+lower, and like `fail` it ignores a stale claim. `claim` may also honour
+`registered: { names, graceMs }`. A driver that ignores it still works; the
+queue then releases the jobs it cannot run.
+
+**A dispatch inside a transaction waits for the commit.** `Job.dispatch()`
+inside `Model.transaction` or `DB.transaction` used to record the job at
+once, so it survived a rollback and could run before the commit, reading
+rows that were not there yet. Now the database driver on Postgres or MySQL
+writes the job's row on the transaction, and every other driver's dispatch
+is held and recorded just after the commit. A rollback drops the job either
+way, and so does a savepoint that rolls back. `dispatch()` still resolves
+inside the transaction, to the job's id. Two things to check:
+
+- A test that dispatches inside a transaction and asserts the job ran
+  before the transaction returned now fails. Assert after it.
+- With the database driver on Postgres or MySQL, a job row that cannot be
+  written now rolls the transaction back, awaited or not, caught or not —
+  a queued listener's dispatch included. The transaction rejects with the
+  database's error, or with `TransactionDependencyError` (its `cause`) when
+  the dispatch was not awaited or its rejection was caught. Before, the
+  transaction committed and the job was lost with a line on stderr.
+
+A queued listener is pushed the same way, so it no longer needs
+`static afterCommit` to wait for the commit. See
+[Dispatching inside a transaction](docs/jobs-and-queues.md#dispatching-inside-a-transaction).
+
+**A `QueueDriver` of your own must honour `enqueue({ id })`**, if you
+wrote one against a 0.63 release candidate: when `id` is given, record the
+job under it and resolve to it. The queue passes one for a dispatch it held
+until a commit. A driver can also add `joinsTransaction()`, returning `true`
+when its `enqueue` will write into the caller's open ORM transaction; the
+queue then hands it the job inside the transaction instead of holding it.
+
+What changes for every app, whatever the driver:
+
+- **A production server told to stop now waits for its running jobs.** The
+  queue provider's `shutdown()` stops claiming and waits for them within
+  `GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. With the memory driver, jobs dispatched
+  while requests drain are still claimed and run before that. With a driver
+  that outlives the process, claiming stops as soon as the signal arrives,
+  and waiting jobs are left to other replicas. A job still running then
+  makes the shutdown exit with code 1. That code used to be 0 whatever
+  happened to the job. If your jobs take longer than 5 seconds, raise the
+  timeout to fit the platform's grace period.
+- **With a custom durable driver, a dispatch outside a server no longer
+  runs jobs.** A console command, seed or script that dispatches records the
+  job and leaves it for a server. Before, it started claiming from the shared
+  driver and could exit in the middle of the jobs it took. The memory driver
+  is unchanged.
+- **A dispatch wakes a polling driver's queue at once.** Before, it waited up
+  to `pollInterval`. The memory driver was never polled, so apps that use it
+  see no difference.
+- **The database driver gives a SQLite connection a one-second busy
+  timeout** if it has none. Before, a write that met another process's lock
+  on the file failed at once with `SQLITE_BUSY`. Now it waits up to a
+  second, and the process is blocked while it waits. With
+  `driver: "database"` this is the app's default connection, so the ORM's
+  writes wait too. Pass `{ busyTimeout: 0 }` to the driver to keep the old
+  behaviour.
+- **Jobs can run in worker processes of their own.** `gemi queue:work`
+  boots the app and claims from the queue without serving HTTP, and
+  `GEMI_QUEUE_CLAIM=off` stops a server claiming, so web and worker
+  replicas scale separately. Both need a driver other processes can reach,
+  such as `"database"`. Nothing changes unless you use them. See
+  [Worker processes](docs/jobs-and-queues.md#worker-processes--gemi-queuework).
+- **Under `gemi dev`, a save hands the database queue to the new code.**
+  Before, the loop from before the save kept claiming rows with the old
+  code, one more loop per save, until `gemi dev` was restarted. Now the
+  reloaded application stops it and claims in its place.
+
+## A shutdown stops the cron schedule and waits for running ticks
+
+The scheduler provider now has a `shutdown()`. When a production server is
+told to stop, it stops the schedule once requests have drained, so no new
+tick starts, and waits for the ticks already running within
+`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. Before, the schedule kept firing until the
+process exited, and a running tick was cut off halfway through. A tick still
+running at the deadline is named in the log, `Cron jobs still running at
+shutdown: …`. If your cron jobs take longer than 5 seconds, raise the timeout
+to fit the platform's grace period.
+
+The cron drain runs before the queue drain and both come out of that one
+timeout. Before, the queue had all of it; now a long-running tick can leave the
+queue almost nothing, so its running jobs are abandoned (and, with the memory
+driver, its pending ones lost). Budget for the longest tick plus the longest
+job.
+
+`Scheduler` gains `drain(timeoutMs)` and `running`. See
+[Stopping the schedule](docs/cron.md#stopping-the-schedule).
+
+## If you used the global middleware list in 0.63.0-rc.1
+
+The `global` list is new in 0.63, so an app coming from 0.62 has nothing to
+change. An app that adopted it on `0.63.0-rc.1` sees two differences:
+
+- **The route starts with the user the list left.** A user a global
+  middleware puts on the context, with `Auth.user()` or `ctx().setUser(...)`,
+  used to stay behind; now the route's context starts with it, and trusts it.
+  `auth` then checks only that an `access_token` cookie or header is present,
+  and `Auth.user()` returns that user. If a global middleware sets a user it
+  has not verified, from an unchecked token or an API-key header read for rate
+  limits or logs, stop it doing so: keep that identity somewhere other than
+  the context's user. See
+  [Global middleware](docs/middleware.md#global-middleware).
+- **In `gemi dev`, the list also runs for `/refresh.js` and
+  `/render-error.js`.** A gate that refuses requests without a header now
+  refuses those too; an exemption by path has to name them.
+
+---
+
 # Upgrading from 0.55 to 0.56
 
 One change, and it is a deletion. **Do it as part of the upgrade** — leaving the

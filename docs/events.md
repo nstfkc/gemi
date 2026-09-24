@@ -90,6 +90,7 @@ There is no `static events = [A, B]`, deliberately. A listener bound to two even
 | `handle` | method | — | The side effect. May be `async`. Required. |
 | `queued` | `boolean` | `false` | Run on the queue instead of inline. A [context boundary](#queued-listeners), not a performance dial. |
 | `maxAttempts` | `number` | `3` | Attempts before dead-lettering, counting the first. Ignored unless `queued`. |
+| `backoff` | `number \| number[]` | `0` | Milliseconds before a retry, as on a job: an array gives one per retry, its last entry repeating. Ignored unless `queued`. |
 | `worker` | `boolean` | `false` | Run `handle` in a Worker thread with its own cloned app. Ignored unless `queued`. |
 
 ## Dispatching
@@ -124,7 +125,7 @@ That is not politeness, it is the point. Listeners are independent side effects,
 
 A listener that must not fail silently should handle its own errors — retry, log to your own sink, or dispatch a [job](./jobs-and-queues.md) that can be retried and dead-lettered.
 
-All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts` and then dead-lettered.
+All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts`, `backoff` apart, and then dead-lettered.
 
 ## When nothing is listening
 
@@ -138,7 +139,7 @@ That single line is the whole early-warning system here, because four different 
 
 ## Queued listeners
 
-`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, dead-lettering and worker threads coming from there rather than from anything events add:
+`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, `backoff`, dead-lettering and worker threads coming from there rather than from anything events add:
 
 ```typescript
 // app/listeners/SendWelcomeEmail.ts
@@ -238,6 +239,8 @@ export class UserRegistered extends Event {
 | `false` (default) | either | The listeners run now. |
 | `true` | no | The listeners run now — there is nothing to wait for. |
 | `true` | yes | The listeners run when that transaction commits, and not at all if it rolls back. |
+
+A **queued** listener on an event without `afterCommit` is pushed at the dispatch, and the queue then treats it as it treats [any dispatch inside a transaction](./jobs-and-queues.md#dispatching-inside-a-transaction): its job is recorded with the commit and dropped by a rollback. So a queued listener never runs before the commit either way. `afterCommit` is what holds back the **sync** ones.
 
 It is a property of the **event**, not of the listener: whether a side effect is allowed to happen before the write is durable is a fact about what happened, and every listener bound to it agrees. Both kinds are deferred together — a sync listener runs after the commit, and a queued one is *pushed* after the commit. Pushing early would be running early, because the queue drains in-process and often starts from the push itself.
 

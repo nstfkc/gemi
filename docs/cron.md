@@ -296,6 +296,20 @@ const jobs = await discoverCronJobs(); // every CronJob subclass under app/cron
 
 > **Note:** Cron jobs run **in-process** in the server. Every running server instance registers and fires its own schedule, so if you run multiple replicas, a job scheduled `@daily` fires once per replica per day. For work that must run exactly once across a fleet, add your own coordination (e.g. an advisory lock) inside `callback`.
 
+### Stopping the schedule
+
+`app(Scheduler).stop()` stops every schedule, so no new tick starts; a tick already running is left to finish. `drain(timeoutMs)` stops the same way, then waits up to `timeoutMs` for the running ticks and resolves to `{ unfinished }` — each tick still running at the deadline, as `{ name, startedAt }`. Nothing is cancelled. `start()` schedules again. `running` is how many ticks are in progress.
+
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), the schedule keeps running while in-flight requests drain. The scheduler provider's `shutdown()` then stops it — so a tick that falls due from then on does not start — and waits for the running ticks within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). A tick still running at the deadline is abandoned when the process exits, and named in the log:
+
+```
+[gemi] Cron jobs still running at shutdown: NightlyReport (started 2026-09-24T02:00:00.000Z)
+```
+
+The cron drain and the [queue drain](./jobs-and-queues.md#stopping-the-queue) share that one deadline, and the cron drain goes first — deliberately, since a tick may dispatch jobs the queue should then wait for. A tick that runs long therefore spends the queue's time: with the default 5 seconds and a tick that needs 30, the queue is left about 100 milliseconds (or is skipped outright) for its own running jobs, and with the memory driver whatever is still pending is lost. Size `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` for the longest tick *plus* the longest job, or move long cron work onto the queue as below.
+
+An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
+
 ## Cron jobs vs. queued jobs
 
 Use a **cron job** for time-based, recurring work that runs on its own schedule. Use a **queued job** for work triggered by a request that you want to run in the background. The two compose well — a cron `callback` often dispatches queued jobs to fan work out. See [Jobs & Queues](./jobs-and-queues.md).

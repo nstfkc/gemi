@@ -31,6 +31,44 @@ export class MiddlewareRegistry {
     return this.config.aliases;
   }
 
+  /**
+   * Throws on a `global` entry that would not run. A route's unknown alias is
+   * skipped silently, which is survivable there; a global middleware is
+   * usually a gate for the whole origin, and a typo in its alias would leave
+   * every request ungated with nothing saying so. A `-alias` has nothing to
+   * cancel in a list that nothing is inherited into.
+   */
+  assertGlobalMiddleware() {
+    for (const entry of this.config.global) {
+      if (typeof entry !== "string") {
+        continue;
+      }
+      const [alias] = entry.split(":");
+      if (alias.startsWith("-")) {
+        throw new Error(
+          `Global middleware "${entry}" cancels an alias, but nothing is inherited into the global list. Remove it.`,
+        );
+      }
+      if (!this.aliases[alias]) {
+        throw new Error(
+          `Global middleware "${alias}" is not a registered alias. Add it to \`aliases\` in the middleware config, or list the class itself.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * The `global` list, run the way a route's list is.
+   *
+   * It does not re-check the list: `MiddlewareServiceProvider.boot` has
+   * already thrown on a bad entry, a boot failure stops `gemi start`, and the
+   * config is not written to afterwards. This runs on every request the server
+   * takes, static files included, so the check belongs at boot and only there.
+   */
+  public runGlobalMiddleware() {
+    return this.runMiddleware(this.config.global);
+  }
+
   public runMiddleware(
     middleware: (
       | string

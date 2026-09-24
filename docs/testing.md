@@ -47,6 +47,7 @@ test("renders the organisation's messages", () => {
 | `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
 | `user` | `null` | `useUser()`. |
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `domain` | `null` | `useDomain()` — the `route.domains` group the page is served under. `{ host }` is the only required field: `group` defaults to the apex, `root` to the host minus its first label, and `origin` to `https://` on that host, so `domain={{ host: "acme.example.com", params: { tenant: "acme" } }}` is usually enough. Left out, `useDomain()` reads empty and `url()` throws, exactly as in an app with no `route.domains`. |
 | `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
 | `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
@@ -143,6 +144,18 @@ test("greets in Turkish", () => {
 ```
 
 No `dictionaries`, no `translations`, and no dictionary name that can drift out of sync with the component. The import cost described above does not apply either — a `defineDictionary` module imports `gemi/client`, not `gemi/i18n`, so it never pulls the container in and works under a real-browser runner.
+
+**If your runner applies gemi's Vite transform**, a dictionary loads each locale lazily instead, and the first render to read it suspends. A test whose component then also suspends on an unseeded `useQuery` never commits under `act`. The same happens if an earlier render in the same file suspended on that dictionary, because the registry keeps the promise React tracked for the rest of the test file. Warm the dictionaries before rendering, not by rendering:
+
+```tsx
+import { preloadDictionaries } from "gemi/dictionary";
+
+beforeEach(async () => {
+  await preloadDictionaries("en-US");
+});
+```
+
+Strings loaded that way are read without React's `use()`, so they never hold up the render.
 
 Both APIs compose on one page, which is what a half-migrated app needs:
 

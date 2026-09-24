@@ -186,6 +186,35 @@ describe("constraint violations", () => {
     });
   });
 
+  // Read off a live server: Postgres quotes a mixed-case column in the detail.
+  test("a quoted mixed-case column is reported unquoted", () => {
+    expect(
+      postgres.constraintViolation({
+        ...violation,
+        detail: 'Key (provider, "providerId")=(github, gh-1) already exists.',
+        constraint: "SocialAccount_provider_providerId_key",
+      }),
+    ).toEqual({
+      kind: "unique",
+      columns: ["provider", "providerId"],
+      constraint: "SocialAccount_provider_providerId_key",
+    });
+  });
+
+  test("a quoted column holding a comma or a quote stays one column", () => {
+    expect(
+      postgres.constraintViolation({
+        ...violation,
+        detail: 'Key ("last, first", c, "say ""hi""")=(a, b, c, d) already exists.',
+        constraint: "t_key",
+      }),
+    ).toEqual({
+      kind: "unique",
+      columns: ["last, first", "c", 'say "hi"'],
+      constraint: "t_key",
+    });
+  });
+
   // The whole point of matching five characters rather than the `23` class:
   // these are integrity violations too, and reporting one as a duplicate key
   // sends the caller looking for a row that does not exist.

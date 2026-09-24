@@ -96,6 +96,15 @@ export interface OrmScope {
    * tests write — from swallowing a dispatch into a list nothing drains.
    */
   afterCommit?: AfterCommitCallback[];
+  /**
+   * Statements written on `tx` that the commit must wait for and must not
+   * outlive — today, a job row the database queue driver wrote on the
+   * transaction (#563), and nothing else. See `commitDependsOn`.
+   *
+   * Created and shared exactly as `afterCommit` is, and truncated with it
+   * when a savepoint rolls back.
+   */
+  commitDependsOn?: Promise<unknown>[];
 }
 
 /**
@@ -241,6 +250,70 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
 
   store.afterCommit.push(callback);
   return true;
+}
+
+/**
+ * Make the open transaction's commit depend on `write`, a statement issued on
+ * its handle: the transaction does not commit until `write` settles, and
+ * rolls back — rejecting with `TransactionDependencyError` — if it rejected.
+ *
+ * For a write the caller may not await. A queued listener's dispatch never is
+ * (`EventManager` pushes it and moves on), and on Postgres a statement that
+ * fails aborts the whole transaction: every statement after it is refused and
+ * Bun's `COMMIT` quietly becomes a rollback. Without this, the callback's
+ * promise resolved, `begin` resolved, and the rows the caller wrote were gone
+ * with nothing to say so. MySQL does not abort on a failed statement, and is
+ * failed here anyway, so that a joined write means the same thing on both:
+ * it commits with the transaction or the transaction does not commit.
+ *
+ * `false` when there is no transaction to depend on, as for
+ * `deferUntilCommit`.
+ */
+export function commitDependsOn(write: Promise<unknown>): boolean {
+  const store = ormContext.getStore();
+  if (store?.tx === undefined || store.commitDependsOn === undefined) {
+    return false;
+  }
+  store.commitDependsOn.push(write);
+  return true;
+}
+
+/**
+ * A write the transaction's commit depended on failed, so the transaction —
+ * or the savepoint the write was made in — rolled back. `cause` is the write's
+ * own error.
+ */
+export class TransactionDependencyError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `A statement this transaction depended on failed after being issued on ` +
+        `it, so the transaction rolled back instead of committing: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = "TransactionDependencyError";
+  }
+}
+
+/**
+ * Wait for the writes registered from `mark` on, and throw if one failed.
+ *
+ * Called at the end of a transaction's or savepoint's callback, *inside*
+ * `begin`/`savepoint`, so a throw is what makes Bun roll back rather than
+ * commit — after `begin` has resolved it is too late to do anything but
+ * report. Every write is settled before throwing, so none is still running on
+ * the handle when the rollback is issued.
+ */
+async function awaitDependencies(
+  writes: Promise<unknown>[],
+  mark: number,
+): Promise<void> {
+  if (writes.length === mark) return;
+  const settled = await Promise.allSettled(writes.slice(mark));
+  const failed = settled.find(
+    (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+  );
+  if (failed) throw new TransactionDependencyError(failed.reason);
 }
 
 /** How deeply nested the current transaction is; `null` outside one. */
@@ -443,6 +516,7 @@ async function drainAfterCommit(
       ...outside,
       tx: undefined,
       afterCommit: undefined,
+      commitDependsOn: undefined,
       depth: outside?.depth ?? 0,
     },
     async () => {
@@ -567,17 +641,31 @@ export function withTransaction<T>(
     // between the mark and the failure but this savepoint's own subtree.
     const deferred = current.afterCommit;
     const mark = deferred?.length ?? 0;
+    // The same mark for the writes the commit depends on. The savepoint waits
+    // for its own before it releases, so one that failed rolls back only the
+    // savepoint — which a caller that catches can survive, exactly as it
+    // survives a statement that threw inside it — and is then forgotten
+    // rather than failing the transaction a second time.
+    const dependencies = current.commitDependsOn;
+    const dependencyMark = dependencies?.length ?? 0;
 
     return current.tx
       .savepoint((sp) => {
         const nested = sp as TransactionSQL;
         return ormContext.run(
           { ...current, tx: nested, depth: current.depth + 1 },
-          () => fn(nested),
+          async () => {
+            const result = await fn(nested);
+            if (dependencies) {
+              await awaitDependencies(dependencies, dependencyMark);
+            }
+            return result;
+          },
         );
       })
       .catch((error: unknown) => {
         if (deferred) deferred.length = mark;
+        if (dependencies) dependencies.length = dependencyMark;
         throw error;
       }) as Promise<T>;
   }
@@ -595,6 +683,7 @@ export function withTransaction<T>(
   // below needs it *after* that callback's scope is gone, and reading it off
   // the store then is exactly what is no longer possible.
   const deferred: AfterCommitCallback[] = [];
+  const dependencies: Promise<unknown>[] = [];
 
   // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
   // `.finally` alone would not: it is only attached once `begin` has returned a
@@ -629,8 +718,13 @@ export function withTransaction<T>(
               // by a callback during a drain gets its own list either way,
               // rather than appending to the array it is being run out of.
               afterCommit: deferred,
+              commitDependsOn: dependencies,
             },
-            () => fn(tx),
+            async () => {
+              const result = await fn(tx);
+              await awaitDependencies(dependencies, 0);
+              return result;
+            },
           ),
         )
         // `finally` and not a `then`/`catch` pair: the connection is released on

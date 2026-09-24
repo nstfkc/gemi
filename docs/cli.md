@@ -29,6 +29,8 @@ It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, r
 
 In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
 
+`dev` relays `SIGTERM` and `SIGINT` to the dev server and exits with its exit code, as [`start`](#gemi-start) does, so a dev container or process manager that stops `gemi dev` stops the server too rather than leaving it on its port. There is no drain in development: the signal stops the server at once.
+
 ### The update notice
 
 `dev` also asks npm whether a newer gemi has been published, and prints a line if one has:
@@ -69,6 +71,8 @@ The command runs in three stages:
 
 Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
 
+`GEMI_ASSET_BASE` (or `assetBase` in `gemi.config.ts`) builds the client bundle to be served from a CDN; the base is recorded in `dist/client/.vite/gemi.json` for `gemi start` to read. See [Asset base](./configuration.md#asset-base).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
 
 ## `gemi start`
@@ -81,7 +85,25 @@ gemi start
 
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
+`start` relays `SIGTERM` and `SIGINT` to that process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. The server drains in-flight requests before it exits; see [Graceful shutdown](./configuration.md#graceful-shutdown). The server stays in `start`'s process group, so a signal sent to the whole group — a Ctrl+C, or a supervisor's `SIGKILL` — reaches it directly as well.
+
+> **Gotcha:** the relay covers `start` and nothing above it. `bun run start` passes `SIGTERM` on to its script, but a wrapper script of your own between the platform and `gemi start` has to do the same, or the server never hears it.
+
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi queue:work`
+
+Runs queued jobs without serving HTTP, so job capacity can be scaled apart from web traffic.
+
+```bash
+NODE_ENV=production gemi queue:work
+```
+
+It launches a fresh Bun process with the same runtime preloads as `start`, boots the application, and claims from the queue until it gets `SIGTERM` or `SIGINT`. `queue:work` relays both, as `start` does. The worker then stops claiming, waits for the jobs it is running, runs every provider's `shutdown()`, and exits `0`, or `1` if a job was still running or a provider failed. `queue:work` exits with the same code.
+
+The queue has to use a driver every process can reach, such as `"database"`. On the memory driver the command refuses to start and exits `1`, because a worker never sees a job dispatched in another process. Set `GEMI_QUEUE_CLAIM=off` on the web process to leave all jobs to workers. See [Worker processes](./jobs-and-queues.md#worker-processes--gemi-queuework) for the topology and the shutdown budgets.
+
+> **Gotcha:** as with `gemi run`, `NODE_ENV` is inherited rather than forced, and the cron scheduler is off (`GEMI_NO_SCHEDULE=1`) unless the environment sets `GEMI_NO_SCHEDULE` itself.
 
 ## `gemi run`
 
@@ -102,6 +124,8 @@ Like `dev` and `start`, it launches a fresh Bun process with the same two runtim
 > **Gotcha:** the cron scheduler does not start under `gemi run`, so a long-running command cannot fire your whole schedule in a process nobody is watching. Jobs are still discovered and `app(Scheduler).jobs` still answers honestly. The command sets `GEMI_NO_SCHEDULE=1` on the process it spawns, which also works as a general "boot this app but do not schedule anything" switch.
 
 > **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
+
+`run` relays `SIGTERM` and `SIGINT` to the command's process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. A long-running command that listens for `SIGTERM` (`process.on("SIGTERM", ...)`) gets to finish its batch or record where it stopped; one that does not is ended by the signal, as before. A signal sent to the whole process group — a Ctrl+C in a terminal — reaches the command twice, directly and through the relay, so a handler should be idempotent: one that reads a second `SIGINT` as "force quit" would skip its cleanup on a single Ctrl+C.
 
 ## `gemi upgrade`
 
@@ -230,6 +254,26 @@ This command walks `app/models`, imports every file, and asks the same question 
 
 It reports one thing: a class carrying policies the registered class does not. A typed view carrying its own narrowing, and an unpolicied class written against a model's schema, are both deliberately *not* reported — each is supposed to be absent from the declared modules, and exporting either would turn a working boot into `AmbiguousModelRegistrationError`. See [ORM → Your model class](./orm.md#your-model-class).
 
+## `gemi ai:generate-client`
+
+Writes an agent's tool and output types for the iOS or Android client.
+
+```bash
+gemi ai:generate-client app/agents/support.ts#supportAgent --out ios/App/Agents --platform swift
+gemi ai:generate-client app/agents/support.ts#supportAgent --out android/app/src/main/kotlin/com/example/agents \
+  --platform kotlin --package com.example.agents
+```
+
+- `<agent>` — the module and export holding the value `Agent.create` returned, as `<file>#<export>`. A bare file means its default export.
+- `--out <dir>` — where to write. The file is named after the generated type: `--name` if given, else the export (`SupportAgent.swift`, `SupportAgent.kt`). `export default supportAgent` counts as `supportAgent`; an anonymous default export is named after the file (`support.ts` gives `Support.swift`).
+- `--platform <swift|kotlin>` — which client to write for.
+- `--package <name>` — Kotlin only, and required there: the package the file declares.
+- `--name <name>` — name the generated type something other than the export.
+
+It reads the agent's TypeScript types with the compiler your app already has, and nothing is imported or run. So it works in CI without a database or secrets, and a tool's progress type comes out typed even though it has no schema. A shape with no faithful Swift or Kotlin spelling is left as raw JSON, and a `warning:` line names where it was.
+
+See [Mobile Clients](./mobile-clients.md) for what the generated file is for.
+
 ## `gemi ide:generate-api-manifest`
 
 Generates the API route manifest behind the Emacs integration in `packages/gemi/ide/emacs`, which lists your routes and jumps to the handler you pick.
@@ -265,6 +309,7 @@ Like `app:component-tree`, it loads the app from the kernel and prints the resol
 ## Related
 
 - [Commands](./commands.md) — writing the application commands `gemi run` runs.
+- [Mobile Clients](./mobile-clients.md) — the iOS and Android clients `gemi ai:generate-client` writes types for.
 - [Getting Started](./getting-started.md) — installing gemi and running your first commands.
 - [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
 - [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.

@@ -14,6 +14,7 @@ import { ApiManifestGenerator } from "./ide/generateApiManifest";
 import { reportUpdate } from "./update-check";
 import { runUpgrade } from "./upgrade";
 import { SKILL_NAME, installSkill } from "./install-skill";
+import { spawnForwardingSignals } from "./forwardSignals";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
 // gemi's own runtime plugin) before the server entry runs — so it executes
@@ -28,7 +29,11 @@ program.command("dev").action(async () => {
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
   process.env.NODE_ENV = "development";
-  Bun.spawn({
+  // Relayed like `start`'s, so a dev container or process manager that stops
+  // `gemi dev` with `SIGTERM` stops the dev server too, instead of leaving it
+  // orphaned on its port (#566). There is no drain behind it: `Server` installs
+  // none in development, where a Ctrl+C should stop the server now.
+  const exited = spawnForwardingSignals({
     cmd: [
       "bun",
       "--hot",
@@ -44,8 +49,6 @@ program.command("dev").action(async () => {
       ...appPreloadArgs(appDir),
       `${path.join(appDir, "server.ts")}`,
     ],
-    stdout: "inherit",
-    stderr: "inherit",
   });
 
   // Deliberately not awaited: the dev server is already starting, and a version
@@ -53,6 +56,8 @@ program.command("dev").action(async () => {
   // moment later, or never — `reportUpdate` swallows every failure, so being
   // offline costs nothing but silence. `GEMI_NO_UPDATE_CHECK=1` turns it off.
   void reportUpdate({ rootDir });
+
+  process.exit(await exited);
 });
 
 program.command("build").action(async () => {
@@ -160,7 +165,11 @@ program.command("start").action(async () => {
   // same as the `dev` command.
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
-  const proc = Bun.spawn({
+  //
+  // The server is a child of this process, so a platform's SIGTERM — sent to
+  // whatever it started, never below it — has to be relayed, and the child's
+  // exit code with it. `spawnForwardingSignals` does both (#48).
+  const code = await spawnForwardingSignals({
     cmd: [
       "bun",
       // The built `server.mjs` is a thin bootstrap: `packages: "external"` keeps
@@ -176,12 +185,45 @@ program.command("start").action(async () => {
       ...appPreloadArgs(appDir),
       `${rootDir}/dist/server/server.mjs`,
     ],
-    stdout: "inherit",
-    stderr: "inherit",
     env: { ...process.env, NODE_ENV: "production" },
   });
-  await proc.exited;
+  process.exit(code);
 });
+
+program
+  .command("queue:work")
+  .description(
+    "Boot the app and run queued jobs, without serving HTTP, so job capacity " +
+      "scales apart from web traffic. Needs a queue driver every process can " +
+      "reach, such as \"database\". Drains on SIGTERM/SIGINT like `gemi start`",
+  )
+  .action(async () => {
+    const rootDir = path.resolve(process.cwd());
+    const appDir = path.join(rootDir, "app");
+
+    // From the application's gemi, never this binary's, as `gemi run` does.
+    let entry: string;
+    try {
+      entry = Bun.resolveSync("gemi/queue/work", rootDir);
+    } catch {
+      console.error(
+        `Could not resolve \`gemi/queue/work\` from ${rootDir}. Run this from ` +
+          `the root of a gemi project, on a version of gemi that has it.`,
+      );
+      process.exit(1);
+    }
+
+    // Relayed like `gemi start`, so a platform's SIGTERM reaches the worker
+    // and it drains its jobs. NODE_ENV is passed through, as `gemi run` does:
+    // one worker runs beside `gemi dev` from source, another in production.
+    // The scheduler is off unless GEMI_NO_SCHEDULE says otherwise, so adding
+    // workers does not add copies of every cron job.
+    const code = await spawnForwardingSignals({
+      cmd: ["bun", "--preload", "gemi/bun/preload", ...appPreloadArgs(appDir), entry],
+      env: { GEMI_NO_SCHEDULE: "1", ...process.env },
+    });
+    process.exit(code);
+  });
 
 // Everything after the command's name belongs to the command, including its
 // flags. Two commander settings do that, and both are load-bearing:
@@ -237,7 +279,11 @@ program
       process.exit(1);
     }
 
-    const proc = Bun.spawn({
+    // Relayed like `start`'s (#566): a `SIGTERM` to `gemi run` reaches the
+    // command, which gets the chance to clean up that a long backfill needs,
+    // and `gemi run` waits for it rather than exiting underneath it. A command
+    // ended by a signal now exits `128 + n` instead of 1.
+    const code = await spawnForwardingSignals({
       cmd: [
         "bun",
         // The same two preloads as `dev` and `start`, in the same order and for
@@ -251,8 +297,6 @@ program
         ...(name === undefined ? [] : [name]),
         ...args,
       ],
-      stdout: "inherit",
-      stderr: "inherit",
       // Explicit: `Bun.spawn` ignores stdin by default, and a destructive
       // command that asks for confirmation would read EOF and take the default.
       stdin: "inherit",
@@ -262,9 +306,7 @@ program
       // child's first line.
       env: { ...process.env, GEMI_NO_SCHEDULE: "1" },
     });
-
-    await proc.exited;
-    process.exit(proc.exitCode ?? 1);
+    process.exit(code);
   });
 
 program
@@ -394,6 +436,39 @@ check
         // A `CheckModelsError` is a sentence written for this moment; anything
         // else is a bug and keeps its stack.
         if (!(error instanceof CheckModelsError)) throw error;
+        console.error(error.message);
+        process.exit(1);
+      }
+    },
+  );
+
+program
+  .command("ai:generate-client")
+  .description(
+    "Generate an agent's tool and output types for the iOS (GemiChat, Swift) or " +
+      "Android (dev.gemijs.chat, Kotlin) client. Reads the agent's TypeScript types — nothing is " +
+      "imported or run — so a tool's progress is typed from what it yields",
+  )
+  .argument("<agent>", "The agent, as <file>#<export>, e.g. app/agents/support.ts#supportAgent")
+  .requiredOption("--out <dir>", "Directory to write the generated file into")
+  .requiredOption("--platform <platform>", "swift or kotlin")
+  .option("--name <name>", "Name of the generated type. Defaults to the export's name")
+  .option("--package <name>", "Kotlin only: the package the generated file declares")
+  .action(
+    async (
+      agent: string,
+      options: { out: string; platform: string; name?: string; package?: string },
+    ) => {
+      // Imported here, not at the top: it loads the TypeScript compiler, which
+      // every other command would otherwise pay for on startup.
+      const { generateClient, GenerateClientError } = await import("./ai-client/generate");
+      try {
+        const { file, warnings } = await generateClient({ agent, ...options });
+        for (const warning of warnings) console.warn(`warning: ${warning}`);
+        console.log(`Wrote ${path.relative(process.cwd(), file)}`);
+        process.exit(0);
+      } catch (error) {
+        if (!(error instanceof GenerateClientError)) throw error;
         console.error(error.message);
         process.exit(1);
       }

@@ -19,6 +19,16 @@ export interface AuthModels {
   SocialAccount: any;
 }
 
+export type SocialAccount = {
+  id: number;
+  userId: number;
+  provider: string;
+  /** `""` or `null` on a row written before the callback recorded it. */
+  providerId: string | null;
+  username?: string | null;
+  email?: string | null;
+};
+
 export type CreateSocialAccountArgs = {
   email?: string;
   provider: string;

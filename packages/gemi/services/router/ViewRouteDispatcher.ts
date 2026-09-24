@@ -1,6 +1,6 @@
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
-import { ensureSessionId, RequestContext } from "../../http/requestContext";
+import { type CarriedContext, ensureSessionId, RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import {
   createFlatViewRoutes,
@@ -19,6 +19,7 @@ import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { Translator } from "../../i18n/Translator";
+import { resolveLocale } from "../../i18n/resolveLocale";
 import { preloadDictionaries } from "../../i18n/dictionaryRegistry";
 import { createDictionarySink } from "../../i18n/dictionarySink";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
@@ -30,7 +31,11 @@ import { FeatureManager } from "../features/FeatureManager";
 import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
+import { isPolicyDeniedError } from "../../orm/errors";
+import { QueryError } from "../../client/QueryError";
+import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
+import { DomainRouter } from "./DomainRouter";
 import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
@@ -146,10 +151,17 @@ async function getTtfFont(
  */
 export const RESERVED_ROUTE_PREFIX = "/assets";
 
+/**
+ * `/assets` or anything under it. The boot-time route check and the production
+ * static handler both ask this, so a route the router accepts is never one the
+ * static handler answers from `dist/client` instead.
+ */
+export function isReservedAssetPath(path: string): boolean {
+  return path === RESERVED_ROUTE_PREFIX || path.startsWith(`${RESERVED_ROUTE_PREFIX}/`);
+}
+
 export function assertNoReservedRoutePaths(routePaths: string[]) {
-  const reserved = routePaths.filter(
-    (path) => path === RESERVED_ROUTE_PREFIX || path.startsWith(`${RESERVED_ROUTE_PREFIX}/`),
-  );
+  const reserved = routePaths.filter(isReservedAssetPath);
 
   if (reserved.length > 0) {
     const many = reserved.length > 1;
@@ -160,6 +172,37 @@ export function assertNoReservedRoutePaths(routePaths: string[]) {
         `Mount it somewhere else.`,
     );
   }
+}
+
+/** A request breaker's `payload.view` as the page response it stands for. */
+/** What a page learns of its host group — `useDomain()` reads it. */
+function clientDomain(req: HttpRequest) {
+  const resolver = app(DomainRouter).resolver!;
+  return {
+    ...req.domain!,
+    root: resolver.root,
+    origin: resolver.publicOrigin(req.rawRequest),
+  };
+}
+
+export function viewBreakResponse(view: Record<string, any>) {
+  const { status = 400, error } = view;
+  return new Response(error?.message, {
+    ...view,
+    status,
+  });
+}
+
+/**
+ * The same break for a `.json` navigation, from its `payload.api`: the client
+ * router reads `data` and `directive` out of the body.
+ */
+export function viewDataBreakResponse(api: Record<string, any>) {
+  const { status = 400, data, directive, headers } = api;
+  return new Response(JSON.stringify({ data, directive }), {
+    headers,
+    status,
+  });
 }
 
 export class ViewRouteDispatcher {
@@ -402,6 +445,8 @@ export class ViewRouteDispatcher {
           currentPath: pathname,
           searchParams: url.search,
           is404: !currentPathName ? true : false,
+          // Only on the document: a client-side navigation never changes host.
+          domain: req.domain ? clientDomain(req) : null,
         },
         appId,
         // Evaluated key -> value only. Rules, conditions, segment criteria and
@@ -447,6 +492,12 @@ export class ViewRouteDispatcher {
        * route's chain is preloaded.
        */
       modulePreloadManifest?: Record<string, string[]>;
+      /**
+       * The prefix the client build was built with. `cssManifest` carries
+       * manifest paths, not URLs — they double as the `id` of the `<style>`
+       * each one is inlined into — so the client needs the base to fetch one.
+       */
+      assetBase?: string;
     }) => {
       const {
         bootstrapModules = [],
@@ -458,6 +509,7 @@ export class ViewRouteDispatcher {
         viewModules,
         clientEntry,
         modulePreloadManifest,
+        assetBase,
       } = params;
 
       // `clientEntry` and `bootstrapModules` are two spellings of the same job,
@@ -543,6 +595,11 @@ export class ViewRouteDispatcher {
       // shell head carries — shipped like `cssManifest` and warmed by
       // `preloadRouteModules` (#352).
       result.data["modulePreloadManifest"] = modulePreloadManifest ?? {};
+      // Only when there is one: the client's default is the root-relative `/`,
+      // and a payload without the key is the one every app shipped before it.
+      if (assetBase && assetBase !== "/") {
+        result.data["assetBase"] = assetBase;
+      }
 
       // Hydration reaches each route segment through `window.loaders`, i.e. an
       // `import()` the browser cannot see until the entry has run — and it
@@ -689,6 +746,17 @@ export class ViewRouteDispatcher {
         );
       } catch (err) {
         clearTimeout(deadlineTimer);
+        // The document below writes the message and stack into the page for
+        // the dev overlay. In production they would reach whoever loaded the
+        // page (#523), so the error goes on to the server's last-resort
+        // handler instead, which answers a generic 500 and reports it. No
+        // body will close to end the span, so it ends here.
+        if (process.env.NODE_ENV === "production") {
+          runInRequestScope(() =>
+            this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+          );
+          throw err;
+        }
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: bootstrapScriptContent(
             `window.error= ${htmlSafeJson(err.message)}; window.stack_trace=${htmlSafeJson(err.stack)};window.__GEMI_DATA__ = ${htmlSafeJson(result.data)}`,
@@ -718,7 +786,7 @@ export class ViewRouteDispatcher {
     };
   }
 
-  async handleViewRequest(req: Request) {
+  async handleViewRequest(req: Request, carried?: CarriedContext | null) {
     const url = new URL(req.url);
     const isViewDataRequest = url.pathname.endsWith(".json");
     const isOgRequest = url.pathname.endsWith(".og");
@@ -739,6 +807,38 @@ export class ViewRouteDispatcher {
     } else {
       urlLocaleSegment = maybeLocale;
       urlLocale = maybeLocale;
+    }
+
+    // A first path segment is not necessarily a locale, and the shapes overlap:
+    // `de-luxe` is a language `de` with a legal 4-letter subtag, `en-suite` the
+    // same for `en`. No tightening of the tag pattern separates them, so route
+    // existence is the signal — a path the app actually serves is served, and
+    // only one it does not is read as a locale that needs redirecting. Without
+    // this, `/de-luxe` answered `302 /de-DE` and the page was gone.
+    const pathIsARoute =
+      urlLocale === null && matchViewRoute(this.flatViewRoutes, urlPathname) !== null;
+
+    if (translator.isLocaleAware && !isOgRequest && urlLocale === null && !pathIsARoute) {
+      // A locale prefix the app doesn't serve verbatim but can map onto one it
+      // does — `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about` —
+      // is sent to that locale's URL rather than rendered as an unknown path.
+      const resolvedLocale = resolveLocale(
+        maybeLocale,
+        translator.supportedLocales,
+        translator.defaultLocale,
+      );
+      if (resolvedLocale) {
+        // `rest` is the path after the locale segment; `.json` is re-appended
+        // so a route-data request lands on the data it asked for.
+        const restPath = rest.length ? `/${rest.join("/")}` : "";
+        return new Response("", {
+          status: 302,
+          headers: {
+            "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+            Location: `/${resolvedLocale}${restPath}${isViewDataRequest ? ".json" : ""}${url.search}`,
+          },
+        });
+      }
     }
 
     if (translator.isLocaleAware && !isOgRequest) {
@@ -1126,17 +1226,9 @@ export class ViewRouteDispatcher {
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
           if (isViewDataRequest) {
-            const { status = 400, data, directive, headers } = err.payload.api;
-            return new Response(JSON.stringify({ data, directive }), {
-              headers,
-              status,
-            });
+            return viewDataBreakResponse(err.payload.viewData ?? err.payload.api);
           } else {
-            const { status = 400, error } = err.payload.view;
-            return new Response(error?.message, {
-              ...err.payload.view,
-              status,
-            });
+            return viewBreakResponse(err.payload.view);
           }
         }
         // `Query.instant` rethrows the entry's error object into this catch —
@@ -1144,8 +1236,26 @@ export class ViewRouteDispatcher {
         if (!reportedQueryErrors.has(err)) {
           this.hooks.onRequestFail(httpRequest, err);
         }
+        // A loader or a middleware read a policied model it may not see. Left
+        // to throw, it became the server's 500, whose body in production is
+        // the error's stack and so the policy's message: a server error for
+        // what is a refusal. The developer keeps the reason through
+        // `onRequestFail` above and the log; the client gets the api's 403
+        // body on a `.json` navigation and a 403 page otherwise.
+        if (isPolicyDeniedError(err)) {
+          console.error(err);
+          return isViewDataRequest ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
+        }
+        // The same refusal one step removed: the loader's `Query.instant` hit
+        // an api route that answered 403, a policy denial there among them.
+        // The api side logged it and the query's rejection reported it, so
+        // the view only passes the refusal on instead of turning it into a
+        // 500.
+        if (err instanceof QueryError && err.status === 403) {
+          return isViewDataRequest ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
+        }
         throw err;
       }
-    });
+    }, carried);
   }
 }

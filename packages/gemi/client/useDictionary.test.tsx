@@ -2,7 +2,7 @@
 import { lazy, Suspense } from "react";
 // @ts-ignore — same untyped entry the view router renders with.
 import { renderToReadableStream } from "react-dom/server.browser";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { defineDictionary, __gemi_dict__ } from "../i18n/defineDictionary";
 import {
@@ -310,9 +310,11 @@ describe("preloading", () => {
 });
 
 /**
- * The contract with React's `use()` (#494). `useDictionary` calls it on every
- * path, so what it is handed has to be a thenable on every path — including
- * the one where the strings are already sitting in the registry.
+ * The contract with React's `use()` (#494). What the render path hands back
+ * is a thenable on every path — including the one where the strings are
+ * already sitting in the registry. `useDictionary` skips `use()` only for a
+ * thenable built from strings already in hand, which carries them as `inHand`
+ * (#542); one that was ever pending always goes through it.
  *
  * The bug this pins was invisible in the hook's output: returning the strings
  * raw made the `use()` call conditional, and a component whose first pass
@@ -373,6 +375,64 @@ describe("what the render path hands use()", () => {
     // Across the cold/warm boundary as well: this is exactly the read the
     // replay makes, and where the identity used to change.
     expect(dict.loadForRender("en-US")).toBe(cold);
+  });
+});
+
+/**
+ * Which thenables `useDictionary` may read without `use()` (#542). Only one
+ * made from strings already in hand: no render can have suspended on it, so
+ * none can be replayed on it. Any thenable a render could have suspended on
+ * must keep `inHand` unset, or its replay skips `use()` and #494 is back.
+ */
+describe("inHand", () => {
+  test("is set for strings in hand, unbundled or preloaded", async () => {
+    expect(defineDictionary(TRANSLATIONS).loadForRender("en-US").inHand).toEqual({
+      greeting: "Hello {{name}}",
+      cta: "Get started",
+    });
+
+    const warmed = __gemi_dict__("d_inhand_warm", {
+      "en-US": async () => ({ default: { cta: "Get started" } }),
+    });
+    await preloadDictionaries("en-US");
+    expect(warmed.loadForRender("en-US").inHand).toEqual({ cta: "Get started" });
+  });
+
+  test("stays unset on a thenable that was pending, even once it resolves", async () => {
+    const dict = __gemi_dict__("d_inhand_cold", {
+      "en-US": async () => ({ default: { cta: "Get started" } }),
+    });
+
+    const cold = dict.loadForRender("en-US");
+    expect(cold.inHand).toBeUndefined();
+    await cold;
+    expect(dict.loadForRender("en-US").inHand).toBeUndefined();
+  });
+
+  test("stays unset on the thenable that replaces a degraded one", async () => {
+    // A render may have suspended on the degraded thenable; its replay reads
+    // the replacement, and has to reach `use()` again.
+    let fail = true;
+    const dict = __gemi_dict__("d_inhand_degraded", {
+      "en-US": () =>
+        fail
+          ? Promise.reject(new Error("gone"))
+          : Promise.resolve({ default: { cta: "Get started" } }),
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const degraded = dict.loadForRender("en-US");
+    await degraded;
+    logged.mockRestore();
+    expect(degraded.degraded).toBe(true);
+
+    fail = false;
+    await preloadDictionaries("en-US");
+
+    const replacement = dict.loadForRender("en-US");
+    expect(replacement).not.toBe(degraded);
+    await expect(replacement).resolves.toEqual({ cta: "Get started" });
+    expect(replacement.inHand).toBeUndefined();
   });
 });
 

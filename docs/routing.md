@@ -344,6 +344,7 @@ export default class extends ViewRouter {
 
 ## See also
 
+- [Subdomains & Custom Domains](./domains.md) — routing by host: `admin.example.com`, `:tenant` subdomains, and custom domains.
 - [Controllers](./controllers.md) — writing `Controller` / `ResourceController` classes and using `HttpRequest`.
 - [Middleware](./middleware.md) — the middleware DSL and built-in middleware.
 - [Views & Layouts](./views-and-layouts.md) — authoring the React components that routes render.

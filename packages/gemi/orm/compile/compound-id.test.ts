@@ -19,7 +19,7 @@ import { compileWrite } from "./write";
  *     where: { organizationId: 1, userId: 2 }  ->  needs a unique field
  *
  * It hid because the template's only compound key is `SocialAccount`'s
- * `@@unique([username, provider])` — a different path, and one that was
+ * `@@unique([provider, providerId])` — a different path, and one that was
  * covered.
  */
 
