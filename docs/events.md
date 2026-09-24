@@ -239,6 +239,8 @@ export class UserRegistered extends Event {
 | `true` | no | The listeners run now — there is nothing to wait for. |
 | `true` | yes | The listeners run when that transaction commits, and not at all if it rolls back. |
 
+A **queued** listener on an event without `afterCommit` is pushed at the dispatch, and the queue then treats it as it treats [any dispatch inside a transaction](./jobs-and-queues.md#dispatching-inside-a-transaction): its job is recorded with the commit and dropped by a rollback. So a queued listener never runs before the commit either way. `afterCommit` is what holds back the **sync** ones.
+
 It is a property of the **event**, not of the listener: whether a side effect is allowed to happen before the write is durable is a fact about what happened, and every listener bound to it agrees. Both kinds are deferred together — a sync listener runs after the commit, and a queued one is *pushed* after the commit. Pushing early would be running early, because the queue drains in-process and often starts from the push itself.
 
 The listeners run **outside** the transaction that deferred them. A listener that opens its own transaction gets a real one rather than a savepoint on a handle that has already closed — which matters more than it looks: Bun's transaction handle stays callable after the commit and simply runs on the pool, so the wrong answer here would be silent.
