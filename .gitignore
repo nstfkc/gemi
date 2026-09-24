@@ -54,3 +54,6 @@ Package.resolved
 .gradle
 .kotlin
 local.properties
+
+# Log files a run writes into an app's storage directory
+**/storage/logs/

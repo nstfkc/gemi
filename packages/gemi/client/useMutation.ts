@@ -109,19 +109,42 @@ export function useMutation<
     loading: false,
   });
 
-  const [abortController, setAbortController] = useState(
-    () => new AbortController(),
-  );
+  // A controller per request, held in a ref rather than state. Swapping it
+  // through `setState` only took effect on the next render, so a `cancel()`
+  // and a `trigger()` in one tick reused the signal `cancel()` had just
+  // aborted and the new request never left the ground.
+  const abortController = useRef(new AbortController());
+
+  // Only the newest request may write state. Nothing tied a response to the
+  // request that asked for it, so two submits in flight resolved in whatever
+  // order the network returned them — and a slow first submit's validation
+  // error could land after the corrected second one had already succeeded,
+  // putting the message back and wiping the result.
+  const latestRequest = useRef(0);
 
   const formData = useRef(new FormData());
 
+  // `Partial<Config<T>>` means a caller may name only the callbacks it wants,
+  // and the framework's own `useSignIn`/`useSignOut` name only `onSuccess`.
+  // Taking the config as given left the rest undefined, so a success called
+  // `options.onSuccess(data)` on `undefined` and reported its own `TypeError`
+  // through `onError`.
+  const [inputs = {}, config] = args ?? [];
+  const options: Config<T> = { ...defaultOptions, ...config };
+
   async function trigger(input?: U): Promise<T> {
-    setState({
-      data: state.data,
-      error: state.error,
+    const controller = new AbortController();
+    abortController.current = controller;
+    const requestId = ++latestRequest.current;
+    const isLatest = () => latestRequest.current === requestId;
+
+    // The last response's error is about the last submit. Left in place, a
+    // corrected resubmit shows the old validation message until it returns.
+    setState((prev) => ({
+      data: prev.data,
+      error: null,
       loading: true,
-    });
-    const [inputs = {}, options = defaultOptions] = args ?? [];
+    }));
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
     const search = "search" in inputs ? inputs.search : {};
@@ -150,21 +173,31 @@ export function useMutation<
           ...contentType,
         },
         ...(body ? { body } : {}),
-        signal: abortController.signal,
+        signal: controller.signal,
       });
-
-      formData.current = new FormData();
 
       const data = await response.json();
 
+      // A superseded request has nothing left to say: a newer submit is what
+      // the user is waiting on, and its state is the state on screen.
+      if (!isLatest()) return;
+
+      formData.current = new FormData();
+
       if (!response.ok) {
-        setState({
-          data: null,
+        // `data` is the last result the caller was given, and a rejected
+        // submit did not replace it — the same reason the pending state above
+        // keeps it.
+        setState((prev) => ({
+          data: prev.data,
           error: data.error,
           loading: false,
-        });
+        }));
 
-        options?.onError?.(data);
+        // `data.error` rather than the envelope around it: `onError` is typed
+        // `(error: MutationError) => void`, and the envelope has no `kind` to
+        // branch on.
+        options.onError(data.error);
         return;
       }
 
@@ -179,11 +212,21 @@ export function useMutation<
 
       return data as any;
     } catch (error) {
+      if (!isLatest()) return;
+
       formData.current = new FormData();
-      options?.onError?.(error);
+      // `cancel()` aborts the request, so the fetch rejects here. A cancelled
+      // submit is not a failed one: `onCanceled` has already reported it, and
+      // a DOMException carries no `kind` for `<Form>` to read, so leaving it
+      // in `error` only puts a value there that nothing can act on.
+      if ((error as Error)?.name === "AbortError") {
+        setState((prev) => ({ ...prev, loading: false }));
+        return;
+      }
+      options.onError(error as MutationError);
       setState({
         data: null,
-        error,
+        error: error as MutationError,
         loading: false,
       });
     }
@@ -199,17 +242,11 @@ export function useMutation<
     loading: state.loading,
     formData: formData.current,
     cancel: () => {
-      const [, options = defaultOptions] = args ?? [];
-      abortController.abort();
-      setAbortController(new AbortController());
-      setState({
-        data: state.data,
-        error: state.error,
-        loading: false,
-      });
+      abortController.current.abort();
+      setState((prev) => ({ ...prev, loading: false }));
 
       formData.current = new FormData();
-      options.onCanceled();
+      options.onCanceled?.();
     },
     trigger,
   };
