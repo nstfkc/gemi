@@ -127,6 +127,13 @@ export class AuthenticationError extends RequestBreakerError {
       viewData: {
         status: 200,
         data: {},
+        // A refusal is per-visitor, and this one answers 200 so that
+        // `loadRoutePayload` reads it at all — which makes it exactly the
+        // shape a shared cache would happily store and replay to the next
+        // visitor. The `view` payload below says the same thing.
+        headers: {
+          "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
+        },
         directive: { kind: "Redirect", path: location },
       },
       view: {

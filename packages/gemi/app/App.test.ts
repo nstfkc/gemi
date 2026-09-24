@@ -327,6 +327,18 @@ describe("App fetch()", () => {
       });
     });
 
+    /**
+     * It answers 200 so `loadRoutePayload` reads it at all, which is exactly
+     * the shape a shared cache would store and replay to the next visitor.
+     */
+    test("the .json refusal is not cacheable", async () => {
+      const res = await fetchPage("http://gemi.dev/invoices.json");
+
+      expect(res.headers.get("Cache-Control")).toBe(
+        "private, no-cache, no-store, max-age=0, must-revalidate",
+      );
+    });
+
     test("Auth.user() in a loader redirects the same way", async () => {
       const res = await fetchPage("http://gemi.dev/reports");
 

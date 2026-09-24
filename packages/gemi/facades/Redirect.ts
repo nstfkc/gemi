@@ -58,7 +58,11 @@ export class Redirect {
     };
     const searchParams = new URLSearchParams(search).toString();
     throw new RedirectError(
-      [applyParams(path, params), searchParams.toString()]
+      // `applyParams` strips a trailing slash, so the root collapses to `""`
+      // and `filter(Boolean)` then drops it — an empty `Location`. Reachable
+      // with nothing stranger than `Redirect.to(Auth.intendedUrl())`, which
+      // returns `/` when there is no page to go back to.
+      [applyParams(path, params) || "/", searchParams.toString()]
         .filter(Boolean)
         .join("?"),
       status ?? (permanent ? 301 : 307),
