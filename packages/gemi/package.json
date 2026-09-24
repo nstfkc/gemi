@@ -42,6 +42,7 @@
     "./orm": "./orm/index.ts",
     "./support": "./support/index.ts",
     "./console/run": "./console/run.ts",
+    "./queue/work": "./services/queue/work.ts",
     "./ide/typescript-plugin": "./ide/typescript-plugin/index.ts",
     "./bun/preload": "./bun/preload.ts",
     "./bun/plugin": "./bun/plugin.ts"

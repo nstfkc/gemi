@@ -303,6 +303,12 @@ What changes for every app, whatever the driver:
   `driver: "database"` this is the app's default connection, so the ORM's
   writes wait too. Pass `{ busyTimeout: 0 }` to the driver to keep the old
   behaviour.
+- **Jobs can run in worker processes of their own.** `gemi queue:work`
+  boots the app and claims from the queue without serving HTTP, and
+  `GEMI_QUEUE_CLAIM=off` stops a server claiming, so web and worker
+  replicas scale separately. Both need a driver other processes can reach,
+  such as `"database"`. Nothing changes unless you use them. See
+  [Worker processes](docs/jobs-and-queues.md#worker-processes--gemi-queuework).
 - **Under `gemi dev`, a save hands the database queue to the new code.**
   Before, the loop from before the save kept claiming rows with the old
   code, one more loop per save, until `gemi dev` was restarted. Now the

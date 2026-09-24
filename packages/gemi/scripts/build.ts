@@ -66,6 +66,10 @@ const result = await Bun.build({
     // object. Discovery decides what is a command by walking the prototype
     // chain, so two copies would mean the runner finds nothing.
     "./console/run.ts",
+    // The entry `gemi queue:work` spawns, here for the same reason: so it and
+    // the `gemi/*` the application imports load one copy of gemi's modules,
+    // not two side by side.
+    "./services/queue/work.ts",
   ],
   outdir: "./dist",
   external: [
