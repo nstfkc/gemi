@@ -2045,6 +2045,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
 | `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
 | `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
+| `TransactionDependencyError` | A statement issued on the transaction for you, without your awaiting it, failed — today, a job the database queue driver wrote on it ([Jobs & Queues](./jobs-and-queues.md#dispatching-inside-a-transaction)) — so the transaction rolled back instead of committing. The statement's own error is its `cause`. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
 | `MalformedRelationError` / `MissingModelSchemaError` / `UnregisteredRelationTargetError` | The generated artifact and the registry disagree — the same family as the two above, and the same fix. |
