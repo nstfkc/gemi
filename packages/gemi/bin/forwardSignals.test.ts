@@ -24,6 +24,10 @@ writeFileSync(
       first = false;
     });
   }
+  console.log(
+    "child pgid " +
+      Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(process.pid)]).stdout.toString().trim(),
+  );
   console.log("child ready");
   setInterval(() => {}, 1000);
 `,
@@ -98,12 +102,12 @@ async function run(send: (pid: number) => void, cmd = ["bun", parent]) {
 
   const code = await proc.exited;
   await read;
+  const all = output.trim().split("\n");
   return {
     code,
-    lines: output
-      .trim()
-      .split("\n")
-      .filter((line) => !line.startsWith("[gemi]")),
+    pid: proc.pid,
+    pgid: all.find((line) => line.startsWith("child pgid "))?.slice("child pgid ".length),
+    lines: all.filter((line) => !line.startsWith("[gemi]") && !line.startsWith("child pgid ")),
   };
 }
 
@@ -123,14 +127,18 @@ describe("spawnForwardingSignals", () => {
   });
 
   // The child stays in the parent's group, so a supervisor's group SIGKILL
-  // still reaches it. The cost is that a group signal arrives twice.
-  test("a signal to the whole process group reaches the child directly too", async () => {
-    const { lines } = await run((pid) => process.kill(-pid, "SIGINT"));
+  // still reaches it. The cost is that a group signal arrives twice, directly
+  // and through the relay — but how many of the two the child *sees* is a race
+  // the kernel decides: a second SIGINT raised while the first is still
+  // pending is coalesced into one delivery, since ordinary signals don't
+  // queue. Asserting two arrivals made this fail under load. The group is what
+  // the relay actually promises, so that is what this asserts.
+  test("leaves the child in the parent's process group", async () => {
+    const { pid, pgid, lines } = await run((p) => process.kill(-p, "SIGINT"));
 
-    expect(lines.filter((line) => line.startsWith("child got"))).toEqual([
-      "child got SIGINT",
-      "child got SIGINT",
-    ]);
+    // `run` spawns the parent detached, so the parent's pid is its group's id.
+    expect(pgid).toBe(String(pid));
+    expect(lines).toContain("child got SIGINT");
   });
 
   // Every copy of one Ctrl+C or one systemd stop lands within milliseconds,
