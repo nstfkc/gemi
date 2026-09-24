@@ -34,6 +34,7 @@ import { isPolicyDeniedError } from "../../orm/errors";
 import { QueryError } from "../../client/QueryError";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
+import { DomainRouter } from "./DomainRouter";
 import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
@@ -166,6 +167,16 @@ export function assertNoReservedRoutePaths(routePaths: string[]) {
 }
 
 /** A request breaker's `payload.view` as the page response it stands for. */
+/** What a page learns of its host group — `useDomain()` reads it. */
+function clientDomain(req: HttpRequest) {
+  const resolver = app(DomainRouter).resolver!;
+  return {
+    ...req.domain!,
+    root: resolver.root,
+    origin: resolver.publicOrigin(req.rawRequest),
+  };
+}
+
 export function viewBreakResponse(view: Record<string, any>) {
   const { status = 400, error } = view;
   return new Response(error?.message, {
@@ -426,6 +437,8 @@ export class ViewRouteDispatcher {
           currentPath: pathname,
           searchParams: url.search,
           is404: !currentPathName ? true : false,
+          // Only on the document: a client-side navigation never changes host.
+          domain: req.domain ? clientDomain(req) : null,
         },
         appId,
         // Evaluated key -> value only. Rules, conditions, segment criteria and

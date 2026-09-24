@@ -12,6 +12,7 @@ import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import { Translator } from "../../i18n/Translator";
 import { app } from "../../foundation/app";
 import { markModelOriginated } from "../../http/modelOriginated";
+import { setRequestDomain } from "../../http/requestDomain";
 import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
@@ -579,6 +580,10 @@ export class ApiRouteDispatcher {
 
     const req = new Request(url, { method, headers, body: requestBody });
     markModelOriginated(req, clientIp(initiator));
+    // The tool call acts for the same tenant as the request that started it.
+    if (initiator.domain) {
+      setRequestDomain(req, initiator.domain);
+    }
 
     // Started from outside the initiator's scopes, as the server's `fetch` is.
     // `handleApiRequest` opens a fresh request store of its own, but

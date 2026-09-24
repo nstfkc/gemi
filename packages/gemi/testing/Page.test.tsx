@@ -25,6 +25,7 @@ import { useParams } from "../client/useParams";
 import { useQuery } from "../client/useQuery";
 import { useSearchParams } from "../client/useSearchParams";
 import { useTranslator } from "../client/useTranslator";
+import { useDomain } from "../client/useDomain";
 import { useUser } from "../client/auth/useUser";
 
 /**
@@ -260,6 +261,64 @@ describe("<Page> route state", () => {
 
     expect(screen.getByText("true:false")).toBeDefined();
     warn.mockRestore();
+  });
+
+  test("seeds the host group `useDomain()` reports", () => {
+    function View() {
+      const domain = useDomain();
+      return (
+        <div>
+          {`${domain.host}|${domain.group}|${domain.params.tenant}|${domain.custom}`}
+          <a href={domain.url({ subdomain: "admin" }, "/users")}>admin</a>
+        </div>
+      );
+    }
+
+    render(
+      <Page
+        domain={{
+          host: "acme.example.com",
+          group: ":tenant",
+          params: { tenant: "acme" },
+        }}
+      >
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("acme.example.com|:tenant|acme|false")).toBeDefined();
+    // `root` defaulted to the host minus its first label, so the cross-host
+    // link lands on the right apex without the test spelling it out.
+    expect(screen.getByText("admin").getAttribute("href")).toBe(
+      "https://admin.example.com/users",
+    );
+  });
+
+  test("without a domain, `useDomain()` reads as an app that declares none", () => {
+    function View() {
+      const domain = useDomain();
+      let error = "";
+      try {
+        domain.url({ subdomain: "admin" });
+      } catch (e) {
+        error = (e as Error).message;
+      }
+      return (
+        <div>{`${domain.host}|${domain.group}|${domain.custom}|${error}`}</div>
+      );
+    }
+
+    render(
+      <Page>
+        <View />
+      </Page>,
+    );
+
+    expect(
+      screen.getByText(
+        "null|null|false|`useDomain().url` needs `route.domains` to be configured.",
+      ),
+    ).toBeDefined();
   });
 });
 

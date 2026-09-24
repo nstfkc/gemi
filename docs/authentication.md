@@ -75,6 +75,7 @@ a binding into the container, and a facade resolves it.**
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
+| `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
 | `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |

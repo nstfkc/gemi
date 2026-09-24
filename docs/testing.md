@@ -47,6 +47,7 @@ test("renders the organisation's messages", () => {
 | `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
 | `user` | `null` | `useUser()`. |
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `domain` | `null` | `useDomain()` — the `route.domains` group the page is served under. `{ host }` is the only required field: `group` defaults to the apex, `root` to the host minus its first label, and `origin` to `https://` on that host, so `domain={{ host: "acme.example.com", params: { tenant: "acme" } }}` is usually enough. Left out, `useDomain()` reads empty and `url()` throws, exactly as in an app with no `route.domains`. |
 | `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
 | `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
