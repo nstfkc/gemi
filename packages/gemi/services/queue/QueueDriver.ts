@@ -76,6 +76,21 @@ export interface QueueDriver {
   fail(job: ClaimedJob, failure: JobFailure): Promise<void>;
 
   /**
+   * Ends a claim without counting it: the job becomes claimable again after
+   * `retryInMs`, with `attempt` back where it was before this claim, so the
+   * next claimer gets the attempt this one never made. Like `complete` and
+   * `fail`, a report from a stale claim is ignored.
+   *
+   * The manager releases a job it has no class for, on a driver other
+   * processes share: during a blue/green ramp that is a job only the other
+   * release knows, and a replica running that release should have it. Through
+   * `fail` the refusal would cost the job an attempt each time an old replica
+   * picked it up, and one that the other release gives a single attempt would
+   * be dead-lettered without ever having run.
+   */
+  release(job: ClaimedJob, release: JobRelease): Promise<void>;
+
+  /**
    * Extends the leases of jobs still being run by `visibilityTimeoutMs` from
    * now. Optional: a driver whose leases never expire has nothing to extend.
    */
@@ -101,6 +116,31 @@ export type EnqueueJob = {
 
 export type ClaimOptions = {
   visibilityTimeoutMs: number;
+  /**
+   * The names the claiming process has a class for, from its registry. A
+   * driver that can filter by name hands out a job under any other name only
+   * once it has been claimable for `graceMs` — while it has been waiting for a
+   * shorter time than that, it is left for a process that knows the name.
+   *
+   * This is what keeps a blue/green ramp from losing jobs. Both releases claim
+   * from one table for several minutes, and a job only the new release has
+   * would otherwise be claimed by an old replica, which can do nothing with it.
+   * Past `graceMs` the name is taken to be gone rather than deployed
+   * elsewhere, and the job is handed out so the manager can dead-letter it —
+   * otherwise a job whose class was deleted would wait in storage forever,
+   * with nothing anywhere saying so.
+   *
+   * *Claimable* for a waiting job is from when it became due; for a leased one
+   * whose lease ran out, from when the lease did. `graceMs` of `Infinity`
+   * never hands out an unknown name.
+   *
+   * Optional to honour. A driver that ignores it hands out every name, and the
+   * manager releases what it cannot run until the same grace has passed since
+   * the job was enqueued. The memory driver ignores it on purpose: nothing
+   * else can run its jobs, so an unknown name there is dead-lettered at once,
+   * with the line on stderr that says why.
+   */
+  registered?: { names: readonly string[]; graceMs: number };
 };
 
 export type ClaimedJob = {
@@ -114,6 +154,11 @@ export type ClaimedJob = {
   attempt: number;
   /** When `enqueue` recorded it, in epoch milliseconds. */
   createdAt: number;
+};
+
+export type JobRelease = {
+  /** Milliseconds until the job is claimable again. */
+  retryInMs: number;
 };
 
 export type JobFailure = {

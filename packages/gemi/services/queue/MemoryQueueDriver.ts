@@ -1,4 +1,11 @@
-import type { ClaimOptions, ClaimedJob, EnqueueJob, JobFailure, QueueDriver } from "./QueueDriver";
+import type {
+  ClaimOptions,
+  ClaimedJob,
+  EnqueueJob,
+  JobFailure,
+  JobRelease,
+  QueueDriver,
+} from "./QueueDriver";
 
 type Entry = {
   job: ClaimedJob;
@@ -26,6 +33,11 @@ type Entry = {
  * the shared contract suite run against it unchanged. A lease can only lapse
  * here if the event loop was blocked for longer than the visibility timeout,
  * since the manager heartbeats every job it is running.
+ *
+ * It ignores `registered` in `claim` and hands out every name. Nothing but
+ * this process can run its jobs, so a name this process does not know will
+ * not be known by anyone, and the manager dead-letters it at once with a line
+ * saying so; filtered out, it would wait here unseen until the process exited.
  *
  * One timer at most, for the next moment something becomes claimable, and it
  * is unref'd: a queue with nothing due does not hold the process open, and
@@ -99,6 +111,17 @@ export class MemoryQueueDriver implements QueueDriver {
 
     entry.leased = false;
     entry.until = Date.now() + Math.max(0, failure.retryInMs);
+    entry.seq = this.seq++;
+    this.changed();
+  }
+
+  async release(job: ClaimedJob, release: JobRelease): Promise<void> {
+    const entry = this.current(job);
+    if (!entry) return;
+
+    entry.job = { ...entry.job, attempt: entry.job.attempt - 1 };
+    entry.leased = false;
+    entry.until = Date.now() + Math.max(0, release.retryInMs);
     entry.seq = this.seq++;
     this.changed();
   }
