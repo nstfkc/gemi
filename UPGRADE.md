@@ -227,6 +227,20 @@ What changes for every app, whatever the driver:
   to `pollInterval`. The memory driver was never polled, so apps that use it
   see no difference.
 
+## A shutdown stops the cron schedule and waits for running ticks
+
+The scheduler provider now has a `shutdown()`. When a production server is
+told to stop, it stops the schedule once requests have drained, so no new
+tick starts, and waits for the ticks already running within
+`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`. Before, the schedule kept firing until the
+process exited, and a running tick was cut off halfway through. A tick still
+running at the deadline is named in the log, `Cron jobs still running at
+shutdown: …`. If your cron jobs take longer than 5 seconds, raise the timeout
+to fit the platform's grace period.
+
+`Scheduler` gains `drain(timeoutMs)` and `running`. See
+[Stopping the schedule](docs/cron.md#stopping-the-schedule).
+
 ---
 
 # Upgrading from 0.55 to 0.56

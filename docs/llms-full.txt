@@ -1042,7 +1042,7 @@ In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills t
 1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. A queue whose driver outlives the process (such as `database`) stops claiming new jobs and leaves them to other replicas; the memory queue keeps claiming until step 4, since no other process can run its jobs. Jobs already running carry on.
 2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
 3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
-4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue).
+4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule).
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
 
 The handler is installed before the application boots, so a signal that lands during a slow start-up — a pod replaced two seconds into its connection pool — drains the same way: there is no listener to close and nothing in flight, so it goes straight to the providers' `shutdown()` and exits. Without it the default action would kill the process outright, with nothing closed or flushed.
@@ -10733,6 +10733,18 @@ const jobs = await discoverCronJobs(); // every CronJob subclass under app/cron
 ```
 
 > **Note:** Cron jobs run **in-process** in the server. Every running server instance registers and fires its own schedule, so if you run multiple replicas, a job scheduled `@daily` fires once per replica per day. For work that must run exactly once across a fleet, add your own coordination (e.g. an advisory lock) inside `callback`.
+
+### Stopping the schedule
+
+`app(Scheduler).stop()` stops every schedule, so no new tick starts; a tick already running is left to finish. `drain(timeoutMs)` stops the same way, then waits up to `timeoutMs` for the running ticks and resolves to `{ unfinished }` — each tick still running at the deadline, as `{ name, startedAt }`. Nothing is cancelled. `start()` schedules again. `running` is how many ticks are in progress.
+
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), the schedule keeps running while in-flight requests drain. The scheduler provider's `shutdown()` then stops it — so a tick that falls due from then on does not start — and waits for the running ticks within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). A tick still running at the deadline is abandoned when the process exits, and named in the log:
+
+```
+[gemi] Cron jobs still running at shutdown: NightlyReport (started 2026-09-24T02:00:00.000Z)
+```
+
+An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
 
 ## Cron jobs vs. queued jobs
 
