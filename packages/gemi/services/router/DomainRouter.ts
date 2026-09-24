@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import { DomainResolver, FALLBACK_GROUP, ROOT_GROUP, type ResolvedDomain } from "./DomainResolver";
@@ -10,6 +11,20 @@ import { setRequestDomain } from "../../http/requestDomain";
  * proxy calls it on whatever host it reaches the app by.
  */
 export const DOMAIN_ASK_PATH = "/__gemi__/domains/ask";
+
+/**
+ * Compares in constant time, so the secret cannot be recovered a character at
+ * a time. The length is compared first and leaks, which `timingSafeEqual`
+ * requires and which tells an attacker nothing they can walk.
+ */
+function secretMatches(given: string | null, expected: string): boolean {
+  if (given === null) {
+    return false;
+  }
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export interface DomainDispatchers {
   api: ApiRouteDispatcher;
@@ -78,14 +93,24 @@ export class DomainRouter {
   /**
    * Answers a TLS proxy's on-demand "ask": 200 when `?domain=` names a host
    * the app serves in its own right, 404 otherwise. `null` when `req` is not
-   * an ask, or the app declares no `route.domains`.
+   * an ask, the app declares no `route.domains`, or `route.domains.ask` is
+   * not configured or its secret does not match.
+   *
+   * Falling through on a bad secret rather than answering 401 is deliberate:
+   * the reply to a wrong guess is then whatever the app answers for any
+   * unrouted path, so the endpoint cannot be found by probing for it. The
+   * answer it gives is "is this host a tenant of yours", which is worth
+   * guarding — and each one costs the app an `exists` or `resolve` call.
    */
   async ask(req: Request): Promise<Response | null> {
-    if (!this.resolver || req.method !== "GET") {
+    if (!this.resolver?.askSecret || req.method !== "GET") {
       return null;
     }
     const url = new URL(req.url);
     if (url.pathname !== DOMAIN_ASK_PATH) {
+      return null;
+    }
+    if (!secretMatches(url.searchParams.get("secret"), this.resolver.askSecret)) {
       return null;
     }
     const host = url.searchParams.get("domain");

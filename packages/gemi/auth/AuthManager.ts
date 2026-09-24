@@ -51,10 +51,23 @@ export class AuthManager {
   accessTokenCookieOptions(req: HttpRequest<any, any>, expires: Date): CreateCookieOptions {
     return {
       expires,
-      secure: !new URL(req.rawRequest.url).origin.includes("localhost"),
+      // The scheme the client addressed, not whether the host reads as local.
+      // A browser drops a `Secure` cookie from a plain-http origin, and
+      // `localhost` is the only such origin it makes an exception for — so a
+      // loopback root with subdomains, `acme.lvh.me`, is served over http, is
+      // not `localhost`, and could not sign in.
+      secure: this.publicOrigin(req).startsWith("https://"),
       httpOnly: true,
       domain: this.cookieDomain(req),
     };
+  }
+
+  /** The origin the client addressed, through the proxy in front if there is one. */
+  private publicOrigin(req: HttpRequest<any, any>): string {
+    const resolver = app(DomainRouter).resolver;
+    return resolver
+      ? resolver.publicOrigin(req.rawRequest)
+      : new URL(req.rawRequest.url).origin;
   }
 
   /** `config.cookieDomain` when `req`'s host falls under it, else nothing. */

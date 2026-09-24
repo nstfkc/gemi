@@ -86,6 +86,11 @@ export interface DomainGroupConfig extends DomainGroupRouters {
    * For a param subdomain: whether the value names something that exists. A
    * `false` answers the request with a 404 before any route runs, and keeps the
    * ask endpoint from approving a certificate for it.
+   *
+   * `req` is the request being routed — except on the ask path, where it is
+   * the proxy's own request and says nothing about the host being judged. Read
+   * `params`, not `req`'s host, headers or cookies, or a certificate decision
+   * and a routing decision can disagree.
    */
   exists?: (
     params: Record<string, string>,
@@ -139,6 +144,22 @@ export interface DomainsConfig {
   groups?: DomainGroupConfig[];
 
   custom?: CustomDomainConfig;
+
+  /**
+   * Turns on the on-demand TLS ask endpoint, which a proxy calls to decide
+   * whether to issue a certificate for a host.
+   *
+   * Left out, the path is not served at all — it answers the same 404 as any
+   * other unrouted path. That is the default because the answer is exactly
+   * "is this a tenant of yours", asked without a session: open to the
+   * internet it enumerates tenant slugs and customer domains, and runs an
+   * uncached `exists` or `resolve` per probe.
+   *
+   * `secret` must be at least 16 characters and is compared in constant time.
+   * The proxy passes it as `?secret=`; anything else falls through unanswered,
+   * so the endpoint cannot be probed for.
+   */
+  ask?: { secret: string };
 }
 
 // Config key: `route`. Covers both route dispatchers and the MCP registry.

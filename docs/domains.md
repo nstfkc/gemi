@@ -52,7 +52,7 @@ export default defineRouteConfig({
 | Field | Type | Purpose |
 | --- | --- | --- |
 | `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
-| `trustProxy` | `boolean` (default `false`) | Read the host from `X-Forwarded-Host`, and the protocol from `X-Forwarded-Proto`. Only set it behind a proxy that overwrites those headers. Otherwise a client can pick its own host. |
+| `trustProxy` | `boolean` (default `false`) | Read the host from `X-Forwarded-Host`. Only set it behind a proxy that overwrites the header, or a client picks its own host. The **scheme** is read from `X-Forwarded-Proto` either way, so a cross-host link on a page served through a TLS-terminating proxy comes out `https://` without this. |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
@@ -60,8 +60,12 @@ export default defineRouteConfig({
 | `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
 | `custom.cacheTtlMs` | `number` (default `60000`) | How long a `resolve` answer is reused. Both hits and misses are cached. `0` disables the cache. |
 | `custom.fallback` | `{ api?, view? }` | Serves every host `resolve` returned `null` for, instead of a `404`. |
+| `ask` | `{ secret: string }` | Turns on the on-demand TLS endpoint below. Left out, that path is not served at all. |
 
-A malformed config fails the boot. That covers an empty root, a subdomain declared twice, two param subdomains, and a `custom.group` that names no group.
+A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
+path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
+that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, and `ask` on an app whose
+param group has no `exists`.
 
 ## How a host is matched
 
@@ -143,16 +147,35 @@ export default defineAuthConfig({
 
 The cookie is scoped to the domain only on a request whose host is that domain or one of its subdomains. A browser refuses a cookie for another site's domain, so a **custom domain keeps its own session**, and users sign in on that host. Signing out clears both the shared cookie and any host-only cookie set before `cookieDomain` was turned on.
 
+Worth knowing before turning it on: a browser sends a cookie scoped to `example.com` to **every** host under it, including ones the app does not serve. If `status.example.com`, `blog.example.com` or `docs.example.com` are hosted by someone else, they receive `access_token` on every request. Put third-party subdomains on a separate domain, or scope the cookie to a hostname rather than `"root"`.
+
+The cookie is marked `Secure` when the request came in over `https` — through `X-Forwarded-Proto` if a proxy terminated TLS. Browsers drop a `Secure` cookie from a plain-http origin, so signing in over http works only on `localhost` and on the loopback roots below.
+
 ## On-demand TLS for custom domains
 
 `GET /__gemi__/domains/ask?domain=<host>` answers `200` when the app serves that host in its own right, and `404` otherwise. "In its own right" means the host is the root, a declared subdomain, a param subdomain that passes `exists`, or a custom domain that `custom.resolve` accepts. A host only the fallback would serve gets a `404`, so the endpoint never approves certificates for arbitrary hosts.
+
+**It is off until you configure it, and it needs a secret.** The question it answers is "is this host a tenant of yours", asked with no session, and each one costs your app an `exists` or `resolve` call. Served openly it enumerates your tenant slugs and tells anyone which companies are your customers.
+
+```ts
+domains: {
+  root: "example.com",
+  groups: [{ subdomain: ":tenant", exists: async ({ tenant }) => …  }],
+  custom: { group: ":tenant", resolve: async (host) => … },
+  ask: { secret: process.env.GEMI_DOMAIN_ASK_SECRET! },
+}
+```
+
+The proxy passes the secret as `?secret=`. It is compared in constant time, and anything else — a wrong secret, no secret, or `ask` left out — falls through to ordinary routing, so the path answers exactly what any other unrouted path does and cannot be found by probing for it.
+
+`ask` requires the param group to have an `exists`. Without one every label under the root matches, so the endpoint would approve a certificate for every name anyone connects with, and a scripted walk would spend the certificate authority's rate limit for your whole domain — after which no real tenant can get one either.
 
 The endpoint is answered before host matching, so the proxy can call it on any host, `localhost` included. It does run after global middleware. With Caddy:
 
 ```
 {
   on_demand_tls {
-    ask http://localhost:5173/__gemi__/domains/ask
+    ask http://localhost:5173/__gemi__/domains/ask?secret={env.GEMI_DOMAIN_ASK_SECRET}
   }
 }
 
@@ -164,13 +187,17 @@ https:// {
 }
 ```
 
-Caddy keeps the original `Host` when it proxies, so `trustProxy` is not needed here. Set `trustProxy` behind a proxy that rewrites `Host` and sends `X-Forwarded-Host` instead.
+Caddy appends `&domain=<host>` to whatever URL you give it, so the secret goes in the configured URL. Caddy also keeps the original `Host` when it proxies, so `trustProxy` is not needed here — set it behind a proxy that rewrites `Host` and sends `X-Forwarded-Host` instead.
+
+A host served only by `custom.fallback` is never approved, by design. Under on-demand TLS that means the fallback is reachable only over plaintext or with a certificate you already hold.
+
+`custom.resolve` answers are cached for `cacheTtlMs`, and the cache evicts least-recently-used, so a burst of unknown hosts cannot flush your real customers out of it. Concurrent requests for the same cold host share one `resolve` call. `DomainResolver.forget(host)` drops one answer early — call it when a customer changes their domain, rather than waiting out the TTL.
 
 ## Development
 
 `*.localhost` resolves to the loopback address in Chrome and Firefox, so with `root: "localhost"`, `acme.localhost:5173` and `admin.localhost:5173` work with no setup. For a custom domain, add an `/etc/hosts` entry (`127.0.0.1 app.acme.test`). The dev server lets the root, its subdomains and, when `custom` is set, any host through Vite's host check.
 
-Browsers differ on accepting a cookie scoped to `localhost` itself. To test a shared session across subdomains, use a root that resolves to loopback with its subdomains, such as `lvh.me`.
+Browsers differ on accepting a cookie scoped to `localhost` itself. To test a shared session across subdomains, use a root that resolves to loopback with its subdomains, such as `lvh.me`. That works over plain http because the session cookie is marked `Secure` by the request's scheme, not by whether the host is named `localhost`.
 
 ## Limits
 

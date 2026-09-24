@@ -150,19 +150,57 @@ describe("DomainResolver.allows", () => {
 });
 
 describe("DomainResolver.publicOrigin", () => {
-  test("is the request's own origin unless the proxy is trusted", () => {
+  test("takes the host from the proxy only when it is trusted", () => {
     const forwarded = req("http://127.0.0.1:5173/", {
       "x-forwarded-host": "acme.example.com",
       "x-forwarded-proto": "https",
     });
-    expect(resolver().publicOrigin(forwarded)).toBe("http://127.0.0.1:5173");
+    expect(resolver().publicOrigin(forwarded)).toBe("https://127.0.0.1:5173");
     expect(resolver({ trustProxy: true }).publicOrigin(forwarded)).toBe("https://acme.example.com");
+  });
+
+  // TLS is nearly always terminated by a proxy that reaches the app over plain
+  // http, and a forged scheme only spoils the forger's own links — so unlike
+  // the host, the scheme is read whether or not the proxy is trusted.
+  test("takes the scheme from the proxy either way", () => {
+    const behindTls = req("http://127.0.0.1:5173/", { "x-forwarded-proto": "https" });
+    expect(resolver().publicOrigin(behindTls)).toBe("https://127.0.0.1:5173");
+    expect(resolver({ trustProxy: true }).publicOrigin(behindTls)).toBe("https://127.0.0.1:5173");
+  });
+
+  test("keeps anything but http and https out of the scheme", () => {
+    const hostile = req("http://127.0.0.1:5173/", { "x-forwarded-proto": "javascript" });
+    expect(resolver().publicOrigin(hostile)).toBe("http://127.0.0.1:5173");
+  });
+
+  // The header is attacker-supplied text, and it is spliced into an origin that
+  // every cross-host link on the response is built from.
+  test("strips userinfo from a trusted proxy's host, and keeps the port", () => {
+    const trusted = resolver({ trustProxy: true });
+    expect(
+      trusted.publicOrigin(
+        req("http://127.0.0.1:5173/", { "x-forwarded-host": "acme.example.com:8443" }),
+      ),
+    ).toBe("http://acme.example.com:8443");
+    expect(
+      trusted.publicOrigin(
+        req("http://127.0.0.1:5173/", { "x-forwarded-host": "user:pass@acme.example.com" }),
+      ),
+    ).toBe("http://acme.example.com");
+  });
+
+  test("falls back to the request's host when the forwarded one is unparseable", () => {
+    expect(
+      resolver({ trustProxy: true }).publicOrigin(
+        req("http://127.0.0.1:5173/", { "x-forwarded-host": "]" }),
+      ),
+    ).toBe("http://127.0.0.1:5173");
   });
 });
 
 describe("assertValidDomainsConfig", () => {
   const cases: Array<[string, DomainsConfig, RegExp]> = [
-    ["an empty root", { root: "" }, /must be a hostname/],
+    ["an empty root", { root: "" }, /must be a bare hostname/],
     [
       "a subdomain declared twice",
       { root: "example.com", groups: [{ subdomain: "admin" }, { subdomain: "admin" }] },
@@ -193,6 +231,33 @@ describe("assertValidDomainsConfig", () => {
       { root: "example.com", custom: { group: ":tenant", resolve: () => null } },
       /no group declares/,
     ],
+    // A root `normalizeHost` parses but that matches nothing: both of these
+    // booted cleanly and then answered "Unknown host" to every request.
+    ["a root with a scheme", { root: "https://example.com" }, /must be a bare hostname/],
+    ["a root with a leading dot", { root: ".example.com" }, /must be a bare hostname/],
+    ["a root with an underscore", { root: "ex_ample.com" }, /must be a bare hostname/],
+    ["a root with a port", { root: "example.com:8080" }, /must be a bare hostname/],
+    [
+      "a negative cache TTL",
+      { root: "example.com", custom: { group: "", resolve: () => null, cacheTtlMs: -1 } },
+      /cannot be negative/,
+    ],
+    [
+      "a guessable ask secret",
+      { root: "example.com", ask: { secret: "short" } },
+      /at least 16 characters/,
+    ],
+    // With `ask` on and no `exists`, every label under the root is approved for
+    // a certificate, which spends the CA's rate limit for the whole domain.
+    [
+      "`ask` with a param group that cannot say which tenants are real",
+      {
+        root: "example.com",
+        groups: [{ subdomain: ":tenant" }],
+        ask: { secret: "ask-secret-long-enough" },
+      },
+      /needs an `exists`/,
+    ],
   ];
 
   for (const [name, config, message] of cases) {
@@ -200,4 +265,128 @@ describe("assertValidDomainsConfig", () => {
       expect(() => assertValidDomainsConfig(config)).toThrow(message);
     });
   }
+
+  test("accepts `ask` once the param group has an `exists`", () => {
+    expect(() =>
+      assertValidDomainsConfig({
+        root: "example.com",
+        groups: [{ subdomain: ":tenant", exists: () => true }],
+        ask: { secret: "ask-secret-long-enough" },
+      }),
+    ).not.toThrow();
+  });
+
+  test("accepts a root with several labels and a digit", () => {
+    expect(() => assertValidDomainsConfig({ root: "app.gemi-2.example.com" })).not.toThrow();
+  });
+});
+
+describe("DomainResolver custom-domain cache", () => {
+  const withResolve = (
+    resolve: (
+      host: string,
+    ) => Record<string, string> | null | Promise<Record<string, string> | null>,
+    cacheTtlMs?: number,
+  ) =>
+    new DomainResolver({
+      root: "example.com",
+      groups: [{ subdomain: ":tenant" }],
+      custom: { group: ":tenant", resolve, cacheTtlMs },
+    });
+
+  const hit = (r: DomainResolver, host: string) => r.resolve(req(`http://${host}/`));
+
+  test("reuses an answer until the TTL runs out, then asks again", async () => {
+    vi.useFakeTimers();
+    try {
+      const resolve = vi.fn(() => ({ tenant: "acme" }));
+      const r = withResolve(resolve, 60_000);
+
+      await hit(r, "app.acme.com");
+      await hit(r, "app.acme.com");
+      expect(resolve).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(59_000);
+      await hit(r, "app.acme.com");
+      expect(resolve).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(2_000);
+      await hit(r, "app.acme.com");
+      expect(resolve).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A burst of unknown hosts used to evict every real customer, because the
+  // eviction went by insertion rather than by use.
+  test("evicts the least recently used, not the oldest", async () => {
+    const resolve = vi.fn((host: string) => ({ tenant: host }));
+    const r = withResolve(resolve);
+
+    await hit(r, "first.example.org");
+    await hit(r, "second.example.org");
+    // Touch the older one, so of the two it is the least recently *inserted*
+    // and the most recently *used* — the case the two policies disagree on.
+    await hit(r, "first.example.org");
+    expect(resolve).toHaveBeenCalledTimes(2);
+
+    // Enough to overflow the 10 000-entry cache by exactly one, so exactly one
+    // of the pair above is evicted and which one is the whole question.
+    for (let i = 0; i < 9_999; i++) await hit(r, `flood${i}.example.org`);
+    const evictions = resolve.mock.calls.length;
+
+    await hit(r, "first.example.org");
+    expect(resolve).toHaveBeenCalledTimes(evictions);
+    await hit(r, "second.example.org");
+    expect(resolve).toHaveBeenCalledTimes(evictions + 1);
+  });
+
+  test("a cold host that many requests arrive for at once is resolved once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const resolve = vi.fn(async () => {
+      await gate;
+      return { tenant: "acme" };
+    });
+    const r = withResolve(resolve);
+
+    const all = Promise.all(Array.from({ length: 100 }, () => hit(r, "app.acme.com")));
+    release();
+    const results = await all;
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(results.every((d) => d?.params.tenant === "acme")).toBe(true);
+  });
+
+  test("a resolver that throws caches nothing and is retried", async () => {
+    const resolve = vi.fn(() => {
+      throw new Error("database is down");
+    });
+    const r = withResolve(resolve);
+
+    await expect(hit(r, "app.acme.com")).rejects.toThrow("database is down");
+    await expect(hit(r, "app.acme.com")).rejects.toThrow("database is down");
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  test("forget() drops one host, or every host, and normalizes what it is given", async () => {
+    const resolve = vi.fn(() => ({ tenant: "acme" }));
+    const r = withResolve(resolve);
+
+    await hit(r, "app.acme.com");
+    await hit(r, "other.example.org");
+    expect(resolve).toHaveBeenCalledTimes(2);
+
+    // Mixed case and a port, as a caller would have it from a database row.
+    r.forget("APP.acme.com:443");
+    await hit(r, "app.acme.com");
+    await hit(r, "other.example.org");
+    expect(resolve).toHaveBeenCalledTimes(3);
+
+    r.forget();
+    await hit(r, "app.acme.com");
+    await hit(r, "other.example.org");
+    expect(resolve).toHaveBeenCalledTimes(5);
+  });
 });

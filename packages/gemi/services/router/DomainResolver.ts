@@ -20,6 +20,7 @@ export interface ResolvedDomain {
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const MAX_CACHE_ENTRIES = 10_000;
 const LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+const MIN_ASK_SECRET_LENGTH = 16;
 
 function isParamSubdomain(subdomain: string) {
   return subdomain.startsWith(":");
@@ -37,6 +38,19 @@ export function normalizeHost(host: string | null | undefined): string | null {
   }
 }
 
+/** The same, keeping the port — for rebuilding an origin. `null` if unparseable. */
+function hostAndPort(host: string): string | null {
+  try {
+    const url = new URL(`http://${host.trim()}`);
+    // `url.host` keeps userinfo out; the hostname is re-read to drop a trailing
+    // dot the way `normalizeHost` does.
+    const name = url.hostname.toLowerCase().replace(/\.$/, "");
+    return name ? (url.port ? `${name}:${url.port}` : name) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fails the boot on a `domains` config that could never route the way it
  * reads: an empty root, a subdomain declared twice, a malformed label, two
@@ -45,11 +59,30 @@ export function normalizeHost(host: string | null | undefined): string | null {
  */
 export function assertValidDomainsConfig(config: DomainsConfig) {
   const root = normalizeHost(config.root);
-  if (!root) {
-    throw new Error('`route.domains.root` must be a hostname, e.g. "example.com".');
+  // `normalizeHost` alone accepts far more than a hostname, and every one of
+  // these booted cleanly and then matched no request at all:
+  // `https://example.com` parses down to the host `https` — a valid label, so
+  // checking the labels is not enough — while `.example.com` keeps its empty
+  // first label, and `example.com:8080` quietly loses the port it was given.
+  // So the labels have to be valid *and* nothing may have been dropped.
+  const asGiven = config.root?.trim().toLowerCase().replace(/\.$/, "");
+  if (!root || root !== asGiven || !root.split(".").every((label) => LABEL.test(label))) {
+    throw new Error(
+      `\`route.domains.root\` must be a bare hostname, e.g. "example.com" — no scheme, port or path. Got "${config.root}".`,
+    );
+  }
+  if (config.custom && (config.custom.cacheTtlMs ?? 0) < 0) {
+    throw new Error(
+      `\`route.domains.custom.cacheTtlMs\` is ${config.custom.cacheTtlMs}; it cannot be negative. Use 0 to disable the cache.`,
+    );
+  }
+  if (config.ask && config.ask.secret.length < MIN_ASK_SECRET_LENGTH) {
+    throw new Error(
+      `\`route.domains.ask.secret\` must be at least ${MIN_ASK_SECRET_LENGTH} characters. A guessable one is worse than leaving \`ask\` out.`,
+    );
   }
   const seen = new Set<string>();
-  let paramGroup: string | null = null;
+  let paramGroup: DomainGroupConfig | null = null;
   for (const group of config.groups ?? []) {
     const { subdomain } = group;
     if (seen.has(subdomain)) {
@@ -64,10 +97,10 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
       }
       if (paramGroup) {
         throw new Error(
-          `\`route.domains\` declares two param subdomains, "${paramGroup}" and "${subdomain}"; a host could match either.`,
+          `\`route.domains\` declares two param subdomains, "${paramGroup.subdomain}" and "${subdomain}"; a host could match either.`,
         );
       }
-      paramGroup = subdomain;
+      paramGroup = group;
       continue;
     }
     if (group.exists) {
@@ -82,6 +115,15 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
   if (config.custom && !seen.has(config.custom.group)) {
     throw new Error(
       `\`route.domains.custom.group\` is "${config.custom.group}", but no group declares that subdomain.`,
+    );
+  }
+  // Without `exists` the param group matches every label, so the ask endpoint
+  // would approve a certificate for every name anyone connects with, and a
+  // scripted walk would spend the certificate authority's rate limit for the
+  // whole registered domain — after which no real tenant can get one either.
+  if (config.ask && paramGroup && !paramGroup.exists) {
+    throw new Error(
+      `\`route.domains.ask\` is set, so "${paramGroup.subdomain}" needs an \`exists\` to say which tenants are real. Without one every host under the root would be approved for a certificate.`,
     );
   }
 }
@@ -102,6 +144,10 @@ export class DomainResolver {
     string,
     { value: Record<string, string> | null; expiresAt: number }
   >();
+  /** In-progress `custom.resolve` calls, so concurrent misses share one. */
+  private readonly inFlight = new Map<string, Promise<Record<string, string> | null>>();
+  /** The `ask` secret, or `null` when the endpoint is not served. */
+  readonly askSecret: string | null;
 
   constructor(config: DomainsConfig) {
     assertValidDomainsConfig(config);
@@ -116,6 +162,7 @@ export class DomainResolver {
     }
     this.custom = config.custom ?? null;
     this.cacheTtlMs = this.custom?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    this.askSecret = config.ask?.secret ?? null;
   }
 
   /** The hostname the request is addressed to, honouring `trustProxy`. */
@@ -133,15 +180,34 @@ export class DomainResolver {
   /**
    * The origin the client addressed, port included — behind a trusted proxy,
    * the forwarded one rather than the one the proxy reached the app on.
+   *
+   * The scheme follows `X-Forwarded-Proto` whether or not `trustProxy` is set,
+   * and the host only when it is. They are gated differently because the
+   * hazards are: a forged host sends a link to somewhere the attacker chose,
+   * while a forged scheme only spoils the attacker's own links. TLS is almost
+   * always terminated by a proxy that reaches the app over plain http, so
+   * reading the scheme is what keeps a cross-host URL from coming out `http://`
+   * on an `https://` page.
    */
   publicOrigin(req: Request): string {
     const url = new URL(req.url);
+    const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+    // An allowlist, not the header's text: it is spliced into an origin, and
+    // `javascript` there would build a URL that is typed absolute but that
+    // nothing treats as one.
+    const proto =
+      forwardedProto === "http" || forwardedProto === "https"
+        ? forwardedProto
+        : url.protocol.replace(/:$/, "");
     if (!this.trustProxy) {
-      return url.origin;
+      return `${proto}://${url.host}`;
     }
-    const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
-    const host = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-    return `${proto || url.protocol.replace(/:$/, "")}://${host || url.host}`;
+    // Through `normalizeHost` so userinfo, whitespace and an unparseable header
+    // cannot ride into the origin — and back through `URL` so the port
+    // survives, which `normalizeHost` drops.
+    const forwardedHost = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    const host = forwardedHost && normalizeHost(forwardedHost) ? hostAndPort(forwardedHost) : null;
+    return `${proto}://${host ?? url.host}`;
   }
 
   /** The group serving `req`, or `null` when no group, and no fallback, serves its host. */
@@ -204,16 +270,37 @@ export class DomainResolver {
     const now = Date.now();
     const cached = this.cache.get(host);
     if (cached && cached.expiresAt > now) {
+      // Re-insert to move it to the end: a Map iterates in insertion order, so
+      // this is what makes the eviction below least-recently-*used* rather than
+      // oldest-inserted. Without it a burst of unknown hosts evicts every real
+      // customer, however often they are asked for.
+      this.cache.delete(host);
+      this.cache.set(host, cached);
       return cached.value;
     }
-    const value = (await this.custom!.resolve(host)) ?? null;
+    // One call per host at a time. A cold host that a hundred requests arrive
+    // for at once is one `resolve`, not a hundred — the difference between a
+    // cache miss and a stampede against the database behind it.
+    const inFlight = this.inFlight.get(host);
+    if (inFlight) {
+      return inFlight;
+    }
+    const pending = (async () => (await this.custom!.resolve(host)) ?? null)();
+    this.inFlight.set(host, pending);
+    let value: Record<string, string> | null;
+    try {
+      value = await pending;
+    } finally {
+      // Before the `set` below, so a throw leaves nothing cached and nothing
+      // stuck: the next request retries.
+      this.inFlight.delete(host);
+    }
     if (this.cacheTtlMs > 0) {
       if (this.cache.size >= MAX_CACHE_ENTRIES) {
-        // Oldest insertion first — a Map iterates in insertion order.
         this.cache.delete(this.cache.keys().next().value!);
       }
       this.cache.delete(host);
-      this.cache.set(host, { value, expiresAt: now + this.cacheTtlMs });
+      this.cache.set(host, { value, expiresAt: Date.now() + this.cacheTtlMs });
     }
     return value;
   }
