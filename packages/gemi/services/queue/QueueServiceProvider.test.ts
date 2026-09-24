@@ -24,6 +24,7 @@ const env = { ...process.env };
 afterEach(() => {
   vi.restoreAllMocks();
   resetShuttingDown();
+  globalThis.__gemiDevQueue = undefined;
   process.env.NODE_ENV = env.NODE_ENV;
   process.env.ROOT_DIR = env.ROOT_DIR;
   if (env.ROOT_DIR === undefined) delete process.env.ROOT_DIR;
@@ -240,6 +241,113 @@ describe("claiming at boot", () => {
     startClaimingIfServing(application);
 
     expect(application.resolved(QueueManager)).toBe(false);
+  });
+});
+
+describe("a gemi dev reload", () => {
+  /**
+   * One application as `bun --hot` boots it after a save: its own job class,
+   * standing for the code as it was then, over the storage every reload
+   * shares — the table, which `kept` plays here.
+   */
+  async function generation(kept: MemoryQueueDriver, code: string, ran: string[]) {
+    class Report extends Job {
+      static name = "Report";
+      run() {
+        ran.push(code);
+      }
+    }
+    const application = await makeApp({ jobs: [Report], driver: () => bind(kept) });
+    return { application, Report, queue: () => application.make(QueueManager) };
+  }
+
+  function developing() {
+    process.env.NODE_ENV = "development";
+    process.env.ROOT_DIR = "/srv/app";
+  }
+
+  test("stops the loop the previous application started, and runs later jobs on the new code", async () => {
+    developing();
+    const kept = new MemoryQueueDriver();
+    const ran: string[] = [];
+    const before = await generation(kept, "before the save", ran);
+    await before.queue().push(before.Report, "[]");
+    await vi.waitFor(() => expect(ran).toEqual(["before the save"]));
+
+    const after = await generation(kept, "after the save", ran);
+    startClaimingIfServing(after.application);
+
+    // A row another process wrote, or a retry coming due: nobody here
+    // dispatched it, so only a loop already running can claim it.
+    await kept.enqueue({ name: "Report", args: "[]" });
+    await vi.waitFor(() => expect(ran).toHaveLength(2));
+    await sleep(20);
+
+    expect(ran).toEqual(["before the save", "after the save"]);
+    expect(globalThis.__gemiDevQueue).toBe(after.queue());
+    await after.queue().stop();
+  });
+
+  test("starts nothing when no loop was running, as development never claims at boot", async () => {
+    developing();
+    const kept = new MemoryQueueDriver();
+    const { application } = await generation(kept, "after the save", []);
+
+    startClaimingIfServing(application);
+
+    expect(application.resolved(QueueManager)).toBe(false);
+  });
+
+  test("a second boot of one application leaves its own loop running", async () => {
+    developing();
+    const ran: string[] = [];
+    const kept = new MemoryQueueDriver();
+    const only = await generation(kept, "only", ran);
+    await only.queue().push(only.Report, "[]");
+
+    startClaimingIfServing(only.application);
+    await kept.enqueue({ name: "Report", args: "[]" });
+
+    await vi.waitFor(() => expect(ran).toEqual(["only", "only"]));
+    await only.queue().stop();
+  });
+
+  test("an application without the queue provider stops the stale loop and resolves nothing", async () => {
+    developing();
+    const ran: string[] = [];
+    const kept = new MemoryQueueDriver();
+    const before = await generation(kept, "before the save", ran);
+    await before.queue().push(before.Report, "[]");
+    await vi.waitFor(() => expect(ran).toHaveLength(1));
+
+    const bare = new Application(new Repository({}));
+    await bare.boot();
+    expect(() => startClaimingIfServing(bare)).not.toThrow();
+
+    await kept.enqueue({ name: "Report", args: "[]" });
+    await sleep(20);
+    expect(ran).toHaveLength(1);
+    expect(globalThis.__gemiDevQueue).toBeUndefined();
+  });
+
+  test("a memory queue is left running, because nothing else can run what it holds", async () => {
+    developing();
+    const ran: string[] = [];
+    class Report extends Job {
+      static name = "Report";
+      run() {
+        ran.push("before the save");
+      }
+    }
+    const before = await makeApp({ jobs: [Report] });
+    const queue = before.make(QueueManager);
+    await queue.push(Report, "[]");
+
+    startClaimingIfServing(await makeApp({ jobs: [] }));
+    await queue.push(Report, "[]");
+
+    await vi.waitFor(() => expect(ran).toHaveLength(2));
+    await queue.stop();
   });
 });
 

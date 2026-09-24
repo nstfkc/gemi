@@ -118,15 +118,51 @@ export class QueueServiceProvider extends ServiceProvider {
  * command or a migration, which boot the same providers and would claim jobs
  * only to exit under them — `ROOT_DIR` is set by `Server.start()` alone. Not
  * a `worker` job's thread, which clones the application. And not development,
- * where `bun --hot` boots a fresh application on every save and each one's
- * loop would keep polling with the code it was loaded with.
+ * where `bun --hot` boots a fresh application on every save: there the queue
+ * starts at the first dispatch, and a reload hands a running loop over — see
+ * `takeOverDevQueue`.
  */
 export function startClaimingIfServing(application: Application) {
+  if (process.env.NODE_ENV !== "production") return takeOverDevQueue(application);
   const slice = application.config.get<QueueConfig>("queue", {});
   const driver = slice.driver ?? "memory";
   if (driver === "memory" || driver instanceof MemoryQueueDriver) return;
-  if (process.env.NODE_ENV !== "production") return;
   if (!claimsInThisProcess()) return;
   if (!application.bound(QueueManager)) return;
   application.make(QueueManager).start();
+}
+
+/**
+ * Under `gemi dev`, stops the loop the previous application started over a
+ * shared driver, and starts this application's in its place.
+ *
+ * A `bun --hot` reload boots a new application in the same process, and the
+ * old application's loop — started lazily by a dispatch — is a live closure
+ * that nothing stopped. Over the database driver it went on claiming rows
+ * from the table and running them with the code from before the save, and
+ * after a few saves several generations of it were doing so side by side.
+ *
+ * Stopped rather than drained: `stop()` claims nothing more and returns, and
+ * a job the old loop is running finishes on its old code and reports as
+ * usual, where waiting for it would hold up the reload behind a job. Its row
+ * stays claimed until then, so the new loop cannot take it twice.
+ *
+ * The new loop is started only when an old one was running, which keeps the
+ * rule that development claims nothing until something is dispatched, while
+ * a job waiting out a retry when the file was saved still gets its retry —
+ * on the new code, which is the point of the reload. A memory queue is never
+ * recorded, so it is never handed over: only its own application feeds it,
+ * and stopping it would drop whatever was still waiting there.
+ *
+ * Runs from every boot. `waitForBoot` twice on one application stops its own
+ * loop and starts it again at once, which changes nothing. The `bound` guard
+ * is for an application built without the queue provider, which still stops
+ * the stale loop.
+ */
+function takeOverDevQueue(application: Application) {
+  const previous = globalThis.__gemiDevQueue;
+  if (!previous) return;
+  globalThis.__gemiDevQueue = undefined;
+  void previous.stop();
+  if (application.bound(QueueManager)) application.make(QueueManager).start();
 }
