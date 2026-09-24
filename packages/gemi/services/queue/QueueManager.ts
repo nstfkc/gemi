@@ -4,6 +4,7 @@ import { isMainThread } from "node:worker_threads";
 import type { Application } from "../../foundation/Application";
 import { DatabaseManager } from "../../database/DatabaseManager";
 import { kernelContext } from "../../kernel/context";
+import { deferUntilCommit } from "../../orm/context";
 import { isShuttingDown } from "../../server/shutdown";
 import { DatabaseQueueDriver } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
@@ -292,6 +293,15 @@ export class QueueManager {
    * case the job waits in the driver for whichever process claims next. With
    * the memory driver that is nobody; see `drain`. A durable driver's job also
    * waits there when this process is not a server.
+   *
+   * Inside an open ORM transaction the job belongs to the transaction. A
+   * driver that can write it on the transaction does (`joinsTransaction`);
+   * for any other, it is held and recorded once the transaction commits, and
+   * never if it rolls back. Either way no claimer can see the job before the
+   * data it was dispatched about exists. A held dispatch resolves at once, to
+   * the id the job will be recorded under: the transaction does not commit
+   * until its callback returns, so a caller awaiting a promise that waited for
+   * the commit would never return.
    */
   push(
     job: new () => Job,
@@ -302,12 +312,65 @@ export class QueueManager {
        * On by default, because the usual caller is a fire-and-forget
        * `Job.dispatch(...)` whose promise nobody reads. A caller with
        * something better to say — `EventManager`, which knows the event and
-       * the listener — turns it off and says that instead.
+       * the listener — turns it off and says that instead. A held dispatch is
+       * reported here whatever this says, because its promise has already
+       * resolved and the caller has nothing left to catch.
        */
       reportFailure?: boolean;
     } = {},
   ): Promise<string> {
-    const id = this.driver.enqueue({ name: job.name, args });
+    // Asked before anything is written, and in the caller's async context,
+    // which is where the transaction is. The held branch is the fallback
+    // rather than the rule because it loses the job to a crash between the
+    // commit and the enqueue; written on the transaction, the job commits
+    // with the rows or not at all.
+    const joins = this.driver.joinsTransaction?.() === true;
+    if (!joins) {
+      // `deferUntilCommit` is the ORM's commit hook, and the same one an
+      // `afterCommit` event waits on: a savepoint that rolls back takes its
+      // held dispatches with it, and the callback runs outside the
+      // transaction, so the enqueue cannot be pulled back into it.
+      const id = Bun.randomUUIDv7();
+      const held = deferUntilCommit(() =>
+        // Awaited, so the transaction's own promise waits for the enqueue and
+        // a script that exits after its last transaction does not exit under
+        // it. The rejection is swallowed only because `record` has already
+        // reported it; rethrown, the drain would report it a second time.
+        this.record(job, args, {
+          id,
+          reportFailure: true,
+          committed: true,
+        }).then(
+          () => {},
+          () => {},
+        ),
+      );
+      if (held) return Promise.resolve(id);
+    }
+    return this.record(job, args, {
+      reportFailure: options.reportFailure,
+      joins,
+    });
+  }
+
+  /** `push`, once it is known that the job is recorded now. */
+  private record(
+    job: new () => Job,
+    args: string,
+    options: {
+      id?: string;
+      reportFailure?: boolean;
+      /** Written on the caller's open transaction; see `push`. */
+      joins?: boolean;
+      /** Held until a transaction committed; changes only the error line. */
+      committed?: boolean;
+    },
+  ): Promise<string> {
+    const id = this.driver.enqueue({
+      name: job.name,
+      args,
+      ...(options.id === undefined ? {} : { id: options.id }),
+    });
     // A driver that outlives the process is shared with every other one, so
     // a script or console command that dispatches would otherwise claim up to
     // `concurrency` of the table's jobs — other replicas' included — and exit
@@ -321,6 +384,16 @@ export class QueueManager {
     // dispatched here would wait up to `pollInterval` in a queue with room.
     // A spurious wake just claims nothing.
     //
+    // A job written on the caller's transaction is not claimable until that
+    // commits, so its wake waits for the commit too — woken now, the loop
+    // would claim nothing and then sleep a whole `pollInterval` past it.
+    // Registered here, synchronously, because the commit hook is found
+    // through the caller's async context, and this is the one place that is
+    // certainly still current.
+    const wake = () =>
+      !this.driver.subscribe && this.state === "running" && this.wake();
+    const wakeAtCommit = options.joins === true && deferUntilCommit(wake);
+
     // The rejection is reported here unless the caller says it will do it
     // itself, and whatever the driver is. It used to depend on both, and was
     // lost either way: a polled driver got an empty rejection arm, which marks
@@ -332,12 +405,16 @@ export class QueueManager {
     // rejection. A caller that awaits still gets the rejection either way and
     // can still decide what to do about it.
     id.then(
-      () => !this.driver.subscribe && this.state === "running" && this.wake(),
+      () => wakeAtCommit || wake(),
       (error: unknown) => {
         if (options.reportFailure === false) return;
         console.error(
-          `[gemi] The queue driver could not record ${job.name}, so it did ` +
-            `not run and will not be retried.`,
+          `[gemi] The queue driver could not record ${job.name}` +
+            (options.committed
+              ? `, which was held until its transaction committed. The ` +
+                `transaction stays committed; the job did not run and will ` +
+                `not be retried.`
+              : `, so it did not run and will not be retried.`),
           error,
         );
       },
