@@ -381,24 +381,28 @@ export function queueDriverContract(
       test(
         "a lapsed lease under an unknown name waits out the grace window from the lapse",
         withDriver(async (driver) => {
+          // Three clocks a lapsed row could be measured by, spaced a whole
+          // grace window apart so only the lapse keeps it back: enqueued at 0,
+          // claimed at 2, lapsed at 4, looked at by the old replica at 5, in
+          // units of SHORT, against a window of 2. Measured from `created_at`
+          // or `claimed_at` it would already be handed out.
           const id = await driver.enqueue({ name: "NewRelease", args: "[]" });
+          await sleep(SHORT * 2);
           // A replica that knew the name claimed it and died.
           await driver.claim(1, {
-            visibilityTimeoutMs: SHORT,
+            visibilityTimeoutMs: SHORT * 2,
             registered: { names: ["NewRelease"], graceMs: 60_000 },
           });
-          await sleep(SHORT * 2);
+          await sleep(SHORT * 3);
 
           const old = {
             visibilityTimeoutMs: 60_000,
-            registered: { names: ["A"], graceMs: 60_000 },
+            registered: { names: ["A"], graceMs: SHORT * 2 },
           };
           expect(await driver.claim(1, old)).toEqual([]);
 
-          const [again] = await driver.claim(1, {
-            visibilityTimeoutMs: 60_000,
-            registered: { names: ["NewRelease"], graceMs: 60_000 },
-          });
+          await sleep(SHORT * 2);
+          const [again] = await driver.claim(1, old);
           expect(again).toMatchObject({ id, attempt: 2 });
         }),
       );
