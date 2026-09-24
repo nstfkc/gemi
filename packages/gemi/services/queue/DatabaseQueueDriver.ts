@@ -2,7 +2,7 @@ import type { SQL, TransactionSQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import { currentConnectionName, currentTransaction } from "../../orm/context";
+import { commitDependsOn, currentConnectionName, currentTransaction } from "../../orm/context";
 import type {
   ClaimOptions,
   ClaimedJob,
@@ -130,11 +130,26 @@ export class DatabaseQueueDriver implements QueueDriver {
     }
   }
 
-  async enqueue({ name, args, delayMs = 0, id = Bun.randomUUIDv7() }: EnqueueJob): Promise<string> {
+  enqueue(job: EnqueueJob): Promise<string> {
     // Read here, at the call, and never kept: Bun's handle stays callable
     // after its transaction ends and then runs on the pool, so a stored one
     // would write outside any transaction and succeed.
-    const q = this.transaction() ?? this.sql;
+    const tx = this.transaction();
+    const written = this.insert(tx ?? this.sql, job);
+    // A row written on the transaction is part of it, so the commit waits for
+    // it and does not happen if it failed. Otherwise a dispatch nobody awaits
+    // — every queued listener's — that fails on Postgres aborts the
+    // transaction, and the `COMMIT` that follows is quietly a rollback that
+    // `begin` reports as success: the caller's rows are gone with no error.
+    // Registered synchronously, while the caller's scope is current.
+    if (tx) commitDependsOn(written);
+    return written;
+  }
+
+  private async insert(
+    q: SQL,
+    { name, args, delayMs = 0, id = Bun.randomUUIDv7() }: EnqueueJob,
+  ): Promise<string> {
     const now = this.now(q);
     await q`
       INSERT INTO ${this.name(q)}
