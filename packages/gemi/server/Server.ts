@@ -2,9 +2,9 @@ import { App } from "../app";
 import { Kernel } from "../kernel";
 import { projectRoot } from "../support/discover";
 import {
-  closeConnectionWhileShuttingDown,
   drain,
   installShutdownSignals,
+  serveForShutdown,
   shutdownSettings,
   type ShutdownSettings,
 } from "./shutdown";
@@ -30,11 +30,10 @@ export class Server {
   }) {
     this.app = new App({ kernel: params.kernel });
     this.handleSignals = params.handleSignals ?? true;
-    const instrumentation =
+    this.instrumentation = serveForShutdown(
       params.instrumentation ??
-      ((req: Request, next: (req: Request) => Promise<Response>) => next(req));
-    this.instrumentation = async (req, next) =>
-      closeConnectionWhileShuttingDown(await instrumentation(req, next));
+        ((req: Request, next: (req: Request) => Promise<Response>) => next(req)),
+    );
   }
 
   /**

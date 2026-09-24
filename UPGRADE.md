@@ -152,6 +152,17 @@ What to check:
 - **An app that installed its own `SIGTERM` listener** now runs beside gemi's,
   which exits the process when the drain is done. Pass
   `handleSignals: false` to `new Server()` to keep only yours.
+- **`gemi dev` and `gemi run` relay the same two signals** to what they
+  spawn, and wait for it. A `SIGTERM` to either used to end the CLI alone,
+  leaving the dev server on its port or the command running unwatched. A
+  command ended by a signal now makes `gemi run` exit `128 + n` (`143` for
+  `SIGTERM`) where it exited `1`; a script that tests for exactly `1` should
+  test for non-zero.
+- **A request that arrives after the drain is answered `503`.** Bun leaves a
+  kept-alive connection open after the listener closes, so a client that
+  ignores `Connection: close` could still reach your routes while the
+  providers shut down. Such a request now gets `503` with `Connection: close`
+  and never reaches the app or its instrumentation.
 
 ## The queue runs over a driver, and `Job.dispatch()` returns a promise
 

@@ -3,6 +3,12 @@ import { constants } from "node:os";
 type SpawnOptions = {
   cmd: string[];
   env?: Record<string, string | undefined>;
+  /**
+   * `"inherit"` for a child that reads the terminal — `gemi run`, whose
+   * destructive commands ask for confirmation. Left out, the child's stdin is
+   * ignored, Bun's default, which is what a server wants.
+   */
+  stdin?: "inherit";
 };
 
 // Only the two the server drains on. `SIGHUP` is left alone: a closed terminal
@@ -18,7 +24,9 @@ const FORWARDED = ["SIGTERM", "SIGINT"] as const;
  * A platform signals the process it started and nothing below it. Without this
  * the server — a grandchild of PID 1 under `gemi start` — learned about a
  * shutdown only from the `SIGKILL` at the end of the grace period, so there was
- * nothing for it to drain in (#48).
+ * nothing for it to drain in (#48). `gemi dev` and `gemi run` go through here
+ * too (#566): a `SIGTERM` to either used to end the CLI alone, leaving the dev
+ * server holding its port, or the command running with nobody waiting on it.
  *
  * The child stays in this process's group, so whatever signals the group — a
  * terminal's Ctrl+C, a supervisor's group `SIGKILL` — still reaches it
@@ -33,6 +41,7 @@ export async function spawnForwardingSignals(options: SpawnOptions): Promise<num
   const proc = Bun.spawn({
     cmd: options.cmd,
     env: options.env,
+    stdin: options.stdin,
     stdout: "inherit",
     stderr: "inherit",
   });

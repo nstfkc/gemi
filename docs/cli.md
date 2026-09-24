@@ -29,6 +29,8 @@ It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, r
 
 In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
 
+`dev` relays `SIGTERM` and `SIGINT` to the dev server and exits with its exit code, as [`start`](#gemi-start) does, so a dev container or process manager that stops `gemi dev` stops the server too rather than leaving it on its port. There is no drain in development: the signal stops the server at once.
+
 ### The update notice
 
 `dev` also asks npm whether a newer gemi has been published, and prints a line if one has:
@@ -108,6 +110,8 @@ Like `dev` and `start`, it launches a fresh Bun process with the same two runtim
 > **Gotcha:** the cron scheduler does not start under `gemi run`, so a long-running command cannot fire your whole schedule in a process nobody is watching. Jobs are still discovered and `app(Scheduler).jobs` still answers honestly. The command sets `GEMI_NO_SCHEDULE=1` on the process it spawns, which also works as a general "boot this app but do not schedule anything" switch.
 
 > **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
+
+`run` relays `SIGTERM` and `SIGINT` to the command's process, waits for it, and exits with its exit code — `128 + n` if a signal ended it. A long-running command that listens for `SIGTERM` (`process.on("SIGTERM", ...)`) gets to finish its batch or record where it stopped; one that does not is ended by the signal, as before.
 
 ## `gemi upgrade`
 
