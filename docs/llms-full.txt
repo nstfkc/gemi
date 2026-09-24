@@ -2449,7 +2449,9 @@ What a global middleware sees is not quite what a route middleware sees:
 
 A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.
 
-Some things are not requests the server receives, and the list does not run for them: an in-process `dispatchAs` from an MCP tool call, and a view's server-side `Query` — the request they were made from already passed it. The development server's `/refresh.js` and `/render-error.js` scripts are answered before it too; they are fixed strings with no production counterpart.
+Some things are not requests the server receives, and the list does not run for them: an in-process `dispatchAs` from an MCP tool call, and a view's server-side `Query` — the request they were made from already passed it.
+
+In development the list also covers the dev server's own `/refresh.js` and `/render-error.js` scripts, so a gate that refuses a request without a header refuses those too, and an exemption by path has to name them as well. What it cannot cover is Vite's HMR websocket: Vite serves that from a server of its own, on port `24678` by default, and its connections never reach gemi. A request-level gate in `gemi dev` is therefore not a gate on everything the dev process answers; don't expose `gemi dev` where only such a gate stands between it and the network.
 
 > **Keep it cheap.** A global middleware runs on every asset request as well as every page and API call. A header comparison costs nothing; a database read per request is a database read per asset.
 
