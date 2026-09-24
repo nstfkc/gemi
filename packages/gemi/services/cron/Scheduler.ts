@@ -75,11 +75,49 @@ export async function runTick(job: CronJob): Promise<void> {
   }
 }
 
+/** A tick `drain` could not wait out. */
+export interface UnfinishedTick {
+  /** The job's `name`. */
+  name: string;
+  /**
+   * When this tick started. A job whose tick outlasts its own interval has
+   * two ticks running at once, and the name alone would list it twice with
+   * nothing to tell the two apart.
+   */
+  startedAt: Date;
+}
+
+/** What `drain` could not wait out. */
+export interface ScheduleDrainResult {
+  /**
+   * Ticks still running when the timeout elapsed. They keep running — a tick
+   * has no way to be told to stop — until they finish or the process exits.
+   */
+  unfinished: UnfinishedTick[];
+}
+
 export class Scheduler {
   static token = "scheduler";
 
   private handles: BunCronHandle[] = [];
   private resolved: Array<new () => CronJob>;
+
+  /**
+   * Every tick this scheduler has started and not seen settle, keyed by an
+   * object of its own so two overlapping ticks of one job are two entries.
+   * Without this there is nothing for a shutdown to wait on, and a tick the
+   * process exits under is cut off halfway through its `callback`.
+   */
+  private readonly inFlight = new Map<object, { tick: UnfinishedTick; done: Promise<unknown> }>();
+
+  /**
+   * Set by `stop()`, cleared by `start()`. `handle.stop()` is what keeps Bun
+   * from firing again, and this is the second lock on the same door: a
+   * callback Bun had already dispatched when `stop()` ran, or a handle some
+   * other scheduler left in the hot-reload registry, still finds nothing to
+   * start once the drain has begun.
+   */
+  private stopped = false;
 
   constructor(config: Required<ScheduleConfig>) {
     this.resolved = config.jobs;
@@ -129,6 +167,7 @@ export class Scheduler {
    * the old `kernel.waitForBoot()` handshake.
    */
   start(run: ScheduleRunner = (cb) => cb()) {
+    this.stopped = false;
     if (this.resolved.length === 0) {
       return;
     }
@@ -188,17 +227,72 @@ export class Scheduler {
       // Inside `run`, gate included: a `shouldRun` that resolves a service to
       // decide is the ordinary case, and evaluating it out here would leave it
       // without the application context every other line of the tick has.
-      const handle = Bun.cron(job.cron, () => run(() => runTick(job)));
+      const handle = Bun.cron(job.cron, () => {
+        if (this.stopped) return;
+        return this.track(job.name, () => run(() => runTick(job)));
+      });
 
       registry.set(job.name, handle);
       this.handles.push(handle);
     }
   }
 
+  /**
+   * Stops every schedule, so no new tick starts. A tick already running is
+   * left alone — `drain` is how to wait for it.
+   */
   stop() {
+    this.stopped = true;
     for (const handle of this.handles) {
       handle.stop();
     }
     this.handles = [];
+  }
+
+  /**
+   * Stops every schedule, waits up to `timeoutMs` for the ticks already
+   * running, and reports the ones that did not finish.
+   *
+   * Stopping comes first, so a tick that falls due while this waits does not
+   * start: a drain that kept the clock running would never be sure it had
+   * waited for everything. Nothing is cancelled — a job has no way to be told
+   * — so an unfinished tick keeps running after this resolves, until it ends
+   * or the process does.
+   *
+   * A later `start()` schedules again.
+   */
+  async drain(timeoutMs = Infinity): Promise<ScheduleDrainResult> {
+    this.stop();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      if (timeoutMs !== Infinity) timer = setTimeout(resolve, timeoutMs);
+    });
+    await Promise.race([
+      Promise.allSettled([...this.inFlight.values()].map((e) => e.done)),
+      deadline,
+    ]);
+    clearTimeout(timer);
+
+    return {
+      unfinished: [...this.inFlight.values()].map((e) => ({ ...e.tick })),
+    };
+  }
+
+  /** How many ticks this scheduler is running right now. */
+  get running(): number {
+    return this.inFlight.size;
+  }
+
+  private track(name: string, tick: () => unknown): Promise<unknown> {
+    const key = {};
+    // `Promise.resolve().then(...)` rather than calling `tick` directly, so a
+    // runner that throws synchronously lands in the same promise as one that
+    // rejects, and the entry below is removed either way.
+    const done = Promise.resolve()
+      .then(tick)
+      .finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, { tick: { name, startedAt: new Date() }, done });
+    return done;
   }
 }
