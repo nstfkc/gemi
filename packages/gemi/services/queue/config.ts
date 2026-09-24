@@ -92,6 +92,27 @@ export interface QueueConfig {
    * so storage that is down is not asked this often for as long as it is down.
    */
   pollInterval?: number;
+
+  /**
+   * How long, in milliseconds, a job under a name this process has no class
+   * for is left for another process before it is dead-lettered. Default one
+   * hour.
+   *
+   * Only a driver other processes share waits: during a blue/green ramp both
+   * releases claim from one table, and a job only the new release has is
+   * usually one of its replicas' to run, not a dead letter. The database driver
+   * does not claim such a job at all until it has been claimable for this
+   * long; a driver that cannot filter by name hands it out, and the queue gives
+   * it back without spending an attempt. Past the window the name is taken to
+   * be gone — a job class that was deleted or renamed — and the job is
+   * dead-lettered with its error, as it always was.
+   *
+   * Longer than a ramp, then, and than a rollback that should find the other
+   * release's jobs still waiting. `Infinity` never dead-letters an unknown
+   * name. The memory driver ignores this: nothing else can run its jobs, so an
+   * unknown name there is dead-lettered at once.
+   */
+  unknownJobGrace?: number;
 }
 
 export function defineQueueConfig(config: QueueConfig): QueueConfig {
@@ -106,5 +127,6 @@ export function queueConfigDefaults(): Required<QueueConfig> {
     driver: "memory",
     visibilityTimeout: 5 * 60_000,
     pollInterval: 1000,
+    unknownJobGrace: 60 * 60_000,
   };
 }

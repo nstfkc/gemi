@@ -10176,6 +10176,7 @@ export default defineQueueConfig({
 | `driver` | `"memory" \| "database" \| QueueDriver \| (app) => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
 | `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
 | `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. Also the delay before retrying a claim that failed — for any driver, doubling per consecutive failure up to a minute. |
+| `unknownJobGrace` | `number` | `3600000` | Milliseconds a job under a name this replica has no class for is left for another replica before it is dead-lettered. Only for a driver other processes share; see [Deploys and unknown job names](#deploys-and-unknown-job-names). The memory driver dead-letters an unknown name at once. |
 
 The slice is wired into the kernel by name:
 
@@ -10232,13 +10233,14 @@ A driver is any object implementing `QueueDriver` from `gemi/services`. It is cl
 | Method | What it promises |
 | --- | --- |
 | `enqueue({ name, args, delayMs? })` | Records a job, claimable after `delayMs`, and resolves to its id. |
-| `claim(limit, { visibilityTimeoutMs })` | Leases up to `limit` claimable jobs, oldest first — by the moment each became claimable, not the moment it was enqueued — with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. |
+| `claim(limit, { visibilityTimeoutMs, registered? })` | Leases up to `limit` claimable jobs, oldest first — by the moment each became claimable, not the moment it was enqueued — with `attempt` incremented. A job whose lease ran out is claimable again. Concurrent claims never share a job. `registered` is `{ names, graceMs }`: a driver that can should skip a job under a name not in `names` until it has been claimable for `graceMs`. Ignoring it is allowed. |
 | `complete(job)` | Ends the claim; the job is never claimed again. |
 | `fail(job, { error, retryInMs })` | Ends the claim. A number makes the job claimable after that long; `null` dead-letters it for good. |
+| `release(job, { retryInMs })` | Ends the claim without counting it: the job is claimable again after `retryInMs`, with `attempt` back where it was before the claim. |
 | `heartbeat?(jobs, { visibilityTimeoutMs })` | Extends the leases of jobs still running. |
 | `subscribe?(wake)` | Calls `wake` when work may be claimable. Without it the queue polls every `pollInterval`. |
 
-`complete`, `fail` and `heartbeat` receive the claimed job rather than its id, so a driver can ignore a report from a claim whose lease already ran out and was handed to someone else. Durations cross the interface as relative milliseconds, so a driver shared between machines can measure them on one clock.
+`complete`, `fail`, `release` and `heartbeat` receive the claimed job rather than its id, so a driver can ignore a report from a claim whose lease already ran out and was handed to someone else. Durations cross the interface as relative milliseconds, so a driver shared between machines can measure them on one clock.
 
 Hand the driver to the slice as a function, so each application gets its own and nothing is opened by a process that only imports the config. The function is called with the application:
 
@@ -10317,9 +10319,24 @@ How it works:
 - **Recovery on boot.** A production server with a durable driver starts claiming as soon as it boots, not at its first dispatch. That way a replica that serves no dispatches of its own still picks up what an earlier one left behind. Under `gemi dev`, the queue starts at the first dispatch, as before.
 - **`gemi dev` and a shared table.** `gemi dev` runs `bun --hot`, which re-evaluates modules in the same process; a queue loop started before a save keeps running, because a live closure still holds it. With the memory driver each stale loop polls its own empty `Map` and is merely invisible. With `driver: "database"` every one of them polls the same `gemi_jobs` table, so after a few saves several generations of stale code are claiming and running real rows side by side. Restart `gemi dev` when you are working on jobs against a database driver, or point development at `"memory"`.
 - **Dispatching from outside a server.** A console command, a seed or a script that dispatches records the job and leaves it in the table for a server to claim. It does not start claiming itself, because it would take other replicas' jobs too and exit in the middle of running them.
+- **Unknown job names.** A replica only claims jobs whose names it has a class for, until they have waited out `unknownJobGrace`. See [Deploys and unknown job names](#deploys-and-unknown-job-names).
 - **Polling.** Another process's dispatch cannot wake this one, so the queue asks the database for work every `pollInterval` (default one second). A dispatch from this process wakes its own queue immediately.
 
 A dispatch inside `Model.transaction` is not part of that transaction. The row is written on the pool, so it stays if the transaction rolls back, and the job may run before the transaction commits. Dispatch after the commit.
+
+### Deploys and unknown job names
+
+During a blue/green or weighted rollout, both releases serve at once and claim from one `gemi_jobs` table. A job class that only the new release has — or one the new release deleted or renamed — then has a name that half the replicas do not know.
+
+A replica never runs a job it has no class for, and with a driver other processes share it no longer dead-letters one at first sight either:
+
+- **The database driver does not claim it.** Its claim is `WHERE name IN (…)` the replica's registered jobs, so the job waits for a replica that has the class, and the replica that does not never sees it.
+- **A driver that cannot filter by name** hands it out anyway. The queue gives it back without spending an attempt — `release`, not `fail` — and logs one line per name: `Left a queued "…" for another replica`. It is claimable again after one to two `pollInterval`s, so other replicas get their turn at it.
+- **After `unknownJobGrace`** (one hour by default) the name is taken to be gone rather than deployed elsewhere, and the job is dead-lettered with `No job is registered under the name "…"` as its `last_error`. The database driver measures the hour from when the job became claimable. A driver that cannot filter measures it from the dispatch, so a job delayed by longer than the window is dead-lettered by the first replica that does not know it.
+
+Set `unknownJobGrace` longer than your slowest rollout, and longer than you would take to roll one back. A rollback within the window finds the other release's jobs still waiting. `Infinity` never dead-letters an unknown name, and leaves such jobs in the table until you remove them.
+
+The memory driver is unchanged: nothing else can run its jobs, so an unknown name is dead-lettered at once, with a line on stderr.
 
 ### Stopping the queue
 

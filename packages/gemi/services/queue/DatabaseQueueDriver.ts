@@ -2,7 +2,14 @@ import type { SQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import type { ClaimOptions, ClaimedJob, EnqueueJob, JobFailure, QueueDriver } from "./QueueDriver";
+import type {
+  ClaimOptions,
+  ClaimedJob,
+  EnqueueJob,
+  JobFailure,
+  JobRelease,
+  QueueDriver,
+} from "./QueueDriver";
 
 export type DatabaseQueueDriverOptions = {
   /**
@@ -54,6 +61,12 @@ type Row = {
  * bearing rather than tidying. SQLite has no row locks and needs none: it
  * runs one write at a time, so a single `UPDATE … RETURNING` is atomic.
  * MariaDB needs 10.6 for `SKIP LOCKED`.
+ *
+ * It honours `registered`: a claim is `WHERE name IN (…)` the claimer's
+ * registry, so a replica never takes a job it has no class for until that job
+ * has been claimable for the grace window. Every replica claims from this one
+ * table, and during a blue/green ramp half of them are running the other
+ * release.
  *
  * ### Time
  *
@@ -172,6 +185,23 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   /**
+   * `attempts - 1`, so the attempt this claim added is taken back. Guarded by
+   * the claim's attempt like every other report, so it can only undo the
+   * increment it is reporting on.
+   */
+  async release(job: ClaimedJob, release: JobRelease): Promise<void> {
+    const q = this.sql;
+    const now = this.now(q);
+    await q`
+      UPDATE ${this.name(q)}
+      SET status = 'pending', attempts = attempts - 1,
+          available_at = ${now} + ${this.ms(q, release.retryInMs)},
+          lease_expires_at = NULL, updated_at = ${now}
+      WHERE id = ${job.id} AND status = 'claimed' AND attempts = ${job.attempt}
+    `;
+  }
+
+  /**
    * Extends a lease that has lapsed but not been re-issued, too, as the memory
    * driver does: the job is still running here and nobody else has it.
    */
@@ -224,7 +254,7 @@ export class DatabaseQueueDriver implements QueueDriver {
       return await q`
         WITH next AS (
           SELECT id FROM ${table}
-          WHERE ${this.claimable(q)}
+          WHERE ${this.claimable(q, options)}
           ORDER BY available_at, id
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
@@ -244,7 +274,7 @@ export class DatabaseQueueDriver implements QueueDriver {
           lease_expires_at = ${now} + ${lease}, updated_at = ${now}
       WHERE id IN (
         SELECT id FROM ${table}
-        WHERE ${this.claimable(q)}
+        WHERE ${this.claimable(q, options)}
         ORDER BY available_at, id
         LIMIT ${limit}
       )
@@ -309,6 +339,7 @@ export class DatabaseQueueDriver implements QueueDriver {
       const rows: Row[] = await tx`
         SELECT ${columns} FROM ${table}
         WHERE status = 'pending' AND available_at <= ${this.now(tx)}
+          AND ${this.runnable(tx, options, "available_at")}
         ORDER BY available_at, id
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
@@ -321,6 +352,7 @@ export class DatabaseQueueDriver implements QueueDriver {
         const expired: Row[] = await tx`
           SELECT ${columns} FROM ${table}
           WHERE status = 'claimed' AND lease_expires_at <= ${this.now(tx)}
+            AND ${this.runnable(tx, options, "lease_expires_at")}
           ORDER BY lease_expires_at, id
           LIMIT ${limit - rows.length}
           FOR UPDATE SKIP LOCKED
@@ -342,13 +374,43 @@ export class DatabaseQueueDriver implements QueueDriver {
     });
   }
 
-  /** Waiting and due, or leased and the lease has run out. */
-  private claimable(q: SQL) {
+  /**
+   * Waiting and due, or leased and the lease has run out — and, when the
+   * claimer said which names it can run, under one of them or claimable for
+   * longer than the grace window. See `ClaimOptions.registered`.
+   */
+  private claimable(q: SQL, options: ClaimOptions) {
     const now = this.now(q);
     return q`(
-      (status = 'pending' AND available_at <= ${now})
-      OR (status = 'claimed' AND lease_expires_at <= ${now})
+      (status = 'pending' AND available_at <= ${now}
+        AND ${this.runnable(q, options, "available_at")})
+      OR (status = 'claimed' AND lease_expires_at <= ${now}
+        AND ${this.runnable(q, options, "lease_expires_at")})
     )`;
+  }
+
+  /**
+   * Whether a row is one the claimer may take by its name. `since` is the
+   * column holding when the row became claimable, which is what the grace
+   * window is measured from: a job delayed for a day and due a second ago has
+   * been waiting for a second, not a day, and a replica that knows its name
+   * may be about to take it.
+   *
+   * The list is spliced in as one parameter per name, because `name IN ()` is
+   * a syntax error in all three dialects; an empty registry matches no name
+   * and leaves only the grace window.
+   */
+  private runnable(q: SQL, options: ClaimOptions, since: "available_at" | "lease_expires_at") {
+    const registered = options.registered;
+    if (!registered) return q`1 = 1`;
+    const names = registered.names.length
+      ? q`name IN (${registered.names
+          .map((name) => q`${name}`)
+          .reduce((list, name) => q`${list}, ${name}`)})`
+      : q`1 = 0`;
+    if (!Number.isFinite(registered.graceMs)) return names;
+    const column = q.unsafe(since);
+    return q`(${names} OR ${column} <= ${this.now(q)} - ${this.ms(q, registered.graceMs)})`;
   }
 
   /**
