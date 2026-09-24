@@ -5,10 +5,12 @@ import {
   useRef,
   memo,
   type ComponentProps,
+  type ReactElement,
   type SyntheticEvent,
 } from "react";
 
 import { applyParams } from "../utils/applyParams";
+import { isAbsoluteUrl, type AbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
@@ -83,7 +85,33 @@ function normalizeSearch(search: Search): Record<string, string> {
   ) as Record<string, string>;
 }
 
-export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
+/** A link to another host — `useDomain().url(...)` — which the router cannot reach. */
+type ExternalLinkProps = Omit<ComponentProps<"a">, "href"> & {
+  href: AbsoluteUrl;
+  active?: boolean;
+};
+
+// The route signature last: `ComponentProps<typeof Link>` reads the last one.
+type LinkComponent = {
+  (props: ExternalLinkProps): ReactElement;
+  <T extends keyof Views>(props: LinkProps<T>): ReactElement;
+};
+
+/**
+ * A path renders an anchor the client router handles; an absolute URL, one on
+ * another of the app's hosts, a plain anchor the browser loads in full — the
+ * router would otherwise push the path into the current host.
+ */
+export const Link = memo((props: any) => {
+  if (isAbsoluteUrl(props.href)) {
+    const { active = false, ...rest } = props as ExternalLinkProps;
+    return <a data-active={active} {...rest} />;
+  }
+  const Route = RouteLink as unknown as (props: any) => ReactElement;
+  return <Route {...props} />;
+}) as unknown as LinkComponent;
+
+const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   const _params = useParams();
   const { isTransitioning, targetPath } = useRouteTransition();
   const {

@@ -176,6 +176,10 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     plugins: [gemiVite()],
     server: {
       middlewareMode: true,
+      // Vite answers any host other than `localhost` and `*.localhost` with a
+      // 403, which would block a `route.domains` root such as `lvh.me` and
+      // every custom domain pointed here from `/etc/hosts`.
+      allowedHosts: app.devAllowedHosts.call(app),
       // gemi reloads `.env` into process.env itself (see `watchEnv`). Stop Vite
       // from *also* watching env files: Vite's env-change handler restarts the
       // dev server, which closes the SSR module runner — but gemi keeps a single

@@ -2,6 +2,7 @@ import type { SQL } from "bun";
 import type { DatabaseConnection } from "../database/Connection";
 import { DatabaseManager } from "../database/DatabaseManager";
 import type { Dialect } from "../database/dialect";
+import type { DatabaseSchema } from "../database/introspect/types";
 import { app } from "../foundation/app";
 import {
   assertConnectionUsable,
@@ -174,6 +175,32 @@ export class ConnectionQueries {
     );
   }
 
+  // The schema of the live database, read back from its own catalog: every
+  // table, its columns and their types, its primary key, and the foreign keys
+  // that relate it to the others.
+  //
+  //   const { tables } = await DB.schema()
+  //   tables.find((t) => t.name === "Post")?.relations
+  //   // [{ columns: ["authorId"], referencedTable: "User", referencedColumns: ["id"], … }]
+  //
+  // **What the database says, not what the models say.** The ORM's schema is
+  // generated from Prisma and never checked against the database; this is the
+  // database's side of that, on every dialect including MySQL, where
+  // `query` itself is not supported yet.
+  //
+  // The introspection code is loaded on the first call, not with the facade.
+  // It is a diagnostic most apps never run, so nothing that imports `DB` pays
+  // for it.
+  //
+  // On the ambient transaction when there is one, like `query`: a table created
+  // earlier in the same transaction is in the answer. `async` for the same
+  // reason as the others.
+  async schema(): Promise<DatabaseSchema> {
+    const db = this.connection();
+    const { introspect } = await import("../database/introspect/index.js");
+    return introspect(this.handle() ?? db.sql, db.dialect);
+  }
+
   private run(fragment: SqlFragment, operation: string) {
     const db = this.connection();
     // Per call, never captured: the same rule `Model.$exec` follows, and what
@@ -282,6 +309,13 @@ export class DB extends Facade {
   // `User.create` inside this joins it. See `ConnectionQueries.transaction`.
   static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
     return ambient.transaction(fn);
+  }
+
+  // The schema of the live database: tables, columns and their types, primary
+  // keys and foreign-key relations. Loads its code on first use. See
+  // `ConnectionQueries.schema`.
+  static schema(): Promise<DatabaseSchema> {
+    return ambient.schema();
   }
 
   /** Closes every configured connection, not only the default one. */

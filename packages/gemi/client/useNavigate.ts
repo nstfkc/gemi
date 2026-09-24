@@ -2,6 +2,7 @@ import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
+import { isAbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
 import { I18nContext } from "./I18nContext";
 
@@ -36,6 +37,12 @@ export function useNavigate() {
       const navigationAbortController = new AbortController();
       if (setNavigationAbortController) {
         setNavigationAbortController(navigationAbortController);
+      }
+
+      // Another host — `useDomain().url(...)` — is out of this router's reach.
+      if (isAbsoluteUrl(path)) {
+        window.location[pushOrReplace === "push" ? "assign" : "replace"](path);
+        return;
       }
 
       const [options = {}] = args;

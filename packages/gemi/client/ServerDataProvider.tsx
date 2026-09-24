@@ -17,6 +17,15 @@ export interface ServerDataContextValue {
     is404: boolean;
     searchParams: string;
     urlLocaleSegment: string | null;
+    /** The `route.domains` group the page was served under; `null` without `route.domains`. */
+    domain?: {
+      host: string;
+      group: string;
+      params: Record<string, string>;
+      custom: boolean;
+      root: string;
+      origin: string;
+    } | null;
   };
   i18n: {
     dictionary: Translations;

@@ -75,6 +75,7 @@ a binding into the container, and a facade resolves it.**
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
+| `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
 | `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
 | `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |

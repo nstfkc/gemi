@@ -195,6 +195,7 @@ See [Broadcasting](./broadcasting.md) for defining channels and the client `useS
 
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
 - `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+- `Url.forDomain(target, path, params?)` — a fully-qualified URL on another `route.domains` host (`{ subdomain: "acme" }` or `{ host }`). See [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
 ```typescript
 import { Url } from "gemi/facades";
@@ -203,7 +204,7 @@ Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
 ```
 
-> **Note:** `Url` resolves nothing from the container — `Url.absolute` reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md).
+> **Note:** `Url.absolute` resolves nothing from the container — it reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md). `Url.forDomain` reads `route.domains`.
 
 ## Log
 

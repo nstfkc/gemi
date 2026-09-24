@@ -130,6 +130,23 @@ export interface PageProps {
   /** What `useBreadcrumbs()` returns, in order. */
   breadcrumbs?: Breadcrumb[];
   /**
+   * The `route.domains` group the page is served under, as `useDomain()`
+   * reports it. Left out, `useDomain()` reads empty — the shape an app without
+   * `route.domains` sees — and `useDomain().url()` throws, exactly as it does
+   * there.
+   *
+   * `root` and `origin` default off the host, so the common case is one field:
+   * `domain={{ host: "acme.example.com", params: { tenant: "acme" } }}`.
+   */
+  domain?: {
+    host: string;
+    group?: string;
+    params?: Record<string, string>;
+    custom?: boolean;
+    root?: string;
+    origin?: string;
+  } | null;
+  /**
    * What `useFeature()` reports, keyed by feature key. Anything left out reads
    * as off, exactly as an undeclared key does in a real request.
    *
@@ -364,6 +381,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     queryConfig,
     user = null,
     breadcrumbs = [],
+    domain = null,
     features = {},
     theme,
     fallback = null,
@@ -382,6 +400,24 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     [props.supportedLocales, defaultLocale, locale],
   );
   const pathname = applyParams(routePath, params) || "/";
+  // `root` defaults to the host minus its first label, so a tenant subdomain
+  // needs only its host; `origin` to https on that host. Either can be given
+  // outright when the test is about the other.
+  const domainValue = useMemo(() => {
+    if (!domain) {
+      return null;
+    }
+    const labels = domain.host.split(".");
+    return {
+      host: domain.host,
+      group: domain.group ?? "",
+      params: domain.params ?? {},
+      custom: domain.custom ?? false,
+      root:
+        domain.root ?? (labels.length > 2 ? labels.slice(1).join(".") : domain.host),
+      origin: domain.origin ?? `https://${domain.host}`,
+    };
+  }, [domain]);
   const search = toSearchString(searchParams);
   // The URL's locale segment, which the default locale does not get.
   const urlLocaleSegment = locale === defaultLocale ? null : locale;
@@ -501,6 +537,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
         is404: false,
         searchParams: search,
         urlLocaleSegment,
+        domain: domainValue,
       },
       i18n: {
         dictionary,

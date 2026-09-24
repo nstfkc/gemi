@@ -17,6 +17,15 @@ const auth = {
     findUserBySocialAccount: async () => ({ id: 1, email: "a@example.com" }),
   },
   createOrUpdateSessionV2: async () => ({ token: "t", expiresAt: new Date() }),
+  // Every `access_token` write goes through this; the real one also decides
+  // the cookie's `Domain` from `auth.cookieDomain`, which this kernel has none
+  // of.
+  accessTokenCookieOptions: (_req: unknown, expires: Date) => ({
+    expires,
+    httpOnly: true,
+    secure: false,
+    domain: undefined,
+  }),
 };
 
 vi.mock("../foundation/app", () => ({ app: () => auth }));

@@ -25,6 +25,16 @@ export interface AuthConfig {
   sessionExpiresInHours?: number;
   sessionAbsoluteExpiresInHours?: number;
 
+  /**
+   * Shares the session cookie across subdomains. `"root"` is
+   * `route.domains.root`; a hostname names the domain outright. Applied only
+   * to a request whose host is that domain or one of its subdomains — on a
+   * custom domain the browser would refuse it, so a custom domain keeps its
+   * own session and its users sign in there. `null`, the default, scopes the
+   * cookie to the host that set it.
+   */
+  cookieDomain?: "root" | (string & {}) | null;
+
   signUpRequest?: new () => HttpRequest<any, any>;
   oauthProviders?: Record<string, OAuthProvider>;
 
@@ -131,6 +141,7 @@ export function authConfigDefaults(
 
     sessionExpiresInHours: 24,
     sessionAbsoluteExpiresInHours: 24 * 7 * 4,
+    cookieDomain: null,
 
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},

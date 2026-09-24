@@ -21,6 +21,7 @@ export {
 export { QueryManagerProvider } from "./QueryManagerContext";
 export type { QueryConfig } from "./QueryManagerContext";
 export { useParams } from "./useParams";
+export { useDomain } from "./useDomain";
 export { useLocation } from "./useLocation";
 export { useSearchParams } from "./useSearchParams";
 export { useRoute } from "./useRoute";
