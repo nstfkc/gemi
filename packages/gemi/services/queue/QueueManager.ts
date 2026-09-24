@@ -152,6 +152,8 @@ export class QueueManager {
   private resume: (() => void) | undefined;
   private unsubscribe: (() => void) | undefined;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /** Unknown names already reported as left for another replica; see `run`. */
+  private readonly releasedNames = new Set<string>();
 
   /**
    * `application` is entered around every job, so `app()` inside one resolves
@@ -440,7 +442,13 @@ export class QueueManager {
 
       if (room > 0) {
         this.woken = false;
-        const claim = this.driver.claim(room, this.lease());
+        const claim = this.driver.claim(room, {
+          ...this.lease(),
+          registered: {
+            names: Object.keys(this.jobs),
+            graceMs: this.config.unknownJobGrace,
+          },
+        });
         this.claiming = claim;
         let claimed: ClaimedJob[] = [];
         try {
@@ -596,6 +604,46 @@ export class QueueManager {
     const Job = this.jobs[claimed.name];
 
     if (!Job) {
+      // A driver other processes share may have handed this out because it
+      // cannot filter by name, and while a blue/green ramp has both releases
+      // claiming from one table, a name this replica lacks is usually one only
+      // the other release has. So it goes back, without spending an attempt,
+      // for a replica that has the class — until `unknownJobGrace` has passed
+      // since the dispatch, after which the name is taken to be gone. Measured
+      // from `createdAt` because that is all a claim carries; it is the
+      // driver's clock against this one, and the skew is seconds against a
+      // window of minutes. A driver that does filter only hands out an unknown
+      // name once it has waited out the same window, so it lands below.
+      const age = Date.now() - claimed.createdAt;
+      if (this.durable && age < this.config.unknownJobGrace) {
+        // Once per name: with a driver that cannot filter, every poll can
+        // claim the same job again, and a line per poll would bury the one
+        // that matters — a replica whose discovery missed a job, say.
+        if (!this.releasedNames.has(claimed.name)) {
+          this.releasedNames.add(claimed.name);
+          console.error(
+            `Left a queued "${claimed.name}" for another replica: nothing is ` +
+              `registered here under that name. It is dead-lettered if no ` +
+              `replica has run it within unknownJobGrace ` +
+              `(${this.config.unknownJobGrace}ms) of its dispatch.`,
+          );
+        }
+        // Off this replica's own rhythm, and differently each time. It claims
+        // again the moment the release lands, finds nothing due, and then
+        // polls every `pollInterval`; a delay of exactly one interval made the
+        // job due at the instant of that next poll, so the replica that could
+        // not run it won the race for it every time. Any fixed fraction has
+        // the same flaw for a replica whose polls happen to fall just before
+        // the due moment each cycle — it loses every race, for good. Random
+        // within one interval, every other replica's next poll has a chance.
+        await this.driver.release(claimed, {
+          retryInMs: Math.round(
+            this.config.pollInterval * (1 + Math.random()),
+          ),
+        });
+        return;
+      }
+
       // The one place this is observable. A dispatch carries a name, the
       // registry is keyed by name, and a name nobody registered matches
       // nothing — which is exactly the silence #322 is about, except here it

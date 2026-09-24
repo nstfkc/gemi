@@ -231,6 +231,23 @@ delivers at least once, not exactly once.
 A driver factory is now called with the application,
 `driver: (app) => …`. A factory that takes no argument works as before.
 
+**A replica leaves a job it has no class for to the replicas that have
+it.** During a blue/green rollout both releases claim from one table, so a
+job only the new release has used to be dead-lettered by whichever old
+replica claimed it first. The database driver now claims only the names a
+replica has registered. A job under any other name is claimed and
+dead-lettered only after `unknownJobGrace`, one hour by default, when the
+name is taken to be gone. With the memory driver an unknown name is still
+dropped at once. See
+[Deploys and unknown job names](docs/jobs-and-queues.md#deploys-and-unknown-job-names).
+
+**A `QueueDriver` of your own needs a `release(job, { retryInMs })`**, if
+you wrote one against a 0.63 release candidate. It ends a claim without
+counting it: the job becomes claimable after `retryInMs` with `attempt` one
+lower, and like `fail` it ignores a stale claim. `claim` may also honour
+`registered: { names, graceMs }`. A driver that ignores it still works; the
+queue then releases the jobs it cannot run.
+
 What changes for every app, whatever the driver:
 
 - **A production server told to stop now waits for its running jobs.** The

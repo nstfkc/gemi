@@ -258,6 +258,7 @@ function scriptedDriver(claims: ClaimedJob[][]): QueueDriver & {
     claim: async () => claims.shift() ?? [],
     complete: async () => {},
     fail: async (job, failure) => void failed.push([job, failure]),
+    release: async () => {},
   };
 }
 
