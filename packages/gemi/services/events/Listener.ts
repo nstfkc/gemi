@@ -147,6 +147,15 @@ export abstract class Listener {
   maxAttempts = 3;
 
   /**
+   * Milliseconds to wait before each retry: a number for every retry, or an
+   * array with one entry per retry, its last repeating. `Job`'s field and
+   * `Job`'s meaning, because it is forwarded to one.
+   *
+   * **Ignored unless `queued` is true**, for the reason `maxAttempts` is.
+   */
+  backoff: number | number[] = 0;
+
+  /**
    * Runs `handle` in a Worker thread with its own cloned application, for a
    * queued listener whose work is CPU-bound. `Job`'s field and `Job`'s
    * meaning, because it is forwarded to one.
