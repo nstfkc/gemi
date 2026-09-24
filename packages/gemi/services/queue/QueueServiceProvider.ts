@@ -1,10 +1,17 @@
+import { isMainThread } from "node:worker_threads";
+
 import type { Application } from "../../foundation/Application";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { discoverJobs } from "../discovery";
 import { withDefaults } from "../../support/withDefaults";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
-import { claimsInThisProcess, QueueManager } from "./QueueManager";
+import {
+  claimingTurnedOff,
+  claimsInThisProcess,
+  isQueueWorker,
+  QueueManager,
+} from "./QueueManager";
 
 /**
  * How far inside the provider deadline the drain stops, so there is time left
@@ -116,20 +123,58 @@ export class QueueServiceProvider extends ServiceProvider {
  *
  * Not the memory driver, which never has anything left behind. Not a console
  * command or a migration, which boot the same providers and would claim jobs
- * only to exit under them — `ROOT_DIR` is set by `Server.start()` alone. Not
+ * only to exit under them — `ROOT_DIR` is set by `Server.start()` and the
+ * `gemi queue:work` worker alone. Not a server started with
+ * `GEMI_QUEUE_CLAIM=off`, which leaves its jobs to workers. Not
  * a `worker` job's thread, which clones the application. And not development,
  * where `bun --hot` boots a fresh application on every save: there the queue
  * starts at the first dispatch, and a reload hands a running loop over — see
  * `takeOverDevQueue`.
  */
 export function startClaimingIfServing(application: Application) {
+  warnAboutClaimSwitch(application);
   if (process.env.NODE_ENV !== "production") return takeOverDevQueue(application);
-  const slice = application.config.get<QueueConfig>("queue", {});
-  const driver = slice.driver ?? "memory";
-  if (driver === "memory" || driver instanceof MemoryQueueDriver) return;
+  if (configuresMemory(application)) return;
   if (!claimsInThisProcess()) return;
   if (!application.bound(QueueManager)) return;
   application.make(QueueManager).start();
+}
+
+function configuresMemory(application: Application) {
+  const driver = application.config.get<QueueConfig>("queue", {}).driver ?? "memory";
+  return driver === "memory" || driver instanceof MemoryQueueDriver;
+}
+
+/**
+ * Says so at boot when a server's `GEMI_QUEUE_CLAIM` will not do what it
+ * reads as. Only in a server's main thread: a console command or a `worker`
+ * job's thread shares the server's environment and claims nothing anyway.
+ *
+ * - `off` with the memory driver is ignored, because a memory queue's jobs
+ *   exist only in the process that dispatched them. Honoured, it would leave
+ *   every dispatch waiting in a `Map` that no worker can see, for good.
+ * - Any value but `off` or `on` claims. `false` or `0` read as "off" and are
+ *   not it, and a web process that quietly keeps claiming is the failure a
+ *   deploy that set one would never notice.
+ */
+function warnAboutClaimSwitch(application: Application) {
+  const value = process.env.GEMI_QUEUE_CLAIM;
+  if (value === undefined || isQueueWorker()) return;
+  if (process.env.ROOT_DIR === undefined || !isMainThread) return;
+  if (claimingTurnedOff()) {
+    if (!configuresMemory(application)) return;
+    console.warn(
+      `[gemi] GEMI_QUEUE_CLAIM=off is ignored: the memory queue driver keeps ` +
+        `jobs in the process that dispatched them, so no worker could run ` +
+        `them. This server runs its own jobs. Use a driver other processes ` +
+        `can read, such as "database", to hand jobs to \`gemi queue:work\`.`,
+    );
+  } else if (value.trim().toLowerCase() !== "on") {
+    console.warn(
+      `[gemi] GEMI_QUEUE_CLAIM="${value}" is not "off" or "on", so this ` +
+        `server claims jobs. Set it to "off" to leave them to \`gemi queue:work\`.`,
+    );
+  }
 }
 
 /**

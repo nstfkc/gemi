@@ -9,7 +9,7 @@ import { DatabaseQueueDriver } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import type { QueueConfig } from "./config";
-import { QueueManager } from "./QueueManager";
+import { claimsInThisProcess, markQueueWorker, QueueManager } from "./QueueManager";
 import { QueueServiceProvider, startClaimingIfServing } from "./QueueServiceProvider";
 
 /**
@@ -28,6 +28,8 @@ afterEach(() => {
   process.env.NODE_ENV = env.NODE_ENV;
   process.env.ROOT_DIR = env.ROOT_DIR;
   if (env.ROOT_DIR === undefined) delete process.env.ROOT_DIR;
+  delete process.env.GEMI_QUEUE_CLAIM;
+  markQueueWorker(false);
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -241,6 +243,101 @@ describe("claiming at boot", () => {
     startClaimingIfServing(application);
 
     expect(application.resolved(QueueManager)).toBe(false);
+  });
+});
+
+describe("GEMI_QUEUE_CLAIM=off, for a web process beside workers", () => {
+  function serving() {
+    process.env.NODE_ENV = "production";
+    process.env.ROOT_DIR = "/srv/app";
+    process.env.GEMI_QUEUE_CLAIM = "off";
+  }
+
+  test("a production server claims nothing at boot or on a dispatch, and records the job", async () => {
+    serving();
+    const { Gated, started } = gated();
+    const kept = new MemoryQueueDriver();
+    await kept.enqueue({ name: "Gated", args: "[0]" });
+    const application = await makeApp({ jobs: [Gated], driver: () => bind(kept) });
+
+    startClaimingIfServing(application);
+    await application.make(QueueManager).push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([]);
+    expect(kept.waiting).toBe(2);
+    await application.make(QueueManager).stop();
+  });
+
+  test("a development server leaves a dispatch for the worker too", async () => {
+    serving();
+    process.env.NODE_ENV = "development";
+    const { Gated, started } = gated();
+    const kept = new MemoryQueueDriver();
+    const application = await makeApp({ jobs: [Gated], driver: () => bind(kept) });
+
+    await application.make(QueueManager).push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([]);
+    expect(globalThis.__gemiDevQueue).toBeUndefined();
+  });
+
+  test.each(["off", "OFF", " Off "])("reads %j as off", (value) => {
+    serving();
+    process.env.GEMI_QUEUE_CLAIM = value;
+    expect(claimsInThisProcess()).toBe(false);
+  });
+
+  test("any other value claims, and says so at boot", async () => {
+    serving();
+    process.env.GEMI_QUEUE_CLAIM = "false";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { Gated, started, release } = gated();
+    const kept = new MemoryQueueDriver();
+    await kept.enqueue({ name: "Gated", args: "[7]" });
+    const application = await makeApp({ jobs: [Gated], driver: () => bind(kept) });
+
+    startClaimingIfServing(application);
+    await sleep(10);
+
+    expect(started).toEqual([7]);
+    expect(warn.mock.calls.flat().join(" ")).toContain('GEMI_QUEUE_CLAIM="false"');
+    release();
+    await application.make(QueueManager).stop();
+  });
+
+  test("is ignored, loudly, for the memory driver, whose jobs no worker could see", async () => {
+    serving();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { Gated, started, release } = gated();
+    const application = await makeApp({ jobs: [Gated] });
+
+    startClaimingIfServing(application);
+    await application.make(QueueManager).push(Gated, "[1]");
+    await sleep(10);
+
+    expect(started).toEqual([1]);
+    expect(warn.mock.calls.flat().join(" ")).toContain("GEMI_QUEUE_CLAIM=off is ignored");
+    release();
+    await application.make(QueueManager).stop();
+  });
+
+  test("says nothing in a process that is not a server", async () => {
+    serving();
+    delete process.env.ROOT_DIR;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    startClaimingIfServing(await makeApp({}));
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("does not stop a worker, which claims with or without a server's ROOT_DIR", () => {
+    serving();
+    delete process.env.ROOT_DIR;
+    markQueueWorker();
+    expect(claimsInThisProcess()).toBe(true);
   });
 });
 
