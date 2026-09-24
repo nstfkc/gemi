@@ -789,7 +789,16 @@ export class ViewRouteDispatcher {
       urlLocale = maybeLocale;
     }
 
-    if (translator.isLocaleAware && !isOgRequest && urlLocale === null) {
+    // A first path segment is not necessarily a locale, and the shapes overlap:
+    // `de-luxe` is a language `de` with a legal 4-letter subtag, `en-suite` the
+    // same for `en`. No tightening of the tag pattern separates them, so route
+    // existence is the signal — a path the app actually serves is served, and
+    // only one it does not is read as a locale that needs redirecting. Without
+    // this, `/de-luxe` answered `302 /de-DE` and the page was gone.
+    const pathIsARoute =
+      urlLocale === null && matchViewRoute(this.flatViewRoutes, urlPathname) !== null;
+
+    if (translator.isLocaleAware && !isOgRequest && urlLocale === null && !pathIsARoute) {
       // A locale prefix the app doesn't serve verbatim but can map onto one it
       // does — `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about` —
       // is sent to that locale's URL rather than rendered as an unknown path.

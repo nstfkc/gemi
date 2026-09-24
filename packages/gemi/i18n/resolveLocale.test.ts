@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { HttpRequest } from "../http/HttpRequest";
 import { Translator } from "./Translator";
 import { translationConfigDefaults } from "./config";
-import { resolveLocale } from "./resolveLocale";
+import { looksLikeLocale, resolveLocale } from "./resolveLocale";
 
 const supported = ["en-US", "de-DE", "tr-TR"];
 
@@ -67,5 +67,42 @@ describe("Translator.detectLocale", () => {
 
   test("falls back to the default locale", () => {
     expect(translator.detectLocale(request({ "accept-language": "fr-FR" }))).toBe("en-US");
+  });
+});
+
+describe("looksLikeLocale", () => {
+  /**
+   * This is the only thing separating a locale prefix from an ordinary path
+   * segment, so it is what decides whether a URL is redirected at all.
+   */
+  test.each(["en", "de", "en-US", "de_AT", "zh-Hant-TW", "eng"])("%s is a tag", (segment) => {
+    expect(looksLikeLocale(segment)).toBe(true);
+  });
+
+  test.each(["blog", "settings", "a", "about-us", "2024", "-en", "en-", "en-toolongsubtag"])(
+    "%s is not",
+    (segment) => {
+      expect(looksLikeLocale(segment)).toBe(false);
+    },
+  );
+
+  /**
+   * The gate only shows on a segment whose *language* the app supports but
+   * whose shape is not a tag — without it, the same-language fallback happily
+   * maps `/en-toolongsubtag` onto `en-US` and redirects a path away.
+   */
+  test.each(["en-toolongsubtag", "en-", "en_", "en-US-", "en--US"])(
+    "refuses %s even though its language is supported",
+    (segment) => {
+      expect(resolveLocale(segment, ["en-US", "de-DE"], "en-US")).toBeNull();
+    },
+  );
+});
+
+describe("resolveLocale separators", () => {
+  /** `de_AT` and `de-AT` are the same tag, and the exact match must see that. */
+  test("an underscore tag matches its hyphenated locale exactly", () => {
+    expect(resolveLocale("de_AT", ["de-DE", "de-AT"], "de-DE")).toBe("de-AT");
+    expect(resolveLocale("zh_Hant_TW", ["zh-Hans-CN", "zh-Hant-TW"])).toBe("zh-Hant-TW");
   });
 });
