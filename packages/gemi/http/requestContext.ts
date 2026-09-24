@@ -39,6 +39,15 @@ export function createCookie(
 
 const requestContext = new AsyncLocalStorage<Store>();
 
+/**
+ * What a route's request context takes over from the global middleware list's
+ * (see `runGlobalMiddleware`): the user, so one the list resolved is not
+ * looked up a second time.
+ */
+export interface CarriedContext {
+  user: any;
+}
+
 class Store {
   cookies: Set<string> = new Set();
   headers: Headers = new Headers();
@@ -272,8 +281,20 @@ export class RequestContext {
     requestContext.getStore().req = req;
   }
 
-  static run<T>(httpRequest: HttpRequest, fn: () => T): T {
-    return requestContext.run(new Store(httpRequest), fn);
+  /**
+   * Opens a fresh request scope. `carried` seeds it with what the global
+   * middleware list resolved for the same request; nothing else crosses over.
+   */
+  static run<T>(
+    httpRequest: HttpRequest,
+    fn: () => T,
+    carried?: CarriedContext | null,
+  ): T {
+    const store = new Store(httpRequest);
+    if (carried) {
+      store.user = carried.user;
+    }
+    return requestContext.run(store, fn);
   }
 
   /**

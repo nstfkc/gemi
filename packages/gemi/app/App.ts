@@ -1,5 +1,6 @@
 import type { WebSocketHandler } from "bun";
 import type { Kernel } from "../kernel";
+import type { CarriedContext } from "../http/requestContext";
 import { isApiPath } from "../services/router/apiPath";
 
 interface AppParams {
@@ -70,9 +71,10 @@ export class App {
   }
 
   // Requests `withGlobalMiddleware` already ran the global middleware for, so
-  // `fetch` inside it does not run the list a second time. Keyed by the Request
-  // object: the servers hand `fetch` the same one they gated.
-  private globallyGated = new WeakSet<Request>();
+  // `fetch` inside it does not run the list a second time, and can still hand
+  // the route what the list carried. Keyed by the Request object: the servers
+  // hand `fetch` the same one they gated.
+  private globallyGated = new WeakMap<Request, CarriedContext | null>();
 
   /**
    * Runs the `global` middleware list, then `next` — what the servers put in
@@ -96,7 +98,7 @@ export class App {
     if (outcome.refusal) {
       return outcome.refusal;
     }
-    this.globallyGated.add(req);
+    this.globallyGated.set(req, outcome.carried);
     return outcome.apply(await next(req));
   }
 
@@ -105,7 +107,9 @@ export class App {
     return this.kernel.run.call(this.kernel, async () => {
       // Run here too for a caller that is not one of the servers, a test or an
       // app's own `Bun.serve`, so the list is not skipped by calling `fetch`.
-      const outcome = this.globallyGated.has(req) ? null : await this.kernel.globalMiddleware(req);
+      const gated = this.globallyGated.has(req);
+      const outcome = gated ? null : await this.kernel.globalMiddleware(req);
+      const carried = gated ? this.globallyGated.get(req) : outcome.carried;
       if (outcome?.refusal) {
         return outcome.refusal;
       }
@@ -119,8 +123,8 @@ export class App {
         return outcome ? outcome.apply(unknown) : unknown;
       }
       const result = isApiPath(url.pathname)
-        ? await dispatchers.api.handleApiRequest(req)
-        : await dispatchers.view.handleViewRequest(req);
+        ? await dispatchers.api.handleApiRequest(req, carried)
+        : await dispatchers.view.handleViewRequest(req, carried);
       if (!outcome) {
         return result;
       }
