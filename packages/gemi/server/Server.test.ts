@@ -59,7 +59,15 @@ describe("Server.stop", () => {
 // `httpProd` reads a built `dist/`, so it is replaced by one that keeps the
 // instrumentation `Server` hands it: that composed function is what wraps every
 // production response, and the part of `start()` this file can reach.
-const listening = { stop: async () => {}, pendingRequests: 0 };
+// Its `stop()` waits on `listening.release`, so a test can respond while the
+// listener is closing — the drain window — and again once it has.
+const listening = {
+  release: () => {},
+  stop() {
+    return new Promise<void>((resolve) => (listening.release = resolve));
+  },
+  pendingRequests: 0,
+};
 const httpProd = vi.hoisted(() => ({
   instrumentation: undefined as
     | undefined
@@ -73,7 +81,7 @@ vi.mock("./httpProd", () => ({
 }));
 
 describe("Server.start", () => {
-  test("resolves with the server, whose responses close the connection once shutting down", async () => {
+  test("resolves with the server, whose responses close the connection while draining and are refused after", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubEnv("NODE_ENV", "production");
     // `start()` sets it; stubbed so the unstub below puts back what was there.
@@ -94,16 +102,26 @@ describe("Server.start", () => {
 
       expect(await server.start()).toBe(listening);
 
-      const respond = () =>
-        httpProd.instrumentation!(new Request("http://app/"), async () => new Response("ok"));
+      const reached = vi.fn(async () => new Response("ok"));
+      const respond = () => httpProd.instrumentation!(new Request("http://app/"), reached);
       const before = await respond();
       expect(before.headers.get("Connection")).toBeNull();
       expect(before.headers.get("X-Instrumented")).toBe("yes");
 
-      await server.stop();
+      const stopping = server.stop();
       const during = await respond();
       expect(during.headers.get("Connection")).toBe("close");
       expect(during.headers.get("X-Instrumented")).toBe("yes");
+
+      listening.release();
+      await stopping;
+      // The request drain is over: what a kept-alive connection still
+      // delivers is refused before it reaches the app (#566).
+      const after = await respond();
+      expect(after.status).toBe(503);
+      expect(after.headers.get("Connection")).toBe("close");
+      expect(after.headers.get("X-Instrumented")).toBeNull();
+      expect(reached).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllEnvs();
     }

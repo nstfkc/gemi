@@ -1,5 +1,6 @@
 import { constants } from "node:os";
 import type { ShutdownReport } from "../foundation/Application";
+import type { Instrumentation } from "./types";
 
 // On `globalThis` under a registry symbol rather than in a module variable, so
 // the flag an app's health route reads is the one the server set even when two
@@ -7,11 +8,11 @@ import type { ShutdownReport } from "../foundation/Application";
 // `app/App.ts`), and `bun --hot` re-evaluates every module on a reload.
 const STATE = Symbol.for("gemi.server.shutdown");
 
-type ShutdownState = { shuttingDown: boolean };
+type ShutdownState = { shuttingDown: boolean; drained: boolean };
 
 function state(): ShutdownState {
   const global = globalThis as { [STATE]?: ShutdownState };
-  global[STATE] ??= { shuttingDown: false };
+  global[STATE] ??= { shuttingDown: false, drained: false };
   return global[STATE];
 }
 
@@ -35,9 +36,18 @@ export function markShuttingDown() {
   state().shuttingDown = true;
 }
 
+/**
+ * The request drain is over and the providers' `shutdown()` may be running:
+ * from here on a request must not reach the app. See `serveForShutdown`.
+ */
+export function markDrained() {
+  state().drained = true;
+}
+
 /** Test seam: a fresh process starts false, and so should each test. */
 export function resetShuttingDown() {
   state().shuttingDown = false;
+  state().drained = false;
 }
 
 export type ShutdownSettings = {
@@ -119,7 +129,9 @@ export type Stoppable = {
  *    new connections are refused, while every request in flight — a streamed
  *    response included, to its last chunk — runs to completion.
  * 3. That completion is awaited until `timeoutMs` from the start.
- * 4. Every provider's `shutdown()` runs, reverse order, `providerTimeoutMs`.
+ * 4. From here a request is refused with a `503` before it reaches the app
+ *    (`serveForShutdown`), and every provider's `shutdown()` runs, reverse
+ *    order, `providerTimeoutMs`.
  *
  * Resolves with the exit code: 0 when every step finished in time, 1 when the
  * drain was cut short or a provider failed or overran.
@@ -131,10 +143,15 @@ export type Stoppable = {
  *   listener closes stays open, and a request sent down it afterwards is
  *   served. That is what the `Connection: close` on every response in the
  *   window is for: a client (or a proxy in front) that honours it opens its
- *   next request on a new connection, which the closed listener refuses.
+ *   next request on a new connection, which the closed listener refuses. A
+ *   client that does not honour it is what step 4's `503` is for — Bun does
+ *   not close the socket after a `Connection: close` response either (#566).
  * - `stop(true)` issued after a graceful `stop()` does not cut the remaining
  *   requests off; it waits for the same ones. It is still called when the
- *   drain times out, for a Bun that does, but nothing here depends on it.
+ *   drain times out, for a Bun that does, but nothing here depends on it. Nor
+ *   does it close an idle kept-alive connection. Only a `stop(true)` issued
+ *   *first* does that, and it cuts off the requests in flight with it, which
+ *   is the drain given up — so the idle ones are refused, not closed.
  */
 export async function drain(params: {
   server: Stoppable | undefined;
@@ -171,6 +188,10 @@ export async function drain(params: {
     }
   }
 
+  // Whether or not the drain finished: a request that arrives now, down a
+  // kept-alive connection the listener's close left open, would run against
+  // providers that are being shut down underneath it.
+  markDrained();
   const report = await params.shutdownProviders({ timeoutMs: settings.providerTimeoutMs });
   const clean = drained && report.failed.length === 0 && report.timedOut.length === 0;
   console.log(`[gemi] Shutdown ${clean ? "complete" : "finished with errors"}.`);
@@ -220,6 +241,33 @@ export function closeConnectionWhileShuttingDown(res: Response): Response {
     copy.headers.set("Connection", "close");
     return copy;
   }
+}
+
+/**
+ * What every response goes through while this process serves: the app's
+ * instrumentation, with the two changes a shutdown makes to it.
+ *
+ * - While the requests in flight drain, a response carries `Connection: close`
+ *   (`closeConnectionWhileShuttingDown`).
+ * - Once they have drained, a request is answered `503` with
+ *   `Connection: close` and reaches neither the app nor its instrumentation.
+ *   The listener is closed by then, so only a kept-alive connection can still
+ *   deliver one, and `server.stop()` leaves those open. Serving it would run a
+ *   handler against providers whose `shutdown()` is closing the pool, the
+ *   queue or the cache it uses — until the process exits. The instrumentation
+ *   is skipped too because it is app code, and a tracer or error reporter is
+ *   exactly what a provider flushes and closes at this point.
+ */
+export function serveForShutdown(instrumentation: Instrumentation): Instrumentation {
+  return async (req, next) => {
+    if (state().drained) {
+      return new Response("Service Unavailable", {
+        status: 503,
+        headers: { Connection: "close" },
+      });
+    }
+    return closeConnectionWhileShuttingDown(await instrumentation(req, next));
+  };
 }
 
 // Installed once per process, not once per `Server`: a listener per instance
