@@ -62,12 +62,18 @@ export class AuthManager {
     };
   }
 
-  /** The origin the client addressed, through the proxy in front if there is one. */
+  /**
+   * The origin the client addressed, through the proxy in front if there is
+   * one.
+   *
+   * `DomainRouter` is bound by `RouteServiceProvider`, which a test that
+   * exercises auth against a database need not register — and writing a cookie
+   * is no reason to demand the router exist. Without it the request's own
+   * origin is the answer, since there is no proxy config to consult.
+   */
   private publicOrigin(req: HttpRequest<any, any>): string {
-    const resolver = app(DomainRouter).resolver;
-    return resolver
-      ? resolver.publicOrigin(req.rawRequest)
-      : new URL(req.rawRequest.url).origin;
+    const resolver = app().bound(DomainRouter) ? app(DomainRouter).resolver : null;
+    return resolver ? resolver.publicOrigin(req.rawRequest) : new URL(req.rawRequest.url).origin;
   }
 
   /** `config.cookieDomain` when `req`'s host falls under it, else nothing. */
