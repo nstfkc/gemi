@@ -271,6 +271,24 @@ job.
 `Scheduler` gains `drain(timeoutMs)` and `running`. See
 [Stopping the schedule](docs/cron.md#stopping-the-schedule).
 
+## If you used the global middleware list in 0.63.0-rc.1
+
+The `global` list is new in 0.63, so an app coming from 0.62 has nothing to
+change. An app that adopted it on `0.63.0-rc.1` sees two differences:
+
+- **The route starts with the user the list left.** A user a global
+  middleware puts on the context, with `Auth.user()` or `ctx().setUser(...)`,
+  used to stay behind; now the route's context starts with it, and trusts it.
+  `auth` then checks only that an `access_token` cookie or header is present,
+  and `Auth.user()` returns that user. If a global middleware sets a user it
+  has not verified, from an unchecked token or an API-key header read for rate
+  limits or logs, stop it doing so: keep that identity somewhere other than
+  the context's user. See
+  [Global middleware](docs/middleware.md#global-middleware).
+- **In `gemi dev`, the list also runs for `/refresh.js` and
+  `/render-error.js`.** A gate that refuses requests without a header now
+  refuses those too; an exemption by path has to name them.
+
 ---
 
 # Upgrading from 0.55 to 0.56
