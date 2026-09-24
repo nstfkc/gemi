@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { DEFAULT_CONNECTION } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import { withTransaction } from "../../orm/context";
+import { TransactionDependencyError, currentTransaction, withTransaction } from "../../orm/context";
 import { DatabaseQueueDriver, createTableStatements } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import type { QueueDriver } from "./QueueDriver";
@@ -498,6 +498,99 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     });
     await until(() => runs.length === 1, 1_000);
   });
+
+  // #563's review. A job written on the transaction that fails aborts the
+  // transaction on Postgres, and Bun's `COMMIT` after it is a rollback that
+  // `begin` reports as success: without the commit waiting on the job, the
+  // caller's rows vanished and its transaction resolved. A queued listener's
+  // dispatch is never awaited, so "await the dispatch" is not a way out.
+  // SQLite never joins (its held dispatch fails after the commit, which
+  // stays), so there is nothing there to roll back.
+  describe.skipIf(backend.dialect === "sqlite")(
+    "a job written on the transaction that fails",
+    () => {
+      // A data table beside the jobs, and a driver on the default connection
+      // whose own table was never created — an app whose jobs migration has
+      // not run.
+      async function unmigrated() {
+        const { application } = await database();
+        const { sql } = application();
+        const orders = quoteTable(backend.dialect, `orders_${crypto.randomUUID().slice(0, 8)}`);
+        await sql.unsafe(`CREATE TABLE ${orders} (id INT PRIMARY KEY)`);
+        const previous = dispose;
+        dispose = async () => {
+          await sql.unsafe(`DROP TABLE IF EXISTS ${orders}`);
+          await previous?.();
+        };
+        const driver = new DatabaseQueueDriver(
+          { name: DEFAULT_CONNECTION, sql, dialect: backend.dialect },
+          { table: `missing_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}` },
+        );
+        const count = async () =>
+          Number(
+            ((await sql.unsafe(`SELECT COUNT(*) AS n FROM ${orders}`)) as Array<{ n: unknown }>)[0]!
+              .n,
+          );
+        return { sql, driver, orders, count };
+      }
+
+      /** The caller's own write, on the transaction the ORM would use. */
+      const currentInsert = (orders: string, id = 1) =>
+        currentTransaction()!.unsafe(`INSERT INTO ${orders} (id) VALUES (${id})`);
+
+      const runs: Array<{ n: number; worker: string }> = [];
+      const Noop = recorder("Noop", "here", runs);
+
+      test("rolls the transaction back, and says so, when nobody awaited it", async () => {
+        const { sql, driver, orders, count } = await unmigrated();
+        const queue = worker(driver, [Noop]);
+        // Stopped, so the push does not start a claim loop: on MySQL a claim
+        // loop against a missing table also produces unhandled rejections
+        // (Bun 1.3.14, with or without this change), which is not what this
+        // test is about.
+        await queue.drain(0);
+        const failed = vi.fn();
+
+        const outcome = withTransaction(sql, async () => {
+          await currentInsert(orders);
+          // As `EventManager` pushes a queued listener: not awaited.
+          queue.push(Noop, "[]", { reportFailure: false }).catch(failed);
+          return "ok";
+        });
+
+        await expect(outcome).rejects.toBeInstanceOf(TransactionDependencyError);
+        expect(await count()).toBe(0);
+        expect(failed).toHaveBeenCalledOnce();
+      });
+
+      test("rolls the transaction back when the caller awaited it and caught the error", async () => {
+        const { sql, driver, orders, count } = await unmigrated();
+
+        await expect(
+          withTransaction(sql, async () => {
+            await currentInsert(orders);
+            await driver.enqueue({ name: "Noop", args: "[]" }).catch(() => "ignored");
+          }),
+        ).rejects.toBeInstanceOf(TransactionDependencyError);
+        expect(await count()).toBe(0);
+      });
+
+      test("inside a savepoint rolls back only the savepoint, and a caller that catches keeps the rest", async () => {
+        const { sql, driver, orders, count } = await unmigrated();
+
+        await withTransaction(sql, async () => {
+          await currentInsert(orders, 1);
+          await expect(
+            withTransaction(sql, async () => {
+              await currentInsert(orders, 2);
+              void driver.enqueue({ name: "Noop", args: "[]" }).catch(() => {});
+            }),
+          ).rejects.toBeInstanceOf(TransactionDependencyError);
+        });
+        expect(await count()).toBe(1);
+      });
+    },
+  );
 
   test("a driver that cannot tell which connection it is on never joins a transaction", async () => {
     const { driver, application } = await database();

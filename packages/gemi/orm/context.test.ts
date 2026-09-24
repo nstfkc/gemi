@@ -4,6 +4,7 @@ import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
 import { CrossConnectionTransactionError } from "../database/Connection";
 import {
   assertConnectionUsable,
+  commitDependsOn,
   currentConnectionName,
   currentTransaction,
   deferUntilCommit,
@@ -12,6 +13,7 @@ import {
   runAsSystem,
   runOnConnection,
   slowTransactionThreshold,
+  TransactionDependencyError,
   transactionDepth,
   withTransaction,
 } from "./context";
@@ -215,14 +217,16 @@ describe("the ambient transaction scope", () => {
     const pool = fakePool("a");
 
     await withTransaction(pool, async () => {
-      // The after-commit list is created empty by every outermost transaction
-      // rather than on first use: a savepoint's scope is a spread of this one,
-      // so a list that appeared later would appear on the savepoint's copy and
-      // not on the parent that has to drain it.
+      // The after-commit list — and the list of writes the commit depends
+      // on, for the same reason — is created empty by every outermost
+      // transaction rather than on first use: a savepoint's scope is a spread
+      // of this one, so a list that appeared later would appear on the
+      // savepoint's copy and not on the parent that has to drain it.
       expect(ormContext.getStore()).toEqual({
         tx: pool.handle,
         depth: 0,
         afterCommit: [],
+        commitDependsOn: [],
       });
     });
   });
@@ -1048,5 +1052,90 @@ describe("the ambient connection", () => {
       expect(ormContext.getStore()).toBeUndefined();
       expect(currentConnectionName()).toBe("default");
     });
+  });
+});
+
+/**
+ * #563's review: a job row written on the transaction and never awaited —
+ * every queued listener's — that fails. On Postgres the failure aborts the
+ * transaction and the `COMMIT` after it is a rollback Bun reports as success,
+ * so the only place left to turn it into an error is before `begin` commits.
+ * The fake pool cannot roll anything back; that `begin`'s callback rejects is
+ * what makes Bun roll back, and `DatabaseQueueDriver.test.ts` shows the rows
+ * go against Postgres and MySQL.
+ */
+describe("writes the commit depends on", () => {
+  const failed = () => {
+    const write = Promise.reject(new Error('relation "gemi_jobs" does not exist'));
+    // Handled by whoever issued it, as the queue manager does.
+    write.catch(() => {});
+    return write;
+  };
+
+  test("there is nothing to depend on outside a transaction", () => {
+    expect(commitDependsOn(Promise.resolve())).toBe(false);
+  });
+
+  test("a failed one the callback never awaited rolls the transaction back", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    const outcome = withTransaction(pool, async () => {
+      deferUntilCommit(() => void ran.push("after commit"));
+      expect(commitDependsOn(failed())).toBe(true);
+      return "ok";
+    });
+
+    await expect(outcome).rejects.toBeInstanceOf(TransactionDependencyError);
+    await expect(outcome).rejects.toThrow('relation "gemi_jobs" does not exist');
+    expect(ran).toEqual([]);
+  });
+
+  test("a failed one the callback awaited and caught still rolls it back", async () => {
+    const pool = fakePool("a");
+
+    await expect(
+      withTransaction(pool, async () => {
+        const write = failed();
+        commitDependsOn(write);
+        await write.catch(() => "handled");
+      }),
+    ).rejects.toBeInstanceOf(TransactionDependencyError);
+  });
+
+  test("the commit waits for one still in flight", async () => {
+    const pool = fakePool("a");
+    const order: string[] = [];
+
+    await withTransaction(pool, async () => {
+      commitDependsOn(
+        new Promise((resolve) => setTimeout(resolve, 5)).then(() => order.push("write")),
+      );
+    });
+    order.push("committed");
+
+    expect(order).toEqual(["write", "committed"]);
+  });
+
+  test("one that failed inside a savepoint rolls back only the savepoint", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    const result = await withTransaction(pool, async () => {
+      await expect(
+        withTransaction(pool, async () => {
+          deferUntilCommit(() => void ran.push("inside"));
+          commitDependsOn(failed());
+        }),
+      ).rejects.toBeInstanceOf(TransactionDependencyError);
+
+      deferUntilCommit(() => void ran.push("after"));
+      return "committed";
+    });
+
+    // The caller caught it, so the transaction commits, and the failed write
+    // is not held against it a second time.
+    expect(result).toBe("committed");
+    expect(ran).toEqual(["after"]);
   });
 });
