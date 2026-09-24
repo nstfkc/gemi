@@ -1173,7 +1173,7 @@ export class ViewRouteDispatcher {
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
           if (isViewDataRequest) {
-            return viewDataBreakResponse(err.payload.api);
+            return viewDataBreakResponse(err.payload.viewData ?? err.payload.api);
           } else {
             return viewBreakResponse(err.payload.view);
           }

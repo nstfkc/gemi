@@ -1,5 +1,7 @@
 import type { User } from "../auth/types";
 import { AuthManager } from "../auth/AuthManager";
+import { signInLocation } from "../auth/signInRedirect";
+import { INTENDED_URL_PARAM, safeRedirectPath } from "../utils/intendedUrl";
 import {
   AuthenticationError,
   InsufficientPermissionsError,
@@ -45,7 +47,34 @@ export class Auth extends Facade {
     if (user) {
       return user;
     }
-    throw new AuthenticationError();
+    throw new AuthenticationError({
+      redirectTo: signInLocation(
+        requestContextStore?.req,
+        this.getFacadeRoot().config.signInPath,
+      ),
+    });
+  }
+
+  /**
+   * Where to send a user who has just signed in: the page they were turned
+   * away from, which `AuthenticationMiddleware` put on the sign-in URL as
+   * `?redirect=`, or `auth.redirectPath` when there is none.
+   *
+   * Reads the current request's query, so call it from the sign-in page's own
+   * loader or from a controller the sign-in page posts to with its query
+   * forwarded. Anything but a path on this origin is ignored — the parameter
+   * is attacker-writable, and passing it on unchecked is an open redirect.
+   *
+   * ```ts
+   * Redirect.to(Auth.intendedUrl() as any);
+   * ```
+   */
+  static intendedUrl(fallback?: string): string {
+    const req = RequestContext.getStore()?.req;
+    return safeRedirectPath(
+      req?.search.get(INTENDED_URL_PARAM),
+      fallback ?? this.getFacadeRoot().config.redirectPath,
+    );
   }
 
   static async guard(

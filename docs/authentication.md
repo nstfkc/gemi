@@ -75,7 +75,8 @@ a binding into the container, and a facade resolves it.**
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
-| `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
+| `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
+| `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an absolute URL for sign-in hosted elsewhere. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
@@ -607,6 +608,7 @@ current user and session.
 | `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
 | `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
 | `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
+| `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
 
@@ -656,6 +658,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
 
@@ -767,7 +770,87 @@ export default class extends Kernel {
 this.get(DashboardController, "index").middleware(["auth"]);
 ```
 
-Requests without a valid `access_token` are rejected with an `AuthenticationError`
-(401 for API routes, a redirect to `/auth/sign-in` for views). See
-[Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
-and [Authorization](./authorization.md) for role enforcement.
+Requests without a valid `access_token` are rejected with an `AuthenticationError`:
+a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
+a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
+view's loader refuses the same way. See [Middleware](./middleware.md) for the full DSL
+(`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
+role enforcement.
+
+The sign-in page is set once in the auth config:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  signInPath: "/login",
+});
+```
+
+A route that needs a different one — an admin area with its own sign-in — names it as the
+middleware's parameter:
+
+```typescript
+"/admin": this.view("Admin").middleware(["auth:/admin/sign-in"]),
+```
+
+### Returning to the intended page
+
+The redirect carries the page that was asked for, as `?redirect=`:
+`/invoices?page=2` is sent to `/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2`. The locale
+segment is left off, since `useNavigate` adds the current one back. After sign-in, send the
+user there:
+
+```tsx
+import { Form, useIntendedUrl, useNavigate } from "gemi/client";
+
+function SignIn() {
+  const { push } = useNavigate();
+  const intended = useIntendedUrl("/dashboard");
+  return (
+    <Form method="POST" action="/auth/sign-in-v2" onSuccess={() => push(intended)}>
+      {/* ... */}
+    </Form>
+  );
+}
+```
+
+On the server, `Auth.intendedUrl()` reads the same parameter from the current request —
+for example in the sign-in page's loader, to send an already-signed-in visitor on:
+
+```typescript
+"/sign-in": this.view("auth/SignIn", async () => {
+  const user = await Auth.user().catch(() => null);
+  if (user) {
+    // `as any`: the target is a runtime path, not a typed route.
+    Redirect.to(Auth.intendedUrl() as any);
+  }
+  return {};
+}),
+```
+
+Both accept only a path on this origin and fall back otherwise. The parameter is part of a
+URL anyone can send a user, so passing it on unchecked would be an open redirect:
+`?redirect=https://evil.example` must not sign a user in and hand them to a look-alike.
+Read it through these two helpers rather than off `useSearchParams()` directly.
+
+**OAuth.** The provider round trip drops the query string, so forward the parameter onto the
+OAuth link and the framework keeps it for the callback in a short-lived cookie:
+
+```tsx
+const intended = useIntendedUrl();
+<a href={`/auth/oauth/google?redirect=${encodeURIComponent(intended)}`}>Sign in with Google</a>
+```
+
+The callback view (`auth/OauthCallback`) then receives `redirectTo` next to `session`: the
+forwarded page, or `redirectPath` when there was none.
+
+```tsx
+export default function OauthCallback({ session, redirectTo }) {
+  if (session) return <Redirect action="replace" href={redirectTo} />;
+  // ...
+}
+```
+
+A **magic link** is opened from an email, not from the sign-in page, so it carries no
+`?redirect=` unless your `onMagicLinkCreated` / `onSignUp` hook puts one on the link it
+mails; when it does, `useIntendedUrl()` in the `auth/MagicLinkSignIn` view reads it.

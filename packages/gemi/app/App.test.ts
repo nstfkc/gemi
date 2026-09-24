@@ -10,6 +10,7 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { AuthenticationMiddleware, RequestBreakerError } from "../http";
 import { Kernel } from "../kernel";
+import { Auth } from "../facades/Auth";
 
 process.env.SECRET ??= "test-secret";
 
@@ -91,6 +92,19 @@ class RootViewRouter extends ViewRouter {
       return { message: "Home" };
     }),
     "/about": this.view("About", [TestController, "test"]),
+    "/invoices": this.view("Invoices", [TestController, "test"]).middleware([
+      "auth",
+    ]),
+    "/admin": this.view("Admin", [TestController, "test"]).middleware([
+      "auth:/admin/sign-in",
+    ]),
+    "/reports": this.view("Reports", async () => {
+      await Auth.user();
+      return {};
+    }),
+    "/auth/sign-in": this.view("SignIn", [TestController, "test"]).middleware([
+      "auth",
+    ]),
   };
 }
 
@@ -284,6 +298,64 @@ describe("App fetch()", () => {
     const res = await app.fetch(request);
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: { message: "Not found" } });
+  });
+
+  describe("a signed-out request for a guarded view", () => {
+    const fetchPage = async (url: string) => {
+      const res = await app.fetch(new Request(url, { method: "GET" }));
+      return typeof res === "function" ? await (res as any)(renderParams) : res;
+    };
+
+    test("a page load redirects to sign-in, carrying the page", async () => {
+      const res = await fetchPage("http://gemi.dev/invoices?page=2");
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("Location");
+      expect(location).toBe("/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2");
+      expect(new URL(location, "http://h").searchParams.get("redirect")).toBe(
+        "/invoices?page=2",
+      );
+    });
+
+    test("a .json navigation gets a Redirect directive, not a bare 401", async () => {
+      const res = await fetchPage("http://gemi.dev/invoices.json?page=2");
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).directive).toEqual({
+        kind: "Redirect",
+        path: "/auth/sign-in?redirect=%2Finvoices%3Fpage%3D2",
+      });
+    });
+
+    test("Auth.user() in a loader redirects the same way", async () => {
+      const res = await fetchPage("http://gemi.dev/reports");
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe(
+        "/auth/sign-in?redirect=%2Freports",
+      );
+    });
+
+    test("the route's own sign-in path wins over the config", async () => {
+      const res = await fetchPage("http://gemi.dev/admin");
+
+      expect(res.headers.get("Location")).toBe(
+        "/admin/sign-in?redirect=%2Fadmin",
+      );
+    });
+
+    test("the sign-in page does not send itself back to itself", async () => {
+      const res = await fetchPage("http://gemi.dev/auth/sign-in?redirect=%2Fx");
+
+      expect(res.headers.get("Location")).toBe("/auth/sign-in");
+    });
+
+    test("an api route still answers 401", async () => {
+      const res = await app.fetch(new Request("http://gemi.dev/api/bar"));
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get("Location")).toBeNull();
+    });
   });
 
   test("404 view handler", async () => {

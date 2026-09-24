@@ -24,6 +24,7 @@ const user = { id: 1, email: "a@example.com", globalRole: 1 } as any;
 /** Runs `fn` inside a request whose session resolves to `sessionUser`. */
 function inRequest<T>(sessionUser: any, fn: () => Promise<T>): Promise<T> {
   vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+    config: { signInPath: "/auth/sign-in", redirectPath: "/dashboard" },
     getSession: async () => (sessionUser ? { user: sessionUser } : null),
   } as any);
   return RequestContext.run(fakeRequest(), fn);
@@ -145,5 +146,31 @@ describe("InsufficientPermissionsError.apiStatus", () => {
 
   test("defaults to 403", () => {
     expect(new InsufficientPermissionsError().payload.api.status).toBe(403);
+  });
+});
+
+describe("Auth.intendedUrl", () => {
+  function withRedirect<T>(redirect: string | undefined, fn: () => T): T {
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+      config: { redirectPath: "/dashboard" },
+    } as any);
+    const req = { search: { get: () => redirect } } as any;
+    return RequestContext.run(req, fn);
+  }
+
+  test("returns the page the sign-in redirect carried", () => {
+    expect(withRedirect("/invoices?page=2", () => Auth.intendedUrl())).toBe(
+      "/invoices?page=2",
+    );
+  });
+
+  test("falls back to redirectPath without one", () => {
+    expect(withRedirect(undefined, () => Auth.intendedUrl())).toBe("/dashboard");
+  });
+
+  test("refuses an off-origin target, to the given fallback", () => {
+    expect(
+      withRedirect("//evil.example", () => Auth.intendedUrl("/home")),
+    ).toBe("/home");
   });
 });

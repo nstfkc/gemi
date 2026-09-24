@@ -104,24 +104,39 @@ export class FileNotFoundError extends RequestBreakerError {
   }
 }
 
+/**
+ * No signed-in user. A 401 to an API client; a view request is sent to
+ * `redirectTo` instead — a 302 for a page load, and a `Redirect` directive for
+ * a `.json` navigation, so the client router follows it rather than leaving
+ * the previous page on screen.
+ *
+ * `redirectTo` is the whole location, intended-URL parameter included.
+ * `AuthenticationMiddleware` and `Auth.user()` build it from the request and
+ * the `auth.signInPath` config; code throwing this by hand can pass its own.
+ */
 export class AuthenticationError extends RequestBreakerError {
-  constructor() {
+  constructor(options: { redirectTo?: string } = {}) {
     super("Authentication error");
     this.name = "AuthenticationError";
-  }
-
-  payload = {
-    api: {
-      status: 401,
-      data: { error: "Authentication error" },
-    },
-    view: {
-      status: 302,
-      headers: {
-        "Cache-Control":
-          "private, no-cache, no-store, max-age=0, must-revalidate",
-        Location: "/auth/sign-in",
+    const location = options.redirectTo ?? "/auth/sign-in";
+    this.payload = {
+      api: {
+        status: 401,
+        data: { error: "Authentication error" },
       },
-    },
-  };
+      viewData: {
+        status: 200,
+        data: {},
+        directive: { kind: "Redirect", path: location },
+      },
+      view: {
+        status: 302,
+        headers: {
+          "Cache-Control":
+            "private, no-cache, no-store, max-age=0, must-revalidate",
+          Location: location,
+        },
+      },
+    };
+  }
 }

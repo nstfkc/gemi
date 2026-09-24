@@ -53,7 +53,7 @@ The following middleware classes ship with the framework and are exported from `
 
 ### `auth` → `AuthenticationMiddleware`
 
-Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to `/auth/sign-in` for view routes. See [Authentication](./authentication.md).
+Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
 
 ### `cache:...` → `CacheMiddleware`
 

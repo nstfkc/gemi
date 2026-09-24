@@ -9,6 +9,10 @@ import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
+import { INTENDED_URL_PARAM, safeRedirectPath } from "../utils/intendedUrl";
+
+/** Holds a `?redirect=` across the OAuth provider round trip. */
+const INTENDED_URL_COOKIE = "intended_url";
 
 class SignInRequest extends HttpRequest<
   {
@@ -534,6 +538,20 @@ export class AuthController extends Controller {
       throw new Error(`Invalid provider: ${provider}`);
     }
 
+    // The provider round trip drops our query string, so a `?redirect=` the
+    // sign-in page forwarded onto this link waits in a cookie for the callback.
+    // `Lax`, not the default `Strict`: the callback is a cross-site navigation
+    // from the provider, and a strict cookie would not be sent on it.
+    const intended = safeRedirectPath(req.search.get(INTENDED_URL_PARAM), "");
+    if (intended) {
+      req.ctx().setCookie(INTENDED_URL_COOKIE, encodeURIComponent(intended), {
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: !new URL(req.rawRequest.url).origin.includes("localhost"),
+        maxAge: 60 * 10,
+      });
+    }
+
     return {
       destination: await oauthProvider.getRedirectUrl(req),
     };
@@ -650,7 +668,18 @@ export class AuthController extends Controller {
       await config.onSignIn(user, req.search.toJSON());
     }
 
-    return { session };
+    // Where `oauthRedirect` was asked to return to, else `redirectPath`.
+    // Checked again on the way out: a cookie is client-writable too.
+    const stashed = req.cookies.get(INTENDED_URL_COOKIE);
+    let redirectTo = config.redirectPath;
+    if (stashed) {
+      try {
+        redirectTo = safeRedirectPath(decodeURIComponent(stashed), redirectTo);
+      } catch {}
+      req.ctx().setCookie(INTENDED_URL_COOKIE, "", { maxAge: -1 });
+    }
+
+    return { session, redirectTo };
   }
 
   /**

@@ -56,6 +56,7 @@ export { useSignUp } from "./auth/useSignUp";
 export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
+export { useIntendedUrl } from "./auth/useIntendedUrl";
 
 export { useFeature, useFeatures } from "./useFeature";
 export { useTranslator } from "./useTranslator";
