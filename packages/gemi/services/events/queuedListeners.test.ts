@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Application } from "../../foundation/Application";
 import { kernelContext } from "../../kernel/context";
+import { withTransaction } from "../../orm/context";
 import { Repository } from "../../support/Repository";
 import { MemoryQueueDriver } from "../queue/MemoryQueueDriver";
 import { QueueManager } from "../queue/QueueManager";
@@ -162,6 +163,55 @@ describe("a dispatch with one sync listener and one queued", () => {
     expect(
       application.make(QueueManager).registeredJobs.map((job) => job.name),
     ).toEqual(["listener:SendWelcomeEmail"]);
+  });
+});
+
+// #563: the queue holds any dispatch made inside a transaction until the
+// commit, and a queued listener's push is one — so it needs no `afterCommit`.
+describe("a queued listener on an event dispatched inside a transaction", () => {
+  const pool = () => {
+    const handle: any = {};
+    return { begin: (fn: (tx: any) => Promise<unknown>) => Promise.resolve().then(() => fn(handle)) } as any;
+  };
+
+  test("is recorded at the commit, while the sync one runs at once", async () => {
+    const ran: string[] = [];
+    const application = await makeApp([
+      listener("WriteAuditRow", () => void ran.push("sync"), { queued: false }),
+      listener("SendWelcomeEmail", () => void ran.push("queued")),
+    ]);
+    const queue = application.make(QueueManager);
+
+    await kernelContext.run(application, () =>
+      withTransaction(pool(), async () => {
+        await UserRegistered.dispatchAndWait(7, "ada@example.com");
+        await tick();
+        expect(ran).toEqual(["sync"]);
+        expect(held(queue)).toBe(0);
+      }),
+    );
+
+    await tick();
+    expect(ran).toEqual(["sync", "queued"]);
+  });
+
+  test("is never recorded when the transaction rolls back", async () => {
+    const ran: string[] = [];
+    const application = await makeApp([listener("SendWelcomeEmail", () => void ran.push("queued"))]);
+    const queue = application.make(QueueManager);
+
+    await expect(
+      kernelContext.run(application, () =>
+        withTransaction(pool(), async () => {
+          await UserRegistered.dispatchAndWait(7, "ada@example.com");
+          throw new Error("billing declined");
+        }),
+      ),
+    ).rejects.toThrow("billing declined");
+
+    await tick();
+    expect(ran).toEqual([]);
+    expect(held(queue)).toBe(0);
   });
 });
 

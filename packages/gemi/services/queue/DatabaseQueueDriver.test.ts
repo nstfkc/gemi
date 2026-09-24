@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { DEFAULT_CONNECTION } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
+import { withTransaction } from "../../orm/context";
 import { DatabaseQueueDriver, createTableStatements } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import type { QueueDriver } from "./QueueDriver";
@@ -113,21 +115,34 @@ const backends: Backend[] = [
 ];
 
 // The contract, once per backend. The driver's database is disposed with it.
+//
+// Named "default", as the driver `driver: "database"` builds is, so that an
+// ORM transaction opened on its client is one it recognises as its own.
 const disposers = new WeakMap<QueueDriver, () => Promise<void>>();
+const clients = new WeakMap<QueueDriver, SQL>();
 for (const backend of backends) {
   queueDriverContract(
     `DatabaseQueueDriver on ${backend.name}`,
     async () => {
       const db = await backend.prepare();
+      const sql = db.connect();
       const driver = new DatabaseQueueDriver(
-        { sql: db.connect(), dialect: backend.dialect },
+        { name: DEFAULT_CONNECTION, sql, dialect: backend.dialect },
         { table: db.table },
       );
       disposers.set(driver, db.dispose);
+      clients.set(driver, sql);
       return driver;
     },
     (driver) => disposers.get(driver)?.(),
-    { claimsByName: true },
+    {
+      claimsByName: true,
+      transaction: {
+        run: (driver, fn) => withTransaction(clients.get(driver)!, fn),
+        // See `DatabaseQueueDriver.transaction` for why SQLite never joins.
+        joins: backend.dialect !== "sqlite",
+      },
+    },
   );
 }
 
@@ -195,7 +210,17 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
       (await reader.unsafe(`SELECT * FROM ${db.quoted} ORDER BY created_at, id`)) as Array<
         Record<string, unknown>
       >;
-    return { driver, rows };
+    // A driver on the default connection, as `driver: "database"` builds it,
+    // with the client an ORM transaction on that connection would open on.
+    const application = () => {
+      const sql = db.connect();
+      const driver = new DatabaseQueueDriver(
+        { name: DEFAULT_CONNECTION, sql, dialect: backend.dialect },
+        { table: db.table },
+      );
+      return { sql, driver };
+    };
+    return { driver, rows, application };
   }
 
   function worker(driver: QueueDriver, jobs: Array<new () => Job>, config = {}) {
@@ -409,6 +434,92 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     const [dead] = await rows();
     expect(Number(dead!.attempts)).toBe(1);
     expect(String(dead!.last_error)).toContain('No job is registered under the name "RemovedJob"');
+  });
+
+  // #563. On Postgres and MySQL the row is written on the transaction; on
+  // SQLite the manager holds the dispatch until the commit. The contract pins
+  // which of the two each does; this is what either looks like from outside.
+  test("a dispatch inside a transaction is neither recorded nor run before the commit", async () => {
+    const { rows, application } = await database();
+    const { sql, driver } = application();
+    const runs: Array<{ n: number; worker: string }> = [];
+    const Recorder = recorder("RecordRun", "here", runs);
+    const queue = worker(driver, [Recorder]);
+    queue.start();
+
+    await withTransaction(sql, async () => {
+      await queue.push(Recorder, "[1]");
+      // Several polls: a row the claim could see would have been run by now.
+      await sleep(150);
+      expect(runs).toEqual([]);
+      // Read on a client of its own, so this is what another replica sees.
+      expect((await rows()).length).toBe(0);
+    });
+
+    await until(() => runs.length === 1);
+    expect(runs).toEqual([{ n: 1, worker: "here" }]);
+  });
+
+  test("a dispatch inside a transaction that rolls back is never recorded or run", async () => {
+    const { rows, application } = await database();
+    const { sql, driver } = application();
+    const runs: Array<{ n: number; worker: string }> = [];
+    const Recorder = recorder("RecordRun", "here", runs);
+    const queue = worker(driver, [Recorder]);
+    queue.start();
+
+    await expect(
+      withTransaction(sql, async () => {
+        await queue.push(Recorder, "[1]");
+        throw new Error("card declined");
+      }),
+    ).rejects.toThrow("card declined");
+
+    await sleep(150);
+    expect(runs).toEqual([]);
+    expect((await rows()).length).toBe(0);
+  });
+
+  test("a dispatch inside a transaction is claimed at the commit, not a poll interval later", async () => {
+    const { application } = await database();
+    const { sql, driver } = application();
+    const runs: Array<{ n: number; worker: string }> = [];
+    const Recorder = recorder("RecordRun", "here", runs);
+    const queue = worker(driver, [Recorder], { pollInterval: 60_000 });
+    queue.start();
+    // Let the first, empty claim finish, so the loop is asleep on the poll.
+    await sleep(50);
+
+    await withTransaction(sql, async () => {
+      await queue.push(Recorder, "[5]");
+      // Long enough for a claim woken by the dispatch itself to have come
+      // back empty, so only a wake at the commit can get the job run in time.
+      await sleep(100);
+    });
+    await until(() => runs.length === 1, 1_000);
+  });
+
+  test("a driver that cannot tell which connection it is on never joins a transaction", async () => {
+    const { driver, application } = await database();
+    const { sql } = application();
+    const unnamed = driver();
+
+    await withTransaction(sql, async () => {
+      expect(unnamed.joinsTransaction()).toBe(false);
+    });
+  });
+
+  test("a transaction on another connection is not one the driver joins", async () => {
+    const { application } = await database();
+    const { sql, driver } = application();
+
+    await withTransaction(
+      sql,
+      async () => {
+        expect(driver.joinsTransaction()).toBe(false);
+      },
+      { connection: "analytics" },
+    );
   });
 
   test("a dispatch is claimed without waiting out the poll interval", async () => {

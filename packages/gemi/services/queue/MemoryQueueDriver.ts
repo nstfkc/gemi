@@ -62,8 +62,12 @@ export class MemoryQueueDriver implements QueueDriver {
     return this.entries.size - this.waiting;
   }
 
-  async enqueue({ name, args, delayMs = 0 }: EnqueueJob): Promise<string> {
-    const id = crypto.randomUUID();
+  async enqueue({
+    name,
+    args,
+    delayMs = 0,
+    id = crypto.randomUUID(),
+  }: EnqueueJob): Promise<string> {
     const now = Date.now();
     this.entries.set(id, {
       job: { id, name, args, attempt: 0, createdAt: now },

@@ -18,6 +18,15 @@ import type { QueueDriver } from "./QueueDriver";
  * outside those tests, with `A`, `B` and `C` registered, so ignoring it
  * correctly is covered too.
  *
+ * `features.transaction` runs a callback inside the kind of transaction
+ * `joinsTransaction` looks for — for the database driver, an ORM transaction
+ * on its own connection — committing when the callback resolves and rolling
+ * back when it rejects. `joins` says whether the driver writes into it. With
+ * `joins: true` the suite checks the outbox: a job enqueued inside is not
+ * claimable until the commit and is gone after a rollback. With `false` it
+ * checks that the driver says so, because the manager then holds the dispatch
+ * until the commit itself; that half is `QueueManager.transaction.test.ts`.
+ *
  * Not a `*.test.ts` file, so vitest never runs it on its own, and not exported
  * from `gemi/services`, because it imports vitest.
  *
@@ -30,7 +39,13 @@ export function queueDriverContract(
   name: string,
   create: () => QueueDriver | Promise<QueueDriver>,
   cleanup?: (driver: QueueDriver) => void | Promise<void>,
-  features: { claimsByName?: boolean } = {},
+  features: {
+    claimsByName?: boolean;
+    transaction?: {
+      run(driver: QueueDriver, fn: () => Promise<void>): Promise<void>;
+      joins: boolean;
+    };
+  } = {},
 ) {
   // Every name the ordinary tests enqueue is registered, so a driver that
   // filters by name behaves in them exactly as one that does not.
@@ -448,5 +463,72 @@ export function queueDriverContract(
         expect(wakes).toBe(after);
       }),
     );
+
+    test(
+      "enqueue records a job under the id it is given",
+      withDriver(async (driver) => {
+        const given = crypto.randomUUID();
+        expect(await driver.enqueue({ name: "A", args: "[]", id: given })).toBe(given);
+
+        const [claimed] = await driver.claim(1, LEASE);
+        expect(claimed).toMatchObject({ id: given, name: "A", attempt: 1 });
+        // The report is matched by that id too, or the job would come back.
+        await driver.complete(claimed!);
+        expect(await driver.claim(1, LEASE)).toEqual([]);
+      }),
+    );
+
+    test(
+      "joinsTransaction, when the driver has it, is false outside a transaction",
+      withDriver(async (driver) => {
+        expect(driver.joinsTransaction?.() ?? false).toBe(false);
+      }),
+    );
+
+    const transaction = features.transaction;
+    if (transaction?.joins) {
+      test(
+        "a job enqueued inside a transaction is not claimable until the commit",
+        withDriver(async (driver) => {
+          let id: string | undefined;
+          await transaction.run(driver, async () => {
+            expect(driver.joinsTransaction?.()).toBe(true);
+            id = await driver.enqueue({ name: "A", args: "[]" });
+            // `claim` reads through a connection of its own, as another
+            // replica's would, so this is what every claimer sees.
+            expect(await driver.claim(10, LEASE)).toEqual([]);
+          });
+
+          const claimed = await driver.claim(10, LEASE);
+          expect(claimed.map((job) => job.id)).toEqual([id]);
+        }),
+      );
+
+      test(
+        "a job enqueued inside a transaction that rolls back is never claimable",
+        withDriver(async (driver) => {
+          await expect(
+            transaction.run(driver, async () => {
+              await driver.enqueue({ name: "A", args: "[]" });
+              throw new Error("rolled back");
+            }),
+          ).rejects.toThrow("rolled back");
+
+          expect(await driver.claim(10, LEASE)).toEqual([]);
+          // And the rollback took only that: the next job is still recorded.
+          const after = await driver.enqueue({ name: "B", args: "[]" });
+          expect((await driver.claim(10, LEASE)).map((job) => job.id)).toEqual([after]);
+        }),
+      );
+    } else if (transaction) {
+      test(
+        "joinsTransaction is false inside a transaction it does not join",
+        withDriver(async (driver) => {
+          await transaction.run(driver, async () => {
+            expect(driver.joinsTransaction?.() ?? false).toBe(false);
+          });
+        }),
+      );
+    }
   });
 }
