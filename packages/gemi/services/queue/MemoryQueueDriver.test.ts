@@ -20,6 +20,22 @@ describe("MemoryQueueDriver", () => {
     expect(driver.leased).toBe(0);
   });
 
+  test("hands out every name, whatever the claimer has registered", async () => {
+    // Nothing but this process can run what is in here, so a name it does not
+    // know is known nowhere. Filtered out, the job would sit unseen until the
+    // process exited; handed out, the manager dead-letters it with a line on
+    // stderr that says why.
+    const driver = new MemoryQueueDriver();
+    await driver.enqueue({ name: "Unknown", args: "[]" });
+
+    const claimed = await driver.claim(1, {
+      visibilityTimeoutMs: 60_000,
+      registered: { names: [], graceMs: Infinity },
+    });
+
+    expect(claimed).toMatchObject([{ name: "Unknown" }]);
+  });
+
   test("hands out copies, so editing one cannot move the record", async () => {
     const driver = new MemoryQueueDriver();
     await driver.enqueue({ name: "A", args: "[]" });
