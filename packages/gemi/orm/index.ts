@@ -144,6 +144,7 @@ export {
   runAsSystem,
   runAsUser,
   transactionDepth,
+  TransactionDependencyError,
   withTransaction,
   type OrmScope,
 } from "./context";

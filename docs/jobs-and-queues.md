@@ -75,7 +75,7 @@ import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 const jobId = await ProcessVideoJob.dispatch({ videoId: video.id });
 ```
 
-`dispatch` enqueues the job and resolves to its id once the driver has recorded it — it does not wait for the job to run, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). Payload that JSON cannot carry throws synchronously, before anything is queued. With the default memory driver the promise never rejects, so leaving it unawaited is fine; with a driver that can fail to record a job, await it, or the failure is an unhandled rejection. See [Controllers](./controllers.md) for dispatching from request handlers.
+`dispatch` enqueues the job and resolves to its id once the driver has recorded it — it does not wait for the job to run, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). Payload that JSON cannot carry throws synchronously, before anything is queued. With the default memory driver the promise never rejects, so leaving it unawaited is fine; with a driver that can fail to record a job, await it, or the failure is an unhandled rejection. Inside a transaction, a job the database driver cannot record fails the transaction whether you await it or not — see [Dispatching inside a transaction](#dispatching-inside-a-transaction). See [Controllers](./controllers.md) for dispatching from request handlers.
 
 A job runs in the application it was registered with, and outside the request that dispatched it: `app()` resolves as usual, but the dispatching request's user, cookies and open transaction are not there. Pass what the job needs as arguments.
 
@@ -98,7 +98,7 @@ How depends on the driver:
 
 Either way `dispatch()` resolves inside the transaction, to the id the job has or will have, so awaiting it there is fine. What differs is what a failure looks like:
 
-- **Written on the transaction**, a job the database cannot record rejects `dispatch()`. Awaited, that fails the transaction and rolls back its rows; on Postgres, the failed statement aborts the transaction even if you catch the error. Await the dispatch, so the failure reaches you rather than the commit.
+- **Written on the transaction**, a job the database cannot record fails the transaction and rolls back its rows — whether or not you awaited `dispatch()`, and whether or not you caught its rejection. A queued listener's dispatch is never awaited, and on Postgres the failed statement has already aborted the transaction, so the commit waits for the job's row and rolls back if it failed rather than committing nothing and reporting success. Awaited and not caught, the transaction rejects with the database's error; otherwise with `TransactionDependencyError` from `gemi/orm`, whose `cause` is that error. Inside a savepoint only the savepoint rolls back, and catching its rejection keeps the rest of the transaction.
 - **Held until the commit**, a job the driver cannot record fails after the transaction has committed. The rows stay, and the failure is only a line on stderr: `The queue driver could not record …, which was held until its transaction committed`.
 
 A held dispatch inside a savepoint that rolls back is dropped with it, and one inside a savepoint that commits waits for the outer transaction, as [`afterCommit` events](./events.md#savepoints) do. The transaction's own promise resolves only after its held dispatches are recorded.
