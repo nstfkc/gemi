@@ -11,7 +11,11 @@ export interface QueueConfig {
    *
    * A dispatch that names a job the `QueueManager` has never heard of does not
    * fail — `run()` looks the name up in this list, and what is not there is
-   * dropped with a line on stderr and nothing else. `Job.dispatch` has already
+   * dropped with a line on stderr and nothing else. With the memory driver that
+   * happens at once; with one other processes share (the database driver) the
+   * job is first left for a replica that has the class, so the line comes only
+   * after `unknownJobGrace` — an hour by default, of rows sitting pending with
+   * no output at all. `Job.dispatch` has already
    * returned by then, so nothing upstream can be told. The list is therefore a
    * second spelling of `app/jobs`, kept in step by hand, and the cost of the
    * two disagreeing is paid by whatever was supposed to happen after the
