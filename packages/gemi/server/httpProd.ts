@@ -2,13 +2,13 @@ import { join } from "node:path";
 import { compressResponse } from "./compression";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
-import { exists } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createStyles } from "./styles";
 import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
-import { staticAssetMiss } from "./staticAssetMiss";
+import { isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
 import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
@@ -22,6 +22,14 @@ const rootDir = projectRoot();
 
 const appDir = join(rootDir, "app");
 const distDir = join(rootDir, "dist");
+
+async function isFile(path: string) {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
 
 // `app` is built by `Server.start` (from the kernel) and passed in — same as
 // `httpDev` — so prod and dev share one construction path. What differs here is
@@ -102,19 +110,34 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
-  // `mjs` alongside `js`: a build configured to emit `.mjs` chunks writes them
-  // into `assets/` like any other, and without it the origin never treated one
-  // as a file — it went to the app and came back as an SSR-rendered 404, and
-  // `staticAssetMiss`'s `.m?js` branch could never be reached.
-  const staticFilePattern = new URLPattern({
-    pathname: "/*.:filetype(png|txt|js|mjs|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
+  // Which requests are answered from `dist/client` rather than the app:
+  //
+  // - `/assets` and everything under it, whatever the extension. Vite writes
+  //   fonts, GIFs, video and `?url` JSON there too, and an allowlist of
+  //   extensions always trailed the build — a `.woff2` went to the router
+  //   and paid for an SSR attempt. The router refuses routes under `/assets`
+  //   at boot, so there is no app answer to lose, and `staticAssetMiss`
+  //   turns a miss into the reload stub or a 404.
+  // - `/.well-known/*`.
+  // - A root-level public file (`/favicon.ico`, `/robots.txt`, …), known only
+  //   by its extension, since any other path may be an app route. A miss
+  //   there goes to the app. `json` is left out on purpose: a client-side
+  //   navigation fetches a view's data as `/<path>.json`, so matching it would
+  //   put a filesystem lookup in front of every navigation and let a public
+  //   file shadow a view's data. `mjs` is here because a build configured to
+  //   emit `.mjs` chunks is served the same way as `.js`.
+  const publicFilePattern = new URLPattern({
+    pathname:
+      "/*.:filetype(png|jpg|jpeg|gif|svg|avif|webp|ico|css|js|mjs|map|txt|xml|webmanifest|woff|woff2|ttf|otf|webm|mp4|mp3|pdf)",
   });
 
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    const isWellKnownFile = pathname.startsWith("/.well-known");
-    const isFileRequest = staticFilePattern.test({ pathname }) || isWellKnownFile;
+    const isFileRequest =
+      isReservedAssetPath(pathname) ||
+      pathname.startsWith("/.well-known") ||
+      publicFilePattern.test({ pathname });
 
     const isApi = isApiPath(pathname);
 
@@ -123,10 +146,10 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       const filePath = req.url.replace(url.origin, "").split("?")[0];
       const distPath = `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`;
       // Served from here whatever the asset base is: a CDN in front of the
-      // app uses this origin as the source it fills from.
-      const doesExist = await exists(distPath);
-
-      if (!doesExist) {
+      // app uses this origin as the source it fills from. A file, not merely
+      // a path that exists: `/assets` itself is `dist/client/assets`, a
+      // directory, and streaming one would answer 200 and then fail mid-body.
+      if (!(await isFile(distPath))) {
         return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
       }
 
