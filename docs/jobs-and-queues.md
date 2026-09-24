@@ -292,6 +292,8 @@ Set `unknownJobGrace` longer than your slowest rollout, and longer than you woul
 
 The memory driver is unchanged: nothing else can run its jobs, so an unknown name is dead-lettered at once, with a line on stderr.
 
+The same rules apply to a single replica. A job class that discovery missed (a file outside `jobsDir`, say) used to be dead-lettered at once with a `No job is registered` line on stderr. With the database driver it now shows up as rows left `pending` under that name, with no output, until `unknownJobGrace` has passed. If dispatches seem to vanish, look for those rows.
+
 ### Stopping the queue
 
 `app(QueueManager).drain(timeoutMs)` stops claiming, waits up to `timeoutMs` for the jobs already running, and resolves to `{ unfinished }` — the ones still running at the deadline. Nothing is cancelled. `stop()` is `drain(0)`. After either, a dispatch is recorded by the driver but not run until `start()` is called; with the memory driver, whatever is still waiting when the process exits is lost.
