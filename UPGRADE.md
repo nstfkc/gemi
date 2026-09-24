@@ -334,6 +334,39 @@ job.
 `Scheduler` gains `drain(timeoutMs)` and `running`. See
 [Stopping the schedule](docs/cron.md#stopping-the-schedule).
 
+## A mutation's `onError` is handed the error, not the envelope around it
+
+`useMutation` — and `usePost`, `usePut`, `usePatch`, `useDelete`, and `<Form>`
+on top of it — used to pass `onError` the whole response body, `{ error: {...} }`,
+while setting the hook's own `error` from `data.error` inside it. The callback
+is typed `(error: MutationError) => void`, so the type did not describe what
+arrived and no handler could read `kind`. It now receives the same value the
+hook exposes:
+
+```ts
+// before
+usePost("/agents", {}, { onError: (body) => report(body.error.kind) });
+
+// now
+usePost("/agents", {}, { onError: (error) => report(error.kind) });
+```
+
+If a handler of yours reaches through `.error` to get at `kind` or `messages`,
+drop that step. `<Form onError={(error) => ...}>` gets the same value.
+
+Three fixes in the same pass need no change but are worth knowing, because each
+one used to put something in `error` that no `<Form>` could render:
+
+- **Cancelling a mutation is no longer reported as a failure.** `cancel()`
+  aborts the request, and the rejection used to land in `error` as a
+  `DOMException` and call `onError`. It now only calls `onCanceled`.
+- **A submit that was replaced no longer writes over the one that replaced it.**
+  Two submits in flight used to resolve in network order, so a slow first
+  submit's validation error could land after the corrected second one had
+  already succeeded.
+- **A rejected submit keeps the last `data`** instead of blanking it, matching
+  the pending state, which has always kept it.
+
 ## If you used the global middleware list in 0.63.0-rc.1
 
 The `global` list is new in 0.63, so an app coming from 0.62 has nothing to
