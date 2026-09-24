@@ -347,9 +347,27 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   /**
+   * Puts a dead row back to waiting with its attempts reset, so the job gets
+   * its whole `maxAttempts` again. `last_error` is kept until the next failure
+   * replaces it, so the reason it died is still there to read while it runs.
+   */
+  async retryDead(id: string): Promise<boolean> {
+    await this.configure();
+    const q = this.sql;
+    const now = this.now(q);
+    const result = await q`
+      UPDATE ${this.name(q)}
+      SET status = 'pending', attempts = 0, available_at = ${now}, lease_expires_at = NULL,
+          updated_at = ${now}
+      WHERE id = ${id} AND status = 'dead'
+    `;
+    return affected(result) > 0;
+  }
+
+  /**
    * Deletes dead-lettered jobs last touched more than `olderThanMs` ago, and
    * resolves to how many. Dead rows are kept so a failure can be read and the
-   * job re-queued by hand; nothing removes them unless this is called — from
+   * job brought back with `retryDead`; nothing removes them unless this is called — from
    * a scheduled job, say.
    */
   async prune(olderThanMs: number): Promise<number> {
@@ -359,10 +377,7 @@ export class DatabaseQueueDriver implements QueueDriver {
       DELETE FROM ${this.name(q)}
       WHERE status = 'dead' AND updated_at <= ${this.now(q)} - ${this.ms(q, olderThanMs)}
     `;
-    // SQLite and Postgres report deleted rows in `count`; MySQL may report
-    // them in `affectedRows` and zero rows returned in `count`.
-    const counts = result as unknown as { count?: number | null; affectedRows?: number | null };
-    return Math.max(Number(counts.count ?? 0), Number(counts.affectedRows ?? 0));
+    return affected(result);
   }
 
   /**
@@ -587,6 +602,16 @@ export class DatabaseQueueDriver implements QueueDriver {
       ? q`CAST(${ms} AS SIGNED)`
       : q`CAST(${ms} AS BIGINT)`;
   }
+}
+
+/**
+ * How many rows a `DELETE` or `UPDATE` touched. SQLite and Postgres report
+ * them in `count`; MySQL may report them in `affectedRows` and zero rows
+ * returned in `count`.
+ */
+function affected(result: unknown): number {
+  const counts = result as { count?: number | null; affectedRows?: number | null };
+  return Math.max(Number(counts.count ?? 0), Number(counts.affectedRows ?? 0));
 }
 
 /**

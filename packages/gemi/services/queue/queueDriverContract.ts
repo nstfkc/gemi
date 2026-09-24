@@ -443,6 +443,38 @@ export function queueDriverContract(
     );
 
     test(
+      "retryDead, when the driver has it, brings a dead job back as attempt 1, and nothing else",
+      withDriver(async (driver) => {
+        if (!driver.retryDead) return;
+        const dead = await driver.enqueue({ name: "A", args: "[3]" });
+        const [job] = await driver.claim(1, LEASE);
+        await driver.fail(job!, { error: "boom", retryInMs: null });
+
+        const waiting = await driver.enqueue({ name: "B", args: "[]", delayMs: 60_000 });
+        const claimed = await driver.enqueue({ name: "C", args: "[]" });
+        const [held] = await driver.claim(1, LEASE);
+        expect(held!.id).toBe(claimed);
+
+        // Only a dead job. Reviving a claimed one would reset the attempt its
+        // holder is going to report under, so its `complete` would be refused
+        // as stale and the job run again.
+        expect(await driver.retryDead(waiting)).toBe(false);
+        expect(await driver.retryDead(claimed)).toBe(false);
+        expect(await driver.retryDead("no-such-job")).toBe(false);
+        expect(await driver.claim(10, LEASE)).toEqual([]);
+
+        expect(await driver.retryDead(dead)).toBe(true);
+        const [again] = await driver.claim(10, LEASE);
+        expect(again).toMatchObject({ id: dead, name: "A", args: "[3]", attempt: 1 });
+        await driver.complete(again!);
+        await driver.complete(held!);
+
+        // Once, not twice: it is claimed now, so a second call finds nothing.
+        expect(await driver.retryDead(dead)).toBe(false);
+      }),
+    );
+
+    test(
       "subscribe, when the driver has it, wakes on enqueue and on a delay passing",
       withDriver(async (driver) => {
         if (!driver.subscribe) return;
