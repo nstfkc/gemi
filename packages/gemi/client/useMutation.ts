@@ -116,11 +116,13 @@ export function useMutation<
   const formData = useRef(new FormData());
 
   async function trigger(input?: U): Promise<T> {
-    setState({
-      data: state.data,
-      error: state.error,
+    // The last response's error is about the last submit. Left in place, a
+    // corrected resubmit shows the old validation message until it returns.
+    setState((prev) => ({
+      data: prev.data,
+      error: null,
       loading: true,
-    });
+    }));
     const [inputs = {}, options = defaultOptions] = args ?? [];
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
@@ -202,11 +204,7 @@ export function useMutation<
       const [, options = defaultOptions] = args ?? [];
       abortController.abort();
       setAbortController(new AbortController());
-      setState({
-        data: state.data,
-        error: state.error,
-        loading: false,
-      });
+      setState((prev) => ({ ...prev, loading: false }));
 
       formData.current = new FormData();
       options.onCanceled();
