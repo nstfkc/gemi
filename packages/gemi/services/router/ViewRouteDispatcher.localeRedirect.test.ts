@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { createElement } from "react";
 
 import { App } from "../../app/App";
+import { ApiRouter } from "../../http/ApiRouter";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
 
@@ -20,10 +21,18 @@ class RootViewRouter extends ViewRouter {
   };
 }
 
+class RootApiRouter extends ApiRouter {
+  routes = {};
+}
+
 class AppKernel extends Kernel {
   config = {
     translation: { supportedLocales: ["en-US", "de-DE"], defaultLocale: "en-US" },
     route: {
+      // `route.api` is required of every app, and `RouteServiceProvider` builds
+      // both dispatchers at boot — so a kernel that declares only `view` does
+      // not boot, however few api routes it has.
+      api: { rootRouter: RootApiRouter },
       view: { root: () => createElement("div"), rootRouter: RootViewRouter },
     },
   };
