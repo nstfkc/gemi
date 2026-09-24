@@ -49,6 +49,7 @@ import { initialRenderedRoute } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { loadRoutePayload } from "./helpers/loadRoutePayload";
+import { isExternalRedirect } from "../utils/intendedUrl";
 
 declare global {
   interface Window {
@@ -337,7 +338,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         } = payload;
         updateMeta(meta);
         if (directive?.kind === "Redirect") {
-          if (directive?.path) {
+          // An absolute URL (`Redirect.external`, an off-origin sign-in page)
+          // is not a route: the router would prefix a locale and look it up.
+          if (isExternalRedirect(directive?.path)) {
+            window.location.replace(directive.path);
+          } else if (directive?.path) {
             replace(directive.path, { params: {} } as unknown);
           }
 

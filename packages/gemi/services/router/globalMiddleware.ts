@@ -92,7 +92,7 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
         const refusal = isApi
           ? breakResponse(err.payload.api)
           : isViewData
-            ? viewDataBreakResponse(err.payload.api)
+            ? viewDataBreakResponse(err.payload.viewData ?? err.payload.api)
             : viewBreakResponse(err.payload.view);
         return { refusal: apply(refusal), apply };
       }

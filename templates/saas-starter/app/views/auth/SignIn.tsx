@@ -1,17 +1,19 @@
-import { Form, Link, useNavigate, ValidationErrors } from "gemi/client";
+import { Form, Link, useIntendedUrl, useNavigate, ValidationErrors } from "gemi/client";
 import { FormField } from "../components/FormField";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 
 export default function SignIn() {
   const { push } = useNavigate();
+  // The page the `auth` middleware turned the visitor away from, if any.
+  const intended = useIntendedUrl("/dashboard");
 
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
         method="POST"
         action="/auth/sign-in-v2"
-        onSuccess={() => push("/dashboard")}
+        onSuccess={() => push(intended)}
         className="flex flex-col gap-8 w-full"
       >
         <FormField name="email" label="Email">
@@ -37,7 +39,10 @@ export default function SignIn() {
         </div>
         <ValidationErrors name="invalid_credentials" />
       </Form>
-      <a href="/auth/oauth/google">Sign in with google</a>
+      {/* Forwarded so the OAuth callback can return there too. */}
+      <a href={`/auth/oauth/google?redirect=${encodeURIComponent(intended)}`}>
+        Sign in with google
+      </a>
     </div>
   );
 }

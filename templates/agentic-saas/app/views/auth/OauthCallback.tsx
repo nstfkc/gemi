@@ -10,9 +10,17 @@ import { Redirect } from "gemi/client";
  * session cookie was set on this response. Reloading is what makes the rest of
  * the app read it.
  */
-export default function OauthCallback({ session }: { session?: unknown }) {
+export default function OauthCallback({
+  session,
+  redirectTo,
+}: {
+  session?: unknown;
+  redirectTo?: string;
+}) {
   if (session) {
-    return <Redirect action="replace" href="/chat" />;
+    // The page the sign-in link forwarded as `?redirect=`, else `redirectPath`.
+    // Cast because it is a runtime path, not one of the typed routes.
+    return <Redirect action="replace" href={(redirectTo ?? "/chat") as "/chat"} />;
   }
 
   return (
