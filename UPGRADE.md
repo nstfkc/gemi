@@ -260,9 +260,11 @@ inside the transaction, to the job's id. Two things to check:
 - A test that dispatches inside a transaction and asserts the job ran
   before the transaction returned now fails. Assert after it.
 - With the database driver on Postgres or MySQL, a job row that cannot be
-  written now rejects the awaited `dispatch()` inside the transaction and
-  rolls the transaction back. Before, the transaction committed and the job
-  was lost with a line on stderr.
+  written now rolls the transaction back, awaited or not, caught or not —
+  a queued listener's dispatch included. The transaction rejects with the
+  database's error, or with `TransactionDependencyError` (its `cause`) when
+  the dispatch was not awaited or its rejection was caught. Before, the
+  transaction committed and the job was lost with a line on stderr.
 
 A queued listener is pushed the same way, so it no longer needs
 `static afterCommit` to wait for the commit. See
