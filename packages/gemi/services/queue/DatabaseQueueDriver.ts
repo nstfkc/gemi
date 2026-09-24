@@ -18,6 +18,14 @@ export type DatabaseQueueDriverOptions = {
    * and underscores — because it is spliced into every statement.
    */
   table?: string;
+  /**
+   * SQLite only: how long, in milliseconds, a statement waits for another
+   * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
+   * Applied only to a connection whose busy timeout is still SQLite's `0`, so
+   * one the application configured itself keeps its own; `0` here leaves the
+   * connection alone. See `configure` for what the wait costs.
+   */
+  busyTimeout?: number;
 };
 
 /**
@@ -97,6 +105,8 @@ export class DatabaseQueueDriver implements QueueDriver {
   private readonly dialect: Dialect;
   /** The connection's name, when it came with one; see `transaction`. */
   private readonly connection: string | undefined;
+  private readonly busyTimeout: number;
+  private configured: Promise<void> | undefined;
 
   constructor(
     connection: Pick<DatabaseConnection, "sql" | "dialect"> &
@@ -110,10 +120,61 @@ export class DatabaseQueueDriver implements QueueDriver {
           `letters, digits and underscores.`,
       );
     }
+    const busyTimeout = options.busyTimeout ?? 1000;
+    if (!Number.isInteger(busyTimeout) || busyTimeout < 0) {
+      throw new Error(
+        `The queue's busyTimeout must be a whole number of milliseconds, 0 or more; got ${busyTimeout}.`,
+      );
+    }
     this.table = table;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
     this.connection = connection.name;
+    this.busyTimeout = busyTimeout;
+  }
+
+  /**
+   * Gives a SQLite connection a busy timeout, once, before the driver's first
+   * statement on it.
+   *
+   * Bun opens SQLite with `busy_timeout` 0, so a statement that finds another
+   * process holding the file's write lock fails at once with `SQLITE_BUSY`.
+   * Two processes on one file — `gemi dev` and a script that dispatches, or
+   * the dev server and a seed — then lose writes at random: a dispatch whose
+   * INSERT is refused is a job that never runs, and a `complete` that is
+   * refused leaves the row claimed until its lease lapses and runs it again.
+   * With a timeout SQLite retries the lock for that long instead.
+   *
+   * The wait is not free. Bun runs SQLite on the JavaScript thread, and the
+   * busy handler sleeps there: while one statement waits out another
+   * process's transaction, this process serves nothing else — measured, a
+   * timer due every 10ms did not fire once across a 400ms wait. Hence a
+   * second rather than the several a dedicated worker would choose; a lock
+   * held longer than that still fails as it did before.
+   *
+   * On the connection, not on the driver's statements, because SQLite has no
+   * other place for it — so it is the application's default connection's
+   * setting too whenever the queue shares that connection, as `"database"`
+   * does. That is why a connection already set to anything but 0 is left as
+   * it is. Lazily rather than from the constructor, because a driver built
+   * over a connection that is closed unused would otherwise leave a pragma
+   * rejecting against it with nobody holding the promise. Retried after a
+   * failure rather than remembered, so one lost statement does not fail every
+   * later one.
+   */
+  private configure(): Promise<void> {
+    if (this.dialect !== "sqlite" || this.busyTimeout === 0) return Promise.resolve();
+    this.configured ??= (async () => {
+      const [current] = (await this.sql.unsafe("PRAGMA busy_timeout")) as Array<{
+        timeout: number | string;
+      }>;
+      if (Number(current?.timeout ?? 0) !== 0) return;
+      await this.sql.unsafe(`PRAGMA busy_timeout = ${this.busyTimeout}`);
+    })().catch((error) => {
+      this.configured = undefined;
+      throw error;
+    });
+    return this.configured;
   }
 
   /**
@@ -125,6 +186,7 @@ export class DatabaseQueueDriver implements QueueDriver {
    * it.
    */
   async createTable(): Promise<void> {
+    await this.configure();
     for (const statement of createTableStatements(this.dialect, this.table)) {
       await this.sql.unsafe(statement);
     }
@@ -150,6 +212,7 @@ export class DatabaseQueueDriver implements QueueDriver {
     q: SQL,
     { name, args, delayMs = 0, id = Bun.randomUUIDv7() }: EnqueueJob,
   ): Promise<string> {
+    await this.configure();
     const now = this.now(q);
     await q`
       INSERT INTO ${this.name(q)}
@@ -193,6 +256,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   async claim(limit: number, options: ClaimOptions): Promise<ClaimedJob[]> {
     const count = Math.max(0, Math.floor(limit));
     if (count === 0) return [];
+    await this.configure();
 
     const rows =
       this.dialect === "mysql" || this.dialect === "mariadb"
@@ -216,6 +280,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   async complete(job: ClaimedJob): Promise<void> {
+    await this.configure();
     const q = this.sql;
     await q`
       DELETE FROM ${this.name(q)}
@@ -224,6 +289,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   async fail(job: ClaimedJob, failure: JobFailure): Promise<void> {
+    await this.configure();
     const q = this.sql;
     const now = this.now(q);
     if (failure.retryInMs === null) {
@@ -265,6 +331,7 @@ export class DatabaseQueueDriver implements QueueDriver {
    * driver does: the job is still running here and nobody else has it.
    */
   async heartbeat(jobs: ClaimedJob[], options: ClaimOptions): Promise<void> {
+    await this.configure();
     const q = this.sql;
     await Promise.all(
       jobs.map((job) => {
@@ -286,6 +353,7 @@ export class DatabaseQueueDriver implements QueueDriver {
    * a scheduled job, say.
    */
   async prune(olderThanMs: number): Promise<number> {
+    await this.configure();
     const q = this.sql;
     const result = await q`
       DELETE FROM ${this.name(q)}
