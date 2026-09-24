@@ -563,6 +563,21 @@ describe("draining the schedule", () => {
     expect(calls).toEqual(["onTick", "callback", "onComplete"]);
     expect(scheduler.running).toBe(0);
   });
+
+  test("a start() after a drain schedules again, and its ticks run", async () => {
+    const calls: string[] = [];
+    const { scheduler, tick } = scheduled([recorder(calls)]);
+
+    await scheduler.drain();
+    await tick(0);
+    expect(calls).toEqual([]);
+
+    // Without clearing the flag, start() would register fresh handles whose
+    // every callback returns early — a schedule that looks live and never runs.
+    scheduler.start();
+    await tick(1);
+    expect(calls).toEqual(["onTick", "callback", "onComplete"]);
+  });
 });
 
 describe("the provider's shutdown", () => {

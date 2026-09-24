@@ -306,6 +306,8 @@ When a production server is told to stop (see [Graceful shutdown](./configuratio
 [gemi] Cron jobs still running at shutdown: NightlyReport (started 2026-09-24T02:00:00.000Z)
 ```
 
+The cron drain and the [queue drain](./jobs-and-queues.md#stopping-the-queue) share that one deadline, and the cron drain goes first — deliberately, since a tick may dispatch jobs the queue should then wait for. A tick that runs long therefore spends the queue's time: with the default 5 seconds and a tick that needs 30, the queue is left about 100 milliseconds (or is skipped outright) for its own running jobs, and with the memory driver whatever is still pending is lost. Size `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` for the longest tick *plus* the longest job, or move long cron work onto the queue as below.
+
 An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
 
 ## Cron jobs vs. queued jobs
