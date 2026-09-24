@@ -32,7 +32,9 @@ const FORWARDED = ["SIGTERM", "SIGINT"] as const;
  * terminal's Ctrl+C, a supervisor's group `SIGKILL` — still reaches it
  * directly. A signal sent that way arrives twice, directly and through this
  * relay; the server reads a repeat within a second of the first as the same
- * shutdown (see `installShutdownSignals`), so it still drains once. Spawning it
+ * shutdown (see `installShutdownSignals`), so it still drains once. A `gemi run`
+ * command has no such guard, and docs/cli.md tells its authors to expect the
+ * repeat. Spawning it
  * `detached` would avoid the duplicate only from this layer — not from
  * `bun run` or systemd above it — and would orphan the server, port and all,
  * whenever `gemi start` is killed without a chance to relay.
