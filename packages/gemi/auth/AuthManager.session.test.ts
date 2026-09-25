@@ -148,6 +148,25 @@ describe("signing in", () => {
     ).rejects.toBeInstanceOf(AuthenticationError);
   });
 
+  /**
+   * "Two mints differ" is satisfied by a one-byte nonce 255 times out of 256,
+   * and by any counter. Minting many and requiring every one to be distinct
+   * is what a narrowed nonce fails: at one byte the collision is certain, at
+   * two it is all but certain. It cannot tell a CSPRNG from a well-spread
+   * PRNG — that is what naming `randomBytes` in the source is for — but it
+   * does hold the width.
+   */
+  test("mints from a wide enough nonce that 512 tokens never repeat", async () => {
+    const tokens = new Set<string>();
+    for (let i = 0; i < 512; i++) {
+      const { result } = await inRequest({}, () =>
+        auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+      );
+      tokens.add(result.token as string);
+    }
+    expect(tokens.size).toBe(512);
+  });
+
   test("refuses to mint without a secret", async () => {
     delete process.env.SECRET;
     await expect(
@@ -263,6 +282,59 @@ describe("a token from before the upgrade", () => {
     expect(result!.user.id).toBe(1);
     expect(accessTokenCookie(cookies)).toBeUndefined();
     expect(provider.rows.size).toBe(1);
+  });
+
+  /**
+   * Pinning the trade-off UPGRADE.md describes, because it is the one place
+   * expiry is deliberately not enforced and it would otherwise look like the
+   * bug this release fixes. A legacy token is `sha256(email + User-Agent)`,
+   * so for as long as its row exists anyone who can recompute it holds the
+   * account — expired or not. What bounds that is deleting the rows, not
+   * these dates, which were never read and are long past for active clients.
+   *
+   * Note what the exchange therefore grants: a freshly minted session with a
+   * full lifetime, which outlives the cleanup that deletes legacy rows.
+   */
+  test("is exchanged even long past its dates — the row, not the date, is the bound", async () => {
+    const legacy = seedLegacy(1, "a@example.com", {
+      expiresAt: new Date(Date.now() - 365 * 24 * HOUR),
+      absoluteExpiresAt: new Date(Date.now() - 365 * 24 * HOUR),
+    });
+
+    const { result, cookies } = await inRequest({ Cookie: `access_token=${legacy}` }, () =>
+      auth.getSession(legacy, UA),
+    );
+
+    expect(result!.user.id).toBe(1);
+    const next = accessTokenCookie(cookies)!;
+    expect(next).toMatch(/^v2\./);
+    expect(provider.rows.get(next)!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
+/**
+ * `new Date(undefined).getTime()` is `NaN`, and `NaN <= now` is false, so a
+ * provider that does not return the expiry columns — a narrowed `select`, a
+ * schema missing one — read as a session that never expires.
+ */
+describe("an expiry the provider could not give us", () => {
+  test.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["an unparseable string", "not a date"],
+  ])("counts as spent, not as forever: %s", async (_, value) => {
+    const { result: session } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    const token = session.token as string;
+    provider.rows.set(token, {
+      ...provider.rows.get(token)!,
+      expiresAt: value as never,
+      absoluteExpiresAt: value as never,
+    });
+
+    const { result } = await inRequest({ access_token: token }, () => auth.getSession(token, UA));
+    expect(result).toBeNull();
   });
 });
 

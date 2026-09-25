@@ -65,6 +65,21 @@ If your native app sends the header, ship a version that signs in again (or
 keeps cookies) before you run the `DELETE`, or accept that its users sign in
 once more.
 
+**That `DELETE` does not undo a takeover that already happened.** A legacy
+token presented as a cookie is exchanged for a `v2.` one, so someone who
+computed a token and used it during the window now holds a normally minted
+session with a full lifetime — and `token NOT LIKE 'v2.%'` spares exactly
+that row. The cleanup bounds who can *start* using a computed token; it does
+not evict anyone who already did.
+
+If you have reason to think a token was computed — or you would rather not
+reason about it — sign everyone out instead, and take the one round of
+re-authentication:
+
+```sql
+DELETE FROM "Session";
+```
+
 **If you stub `UserProvider.findSession` in tests**, return what a real row
 has: a token starting with `v2.`, and `expiresAt`/`absoluteExpiresAt` more
 than half of `sessionExpiresInHours` away. Otherwise `getSession` extends the

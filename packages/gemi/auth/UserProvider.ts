@@ -331,6 +331,12 @@ export class UserProvider {
   }
 
   async deleteSession(args: DeleteSessionArgs): Promise<void> {
+    // An absent token is nothing to delete, and must not be asked for: a
+    // `where` operand of `undefined` is dropped as "not provided", which
+    // would leave `deleteMany({ where: {} })` — every session in the table.
+    if (!args.token) {
+      return;
+    }
     // `deleteMany`, not `delete`: signing out twice must not raise, and `delete`
     // raises when nothing matched.
     await this.run(() =>

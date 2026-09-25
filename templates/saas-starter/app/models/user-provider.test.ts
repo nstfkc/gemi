@@ -410,6 +410,24 @@ function suite(label: string, url?: string) {
       expect(await auth.findSession({ token: "tok", userAgent: "a" })).toBeNull();
     });
 
+    /**
+     * A `where` operand of `undefined` is dropped as "not provided", so
+     * `deleteMany({ where: { token: undefined } })` is an unfiltered delete
+     * over the whole table. Nothing reaches it with an absent token today;
+     * the guard is there so nothing ever can.
+     */
+    test("deleteSession without a token deletes nothing, not everything", async () => {
+      const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+      await auth.createSession(session(user.id, "one"));
+      await auth.createSession(session(user.id, "two"));
+
+      await auth.deleteSession({ token: undefined as never });
+      await auth.deleteSession({ token: "" });
+
+      expect(await auth.findSession({ token: "one", userAgent: "a" })).not.toBeNull();
+      expect(await auth.findSession({ token: "two", userAgent: "a" })).not.toBeNull();
+    });
+
     test("deleteAllUserSessions", async () => {
       const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
       await auth.createSession(session(user.id, "one"));

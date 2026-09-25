@@ -17,6 +17,20 @@ import type { CreateCookieOptions } from "../http/requestContext";
 import { DomainRouter } from "../services/router/DomainRouter";
 import { normalizeHost } from "../services/router/DomainResolver";
 
+/**
+ * A session's expiry in milliseconds, or `0` — already past — for a date the
+ * provider could not give us.
+ *
+ * `new Date(undefined).getTime()` is `NaN`, and every comparison against
+ * `NaN` is false, so a column that arrived missing read as a session that
+ * never expires. A date this cannot make sense of is treated as spent, which
+ * costs a re-authentication and never grants one.
+ */
+function expiryMs(value: Date | string | number | null | undefined): number {
+  const ms = new Date(value ?? 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 export class AuthManager {
   static token = "auth";
 
@@ -144,11 +158,12 @@ export class AuthManager {
     }
 
     const now = Date.now();
-    const expiresAt = new Date(session.expiresAt).getTime();
-    const absoluteExpiresAt = new Date(session.absoluteExpiresAt).getTime();
+    const expiresAt = expiryMs(session.expiresAt);
+    const absoluteExpiresAt = expiryMs(session.absoluteExpiresAt);
+    const expired = expiresAt <= now || absoluteExpiresAt <= now;
 
     if (isSessionToken(token)) {
-      if (expiresAt <= now || absoluteExpiresAt <= now) {
+      if (expired) {
         await this.userProvider.deleteSession({ token });
         return null;
       }
@@ -159,6 +174,11 @@ export class AuthManager {
         return null;
       }
     } else {
+      // Deliberately not held to its expiry dates: they were written and
+      // never read, so an active client's are usually long past, and
+      // enforcing them here would sign out almost everyone who has not come
+      // back since the deploy. What bounds the legacy scheme instead is
+      // deleting the rows — see UPGRADE.md.
       session = await this.exchangeLegacySession(session, now);
     }
 
