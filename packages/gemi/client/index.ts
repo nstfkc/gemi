@@ -32,7 +32,7 @@ export { usePrefetch } from "./usePrefetch";
 export { useBreadcrumbs } from "./useBreadcrumbs";
 export { useRouteTransition } from "./RouteTransitionProvider";
 export { Link } from "./Link";
-export type { PrefetchStrategy } from "./Link";
+export type { ExternalLinkProps, LinkProps, PrefetchStrategy } from "./Link";
 export { Redirect } from "./Redirect";
 export { init, create } from "./init";
 export { createRoot } from "./createRoot";
