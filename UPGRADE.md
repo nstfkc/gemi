@@ -1,11 +1,17 @@
 # Upgrading from 0.62 to 0.63
 
-No code has to change, but several responses do: a refusal now answers `403`,
-and an unhandled error in production answers a generic `500`. Nothing
+Almost no code has to change, but several responses do: a refusal now answers
+`403`, and an unhandled error in production answers a generic `500`. Nothing
 here fails to compile, and a server-side test suite only notices where it
 asserts on a status. **Check what your clients do with these responses before
 you deploy** — especially a shipped native client, which cannot be updated in
 the same deploy as the server.
+
+**One schema migration**, and only if your app has social sign-in:
+`SocialAccount` needs a `providerId` column and a new unique index. It is the
+one change here that fails at runtime rather than changing a status code —
+see [A social account is identified by
+`(provider, providerId)`](#a-social-account-is-identified-by-provider-providerid--needs-a-migration).
 
 ## `InsufficientPermissionsError` answers `403`, not `401` — breaking
 
@@ -333,6 +339,52 @@ job.
 
 `Scheduler` gains `drain(timeoutMs)` and `running`. See
 [Stopping the schedule](docs/cron.md#stopping-the-schedule).
+
+## A social account is identified by `(provider, providerId)` — needs a migration
+
+**Only if your app has social sign-in.** The OAuth callback now resolves a
+returning login by the provider's own stable identifier — Google's `sub`, X's
+user id — before it looks at anything else, so a user who changes their email
+or display name at the provider still reaches the same account, and two
+accounts sharing a display name no longer collide.
+
+`AuthController` reads it through `UserProvider.findUserBySocialAccount(provider, providerId)`,
+so this is framework surface, not a template detail: a `SocialAccount` table
+without the column and index breaks social sign-in at runtime.
+
+```prisma
+model SocialAccount {
+  provider   String
+  // The provider's stable account identifier — Google's `sub`, X's user id.
+  // Nullable only for rows written before the callback recorded it.
+  providerId String?
+  username   String?
+  email      String?
+
+  @@unique([provider, providerId])
+  @@index([userId])
+}
+```
+
+The old unique key was `(username, provider)`, which constrained a display
+name and left the one stable value unconstrained.
+
+`providerId` is nullable on purpose. The old callback wrote `""` there, and a
+unique index cannot hold more than one of those per provider, so carry legacy
+empty values over as `NULL` — which a unique index treats as distinct — rather
+than inventing an identifier from a name or an email:
+
+```sql
+-- in the backfill, however your dialect spells it
+NULLIF("providerId", '')
+```
+
+Nothing needs filling in by hand afterwards: the callback claims a legacy row
+with its real identifier on that user's next sign-in.
+
+Both templates ship the Prisma migration as
+`20260922000000_social_account_provider_identity` if you want a reference; an
+app with its own schema applies the equivalent.
 
 ## A mutation's `onError` is handed the error, not the envelope around it
 
