@@ -37,7 +37,6 @@ export class Auth extends Facade {
 
     if (!user) {
       const container = this.getFacadeRoot();
-      // TODO: extend session if its expired
       const session = await container.getSession(accessToken, userAgent);
 
       user = session?.user;

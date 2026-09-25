@@ -73,7 +73,7 @@ a binding into the container, and a facade resolves it.**
 | --- | --- | --- | --- |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
-| `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
+| `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
 | `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
@@ -81,7 +81,7 @@ a binding into the container, and a facade resolves it.**
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
-| `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | sha256 of value + timestamp | Token minting. |
+| `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | 32 random bytes, hex | Token minting. Whatever you return must not be computable from the user's email or the time. |
 
 > **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
 > constructs a [`UserProvider`](#user-provider) on the ORM and exposes it as
@@ -89,9 +89,23 @@ a binding into the container, and a facade resolves it.**
 > `Illuminate\Contracts\Auth\UserProvider`. Earlier versions took an `IAuthenticationAdapter`
 > here (and a `adapter` field before that); see [Upgrading](#upgrading-from-the-adapter-config).
 
-> **Note:** Session lifetime is enforced two ways. `sessionExpiresInHours` is a *rolling*
-> window pushed forward on each request; `sessionAbsoluteExpiresInHours` is a fixed cap
-> stamped at creation. Setting both very high effectively creates long-lived sessions.
+> **Note:** Session lifetime is enforced on the server, on every request, for the cookie
+> and the `access_token` header alike. `sessionExpiresInHours` is an idle timeout, pushed
+> forward while the session is in use; `sessionAbsoluteExpiresInHours` is a fixed cap
+> stamped at creation. A session past either one is deleted. Setting both very high
+> effectively creates long-lived sessions.
+
+### Session tokens
+
+Every sign-in creates a new session with its own token:
+`v2.` + HMAC-SHA256(secret, user id + 16 random bytes). The secret is the app's `SECRET`, the
+same one CSRF uses; signing in fails if it is not set. The token is
+looked up, not verified against the secret, so changing the secret changes new tokens and
+signs nobody out.
+
+Tokens issued before 0.64 were derived from the email and the User-Agent and could be
+computed. [UPGRADE.md](../UPGRADE.md) describes how they are replaced without signing
+anybody out.
 
 ## User provider
 
@@ -167,7 +181,7 @@ The twenty-five methods, all overridable:
 | `updateUserPassword(args)` | Set a new (hashed) password by user id. |
 | `findUserByEmailAddress(email, verifyEmail)` | Look up a user; when `verifyEmail` is true, only return verified users. |
 | `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). |
-| `updateSession(args)` | Push a session's `expiresAt` forward. |
+| `updateSession(args)` | Set a session's `expiresAt`, and its `absoluteExpiresAt` when given. |
 | `findSession(args)` | Load a session (+ its user) by token. |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
 | `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |

@@ -1,3 +1,86 @@
+# Upgrading from 0.63 to 0.64
+
+This release fixes session and account-recovery tokens that could be computed
+by anyone who knew a user's email. **Check `SECRET` is set before you deploy,
+and plan the cleanup step below.** No code has to change unless you stub
+`UserProvider.findSession` in your own tests.
+
+## Session tokens are minted, and a sign-in never extends someone else's session — security
+
+A session token used to be `sha256(email + User-Agent)`. Anyone who knew a
+user's email and could guess their client (a native app sends a fixed
+User-Agent) could compute a token the server accepted, from a cookie or the
+`access_token` header. The same token came back on every sign-in, and a user
+who later took over the email address was handed the previous owner's session.
+
+Every sign-in now creates a new row with a token of its own:
+`v2.` + HMAC-SHA256(secret, user id + 16 random bytes).
+
+The secret is the app's existing `SECRET`, which CSRF and agent approvals
+already use. **Check it is set, and not the template's placeholder, before
+you deploy**: without it, signing in fails. The token is looked up, not verified against the
+secret, so changing the secret later signs nobody out.
+
+## Session expiry is enforced — behaviour change
+
+`expiresAt` and `absoluteExpiresAt` were written but never checked; only a
+browser's cookie `Expires` honoured them, so a token sent in the
+`access_token` header never expired. `AuthManager.getSession` now treats a
+session past either one as no session, and deletes it.
+
+`sessionExpiresInHours` is now an idle timeout, as the docs always said: a
+session used after half of it has passed is pushed to `now + N` hours, capped
+at `absoluteExpiresAt`, and the cookie is written again. A browser user who
+stays active is no longer signed out once a day.
+
+## Existing sessions keep working, and are moved over
+
+A row written before this release still has a computable token, and its
+expiry dates were never checked (an active native client's `expiresAt` is
+usually long past). So a legacy token is not held to them. Instead:
+
+- **Sent as the `access_token` cookie**, it is exchanged on its next request:
+  a new session with a full lifetime is created, the new cookie is written,
+  and the old token keeps working for five more minutes for the requests
+  already in flight, then stops. Browsers, and native clients that keep
+  cookies (a `URLSession` or OkHttp cookie jar), move over without noticing.
+- **Sent in the `access_token` header**, it is left alone, since that client
+  may not read a new cookie. It keeps working until the user signs in again,
+  which gets a new token, or until you delete it.
+
+Until the last legacy row is gone, a legacy token can still be computed for a
+user who hasn't come back since the deploy. Once most active users have moved
+over (a few days, not months), delete what is left. Those users sign in
+again:
+
+```sql
+-- How many are left
+SELECT count(*) FROM "Session" WHERE token NOT LIKE 'v2.%';
+
+-- Delete them
+DELETE FROM "Session" WHERE token NOT LIKE 'v2.%';
+```
+
+If your native app sends the header, ship a version that signs in again (or
+keeps cookies) before you run the `DELETE`, or accept that its users sign in
+once more.
+
+**If you stub `UserProvider.findSession` in tests**, return what a real row
+has: a token starting with `v2.`, and `expiresAt`/`absoluteExpiresAt` more
+than half of `sessionExpiresInHours` away. Otherwise `getSession` extends the
+session through `updateSession`, or exchanges an old-style token through
+`createSessionV2`, and a stub usually has neither.
+
+## Password-reset, email-verification and magic-link tokens are random
+
+Their defaults were `sha256(email + Date.now())`. Someone who requested a
+reset for another user's email could try each millisecond around their own
+request and reset that user's password. They are now 32 random bytes. A
+token already sent by email keeps working until it is used. If you override
+`generateForgotPasswordToken`, `generateEmailVerificationToken` or
+`generateMagicLinkToken`, check that yours can't be computed from the email
+and the time either.
+
 # Upgrading from 0.62 to 0.63
 
 Almost no code has to change, but several responses do: a refusal now answers

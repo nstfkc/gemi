@@ -153,6 +153,7 @@ function suite(label: string, url?: string) {
     }, 120_000);
 
     afterAll(async () => {
+      vi.unstubAllEnvs();
       await raw?.close();
       await database?.close();
       if (previous) Application.setInstance(previous);
@@ -160,6 +161,8 @@ function suite(label: string, url?: string) {
     });
 
     beforeEach(async () => {
+      // Signing in mints a session token, which needs a secret.
+      vi.stubEnv("SECRET", "test-secret");
       clearPlanCache();
       fakeGoogle();
       hooks.length = 0;

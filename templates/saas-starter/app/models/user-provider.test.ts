@@ -380,6 +380,25 @@ function suite(label: string, url?: string) {
       expect(updated.user.email).toBe("a@x.test");
     });
 
+    // How a legacy token is retired: the epoch as its idle expiry, and the end
+    // of its grace as its absolute one.
+    test("updateSession sets absoluteExpiresAt when given, and only then", async () => {
+      const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+      const created: any = await auth.createSession(session(user.id));
+
+      const kept: any = await auth.updateSession({ token: "tok", expiresAt: new Date(0) });
+      expect(kept.absoluteExpiresAt.getTime()).toBe(created.absoluteExpiresAt.getTime());
+
+      const graceEnd = new Date(Date.now() + 300_000);
+      const retired: any = await auth.updateSession({
+        token: "tok",
+        expiresAt: new Date(0),
+        absoluteExpiresAt: graceEnd,
+      });
+      expect(retired.expiresAt.getTime()).toBe(0);
+      expect(retired.absoluteExpiresAt.getTime()).toBe(graceEnd.getTime());
+    });
+
     // `deleteMany` rather than `delete`, so signing out twice does not raise.
     test("deleteSession is idempotent", async () => {
       const user: any = await auth.createUser({ name: "A", email: "a@x.test" });

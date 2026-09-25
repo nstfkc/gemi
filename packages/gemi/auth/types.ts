@@ -109,7 +109,7 @@ export interface CreateSessionArgs {
   token: string;
   userId: number;
   location?: string;
-  userAgent: string;
+  userAgent: string | null;
   expiresAt: Date;
   absoluteExpiresAt: Date;
 }
@@ -149,6 +149,8 @@ export interface FindSessionArgs {
 
 export interface UpdateSessionArgs {
   expiresAt: Date;
+  /** Left as it is when absent. */
+  absoluteExpiresAt?: Date;
   token: string;
 }
 

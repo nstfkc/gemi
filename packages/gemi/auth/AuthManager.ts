@@ -1,6 +1,14 @@
 import { randomBytes } from "crypto";
-import { Temporal } from "temporal-polyfill";
 import { HttpRequest } from "../http";
+import { AuthenticationError } from "../http/errors";
+import { RequestContext } from "../http/requestContext";
+import {
+  LEGACY_TOKEN_GRACE_MS,
+  isSessionToken,
+  mintSessionToken,
+  recordReplacedToken,
+} from "./sessionToken";
+import type { SessionWithUser } from "./types";
 import { authConfigDefaults, type AuthConfig } from "./config";
 import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
@@ -93,17 +101,136 @@ export class AuthManager {
     return host === domain || host?.endsWith(`.${domain}`) ? domain : undefined;
   }
 
+  /**
+   * The session `token` names, or null when there is none or it has run out.
+   *
+   * **Expiry is enforced here.** `expiresAt` is the idle timeout and
+   * `absoluteExpiresAt` the hard cap; either one past is no session, and the
+   * row is deleted. Both used to exist only as the cookie's `Expires`, which a
+   * client sending the `access_token` header never honoured, so its token was
+   * good for as long as the row existed.
+   *
+   * **The idle timeout slides.** A session used after half of its window has
+   * gone is pushed to `now + sessionExpiresInHours`, never past
+   * `absoluteExpiresAt`, and the cookie is written again when this request is
+   * the one that carried the token. Without that, enforcing `expiresAt` would
+   * sign every user out `sessionExpiresInHours` after they signed in, however
+   * active they were.
+   *
+   * **A legacy token is exchanged, not enforced.** Rows written before tokens
+   * were minted (see `sessionToken.ts`) carry expiries that were never
+   * checked — an active native client's `expiresAt` is long past — so
+   * enforcing them would sign those users out on deploy. Instead:
+   *
+   * - Sent as this request's cookie, it is exchanged for a new session with a
+   *   full lifetime, the new cookie is written, and the old row is retired: it
+   *   keeps working for `LEGACY_TOKEN_GRACE_MS`, for the requests already in
+   *   flight with it, and then it is gone.
+   * - Sent any other way — the `access_token` header, whose client may not
+   *   read a replacement, or outside a request — it is returned as it is, so
+   *   the client keeps working until it signs in again or the operator deletes
+   *   the remaining legacy rows. UPGRADE.md has the query.
+   *
+   * A retired row is marked by `expiresAt` at the epoch, which no live row
+   * has, with `absoluteExpiresAt` holding the end of its grace.
+   */
   async getSession(token: string, userAgent: string) {
-    const session = await this.userProvider.findSession({
+    let session = await this.userProvider.findSession({
       token,
       userAgent,
     });
-    let sessionExtension = null;
-    if (session?.user) {
-      sessionExtension = await this.config.extendSession(session.user);
-      session.user["extension"] = sessionExtension;
+    if (!session?.user) {
+      return null;
     }
+
+    const now = Date.now();
+    const expiresAt = new Date(session.expiresAt).getTime();
+    const absoluteExpiresAt = new Date(session.absoluteExpiresAt).getTime();
+
+    if (isSessionToken(token)) {
+      if (expiresAt <= now || absoluteExpiresAt <= now) {
+        await this.userProvider.deleteSession({ token });
+        return null;
+      }
+      session = await this.slideSession(session, now);
+    } else if (expiresAt === 0) {
+      if (absoluteExpiresAt <= now) {
+        await this.userProvider.deleteSession({ token });
+        return null;
+      }
+    } else {
+      session = await this.exchangeLegacySession(session, now);
+    }
+
+    session.user["extension"] = await this.config.extendSession(session.user);
     return session;
+  }
+
+  /** The current request, when `token` arrived as its `access_token` cookie. */
+  private requestCarryingCookie(token: string): HttpRequest<any, any> | null {
+    const req = RequestContext.getStore()?.req;
+    return req?.cookies.get("access_token") === token ? req : null;
+  }
+
+  private async slideSession(session: SessionWithUser, now: number) {
+    const window = this.config.sessionExpiresInHours * 3_600_000;
+    if (new Date(session.expiresAt).getTime() - now >= window / 2) {
+      return session;
+    }
+    const expiresAt = new Date(
+      Math.min(now + window, new Date(session.absoluteExpiresAt).getTime()),
+    );
+    const updated = await this.userProvider.updateSession({
+      token: session.token,
+      expiresAt,
+    });
+    const req = this.requestCarryingCookie(session.token);
+    if (req) {
+      req
+        .ctx()
+        .setCookie(
+          "access_token",
+          session.token,
+          this.accessTokenCookieOptions(req, expiresAt),
+        );
+    }
+    return updated ?? session;
+  }
+
+  private async exchangeLegacySession(session: SessionWithUser, now: number) {
+    const req = this.requestCarryingCookie(session.token);
+    if (!req) {
+      return session;
+    }
+    const replacement = await this.userProvider.createSessionV2({
+      token: mintSessionToken(session.user.id),
+      userId: session.user.id,
+      userAgent: session.userAgent,
+      ...this.freshLifetime(now),
+    });
+    await this.userProvider.updateSession({
+      token: session.token,
+      expiresAt: new Date(0),
+      absoluteExpiresAt: new Date(now + LEGACY_TOKEN_GRACE_MS),
+    });
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        replacement.token,
+        this.accessTokenCookieOptions(req, replacement.expiresAt),
+      );
+    recordReplacedToken(req.rawRequest, replacement.token);
+    return replacement;
+  }
+
+  private freshLifetime(now: number) {
+    return {
+      expiresAt: new Date(now + this.config.sessionExpiresInHours * 3_600_000),
+      absoluteExpiresAt: new Date(
+        now + this.config.sessionAbsoluteExpiresInHours * 3_600_000,
+      ),
+    };
   }
 
   async generateMagicLink(email: string) {}
@@ -151,62 +278,34 @@ export class AuthManager {
     return session;
   }
 
+  /**
+   * A new session for `user`, on every sign-in.
+   *
+   * The name is historical: this used to derive the token from the email and
+   * the User-Agent and, finding a row under it, extend that row — without
+   * checking whose it was, so a user who took over a freed email address was
+   * handed its previous owner's session. Every sign-in now mints its own token
+   * and its own row, bound to the id of the user who just authenticated.
+   */
   async createOrUpdateSession(user: { email: string; id?: number }) {
     const req = new HttpRequest();
 
-    const userAgent = req.headers.get("User-Agent");
+    const userId =
+      user.id ??
+      (await this.userProvider.findUserByEmailAddress(user.email, false))?.id;
+    if (!userId) {
+      throw new AuthenticationError();
+    }
 
-    const hasher = new Bun.CryptoHasher("sha256");
-    hasher.update(`${user.email}${userAgent}`);
-
-    const token = hasher.digest("hex");
-    let session = await this.userProvider.findSession({
-      token,
+    return await this.userProvider.createSessionV2({
+      token: mintSessionToken(userId),
+      userId,
       userAgent:
         process.env.NODE_ENV === "development"
           ? "local"
           : req.headers.get("User-Agent"),
+      ...this.freshLifetime(Date.now()),
     });
-
-    if (!session) {
-      let userId: number = user.id;
-      if (!userId) {
-        const { id } = await this.userProvider.findUserByEmailAddress(
-          user.email,
-          false,
-        );
-        userId = id;
-      }
-      session = await this.userProvider.createSessionV2({
-        token,
-        userId,
-        userAgent:
-          process.env.NODE_ENV === "development"
-            ? "local"
-            : req.headers.get("User-Agent"),
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionExpiresInHours })
-            .toString(),
-        ),
-        absoluteExpiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionAbsoluteExpiresInHours })
-            .toString(),
-        ),
-      });
-    } else {
-      session = await this.userProvider.updateSession({
-        token,
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionExpiresInHours })
-            .toString(),
-        ),
-      });
-    }
-
-    return session;
   }
 
   async createMagicLinkToken(email: string) {

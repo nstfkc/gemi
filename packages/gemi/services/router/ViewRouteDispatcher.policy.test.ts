@@ -27,14 +27,20 @@ import { ServiceProvider } from "../../support/ServiceProvider";
 process.env.SECRET ??= "view-policy-test-secret";
 
 const SESSIONS: Record<string, { id: number; name: string }> = {
-  "tok-alice": { id: 1, name: "alice" },
-  "tok-bob": { id: 2, name: "bob" },
+  "v2.tok-alice": { id: 1, name: "alice" },
+  "v2.tok-bob": { id: 2, name: "bob" },
+};
+
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
 };
 
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     const user = SESSIONS[args.token];
-    return user ? ({ token: args.token, user } as any) : null;
+    return user ? ({ token: args.token, ...LIVE, user } as any) : null;
   }
 }
 
@@ -117,8 +123,8 @@ class AppKernel extends Kernel {
 
 const app = new App({ kernel: AppKernel });
 
-const bob = { Cookie: "access_token=tok-bob" };
-const alice = { Cookie: "access_token=tok-alice" };
+const bob = { Cookie: "access_token=v2.tok-bob" };
+const alice = { Cookie: "access_token=v2.tok-alice" };
 
 /**
  * `app.fetch` answers a view request with either a Response or the render

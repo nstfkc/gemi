@@ -39,14 +39,20 @@ import { toAgentTools } from "./toAgentTools";
 // --- the app -----------------------------------------------------------------
 
 const SESSIONS: Record<string, { id: number; name: string; orgId: string }> = {
-  "tok-alice": { id: 1, name: "alice", orgId: "org_alice" },
-  "tok-bob": { id: 2, name: "bob", orgId: "org_bob" },
+  "v2.tok-alice": { id: 1, name: "alice", orgId: "org_alice" },
+  "v2.tok-bob": { id: 2, name: "bob", orgId: "org_bob" },
+};
+
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
 };
 
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     const user = SESSIONS[args.token];
-    return user ? ({ token: args.token, user } as any) : null;
+    return user ? ({ token: args.token, ...LIVE, user } as any) : null;
   }
 }
 
@@ -345,7 +351,7 @@ async function streamTool(
     .find((part: any) => part.type === "tool-result" && part.toolCallId === "c1") as any;
 }
 
-const alice = { Cookie: "access_token=tok-alice" };
+const alice = { Cookie: "access_token=v2.tok-alice" };
 
 beforeEach(() => {
   handled.length = 0;

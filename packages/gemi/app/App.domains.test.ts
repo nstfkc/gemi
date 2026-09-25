@@ -517,10 +517,16 @@ describe("the domain reaches the app's own sub-requests", () => {
  */
 const deleted: string[] = [];
 
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
+};
+
 class StubUsers extends UserProvider {
   async findSession(args: any): Promise<any> {
-    return args.token === "tok-alice"
-      ? { token: args.token, user: { id: 1, email: "alice@gemi.dev" } }
+    return args.token === "v2.tok-alice"
+      ? { token: args.token, ...LIVE, user: { id: 1, email: "alice@gemi.dev" } }
       : null;
   }
   async deleteSession(args: any) {
@@ -577,7 +583,7 @@ describe("signing out clears the cookie signing in wrote", () => {
   const signOut = (host: string) =>
     cookies(`http://${host}/api/auth/sign-out`, {
       method: "POST",
-      headers: { Cookie: "access_token=tok-alice" },
+      headers: { Cookie: "access_token=v2.tok-alice" },
     });
 
   const isExpired = (attrs: Record<string, string>) =>
@@ -587,7 +593,7 @@ describe("signing out clears the cookie signing in wrote", () => {
     deleted.length = 0;
     const written = await signOut("acme.gemi.dev");
 
-    expect(deleted).toEqual(["tok-alice"]);
+    expect(deleted).toEqual(["v2.tok-alice"]);
     expect(written).toHaveLength(2);
     for (const cookie of written) {
       const { pair, attrs } = attributes(cookie);

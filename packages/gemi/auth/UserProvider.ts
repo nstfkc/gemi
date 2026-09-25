@@ -314,7 +314,9 @@ export class UserProvider {
     return await this.run(() =>
       this.models.Session.update({
         where: { token: args.token },
-        data: { expiresAt: args.expiresAt },
+        data: args.absoluteExpiresAt
+          ? { expiresAt: args.expiresAt, absoluteExpiresAt: args.absoluteExpiresAt }
+          : { expiresAt: args.expiresAt },
         select: {
           token: true,
           expiresAt: true,
