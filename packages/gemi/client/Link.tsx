@@ -70,7 +70,8 @@ type LinkBaseProps<T extends keyof Views> = Omit<
     : Search;
 };
 
-type LinkProps<T extends keyof Views, U = UrlParser<T>> = U extends Record<
+/** A link to one of the app's own view routes, handled by the client router. */
+export type LinkProps<T extends keyof Views, U = UrlParser<T>> = U extends Record<
   string,
   never
 >
@@ -86,12 +87,14 @@ function normalizeSearch(search: Search): Record<string, string> {
 }
 
 /** A link to another host — `useDomain().url(...)` — which the router cannot reach. */
-type ExternalLinkProps = Omit<ComponentProps<"a">, "href"> & {
+export type ExternalLinkProps = Omit<ComponentProps<"a">, "href"> & {
   href: AbsoluteUrl;
   active?: boolean;
 };
 
-// The route signature last: `ComponentProps<typeof Link>` reads the last one.
+// `ComponentProps<typeof Link>` cannot see through an overloaded generic
+// signature and comes out `{}` — derive prop types from `LinkProps` and
+// `ExternalLinkProps` instead.
 type LinkComponent = {
   (props: ExternalLinkProps): ReactElement;
   <T extends keyof Views>(props: LinkProps<T>): ReactElement;
