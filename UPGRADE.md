@@ -419,6 +419,30 @@ one used to put something in `error` that no `<Form>` could render:
 - **A rejected submit keeps the last `data`** instead of blanking it, matching
   the pending state, which has always kept it.
 
+## Derive link prop types from `LinkProps`, not `ComponentProps<typeof Link>`
+
+`Link` became an overloaded component in 0.63.0, and `ComponentProps` cannot
+read props off an overloaded generic call signature — it comes out `{}`. Any
+type derived through it silently collapses:
+
+```ts
+// 0.62: "/dashboard" | "/invoices" | …      0.63.0: Property 'href' does not
+type BackHref = ComponentProps<typeof Link>["href"];  // exist on type '{}'
+```
+
+`LinkProps` and `ExternalLinkProps` are exported from `gemi/client` for this:
+
+```ts
+import type { LinkProps } from "gemi/client";
+
+type BackHref = LinkProps<"/dashboard">["href"];
+```
+
+The same collapse is why `<Redirect>` accepted only `action` on 0.63.0, and
+rejected every `href` and `params` passed to it. `Redirect` is typed against
+`LinkProps<T>` directly now, so its props are back without any change on your
+side.
+
 ## If you used the global middleware list in 0.63.0-rc.1
 
 The `global` list is new in 0.63, so an app coming from 0.62 has nothing to
