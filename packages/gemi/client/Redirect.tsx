@@ -20,13 +20,21 @@ export const Redirect = <T extends ViewPaths>(
   };
   const { push, replace } = useNavigate();
 
+  // The destination decides when to navigate again, because none of the parts
+  // it is made of keep their identity: `useNavigate` builds `push` and
+  // `replace` fresh on every render, and `params` and `search` fall back to
+  // new objects each time. Depending on them directly navigated on every
+  // render of whatever holds this — with `action="push"`, one history entry
+  // per render, which the back button then has to walk back through.
+  const target = JSON.stringify([action, href, params, search]);
+
   useEffect(() => {
     if (action === "replace") {
       replace(href, { params, search } as any);
     } else {
       push(href, { params, search } as any);
     }
-  }, [replace, action, push, params, search, href]);
+  }, [target]);
 
   return <></>;
 };

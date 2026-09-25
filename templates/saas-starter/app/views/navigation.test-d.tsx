@@ -48,6 +48,11 @@ describe("LinkProps", () => {
   });
 
   test("the external variant takes an absolute URL, not a path", () => {
-    expectTypeOf<ExternalLinkProps["href"]>().not.toEqualTypeOf<string>();
+    // Naming the type it must be, rather than one it must not: `not
+    // .toEqualTypeOf<string>()` also passed for `string | number`, so it only
+    // ever caught `href` widening to exactly `string`.
+    expectTypeOf<ExternalLinkProps["href"]>().toEqualTypeOf<
+      `http://${string}` | `https://${string}`
+    >();
   });
 });
