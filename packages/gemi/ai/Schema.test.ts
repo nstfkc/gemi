@@ -531,6 +531,18 @@ describe("json()", () => {
     // variant", which is the whole reason to reach for this in a union.
     expect(schema.parse({ anything: [1, 2] })).toEqual({ anything: [1, 2] });
   });
+
+  test("is the variant blamed when nothing matches, being the closest", () => {
+    // The only way both members fail: a value that is not JSON at all. The
+    // json node scores as a match here so that the report names the reason the
+    // value was refused, rather than the discriminant of a variant the model
+    // was never aiming at.
+    const schema = s.union([s.object({ kind: s.literal("ref"), id: s.string() }), s.json()]);
+    expect(schema.safeParse(() => {})).toEqual({
+      ok: false,
+      errors: ["no matching variant; closest: expected a JSON value, got a function"],
+    });
+  });
 });
 
 describe("supportsStrict", () => {
