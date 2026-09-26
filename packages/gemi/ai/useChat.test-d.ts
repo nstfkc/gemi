@@ -42,13 +42,26 @@ class PageBuilderController extends AgentController<typeof pageAgent> {
   agent = pageAgent;
 }
 
+/**
+ * ONE ROUTE KEY PER TEST FILE, AND NOT A PLAUSIBLE ONE.
+ *
+ * This augmentation is global to the program, not local to this file, so two
+ * test files declaring the same key are two declarations of one property —
+ * `TS2717`, with a message that prints the two types identically because the
+ * classes behind them merely share a name. The follow-on errors land in
+ * `expectTypeOf` assertions and read as though the narrowing broke.
+ *
+ * It costs nothing to avoid and is confusing to diagnose, so the key names the
+ * file rather than the thing: `/page-builder` is what a second test file would
+ * also have picked.
+ */
 declare module "../client/rpc" {
   interface RPC {
-    "/page-builder": AgentRouteRPC<typeof PageBuilderController>;
+    "/on-tool-result": AgentRouteRPC<typeof PageBuilderController>;
   }
 }
 
-type OnToolResult = NonNullable<UseChatParams<"/page-builder">["onToolResult"]>;
+type OnToolResult = NonNullable<UseChatParams<"/on-tool-result">["onToolResult"]>;
 type Part = Parameters<OnToolResult>[0];
 
 describe("onToolResult", () => {
