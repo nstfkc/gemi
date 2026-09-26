@@ -1157,6 +1157,159 @@ describe("namespaces", () => {
   });
 });
 
+/**
+ * Bounding a generation that will not stop on its own.
+ *
+ * A model asked for non-strict JSON can degenerate into emitting one character
+ * until something intervenes, and with no ceiling the only thing that does is
+ * the client giving up — a turn that never ends rather than one that fails.
+ * The plumbing existed on `ProviderStreamParams` and had no way in from an app.
+ */
+describe("maxOutputTokens and temperature", () => {
+  const sent = async (
+    create: Record<string, unknown> = {},
+    run: Record<string, unknown> = {},
+  ) => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "a", provider, ...create });
+    await agent.stream({ messages: [], req, ...run }).result();
+    return provider.calls[0];
+  };
+
+  test("reach the provider from Agent.create", async () => {
+    expect(await sent({ maxOutputTokens: 8000, temperature: 0.2 })).toMatchObject({
+      maxOutputTokens: 8000,
+      temperature: 0.2,
+    });
+  });
+
+  test("are absent when the app sets neither, so nothing is invented", async () => {
+    const call = await sent();
+    expect(call.maxOutputTokens).toBeUndefined();
+    expect(call.temperature).toBeUndefined();
+  });
+
+  test("a per-run value overrides the agent's own", async () => {
+    expect(
+      await sent({ maxOutputTokens: 8000, temperature: 0.2 }, { maxOutputTokens: 500 }),
+    ).toMatchObject({ maxOutputTokens: 500, temperature: 0.2 });
+  });
+
+  test("a temperature of 0 is sent, rather than read as absent", async () => {
+    // `??` and not `||`: zero is the most likely value an app picks for a
+    // generation whose shape matters, and the falsy test would drop it.
+    expect(await sent({ temperature: 0 })).toMatchObject({ temperature: 0 });
+  });
+
+  test("a sub-agent takes its own, not the caller's", async () => {
+    const subProvider = fakeProvider([finish()]);
+    const sub = Agent.create({ name: "sub", provider: subProvider, maxOutputTokens: 100 });
+    const outer = AgentTool.create({
+      name: "outer",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        await ctx.runAgent(sub, { prompt: "go" });
+        return { ok: true };
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "outer", { pattern: "x" })], [finish()]),
+      tools: [outer],
+      maxOutputTokens: 9999,
+    });
+
+    await agent.stream({ messages: [], req }).result();
+
+    // The parent's ceiling is the parent's. A generator writing a document and
+    // a router answering one word are different jobs.
+    expect(subProvider.calls[0].maxOutputTokens).toBe(100);
+  });
+
+  test("runAgent can override the sub-agent's for one run", async () => {
+    const subProvider = fakeProvider([finish()]);
+    const sub = Agent.create({ name: "sub", provider: subProvider, maxOutputTokens: 100 });
+    const outer = AgentTool.create({
+      name: "outer",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        await ctx.runAgent(sub, { prompt: "go", maxOutputTokens: 4096, temperature: 0.1 });
+        return { ok: true };
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "outer", { pattern: "x" })], [finish()]),
+      tools: [outer],
+    });
+
+    await agent.stream({ messages: [], req }).result();
+
+    expect(subProvider.calls[0]).toMatchObject({ maxOutputTokens: 4096, temperature: 0.1 });
+  });
+});
+
+/**
+ * What a run that hit the ceiling hands back.
+ *
+ * The trap this closes: a cut-off answer is a *prefix* of the JSON the model
+ * meant to write, and `bestEffortParse` closes whatever brackets are open — so
+ * a truncated document reaches `safeParse` looking whole. Against a schema of
+ * `s.json()` fields it passes, and a half-written page is indistinguishable
+ * from a finished one.
+ */
+describe("a run cut off by the output ceiling", () => {
+  // A schema that constrains nothing, which is the case that matters: `s.json()`
+  // (#589) is one, and against it a repaired prefix parses as readily as a
+  // whole document. Built with the local helper so this branch does not depend
+  // on that one.
+  const OUTPUT = anything();
+  const half = '{"state":{"a":1},"components":[{"tag":"div"';
+
+  const truncatedRun = async (reason: "length" | "stop") => {
+    const provider = fakeProvider([
+      { type: "output-delta", delta: half },
+      { type: "finish", reason, usage: usage(10, 5) },
+    ]);
+    const agent = Agent.create({ name: "gen", provider, output: OUTPUT });
+    const run = agent.stream({ messages: [], req });
+    const events: any[] = [];
+    for await (const event of run) events.push(event);
+    return { result: await run.result(), events };
+  };
+
+  test("ends with finishReason length and no output", async () => {
+    const { result } = await truncatedRun("length");
+
+    expect(result.finishReason).toBe("length");
+    expect(result.output).toBeUndefined();
+    expect(
+      result.messages.flatMap((m: any) => m.content).filter((p: any) => p.type === "output"),
+    ).toEqual([]);
+  });
+
+  test("and does not report an error, because the app set the cap", async () => {
+    // `finishReason` is the channel for "not an error, and not a finished
+    // answer" — the argument `max-steps` already makes.
+    const { events } = await truncatedRun("length");
+    expect(events.filter((event) => event.type === "error")).toEqual([]);
+  });
+
+  test("whereas the same half-written document on a normal finish still parses", async () => {
+    // Not an endorsement of the value — it shows why the `length` case cannot
+    // be left to the schema. `s.json()` constrains nothing, so the repaired
+    // prefix is accepted and would have been handed over as a finished page.
+    const { result } = await truncatedRun("stop");
+
+    expect(result.finishReason).toBe("stop");
+    expect(result.output).toMatchObject({ state: { a: 1 } });
+  });
+});
+
 // --- nested agent runs ---------------------------------------------------
 
 /**

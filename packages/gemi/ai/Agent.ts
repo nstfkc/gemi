@@ -259,6 +259,16 @@ export interface RunAgentParams {
    * the user is only worth making if the whole subtree keeps it.
    */
   onPending?: "escalate" | "deny";
+  /**
+   * Override the sub-agent's own ceiling for this run.
+   *
+   * Not inherited from the parent. A sub-agent is a different job with a
+   * different output size — a generator writing a document against a router
+   * answering one word — and silently handing down the caller's ceiling would
+   * either strangle the one or fail to bound the other.
+   */
+  maxOutputTokens?: number;
+  temperature?: number;
 }
 
 /**
@@ -683,6 +693,28 @@ export interface CreateAgentParams<
    */
   maxDepth?: number;
   reasoning?: ReasoningEffort;
+  /**
+   * A ceiling on the tokens one model call may produce, passed to the provider
+   * as its own `max_output_tokens`.
+   *
+   * It bounds a degenerate generation. A model asked for non-strict JSON can
+   * fall into emitting the same character until something stops it, and with
+   * no cap the only thing that does is the client giving up — a turn that
+   * never ends rather than one that fails. The cap turns that into a run
+   * ending with `finishReason: "length"`, which an app can retry.
+   *
+   * Per model call, not per run: a run of four steps may produce four times
+   * this. `maxSteps` is the bound on the run.
+   */
+  maxOutputTokens?: number;
+  /**
+   * Passed to the provider unchanged. Lower is steadier, which is worth having
+   * for a generation whose shape matters more than its phrasing.
+   *
+   * Dropped by a provider whose model does not accept it, the way `reasoning`
+   * is — the newer reasoning models refuse the parameter outright.
+   */
+  temperature?: number;
 }
 
 /**
@@ -707,6 +739,11 @@ export interface AgentStreamParams {
   provider?: AgentProvider;
   maxSteps?: number;
   reasoning?: ReasoningEffort;
+  /** Overrides the agent's own for this run. A generation whose size varies by
+   *  request — a page with ten components against one with two — is the case
+   *  a fixed ceiling on the agent cannot serve. */
+  maxOutputTokens?: number;
+  temperature?: number;
   /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
@@ -839,6 +876,8 @@ type RunConfig = {
   maxSteps: number;
   maxDepth: number;
   reasoning?: ReasoningEffort;
+  maxOutputTokens?: number;
+  temperature?: number;
 };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -885,6 +924,8 @@ export class Agent<
       maxSteps: this.maxSteps,
       maxDepth: this.maxDepth,
       reasoning: this.reasoning,
+      maxOutputTokens: params.maxOutputTokens,
+      temperature: params.temperature,
     };
   }
 
@@ -902,6 +943,8 @@ export class Agent<
       provider: params.provider ?? this.config.provider,
       maxSteps: params.maxSteps ?? this.config.maxSteps,
       reasoning: params.reasoning ?? this.config.reasoning,
+      maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
+      temperature: params.temperature ?? this.config.temperature,
     };
     return new AgentRunImpl(config, params) as unknown as AgentRun<
       ToolShapesOf<T>,
@@ -1821,6 +1864,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         ? { name: "output", schema: this.config.output.toJSONSchema() }
         : undefined,
       reasoning: this.config.reasoning,
+      maxOutputTokens: this.config.maxOutputTokens,
+      temperature: this.config.temperature,
       signal,
     });
 
@@ -1920,7 +1965,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.emit({ type: "tool-call", messageId: message.id, part });
     }
 
-    if (this.config.output && outputText && !outcome.error) {
+    // `length` is excluded, and it is the reason `maxOutputTokens` is worth
+    // having at all. A cut-off answer is a prefix of the JSON the model meant
+    // to write, and `bestEffortParse` closes whatever brackets are open — so a
+    // truncated document arrives at `safeParse` looking like a whole one. For
+    // a schema of `s.json()` fields it then *passes*, and the app is handed a
+    // half-written page with nothing to distinguish it from a finished one.
+    //
+    // So a run that hit the ceiling produces no `output` part and ends with
+    // `finishReason: "length"`. No error is emitted: the app set the cap, and
+    // the finish reason is the channel for "not an error, and not a finished
+    // answer" — the same argument `max-steps` makes in the `FinishReason` type.
+    const truncated = outcome.reason === "length";
+    if (this.config.output && outputText && !outcome.error && !truncated) {
       const parsed = this.config.output.safeParse(bestEffortParse(outputText));
       if (parsed.ok === true) {
         this.output = parsed.value;
@@ -2326,6 +2383,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       signal: this.controller.signal,
       threadId: this.params.threadId,
       instructions: params.instructions,
+      maxOutputTokens: params.maxOutputTokens,
+      temperature: params.temperature,
       // Kept across turns so the transcript the client already has keeps its
       // identity when the run continues.
       runId: resuming ? recorded.runId : undefined,
