@@ -54,6 +54,26 @@ import type {
  */
 export interface ToolContext {
   req: HttpRequest<any, any>;
+  /**
+   * The app's own fields from the turn's request body — what `useChat`'s
+   * `body` option sent, minus the keys the turn envelope owns.
+   *
+   * Here rather than behind `ctx.req.input()`, and not because that would be
+   * inconvenient: `AgentController` has already consumed the body, and a run
+   * outlives the request anyway, so by the time a tool executes there is
+   * nothing left to read. The values are copied onto the run when it starts.
+   *
+   * `{}` for a run started with none. Untyped on purpose — a tool is a
+   * module-scope singleton that any controller may mount, so there is no one
+   * `Body` for it to be. The controller that declares one gets it typed in
+   * `instructions()`; a tool validates, the way it would any other input it
+   * did not define.
+   *
+   * CLIENT-CONTROLLED. Same trust as a request body: fine to read, not a
+   * finding about who the user is. An id from here says which record the
+   * client wants, never that it may have it.
+   */
+  body: Record<string, unknown>;
   runId: string;
   threadId?: string;
   toolCallId: string;
@@ -703,6 +723,16 @@ export interface AgentStreamParams {
   threadId?: string;
   /** Appended to the agent's own `instructions` for this request only. */
   instructions?: string;
+  /**
+   * The app's own fields from the turn's request body, handed to every tool of
+   * this run as `ctx.body`.
+   *
+   * Carried on the run rather than left to be read from `ctx.req`: a run
+   * outlives the request that started it, so that a refresh can reattach, and
+   * by the time a tool executes there is no body left to read. See
+   * `AgentController`'s `Body`.
+   */
+  body?: Record<string, unknown>;
   /** Per-request model choice, e.g. letting a user pick. */
   provider?: AgentProvider;
   maxSteps?: number;
@@ -2119,6 +2149,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   ): Promise<ToolResultPart> {
     const ctx: ToolContext = {
       req: this.params.req,
+      // `{}` rather than undefined, so a tool can read a field without a guard
+      // and get the same answer — absent — whether the client sent nothing or
+      // the run was started without a body at all.
+      body: this.params.body ?? {},
       runId: this.runId,
       threadId: this.params.threadId,
       toolCallId: call.toolCallId,
@@ -2321,6 +2355,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // nothing to widen here and nothing to narrow: a second scope would be a
       // second answer to a question the request already answered once.
       attachments: this.params.attachments,
+      // Inherited for the same reason the scope above is: a sub-agent is part
+      // of the turn its parent is serving, so the fields the client sent with
+      // that turn are as much its context as the parent's. A generator run
+      // through `runAgent` whose tools could not see `pageId` would have to be
+      // passed it through the prompt, as text, for the model to copy back.
+      body: this.params.body,
       // Inherited, not new: this is what makes the parent's `stop()` reach a
       // sub-run three levels down without anything in between forwarding it.
       signal: this.controller.signal,

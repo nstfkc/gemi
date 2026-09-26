@@ -33,6 +33,21 @@ type OutputOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { output: in
   : unknown;
 
 /**
+ * The extra body fields the route's controller declared, or an open record for
+ * one that declared none.
+ *
+ * The fallback is not just for an undeclared body: it also covers a route
+ * whose `RPC` entry predates this field, which is every entry in an app that
+ * has not regenerated its types yet. Falling back to the old signature there
+ * is the difference between an upgrade that compiles and one that does not.
+ */
+type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer B }
+  ? B extends Record<string, unknown>
+    ? B
+    : Record<string, unknown>
+  : Record<string, unknown>;
+
+/**
  * What the UI is waiting on.
  *
  * `awaiting-input` is its own state rather than a flavour of idle: the run is
@@ -78,9 +93,18 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * `runId` of its own. Defaults to true.
    */
   attach?: boolean;
-  /** Merged into the request body, for anything the agent's controller reads
-   *  off the request that is not a message. */
-  body?: Record<string, unknown>;
+  /**
+   * Merged into the request body, and read back on the server in
+   * `instructions(req, { body })` and on every tool's `ctx.body`.
+   *
+   * Typed by the controller: a controller written as `AgentController<typeof
+   * agent, { pageId: string }>` makes this required and checked here, and one
+   * that declares no body leaves it the open record it has always been. The
+   * four keys the turn envelope owns — `turn`, `clientRunId`, `threadId`,
+   * `messages` — are removed before the server sees this, so naming one of
+   * them here sends it and changes nothing.
+   */
+  body?: BodyOf<P>;
   headers?: Record<string, string>;
   onFinish?: (message: AgentMessage<ToolsOf<P>, OutputOf<P>>) => void;
   onError?: (error: AgentError) => void;
