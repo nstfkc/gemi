@@ -498,6 +498,35 @@ describe("json()", () => {
     expect(s.json().safeParse(value)).toEqual({ ok: true, value });
   });
 
+  test("checks what a toJSON returns, not the object behind it", () => {
+    // Writing a `toJSON` is exactly what one does about a field JSON cannot
+    // carry, so walking the wrapper's own fields refused values
+    // `JSON.stringify` serializes without complaint.
+    const money = { cents: 5n, toJSON: () => "5" };
+    expect(s.json().safeParse({ total: money })).toEqual({
+      ok: true,
+      value: { total: money },
+    });
+    expect(JSON.stringify({ total: money })).toBe('{"total":"5"}');
+  });
+
+  test("still refuses a value whose toJSON returns something JSON cannot carry", () => {
+    const bad = { toJSON: () => ({ nested: () => {} }) };
+    expect(s.json().safeParse({ bad })).toEqual({
+      ok: false,
+      errors: ["bad.nested: expected a JSON value, got a function"],
+    });
+  });
+
+  test("refuses a toJSON that hands back its own object, rather than recursing forever", () => {
+    const loop: any = {};
+    loop.toJSON = () => loop;
+    expect(s.json().safeParse(loop)).toEqual({
+      ok: false,
+      errors: ["expected a JSON value, got a toJSON that returns its own object"],
+    });
+  });
+
   test("allows a value with a toJSON, rather than refusing a Date to catch a Map", () => {
     const value = { at: new Date("2026-01-01T00:00:00.000Z") };
     expect(s.json().safeParse(value)).toEqual({ ok: true, value });
@@ -574,6 +603,49 @@ describe("supportsStrict", () => {
     ]) {
       expect(supportsStrict(schema), JSON.stringify(schema.toJSONSchema())).toBe(false);
     }
+  });
+
+  /**
+   * The hole this closes. `McpRegistry.combineSchemas` casts a hand-built object
+   * into `Schema<T>` and spreads `meta.input.toJSONSchema()` into it — so an
+   * `s.json()` field an app declared on an `mcp` route reaches the provider
+   * while the tree that would have reported it is discarded. Every
+   * MCP-projected tool was sent `strict: true` with an empty subschema inside.
+   */
+  test("reads the emitted schema when there is no tree, so a foreign one cannot hide a json node", () => {
+    const merged = {
+      toJSONSchema: () => ({
+        type: "object" as const,
+        properties: {
+          // What `s.json().describe(...)` emits, surviving the merge.
+          definition: { description: "A UI document" },
+          orgId: { type: "string" },
+        },
+        required: ["definition", "orgId"],
+        additionalProperties: false as const,
+      }),
+      parse: (v: unknown) => v,
+      safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+    } as never;
+
+    expect(supportsStrict(merged)).toBe(false);
+  });
+
+  test("finds an unconstrained node at any depth of an emitted schema", () => {
+    const at = (properties: Record<string, unknown>) =>
+      ({
+        toJSONSchema: () => ({ type: "object", properties, required: Object.keys(properties) }),
+        parse: (v: unknown) => v,
+        safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+      }) as never;
+
+    expect(supportsStrict(at({ a: { type: "array", items: {} } }))).toBe(false);
+    expect(supportsStrict(at({ a: { anyOf: [{ type: "string" }, {}] } }))).toBe(false);
+    expect(
+      supportsStrict(at({ a: { type: "object", properties: { b: { description: "x" } } } })),
+    ).toBe(false);
+    // And true when every node says something about its value.
+    expect(supportsStrict(at({ a: { type: "array", items: { type: "string" } } }))).toBe(true);
   });
 
   test("answers true for a hand-built schema, which has no tree to walk", () => {

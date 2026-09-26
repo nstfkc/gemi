@@ -1275,8 +1275,12 @@ describe("strict mode follows the schema", () => {
     const result = await run.result();
 
     expect(result.output).toEqual({ definition: document });
-    // Not merely equal: the parse hands the very object back, so what the app
-    // reads is what arrived.
+    // Reaching into the awkward corner on purpose: an arbitrary key, a
+    // mixed-type array, a null at depth. Equality above already covers it —
+    // this says which shapes were meant to survive. Identity is not checkable
+    // here and is not claimed: the value was serialized into the provider's
+    // deltas and rebuilt by `bestEffortParse`, so nothing could hand back the
+    // original object. `Schema.test.ts` pins the by-reference parse.
     expect(result.output.definition.state["weird-key"][2]).toEqual({ deep: null });
 
     // Streaming is untouched by the schema — a snapshot is `bestEffortParse` of

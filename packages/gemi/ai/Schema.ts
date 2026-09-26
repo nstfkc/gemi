@@ -339,8 +339,12 @@ function score(definition: Definition, value: unknown): number {
       return node.members.reduce((best, member) => Math.max(best, score(member, value)), 0);
     // Matches, because it matches everything — but at the score of a plain
     // scalar, so a sibling variant that pinned its discriminant still wins the
-    // blame. A union with a `json` member never reaches the blaming code
-    // anyway: that member parses, so there is nothing to report.
+    // blame.
+    //
+    // Reached only when no member parsed, which for a `json` member means the
+    // value is not JSON at all: a function, a bigint, a cycle. Then this is
+    // what makes the report name the reason the value was refused rather than
+    // the discriminant of a variant the model was never aiming at.
     case "json":
       return 1;
   }
@@ -445,6 +449,10 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
  * `JSON.stringify` drops an `undefined` property, writes `null` for an
  * `undefined` element, and calls `toJSON` where there is one. Those are JSON's
  * own answers, and rejecting a `Date` to catch a `Map` is a bad trade.
+ *
+ * `toJSON` is honoured rather than assumed harmless: the walk checks what it
+ * returns and never the object behind it, because that is all `JSON.stringify`
+ * will look at.
  */
 function checkJson(value: unknown, path: string, errors: string[], seen: Set<object>): void {
   const reject = (what: string) => {
@@ -469,6 +477,26 @@ function checkJson(value: unknown, path: string, errors: string[], seen: Set<obj
 
   if (value === null) return;
   const object = value as object;
+  // `JSON.stringify` asks `toJSON` what to write and never looks at the object
+  // itself, so that answer is what has to be checked. Without this the walk
+  // descended into the wrapper's own fields and refused values `stringify`
+  // serializes without complaint — a `toJSON` returning a string off a `bigint`
+  // field being the archetype, since writing a `toJSON` is exactly what one
+  // does about a field JSON cannot carry. `Date` passed only by having no own
+  // enumerable properties to trip over.
+  const toJSON = (object as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON === "function") {
+    let replaced: unknown;
+    try {
+      replaced = (toJSON as (key?: string) => unknown).call(object);
+    } catch {
+      return reject("a toJSON that threw");
+    }
+    // Guarded against a `toJSON` that answers with itself, which would
+    // otherwise recurse forever.
+    if (replaced === value) return reject("a toJSON that returns its own object");
+    return checkJson(replaced, path, errors, seen);
+  }
   // A cycle is the one shape that cannot be reported from where it is found,
   // because walking it does not terminate.
   if (seen.has(object)) return reject("a circular reference");
@@ -612,12 +640,52 @@ export const s: {
  */
 export function supportsStrict(schema: AnySchema): boolean {
   const definition = definitions.get(schema);
-  // A schema built by hand rather than with `s` — `questionSchema` in
-  // `ai/Agent.ts`, the merged one in `services/mcp`. There is no tree to walk,
-  // and both are the strict subset by construction, so `true` is both the right
-  // answer and the one they had before this function existed.
-  if (!definition) return true;
-  return strictNode(definition.node);
+  if (definition) return strictNode(definition.node);
+  // A schema built by hand rather than with `s`: `questionSchema` in
+  // `ai/Agent.ts`, and the merged one `services/mcp` casts together.
+  //
+  // Answering `true` here was wrong, and not harmlessly. `McpRegistry`'s
+  // `combineSchemas` spreads `meta.input.toJSONSchema()` into its own object,
+  // so an `s.json()` field an app declared on an `mcp` route survives into the
+  // emitted schema while the *tree* that would have reported it is discarded.
+  // Every MCP-projected tool was therefore sent `strict: true` with an empty
+  // subschema inside it — a 400 on every turn, from the one path this function
+  // exists to get right.
+  //
+  // So the emitted schema is read instead. It is the same question asked of the
+  // artifact rather than the source, which is the only thing a foreign schema
+  // has to offer.
+  return strictJSONSchema(schema.toJSONSchema());
+}
+
+/**
+ * Whether an already-emitted JSON Schema constrains every value it describes.
+ *
+ * Only for schemas with no definition tree. It answers a narrower question than
+ * `strictNode` — it cannot see optionality or a builder's intent, just whether
+ * some node says nothing about its value — but that is exactly the property
+ * strict mode rejects, and it is visible in the artifact.
+ */
+function strictJSONSchema(schema: JSONSchema): boolean {
+  // `description` is prose, not a constraint. A node carrying only that — which
+  // is what `s.json().describe(...)` emits — says nothing about its value.
+  const constrained =
+    schema.type !== undefined ||
+    schema.enum !== undefined ||
+    schema.const !== undefined ||
+    schema.anyOf !== undefined ||
+    schema.properties !== undefined ||
+    schema.items !== undefined;
+  if (!constrained) return false;
+
+  for (const child of Object.values(schema.properties ?? {})) {
+    if (!strictJSONSchema(child)) return false;
+  }
+  if (schema.items && !strictJSONSchema(schema.items)) return false;
+  for (const member of schema.anyOf ?? []) {
+    if (!strictJSONSchema(member)) return false;
+  }
+  return true;
 }
 
 /**
