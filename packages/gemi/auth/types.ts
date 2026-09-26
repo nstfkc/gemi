@@ -109,7 +109,7 @@ export interface CreateSessionArgs {
   token: string;
   userId: number;
   location?: string;
-  userAgent: string;
+  userAgent: string | null;
   expiresAt: Date;
   absoluteExpiresAt: Date;
 }

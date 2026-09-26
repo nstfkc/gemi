@@ -33,14 +33,23 @@ import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
  */
 
 const SESSIONS: Record<string, { id: number; name: string }> = {
-  "tok-alice": { id: 1, name: "alice" },
-  "tok-bob": { id: 2, name: "bob" },
+  "v2.tok-alice": { id: 1, name: "alice" },
+  "v2.tok-bob": { id: 2, name: "bob" },
+};
+
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
 };
 
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     const user = SESSIONS[args.token];
-    return user ? ({ token: args.token, user } as any) : null;
+    return user ? ({ token: args.token, user, ...LIVE } as any) : null;
+  }
+  async updateSession(args: any): Promise<SessionWithUser | null> {
+    return null;
   }
 }
 
@@ -245,7 +254,7 @@ describe("dispatchAs", () => {
 
   test("an authenticated initiator runs the route as that user", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) => snapshot(await dispatcher.dispatchAs(req, "GET", "/me")),
     );
 
@@ -253,7 +262,7 @@ describe("dispatchAs", () => {
   });
 
   test("an access_token header is carried as a header", async () => {
-    const { result } = await fromAgent({ access_token: "tok-bob" }, async (req, dispatcher) =>
+    const { result } = await fromAgent({ access_token: "v2.tok-bob" }, async (req, dispatcher) =>
       snapshot(await dispatcher.dispatchAs(req, "GET", "/me")),
     );
 
@@ -263,7 +272,7 @@ describe("dispatchAs", () => {
   test("copies the credentials and the user agent, and nothing else", async () => {
     const { result } = await fromAgent(
       {
-        Cookie: "access_token=tok-alice; csrf_token=c; theme=dark",
+        Cookie: "access_token=v2.tok-alice; csrf_token=c; theme=dark",
         "User-Agent": "agent-test",
         "X-Forwarded-For": "1.2.3.4",
         "Accept-Language": "tr",
@@ -273,13 +282,13 @@ describe("dispatchAs", () => {
     );
 
     expect(result).toEqual({
-      cookie: "access_token=tok-alice",
+      cookie: "access_token=v2.tok-alice",
       "user-agent": "agent-test",
     });
   });
 
   test("a policy that denies the user denies the in-process call too", async () => {
-    const bob = { Cookie: "access_token=tok-bob" };
+    const bob = { Cookie: "access_token=v2.tok-bob" };
     const viaHttp = await snapshot(await direct("/orders", { headers: bob }));
     expect(viaHttp).toEqual({ status: 403, body: { error: { message: "Forbidden" } } });
 
@@ -288,7 +297,7 @@ describe("dispatchAs", () => {
     );
     expect(result).toEqual(viaHttp);
 
-    const alice = await fromAgent({ Cookie: "access_token=tok-alice" }, async (req, dispatcher) =>
+    const alice = await fromAgent({ Cookie: "access_token=v2.tok-alice" }, async (req, dispatcher) =>
       snapshot(await dispatcher.dispatchAs(req, "GET", "/orders")),
     );
     expect(alice.result).toEqual({ status: 200, body: { orders: [] } });
@@ -296,7 +305,7 @@ describe("dispatchAs", () => {
 
   test("a multipart route's file rule sees the forwarded File", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) => {
         const form = new FormData();
         form.append("title", "Mug");
@@ -313,7 +322,7 @@ describe("dispatchAs", () => {
 
   test("a multipart route's file rule rejects what is not a file", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) =>
         snapshot(
           await dispatcher.dispatchAs(req, "POST", "/products", {
@@ -328,7 +337,7 @@ describe("dispatchAs", () => {
   });
 
   test("dispatches under the route's real path, so onRequestStart fires", async () => {
-    await fromAgent({ Cookie: "access_token=tok-alice" }, async (req, dispatcher) =>
+    await fromAgent({ Cookie: "access_token=v2.tok-alice" }, async (req, dispatcher) =>
       dispatcher.dispatchAs(req, "GET", "/me"),
     );
 
@@ -342,7 +351,7 @@ describe("dispatchAs", () => {
   });
 
   test("a query that mentions /__gemi__ does not keep the call out of the lifecycle hooks", async () => {
-    const { result } = await fromAgent({ Cookie: "access_token=tok-alice" }, async (req, dispatcher) =>
+    const { result } = await fromAgent({ Cookie: "access_token=v2.tok-alice" }, async (req, dispatcher) =>
       snapshot(await dispatcher.dispatchAs(req, "GET", "/me?note=/__gemi__")),
     );
 
@@ -354,7 +363,7 @@ describe("dispatchAs", () => {
   test("an inbound request cannot mark itself model-originated", async () => {
     const res = await direct("/me", {
       headers: {
-        Cookie: "access_token=tok-alice; model_originated=1",
+        Cookie: "access_token=v2.tok-alice; model_originated=1",
         "X-Gemi-Model-Originated": "1",
         "X-Model-Originated": "true",
       },
@@ -368,7 +377,7 @@ describe("dispatchAs", () => {
 
   test("the inner call gets its own context, and the outer one is untouched", async () => {
     const { result, outer } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) => {
         const ctx = req.ctx();
         ctx.setCookie("outer", "1");
@@ -407,7 +416,7 @@ describe("dispatchAs", () => {
 
   test("an asSystem block around the call does not reach the route's policies", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) =>
         runAsSystem(() =>
           dispatcher.dispatchAs(req, "GET", "/public-orders").then((res) => res.status),
@@ -424,7 +433,7 @@ describe("dispatchAs", () => {
 
   test("an asUser block for someone else around the call does not swap the route's user", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) =>
         runAsUser({ id: 2, name: "bob" }, () =>
           dispatcher.dispatchAs(req, "GET", "/orders").then(
@@ -449,7 +458,7 @@ describe("dispatchAs", () => {
     ["a fragment", "/me#x"],
   ])("refuses a path with %s", async (_label, path) => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) =>
         dispatcher.dispatchAs(req, "GET", path).then(
           () => null,
@@ -462,7 +471,7 @@ describe("dispatchAs", () => {
 
   test("keeps a query string for GET routes", async () => {
     const { result } = await fromAgent(
-      { Cookie: "access_token=tok-alice" },
+      { Cookie: "access_token=v2.tok-alice" },
       async (req, dispatcher) => snapshot(await dispatcher.dispatchAs(req, "GET", "/me?x=1")),
     );
 
@@ -472,12 +481,12 @@ describe("dispatchAs", () => {
   describe("rate limits", () => {
     test("two users' tool calls spend separate budgets", async () => {
       const alice = await fromAgent(
-        { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.1" },
+        { Cookie: "access_token=v2.tok-alice", "X-Forwarded-For": "10.0.0.1" },
         async (req, dispatcher) =>
           (await dispatcher.dispatchAs(req, "GET", "/limited-per-user")).status,
       );
       const bob = await fromAgent(
-        { Cookie: "access_token=tok-bob", "X-Forwarded-For": "10.0.0.2" },
+        { Cookie: "access_token=v2.tok-bob", "X-Forwarded-For": "10.0.0.2" },
         async (req, dispatcher) =>
           (await dispatcher.dispatchAs(req, "GET", "/limited-per-user")).status,
       );
@@ -489,7 +498,7 @@ describe("dispatchAs", () => {
     });
 
     test("a user's direct call and their tool call spend one budget", async () => {
-      const headers = { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.3" };
+      const headers = { Cookie: "access_token=v2.tok-alice", "X-Forwarded-For": "10.0.0.3" };
       expect((await direct("/limited-shared", { headers })).status).toBe(200);
 
       const { result } = await fromAgent(
@@ -502,7 +511,7 @@ describe("dispatchAs", () => {
     });
 
     test("a custom key sees isModelOriginated, so model traffic can have its own budget", async () => {
-      const headers = { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.4" };
+      const headers = { Cookie: "access_token=v2.tok-alice", "X-Forwarded-For": "10.0.0.4" };
       expect((await direct("/limited-by-origin", { headers })).status).toBe(200);
 
       const { result } = await fromAgent(
@@ -525,7 +534,7 @@ describe("dispatchAs", () => {
         // copied header would re-key every nested call.
         const raw = new Request("http://gemi.dev/api/agent", {
           method: "POST",
-          headers: { Cookie: "access_token=tok-alice", "X-Forwarded-For": "6.6.6.6" },
+          headers: { Cookie: "access_token=v2.tok-alice", "X-Forwarded-For": "6.6.6.6" },
         });
         markModelOriginated(raw, "10.0.0.5");
         const initiator = new HttpRequest<any, any>(raw);
@@ -539,7 +548,7 @@ describe("dispatchAs", () => {
 });
 
 describe("a policy denial", () => {
-  const bob = { Cookie: "access_token=tok-bob" };
+  const bob = { Cookie: "access_token=v2.tok-bob" };
 
   test("answers 403 with no policy text in the body", async () => {
     const res = await direct("/orders", { headers: bob });
@@ -603,7 +612,7 @@ describe("a policy denial", () => {
     expect(failed[0]!.error).toMatchObject({ name: "PolicyDeniedError", reason: "denied" });
 
     const alice = await direct("/orders-by-middleware", {
-      headers: { Cookie: "access_token=tok-alice" },
+      headers: { Cookie: "access_token=v2.tok-alice" },
     });
     expect(alice.status).toBe(200);
   });

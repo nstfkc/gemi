@@ -399,11 +399,27 @@ export class AuthController extends Controller {
   }
 
   async signOut(req = new HttpRequest()) {
-    const token = req.cookies.get("access_token");
-
-    const user = await Auth.user();
+    // Both transports the `auth` middleware accepts, in its order: a browser's
+    // cookie, or the `access_token` header a native client sends. Reading the
+    // cookie alone revoked nothing for a header client — and, because
+    // `Auth.user()` reads the cookie too, that sign-out answered `401` before
+    // it ever reached the revocation below.
+    const token =
+      req.cookies.get("access_token") ?? req.headers.get("access_token");
 
     const { userProvider, config } = app(AuthManager);
+
+    // Looked up, rather than resolved through `Auth.user()`. Two reasons: it
+    // reads the cookie alone, and it goes through `getSession`, which slides a
+    // session past half its window and writes the cookie again — a second
+    // `Set-Cookie` for `access_token` racing the one below that clears it,
+    // since a request's cookies are a set of serialized strings, not a map.
+    const session = token
+      ? await userProvider.findSession({
+          token,
+          userAgent: req.headers.get("User-Agent"),
+        })
+      : null;
 
     await userProvider.deleteSession({ token });
 
@@ -423,7 +439,15 @@ export class AuthController extends Controller {
       });
     }
 
-    await config.onSignOut(user);
+    // No session is no longer a refusal: signing out is what a client does when
+    // it wants none, and enforcing expiry makes "it ran out a moment ago" an
+    // ordinary case — one whose cookie the old `401` left in place, with no way
+    // to clear it. The hook still only ever sees a real user, as it did when
+    // `Auth.user()` stood in front of it.
+    if (session?.user) {
+      session.user["extension"] = await config.extendSession(session.user);
+      await config.onSignOut(session.user);
+    }
 
     return {};
   }

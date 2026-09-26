@@ -73,7 +73,7 @@ a binding into the container, and a facade resolves it.**
 | --- | --- | --- | --- |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
-| `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
+| `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
 | `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
@@ -81,7 +81,7 @@ a binding into the container, and a facade resolves it.**
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
-| `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | sha256 of value + timestamp | Token minting. |
+| `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | 32 random bytes, hex | Token minting. Whatever you return must not be computable from the user's email or the time. |
 
 > **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
 > constructs a [`UserProvider`](#user-provider) on the ORM and exposes it as
@@ -89,9 +89,26 @@ a binding into the container, and a facade resolves it.**
 > `Illuminate\Contracts\Auth\UserProvider`. Earlier versions took an `IAuthenticationAdapter`
 > here (and a `adapter` field before that); see [Upgrading](#upgrading-from-the-adapter-config).
 
-> **Note:** Session lifetime is enforced two ways. `sessionExpiresInHours` is a *rolling*
-> window pushed forward on each request; `sessionAbsoluteExpiresInHours` is a fixed cap
-> stamped at creation. Setting both very high effectively creates long-lived sessions.
+> **Note:** Session lifetime is enforced on the server, on every request, for the cookie
+> and the `access_token` header alike. `sessionExpiresInHours` is an idle timeout, pushed
+> forward while the session is in use; `sessionAbsoluteExpiresInHours` is a fixed cap
+> stamped at creation. A session past either one is deleted. Setting both very high
+> effectively creates long-lived sessions.
+
+### Session tokens
+
+Every sign-in creates a new session with its own token:
+`v2.` + HMAC-SHA256(secret, user id + 16 random bytes). The secret is the app's `SECRET`, the
+same one CSRF uses; signing in fails if it is not set. The token is
+looked up, not verified against the secret, so changing the secret changes new tokens and
+signs nobody out.
+
+Tokens issued before 0.64 were derived from the email and the User-Agent and could be
+computed. They are refused, so their users sign in again; see [UPGRADE.md](../UPGRADE.md).
+
+Signing out deletes the row for the token the request carried, whether it arrived as the
+cookie or the `access_token` header, and clears the cookie. It answers `{}` even when there
+was no session to revoke, so a client can always discard a token it no longer wants.
 
 ## User provider
 
@@ -278,7 +295,7 @@ may be sync or async.
 | `onUserCreated` | `(user) => Promise<void>` | A user row is written — **inside the transaction that writes it**, before it commits. A throw rolls the user back. See [onUserCreated](#onusercreated). |
 | `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in), after it is committed. `verificationToken` is empty when `verifyEmail` is off, and on the OAuth path, where there is nothing to verify. |
 | `onSignIn` | `(session, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
-| `onSignOut` | `(session)` | The `/auth/sign-out` endpoint runs. |
+| `onSignOut` | `(session)` | The `/auth/sign-out` endpoint revokes a session. Not fired when the request carried none, so the argument is always a real user. |
 | `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
 | `onResetPassword` | `(session)` | A password reset completes (all the user's sessions are already invalidated). |
 | `onMagicLinkCreated` | `(session, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
@@ -774,7 +791,11 @@ this.get(DashboardController, "index").middleware(["auth"]);
 Requests without a valid `access_token` are rejected with an `AuthenticationError`:
 a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
 a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
-view's loader refuses the same way. See [Middleware](./middleware.md) for the full DSL
+view's loader refuses the same way, with one difference worth knowing: the middleware takes
+the token from the `access_token` cookie **or** the `access_token` header, while `Auth.user()`
+reads the cookie alone. On a route carrying `auth` that gap is invisible, because the
+middleware has already put the user on the request context; on a route without it, a client
+that authenticates by header is refused. See [Middleware](./middleware.md) for the full DSL
 (`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
 role enforcement.
 

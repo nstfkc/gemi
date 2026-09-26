@@ -34,10 +34,16 @@ import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
  * an app writes a message under the user who sent it.
  */
 
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
+};
+
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
-    return args.token === "tok-alice"
-      ? ({ token: args.token, user: { id: 1, name: "alice" } } as any)
+    return args.token === "v2.tok-alice"
+      ? ({ token: args.token, ...LIVE, user: { id: 1, name: "alice" } } as any)
       : null;
   }
 }
@@ -203,7 +209,7 @@ function send(body: Record<string, unknown>, path = "/api/chat") {
   return app.fetch(
     new Request(`http://gemi.dev${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: "access_token=tok-alice" },
+      headers: { "Content-Type": "application/json", Cookie: "access_token=v2.tok-alice" },
       body: JSON.stringify(body),
     }),
   );

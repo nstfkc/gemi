@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { HttpRequest } from "../http/HttpRequest";
 import type { User } from "./types";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
@@ -149,24 +150,17 @@ export function authConfigDefaults(
     verifyPassword: async (password, hash) =>
       await Bun.password.verify(password, hash),
     hashPassword: async (password) => await Bun.password.hash(password),
-    generateForgotPasswordToken: async (user) => {
-      const hasher = new Bun.CryptoHasher("sha256");
-      hasher.update(`${user.email}${Date.now()}`);
-      return hasher.digest("hex");
-    },
-    generateEmailVerificationToken: (email) => {
+    // Random, not derived. These used to be sha256(email + Date.now()), which
+    // anyone who asked for a reset could recompute: the email is theirs to
+    // choose and the millisecond is within a second of their own request.
+    generateForgotPasswordToken: async () => randomBytes(32).toString("hex"),
+    generateEmailVerificationToken: () => {
       if (!(config.verifyEmail ?? true)) {
         return "";
       }
-      const hasher = new Bun.CryptoHasher("sha256");
-      hasher.update(`${email}${Date.now()}`);
-      return hasher.digest("hex");
+      return randomBytes(32).toString("hex");
     },
-    generateMagicLinkToken: (email) => {
-      const hasher = new Bun.CryptoHasher("sha256");
-      hasher.update(`${email}${Date.now()}`);
-      return hasher.digest("hex");
-    },
+    generateMagicLinkToken: () => randomBytes(32).toString("hex"),
 
     extendSession: () => ({}),
 

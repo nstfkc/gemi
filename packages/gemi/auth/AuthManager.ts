@@ -1,6 +1,9 @@
 import { randomBytes } from "crypto";
-import { Temporal } from "temporal-polyfill";
 import { HttpRequest } from "../http";
+import { AuthenticationError } from "../http/errors";
+import { RequestContext } from "../http/requestContext";
+import { isSessionToken, mintSessionToken } from "./sessionToken";
+import type { SessionWithUser } from "./types";
 import { authConfigDefaults, type AuthConfig } from "./config";
 import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
@@ -8,6 +11,20 @@ import { app } from "../foundation/app";
 import type { CreateCookieOptions } from "../http/requestContext";
 import { DomainRouter } from "../services/router/DomainRouter";
 import { normalizeHost } from "../services/router/DomainResolver";
+
+/**
+ * A session's expiry in milliseconds, or `0` — already past — for a date the
+ * provider could not give us.
+ *
+ * `new Date(undefined).getTime()` is `NaN`, and every comparison against
+ * `NaN` is false, so a column that arrived missing read as a session that
+ * never expires. A date this cannot make sense of is treated as spent, which
+ * costs a re-authentication and never grants one.
+ */
+function expiryMs(value: Date | string | number | null | undefined): number {
+  const ms = new Date(value ?? 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
 
 export class AuthManager {
   static token = "auth";
@@ -93,17 +110,92 @@ export class AuthManager {
     return host === domain || host?.endsWith(`.${domain}`) ? domain : undefined;
   }
 
+  /**
+   * The session `token` names, or null when there is none or it has run out.
+   *
+   * **Expiry is enforced here.** `expiresAt` is the idle timeout and
+   * `absoluteExpiresAt` the hard cap; either one past is no session, and the
+   * row is deleted. Both used to exist only as the cookie's `Expires`, which a
+   * client sending the `access_token` header never honoured, so its token was
+   * good for as long as the row existed.
+   *
+   * **The idle timeout slides.** A session used after half of its window has
+   * gone is pushed to `now + sessionExpiresInHours`, never past
+   * `absoluteExpiresAt`, and the cookie is written again when this request is
+   * the one that carried the token. Without that, enforcing `expiresAt` would
+   * sign every user out `sessionExpiresInHours` after they signed in, however
+   * active they were.
+   *
+   * **A token from before minted tokens is no session.** It was computable
+   * (see `sessionToken.ts`), so it is refused before the lookup; its row is
+   * left for the operator to delete. Its user signs in again.
+   */
   async getSession(token: string, userAgent: string) {
+    // `Auth.user()` asks with no token at all when the request carried none.
+    if (!token || !isSessionToken(token)) {
+      return null;
+    }
     const session = await this.userProvider.findSession({
       token,
       userAgent,
     });
-    let sessionExtension = null;
-    if (session?.user) {
-      sessionExtension = await this.config.extendSession(session.user);
-      session.user["extension"] = sessionExtension;
+    if (!session?.user) {
+      return null;
     }
-    return session;
+
+    const now = Date.now();
+    const expiresAt = expiryMs(session.expiresAt);
+    const absoluteExpiresAt = expiryMs(session.absoluteExpiresAt);
+    const expired = expiresAt <= now || absoluteExpiresAt <= now;
+
+    if (expired) {
+      await this.userProvider.deleteSession({ token });
+      return null;
+    }
+    const current = await this.slideSession(session, now);
+
+    current.user["extension"] = await this.config.extendSession(current.user);
+    return current;
+  }
+
+  /** The current request, when `token` arrived as its `access_token` cookie. */
+  private requestCarryingCookie(token: string): HttpRequest<any, any> | null {
+    const req = RequestContext.getStore()?.req;
+    return req?.cookies.get("access_token") === token ? req : null;
+  }
+
+  private async slideSession(session: SessionWithUser, now: number) {
+    const window = this.config.sessionExpiresInHours * 3_600_000;
+    if (new Date(session.expiresAt).getTime() - now >= window / 2) {
+      return session;
+    }
+    const expiresAt = new Date(
+      Math.min(now + window, new Date(session.absoluteExpiresAt).getTime()),
+    );
+    const updated = await this.userProvider.updateSession({
+      token: session.token,
+      expiresAt,
+    });
+    const req = this.requestCarryingCookie(session.token);
+    if (req) {
+      req
+        .ctx()
+        .setCookie(
+          "access_token",
+          session.token,
+          this.accessTokenCookieOptions(req, expiresAt),
+        );
+    }
+    return updated ?? session;
+  }
+
+  private freshLifetime(now: number) {
+    return {
+      expiresAt: new Date(now + this.config.sessionExpiresInHours * 3_600_000),
+      absoluteExpiresAt: new Date(
+        now + this.config.sessionAbsoluteExpiresInHours * 3_600_000,
+      ),
+    };
   }
 
   async generateMagicLink(email: string) {}
@@ -151,62 +243,34 @@ export class AuthManager {
     return session;
   }
 
+  /**
+   * A new session for `user`, on every sign-in.
+   *
+   * The name is historical: this used to derive the token from the email and
+   * the User-Agent and, finding a row under it, extend that row — without
+   * checking whose it was, so a user who took over a freed email address was
+   * handed its previous owner's session. Every sign-in now mints its own token
+   * and its own row, bound to the id of the user who just authenticated.
+   */
   async createOrUpdateSession(user: { email: string; id?: number }) {
     const req = new HttpRequest();
 
-    const userAgent = req.headers.get("User-Agent");
+    const userId =
+      user.id ??
+      (await this.userProvider.findUserByEmailAddress(user.email, false))?.id;
+    if (!userId) {
+      throw new AuthenticationError();
+    }
 
-    const hasher = new Bun.CryptoHasher("sha256");
-    hasher.update(`${user.email}${userAgent}`);
-
-    const token = hasher.digest("hex");
-    let session = await this.userProvider.findSession({
-      token,
+    return await this.userProvider.createSessionV2({
+      token: mintSessionToken(userId),
+      userId,
       userAgent:
         process.env.NODE_ENV === "development"
           ? "local"
           : req.headers.get("User-Agent"),
+      ...this.freshLifetime(Date.now()),
     });
-
-    if (!session) {
-      let userId: number = user.id;
-      if (!userId) {
-        const { id } = await this.userProvider.findUserByEmailAddress(
-          user.email,
-          false,
-        );
-        userId = id;
-      }
-      session = await this.userProvider.createSessionV2({
-        token,
-        userId,
-        userAgent:
-          process.env.NODE_ENV === "development"
-            ? "local"
-            : req.headers.get("User-Agent"),
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionExpiresInHours })
-            .toString(),
-        ),
-        absoluteExpiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionAbsoluteExpiresInHours })
-            .toString(),
-        ),
-      });
-    } else {
-      session = await this.userProvider.updateSession({
-        token,
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.config.sessionExpiresInHours })
-            .toString(),
-        ),
-      });
-    }
-
-    return session;
   }
 
   async createMagicLinkToken(email: string) {

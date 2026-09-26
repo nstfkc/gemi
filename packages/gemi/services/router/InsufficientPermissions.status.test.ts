@@ -23,10 +23,16 @@ import { ServiceProvider } from "../../support/ServiceProvider";
 
 process.env.SECRET ??= "insufficient-permissions-status-test-secret";
 
+// Far from both ends, so `getSession` neither expires nor slides it.
+const LIVE = {
+  expiresAt: new Date(Date.now() + 365 * 86_400_000),
+  absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
+};
+
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
-    return args.token === "tok-bob"
-      ? ({ token: args.token, user: { id: 2, name: "bob" } } as any)
+    return args.token === "v2.tok-bob"
+      ? ({ token: args.token, ...LIVE, user: { id: 2, name: "bob" } } as any)
       : null;
   }
 }
@@ -81,7 +87,7 @@ class AppKernel extends Kernel {
 }
 
 const app = new App({ kernel: AppKernel });
-const bob = { Cookie: "access_token=tok-bob" };
+const bob = { Cookie: "access_token=v2.tok-bob" };
 
 async function status(path: string) {
   const result: unknown = await app.fetch(new Request(`http://gemi.dev${path}`, { headers: bob }));

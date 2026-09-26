@@ -23,8 +23,14 @@ import { ServiceProvider } from "../../support/ServiceProvider";
 
 class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
-    return args.token === "tok-alice"
-      ? ({ token: args.token, user: { id: 1, name: "alice" } } as any)
+    return args.token === "v2.tok-alice"
+      ? ({
+          token: args.token,
+          user: { id: 1, name: "alice" },
+          // Far from both ends, so `getSession` neither expires nor slides it.
+          expiresAt: new Date(Date.now() + 365 * 86_400_000),
+          absoluteExpiresAt: new Date(Date.now() + 365 * 86_400_000),
+        } as any)
       : null;
   }
 }
@@ -204,7 +210,7 @@ class AppKernel extends Kernel {
 }
 
 const app = new App({ kernel: AppKernel });
-const alice = { Cookie: "access_token=tok-alice" };
+const alice = { Cookie: "access_token=v2.tok-alice" };
 
 beforeEach(() => {
   ended.length = 0;

@@ -366,9 +366,16 @@ function suite(label: string, url?: string) {
       expect(await auth.findSession({ token: "nope", userAgent: "a" })).toBeNull();
     });
 
-    test("updateSession extends the expiry", async () => {
+    /**
+     * The idle timeout slides through this method on most requests; the
+     * absolute cap must not slide with it. `absoluteExpiresAt` is stamped once
+     * at creation and is what bounds a session whose owner never goes idle —
+     * a provider that wrote it here too would push the hard end forward on
+     * every request, and the cap this release enforces would never arrive.
+     */
+    test("updateSession extends the expiry, and leaves the absolute cap alone", async () => {
       const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
-      await auth.createSession(session(user.id));
+      const created: any = await auth.createSession(session(user.id));
 
       const later = new Date(Date.now() + 7_200_000);
       const updated: any = await auth.updateSession({
@@ -377,6 +384,9 @@ function suite(label: string, url?: string) {
       });
 
       expect(updated.expiresAt.getTime()).toBe(later.getTime());
+      expect(updated.absoluteExpiresAt.getTime()).toBe(
+        created.absoluteExpiresAt.getTime(),
+      );
       expect(updated.user.email).toBe("a@x.test");
     });
 
@@ -389,6 +399,24 @@ function suite(label: string, url?: string) {
       await expect(auth.deleteSession({ token: "tok" })).resolves.toBeUndefined();
 
       expect(await auth.findSession({ token: "tok", userAgent: "a" })).toBeNull();
+    });
+
+    /**
+     * A `where` operand of `undefined` is dropped as "not provided", so
+     * `deleteMany({ where: { token: undefined } })` is an unfiltered delete
+     * over the whole table. Nothing reaches it with an absent token today;
+     * the guard is there so nothing ever can.
+     */
+    test("deleteSession without a token deletes nothing, not everything", async () => {
+      const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+      await auth.createSession(session(user.id, "one"));
+      await auth.createSession(session(user.id, "two"));
+
+      await auth.deleteSession({ token: undefined as never });
+      await auth.deleteSession({ token: "" });
+
+      expect(await auth.findSession({ token: "one", userAgent: "a" })).not.toBeNull();
+      expect(await auth.findSession({ token: "two", userAgent: "a" })).not.toBeNull();
     });
 
     test("deleteAllUserSessions", async () => {

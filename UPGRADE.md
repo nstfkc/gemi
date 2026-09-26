@@ -1,3 +1,101 @@
+# Upgrading from 0.63 to 0.64
+
+This release fixes session and account-recovery tokens that could be computed
+by anyone who knew a user's email. **Check `SECRET` is set before you deploy,
+and expect every user to sign in once more.** Almost no code has to change —
+the two `UserProvider` notes below cover the exceptions, if you stub
+`findSession` or override `updateSession` yourself.
+
+## Session tokens are minted, and a sign-in never extends someone else's session — security
+
+A session token used to be `sha256(email + User-Agent)`. Anyone who knew a
+user's email and could guess their client (a native app sends a fixed
+User-Agent) could compute a token the server accepted, from a cookie or the
+`access_token` header. The same token came back on every sign-in, and a user
+who later took over the email address was handed the previous owner's session.
+
+Every sign-in now creates a new row with a token of its own:
+`v2.` + HMAC-SHA256(secret, user id + 16 random bytes).
+
+The secret is the app's existing `SECRET`, which CSRF and agent approvals
+already use. **Check it is set, and not the template's placeholder, before
+you deploy**: without it, signing in fails. The token is looked up, not verified against the
+secret, so changing the secret later signs nobody out.
+
+## Session expiry is enforced — behaviour change
+
+`expiresAt` and `absoluteExpiresAt` were written but never checked; only a
+browser's cookie `Expires` honoured them, so a token sent in the
+`access_token` header never expired. `AuthManager.getSession` now treats a
+session past either one as no session, and deletes it.
+
+`sessionExpiresInHours` is now an idle timeout, as the docs always said: a
+session used after half of it has passed is pushed to `now + N` hours, capped
+at `absoluteExpiresAt`, and the cookie is written again. A browser user who
+stays active is no longer signed out once a day.
+
+## Existing sessions end — every user signs in again
+
+A token issued before this release is computable, so it is no longer a
+session: `getSession` refuses any token that doesn't start with `v2.`, from a
+cookie or the `access_token` header, without looking it up. Each user signs
+in once more after the deploy and gets a minted token.
+
+If your native app has no path back to its sign-in screen when a request
+answers `401`, ship one before you deploy.
+
+The old rows grant nothing, but they still hold computable tokens. Delete
+them:
+
+```sql
+DELETE FROM "Session" WHERE token NOT LIKE 'v2.%';
+```
+
+**If you stub `UserProvider.findSession` in tests**, two things matter and they
+are separate. The token the test *asks* with has to start with `v2.`:
+`getSession` checks its argument and returns before the lookup, so a stub that
+returns a `v2.` row is no help if the call passes a bare one. And the row it
+*returns* needs `expiresAt`/`absoluteExpiresAt` more than half of
+`sessionExpiresInHours` away, or `getSession` counts the session as spent, or
+slides it through `updateSession` — which a stub usually doesn't have either.
+
+**If you override `UserProvider.updateSession`**, `UpdateSessionArgs` no longer
+carries `absoluteExpiresAt`. It only ever arrived when a legacy session was
+being retired, and nothing retires one now. An override that wrote it when
+present is simply never asked to again; one that took it as required stops
+typechecking. `absoluteExpiresAt` is stamped once, at creation, and nothing
+moves it afterwards — it is what bounds a session whose owner never goes idle,
+so a provider that slid it along with `expiresAt` would mean the cap never
+arrives.
+
+## Signing out revokes the header transport too, and no longer answers `401`
+
+`POST /auth/sign-out` read the `access_token` cookie, and resolved the user
+through `Auth.user()`, which reads the cookie too. A client authenticating
+with the `access_token` header therefore got a `401` — thrown before the
+revocation — and its row stayed in the table with its token still valid. The
+token is now taken from the cookie or the header, in the order the `auth`
+middleware uses, and the row is deleted either way.
+
+A sign-out with nothing behind it — no token, or one that has just run out,
+which enforcing expiry above makes an everyday case — now clears the cookie
+and answers `{}` rather than refusing. The old `401` left that stale cookie in
+the browser with nothing able to clear it.
+
+`onSignOut` is unchanged where it fired before: it is handed the session's
+user, extended as always. It does not fire for a sign-out that had no session
+to revoke, so an override may assume its argument is a real user.
+
+## Password-reset, email-verification and magic-link tokens are random
+
+Their defaults were `sha256(email + Date.now())`. Someone who requested a
+reset for another user's email could try each millisecond around their own
+request and reset that user's password. They are now 32 random bytes. A
+token already sent by email keeps working until it is used. If you override
+`generateForgotPasswordToken`, `generateEmailVerificationToken` or
+`generateMagicLinkToken`, check that yours can't be computed from the email
+and the time either.
+
 # Upgrading from 0.62 to 0.63
 
 Almost no code has to change, but several responses do: a refusal now answers
