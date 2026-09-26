@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import path from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import type { Dialect } from "./dialect";
 
@@ -31,7 +31,7 @@ import type { Dialect } from "./dialect";
  */
 
 /** Prisma's default schema location, relative to the project root. */
-const SCHEMA_PATH = path.join("prisma", "schema.prisma");
+const SCHEMA_PATH = join("prisma", "schema.prisma");
 
 /**
  * Two databases, one URL.
@@ -115,7 +115,7 @@ export function resolveSqliteUrl(
   // absolute segment, so the `from === to` check below reaches the same answer
   // and no test can tell the two apart. This states the intent where a reader
   // looks for it, and saves a `statSync` on every connection that has one.
-  if (path.isAbsolute(split.file)) {
+  if (isAbsolute(split.file)) {
     return { url };
   }
 
@@ -125,16 +125,16 @@ export function resolveSqliteUrl(
   const file = query === -1 ? split.file : split.file.slice(0, query);
   const suffix = query === -1 ? "" : split.file.slice(query);
 
-  const schemaDirectory = path.join(cwd, "prisma");
-  if (!existsSync(path.join(cwd, SCHEMA_PATH))) {
+  const schemaDirectory = join(cwd, "prisma");
+  if (!existsSync(join(cwd, SCHEMA_PATH))) {
     // No Prisma schema, so no second opinion about where this points. Left as
     // it was, which keeps an app that never used Prisma working exactly as it
     // did.
     return { url };
   }
 
-  const from = path.resolve(cwd, file);
-  const to = path.resolve(schemaDirectory, file);
+  const from = resolve(cwd, file);
+  const to = resolve(schemaDirectory, file);
   if (from === to) {
     return { url };
   }

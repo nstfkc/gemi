@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import path from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { resolveSqliteUrl, strandedDatabase } from "./sqlitePath";
@@ -23,11 +23,11 @@ const roots: string[] = [];
 /** A project directory, optionally with the Prisma schema that makes gemi
  *  defer to Prisma's idea of where a relative path points. */
 function project(options: { schema?: boolean } = {}): string {
-  const root = mkdtempSync(path.join(tmpdir(), "gemi-sqlite-"));
+  const root = mkdtempSync(join(tmpdir(), "gemi-sqlite-"));
   roots.push(root);
   if (options.schema !== false) {
-    mkdirSync(path.join(root, "prisma"), { recursive: true });
-    writeFileSync(path.join(root, "prisma", "schema.prisma"), "datasource db {}");
+    mkdirSync(join(root, "prisma"), { recursive: true });
+    writeFileSync(join(root, "prisma", "schema.prisma"), "datasource db {}");
   }
   return root;
 }
@@ -43,10 +43,10 @@ describe("a relative SQLite path", () => {
     const root = project();
     const resolved = resolveSqliteUrl("file:./dev.db", "sqlite", root);
 
-    expect(resolved.url).toBe(`file:${path.join(root, "prisma", "dev.db")}`);
+    expect(resolved.url).toBe(`file:${join(root, "prisma", "dev.db")}`);
     expect(resolved.moved).toEqual({
-      from: path.join(root, "dev.db"),
-      to: path.join(root, "prisma", "dev.db"),
+      from: join(root, "dev.db"),
+      to: join(root, "prisma", "dev.db"),
     });
   });
 
@@ -59,7 +59,7 @@ describe("a relative SQLite path", () => {
     const root = project();
     const resolved = resolveSqliteUrl(url, "sqlite", root);
 
-    expect(resolved.url.endsWith(path.join(root, "prisma", "dev.db"))).toBe(true);
+    expect(resolved.url.endsWith(join(root, "prisma", "dev.db"))).toBe(true);
     // The prefix is put back, not normalised away: the client reads it.
     expect(resolved.url.startsWith(url.slice(0, url.length - "./dev.db".length))).toBe(true);
   });
@@ -70,14 +70,14 @@ describe("a relative SQLite path", () => {
     const root = project();
     const resolved = resolveSqliteUrl("file:../dev.db", "sqlite", root);
 
-    expect(resolved.url).toBe(`file:${path.join(root, "dev.db")}`);
+    expect(resolved.url).toBe(`file:${join(root, "dev.db")}`);
   });
 
   test("keeps a query string on the URL rather than in the file name", () => {
     const root = project();
     const resolved = resolveSqliteUrl("file:./dev.db?mode=ro", "sqlite", root);
 
-    expect(resolved.url).toBe(`file:${path.join(root, "prisma", "dev.db")}?mode=ro`);
+    expect(resolved.url).toBe(`file:${join(root, "prisma", "dev.db")}?mode=ro`);
   });
 });
 
@@ -90,7 +90,7 @@ describe("what is left exactly as it was", () => {
 
   test("an absolute path, which cannot be read two ways", () => {
     const root = project();
-    const absolute = `file:${path.join(root, "some", "where.db")}`;
+    const absolute = `file:${join(root, "some", "where.db")}`;
 
     expect(resolveSqliteUrl(absolute, "sqlite", root)).toEqual({ url: absolute });
   });
@@ -132,29 +132,29 @@ describe("an app that already worked around this by hand", () => {
     const resolved = resolveSqliteUrl("file:./prisma/dev.db", "sqlite", root);
 
     expect(resolved.moved).toEqual({
-      from: path.join(root, "prisma", "dev.db"),
-      to: path.join(root, "prisma", "prisma", "dev.db"),
+      from: join(root, "prisma", "dev.db"),
+      to: join(root, "prisma", "prisma", "dev.db"),
     });
   });
 
   test("and is refused rather than silently repointed at an empty file", () => {
     const root = project();
-    writeFileSync(path.join(root, "prisma", "dev.db"), "SQLite format 3\0their actual data");
+    writeFileSync(join(root, "prisma", "dev.db"), "SQLite format 3\0their actual data");
     const resolved = resolveSqliteUrl("file:./prisma/dev.db", "sqlite", root);
 
-    expect(strandedDatabase(resolved.moved!)).toBe(path.join(root, "prisma", "dev.db"));
+    expect(strandedDatabase(resolved.moved!)).toBe(join(root, "prisma", "dev.db"));
   });
 });
 
 describe("the database the old resolution left behind", () => {
   const moved = (root: string) => ({
-    from: path.join(root, "dev.db"),
-    to: path.join(root, "prisma", "dev.db"),
+    from: join(root, "dev.db"),
+    to: join(root, "prisma", "dev.db"),
   });
 
   test("is ignored when it is the 0-byte file the bug creates", () => {
     const root = project();
-    writeFileSync(path.join(root, "dev.db"), "");
+    writeFileSync(join(root, "dev.db"), "");
 
     // SQLite creates an empty file for a path that is not there, so this is
     // the expected wreckage rather than a second database.
@@ -167,14 +167,14 @@ describe("the database the old resolution left behind", () => {
 
   test("is reported when it holds data, because then it could be the real one", () => {
     const root = project();
-    writeFileSync(path.join(root, "dev.db"), "SQLite format 3\0and then some pages");
+    writeFileSync(join(root, "dev.db"), "SQLite format 3\0and then some pages");
 
-    expect(strandedDatabase(moved(root))).toBe(path.join(root, "dev.db"));
+    expect(strandedDatabase(moved(root))).toBe(join(root, "dev.db"));
   });
 
   test("is not a directory that happens to share the name", () => {
     const root = project();
-    mkdirSync(path.join(root, "dev.db"));
+    mkdirSync(join(root, "dev.db"));
 
     expect(strandedDatabase(moved(root))).toBeNull();
   });
