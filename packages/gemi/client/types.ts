@@ -15,6 +15,25 @@ export type RemoveGroupPrefix<T extends string> =
     ? RemoveDoubleSlash<`${P}${S}`>
     : T;
 
+/**
+ * Every view path the application declares — what `Link`, `Redirect`,
+ * `useNavigate`, `usePrefetch` and `Url` take.
+ *
+ * Exported since 0.65, because `Link` is overloaded and therefore has no single
+ * `ComponentProps` to derive this from, and the map behind it is internal.
+ *
+ * TWO THINGS A CALLER WILL MEET. It is **`never`** in any file where the app's
+ * route augmentation does not resolve — a shared package in a monorepo, an app
+ * on a `src/` layout or a different alias, a playground; `gemi.d.ts` lists them.
+ * Not a permissive fallback like `FeatureKey`'s, and deliberately so: widening
+ * it to `string` there would widen `Link`, `Redirect` and `Url.absolute` with
+ * it. A component in a shared package typed `to: ViewPaths` compiles and then
+ * fails at every call site against `never`.
+ *
+ * And its members are route **patterns**: `/orgs/:orgId/reports` is one. They go
+ * where a path pattern goes, alongside the `params` that fill it in — not into
+ * an `href`.
+ */
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
 
 export type ViewResult<T extends keyof ViewRPC> =

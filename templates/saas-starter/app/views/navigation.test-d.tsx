@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, test } from "vitest";
 
-import { Redirect, type ExternalLinkProps, type LinkProps } from "gemi/client";
+import { Redirect, type ExternalLinkProps, type LinkProps, type ViewPaths } from "gemi/client";
 
 /**
  * **`Redirect` and the exported link prop types, from inside a real application.**
@@ -32,6 +32,24 @@ describe("Redirect", () => {
   test("still requires `action`", () => {
     // @ts-expect-error — `action` is missing.
     <Redirect href="/dashboard" />;
+  });
+});
+
+describe("ViewPaths", () => {
+  test("names the app's own routes, and nothing else", () => {
+    // Asserted against a real route rather than `not.toEqualTypeOf<never>()`,
+    // for the reason the `ExternalLinkProps` test below gives: a negative
+    // assertion passes for the wrong reasons.
+    expectTypeOf<"/dashboard">().toExtend<ViewPaths>();
+    expectTypeOf<"/partial/:orgId/reports">().toExtend<ViewPaths>();
+
+    // @ts-expect-error — no such route.
+    const nowhere: ViewPaths = "/nowhere";
+    void nowhere;
+  });
+
+  test("is the domain Link accepts, so the two cannot drift", () => {
+    expectTypeOf<LinkProps<ViewPaths>["href"]>().toEqualTypeOf<ViewPaths>();
   });
 });
 
