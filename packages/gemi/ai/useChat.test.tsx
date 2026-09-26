@@ -1653,6 +1653,47 @@ describe("onToolResult", () => {
     expect(onToolResult.mock.calls.map(([part]: any[]) => part.toolCallId)).toEqual(["tc_b"]);
   });
 
+  test("fires for every call of the same tool in one turn", async () => {
+    // The stated use: a turn that edits three components refetches after each
+    // one. Deduping on the tool name rather than the call id would deliver the
+    // first and swallow the rest, and a fixture using two different tools
+    // cannot tell the two rules apart.
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_5", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m5", role: "assistant" } },
+        ...["tc_1", "tc_2", "tc_3"].map((toolCallId, index) => ({
+          seq: 2 + index,
+          event: {
+            type: "tool-result",
+            messageId: "m5",
+            part: {
+              type: "tool-result",
+              toolCallId,
+              name: "editComponent",
+              status: "ok",
+              output: { ok: true },
+            },
+          },
+        })),
+        { seq: 5, event: { type: "message-end", messageId: "m5", finishReason: "stop" } },
+        { seq: 6, event: { type: "run-end", runId: "run_5", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolResult = vi.fn();
+    const { box } = mount({ attach: false, onToolResult });
+
+    await act(async () => {
+      await box.api.sendMessage("edit three components");
+    });
+
+    expect(onToolResult.mock.calls.map(([part]: any[]) => part.toolCallId)).toEqual([
+      "tc_1",
+      "tc_2",
+      "tc_3",
+    ]);
+  });
+
   test("a failed tool result fires too, so an app can react to it", async () => {
     fetchMock.mockResolvedValueOnce(
       streamed([
