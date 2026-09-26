@@ -56,6 +56,24 @@ than half of `sessionExpiresInHours` away. Otherwise `getSession` refuses the
 token, or extends the session through `updateSession`, which a stub usually
 doesn't have.
 
+## Signing out revokes the header transport too, and no longer answers `401`
+
+`POST /auth/sign-out` read the `access_token` cookie, and resolved the user
+through `Auth.user()`, which reads the cookie too. A client authenticating
+with the `access_token` header therefore got a `401` — thrown before the
+revocation — and its row stayed in the table with its token still valid. The
+token is now taken from the cookie or the header, in the order the `auth`
+middleware uses, and the row is deleted either way.
+
+A sign-out with nothing behind it — no token, or one that has just run out,
+which enforcing expiry above makes an everyday case — now clears the cookie
+and answers `{}` rather than refusing. The old `401` left that stale cookie in
+the browser with nothing able to clear it.
+
+`onSignOut` is unchanged where it fired before: it is handed the session's
+user, extended as always. It does not fire for a sign-out that had no session
+to revoke, so an override may assume its argument is a real user.
+
 ## Password-reset, email-verification and magic-link tokens are random
 
 Their defaults were `sha256(email + Date.now())`. Someone who requested a

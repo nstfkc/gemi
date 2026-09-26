@@ -7450,6 +7450,10 @@ signs nobody out.
 Tokens issued before 0.64 were derived from the email and the User-Agent and could be
 computed. They are refused, so their users sign in again; see [UPGRADE.md](../UPGRADE.md).
 
+Signing out deletes the row for the token the request carried, whether it arrived as the
+cookie or the `access_token` header, and clears the cookie. It answers `{}` even when there
+was no session to revoke, so a client can always discard a token it no longer wants.
+
 ## User provider
 
 `UserProvider` is the bridge between the auth system and your database: creating users,
@@ -7635,7 +7639,7 @@ may be sync or async.
 | `onUserCreated` | `(user) => Promise<void>` | A user row is written — **inside the transaction that writes it**, before it commits. A throw rolls the user back. See [onUserCreated](#onusercreated). |
 | `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in), after it is committed. `verificationToken` is empty when `verifyEmail` is off, and on the OAuth path, where there is nothing to verify. |
 | `onSignIn` | `(session, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
-| `onSignOut` | `(session)` | The `/auth/sign-out` endpoint runs. |
+| `onSignOut` | `(session)` | The `/auth/sign-out` endpoint revokes a session. Not fired when the request carried none, so the argument is always a real user. |
 | `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
 | `onResetPassword` | `(session)` | A password reset completes (all the user's sessions are already invalidated). |
 | `onMagicLinkCreated` | `(session, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
