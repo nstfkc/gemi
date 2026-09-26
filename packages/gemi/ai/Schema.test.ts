@@ -518,13 +518,69 @@ describe("json()", () => {
     });
   });
 
-  test("refuses a toJSON that hands back its own object, rather than recursing forever", () => {
-    const loop: any = {};
-    loop.toJSON = () => loop;
-    expect(s.json().safeParse(loop)).toEqual({
-      ok: false,
-      errors: ["expected a JSON value, got a toJSON that returns its own object"],
+  /**
+   * A `toJSON` is arbitrary code, so every one of these was a way to make the
+   * walk not terminate. The cycle guard sits above the `toJSON` call for that
+   * reason; below it, the first case here hung `safeParse` forever and the second
+   * threw `RangeError` out of a function documented to return a result.
+   *
+   * Two of them are values `JSON.stringify` would have written as `{}`. Refusing
+   * them is an over-rejection, taken deliberately: the alternative is following
+   * arbitrary code until it stops, and no real value has this shape.
+   */
+  describe("refuses a toJSON that will not terminate", () => {
+    test("two objects whose toJSON return each other", () => {
+      const a: any = {};
+      const b: any = {};
+      a.toJSON = () => b;
+      b.toJSON = () => a;
+
+      // Terminates, and says something. The value is sendable in principle —
+      // `JSON.stringify(a)` is `"{}"` — so this is the deliberate trade.
+      expect(s.json().safeParse(a)).toEqual({
+        ok: false,
+        errors: ["toJSON: expected a JSON value, got a function"],
+      });
     });
+
+    test("a toJSON returning a fresh object that points back at it", () => {
+      const a: any = {};
+      a.toJSON = () => ({ self: a });
+
+      expect(s.json().safeParse(a)).toEqual({
+        ok: false,
+        errors: ["self: expected a JSON value, got a circular reference"],
+      });
+    });
+
+    test("a toJSON that hands back its own object", () => {
+      const loop: any = {};
+      loop.toJSON = () => loop;
+
+      expect(s.json().safeParse(loop)).toEqual({
+        ok: false,
+        errors: ["expected a JSON value, got a circular reference"],
+      });
+    });
+  });
+
+  test("refuses a toJSON that returns undefined, which is nothing to send", () => {
+    // `JSON.stringify({ toJSON: () => undefined })` is `undefined` — there is no
+    // JSON value at all. `read` guards a bare `undefined` at a json node, and the
+    // `toJSON` path used to walk straight past that guard.
+    expect(s.json().safeParse({ toJSON: () => undefined })).toEqual({
+      ok: false,
+      errors: ["expected a JSON value, got a toJSON that returns undefined"],
+    });
+  });
+
+  test("applies toJSON once per position, as JSON.stringify does", () => {
+    // The replacement is checked with `toJSON` switched off for that position,
+    // which is what stops a chain of them being followed. Its nested values still
+    // get their own.
+    const inner = { cents: 5n, toJSON: () => "5" };
+    const outer = { toJSON: () => ({ nested: inner }) };
+    expect(s.json().safeParse(outer)).toEqual({ ok: true, value: outer });
   });
 
   test("allows a value with a toJSON, rather than refusing a Date to catch a Map", () => {

@@ -454,7 +454,16 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
  * returns and never the object behind it, because that is all `JSON.stringify`
  * will look at.
  */
-function checkJson(value: unknown, path: string, errors: string[], seen: Set<object>): void {
+function checkJson(
+  value: unknown,
+  path: string,
+  errors: string[],
+  seen: Set<object>,
+  // False for the value a `toJSON` just returned: `JSON.stringify` applies
+  // `toJSON` once per position, and re-applying it is how a pair of them
+  // returning each other became an infinite loop.
+  applyToJSON = true,
+): void {
   const reject = (what: string) => {
     errors.push(`${at(path)}expected a JSON value, got ${what}`);
   };
@@ -477,41 +486,51 @@ function checkJson(value: unknown, path: string, errors: string[], seen: Set<obj
 
   if (value === null) return;
   const object = value as object;
-  // `JSON.stringify` asks `toJSON` what to write and never looks at the object
-  // itself, so that answer is what has to be checked. Without this the walk
-  // descended into the wrapper's own fields and refused values `stringify`
-  // serializes without complaint — a `toJSON` returning a string off a `bigint`
-  // field being the archetype, since writing a `toJSON` is exactly what one
-  // does about a field JSON cannot carry. `Date` passed only by having no own
-  // enumerable properties to trip over.
-  const toJSON = (object as { toJSON?: unknown }).toJSON;
-  if (typeof toJSON === "function") {
-    let replaced: unknown;
-    try {
-      replaced = (toJSON as (key?: string) => unknown).call(object);
-    } catch {
-      return reject("a toJSON that threw");
-    }
-    // Guarded against a `toJSON` that answers with itself, which would
-    // otherwise recurse forever.
-    if (replaced === value) return reject("a toJSON that returns its own object");
-    return checkJson(replaced, path, errors, seen);
-  }
-  // A cycle is the one shape that cannot be reported from where it is found,
-  // because walking it does not terminate.
+
+  // The cycle guard comes FIRST, above `toJSON`, and that ordering is the whole
+  // of it: a `toJSON` is arbitrary code that can hand back another object with a
+  // `toJSON` of its own, so two of them returning each other is a cycle that
+  // `seen` catches and an identity test cannot. Below the guard, that pair hung
+  // `safeParse` forever — and a `toJSON` returning a fresh object each time threw
+  // `RangeError` out of a function documented to return `{ ok: false, errors }`.
   if (seen.has(object)) return reject("a circular reference");
   seen.add(object);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => checkJson(item, `${path}[${index}]`, errors, seen));
-  } else {
-    for (const [key, child] of Object.entries(object)) {
-      checkJson(child, path ? `${path}.${key}` : key, errors, seen);
+  try {
+    // `JSON.stringify` asks `toJSON` what to write and never looks at the object
+    // itself, so that answer is what has to be checked. Without this the walk
+    // descended into the wrapper's own fields and refused values `stringify`
+    // serializes without complaint — a `toJSON` returning a string off a `bigint`
+    // field being the archetype, since writing a `toJSON` is exactly what one
+    // does about a field JSON cannot carry. `Date` passed only by having no own
+    // enumerable properties to trip over.
+    const toJSON = applyToJSON ? (object as { toJSON?: unknown }).toJSON : undefined;
+    if (typeof toJSON === "function") {
+      let replaced: unknown;
+      try {
+        replaced = (toJSON as (key?: string) => unknown).call(object);
+      } catch {
+        return reject("a toJSON that threw");
+      }
+      // `JSON.stringify` applies `toJSON` once per value position, not until it
+      // stops changing, so the replacement is checked with it switched off here
+      // — its nested values get their own.
+      if (replaced === undefined) return reject("a toJSON that returns undefined");
+      return checkJson(replaced, path, errors, seen, false);
     }
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => checkJson(item, `${path}[${index}]`, errors, seen));
+    } else {
+      for (const [key, child] of Object.entries(object)) {
+        checkJson(child, path ? `${path}.${key}` : key, errors, seen);
+      }
+    }
+  } finally {
+    // Removed rather than left in: `seen` is the path currently being walked, and
+    // keeping it would call the same object appearing twice side by side — which
+    // `JSON.stringify` writes out twice quite happily — a cycle. In a `finally`
+    // so the `toJSON` returns above cannot leave it marked.
+    seen.delete(object);
   }
-  // Removed rather than left in: `seen` is the path currently being walked, and
-  // keeping it would call the same object appearing twice side by side — which
-  // `JSON.stringify` writes out twice quite happily — a cycle.
-  seen.delete(object);
 }
 
 /**
@@ -598,6 +617,12 @@ export const s: {
    * JSON. Validate it in `execute` and hand the model back an error it can fix,
    * the way it would any other bad argument. `describe()` is where you tell it
    * the format; with no constraints to read, that prose is all it gets.
+   *
+   * `ai:generate-client` maps it to the native `JSONValue`, which is right, and
+   * may also print "a union that is not told apart by one string member" naming
+   * `JsonValue` — because that is what the default output type is. Cosmetic, and
+   * inconsistent: measured, it warns for a `json()` field declared beside another
+   * field and not for one declared alone. Tracked separately.
    */
   json<T = JsonValue>(): SchemaBuilder<T>;
 } = {
