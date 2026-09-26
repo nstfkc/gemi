@@ -329,10 +329,7 @@ export abstract class AgentController<
    * read from here is the client's claim about which tenant it wants, not the
    * middleware's finding about who it is.
    */
-  instructions(
-    req: HttpRequest<any, any>,
-    extra: { body: Body },
-  ): string | Promise<string> | void {
+  instructions(req: HttpRequest<any, any>, extra: { body: Body }): string | Promise<string> | void {
     void req;
     void extra;
   }

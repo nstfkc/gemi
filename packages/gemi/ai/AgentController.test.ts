@@ -1547,7 +1547,6 @@ describe("the request body an app sent with the turn", () => {
     expect(seen.body).toEqual({ text: "the app's own field" });
     run.finish();
   });
-
 });
 
 /**
