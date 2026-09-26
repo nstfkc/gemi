@@ -10,10 +10,9 @@ type RemoveDoubleSlash<T extends string> = T extends `${infer P}//${infer S}`
   ? RemoveDoubleSlash<`${P}/${S}`>
   : T;
 
-export type RemoveGroupPrefix<T extends string> =
-  T extends `${infer P}(${string})${infer S}`
-    ? RemoveDoubleSlash<`${P}${S}`>
-    : T;
+export type RemoveGroupPrefix<T extends string> = T extends `${infer P}(${string})${infer S}`
+  ? RemoveDoubleSlash<`${P}${S}`>
+  : T;
 
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
 
@@ -24,22 +23,12 @@ export type ViewResult<T extends keyof ViewRPC> =
 
 export type ViewRoute = keyof ViewRPC;
 
-type ViewKeys<T> = T extends keyof ViewRPC
-  ? T extends `view:${infer K}`
-    ? K
-    : never
-  : never;
+type ViewKeys<T> = T extends keyof ViewRPC ? (T extends `view:${infer K}` ? K : never) : never;
 
-type LayoutKeys<T> = T extends keyof ViewRPC
-  ? T extends `layout:${infer K}`
-    ? K
-    : never
-  : never;
+type LayoutKeys<T> = T extends keyof ViewRPC ? (T extends `layout:${infer K}` ? K : never) : never;
 
 export type ViewProps<T extends ViewKeys<keyof ViewRPC>> =
-  ViewRPC[`view:${T}`] extends ViewHandler<any, infer O, any>
-    ? Prettify<UnwrapPromise<O>>
-    : never;
+  ViewRPC[`view:${T}`] extends ViewHandler<any, infer O, any> ? Prettify<UnwrapPromise<O>> : never;
 
 export type LayoutProps<T extends LayoutKeys<keyof ViewRPC>> =
   ViewRPC[`layout:${T}`] extends ViewHandler<any, infer O, any>
@@ -98,7 +87,13 @@ export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
  *
  * Unions are unaffected, which is why this costs nothing: a union of declared
  * routes distributes to `true | true`, and a mixed one to `boolean`, exactly as
- * the tupled form answered. `never` distributes to `never`, which also fails
- * `extends true` — and a `never`-typed path is not a call anyone makes.
+ * the tupled form answered.
+ *
+ * Measured, so the comment does not have to be believed: `any` is the ONLY input
+ * the two spellings disagree on. Distributing gives it the loose branch and
+ * tupling gives it the strict one. `never` takes the strict branch either way —
+ * `P extends ViewPaths` over `never` is `never`, and `never extends true` is
+ * satisfied — which is wrong in the same way and does not matter, because a
+ * `never`-typed path is not a call anyone makes.
  */
 export type IsViewPath<P extends string> = P extends ViewPaths ? true : false;

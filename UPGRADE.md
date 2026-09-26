@@ -1,3 +1,29 @@
+# Upgrading from 0.64 to 0.65
+
+## Navigating to a path built at runtime compiles again — behaviour unchanged
+
+`push`, `replace` and the prefetcher accept a path your code built — what
+`useIntendedUrl()` returns, a redirect target off an API response — and that
+stopped compiling as soon as an app declared its first parameterised route:
+`TS2554: Expected 2 arguments, but got 1`. It is fixed, and nothing about how a
+route is navigated changed.
+
+One narrowing comes with it. The options for a runtime-built path take
+`params?: Record<string, string | number | undefined>`, so passing an **array**
+is now a `TS2322` where it used to compile:
+
+```ts
+const path: string = "/docs/:rest*/edit";
+push(path, { params: { rest: ["a", "b"] } });   // TS2322 since 0.65
+push(path, { params: { rest: "a/b" } });        // and this is what you wanted
+```
+
+That call was already broken. `applyParams` does `String(value)`, so the array
+produced `/docs/a,b/edit` — a comma, not a path. The spelling that works
+type-checks now and did not before. Only runtime-typed paths are affected: a
+declared wildcard route still takes `params: { rest: string[] }` and still
+requires it.
+
 # Upgrading from 0.63 to 0.64
 
 This release fixes session and account-recovery tokens that could be computed
