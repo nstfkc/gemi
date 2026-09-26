@@ -536,6 +536,15 @@ import type { LinkProps } from "gemi/client";
 type BackHref = LinkProps<"/dashboard">["href"];
 ```
 
+For the union of every view path — what the 0.62 type above came out as — use
+`ViewPaths`, also exported from `gemi/client`:
+
+```ts
+import type { ViewPaths } from "gemi/client";
+
+type BackHref = ViewPaths;
+```
+
 The same collapse is why `<Redirect>` accepted only `action` on 0.63.0, and
 rejected every `href` and `params` passed to it. `Redirect` is typed against
 `LinkProps<T>` directly now, so its props are back without any change on your
