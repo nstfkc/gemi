@@ -138,11 +138,10 @@ export function resolveSqliteUrl(
   const suffix = query === -1 ? "" : split.file.slice(query);
 
   const schemaDirectory = join(cwd, "prisma");
-  if (!prismaResolvesSqliteHere(cwd)) {
-    // No Prisma schema, or one whose datasource is not SQLite. Either way there
-    // is no second opinion about where this points, so it is left as it was —
-    // which keeps an app that never used Prisma, and an app whose Prisma
-    // datasource is Postgres, working exactly as they did.
+  if (!prismaMigratesThisUrl(cwd, url)) {
+    // Not the database Prisma migrates — no schema at all, a datasource that is
+    // not SQLite, or a connection whose url is simply a different one. Nothing
+    // else has an opinion about where this points, so it is left as it arrived.
     return { url };
   }
 
@@ -156,22 +155,26 @@ export function resolveSqliteUrl(
 }
 
 /**
- * Whether this project's Prisma schema is the thing that decides where a
- * relative SQLite path points.
+ * Whether THIS url is the one Prisma migrates.
  *
- * Existence of the schema file is not enough, and assuming it was relocated
- * databases Prisma has nothing to do with: an app whose datasource is Postgres
- * may still open a side SQLite connection through `connections`, and that URL
- * was being repointed into `prisma/` — where either an empty database appeared
- * or `AmbiguousSqlitePathError` fired and told the user the file was "the file
- * Prisma migrates", which was false for it.
+ * Not "does a Prisma schema exist", and not "is its datasource SQLite" — both
+ * are questions about the project, and the answer was being applied to every
+ * connection. A project has one Prisma datasource and may open any number of
+ * SQLite connections through `connections`; a secondary one is not something
+ * Prisma has ever seen, so repointing it into `prisma/` either produced an empty
+ * database or an `AmbiguousSqlitePathError` whose message — "the file Prisma
+ * migrates" — was false about that file.
  *
- * So the datasource block has to say `sqlite`. Read with a regex rather than a
- * parser: this needs one word out of one block, and a dependency on Prisma's
- * schema parser to find it would be a poor trade. A schema that cannot be read
- * answers no, which lands on the old behaviour.
+ * So the datasource's own url is read and compared. `url = env("DATABASE_URL")`
+ * resolves through the environment, a quoted literal is taken as written, and a
+ * connection whose url is neither is left exactly as it arrived.
+ *
+ * Read with a regex rather than Prisma's parser: this needs two fields out of
+ * one block, and the dependency would be a poor trade. Line comments are
+ * stripped first, so a commented-out datasource cannot answer for the live one.
+ * Anything unreadable answers no, which lands on the old behaviour.
  */
-function prismaResolvesSqliteHere(cwd: string): boolean {
+function prismaMigratesThisUrl(cwd: string, url: string): boolean {
   const schema = join(cwd, SCHEMA_PATH);
   if (!existsSync(schema)) return false;
   let source: string;
@@ -180,9 +183,21 @@ function prismaResolvesSqliteHere(cwd: string): boolean {
   } catch {
     return false;
   }
-  const datasource = source.match(/datasource\s+\w+\s*\{([\s\S]*?)\}/);
+  // `//` to end of line. Prisma has no block comments, and a `//` inside the
+  // quoted url would be part of a protocol this function does not act on.
+  const live = source.replace(/^\s*\/\/.*$/gm, "");
+  const datasource = live.match(/datasource\s+\w+\s*\{([\s\S]*?)\}/);
   if (!datasource) return false;
-  return /provider\s*=\s*["']sqlite["']/.test(datasource[1]!);
+  const block = datasource[1]!;
+  if (!/provider\s*=\s*["']sqlite["']/.test(block)) return false;
+
+  const fromEnv = block.match(/url\s*=\s*env\(\s*["']([^"']+)["']\s*\)/);
+  if (fromEnv) {
+    const value = process.env[fromEnv[1]!];
+    return typeof value === "string" && value.trim() === url.trim();
+  }
+  const literal = block.match(/url\s*=\s*["']([^"']+)["']/);
+  return literal ? literal[1]!.trim() === url.trim() : false;
 }
 
 /**

@@ -51,12 +51,14 @@ bun dev
 The database is SQLite at `prisma/dev.db` and holds nothing but the auth tables.
 Conversations live in a `MemoryAgentStore` — see below.
 
-`.env` names that one file twice, as `DATABASE_URL` and `PRISMA_DATABASE_URL`,
-and the two values differ. That is not a mistake: Prisma resolves a relative
-SQLite path from its schema's directory and the app resolves one from the
-project root, so a single `file:./dev.db` migrates one file and queries another
-— the second empty, and `no such table: User` the first time you sign up. Point
-both somewhere else and keep them pointed at the same file.
+`.env` names it once, as `DATABASE_URL=file:./dev.db`, and both Prisma and the
+app read that as `prisma/dev.db` — relative to the schema's directory. Earlier
+versions of this template named the same file twice, under two variable names,
+because gemi resolved a relative path from the project root while Prisma resolved
+it from the schema directory: one `file:./dev.db` migrated one file and queried
+another, the second empty, with `no such table: User` the first time you signed
+up. Fixed in 0.65; if you are upgrading a project that carried the workaround,
+drop `PRISMA_DATABASE_URL` and point `DATABASE_URL` at `file:./dev.db`.
 
 ## A tour of `app/agents/`
 

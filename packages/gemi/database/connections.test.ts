@@ -95,9 +95,7 @@ describe("named connections", () => {
 
     const here = (await db.sql.unsafe(`select count(*) as c from t`)) as any;
     expect(here[0].c).toBe(1);
-    await expect(analytics.sql.unsafe(`select * from t`)).rejects.toThrow(
-      /no such table/i,
-    );
+    await expect(analytics.sql.unsafe(`select * from t`)).rejects.toThrow(/no such table/i);
 
     await db.close();
   });
@@ -164,9 +162,7 @@ describe("named connections", () => {
    */
   test("the slow-transaction threshold is inherited, and overridable", async () => {
     const inherited = pair();
-    expect(
-      inherited.connection("analytics").config.slowTransactionThreshold,
-    ).toBeUndefined();
+    expect(inherited.connection("analytics").config.slowTransactionThreshold).toBeUndefined();
     await inherited.close();
 
     const dir = workspace();
@@ -185,9 +181,7 @@ describe("named connections", () => {
     expect(db.connection("analytics").config.slowTransactionThreshold).toBe(
       SLOW_TRANSACTION_THRESHOLD,
     );
-    expect(db.connection("digest").config.slowTransactionThreshold).toBe(
-      60_000,
-    );
+    expect(db.connection("digest").config.slowTransactionThreshold).toBe(60_000);
 
     await db.close();
   });
@@ -222,9 +216,7 @@ describe("named connections", () => {
     await db.ready;
 
     for (const name of db.connectionNames) {
-      const rows = (await db
-        .connection(name)
-        .sql.unsafe(`pragma foreign_keys`)) as any;
+      const rows = (await db.connection(name).sql.unsafe(`pragma foreign_keys`)) as any;
       expect(rows[0].foreign_keys, `${name} enforces foreign keys`).toBe(1);
     }
 
@@ -290,7 +282,11 @@ describe("a relative SQLite url on a connection", () => {
   test("is opened where Prisma migrates it, not where the process happens to be", async () => {
     const root = project();
     const cwd = process.cwd();
+    const url = process.env.DATABASE_URL;
     process.chdir(root);
+    // The gate compares against the url the datasource names, so this has to be
+    // the one the fixture's `env("DATABASE_URL")` resolves to.
+    process.env.DATABASE_URL = "file:./dev.db";
     try {
       const connection = new Connection("default", { url: "file:./dev.db" });
       expect(connection.url).toBe(`file:${join(root, "prisma", "dev.db")}`);
@@ -302,6 +298,8 @@ describe("a relative SQLite url on a connection", () => {
       await connection.close();
     } finally {
       process.chdir(cwd);
+      if (url === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = url;
     }
   });
 
@@ -309,13 +307,15 @@ describe("a relative SQLite url on a connection", () => {
     const root = project();
     writeFileSync(join(root, "dev.db"), "SQLite format 3\0pages and pages");
     const cwd = process.cwd();
+    const url = process.env.DATABASE_URL;
     process.chdir(root);
+    process.env.DATABASE_URL = "file:./dev.db";
     try {
-      expect(() => new Connection("default", { url: "file:./dev.db" })).toThrow(
-        /will not pick/,
-      );
+      expect(() => new Connection("default", { url: "file:./dev.db" })).toThrow(/will not pick/);
     } finally {
       process.chdir(cwd);
+      if (url === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = url;
     }
   });
 });

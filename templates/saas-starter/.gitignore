@@ -30,12 +30,18 @@ app/models/generated-lists/
 # `generator client` block, which is what lets an app install `prisma` alone.
 app/models/prisma-client/
 
-# The local SQLite database. `prisma migrate` / `db push` write it beside the
-# schema, and since 0.65 gemi opens the same file — so the pattern has to match
-# at any depth, not only at the root. The bare `dev.db` here matched the root
-# copy only, which is how a 98KB `prisma/dev.db` came to be committed while the
-# 0-byte root one gemi used to create was correctly ignored.
-**/dev.db
-**/dev.db-journal
-**/dev.db-wal
-**/dev.db-shm
+# The root `dev.db` only, and deliberately not `prisma/dev.db`.
+#
+# `prisma/dev.db` is a COMMITTED FIXTURE: `app/models/User.test.ts` copies it to
+# a temp file and runs the whole ORM pipeline against the template's real schema.
+# Ignoring it breaks fifteen tests on a clean checkout.
+#
+# The root copy is the artifact of a bug rather than anything's output. Before
+# 0.65, gemi resolved a relative `file:` url against the process cwd while Prisma
+# resolved it against the schema directory, so the dev server created an empty
+# `dev.db` here and queried it. Nothing writes it now, and the entry stays so an
+# upgrading checkout does not suddenly show one.
+dev.db
+dev.db-journal
+dev.db-wal
+dev.db-shm

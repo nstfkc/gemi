@@ -13,9 +13,10 @@ import { resolveSqliteUrl, strandedDatabase } from "./sqlitePath";
  * server opened `./dev.db`, SQLite created it empty, and every query failed
  * with `no such table`.
  *
- * The repository's own template still carries both files, which is what a
- * reproduction looks like when nobody notices for a while: a 98KB
- * `prisma/dev.db` and a 0-byte `dev.db` beside it.
+ * The repository's own saas-starter template carried the wreckage: a 0-byte
+ * `dev.db` at its root, beside the real `prisma/dev.db` that Prisma migrates and
+ * that `app/models/User.test.ts` copies as a fixture. Only the root one was ever
+ * gemi's, and nothing creates it now.
  */
 
 const roots: string[] = [];
@@ -39,6 +40,30 @@ const POSTGRES_SCHEMA = `datasource db {
  * still open a side SQLite connection, and Prisma has no opinion about where
  * that one lives.
  */
+/**
+ * Sets `DATABASE_URL` for one call, since the gate now compares the connection's
+ * url against what the datasource actually names. Restored afterwards.
+ */
+function withDatabaseUrl<T>(value: string | undefined, run: () => T): T {
+  const before = process.env.DATABASE_URL;
+  if (value === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = value;
+  try {
+    return run();
+  } finally {
+    if (before === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = before;
+  }
+}
+
+/**
+ * Resolve with `DATABASE_URL` set to the url under test — i.e. this url IS the
+ * one the schema's datasource names, which is the ordinary case and the only one
+ * the resolution is meant to touch.
+ */
+const asPrismas = (url: string, root: string) =>
+  withDatabaseUrl(url, () => resolveSqliteUrl(url, "sqlite", root));
+
 function project(options: { schema?: boolean | "postgres" } = {}): string {
   const root = mkdtempSync(join(tmpdir(), "gemi-sqlite-"));
   roots.push(root);
@@ -61,7 +86,7 @@ afterEach(() => {
 describe("a relative SQLite path", () => {
   test("resolves against the schema directory, the way Prisma resolves it", () => {
     const root = project();
-    const resolved = resolveSqliteUrl("file:./dev.db", "sqlite", root);
+    const resolved = asPrismas("file:./dev.db", root);
 
     expect(resolved.url).toBe(`file:${join(root, "prisma", "dev.db")}`);
     expect(resolved.moved).toEqual({
@@ -79,7 +104,7 @@ describe("a relative SQLite path", () => {
     ["FILE: uppercase", "FILE:./dev.db", "FILE:"],
   ])("in the %s form, keeping the prefix it arrived with", (_name, url, prefix) => {
     const root = project();
-    const resolved = resolveSqliteUrl(url, "sqlite", root);
+    const resolved = asPrismas(url, root);
 
     // Stated as the whole string rather than a `startsWith`, which was vacuous
     // for the bare-path case (every string starts with "").
@@ -90,14 +115,14 @@ describe("a relative SQLite path", () => {
     // `file:../dev.db` from `prisma/` is the project root — which is where an
     // app that already worked around this by hand would have pointed it.
     const root = project();
-    const resolved = resolveSqliteUrl("file:../dev.db", "sqlite", root);
+    const resolved = asPrismas("file:../dev.db", root);
 
     expect(resolved.url).toBe(`file:${join(root, "dev.db")}`);
   });
 
   test("keeps a query string on the URL rather than in the file name", () => {
     const root = project();
-    const resolved = resolveSqliteUrl("file:./dev.db?mode=ro", "sqlite", root);
+    const resolved = asPrismas("file:./dev.db?mode=ro", root);
 
     expect(resolved.url).toBe(`file:${join(root, "prisma", "dev.db")}?mode=ro`);
   });
@@ -107,7 +132,7 @@ describe("what is left exactly as it was", () => {
   test("an app with no prisma/schema.prisma, which has no second opinion", () => {
     const root = project({ schema: false });
 
-    expect(resolveSqliteUrl("file:./dev.db", "sqlite", root)).toEqual({ url: "file:./dev.db" });
+    expect(asPrismas("file:./dev.db", root)).toEqual({ url: "file:./dev.db" });
   });
 
   /**
@@ -120,16 +145,64 @@ describe("what is left exactly as it was", () => {
   test("a SQLite connection in an app whose Prisma datasource is Postgres", () => {
     const root = project({ schema: "postgres" });
 
-    expect(resolveSqliteUrl("file:./analytics.db", "sqlite", root)).toEqual({
+    expect(asPrismas("file:./analytics.db", root)).toEqual({
       url: "file:./analytics.db",
     });
+  });
+
+  /**
+   * A second SQLite connection in the same project. A project has one Prisma
+   * datasource; anything else opened through `connections` is a file Prisma has
+   * never seen, so repointing it into `prisma/` produced either an empty database
+   * or an error calling it "the file Prisma migrates", which was false about it.
+   */
+  test("a SQLite connection that is not the one the datasource names", () => {
+    const root = project();
+
+    const resolved = withDatabaseUrl("file:./dev.db", () =>
+      resolveSqliteUrl("file:./analytics.db", "sqlite", root),
+    );
+
+    expect(resolved).toEqual({ url: "file:./analytics.db" });
+  });
+
+  test("a datasource whose env var is not set at all", () => {
+    const root = project();
+
+    expect(
+      withDatabaseUrl(undefined, () => resolveSqliteUrl("file:./dev.db", "sqlite", root)),
+    ).toEqual({ url: "file:./dev.db" });
+  });
+
+  test("a commented-out datasource cannot answer for the live one", () => {
+    const root = project();
+    writeFileSync(
+      join(root, "prisma", "schema.prisma"),
+      '// datasource db {\n//   provider = "sqlite"\n//   url = env("DATABASE_URL")\n// }\n' +
+        'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}',
+    );
+
+    expect(
+      withDatabaseUrl("file:./dev.db", () => resolveSqliteUrl("file:./dev.db", "sqlite", root)),
+    ).toEqual({ url: "file:./dev.db" });
+  });
+
+  test("a datasource naming the url as a literal rather than through env", () => {
+    const root = project();
+    writeFileSync(
+      join(root, "prisma", "schema.prisma"),
+      'datasource db {\n  provider = "sqlite"\n  url = "file:./dev.db"\n}',
+    );
+
+    const resolved = resolveSqliteUrl("file:./dev.db", "sqlite", root);
+    expect(resolved.url).toBe(`file:${join(root, "prisma", "dev.db")}`);
   });
 
   test("a schema whose datasource block cannot be found at all", () => {
     const root = project();
     writeFileSync(join(root, "prisma", "schema.prisma"), "generator client {}");
 
-    expect(resolveSqliteUrl("file:./dev.db", "sqlite", root)).toEqual({ url: "file:./dev.db" });
+    expect(asPrismas("file:./dev.db", root)).toEqual({ url: "file:./dev.db" });
   });
 
   test("the old location reached through a symlink is not a second database", () => {
@@ -138,7 +211,7 @@ describe("what is left exactly as it was", () => {
     const root = project();
     writeFileSync(join(root, "prisma", "dev.db"), "SQLite format 3\0pages");
     symlinkSync(join(root, "prisma", "dev.db"), join(root, "dev.db"));
-    const resolved = resolveSqliteUrl("file:./dev.db", "sqlite", root);
+    const resolved = asPrismas("file:./dev.db", root);
 
     expect(strandedDatabase(resolved.moved!)).toBeNull();
   });
@@ -147,7 +220,7 @@ describe("what is left exactly as it was", () => {
     const root = project();
     const absolute = `file:${join(root, "some", "where.db")}`;
 
-    expect(resolveSqliteUrl(absolute, "sqlite", root)).toEqual({ url: absolute });
+    expect(asPrismas(absolute, root)).toEqual({ url: absolute });
   });
 
   test.each([
@@ -161,7 +234,7 @@ describe("what is left exactly as it was", () => {
     "file::memory:?cache=shared",
   ])("%s, which is not a path at all", (url) => {
     const root = project();
-    expect(resolveSqliteUrl(url, "sqlite", root)).toEqual({ url });
+    expect(asPrismas(url, root)).toEqual({ url });
   });
 
   test("every networked dialect", () => {
@@ -190,7 +263,7 @@ describe("what is left exactly as it was", () => {
 describe("an app that already worked around this by hand", () => {
   test("is moved too, because Prisma reads that path the same way", () => {
     const root = project();
-    const resolved = resolveSqliteUrl("file:./prisma/dev.db", "sqlite", root);
+    const resolved = asPrismas("file:./prisma/dev.db", root);
 
     expect(resolved.moved).toEqual({
       from: join(root, "prisma", "dev.db"),
@@ -201,7 +274,7 @@ describe("an app that already worked around this by hand", () => {
   test("and is refused rather than silently repointed at an empty file", () => {
     const root = project();
     writeFileSync(join(root, "prisma", "dev.db"), "SQLite format 3\0their actual data");
-    const resolved = resolveSqliteUrl("file:./prisma/dev.db", "sqlite", root);
+    const resolved = asPrismas("file:./prisma/dev.db", root);
 
     expect(strandedDatabase(resolved.moved!)).toBe(join(root, "prisma", "dev.db"));
   });

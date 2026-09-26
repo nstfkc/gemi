@@ -14,5 +14,10 @@ node_modules/
 .debug
 
 # Local SQLite database created by `prisma db push` / the dev server.
-dev.db
-dev.db-journal
+# At any depth: this template's database lives at `prisma/dev.db`, which is
+# where both Prisma and gemi resolve `file:./dev.db` to. Unlike saas-starter,
+# nothing here commits one as a test fixture.
+**/dev.db
+**/dev.db-journal
+**/dev.db-wal
+**/dev.db-shm
