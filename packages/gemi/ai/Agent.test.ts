@@ -1339,8 +1339,13 @@ describe("a run cut off by the output ceiling", () => {
   test("and does not report an error for a schema that would have accepted it", async () => {
     // `finishReason` is the channel for "not an error, and not a finished
     // answer" — the argument `max-steps` already makes.
-    const { events } = await truncatedRun("length");
+    //
+    // The output assertion is here too, and not only in the test above: with a
+    // schema that accepts the repaired prefix, "no error was emitted" is true
+    // whether or not the guard exists, so on its own this pinned nothing.
+    const { events, result } = await truncatedRun("length");
     expect(events.filter((event) => event.type === "error")).toEqual([]);
+    expect(result.output).toBeUndefined();
   });
 
   test("whereas the same half-written document on a normal finish still parses", async () => {

@@ -702,13 +702,13 @@ export interface CreateAgentParams<
    * for a generation whose shape matters more than its phrasing.
    *
    * SENT WHENEVER SET, and not capability-gated the way `reasoning` is.
-   * `ProviderCapabilities` has no flag for it and `buildResponsesRequest` has no
-   * test — which matters because the newer reasoning models reject the
-   * parameter outright, so setting this for one is a 400 rather than a quietly
-   * degraded request. That is the same bargain `output` takes in `request.ts`:
-   * an explicit choice is sent and the API gets to say no, because silently
-   * dropping one leaves an app believing something about its request that is
-   * not true.
+   * `ProviderCapabilities` carries no flag for it, so `buildResponsesRequest`
+   * writes it whenever it is a number and never drops it. That matters because
+   * the newer reasoning models reject the parameter outright: setting this for
+   * one is a 400 rather than a quietly degraded request. It is the same bargain
+   * `output` takes in `request.ts` — an explicit choice is sent and the API gets
+   * to say no, because silently dropping one leaves an app believing something
+   * about its request that is not true.
    */
   temperature?: number;
 }
@@ -1500,6 +1500,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private history: AgentMessage[] = [];
   private produced: AgentMessage[] = [];
   private current: AgentMessage | null = null;
+  /**
+   * Whether a step of the message now open ran out of output budget.
+   *
+   * Separate from `finishReason` because they are different facts: a step that
+   * hits the ceiling and also calls a tool closes its message `awaiting-input` or
+   * `max-steps`. Cleared as each message is finalized.
+   */
+  private outputTruncated = false;
 
   /** Messages from an earlier run this one has amended, by id. Cloned once and
    *  reused, so two results for the same message do not fork it. */
@@ -1809,6 +1817,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const message = this.current;
     if (!message) return;
     this.current = null;
+    // Read and cleared together: it describes the message being closed, and the
+    // next one starts with no opinion.
+    const outputTruncated = this.outputTruncated;
+    this.outputTruncated = false;
     message.finishReason = reason;
     // Before the message is handed to `onMessage` to be persisted and before it
     // reaches `result()` — the two places it stops being written and starts
@@ -1818,7 +1830,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         if (typeof part.text === "string") part.text = resolveRope(part.text);
       }
     }
-    this.emit({ type: "message-end", messageId: message.id, finishReason: reason });
+    this.emit({
+      type: "message-end",
+      messageId: message.id,
+      finishReason: reason,
+      // Only when true, so the frame an ordinary message ends with is unchanged.
+      ...(outputTruncated ? { outputTruncated: true as const } : {}),
+    });
     await this.report(message);
     // After it, never before: a file a tool showed during this message belongs
     // below the message whose tool call produced it, in the hook exactly as it
@@ -1988,6 +2006,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // replaces it is one answer for every schema: no output, and a finish
     // reason that says why.
     const truncated = outcome.reason === "length";
+    // Recorded on the run rather than inferred from the message's finish reason,
+    // which is not this: a step that hits the ceiling and also calls a tool ends
+    // the message `awaiting-input` or `max-steps`. The client needs the fact
+    // itself, or it completes a partial output the server withheld.
+    if (truncated) this.outputTruncated = true;
     if (this.config.output && outputText && !outcome.error && !truncated) {
       const parsed = this.config.output.safeParse(bestEffortParse(outputText));
       if (parsed.ok === true) {

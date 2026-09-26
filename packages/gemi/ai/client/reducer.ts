@@ -371,7 +371,11 @@ function reduce<T extends ToolShapes, O>(
           // half-written object as the finished one. The server already
           // withholds the output part on `length` for that reason; without this
           // the two disagreed, and the client held the more convincing lie.
-          event.finishReason === "length"
+          // `outputTruncated` first: it is the fact, and the finish reason is
+          // not it — a step that hit the ceiling and also called a tool ends the
+          // message `awaiting-input` or `max-steps`. `length` is still honoured
+          // for a server that predates the field.
+          event.outputTruncated || event.finishReason === "length"
             ? message.content.filter((part) => !(part.type === "output" && part.partial))
             : message.content.map((part) =>
                 part.type === "output" && part.partial ? { ...part, partial: false } : part,

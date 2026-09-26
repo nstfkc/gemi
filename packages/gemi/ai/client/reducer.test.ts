@@ -395,6 +395,30 @@ describe("the rest of the event union", () => {
     expect(cut.messages[0]!.finishReason).toBe("length");
   });
 
+  test("drops it on outputTruncated even when the message ended some other way", () => {
+    // The case a finish reason cannot express: the step that ran out of output
+    // budget also called a tool, so the message ends `awaiting-input`. The server
+    // still withholds its output part, and the client has to agree.
+    const cut = fold(initialChatState(), [
+      {
+        seq: 0,
+        event: { type: "output-delta", messageId: "m1", delta: "{", snapshot: { half: true } },
+      },
+      {
+        seq: 1,
+        event: {
+          type: "message-end",
+          messageId: "m1",
+          finishReason: "awaiting-input",
+          outputTruncated: true,
+        },
+      },
+    ]);
+
+    expect(cut.messages[0]!.content).toEqual([]);
+    expect(cut.messages[0]!.finishReason).toBe("awaiting-input");
+  });
+
   test("and leaves everything else on the message alone", () => {
     const cut = fold(initialChatState(), [
       { seq: 0, event: { type: "text-delta", messageId: "m1", delta: "Working on it." } },

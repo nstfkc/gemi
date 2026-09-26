@@ -221,6 +221,27 @@ extension ChatState {
     case "message-end":
       withMessage(event.string("messageId") ?? "", now: now) { message in
         message["finishReason"] = event["finishReason"]
+        // A run cut off by the output ceiling has no answer, so the partial
+        // output part is dropped rather than completed. `snapshot` is a
+        // best-effort parse that closes whatever brackets are open, so the last
+        // partial looks like a whole document — completing it presented a
+        // half-written object as the finished one, and the server withholds its
+        // own output part for the same reason.
+        // `outputTruncated` first: it is the fact, and the finish reason is not
+        // it — a step that hit the ceiling and also called a tool ends the
+        // message `awaiting-input` or `max-steps`. `length` is still honoured for
+        // a server that predates the field.
+        if event["outputTruncated"]?.boolValue == true
+          || event.string("finishReason") == "length"
+        {
+          message["content"] = .array(
+            message.content.filter { part in
+              guard let candidate = part.objectValue else { return true }
+              return !(candidate.string("type") == "output"
+                && candidate["partial"]?.boolValue == true)
+            })
+          return
+        }
         message["content"] = .array(
           message.content.map { part in
             guard var closed = part.objectValue, closed.string("type") == "output",

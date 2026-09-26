@@ -481,7 +481,23 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    * the next turn is an ordinary send.
    */
   | { type: "awaiting-input"; runId: string; pending: PendingToolCall<T>[] }
-  | { type: "message-end"; messageId: string; finishReason: FinishReason }
+  /**
+   * `outputTruncated` says the model ran out of output budget while writing this
+   * message's structured answer, whatever the message's finish reason turned out
+   * to be.
+   *
+   * It needs its own field because `finishReason` cannot carry it: a step that
+   * hits the ceiling *and* calls a tool ends the message `awaiting-input` or
+   * `max-steps`, and both of those are load-bearing for the UI. The client uses
+   * this to drop the partial `output` part rather than complete it — the server
+   * withholds its own for the same reason, and the two must not disagree.
+   */
+  | {
+      type: "message-end";
+      messageId: string;
+      finishReason: FinishReason;
+      outputTruncated?: true;
+    }
   | { type: "usage"; usage: Usage }
   /**
    * An error after the headers are flushed cannot be an HTTP status, so it is an
