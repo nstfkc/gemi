@@ -239,10 +239,11 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
 const pendingTurns = new Map<string, { cancelled: boolean }>();
 
 /**
- * The key `Body` hangs off the instance type by. A `declare const` unique
- * symbol, so it exists only in the type layer — the same device `Schema.ts`
- * uses for its output type, and for the same reason: a real property would be
- * one an app could see, serialise or depend on.
+ * The key that carries `Body` on the instance type.
+ *
+ * A `declare const` unique symbol, so it exists only in the type layer — the
+ * same device `Schema.ts` uses for its output type, and for the same reason: a
+ * real property would be one an app could see, serialise or depend on.
  */
 declare const BODY: unique symbol;
 
@@ -256,8 +257,15 @@ export abstract class AgentController<
    * through `AgentRouteRPC`, so a `body` the controller does not expect is a
    * compile error at the call site rather than an `undefined` three layers
    * into a tool. It types the shape, not the contents — see `instructions`.
+   *
+   * Constrained to `object`, not `Record<string, unknown>`: an `interface` gets
+   * no implicit index signature, so the tighter bound refused
+   * `interface PageBody { pageId: string }` with a `TS2344` that names the
+   * constraint and not the reason. An interface is how most apps write a request
+   * shape, and turning that into a puzzle about `type` versus `interface` is a
+   * poor first impression of the feature.
    */
-  Body extends Record<string, unknown> = Record<string, unknown>,
+  Body extends object = Record<string, unknown>,
 > extends ControllerBase {
   static kind = "agent-controller" as const;
 
@@ -521,7 +529,12 @@ export abstract class AgentController<
         // disagree about what the client sent — and carried on the run rather
         // than read from `ctx.req`, because a run outlives the request that
         // started it. By the time a tool executes, the body is long gone.
-        body: extraBody,
+        // Cast because `Body` is constrained to `object` so an `interface` can be
+        // used, and an interface has no index signature to satisfy
+        // `Record<string, unknown>`. The value is a parsed JSON object either
+        // way; the constraint is about what an app may declare, not about what
+        // arrives.
+        body: extraBody as Record<string, unknown>,
       }) as AgentRun;
 
       const ctx: AgentHookContext = { req, runId: run.runId, threadId };
@@ -1264,15 +1277,6 @@ export abstract class AgentController<
 // --- request plumbing ----------------------------------------------------
 
 /**
- * A body, or the reason there is not one.
- *
- * Deliberately one shape with an optional `error` rather than a discriminated
- * union on `ok`: this package compiles with `strict: false`, and without
- * `strictNullChecks` TypeScript will not narrow a union by a boolean
- * discriminant — `if (!parsed.ok)` leaves `parsed.message` an error. A field
- * that is either set or not needs no narrowing to read.
- */
-/**
  * The keys of the turn envelope itself, which `useChat` puts in the same JSON
  * object as an app's `body`.
  *
@@ -1303,7 +1307,7 @@ const BARE_TURN_KEYS = ["text", "files", "toolResults"] as const;
  * reader to move a line above this one should not have to know that the body
  * was quietly hollowed out.
  */
-function appBody<Body extends Record<string, unknown>>(body: Record<string, any>): Body {
+function appBody<Body extends object>(body: Record<string, any>): Body {
   const reserved: readonly string[] = hasTurnEnvelope(body)
     ? ENVELOPE_KEYS
     : [...ENVELOPE_KEYS, ...BARE_TURN_KEYS];
@@ -1325,6 +1329,15 @@ function appBody<Body extends Record<string, unknown>>(body: Record<string, any>
   return extra as Body;
 }
 
+/**
+ * A body, or the reason there is not one.
+ *
+ * Deliberately one shape with an optional `error` rather than a discriminated
+ * union on `ok`: this package compiles with `strict: false`, and without
+ * `strictNullChecks` TypeScript will not narrow a union by a boolean
+ * discriminant — `if (!parsed.ok)` leaves `parsed.message` an error. A field
+ * that is either set or not needs no narrowing to read.
+ */
 type ParsedBody = {
   body: Record<string, any>;
   error?: string;
@@ -1435,16 +1448,6 @@ function invalidRequest(parsed: ParsedBody): Response {
 }
 
 /**
- * The client's turn, accepting both `{ turn: {...} }` and the flattened
- * `{ text, files, toolResults }` — the second is what a hand-written `fetch`
- * writes, and refusing it buys nothing.
- *
- * `turn` is `undefined` for an empty turn, which is a real request:
- * reattaching to a conversation and letting the model continue is a turn with
- * nothing in it. `error` is a turn that is refused with a 400 before anything
- * runs — see `toTurnFiles`.
- */
-/**
  * Whether the turn arrived in a `turn` object of its own, rather than spread
  * across the top level of the body.
  *
@@ -1457,6 +1460,16 @@ function hasTurnEnvelope(body: Record<string, any>): boolean {
   return Boolean(body.turn) && typeof body.turn === "object";
 }
 
+/**
+ * The client's turn, accepting both `{ turn: {...} }` and the flattened
+ * `{ text, files, toolResults }` — the second is what a hand-written `fetch`
+ * writes, and refusing it buys nothing.
+ *
+ * `turn` is `undefined` for an empty turn, which is a real request:
+ * reattaching to a conversation and letting the model continue is a turn with
+ * nothing in it. `error` is a turn that is refused with a 400 before anything
+ * runs — see `toTurnFiles`.
+ */
 function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: string } {
   const source = hasTurnEnvelope(body) ? body.turn : body;
   const turn: ClientTurn = {};
@@ -1729,11 +1742,7 @@ export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
    * `instructions(req)` — the pre-existing signature, so every existing
    * override — gave inference nothing to work with and got the open record.
    */
-  body: InstanceType<T> extends { [BODY]?: infer B }
-    ? B extends Record<string, unknown>
-      ? B
-      : Record<string, unknown>
-    : Record<string, unknown>;
+  body: InstanceType<T> extends { [BODY]?: infer B } ? B : Record<string, unknown>;
 };
 
 /** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */

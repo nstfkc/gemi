@@ -1521,11 +1521,6 @@ describe("the request body an app sent with the turn", () => {
     run.finish();
   });
 
-  /**
-   * The bare form, where `toClientTurn` reads the turn off the top level. Those
-   * three names are the framework's there and the app's when an envelope is
-   * present, which is why one predicate decides it for both.
-   */
   test("carries a __proto__ key as data, rather than as a prototype change", async () => {
     // `JSON.parse` makes `__proto__` an own property and `Object.entries` hands
     // it over like any other key; assigning it with `[]` would run
@@ -1546,6 +1541,11 @@ describe("the request body an app sent with the turn", () => {
     run.finish();
   });
 
+  /**
+   * The bare form, where `toClientTurn` reads the turn off the top level. Those
+   * three names are the framework's there and the app's when an envelope is
+   * present, which is why one predicate decides it for both.
+   */
   test("hides the turn's own fields when the turn came in bare", async () => {
     const seen: { body?: unknown } = {};
     const { Chat, run } = chatWith(seen);

@@ -1580,6 +1580,44 @@ describe("an app body that collides with the turn envelope", () => {
     expect(rawBodyOf(0).threadId).toBe("th_9");
   });
 
+  /**
+   * The case the first version of this fix missed, and the one its own comment
+   * claimed to have closed. `threadId` and `messages` were written by a ternary,
+   * so only one of them overwrote the app's `body` and the other was left to it:
+   * a stateless turn naming `threadId` still put a real-looking thread id on the
+   * wire, and the server answered `thread_not_found` before `instructions()` ran.
+   */
+  test("does not invent a thread id on a stateless turn", async () => {
+    const { box } = mount({ attach: false, body: { threadId: "my-record-id" } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const sent = rawBodyOf(0);
+    expect("threadId" in sent).toBe(false);
+    // And the stateless turn still carries its history.
+    expect(Array.isArray(sent.messages)).toBe(true);
+  });
+
+  test("does not let an app's messages stand in for the thread's", async () => {
+    // The mirror image: on a threaded turn the payload writes no `messages` key,
+    // so an app naming it owned that field outright.
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      body: { messages: [{ id: "forged" }] },
+    });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const sent = rawBodyOf(0);
+    expect("messages" in sent).toBe(false);
+    expect(sent.threadId).toBe("th_9");
+  });
+
   test("does not replace the turn, the messages, or the correlation id", async () => {
     const { box } = mount({
       attach: false,

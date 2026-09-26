@@ -35,7 +35,20 @@ const pageAgent = Agent.create({
 
 type PageBody = { pageId: string; selectedComponent?: string };
 
+/**
+ * The same shape as an `interface`, which is how most apps write a request body.
+ * An interface gets no implicit index signature, so a `Record<string, unknown>`
+ * constraint refused it with a `TS2344` naming the constraint and not the reason.
+ */
+interface InterfaceBody {
+  pageId: string;
+}
+
 class PageBuilderController extends AgentController<typeof pageAgent, PageBody> {
+  agent = pageAgent;
+}
+
+class InterfaceController extends AgentController<typeof pageAgent, InterfaceBody> {
   agent = pageAgent;
 }
 
@@ -78,6 +91,7 @@ declare module "../client/rpc" {
     "/controller-body": AgentRouteRPC<typeof PageBuilderController>;
     "/controller-body-plain": AgentRouteRPC<typeof PlainController>;
     "/controller-body-legacy": AgentRouteRPC<typeof LegacyOverrideController>;
+    "/controller-body-interface": AgentRouteRPC<typeof InterfaceController>;
   }
 }
 
@@ -92,6 +106,19 @@ describe("a controller that declares its body", () => {
       }
     }
     expectTypeOf<Typed>().toExtend<AgentController<typeof pageAgent, PageBody>>();
+  });
+
+  test("takes a body declared as an interface, not only a type alias", () => {
+    // `Record<string, unknown>` refused this outright, and the guard that used to
+    // sit in `AgentRouteRPC` would have silently downgraded it to the open record
+    // even if the constraint had let it through — which is the failure the
+    // phantom key exists to prevent.
+    expectTypeOf<
+      AgentRouteRPC<typeof InterfaceController>["body"]
+    >().toEqualTypeOf<InterfaceBody>();
+    expectTypeOf<UseChatParams<"/controller-body-interface">["body"]>().toEqualTypeOf<
+      InterfaceBody | undefined
+    >();
   });
 
   test("carries it onto the route's RPC entry", () => {

@@ -42,9 +42,7 @@ type OutputOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { output: in
  * is the difference between an upgrade that compiles and one that does not.
  */
 type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer B }
-  ? B extends Record<string, unknown>
-    ? B
-    : Record<string, unknown>
+  ? B
   : Record<string, unknown>;
 
 /**
@@ -714,14 +712,25 @@ export function useChat<P extends keyof AgentRoutes>(
           // `thread_not_found`. These four names belong to the turn envelope;
           // an app naming one now sends it and is ignored, which is what the
           // docblock on `body` has always claimed.
-          ...body,
+          // Cast for the same reason `Body` is `object`: an `interface` has no
+          // index signature, and a spread of an unresolved type parameter is
+          // refused without one.
+          ...(body as Record<string, unknown> | undefined),
           turn,
           clientRunId,
-          ...(stateRef.current!.threadId
-            ? { threadId: stateRef.current!.threadId }
-            : // Stripped of the progress logs, which no part of the server
-              // reads and which every later turn would otherwise re-upload.
-              { messages: forWire(history) }),
+          // BOTH KEYS, ALWAYS, one of them `undefined` — which `JSON.stringify`
+          // omits, so the wire carries exactly one of them as before.
+          //
+          // Written as a ternary that produced one key or the other, only that
+          // one overwrote the app's `body`, and the other was left to it. So a
+          // stateless turn sending `body: { threadId: someRecordId }` still put
+          // a real-looking thread id on the wire and answered
+          // `thread_not_found` — the exact case the reorder was supposed to
+          // close, with a comment claiming it had.
+          threadId: stateRef.current!.threadId,
+          // Stripped of the progress logs, which no part of the server reads and
+          // which every later turn would otherwise re-upload.
+          messages: stateRef.current!.threadId ? undefined : forWire(history),
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {

@@ -68,6 +68,16 @@
     "dist",
     "**/*.test.ts",
     "**/*.test.tsx",
+    // Type tests, which were NOT excluded and so were emitted into `dist/`.
+    // Harmless for most of them, and not for one that augments a global
+    // interface: `ai/useChat.test-d.ts` and `ai/AgentController.body.test-d.ts`
+    // each `declare module "../client/rpc"` to give themselves a route to test
+    // against, and shipping those declarations puts phantom agent routes on a
+    // consumer's own `RPC` for any program whose file set reaches into
+    // `node_modules/gemi/dist`. They are checked by `vitest --typecheck`, which
+    // collects them itself, so nothing here needs them.
+    "**/*.test-d.ts",
+    "**/*.test-d.tsx",
     "**/*.spec.ts",
     "**/*.spec.tsx",
     // Inputs to tests, not code: `bin/ai-client`'s fixture agents exist to be
