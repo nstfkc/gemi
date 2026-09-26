@@ -92,6 +92,34 @@ const ASKING: AgentStreamFrame[] = [
   { seq: 5, event: { type: "run-end", runId: "run_2", finishReason: "awaiting-input" } },
 ];
 
+/**
+ * Two tool results in one turn, then the closing message. The shape the
+ * `onToolResult` tests below need: something to act on before `onFinish`.
+ */
+const EDITS: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_3", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m3", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-result",
+      messageId: "m3",
+      part: { type: "tool-result", toolCallId: "tc_a", name: "editComponent", status: "ok", output: { ok: true } },
+    },
+  },
+  {
+    seq: 3,
+    event: {
+      type: "tool-result",
+      messageId: "m3",
+      part: { type: "tool-result", toolCallId: "tc_b", name: "createPage", status: "ok", output: { ok: true } },
+    },
+  },
+  { seq: 4, event: { type: "text-delta", messageId: "m3", delta: "Done." } },
+  { seq: 5, event: { type: "message-end", messageId: "m3", finishReason: "stop" } },
+  { seq: 6, event: { type: "run-end", runId: "run_3", finishReason: "stop" } },
+];
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function mount(params: Record<string, unknown> = {}) {
@@ -1554,5 +1582,164 @@ describe("the history a stateless turn posts back", () => {
     expect(call.progress).toEqual([{ chunk: 1 }, { chunk: 2 }]);
     const inner = call.nested[0].messages[0].content.find((p: any) => p.type === "tool-call");
     expect(inner.progress).toEqual([{ page: 1 }]);
+  });
+});
+
+/**
+ * Acting on a tool result without waiting for the turn to end.
+ *
+ * `onFinish` does not arrive until the agent has written its closing message,
+ * which for a tool that changed something server-side is a visibly stale UI in
+ * between. This is the hook for refetching right then.
+ */
+describe("onToolResult", () => {
+  test("fires once per result, as each arrives, before onFinish", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(EDITS));
+    const order: string[] = [];
+    const onToolResult = vi.fn((part: any) => order.push(`result:${part.toolCallId}`));
+    const onFinish = vi.fn(() => order.push("finish"));
+    const { box } = mount({ attach: false, onToolResult, onFinish });
+
+    await act(async () => {
+      await box.api.sendMessage("edit two things");
+    });
+
+    expect(onToolResult).toHaveBeenCalledTimes(2);
+    expect(onToolResult.mock.calls[0]![0]).toMatchObject({
+      toolCallId: "tc_a",
+      name: "editComponent",
+      status: "ok",
+      output: { ok: true },
+    });
+    // The whole point: both results are in hand before the turn finishes.
+    expect(order).toEqual(["result:tc_a", "result:tc_b", "finish"]);
+  });
+
+  test("does not fire for a result the client already had", async () => {
+    // A run replayed from the top onto a restored transcript — the case `seq`
+    // cannot catch, because every frame is new to a client that restored
+    // messages without a cursor. An app refetching in here would refetch on
+    // every refresh; one writing to a database would write twice.
+    fetchMock.mockResolvedValueOnce(streamed(EDITS));
+    const onToolResult = vi.fn();
+    mount({
+      threadId: "th_9",
+      onToolResult,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "" },
+        {
+          id: "m3",
+          role: "assistant",
+          createdAt: "",
+          finishReason: "stop",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "tc_a",
+              name: "editComponent",
+              status: "ok",
+              output: { ok: true },
+            },
+          ],
+        },
+      ],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // `tc_a` was already there; `tc_b` was not.
+    expect(onToolResult.mock.calls.map(([part]: any[]) => part.toolCallId)).toEqual(["tc_b"]);
+  });
+
+  test("fires for every call of the same tool in one turn", async () => {
+    // The stated use: a turn that edits three components refetches after each
+    // one. Deduping on the tool name rather than the call id would deliver the
+    // first and swallow the rest, and a fixture using two different tools
+    // cannot tell the two rules apart.
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_5", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m5", role: "assistant" } },
+        ...["tc_1", "tc_2", "tc_3"].map((toolCallId, index) => ({
+          seq: 2 + index,
+          event: {
+            type: "tool-result",
+            messageId: "m5",
+            part: {
+              type: "tool-result",
+              toolCallId,
+              name: "editComponent",
+              status: "ok",
+              output: { ok: true },
+            },
+          },
+        })),
+        { seq: 5, event: { type: "message-end", messageId: "m5", finishReason: "stop" } },
+        { seq: 6, event: { type: "run-end", runId: "run_5", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolResult = vi.fn();
+    const { box } = mount({ attach: false, onToolResult });
+
+    await act(async () => {
+      await box.api.sendMessage("edit three components");
+    });
+
+    expect(onToolResult.mock.calls.map(([part]: any[]) => part.toolCallId)).toEqual([
+      "tc_1",
+      "tc_2",
+      "tc_3",
+    ]);
+  });
+
+  test("a failed tool result fires too, so an app can react to it", async () => {
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_4", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m4", role: "assistant" } },
+        {
+          seq: 2,
+          event: {
+            type: "tool-result",
+            messageId: "m4",
+            part: {
+              type: "tool-result",
+              toolCallId: "tc_c",
+              name: "editComponent",
+              status: "error",
+              error: { code: "unknown", message: "nope", retryable: true },
+            },
+          },
+        },
+        { seq: 3, event: { type: "message-end", messageId: "m4", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_4", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolResult = vi.fn();
+    const { box } = mount({ attach: false, onToolResult });
+
+    await act(async () => {
+      await box.api.sendMessage("edit");
+    });
+
+    // Not filtered to `ok`: a UI that greyed something out when the call
+    // started has to un-grey it when the call fails, and `onError` is for the
+    // run failing, not a tool.
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+    expect(onToolResult.mock.calls[0]![0]).toMatchObject({ status: "error" });
+  });
+
+  test("is optional, and its absence changes nothing", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(EDITS));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("edit two things");
+    });
+
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages).toHaveLength(2);
   });
 });
