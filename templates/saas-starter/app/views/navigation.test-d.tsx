@@ -76,6 +76,18 @@ describe("useNavigate over a runtime-built path", () => {
     useNavigate().push(pattern, { params: { orgId: "acme" } });
   });
 
+  test("an any-typed path takes the loose branch, rather than TS2554", () => {
+    // A path that has lost its type on the way here: a field off an untyped API
+    // response, `JSON.parse(...)`, a value through a cast. This was the one
+    // surviving mutation in the first round of this PR, and it was not
+    // cosmetic — `[any] extends [ViewPaths]` answers `true`, so an `any` path
+    // was demanding params for every route in the app.
+    const untyped: any = "/dashboard";
+    useNavigate().push(untyped);
+    usePrefetch()(untyped);
+    useNavigate().push(JSON.parse('{"to":"/dashboard"}').to);
+  });
+
   test("the prefetcher agrees, having had the same fault", () => {
     usePrefetch()(useIntendedUrl("/"));
   });

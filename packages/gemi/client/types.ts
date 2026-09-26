@@ -85,13 +85,20 @@ export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
  * nothing. An app with no param routes never saw it, which is why this survived
  * as long as it did.
  *
- * Tupled on both sides to answer for `P` as a whole rather than distributing
- * over it. That is defensive rather than load-bearing: for every union reachable
- * here the two spellings agree — all-declared distributes to `true | true`, and
- * a mixed union to `boolean`, which fails `extends true` exactly as the tupled
- * form fails. The tuple is kept because it is the spelling that stays correct
- * if `ViewPaths` ever gains a member that distribution would split, and because
- * `never` is the one input where they already differ. No test pins it; a test
- * that claimed to would be asserting a distinction this app cannot make.
+ * Distributing, not tupled, and that is the whole of what it buys over the
+ * obvious spelling. `[any] extends [ViewPaths]` is an ordinary assignability
+ * check with no special rule for `any`, so it answers `true` — and
+ * `UrlParser<any>` takes its `string extends T` arm and reports every route's
+ * params as required. An `any`-typed path therefore hit the exact `TS2554` this
+ * type exists to remove: `JSON.parse(body).to`, a field off an untyped API
+ * response, anything that has lost its type on the way here. Distributing sends
+ * `any` down both arms, which resolves to `boolean`, which fails `extends true`
+ * — the loose branch, which is the right answer for a path nothing knows
+ * anything about.
+ *
+ * Unions are unaffected, which is why this costs nothing: a union of declared
+ * routes distributes to `true | true`, and a mixed one to `boolean`, exactly as
+ * the tupled form answered. `never` distributes to `never`, which also fails
+ * `extends true` — and a `never`-typed path is not a call anyone makes.
  */
-export type IsViewPath<P extends string> = [P] extends [ViewPaths] ? true : false;
+export type IsViewPath<P extends string> = P extends ViewPaths ? true : false;
