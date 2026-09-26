@@ -100,8 +100,11 @@ describe("useNavigate over a declared route", () => {
     usePrefetch()("/dashboard");
   });
 
-  test("a union of routes is answered as one call, not distributed", () => {
+  test("a union of parameterised routes still requires them", () => {
     // Both members have the same param, so one `params` satisfies the call.
+    // This does not distinguish the tupled test in `IsViewPath` from a
+    // distributing one — they agree on every union this app can build — it
+    // guards that a union of declared routes keeps taking the strict branch.
     const either: "/partial/:orgId/reports" | "/partial/:orgId/settings/general" =
       "/partial/:orgId/reports";
     useNavigate().push(either, { params: { orgId: "acme" } });

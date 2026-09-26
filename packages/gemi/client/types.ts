@@ -85,8 +85,13 @@ export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
  * nothing. An app with no param routes never saw it, which is why this survived
  * as long as it did.
  *
- * Tupled on both sides so a union of routes is answered as a whole rather than
- * distributed: `push(condition ? "/a/:id" : "/b/:id", { params })` is one call
- * that must still demand params, not two answers.
+ * Tupled on both sides to answer for `P` as a whole rather than distributing
+ * over it. That is defensive rather than load-bearing: for every union reachable
+ * here the two spellings agree — all-declared distributes to `true | true`, and
+ * a mixed union to `boolean`, which fails `extends true` exactly as the tupled
+ * form fails. The tuple is kept because it is the spelling that stays correct
+ * if `ViewPaths` ever gains a member that distribution would split, and because
+ * `never` is the one input where they already differ. No test pins it; a test
+ * that claimed to would be asserting a distinction this app cannot make.
  */
 export type IsViewPath<P extends string> = [P] extends [ViewPaths] ? true : false;
