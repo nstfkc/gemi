@@ -14,6 +14,10 @@ export {
   type ConnectionConfig,
   type DatabaseConfig,
 } from "./config";
+// The one error this module throws that an app might want to catch by type: it
+// fires at connection time, so a caller that wants to explain it rather than
+// crash needs the class. The other two dialect errors are already here.
+export { AmbiguousSqlitePathError } from "./sqlitePath";
 export {
   inferDialect,
   isSqlite,

@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 import type { Dialect } from "./dialect";
@@ -72,20 +72,32 @@ export type SqliteResolution = {
 function splitSqliteUrl(url: string): { prefix: string; file: string } | null {
   const trimmed = url.trim();
 
-  // `:memory:`, in every spelling Bun accepts. Not a path, and `path.resolve`
-  // would happily turn it into one.
-  if (trimmed === ":memory:" || trimmed === "file::memory:" || trimmed === "sqlite://:memory:") {
-    return null;
-  }
-
-  for (const prefix of ["file://", "file:", "sqlite://", "sqlite:"]) {
-    if (trimmed.toLowerCase().startsWith(prefix)) {
-      return { prefix, file: trimmed.slice(prefix.length) };
+  // The prefix is sliced off first, and `:memory:` tested after — the other way
+  // round, only the three exact spellings written out longhand were recognised,
+  // and `sqlite::memory:` and `file::memory:?cache=shared` (both of which Bun
+  // opens in memory) were resolved as if `:memory:` were a file name. That
+  // produced a real file called `:memory:` inside `prisma/`, silently, with
+  // nothing stranded for the guard below to notice.
+  //
+  // The original casing is kept rather than the matched constant, so a URL is
+  // handed back as it arrived.
+  let prefix = "";
+  let file = trimmed;
+  for (const candidate of ["file://", "file:", "sqlite://", "sqlite:"]) {
+    if (trimmed.slice(0, candidate.length).toLowerCase() === candidate) {
+      prefix = trimmed.slice(0, candidate.length);
+      file = trimmed.slice(candidate.length);
+      break;
     }
   }
 
-  // A bare path, which Bun reads as a SQLite file.
-  return { prefix: "", file: trimmed };
+  // In memory, however it was spelled and whatever query string follows. Not a
+  // path, and `resolve` would happily turn it into one.
+  if (file === ":memory:" || file.startsWith(":memory:?")) {
+    return null;
+  }
+
+  return { prefix, file };
 }
 
 /**
@@ -126,10 +138,11 @@ export function resolveSqliteUrl(
   const suffix = query === -1 ? "" : split.file.slice(query);
 
   const schemaDirectory = join(cwd, "prisma");
-  if (!existsSync(join(cwd, SCHEMA_PATH))) {
-    // No Prisma schema, so no second opinion about where this points. Left as
-    // it was, which keeps an app that never used Prisma working exactly as it
-    // did.
+  if (!prismaResolvesSqliteHere(cwd)) {
+    // No Prisma schema, or one whose datasource is not SQLite. Either way there
+    // is no second opinion about where this points, so it is left as it was —
+    // which keeps an app that never used Prisma, and an app whose Prisma
+    // datasource is Postgres, working exactly as they did.
     return { url };
   }
 
@@ -143,6 +156,36 @@ export function resolveSqliteUrl(
 }
 
 /**
+ * Whether this project's Prisma schema is the thing that decides where a
+ * relative SQLite path points.
+ *
+ * Existence of the schema file is not enough, and assuming it was relocated
+ * databases Prisma has nothing to do with: an app whose datasource is Postgres
+ * may still open a side SQLite connection through `connections`, and that URL
+ * was being repointed into `prisma/` — where either an empty database appeared
+ * or `AmbiguousSqlitePathError` fired and told the user the file was "the file
+ * Prisma migrates", which was false for it.
+ *
+ * So the datasource block has to say `sqlite`. Read with a regex rather than a
+ * parser: this needs one word out of one block, and a dependency on Prisma's
+ * schema parser to find it would be a poor trade. A schema that cannot be read
+ * answers no, which lands on the old behaviour.
+ */
+function prismaResolvesSqliteHere(cwd: string): boolean {
+  const schema = join(cwd, SCHEMA_PATH);
+  if (!existsSync(schema)) return false;
+  let source: string;
+  try {
+    source = readFileSync(schema, "utf8");
+  } catch {
+    return false;
+  }
+  const datasource = source.match(/datasource\s+\w+\s*\{([\s\S]*?)\}/);
+  if (!datasource) return false;
+  return /provider\s*=\s*["']sqlite["']/.test(datasource[1]!);
+}
+
+/**
  * The database an app was opening before this resolution moved it, when that
  * file holds data.
  *
@@ -153,6 +196,16 @@ export function resolveSqliteUrl(
  * silently would be choosing somebody's data.
  */
 export function strandedDatabase(moved: { from: string; to: string }): string | null {
+  try {
+    // The same file reached two ways is not two databases. `statSync` follows
+    // symlinks, so an app that had already worked around this by symlinking the
+    // old path onto the real database would otherwise be refused for finding
+    // its own data where it put it.
+    if (realpathSync(moved.from) === realpathSync(moved.to)) return null;
+  } catch {
+    // One of the two is not there, which is the ordinary case — fall through and
+    // let the stat below decide.
+  }
   try {
     const stats = statSync(moved.from);
     return stats.isFile() && stats.size > 0 ? moved.from : null;

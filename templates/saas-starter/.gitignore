@@ -30,6 +30,12 @@ app/models/generated-lists/
 # `generator client` block, which is what lets an app install `prisma` alone.
 app/models/prisma-client/
 
-# Local SQLite database created by `prisma db push` / the dev server.
-dev.db
-dev.db-journal
+# The local SQLite database. `prisma migrate` / `db push` write it beside the
+# schema, and since 0.65 gemi opens the same file — so the pattern has to match
+# at any depth, not only at the root. The bare `dev.db` here matched the root
+# copy only, which is how a 98KB `prisma/dev.db` came to be committed while the
+# 0-byte root one gemi used to create was correctly ignored.
+**/dev.db
+**/dev.db-journal
+**/dev.db-wal
+**/dev.db-shm

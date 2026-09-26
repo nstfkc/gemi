@@ -272,7 +272,12 @@ describe("a relative SQLite url on a connection", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "gemi-conn-sqlite-")));
     projects.push(root);
     mkdirSync(join(root, "prisma"), { recursive: true });
-    writeFileSync(join(root, "prisma", "schema.prisma"), "datasource db {}");
+    // `provider = "sqlite"` is the gate: an app whose datasource is Postgres
+    // may still open a side SQLite connection, which Prisma never migrates.
+    writeFileSync(
+      join(root, "prisma", "schema.prisma"),
+      'datasource db {\n  provider = "sqlite"\n  url = env("DATABASE_URL")\n}',
+    );
     return root;
   };
 
