@@ -7448,8 +7448,7 @@ looked up, not verified against the secret, so changing the secret changes new t
 signs nobody out.
 
 Tokens issued before 0.64 were derived from the email and the User-Agent and could be
-computed. [UPGRADE.md](../UPGRADE.md) describes how they are replaced without signing
-anybody out.
+computed. They are refused, so their users sign in again; see [UPGRADE.md](../UPGRADE.md).
 
 ## User provider
 
@@ -7525,7 +7524,7 @@ The twenty-five methods, all overridable:
 | `updateUserPassword(args)` | Set a new (hashed) password by user id. |
 | `findUserByEmailAddress(email, verifyEmail)` | Look up a user; when `verifyEmail` is true, only return verified users. |
 | `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). |
-| `updateSession(args)` | Set a session's `expiresAt`, and its `absoluteExpiresAt` when given. |
+| `updateSession(args)` | Push a session's `expiresAt` forward. |
 | `findSession(args)` | Load a session (+ its user) by token. |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
 | `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |

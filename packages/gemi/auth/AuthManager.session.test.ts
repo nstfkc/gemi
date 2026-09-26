@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { AuthManager } from "./AuthManager";
-import { replacedToken } from "./sessionToken";
 import { Application } from "../foundation/Application";
 import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
@@ -11,7 +10,7 @@ import { AuthenticationError } from "../http/errors";
 /**
  * Sessions against an in-memory provider: the token is minted, not derived;
  * a sign-in never lands in somebody else's row; expiry is enforced; and a
- * token from before all that is moved over without signing anybody out.
+ * token from before all that is no session at all.
  */
 
 const HOUR = 3_600_000;
@@ -47,10 +46,9 @@ class MemoryProvider {
     const row = this.rows.get(token);
     return row ? this.withUser(row) : null;
   }
-  async updateSession(args: { token: string; expiresAt: Date; absoluteExpiresAt?: Date }) {
+  async updateSession(args: { token: string; expiresAt: Date }) {
     const row = this.rows.get(args.token)!;
     row.expiresAt = args.expiresAt;
-    if (args.absoluteExpiresAt) row.absoluteExpiresAt = args.absoluteExpiresAt;
     return this.withUser(row);
   }
   async deleteSession({ token }: { token: string }) {
@@ -229,86 +227,20 @@ describe("expiry", () => {
 });
 
 describe("a token from before the upgrade", () => {
-  test("sent as the cookie, is exchanged for a new one without signing anybody out", async () => {
-    const legacy = seedLegacy(1, "a@example.com");
-
-    const { result, cookies } = await inRequest(
-      { Cookie: `access_token=${legacy}` },
-      async (req) => {
-        const session = await auth.getSession(legacy, UA);
-        return { session, replaced: replacedToken(req.rawRequest) };
-      },
-    );
-
-    const next = accessTokenCookie(cookies)!;
-    expect(result.session!.user.id).toBe(1);
-    expect(next).toMatch(/^v2\./);
-    expect(result.replaced).toBe(next);
-    expect(provider.rows.get(next)!.userId).toBe(1);
-    expect(provider.rows.get(next)!.expiresAt.getTime()).toBeGreaterThan(Date.now());
-  });
-
-  test("keeps working through its grace period, without being exchanged twice", async () => {
-    const legacy = seedLegacy(1, "a@example.com");
-    const cookie = { Cookie: `access_token=${legacy}` };
-
-    await inRequest(cookie, () => auth.getSession(legacy, UA));
-    const { result, cookies } = await inRequest(cookie, () => auth.getSession(legacy, UA));
-
-    expect(result!.user.id).toBe(1);
-    expect(accessTokenCookie(cookies)).toBeUndefined();
-    expect(provider.rows.size).toBe(2);
-  });
-
-  test("stops working when its grace period is over", async () => {
-    const legacy = seedLegacy(1, "a@example.com");
-    const cookie = { Cookie: `access_token=${legacy}` };
-
-    await inRequest(cookie, () => auth.getSession(legacy, UA));
-    provider.rows.get(legacy)!.absoluteExpiresAt = new Date(Date.now() - 1000);
-
-    const { result } = await inRequest(cookie, () => auth.getSession(legacy, UA));
-    expect(result).toBeNull();
-    expect(provider.rows.has(legacy)).toBe(false);
-  });
-
-  test("sent in the header, is left alone, since that client may not read a new one", async () => {
-    const legacy = seedLegacy(1, "a@example.com");
-
-    const { result, cookies } = await inRequest({ access_token: legacy }, () =>
-      auth.getSession(legacy, UA),
-    );
-
-    expect(result!.user.id).toBe(1);
-    expect(accessTokenCookie(cookies)).toBeUndefined();
-    expect(provider.rows.size).toBe(1);
-  });
-
-  /**
-   * Pinning the trade-off UPGRADE.md describes, because it is the one place
-   * expiry is deliberately not enforced and it would otherwise look like the
-   * bug this release fixes. A legacy token is `sha256(email + User-Agent)`,
-   * so for as long as its row exists anyone who can recompute it holds the
-   * account — expired or not. What bounds that is deleting the rows, not
-   * these dates, which were never read and are long past for active clients.
-   *
-   * Note what the exchange therefore grants: a freshly minted session with a
-   * full lifetime, which outlives the cleanup that deletes legacy rows.
-   */
-  test("is exchanged even long past its dates — the row, not the date, is the bound", async () => {
+  test("is no session, however live its row", async () => {
     const legacy = seedLegacy(1, "a@example.com", {
-      expiresAt: new Date(Date.now() - 365 * 24 * HOUR),
-      absoluteExpiresAt: new Date(Date.now() - 365 * 24 * HOUR),
+      expiresAt: new Date(Date.now() + 24 * HOUR),
+      absoluteExpiresAt: new Date(Date.now() + 24 * HOUR),
     });
+    const findSession = vi.spyOn(provider, "findSession");
 
-    const { result, cookies } = await inRequest({ Cookie: `access_token=${legacy}` }, () =>
-      auth.getSession(legacy, UA),
-    );
-
-    expect(result!.user.id).toBe(1);
-    const next = accessTokenCookie(cookies)!;
-    expect(next).toMatch(/^v2\./);
-    expect(provider.rows.get(next)!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    for (const headers of [{ Cookie: `access_token=${legacy}` }, { access_token: legacy }]) {
+      const { result, cookies } = await inRequest(headers, () => auth.getSession(legacy, UA));
+      expect(result).toBeNull();
+      expect(accessTokenCookie(cookies)).toBeUndefined();
+    }
+    expect(findSession).not.toHaveBeenCalled();
+    expect(provider.rows.size).toBe(1);
   });
 });
 

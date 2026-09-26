@@ -149,8 +149,6 @@ export interface FindSessionArgs {
 
 export interface UpdateSessionArgs {
   expiresAt: Date;
-  /** Left as it is when absent. */
-  absoluteExpiresAt?: Date;
   token: string;
 }
 

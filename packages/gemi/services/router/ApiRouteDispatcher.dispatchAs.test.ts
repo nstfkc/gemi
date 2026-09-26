@@ -35,8 +35,6 @@ import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
 const SESSIONS: Record<string, { id: number; name: string }> = {
   "v2.tok-alice": { id: 1, name: "alice" },
   "v2.tok-bob": { id: 2, name: "bob" },
-  // Minted before tokens were: exchanged the first time it arrives as a cookie.
-  "legacy-alice": { id: 1, name: "alice" },
 };
 
 // Far from both ends, so `getSession` neither expires nor slides it.
@@ -49,10 +47,6 @@ class StubUsers extends UserProvider {
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     const user = SESSIONS[args.token];
     return user ? ({ token: args.token, user, ...LIVE } as any) : null;
-  }
-  async createSessionV2(args: any): Promise<SessionWithUser> {
-    SESSIONS[args.token] = SESSIONS["legacy-alice"];
-    return { ...args, user: SESSIONS[args.token] } as any;
   }
   async updateSession(args: any): Promise<SessionWithUser | null> {
     return null;
@@ -244,7 +238,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.unstubAllEnvs();
 });
 
 describe("dispatchAs", () => {
@@ -292,19 +285,6 @@ describe("dispatchAs", () => {
       cookie: "access_token=v2.tok-alice",
       "user-agent": "agent-test",
     });
-  });
-
-  test("replays the token a legacy cookie was exchanged for, not the one about to stop working", async () => {
-    vi.stubEnv("SECRET", "test-secret");
-    const { result } = await fromAgent(
-      { Cookie: "access_token=legacy-alice" },
-      async (req, dispatcher) => {
-        await resolve(AuthManager).getSession("legacy-alice", "");
-        return (await dispatcher.dispatchAs(req, "GET", "/headers")).json();
-      },
-    );
-
-    expect(result.cookie).toMatch(/^access_token=v2\.[0-9a-f]{64}$/);
   });
 
   test("a policy that denies the user denies the in-process call too", async () => {

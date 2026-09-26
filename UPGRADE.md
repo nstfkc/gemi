@@ -2,8 +2,8 @@
 
 This release fixes session and account-recovery tokens that could be computed
 by anyone who knew a user's email. **Check `SECRET` is set before you deploy,
-and plan the cleanup step below.** No code has to change unless you stub
-`UserProvider.findSession` in your own tests.
+and expect every user to sign in once more.** No code has to change unless you
+stub `UserProvider.findSession` in your own tests.
 
 ## Session tokens are minted, and a sign-in never extends someone else's session — security
 
@@ -33,58 +33,28 @@ session used after half of it has passed is pushed to `now + N` hours, capped
 at `absoluteExpiresAt`, and the cookie is written again. A browser user who
 stays active is no longer signed out once a day.
 
-## Existing sessions keep working, and are moved over
+## Existing sessions end — every user signs in again
 
-A row written before this release still has a computable token, and its
-expiry dates were never checked (an active native client's `expiresAt` is
-usually long past). So a legacy token is not held to them. Instead:
+A token issued before this release is computable, so it is no longer a
+session: `getSession` refuses any token that doesn't start with `v2.`, from a
+cookie or the `access_token` header, without looking it up. Each user signs
+in once more after the deploy and gets a minted token.
 
-- **Sent as the `access_token` cookie**, it is exchanged on its next request:
-  a new session with a full lifetime is created, the new cookie is written,
-  and the old token keeps working for five more minutes for the requests
-  already in flight, then stops. Browsers, and native clients that keep
-  cookies (a `URLSession` or OkHttp cookie jar), move over without noticing.
-- **Sent in the `access_token` header**, it is left alone, since that client
-  may not read a new cookie. It keeps working until the user signs in again,
-  which gets a new token, or until you delete it.
+If your native app has no path back to its sign-in screen when a request
+answers `401`, ship one before you deploy.
 
-Until the last legacy row is gone, a legacy token can still be computed for a
-user who hasn't come back since the deploy. Once most active users have moved
-over (a few days, not months), delete what is left. Those users sign in
-again:
+The old rows grant nothing, but they still hold computable tokens. Delete
+them:
 
 ```sql
--- How many are left
-SELECT count(*) FROM "Session" WHERE token NOT LIKE 'v2.%';
-
--- Delete them
 DELETE FROM "Session" WHERE token NOT LIKE 'v2.%';
-```
-
-If your native app sends the header, ship a version that signs in again (or
-keeps cookies) before you run the `DELETE`, or accept that its users sign in
-once more.
-
-**That `DELETE` does not undo a takeover that already happened.** A legacy
-token presented as a cookie is exchanged for a `v2.` one, so someone who
-computed a token and used it during the window now holds a normally minted
-session with a full lifetime — and `token NOT LIKE 'v2.%'` spares exactly
-that row. The cleanup bounds who can *start* using a computed token; it does
-not evict anyone who already did.
-
-If you have reason to think a token was computed — or you would rather not
-reason about it — sign everyone out instead, and take the one round of
-re-authentication:
-
-```sql
-DELETE FROM "Session";
 ```
 
 **If you stub `UserProvider.findSession` in tests**, return what a real row
 has: a token starting with `v2.`, and `expiresAt`/`absoluteExpiresAt` more
-than half of `sessionExpiresInHours` away. Otherwise `getSession` extends the
-session through `updateSession`, or exchanges an old-style token through
-`createSessionV2`, and a stub usually has neither.
+than half of `sessionExpiresInHours` away. Otherwise `getSession` refuses the
+token, or extends the session through `updateSession`, which a stub usually
+doesn't have.
 
 ## Password-reset, email-verification and magic-link tokens are random
 

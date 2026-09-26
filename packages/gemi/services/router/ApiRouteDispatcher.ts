@@ -19,7 +19,6 @@ import { Log } from "../../facades/Log";
 import { isPolicyDeniedError } from "../../orm/errors";
 import { apiPath } from "./apiPath";
 import { policyDeniedResponse } from "./policyDenied";
-import { replacedToken } from "../../auth/sessionToken";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -554,11 +553,7 @@ export class ApiRouteDispatcher {
     }
 
     const headers = new Headers();
-    // The token the client is being handed, if this request exchanged a
-    // legacy one: the cookie it sent stops working a few minutes from now,
-    // and an agent run can outlast that.
-    const cookieToken =
-      replacedToken(initiator.rawRequest) ?? initiator.cookies.get(ACCESS_TOKEN);
+    const cookieToken = initiator.cookies.get(ACCESS_TOKEN);
     if (cookieToken) {
       headers.set("Cookie", `${ACCESS_TOKEN}=${cookieToken}`);
     }

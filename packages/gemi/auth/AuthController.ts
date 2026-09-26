@@ -9,7 +9,6 @@ import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
-import { replacedToken } from "./sessionToken";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
@@ -400,14 +399,9 @@ export class AuthController extends Controller {
   }
 
   async signOut(req = new HttpRequest()) {
-    const user = await Auth.user();
+    const token = req.cookies.get("access_token");
 
-    // Read after resolving the user, not before: resolving is what exchanges
-    // a token from before the session-token change, so a sign-out that read
-    // the cookie first deleted the row it arrived with and left the one it
-    // was just handed alive — with its value already sent in this response.
-    const token =
-      replacedToken(req.rawRequest) ?? req.cookies.get("access_token");
+    const user = await Auth.user();
 
     const { userProvider, config } = app(AuthManager);
 

@@ -2,12 +2,7 @@ import { randomBytes } from "crypto";
 import { HttpRequest } from "../http";
 import { AuthenticationError } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
-import {
-  LEGACY_TOKEN_GRACE_MS,
-  isSessionToken,
-  mintSessionToken,
-  recordReplacedToken,
-} from "./sessionToken";
+import { isSessionToken, mintSessionToken } from "./sessionToken";
 import type { SessionWithUser } from "./types";
 import { authConfigDefaults, type AuthConfig } from "./config";
 import { UserProvider } from "./UserProvider";
@@ -131,25 +126,16 @@ export class AuthManager {
    * sign every user out `sessionExpiresInHours` after they signed in, however
    * active they were.
    *
-   * **A legacy token is exchanged, not enforced.** Rows written before tokens
-   * were minted (see `sessionToken.ts`) carry expiries that were never
-   * checked — an active native client's `expiresAt` is long past — so
-   * enforcing them would sign those users out on deploy. Instead:
-   *
-   * - Sent as this request's cookie, it is exchanged for a new session with a
-   *   full lifetime, the new cookie is written, and the old row is retired: it
-   *   keeps working for `LEGACY_TOKEN_GRACE_MS`, for the requests already in
-   *   flight with it, and then it is gone.
-   * - Sent any other way — the `access_token` header, whose client may not
-   *   read a replacement, or outside a request — it is returned as it is, so
-   *   the client keeps working until it signs in again or the operator deletes
-   *   the remaining legacy rows. UPGRADE.md has the query.
-   *
-   * A retired row is marked by `expiresAt` at the epoch, which no live row
-   * has, with `absoluteExpiresAt` holding the end of its grace.
+   * **A token from before minted tokens is no session.** It was computable
+   * (see `sessionToken.ts`), so it is refused before the lookup; its row is
+   * left for the operator to delete. Its user signs in again.
    */
   async getSession(token: string, userAgent: string) {
-    let session = await this.userProvider.findSession({
+    // `Auth.user()` asks with no token at all when the request carried none.
+    if (!token || !isSessionToken(token)) {
+      return null;
+    }
+    const session = await this.userProvider.findSession({
       token,
       userAgent,
     });
@@ -162,28 +148,14 @@ export class AuthManager {
     const absoluteExpiresAt = expiryMs(session.absoluteExpiresAt);
     const expired = expiresAt <= now || absoluteExpiresAt <= now;
 
-    if (isSessionToken(token)) {
-      if (expired) {
-        await this.userProvider.deleteSession({ token });
-        return null;
-      }
-      session = await this.slideSession(session, now);
-    } else if (expiresAt === 0) {
-      if (absoluteExpiresAt <= now) {
-        await this.userProvider.deleteSession({ token });
-        return null;
-      }
-    } else {
-      // Deliberately not held to its expiry dates: they were written and
-      // never read, so an active client's are usually long past, and
-      // enforcing them here would sign out almost everyone who has not come
-      // back since the deploy. What bounds the legacy scheme instead is
-      // deleting the rows — see UPGRADE.md.
-      session = await this.exchangeLegacySession(session, now);
+    if (expired) {
+      await this.userProvider.deleteSession({ token });
+      return null;
     }
+    const current = await this.slideSession(session, now);
 
-    session.user["extension"] = await this.config.extendSession(session.user);
-    return session;
+    current.user["extension"] = await this.config.extendSession(current.user);
+    return current;
   }
 
   /** The current request, when `token` arrived as its `access_token` cookie. */
@@ -215,33 +187,6 @@ export class AuthManager {
         );
     }
     return updated ?? session;
-  }
-
-  private async exchangeLegacySession(session: SessionWithUser, now: number) {
-    const req = this.requestCarryingCookie(session.token);
-    if (!req) {
-      return session;
-    }
-    const replacement = await this.userProvider.createSessionV2({
-      token: mintSessionToken(session.user.id),
-      userId: session.user.id,
-      userAgent: session.userAgent,
-      ...this.freshLifetime(now),
-    });
-    await this.userProvider.updateSession({
-      token: session.token,
-      expiresAt: new Date(0),
-      absoluteExpiresAt: new Date(now + LEGACY_TOKEN_GRACE_MS),
-    });
-    req
-      .ctx()
-      .setCookie(
-        "access_token",
-        replacement.token,
-        this.accessTokenCookieOptions(req, replacement.expiresAt),
-      );
-    recordReplacedToken(req.rawRequest, replacement.token);
-    return replacement;
   }
 
   private freshLifetime(now: number) {
