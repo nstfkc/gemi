@@ -1157,6 +1157,88 @@ describe("namespaces", () => {
   });
 });
 
+/**
+ * `ctx.body` — the fields the client sent with the turn, reaching the tools.
+ *
+ * Carried on the run rather than read back off `ctx.req`, and that is the whole
+ * point of it existing: `AgentController` consumes the body to find the turn,
+ * and a run outlives the request anyway so a refresh can reattach. By the time
+ * a tool executes there is nothing left to read.
+ */
+describe("the request body on a tool's context", () => {
+  const recorder = () => {
+    const seen: Record<string, unknown>[] = [];
+    const tool = AgentTool.create({
+      name: "recordBody",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        seen.push(ctx.body);
+        return { ok: true };
+      },
+    });
+    return { seen, tool };
+  };
+
+  test("is what the run was started with", async () => {
+    const { seen, tool } = recorder();
+    const provider = fakeProvider([toolCall("c1", "recordBody", { pattern: "x" })], [finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [tool] });
+
+    await agent.stream({ messages: [], req, body: { pageId: "page_7" } }).result();
+
+    expect(seen).toEqual([{ pageId: "page_7" }]);
+  });
+
+  test("is an empty object for a run started without one", async () => {
+    const { seen, tool } = recorder();
+    const provider = fakeProvider([toolCall("c1", "recordBody", { pattern: "x" })], [finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [tool] });
+
+    await agent.stream({ messages: [], req }).result();
+
+    // `{}` rather than undefined, so a tool reads a missing field the same way
+    // whether the client sent nothing or the run carried no body at all.
+    expect(seen).toEqual([{}]);
+  });
+
+  /**
+   * The shape this was asked for: a generator sub-agent reached through
+   * `ctx.runAgent`, whose own tools need the same ids the parent was given.
+   * Without inheritance they would have to be passed down through the prompt,
+   * as text, for the model to copy back — which is a laundering step, not a
+   * channel.
+   */
+  test("is inherited by a sub-agent's tools, being the same turn", async () => {
+    const { seen, tool } = recorder();
+    const sub = Agent.create({
+      name: "sub",
+      provider: fakeProvider([toolCall("s1", "recordBody", { pattern: "x" })], [finish()]),
+      tools: [tool],
+    });
+    const outer = AgentTool.create({
+      name: "outer",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        await ctx.runAgent(sub, { prompt: "go" });
+        return { ok: true };
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "outer", { pattern: "x" })], [finish()]),
+      tools: [outer],
+    });
+
+    await agent.stream({ messages: [], req, body: { pageId: "page_7" } }).result();
+
+    expect(seen).toEqual([{ pageId: "page_7" }]);
+  });
+});
+
 // --- nested agent runs ---------------------------------------------------
 
 /**

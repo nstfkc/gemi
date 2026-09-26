@@ -1451,6 +1451,105 @@ describe("AgentController.instructions", () => {
 });
 
 /**
+ * `useChat`'s `body` option, arriving where an app can read it.
+ *
+ * It is documented as "merged into the request body, for anything the agent's
+ * controller reads off the request that is not a message" — and until this had
+ * no working consumer at all. The controller reads the raw body itself, so an
+ * `await req.input()` in `instructions()` answered `Body already used` and took
+ * the whole turn with it; tools run after the request is gone entirely.
+ */
+describe("the request body an app sent with the turn", () => {
+  const chatWith = (seen: { body?: unknown }) => {
+    const run = new StubAgentRun("run_body");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      instructions(_req: any, extra: { body: Record<string, unknown> }) {
+        seen.body = extra.body;
+      }
+    }
+    return { Chat, calls, run };
+  };
+
+  test("reaches instructions() without the keys the turn envelope owns", async () => {
+    const seen: { body?: unknown } = {};
+    const { Chat, run } = chatWith(seen);
+    const controller = new Chat();
+    // A real thread, so `threadId` is one the store knows: sending an unknown
+    // one is refused before `instructions()` runs, and the test would then be
+    // asserting on a turn that never started.
+    const { threadId } = await controller.store.createThread({});
+
+    await controller.stream(
+      jsonRequest({
+        turn: { text: "hi" },
+        threadId,
+        clientRunId: "crid_1",
+        messages: [],
+        pageId: "page_7",
+        selectedComponent: "hero",
+      }),
+    );
+
+    expect(seen.body).toEqual({ pageId: "page_7", selectedComponent: "hero" });
+    run.finish();
+  });
+
+  test("and reaches every tool of the run as ctx.body", async () => {
+    const seen: { body?: unknown } = {};
+    const { Chat, calls, run } = chatWith(seen);
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" }, pageId: "page_7" }));
+
+    // The same object `instructions()` saw, so the two cannot disagree about
+    // what the client sent.
+    expect(calls[0]!.body).toEqual({ pageId: "page_7" });
+    expect(calls[0]!.body).toBe(seen.body);
+    run.finish();
+  });
+
+  test("is an empty object, not undefined, when the client sent none", async () => {
+    const seen: { body?: unknown } = {};
+    const { Chat, calls, run } = chatWith(seen);
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
+
+    expect(seen.body).toEqual({});
+    expect(calls[0]!.body).toEqual({});
+    run.finish();
+  });
+
+  /**
+   * The bare form, where `toClientTurn` reads the turn off the top level. Those
+   * three names are the framework's there and the app's when an envelope is
+   * present, which is why one predicate decides it for both.
+   */
+  test("hides the turn's own fields when the turn came in bare", async () => {
+    const seen: { body?: unknown } = {};
+    const { Chat, run } = chatWith(seen);
+
+    await new Chat().stream(
+      jsonRequest({ text: "hi", toolResults: [], files: [], pageId: "page_7" }),
+    );
+
+    expect(seen.body).toEqual({ pageId: "page_7" });
+    run.finish();
+  });
+
+  test("but keeps a top-level text when the turn had an envelope of its own", async () => {
+    const seen: { body?: unknown } = {};
+    const { Chat, run } = chatWith(seen);
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" }, text: "the app's own field" }));
+
+    expect(seen.body).toEqual({ text: "the app's own field" });
+    run.finish();
+  });
+});
+
+/**
  * A controller that will not run a turn for just anyone (#542). A stateless
  * turn is a general-purpose chat on the app's bill for any caller the route
  * lets through, so both refusals have to land before the provider is called.
