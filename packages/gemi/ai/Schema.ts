@@ -187,8 +187,7 @@ function emit(definition: Definition): JSONSchema {
   // A `json` node already admits every value there is, null included, so
   // widening it would only add an `anyOf` for the model to read past — and one
   // whose second branch is a strictly narrower repeat of its first.
-  const widen =
-    (definition.optional || definition.nullable) && definition.node.kind !== "json";
+  const widen = (definition.optional || definition.nullable) && definition.node.kind !== "json";
   const body = allowNull(emitNode(definition.node), widen);
   return definition.description ? { description: definition.description, ...body } : body;
 }
@@ -596,7 +595,7 @@ export const s: {
     make<Infer<(typeof members)[number]>>(
       leaf({ kind: "union", members: members.map(definitionOf) }),
     ),
-  json: <T,>() => make<T>(leaf({ kind: "json" })),
+  json: <T>() => make<T>(leaf({ kind: "json" })),
 };
 
 /**

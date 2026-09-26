@@ -1244,6 +1244,52 @@ describe("strict mode follows the schema", () => {
     expect(await run(s.object({ label: s.string() }))).toMatchObject({ strict: true });
     expect(await run(s.object({ doc: s.json() }))).toMatchObject({ strict: false });
   });
+
+  /**
+   * An agent whose whole answer is a free-form document — the shape a UI
+   * generator returns. Worth an end-to-end test rather than trusting the two
+   * halves above: the final answer goes through `safeParse`, and a node that
+   * dropped keys it had not declared would quietly trim the document.
+   */
+  test("a free-form output survives the parse with its arbitrary keys intact", async () => {
+    const document = {
+      state: { count: 0, "weird-key": [1, "two", { deep: null }] },
+      root: ["div", { id: "x" }, [["span", {}, ["hi"]]]],
+    };
+    const text = JSON.stringify({ definition: document });
+    const provider = fakeProvider([
+      // Split mid-document, so the first snapshot below is genuinely partial.
+      { type: "output-delta", delta: text.slice(0, 30) },
+      { type: "output-delta", delta: text.slice(30) },
+      finish(),
+    ]);
+    const agent = Agent.create({
+      name: "ui",
+      provider,
+      output: s.object({ definition: s.json().describe("A kyte ApplicationDefinition") }),
+    });
+
+    const events: any[] = [];
+    const run = agent.stream({ messages: [], req });
+    for await (const event of run) events.push(event);
+    const result = await run.result();
+
+    expect(result.output).toEqual({ definition: document });
+    // Not merely equal: the parse hands the very object back, so what the app
+    // reads is what arrived.
+    expect(result.output.definition.state["weird-key"][2]).toEqual({ deep: null });
+
+    // Streaming is untouched by the schema — a snapshot is `bestEffortParse` of
+    // the raw text, which is what lets a client render the document while the
+    // model is still writing it.
+    const snapshots = events.filter((event) => event.type === "output-delta");
+    expect(snapshots).toHaveLength(2);
+    // Cut at `{"definition":{"state":{"count` — a key with no value yet, which
+    // the repair drops. A partial document is a readable one, which is the
+    // whole reason a client binds to these.
+    expect(snapshots[0].snapshot).toEqual({ definition: { state: {} } });
+    expect(snapshots.at(-1).snapshot).toEqual({ definition: document });
+  });
 });
 
 // --- nested agent runs ---------------------------------------------------
