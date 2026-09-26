@@ -238,6 +238,14 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
  */
 const pendingTurns = new Map<string, { cancelled: boolean }>();
 
+/**
+ * The key `Body` hangs off the instance type by. A `declare const` unique
+ * symbol, so it exists only in the type layer — the same device `Schema.ts`
+ * uses for its output type, and for the same reason: a real property would be
+ * one an app could see, serialise or depend on.
+ */
+declare const BODY: unique symbol;
+
 export abstract class AgentController<
   A extends AnyAgent = AnyAgent,
   /**
@@ -252,6 +260,24 @@ export abstract class AgentController<
   Body extends Record<string, unknown> = Record<string, unknown>,
 > extends ControllerBase {
   static kind = "agent-controller" as const;
+
+  /**
+   * `Body`, in a position nothing can shorten away.
+   *
+   * It has to appear on the instance type for `AgentRouteRPC` to infer it, and
+   * `instructions`'s second parameter is not a safe place to leave that job:
+   * TypeScript's parameter-wise inference stops at the shorter signature, so a
+   * controller overriding `instructions(req)` — which is every override written
+   * before this existed, since that was the only signature — supplied no
+   * candidate and silently fell back to the open record. The client-side
+   * checking then vanished on the most ordinary upgrade path, with nothing to
+   * read.
+   *
+   * `declare` so it emits no field: there is no value here, only a type for
+   * `infer B` to find. Optional and never assigned, so no subclass has to
+   * mention it.
+   */
+  declare readonly [BODY]?: Body;
 
   /** The agent this controller serves. A property rather than a constructor
    *  argument so `Router.agent(ChatController)` can take the class, matching how
@@ -1283,9 +1309,18 @@ function appBody<Body extends Record<string, unknown>>(body: Record<string, any>
     : [...ENVELOPE_KEYS, ...BARE_TURN_KEYS];
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
-    if (!reserved.includes(key)) {
-      extra[key] = value;
-    }
+    if (reserved.includes(key)) continue;
+    // `JSON.parse` produces `__proto__` as an own property, and `Object.entries`
+    // hands it over like any other. Assigning it with `[]` goes through
+    // `Object.prototype`'s setter and changes the prototype of the object an app
+    // is about to read — from a value the client chose. `defineProperty` writes
+    // the key itself, which is what "the fields the client sent" means.
+    Object.defineProperty(extra, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
   return extra as Body;
 }
@@ -1686,12 +1721,19 @@ export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
   output: unknown;
   /**
    * The controller's `Body`, so `useChat` can check what it sends against what
-   * the controller declared. Inferred from the class rather than carried in a
-   * phantom property — `Body` appears in `instructions`'s signature, which is
-   * enough for this to resolve, including for a controller that never
-   * overrides it.
+   * the controller declared.
+   *
+   * Read off the phantom key rather than by matching the class, which is what
+   * made this fail: `Body` used to reach the instance type only through
+   * `instructions`'s second parameter, and a controller overriding
+   * `instructions(req)` — the pre-existing signature, so every existing
+   * override — gave inference nothing to work with and got the open record.
    */
-  body: InstanceType<T> extends AgentController<any, infer B> ? B : Record<string, unknown>;
+  body: InstanceType<T> extends { [BODY]?: infer B }
+    ? B extends Record<string, unknown>
+      ? B
+      : Record<string, unknown>
+    : Record<string, unknown>;
 };
 
 /** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */

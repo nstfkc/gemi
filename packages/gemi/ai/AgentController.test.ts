@@ -1526,6 +1526,26 @@ describe("the request body an app sent with the turn", () => {
    * three names are the framework's there and the app's when an envelope is
    * present, which is why one predicate decides it for both.
    */
+  test("carries a __proto__ key as data, rather than as a prototype change", async () => {
+    // `JSON.parse` makes `__proto__` an own property and `Object.entries` hands
+    // it over like any other key; assigning it with `[]` would run
+    // `Object.prototype`'s setter and repoint the prototype of the object the
+    // app is about to read, from a value the client chose.
+    const seen: { body?: any } = {};
+    const { Chat, run } = chatWith(seen);
+
+    // Written as raw JSON text, not via an object literal: `{ __proto__: ... }`
+    // in a literal sets the prototype instead of creating a key, so
+    // `JSON.stringify` would never have put it on the wire.
+    await new Chat().stream(rawRequest('{"turn":{"text":"hi"},"__proto__":{"polluted":true}}'));
+
+    expect(seen.body.polluted).toBeUndefined();
+    expect(({} as any).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(seen.body)).toBe(Object.prototype);
+    expect(Object.keys(seen.body)).toEqual(["__proto__"]);
+    run.finish();
+  });
+
   test("hides the turn's own fields when the turn came in bare", async () => {
     const seen: { body?: unknown } = {};
     const { Chat, run } = chatWith(seen);

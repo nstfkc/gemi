@@ -98,11 +98,17 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * `instructions(req, { body })` and on every tool's `ctx.body`.
    *
    * Typed by the controller: a controller written as `AgentController<typeof
-   * agent, { pageId: string }>` makes this required and checked here, and one
-   * that declares no body leaves it the open record it has always been. The
-   * four keys the turn envelope owns — `turn`, `clientRunId`, `threadId`,
-   * `messages` — are removed before the server sees this, so naming one of
-   * them here sends it and changes nothing.
+   * agent, { pageId: string }>` has this checked against that shape, and one
+   * that declares no body leaves it the open record it has always been. It
+   * stays optional either way — a required field of a declared body is enforced
+   * when `body` is given, not by forcing every caller to pass one.
+   *
+   * The four names the turn envelope owns — `turn`, `clientRunId`, `threadId`,
+   * `messages` — are written after this, so naming one here sends it and is
+   * ignored rather than replacing the framework's. It is also not stripped from
+   * what the server reads first: `threadId` and `turn` are taken off the top
+   * level before the app's fields are separated out, which is why the envelope
+   * has to win rather than merely be tidied up afterwards.
    */
   body?: BodyOf<P>;
   headers?: Record<string, string>;
@@ -699,6 +705,16 @@ export function useChat<P extends keyof AgentRoutes>(
 
       try {
         const payload: AgentRequestBody = {
+          // The app's fields FIRST, so the envelope below wins every collision.
+          // Spread last, `body: { threadId: someRecordId }` replaced the real
+          // thread id on the wire — and the server reads `body.threadId`,
+          // `turn`, `clientRunId` and `messages` straight off the top level
+          // before it ever separates the app's fields out, so a stateless chat
+          // was routed into the threaded branch and answered
+          // `thread_not_found`. These four names belong to the turn envelope;
+          // an app naming one now sends it and is ignored, which is what the
+          // docblock on `body` has always claimed.
+          ...body,
           turn,
           clientRunId,
           ...(stateRef.current!.threadId
@@ -706,7 +722,6 @@ export function useChat<P extends keyof AgentRoutes>(
             : // Stripped of the progress logs, which no part of the server
               // reads and which every later turn would otherwise re-upload.
               { messages: forWire(history) }),
-          ...body,
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {

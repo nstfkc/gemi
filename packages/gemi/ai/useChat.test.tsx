@@ -567,7 +567,10 @@ describe("attach on mount", () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 }),
     );
-    const { box } = mount({ threadId: "th_9", onAttachMiss: (p: { threadId: string }) => seen.push(p) });
+    const { box } = mount({
+      threadId: "th_9",
+      onAttachMiss: (p: { threadId: string }) => seen.push(p),
+    });
 
     await act(async () => {
       await Promise.resolve();
@@ -1554,5 +1557,52 @@ describe("the history a stateless turn posts back", () => {
     expect(call.progress).toEqual([{ chunk: 1 }, { chunk: 2 }]);
     const inner = call.nested[0].messages[0].content.find((p: any) => p.type === "tool-call");
     expect(inner.progress).toEqual([{ page: 1 }]);
+  });
+});
+
+/**
+ * The turn envelope wins every collision with the app's `body`.
+ *
+ * Spread last, an app-supplied `threadId` replaced the real one on the wire —
+ * and the server reads `body.threadId` and `toClientTurn(body)` off the top
+ * level before it separates the app's fields out, so a stateless chat naming
+ * that key was routed into the threaded branch and answered
+ * `thread_not_found`. The docblock said naming one of these changed nothing.
+ */
+describe("an app body that collides with the turn envelope", () => {
+  test("does not replace the thread id", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false, body: { threadId: "my-record-id" } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(rawBodyOf(0).threadId).toBe("th_9");
+  });
+
+  test("does not replace the turn, the messages, or the correlation id", async () => {
+    const { box } = mount({
+      attach: false,
+      body: { turn: { text: "not this" }, messages: [{ id: "nope" }], clientRunId: "forged" },
+    });
+
+    await act(async () => {
+      await box.api.sendMessage("the real message");
+    });
+
+    const sent = rawBodyOf(0);
+    expect(sent.turn).toEqual({ text: "the real message" });
+    expect(sent.messages).toEqual([]);
+    expect(sent.clientRunId).not.toBe("forged");
+  });
+
+  test("and still sends every field the envelope does not own", async () => {
+    const { box } = mount({ attach: false, body: { pageId: "page_7", turn: { text: "no" } } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(rawBodyOf(0).pageId).toBe("page_7");
   });
 });

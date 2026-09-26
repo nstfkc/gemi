@@ -46,6 +46,20 @@ class PlainController extends AgentController<typeof pageAgent> {
 }
 
 /**
+ * A controller that declares a body AND keeps the one-parameter `instructions`
+ * it already had. This is the upgrade path, since `instructions(req)` was the
+ * only signature before the second parameter existed — and it is where the
+ * inference silently gave up while `Body` lived on that parameter.
+ */
+class LegacyOverrideController extends AgentController<typeof pageAgent, PageBody> {
+  agent = pageAgent;
+  instructions(req: HttpRequest<any, any>) {
+    void req;
+    return "Today is Tuesday.";
+  }
+}
+
+/**
  * ONE ROUTE KEY PER TEST FILE, AND NOT A PLAUSIBLE ONE.
  *
  * This augmentation is global to the program, not local to this file, so two
@@ -63,6 +77,7 @@ declare module "../client/rpc" {
   interface RPC {
     "/controller-body": AgentRouteRPC<typeof PageBuilderController>;
     "/controller-body-plain": AgentRouteRPC<typeof PlainController>;
+    "/controller-body-legacy": AgentRouteRPC<typeof LegacyOverrideController>;
   }
 }
 
@@ -81,6 +96,30 @@ describe("a controller that declares its body", () => {
 
   test("carries it onto the route's RPC entry", () => {
     expectTypeOf<AgentRouteRPC<typeof PageBuilderController>["body"]>().toEqualTypeOf<PageBody>();
+  });
+
+  test("and keeps carrying it when instructions is overridden with one parameter", () => {
+    // The upgrade path, and the case that was silently broken: parameter-wise
+    // inference stops at the shorter signature, so while `Body` lived only on
+    // `instructions`'s second parameter this resolved to the open record and
+    // every call-site check disappeared without a word.
+    expectTypeOf<
+      AgentRouteRPC<typeof LegacyOverrideController>["body"]
+    >().toEqualTypeOf<PageBody>();
+    expectTypeOf<UseChatParams<"/controller-body-legacy">["body"]>().toEqualTypeOf<
+      PageBody | undefined
+    >();
+  });
+
+  test("so a wrong field is still refused through a one-parameter override", () => {
+    const params: UseChatParams<"/controller-body-legacy"> = {
+      body: {
+        pageId: "p1",
+        // @ts-expect-error `tenantId` is not part of this controller's body.
+        tenantId: "t1",
+      },
+    };
+    void params;
   });
 
   test("and a controller that declares none keeps the open record", () => {
