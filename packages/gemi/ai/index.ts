@@ -31,7 +31,7 @@
 // the model sends back, both of which happen beside the tool. The *types* it
 // yields travel to the client on their own, through the route's `RPC` entry.
 export { s } from "./Schema";
-export type { AnySchema, Infer, JSONSchema, OptionalSchema, Schema } from "./Schema";
+export type { AnySchema, Infer, JsonValue, JSONSchema, OptionalSchema, Schema } from "./Schema";
 
 // --- the wire vocabulary --------------------------------------------------
 //

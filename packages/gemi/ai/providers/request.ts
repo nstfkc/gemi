@@ -69,7 +69,7 @@ export function buildResponsesRequest(
         type: "json_schema",
         name: params.output.name,
         schema: params.output.schema,
-        strict: true,
+        strict: params.output.strict,
       },
     };
   }

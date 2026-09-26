@@ -9,7 +9,7 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 
-import { s, type Infer } from "./Schema";
+import { s, type Infer, type JsonValue } from "./Schema";
 
 describe("Infer over the leaves", () => {
   test("reads scalars back", () => {
@@ -106,6 +106,52 @@ describe("Infer over arrays and unions", () => {
   test("refuses a union of one, which is just the member", () => {
     // @ts-expect-error a union needs at least two members
     s.union([s.string()]);
+  });
+});
+
+describe("Infer over json()", () => {
+  test("defaults to JsonValue, which is every shape JSON can hold", () => {
+    // Written as a call rather than `ReturnType<typeof s.json>`: that form
+    // instantiates the signature with the type parameter's *constraint*, so it
+    // would read `unknown` and pass whatever the default said.
+    const doc = s.json();
+    expectTypeOf<Infer<typeof doc>>().toEqualTypeOf<JsonValue>();
+    // Not `any`: the default has to make an app narrow before it indexes, or
+    // `s.json()` would quietly switch type checking off around every use.
+    expectTypeOf<JsonValue>().not.toEqualTypeOf<any>();
+    expectTypeOf<{ a: [1, "two", { b: null }] }>().toExtend<JsonValue>();
+    expectTypeOf<{ at: Date }>().not.toExtend<JsonValue>();
+  });
+
+  test("takes the app's own type when it names one", () => {
+    // The assertion the app makes and then validates itself, in `execute`. The
+    // emitted schema constrains nothing, so nothing else can check this.
+    type Element = [tag: string, props: Record<string, JsonValue>, children: Element[]];
+    const definition = s.json<Element>().describe("A kyte ApplicationDefinition");
+    expectTypeOf<Infer<typeof definition>>().toEqualTypeOf<Element>();
+    expectTypeOf(definition.parse({})).toEqualTypeOf<Element>();
+  });
+
+  test("survives describe(), optional() and nullable() like any other builder", () => {
+    expectTypeOf<Infer<ReturnType<typeof s.json<number>>>>().toEqualTypeOf<number>();
+    const schema = s.object({
+      required: s.json<{ a: string }>(),
+      maybe: s.json<{ b: string }>().optional(),
+      nothing: s.json<{ c: string }>().nullable(),
+    });
+    expectTypeOf<Infer<typeof schema>>().toEqualTypeOf<{
+      required: { a: string };
+      maybe?: { b: string };
+      nothing: { c: string } | null;
+    }>();
+  });
+
+  test("composes into arrays and unions as a member type", () => {
+    const list = s.array(s.json<{ id: string }>());
+    expectTypeOf<Infer<typeof list>>().toEqualTypeOf<{ id: string }[]>();
+
+    const either = s.union([s.object({ kind: s.literal("ref"), id: s.string() }), s.json<null>()]);
+    expectTypeOf<Infer<typeof either>>().toEqualTypeOf<{ kind: "ref"; id: string } | null>();
   });
 });
 

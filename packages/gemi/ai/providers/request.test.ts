@@ -771,8 +771,21 @@ describe("buildResponsesRequest()", () => {
       required: [],
       additionalProperties: false,
     } as const;
-    expect(build({ output: { name: "classification", schema } }).text).toEqual({
+    expect(build({ output: { name: "classification", schema, strict: true } }).text).toEqual({
       format: { type: "json_schema", name: "classification", schema, strict: true },
+    });
+  });
+
+  /**
+   * An output schema containing an `s.json()` node cannot be sent strict, and
+   * the agent works that out from the schema. The provider's job is only to
+   * carry the answer through rather than overwrite it, which is what it did
+   * when this was hard-coded `true`.
+   */
+  test("an unconstrained output schema is sent with strict off", () => {
+    const schema = { type: "object", properties: { doc: {} }, required: ["doc"] } as const;
+    expect(build({ output: { name: "c", schema, strict: false } }).text).toEqual({
+      format: { type: "json_schema", name: "c", schema, strict: false },
     });
   });
 
@@ -784,7 +797,10 @@ describe("buildResponsesRequest()", () => {
    */
   test("output is sent even to a model we think has no structured output", () => {
     const schema = { type: "object", properties: {} } as const;
-    const body = build({ output: { name: "c", schema } }, { ...FULL, structuredOutput: false });
+    const body = build(
+      { output: { name: "c", schema, strict: true } },
+      { ...FULL, structuredOutput: false },
+    );
     expect(body.text).toEqual({
       format: { type: "json_schema", name: "c", schema, strict: true },
     });
