@@ -9,6 +9,7 @@ import type {
   ClientToolResult,
   ClientTurn,
   PendingToolCall,
+  ToolResultPart,
   ToolShapes,
 } from "./types";
 
@@ -83,6 +84,30 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
   onFinish?: (message: AgentMessage<ToolsOf<P>, OutputOf<P>>) => void;
+  /**
+   * Fires once for each of the agent's tool results, as it arrives.
+   *
+   * For acting on a result without waiting for the turn to finish: a tool that
+   * has changed something server-side is worth refetching for immediately, and
+   * `onFinish` does not come until the agent has written its closing message.
+   * A turn that edits three things fires this three times.
+   *
+   * `part` is the discriminated union of the agent's tools, so `part.name ===
+   * "editComponent"` narrows `part.output` — and `part.status` has to be checked
+   * before reading it, since a result can be an error or a refusal.
+   *
+   * ONLY FOR RESULTS THAT ARE NEW HERE. A reattach, a retrying proxy, or a run
+   * replayed from the top onto a restored transcript all redeliver results this
+   * client already has, and an app that writes to a database in here must not
+   * do it twice. Keyed on `toolCallId`, which is the id the transcript upserts
+   * on, so nothing has to be deduped by the app.
+   *
+   * A SUB-AGENT'S TOOLS DO NOT FIRE IT. Their results arrive as nested frames
+   * inside the parent tool call that started them, and belong to that call
+   * rather than to this conversation. What fires here is what this agent
+   * called.
+   */
+  onToolResult?: (part: ToolResultPart<ToolsOf<P>>) => void;
   onError?: (error: AgentError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
@@ -427,6 +452,7 @@ export function useChat<P extends keyof AgentRoutes>(
     body: extraBody,
     headers,
     onFinish,
+    onToolResult,
     onError,
     onAwaitingInput,
     onAttachMiss,
@@ -470,8 +496,8 @@ export function useChat<P extends keyof AgentRoutes>(
   const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
-  const handlers = useRef({ onFinish, onError, onAwaitingInput, onAttachMiss });
-  handlers.current = { onFinish, onError, onAwaitingInput, onAttachMiss };
+  const handlers = useRef({ onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss });
+  handlers.current = { onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss };
   const requestRef = useRef({ base, headers, extraBody });
   requestRef.current = { base, headers, extraBody };
 
@@ -581,6 +607,20 @@ export function useChat<P extends keyof AgentRoutes>(
           const message = next.messages.find((m: AgentMessage) => m.id === event.messageId);
           if (message && before?.finishReason === undefined) {
             handlers.current.onFinish?.(message);
+          }
+        } else if (event.type === "tool-result") {
+          // The same guard `onFinish` needs, keyed on what identifies a result.
+          // `seq` catches an ordinary redelivery, but a run replayed from the
+          // top onto a restored transcript is all new to the cursor — and the
+          // reducer upserts a result by `toolCallId`, so a second delivery is
+          // the same value written twice and must not be announced twice.
+          const had = previous.messages.some((message: AgentMessage) =>
+            message.content.some(
+              (part) => part.type === "tool-result" && part.toolCallId === event.part.toolCallId,
+            ),
+          );
+          if (!had) {
+            handlers.current.onToolResult?.(event.part as ToolResultPart<ToolsOf<P>>);
           }
         } else if (event.type === "awaiting-input") {
           handlers.current.onAwaitingInput?.(event.pending as PendingToolCall<ToolsOf<P>>[]);
