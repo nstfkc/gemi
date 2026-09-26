@@ -4,6 +4,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "./AgentProvider";
+import { supportsStrict } from "./Schema";
 import type { Infer, Schema } from "./Schema";
 import {
   consumeNestedRun,
@@ -921,7 +922,10 @@ function toolSpec(resolved: ResolvedTool): ProviderToolSpec {
     name: resolved.tool.name,
     description: resolved.tool.description,
     parameters: resolved.tool.inputSchema.toJSONSchema(),
-    strict: true,
+    // Read off the schema, not asserted: an input containing an `s.json()`
+    // field cannot be sent strict, and the tool that says so is the only place
+    // that knows.
+    strict: supportsStrict(resolved.tool.inputSchema),
     deferred: resolved.deferred,
   };
 }
@@ -1818,7 +1822,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       systemPrompt: await this.systemPrompt(),
       tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
       output: this.config.output
-        ? { name: "output", schema: this.config.output.toJSONSchema() }
+        ? {
+            name: "output",
+            schema: this.config.output.toJSONSchema(),
+            strict: supportsStrict(this.config.output),
+          }
         : undefined,
       reasoning: this.config.reasoning,
       signal,

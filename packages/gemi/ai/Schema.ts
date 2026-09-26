@@ -14,6 +14,12 @@
  * `required`, `additionalProperties: false` on every object, no patterns, no
  * `oneOf` at the root — and a builder that cannot express the rejected parts is
  * better than one that lets you write a schema the API refuses at runtime.
+ *
+ * `json()` is the one deliberate hole in that, for the formats strict mode
+ * cannot describe at all: a record with arbitrary keys, a mixed-type tuple, a
+ * recursive document. It does not widen the subset — it turns strict mode off
+ * for the schema containing it, which `supportsStrict` reads back off the tree
+ * so that no caller has to remember to.
  */
 
 export type JSONSchema = {
@@ -27,6 +33,18 @@ export type JSONSchema = {
   items?: JSONSchema;
   anyOf?: readonly JSONSchema[];
 };
+
+/**
+ * Any value JSON can carry. The default output type of `json()`, and the
+ * annotation an app reaches for when it hands one of those values on.
+ */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 declare const OUTPUT: unique symbol;
 declare const OPTIONAL: unique symbol;
@@ -131,7 +149,9 @@ type SchemaNode =
   | { kind: "enum"; values: readonly string[] }
   | { kind: "object"; shape: Record<string, Definition> }
   | { kind: "array"; item: Definition }
-  | { kind: "union"; members: readonly Definition[] };
+  | { kind: "union"; members: readonly Definition[] }
+  /** Constrains nothing. The node strict mode has no spelling for. */
+  | { kind: "json" };
 
 type ParseResult = { ok: true; value: unknown } | { ok: false; errors: string[] };
 
@@ -164,7 +184,11 @@ function definitionOf(schema: AnySchema): Definition {
 // --- emitting ------------------------------------------------------------
 
 function emit(definition: Definition): JSONSchema {
-  const body = allowNull(emitNode(definition.node), definition.optional || definition.nullable);
+  // A `json` node already admits every value there is, null included, so
+  // widening it would only add an `anyOf` for the model to read past — and one
+  // whose second branch is a strictly narrower repeat of its first.
+  const widen = (definition.optional || definition.nullable) && definition.node.kind !== "json";
+  const body = allowNull(emitNode(definition.node), widen);
   return definition.description ? { description: definition.description, ...body } : body;
 }
 
@@ -199,6 +223,12 @@ function emitNode(node: SchemaNode): JSONSchema {
       };
     case "union":
       return { anyOf: node.members.map(emit) };
+    // The empty schema, which is JSON Schema's own way of saying "any value" —
+    // no `type` listing all seven, which reads as a constraint the model then
+    // has to check itself. What the field actually is gets said in
+    // `description`, the one channel a model reads either way.
+    case "json":
+      return {};
   }
 }
 
@@ -260,6 +290,8 @@ function wanted(definition: Definition): string {
         return "object";
       case "union":
         return "one of the variants";
+      case "json":
+        return "a JSON value";
     }
   })();
   return definition.optional || definition.nullable ? `${base} or null` : base;
@@ -305,6 +337,12 @@ function score(definition: Definition, value: unknown): number {
     }
     case "union":
       return node.members.reduce((best, member) => Math.max(best, score(member, value)), 0);
+    // Matches, because it matches everything — but at the score of a plain
+    // scalar, so a sibling variant that pinned its discriminant still wins the
+    // blame. A union with a `json` member never reaches the blaming code
+    // anyway: that member parses, so there is nothing to report.
+    case "json":
+      return 1;
   }
 }
 
@@ -382,7 +420,70 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
       errors.push(`${at(path)}no matching variant; closest: ${best.errors.join("; ")}`);
       return undefined;
     }
+    // Passed through by reference, not rebuilt. Two reasons beyond the obvious
+    // one: a rebuild would turn a `Date` into `{}` by copying own properties
+    // that a `toJSON` was going to replace anyway, and the agent loop signs the
+    // *parsed* input and later verifies the signature against it — a parse that
+    // is exactly the identity cannot disagree with itself.
+    case "json":
+      if (value === undefined) return fail();
+      checkJson(value, path, errors, new Set());
+      return value;
   }
+}
+
+/**
+ * Checks that a value is JSON, which is the only check a `json()` node makes.
+ *
+ * Tool arguments arrive through `JSON.parse`, so this never fires on model
+ * input. It fires on a tool *output* or a structured answer an app built, where
+ * a `bigint` or a cycle throws inside `JSON.stringify` and a function or a
+ * `symbol` is dropped without a word — one turn later, with the provider's
+ * request body to debug instead of the value.
+ *
+ * `undefined` and non-plain objects are deliberately allowed below the root:
+ * `JSON.stringify` drops an `undefined` property, writes `null` for an
+ * `undefined` element, and calls `toJSON` where there is one. Those are JSON's
+ * own answers, and rejecting a `Date` to catch a `Map` is a bad trade.
+ */
+function checkJson(value: unknown, path: string, errors: string[], seen: Set<object>): void {
+  const reject = (what: string) => {
+    errors.push(`${at(path)}expected a JSON value, got ${what}`);
+  };
+
+  switch (typeof value) {
+    case "undefined":
+    case "string":
+    case "boolean":
+      return;
+    case "number":
+      if (!Number.isFinite(value)) reject(String(value));
+      return;
+    case "bigint":
+      return reject("a bigint");
+    case "function":
+      return reject("a function");
+    case "symbol":
+      return reject("a symbol");
+  }
+
+  if (value === null) return;
+  const object = value as object;
+  // A cycle is the one shape that cannot be reported from where it is found,
+  // because walking it does not terminate.
+  if (seen.has(object)) return reject("a circular reference");
+  seen.add(object);
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => checkJson(item, `${path}[${index}]`, errors, seen));
+  } else {
+    for (const [key, child] of Object.entries(object)) {
+      checkJson(child, path ? `${path}.${key}` : key, errors, seen);
+    }
+  }
+  // Removed rather than left in: `seen` is the path currently being walked, and
+  // keeping it would call the same object appearing twice side by side — which
+  // `JSON.stringify` writes out twice quite happily — a cycle.
+  seen.delete(object);
 }
 
 /**
@@ -453,6 +554,24 @@ export const s: {
   union<const S extends readonly [AnySchema, AnySchema, ...AnySchema[]]>(
     members: S,
   ): SchemaBuilder<Infer<S[number]>>;
+  /**
+   * Any JSON value, constrained by nothing — for a format the rest of this
+   * builder cannot describe: a record with arbitrary keys, a mixed-type tuple,
+   * a document that nests into itself.
+   *
+   * A schema containing one cannot be sent under strict mode, so a tool whose
+   * input uses it is sent with `strict: false` automatically. That is not an
+   * option to pass anywhere; it is read back off the schema by
+   * `supportsStrict`. The rest of the tool is unaffected, and so is streaming:
+   * partial arguments are parsed from the raw text, never through a schema.
+   *
+   * `T` is an assertion, not a guarantee. The emitted schema constrains
+   * nothing, so nothing checks the model's output against `T` — only that it is
+   * JSON. Validate it in `execute` and hand the model back an error it can fix,
+   * the way it would any other bad argument. `describe()` is where you tell it
+   * the format; with no constraints to read, that prose is all it gets.
+   */
+  json<T = JsonValue>(): SchemaBuilder<T>;
 } = {
   string: () => make<string>(leaf({ kind: "string" })),
   number: () => make<number>(leaf({ kind: "number" })),
@@ -476,4 +595,54 @@ export const s: {
     make<Infer<(typeof members)[number]>>(
       leaf({ kind: "union", members: members.map(definitionOf) }),
     ),
+  json: <T>() => make<T>(leaf({ kind: "json" })),
 };
+
+/**
+ * Whether a schema can be sent under a provider's strict mode.
+ *
+ * False exactly when a `json()` node is somewhere inside it. Strict mode's
+ * bargain is that every node constrains its value; an unconstrained one has no
+ * spelling there, and sending it anyway is a 400 naming a path.
+ *
+ * Derived from the tree rather than declared alongside it, because the two
+ * would drift: a field added to a tool's input a year from now would need
+ * whoever adds it to know that a flag somewhere else describes it. Adding the
+ * field is the whole of turning strict off.
+ */
+export function supportsStrict(schema: AnySchema): boolean {
+  const definition = definitions.get(schema);
+  // A schema built by hand rather than with `s` — `questionSchema` in
+  // `ai/Agent.ts`, the merged one in `services/mcp`. There is no tree to walk,
+  // and both are the strict subset by construction, so `true` is both the right
+  // answer and the one they had before this function existed.
+  if (!definition) return true;
+  return strictNode(definition.node);
+}
+
+/**
+ * Enumerated rather than defaulted, so that a node kind added later cannot
+ * inherit "strict" by omission — which is the failure that shows up as a 400
+ * from the provider rather than as a type error here.
+ *
+ * Needs no cycle guard: a definition tree is built bottom-up out of finished
+ * builders, so nothing in it can refer to something still being constructed.
+ */
+function strictNode(node: SchemaNode): boolean {
+  switch (node.kind) {
+    case "string":
+    case "number":
+    case "boolean":
+    case "literal":
+    case "enum":
+      return true;
+    case "object":
+      return Object.values(node.shape).every((child) => strictNode(child.node));
+    case "array":
+      return strictNode(node.item.node);
+    case "union":
+      return node.members.every((member) => strictNode(member.node));
+    case "json":
+      return false;
+  }
+}

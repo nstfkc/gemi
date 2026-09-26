@@ -6,6 +6,10 @@ import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
 import { toResponsesInput } from "./providers/request";
+// The real builder, imported alongside `schemaOf` below rather than instead of
+// it: the tests in "strict mode follows the schema" are about what `s` produces,
+// so a hand-built stand-in would assert nothing there.
+import { s } from "./Schema";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
 import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
@@ -1154,6 +1158,137 @@ describe("namespaces", () => {
     expect(groupOf(first)).toEqual([{ name: "crm", tools: ["refundOrder"] }]);
     // Constructed second, and the one that would have overwritten the other.
     expect(groupOf(second)).toEqual([{ name: "billing", tools: ["refundOrder"] }]);
+  });
+});
+
+/**
+ * `strict` is not something an app sets. It is read off the tool's own input
+ * schema, because the schema is the only thing that knows: strict mode requires
+ * every node to constrain its value, and `s.json()` constrains nothing.
+ *
+ * Asserted here, at the provider boundary, rather than on `supportsStrict`
+ * alone — a correct derivation that never reaches the request is the bug this
+ * would otherwise miss.
+ */
+describe("strict mode follows the schema", () => {
+  const toolWith = (name: string, inputSchema: Schema<any>) =>
+    AgentTool.create({
+      name,
+      description: "x",
+      inputSchema,
+      outputSchema: anything(),
+      execute: async () => ({}),
+    });
+
+  const specFor = async (inputSchema: Schema<any>) => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [toolWith("t", inputSchema)],
+    });
+    await agent.stream({ messages: [], req }).result();
+    return (provider.calls[0].tools as any[])[0];
+  };
+
+  test("a tool built from the strict subset is sent strict", async () => {
+    expect(await specFor(s.object({ id: s.string() }))).toMatchObject({ strict: true });
+  });
+
+  test("a tool whose input holds an s.json() is sent with strict off", async () => {
+    const spec = await specFor(
+      s.object({ definition: s.json().describe("A kyte ApplicationDefinition") }),
+    );
+    expect(spec.strict).toBe(false);
+    // The rest of the tool is untouched: the schema still goes out, and the
+    // description is what the model reads the format off.
+    expect(spec.parameters).toEqual({
+      type: "object",
+      properties: { definition: { description: "A kyte ApplicationDefinition" } },
+      required: ["definition"],
+      additionalProperties: false,
+    });
+  });
+
+  test("one unconstrained field does not turn strict off for a sibling tool", async () => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [
+        toolWith("plain", s.object({ id: s.string() })),
+        toolWith("loose", s.object({ doc: s.json() })),
+      ],
+    });
+    await agent.stream({ messages: [], req }).result();
+
+    expect((provider.calls[0].tools as any[]).map((tool) => [tool.name, tool.strict])).toEqual([
+      ["plain", true],
+      ["loose", false],
+    ]);
+  });
+
+  test("a hand-built schema stays strict, having no tree to read", async () => {
+    // Every other test in this file uses `schemaOf`, and `Agent.ask` ships one.
+    // Refusing to answer for a foreign schema would have broken all of them.
+    expect(await specFor(stringField("pattern"))).toMatchObject({ strict: true });
+  });
+
+  test("an output schema carries its own answer to the provider", async () => {
+    const run = async (output: Schema<any>) => {
+      const provider = fakeProvider([finish()]);
+      await Agent.create({ name: "a", provider, output }).stream({ messages: [], req }).result();
+      return provider.calls[0].output;
+    };
+
+    expect(await run(s.object({ label: s.string() }))).toMatchObject({ strict: true });
+    expect(await run(s.object({ doc: s.json() }))).toMatchObject({ strict: false });
+  });
+
+  /**
+   * An agent whose whole answer is a free-form document — the shape a UI
+   * generator returns. Worth an end-to-end test rather than trusting the two
+   * halves above: the final answer goes through `safeParse`, and a node that
+   * dropped keys it had not declared would quietly trim the document.
+   */
+  test("a free-form output survives the parse with its arbitrary keys intact", async () => {
+    const document = {
+      state: { count: 0, "weird-key": [1, "two", { deep: null }] },
+      root: ["div", { id: "x" }, [["span", {}, ["hi"]]]],
+    };
+    const text = JSON.stringify({ definition: document });
+    const provider = fakeProvider([
+      // Split mid-document, so the first snapshot below is genuinely partial.
+      { type: "output-delta", delta: text.slice(0, 30) },
+      { type: "output-delta", delta: text.slice(30) },
+      finish(),
+    ]);
+    const agent = Agent.create({
+      name: "ui",
+      provider,
+      output: s.object({ definition: s.json().describe("A kyte ApplicationDefinition") }),
+    });
+
+    const events: any[] = [];
+    const run = agent.stream({ messages: [], req });
+    for await (const event of run) events.push(event);
+    const result = await run.result();
+
+    expect(result.output).toEqual({ definition: document });
+    // Not merely equal: the parse hands the very object back, so what the app
+    // reads is what arrived.
+    expect(result.output.definition.state["weird-key"][2]).toEqual({ deep: null });
+
+    // Streaming is untouched by the schema — a snapshot is `bestEffortParse` of
+    // the raw text, which is what lets a client render the document while the
+    // model is still writing it.
+    const snapshots = events.filter((event) => event.type === "output-delta");
+    expect(snapshots).toHaveLength(2);
+    // Cut at `{"definition":{"state":{"count` — a key with no value yet, which
+    // the repair drops. A partial document is a readable one, which is the
+    // whole reason a client binds to these.
+    expect(snapshots[0].snapshot).toEqual({ definition: { state: {} } });
+    expect(snapshots.at(-1).snapshot).toEqual({ definition: document });
   });
 });
 
