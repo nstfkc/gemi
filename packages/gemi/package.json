@@ -49,7 +49,7 @@
   },
   "scripts": {
     "lint": "oxlint",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p ide/typescript-plugin/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json && tsc --noEmit -p ide/typescript-plugin/tsconfig.json",
     "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:ts-plugin && bun run build:client-types && bun run build:augmentation",
     "build:core": "bun ./scripts/build.ts",
     "build:bin": "bun build --outdir=./dist/bin --target=bun --external=vite --external=react-dom --external=react/jsx-runtime --external=bun --external=sharp --external=@azure/storage-blob --external=typescript --sourcemap ./bin/gemi.ts ./bin/orm-generator.ts && bun ./scripts/prepare-bin.ts",
