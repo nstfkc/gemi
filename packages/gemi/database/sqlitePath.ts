@@ -110,6 +110,11 @@ export function resolveSqliteUrl(
 
   // An absolute path says exactly what it means; there is nothing to resolve
   // and nothing the two tools could disagree about.
+  //
+  // Unobservable, and kept anyway: `path.resolve` ignores its base for an
+  // absolute segment, so the `from === to` check below reaches the same answer
+  // and no test can tell the two apart. This states the intent where a reader
+  // looks for it, and saves a `statSync` on every connection that has one.
   if (path.isAbsolute(split.file)) {
     return { url };
   }
