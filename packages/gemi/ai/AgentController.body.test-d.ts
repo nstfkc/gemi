@@ -45,10 +45,24 @@ class PlainController extends AgentController<typeof pageAgent> {
   agent = pageAgent;
 }
 
+/**
+ * ONE ROUTE KEY PER TEST FILE, AND NOT A PLAUSIBLE ONE.
+ *
+ * This augmentation is global to the program, not local to this file, so two
+ * test files declaring the same key are two declarations of one property —
+ * `TS2717`, whose message prints the two types identically because the classes
+ * behind them merely share a name, followed by errors inside `expectTypeOf`
+ * assertions that read as though the thing under test broke.
+ *
+ * It costs nothing to avoid and is confusing to diagnose, so the keys name the
+ * file rather than the thing. `/page-builder` was the first spelling here and
+ * `ai/useChat.test-d.ts` picked it independently, which is exactly how this
+ * goes wrong.
+ */
 declare module "../client/rpc" {
   interface RPC {
-    "/page-builder": AgentRouteRPC<typeof PageBuilderController>;
-    "/plain": AgentRouteRPC<typeof PlainController>;
+    "/controller-body": AgentRouteRPC<typeof PageBuilderController>;
+    "/controller-body-plain": AgentRouteRPC<typeof PlainController>;
   }
 }
 
@@ -78,23 +92,25 @@ describe("a controller that declares its body", () => {
 
 describe("useChat reads it back off the route", () => {
   test("takes the body the controller declared", () => {
-    expectTypeOf<UseChatParams<"/page-builder">["body"]>().toEqualTypeOf<PageBody | undefined>();
+    expectTypeOf<UseChatParams<"/controller-body">["body"]>().toEqualTypeOf<PageBody | undefined>();
   });
 
   test("so a field the controller does not declare is refused", () => {
     // @ts-expect-error `tenantId` is not part of this controller's body.
-    const params: UseChatParams<"/page-builder"> = { body: { pageId: "p1", tenantId: "t1" } };
+    const params: UseChatParams<"/controller-body"> = { body: { pageId: "p1", tenantId: "t1" } };
     void params;
   });
 
   test("and a missing required field is refused too", () => {
     // @ts-expect-error `pageId` is required.
-    const params: UseChatParams<"/page-builder"> = { body: { selectedComponent: "hero" } };
+    const params: UseChatParams<"/controller-body"> = { body: { selectedComponent: "hero" } };
     void params;
   });
 
   test("a route whose controller declares no body still takes anything", () => {
-    const params: UseChatParams<"/plain"> = { body: { whatever: 1, nested: { ok: true } } };
+    const params: UseChatParams<"/controller-body-plain"> = {
+      body: { whatever: 1, nested: { ok: true } },
+    };
     void params;
   });
 });
