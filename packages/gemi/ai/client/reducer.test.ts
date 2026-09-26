@@ -367,6 +367,52 @@ describe("the rest of the event union", () => {
     ]);
   });
 
+  /**
+   * A run cut off by the output ceiling has no answer to show.
+   *
+   * `snapshot` is `bestEffortParse` of the text so far, which closes whatever
+   * brackets are open — so the last partial looks like a whole document, and
+   * completing it here presented a half-written object as the finished one. The
+   * server withholds the output part on `length` for that reason; the client
+   * held the more convincing version of the same lie.
+   */
+  test("a length finish drops the partial output instead of completing it", () => {
+    const cut = fold(initialChatState(), [
+      {
+        seq: 0,
+        event: {
+          type: "output-delta",
+          messageId: "m1",
+          delta: '{"state":{"a":1},"components":[{"tag":"div"',
+          // What the repair produces: valid JSON, and only half the document.
+          snapshot: { state: { a: 1 }, components: [{ tag: "div" }] },
+        },
+      },
+      { seq: 1, event: { type: "message-end", messageId: "m1", finishReason: "length" } },
+    ]);
+
+    expect(cut.messages[0]!.content).toEqual([]);
+    expect(cut.messages[0]!.finishReason).toBe("length");
+  });
+
+  test("and leaves everything else on the message alone", () => {
+    const cut = fold(initialChatState(), [
+      { seq: 0, event: { type: "text-delta", messageId: "m1", delta: "Working on it." } },
+      {
+        seq: 1,
+        event: {
+          type: "output-delta",
+          messageId: "m1",
+          delta: "{",
+          snapshot: { half: true },
+        },
+      },
+      { seq: 2, event: { type: "message-end", messageId: "m1", finishReason: "length" } },
+    ]);
+
+    expect(cut.messages[0]!.content).toEqual([{ type: "text", text: "Working on it." }]);
+  });
+
   test("an error clears pending, so awaiting-input cannot be true alongside it", () => {
     const state = fold(at(7), [
       {
@@ -666,10 +712,7 @@ describe("nesting tolerates a stream it joined late", () => {
     const state = fold(initialChatState(), NESTED.slice(5));
 
     expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]!.content.map((part) => part.type)).toEqual([
-      "tool-result",
-      "text",
-    ]);
+    expect(state.messages[0]!.content.map((part) => part.type)).toEqual(["tool-result", "text"]);
     expect(state.finishReason).toBe("stop");
   });
 
@@ -789,11 +832,14 @@ describe("a tool that runs a sub-agent", () => {
       { seq: 4, event: nested({ type: "text-delta", messageId: "n1", delta: "one" }) },
       {
         seq: 5,
-        event: nested({ type: "text-delta", messageId: "n2", delta: "two" }, {
-          runId: "nr_2",
-          agent: "legal",
-          label: "checking terms",
-        }),
+        event: nested(
+          { type: "text-delta", messageId: "n2", delta: "two" },
+          {
+            runId: "nr_2",
+            agent: "legal",
+            label: "checking terms",
+          },
+        ),
       },
       { seq: 6, event: nested({ type: "text-delta", messageId: "n1", delta: "!" }) },
     ]);
@@ -935,34 +981,43 @@ describe("nesting two levels deep", () => {
     {
       seq: 6,
       event: nested(
-        nested({ type: "message-start", messageId: "d1", role: "assistant" }, {
-          toolCallId: "tc_9",
-          runId: "nr_2",
-          agent: "web",
-          label: "reading the pricing page",
-        }),
+        nested(
+          { type: "message-start", messageId: "d1", role: "assistant" },
+          {
+            toolCallId: "tc_9",
+            runId: "nr_2",
+            agent: "web",
+            label: "reading the pricing page",
+          },
+        ),
       ),
     },
     {
       seq: 7,
       event: nested(
-        nested({ type: "text-delta", messageId: "d1", delta: "$40 a seat." }, {
-          toolCallId: "tc_9",
-          runId: "nr_2",
-          agent: "web",
-          label: "reading the pricing page",
-        }),
+        nested(
+          { type: "text-delta", messageId: "d1", delta: "$40 a seat." },
+          {
+            toolCallId: "tc_9",
+            runId: "nr_2",
+            agent: "web",
+            label: "reading the pricing page",
+          },
+        ),
       ),
     },
     {
       seq: 8,
       event: nested(
-        nested({ type: "run-end", runId: "nr_2", finishReason: "stop" }, {
-          toolCallId: "tc_9",
-          runId: "nr_2",
-          agent: "web",
-          label: "reading the pricing page",
-        }),
+        nested(
+          { type: "run-end", runId: "nr_2", finishReason: "stop" },
+          {
+            toolCallId: "tc_9",
+            runId: "nr_2",
+            agent: "web",
+            label: "reading the pricing page",
+          },
+        ),
       ),
     },
   ];

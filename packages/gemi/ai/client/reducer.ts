@@ -303,7 +303,8 @@ function reduce<T extends ToolShapes, O>(
           messages: [],
         };
         const next = applyNested(run, nestedEvent, now);
-        const nested = index === -1 ? [...runs, next] : runs.map((r, i) => (i === index ? next : r));
+        const nested =
+          index === -1 ? [...runs, next] : runs.map((r, i) => (i === index ? next : r));
         return { ...part, nested };
       });
     }
@@ -360,9 +361,21 @@ function reduce<T extends ToolShapes, O>(
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         finishReason: event.finishReason,
-        content: message.content.map((part) =>
-          part.type === "output" && part.partial ? { ...part, partial: false } : part,
-        ),
+        content:
+          // A run cut off by the output ceiling has no answer, and the partial
+          // output part is dropped rather than completed.
+          //
+          // `snapshot` is `bestEffortParse` of the text so far, which closes
+          // whatever brackets are open — so the last partial looks like a whole
+          // document, and stamping it `partial: false` here presented a
+          // half-written object as the finished one. The server already
+          // withholds the output part on `length` for that reason; without this
+          // the two disagreed, and the client held the more convincing lie.
+          event.finishReason === "length"
+            ? message.content.filter((part) => !(part.type === "output" && part.partial))
+            : message.content.map((part) =>
+                part.type === "output" && part.partial ? { ...part, partial: false } : part,
+              ),
       }));
 
     case "usage": {
@@ -743,7 +756,10 @@ function appendReasoning<T extends ToolShapes, O>(
   if (last && last.type === "reasoning" && last.id === id) {
     return [...content.slice(0, -1), { ...last, text: (last.text ?? "") + delta }];
   }
-  return [...content, id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta }];
+  return [
+    ...content,
+    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
+  ];
 }
 
 function upsert<T extends ToolShapes, O>(

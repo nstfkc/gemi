@@ -26,7 +26,10 @@ import type {
  * agent loop only ever calls `safeParse` and `toJSONSchema`, so a fake keeps
  * these tests independent of the builder's own progress.
  */
-function schemaOf<T>(validate: (value: any) => string[], json: any = { type: "object" }): Schema<T> {
+function schemaOf<T>(
+  validate: (value: any) => string[],
+  json: any = { type: "object" },
+): Schema<T> {
   const schema = {
     toJSONSchema: () => json,
     parse(value: unknown) {
@@ -230,10 +233,7 @@ describe("reasoning parts", () => {
   test("a provider that reports no id still gets its text rendered", async () => {
     // Azure does not always send one. The text is what a UI shows, so it is
     // kept; it just cannot be echoed back, which `reasoningItem` documents.
-    const provider = fakeProvider([
-      { type: "reasoning-delta", delta: "quiet" },
-      finish(),
-    ]);
+    const provider = fakeProvider([{ type: "reasoning-delta", delta: "quiet" }, finish()]);
     const result = await greetAgent(provider).stream({ messages: [], req }).result();
     expect(partsOf(result.messages, "reasoning")).toEqual([{ type: "reasoning", text: "quiet" }]);
   });
@@ -473,7 +473,12 @@ describe("an approval", () => {
         req,
         turn: {
           toolResults: [
-            { toolCallId: "c1", signature: first.pending[0].signature, approve: false, reason: "too late" },
+            {
+              toolCallId: "c1",
+              signature: first.pending[0].signature,
+              approve: false,
+              reason: "too late",
+            },
           ],
         },
       })
@@ -492,7 +497,11 @@ describe("an approval", () => {
     const provider = fakeProvider([{ type: "text-delta", delta: "ok" }, finish()]);
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const result = await agent
-      .stream({ messages: first.result.messages, req, turn: { text: "actually, what is my balance?" } })
+      .stream({
+        messages: first.result.messages,
+        req,
+        turn: { text: "actually, what is my balance?" },
+      })
       .result();
 
     expect(refundCalls).toEqual([]);
@@ -704,7 +713,10 @@ describe("an approval", () => {
  * second is refused — which is the point, and not what these tests are about.
  */
 async function askQuestion() {
-  const { agent } = approvalAgent([toolCall("c1", "ask", { question: "which invoice?" }), finish()]);
+  const { agent } = approvalAgent([
+    toolCall("c1", "ask", { question: "which invoice?" }),
+    finish(),
+  ]);
   const run = agent.stream({ messages: [], req, turn: { text: "refund something" } });
   const { events, done } = collect(run);
   const result = await run.result();
@@ -1085,9 +1097,9 @@ describe("skills", () => {
       description: "…",
       tools: [grep],
     });
-    expect(() =>
-      Agent.create({ name: "x", provider: fakeProvider(), tools: [shadow] }),
-    ).toThrow(/reserved/);
+    expect(() => Agent.create({ name: "x", provider: fakeProvider(), tools: [shadow] })).toThrow(
+      /reserved/,
+    );
   });
 
   test("two tools may not share a name, because the client discriminates on it", () => {
@@ -1166,10 +1178,7 @@ describe("namespaces", () => {
  * The plumbing existed on `ProviderStreamParams` and had no way in from an app.
  */
 describe("maxOutputTokens and temperature", () => {
-  const sent = async (
-    create: Record<string, unknown> = {},
-    run: Record<string, unknown> = {},
-  ) => {
+  const sent = async (create: Record<string, unknown> = {}, run: Record<string, unknown> = {}) => {
     const provider = fakeProvider([finish()]);
     const agent = Agent.create({ name: "a", provider, ...create });
     await agent.stream({ messages: [], req, ...run }).result();
@@ -1196,9 +1205,20 @@ describe("maxOutputTokens and temperature", () => {
   });
 
   test("a temperature of 0 is sent, rather than read as absent", async () => {
-    // `??` and not `||`: zero is the most likely value an app picks for a
-    // generation whose shape matters, and the falsy test would drop it.
     expect(await sent({ temperature: 0 })).toMatchObject({ temperature: 0 });
+  });
+
+  test("and a per-run 0 overrides a non-zero agent value", async () => {
+    // The case that actually pins `??` over `||` in the merge. The test above
+    // passes either way — nothing is set per run, so the operator never sees a
+    // zero on its left — which is what a first version of these tests claimed
+    // to cover and did not.
+    expect(await sent({ temperature: 0.7 }, { temperature: 0 })).toMatchObject({
+      temperature: 0,
+    });
+    expect(await sent({ maxOutputTokens: 8000 }, { maxOutputTokens: 0 })).toMatchObject({
+      maxOutputTokens: 0,
+    });
   });
 
   test("a sub-agent takes its own, not the caller's", async () => {
@@ -1292,7 +1312,31 @@ describe("a run cut off by the output ceiling", () => {
     ).toEqual([]);
   });
 
-  test("and does not report an error, because the app set the cap", async () => {
+  test("withholds the output for a schema that would have rejected the prefix too", async () => {
+    // Before this, a truncated run fell through to `safeParse`, and a schema
+    // with required keys among the missing ones raised a schema-mismatch error.
+    // One answer for every schema now: no output, and a finish reason saying
+    // why. Asserted with a schema that does reject, since `anything()` cannot
+    // tell the two behaviours apart.
+    const strict = schemaOf<any>((value) =>
+      value && typeof value === "object" && "components" in value ? [] : ["components: required"],
+    );
+    const provider = fakeProvider([
+      { type: "output-delta", delta: '{"state":{"a":1}' },
+      { type: "finish", reason: "length", usage: usage(10, 5) },
+    ]);
+    const agent = Agent.create({ name: "gen", provider, output: strict });
+    const run = agent.stream({ messages: [], req });
+    const events: any[] = [];
+    for await (const event of run) events.push(event);
+    const result = await run.result();
+
+    expect(result.output).toBeUndefined();
+    expect(result.finishReason).toBe("length");
+    expect(events.filter((event) => event.type === "error")).toEqual([]);
+  });
+
+  test("and does not report an error for a schema that would have accepted it", async () => {
     // `finishReason` is the channel for "not an error, and not a finished
     // answer" — the argument `max-steps` already makes.
     const { events } = await truncatedRun("length");
@@ -1321,10 +1365,7 @@ describe("a run cut off by the output ceiling", () => {
  * whole point of several of these is to count how many times that provider was
  * called.
  */
-function nestingTool(
-  name: string,
-  body: (ctx: any, input: any) => Promise<unknown>,
-) {
+function nestingTool(name: string, body: (ctx: any, input: any) => Promise<unknown>) {
   return AgentTool.create({
     name,
     description: "Delegate to another agent",
@@ -1357,10 +1398,7 @@ function answeringAgent(name: string, text: string) {
 
 /** A sub-agent whose first step asks the user something. */
 function askingAgent(name: string, question: string, ...rest: any[]) {
-  const provider = fakeProvider(
-    [toolCall("s1", "ask", { question }), finish()],
-    ...rest,
-  );
+  const provider = fakeProvider([toolCall("s1", "ask", { question }), finish()], ...rest);
   return { provider, agent: Agent.create({ name, provider, tools: [askUser] }) };
 }
 
@@ -1573,11 +1611,10 @@ describe("resuming a tool whose sub-agent asked a question", () => {
    */
   test("replays the finished sub-run from the transcript instead of running it again", async () => {
     const finished = answeringAgent("researcher", "eleven");
-    const asking = askingAgent(
-      "reviewer",
-      "ship it?",
-      [{ type: "text-delta", delta: "shipped" }, finish()],
-    );
+    const asking = askingAgent("reviewer", "ship it?", [
+      { type: "text-delta", delta: "shipped" },
+      finish(),
+    ]);
     const bodies: boolean[] = [];
 
     const plan = nestingTool("plan", async (ctx) => {
@@ -1721,11 +1758,10 @@ describe("resuming a tool whose sub-agent asked a question", () => {
   });
 
   test("a runAgent after the escalating one has not run on turn one, and runs on turn two", async () => {
-    const asking = askingAgent(
-      "asker",
-      "which region?",
-      [{ type: "text-delta", delta: "emea then" }, finish()],
-    );
+    const asking = askingAgent("asker", "which region?", [
+      { type: "text-delta", delta: "emea then" },
+      finish(),
+    ]);
     const later = answeringAgent("worker", "filed");
 
     const plan = nestingTool("plan", async (ctx) => {
@@ -1854,11 +1890,10 @@ describe("resuming a tool whose sub-agent asked a question", () => {
 
 describe('onPending: "deny"', () => {
   test("refuses the sub-agent's question and lets the sub-run finish", async () => {
-    const sub = askingAgent(
-      "researcher",
-      "which region?",
-      [{ type: "text-delta", delta: "assuming emea" }, finish()],
-    );
+    const sub = askingAgent("researcher", "which region?", [
+      { type: "text-delta", delta: "assuming emea" },
+      finish(),
+    ]);
     const research = nestingTool("research", async (ctx) => {
       const run = await ctx.runAgent(sub.agent, { prompt: "find it", onPending: "deny" });
       return { heard: textOf(run.messages[run.messages.length - 1]) };
@@ -1895,11 +1930,10 @@ describe('onPending: "deny"', () => {
   });
 
   test("stays denied all the way down, so a grandchild cannot ask either", async () => {
-    const grandchild = askingAgent(
-      "specialist",
-      "which region?",
-      [{ type: "text-delta", delta: "assuming emea" }, finish()],
-    );
+    const grandchild = askingAgent("specialist", "which region?", [
+      { type: "text-delta", delta: "assuming emea" },
+      finish(),
+    ]);
     const relay = nestingTool("relay", async (ctx) => ({
       // Asks to escalate, and is overruled: the promise made to the caller two
       // levels up is that nothing from this subtree reaches the user.
@@ -1945,11 +1979,10 @@ describe('onPending: "deny"', () => {
 describe("a sibling tool running beside an escalating one", () => {
   test("keeps its result, and the transcript has no call without one", async () => {
     grepCalls.length = 0;
-    const sub = askingAgent(
-      "researcher",
-      "which region?",
-      [{ type: "text-delta", delta: "emea" }, finish()],
-    );
+    const sub = askingAgent("researcher", "which region?", [
+      { type: "text-delta", delta: "emea" },
+      finish(),
+    ]);
     const research = nestingTool("research", async (ctx) => {
       const run = await ctx.runAgent(sub.agent, { prompt: "find it" });
       return { heard: textOf(run.messages[run.messages.length - 1]) };
@@ -1977,7 +2010,11 @@ describe("a sibling tool running beside an escalating one", () => {
     const pending = (events.find((event) => event.type === "awaiting-input") as any)
       .pending as PendingToolCall[];
     const nextProvider = fakeProvider([{ type: "text-delta", delta: "all done" }, finish()]);
-    const nextAgent = Agent.create({ name: "lead", provider: nextProvider, tools: [research, grep] });
+    const nextAgent = Agent.create({
+      name: "lead",
+      provider: nextProvider,
+      tools: [research, grep],
+    });
     const second = await nextAgent
       .stream({
         messages: first.messages,
@@ -1997,7 +2034,9 @@ describe("a sibling tool running beside an escalating one", () => {
 
     // What the provider was handed on the next turn: every call answered.
     const sent = nextProvider.calls[0].messages.flatMap((message) => message.content);
-    const calls = sent.filter((part: any) => part.type === "tool-call").map((part: any) => part.toolCallId);
+    const calls = sent
+      .filter((part: any) => part.type === "tool-call")
+      .map((part: any) => part.toolCallId);
     const answered = sent
       .filter((part: any) => part.type === "tool-result")
       .map((part: any) => part.toolCallId);

@@ -1,9 +1,5 @@
 import type { HttpRequest } from "../http";
-import type {
-  AgentProvider,
-  ProviderToolNamespace,
-  ProviderToolSpec,
-} from "./AgentProvider";
+import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { Infer, Schema } from "./Schema";
 import {
   consumeNestedRun,
@@ -162,10 +158,7 @@ export interface ToolContext {
    * makes; it is written here in plain words rather than solved with a
    * checkpoint API, because that is a much larger feature than this one.
    */
-  runAgent<A extends AnyAgent>(
-    agent: A,
-    params?: RunAgentParams,
-  ): Promise<NestedRunResult>;
+  runAgent<A extends AnyAgent>(agent: A, params?: RunAgentParams): Promise<NestedRunResult>;
 }
 
 /**
@@ -314,9 +307,7 @@ export class PendingEscalation extends Error {
   readonly nested: NestedRun;
 
   constructor(params: { pending: PendingToolCall[]; path: string[]; nested: NestedRun }) {
-    super(
-      `A nested agent run is waiting on the user for ${params.pending.length} tool call(s).`,
-    );
+    super(`A nested agent run is waiting on the user for ${params.pending.length} tool call(s).`);
     this.name = "PendingEscalation";
     this.pending = params.pending;
     this.path = params.path;
@@ -499,7 +490,11 @@ const questionSchema = {
     return result.value;
   },
   safeParse(value: unknown) {
-    if (typeof value !== "object" || value === null || typeof (value as any).question !== "string") {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as any).question !== "string"
+    ) {
       return { ok: false as const, errors: ["question: expected a string"] };
     }
     return { ok: true as const, value: { question: (value as any).question } };
@@ -537,12 +532,7 @@ export class ToolNamespace<
    */
   readonly deferred: boolean;
 
-  private constructor(params: {
-    name: Name;
-    description: string;
-    tools: T;
-    deferred?: boolean;
-  }) {
+  private constructor(params: { name: Name; description: string; tools: T; deferred?: boolean }) {
     this.name = params.name;
     this.description = params.description;
     this.tools = params.tools;
@@ -711,8 +701,14 @@ export interface CreateAgentParams<
    * Passed to the provider unchanged. Lower is steadier, which is worth having
    * for a generation whose shape matters more than its phrasing.
    *
-   * Dropped by a provider whose model does not accept it, the way `reasoning`
-   * is — the newer reasoning models refuse the parameter outright.
+   * SENT WHENEVER SET, and not capability-gated the way `reasoning` is.
+   * `ProviderCapabilities` has no flag for it and `buildResponsesRequest` has no
+   * test — which matters because the newer reasoning models reject the
+   * parameter outright, so setting this for one is a 400 rather than a quietly
+   * degraded request. That is the same bargain `output` takes in `request.ts`:
+   * an explicit choice is sent and the API gets to say no, because silently
+   * dropping one leaves an app believing something about its request that is
+   * not true.
    */
   temperature?: number;
 }
@@ -946,10 +942,7 @@ export class Agent<
       maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
       temperature: params.temperature ?? this.config.temperature,
     };
-    return new AgentRunImpl(config, params) as unknown as AgentRun<
-      ToolShapesOf<T>,
-      OutputOf<O>
-    >;
+    return new AgentRunImpl(config, params) as unknown as AgentRun<ToolShapesOf<T>, OutputOf<O>>;
   }
 }
 
@@ -982,7 +975,10 @@ function toolSpec(resolved: ResolvedTool): ProviderToolSpec {
 function lowerTools(
   entries: readonly ToolEntry[],
   skills: readonly Skill[],
-): { registry: Map<string, ResolvedTool>; providerTools: (ProviderToolSpec | ProviderToolNamespace)[] } {
+): {
+  registry: Map<string, ResolvedTool>;
+  providerTools: (ProviderToolSpec | ProviderToolNamespace)[];
+} {
   const registry = new Map<string, ResolvedTool>();
   const providerTools: (ProviderToolSpec | ProviderToolNamespace)[] = [];
 
@@ -1057,9 +1053,7 @@ function skillTool(skill: Skill): AnyAgentTool {
     // should not read twelve files to answer "hello".
     execute: async () => {
       const body =
-        typeof skill.instructions === "function"
-          ? await skill.instructions()
-          : skill.instructions;
+        typeof skill.instructions === "function" ? await skill.instructions() : skill.instructions;
       const sections = [body];
       for (const file of skill.files ?? []) {
         sections.push(`--- ${file} ---\n${await readSkillFile(file)}`);
@@ -1883,7 +1877,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "reasoning-delta": {
           appendReasoning(message, event.id, event.delta);
-          this.emit({ type: "reasoning-delta", messageId: message.id, delta: event.delta, id: event.id });
+          this.emit({
+            type: "reasoning-delta",
+            messageId: message.id,
+            delta: event.delta,
+            id: event.id,
+          });
           break;
         }
         case "output-delta": {
@@ -1973,9 +1972,21 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // half-written page with nothing to distinguish it from a finished one.
     //
     // So a run that hit the ceiling produces no `output` part and ends with
-    // `finishReason: "length"`. No error is emitted: the app set the cap, and
-    // the finish reason is the channel for "not an error, and not a finished
-    // answer" — the same argument `max-steps` makes in the `FinishReason` type.
+    // `finishReason: "length"`, which is the channel for "not an error, and not
+    // a finished answer" — the argument `max-steps` already makes in the
+    // `FinishReason` type.
+    //
+    // No error is emitted, and that is a deliberate change rather than a
+    // consequence of the cap. `length` does not mean the app set one: the
+    // provider reports it from the model's own ceiling too, which is how this
+    // was reachable before `maxOutputTokens` existed at all. Before this, a
+    // truncated run fell through to `safeParse`, and a schema with required
+    // keys among the missing ones failed it and raised a schema-mismatch error.
+    // That diagnostic is gone on purpose — it described the truncation as a
+    // model mistake, and it never fired for a schema loose enough to accept the
+    // repaired prefix, which is the case that actually needed saying. What
+    // replaces it is one answer for every schema: no output, and a finish
+    // reason that says why.
     const truncated = outcome.reason === "length";
     if (this.config.output && outputText && !outcome.error && !truncated) {
       const parsed = this.config.output.safeParse(bestEffortParse(outputText));
@@ -2082,7 +2093,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           name: call.name,
           input: parsed.value,
           kind,
-          signature: signPendingCall(this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value)),
+          signature: signPendingCall(
+            this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value),
+          ),
           ...(this.pathPrefix.length > 0 ? { path: [...this.pathPrefix] } : {}),
         });
         continue;
@@ -2119,7 +2132,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       );
     }
 
-    await raceAbort(Promise.all(running).then(() => undefined), this.controller.signal);
+    await raceAbort(
+      Promise.all(running).then(() => undefined),
+      this.controller.signal,
+    );
     return pending;
   }
 
@@ -2365,11 +2381,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // and honouring it would replay a first turn the sub-agent has already
       // had. The persisted transcript already contains it.
       messages: resuming ? recorded.messages : (params.messages ?? []),
-      turn: resuming
-        ? { toolResults: mine }
-        : params.prompt
-          ? { text: params.prompt }
-          : undefined,
+      turn: resuming ? { toolResults: mine } : params.prompt ? { text: params.prompt } : undefined,
       req: this.params.req,
       // The same scope, down the whole tree. A sub-agent runs on behalf of the
       // caller who started the parent — that is the only reason it is allowed
@@ -3385,7 +3397,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         return reject(`"${name}" is approved, not answered: the server produces its result.`);
       }
       const schema = resolved.tool.outputSchema;
-      const parsed = schema ? schema.safeParse(answer.output) : { ok: true as const, value: answer.output };
+      const parsed = schema
+        ? schema.safeParse(answer.output)
+        : { ok: true as const, value: answer.output };
       if (parsed.ok === false) {
         return {
           type: "tool-result",
@@ -3622,5 +3636,7 @@ function appendReasoning(message: AgentMessage, id: string | undefined, delta: s
     last.text = (last.text ?? "") + delta;
     return;
   }
-  message.content.push(id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta });
+  message.content.push(
+    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
+  );
 }
