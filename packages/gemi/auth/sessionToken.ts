@@ -1,7 +1,8 @@
 import { createHmac, randomBytes } from "node:crypto";
 
 /**
- * Session tokens, and the one-time move off the old ones.
+ * Session tokens: minting them, and telling them from the computable ones they
+ * replaced.
  *
  * ## The old token was computable
  *
@@ -20,10 +21,11 @@ import { createHmac, randomBytes } from "node:crypto";
  * token is not verified against the secret on the way in — it is looked up —
  * so rotating `SECRET` changes new tokens and signs nobody out.
  *
- * The prefix is how a token that predates this is recognised: an old one is 64
- * hex characters and never starts with `v2.`. `AuthManager.getSession` refuses
- * it without looking it up, so the rows still holding old tokens grant nothing
- * whether or not they have been deleted.
+ * The prefix is the whole test, and it is all a prefix: `isSessionToken` reads
+ * nothing else, so anything not starting with `v2.` is refused — an old token,
+ * which was bare hex, and any other string alike. `AuthManager.getSession`
+ * refuses it without looking it up, so the rows still holding old tokens grant
+ * nothing whether or not they have been deleted.
  */
 export const SESSION_TOKEN_PREFIX = "v2.";
 

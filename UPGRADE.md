@@ -2,8 +2,9 @@
 
 This release fixes session and account-recovery tokens that could be computed
 by anyone who knew a user's email. **Check `SECRET` is set before you deploy,
-and expect every user to sign in once more.** No code has to change unless you
-stub `UserProvider.findSession` in your own tests.
+and expect every user to sign in once more.** Almost no code has to change —
+the two `UserProvider` notes below cover the exceptions, if you stub
+`findSession` or override `updateSession` yourself.
 
 ## Session tokens are minted, and a sign-in never extends someone else's session — security
 
@@ -50,11 +51,22 @@ them:
 DELETE FROM "Session" WHERE token NOT LIKE 'v2.%';
 ```
 
-**If you stub `UserProvider.findSession` in tests**, return what a real row
-has: a token starting with `v2.`, and `expiresAt`/`absoluteExpiresAt` more
-than half of `sessionExpiresInHours` away. Otherwise `getSession` refuses the
-token, or extends the session through `updateSession`, which a stub usually
-doesn't have.
+**If you stub `UserProvider.findSession` in tests**, two things matter and they
+are separate. The token the test *asks* with has to start with `v2.`:
+`getSession` checks its argument and returns before the lookup, so a stub that
+returns a `v2.` row is no help if the call passes a bare one. And the row it
+*returns* needs `expiresAt`/`absoluteExpiresAt` more than half of
+`sessionExpiresInHours` away, or `getSession` counts the session as spent, or
+slides it through `updateSession` — which a stub usually doesn't have either.
+
+**If you override `UserProvider.updateSession`**, `UpdateSessionArgs` no longer
+carries `absoluteExpiresAt`. It only ever arrived when a legacy session was
+being retired, and nothing retires one now. An override that wrote it when
+present is simply never asked to again; one that took it as required stops
+typechecking. `absoluteExpiresAt` is stamped once, at creation, and nothing
+moves it afterwards — it is what bounds a session whose owner never goes idle,
+so a provider that slid it along with `expiresAt` would mean the cap never
+arrives.
 
 ## Signing out revokes the header transport too, and no longer answers `401`
 

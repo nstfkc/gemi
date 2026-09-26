@@ -8135,7 +8135,11 @@ this.get(DashboardController, "index").middleware(["auth"]);
 Requests without a valid `access_token` are rejected with an `AuthenticationError`:
 a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
 a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
-view's loader refuses the same way. See [Middleware](./middleware.md) for the full DSL
+view's loader refuses the same way, with one difference worth knowing: the middleware takes
+the token from the `access_token` cookie **or** the `access_token` header, while `Auth.user()`
+reads the cookie alone. On a route carrying `auth` that gap is invisible, because the
+middleware has already put the user on the request context; on a route without it, a client
+that authenticates by header is refused. See [Middleware](./middleware.md) for the full DSL
 (`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
 role enforcement.
 
