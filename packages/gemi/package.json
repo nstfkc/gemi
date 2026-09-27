@@ -56,7 +56,7 @@
     "build:client": "rm -rf dist/client dist/testing dist/ai/client dist/chunks && vite build -c vite.client.config.mts",
     "build:plugin": "vite build -c vite.plugin.config.mts",
     "build:ts-plugin": "bun ./scripts/build-ts-plugin.ts",
-    "build:types": "tsc",
+    "build:types": "tsc -p tsconfig.build.json",
     "build:client-types": "tsc -p tsconfig.browser.json",
     "test": "bun --bun vitest",
     "test:types": "vitest run --typecheck.only",

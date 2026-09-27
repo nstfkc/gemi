@@ -1,3 +1,64 @@
+# Upgrading from 0.64 to 0.65
+
+## The union of every view path is exported as `ViewPaths`
+
+`Link` became overloaded in 0.63 so that it could accept an external URL as well
+as a route, and an overloaded component has no single `ComponentProps`. So
+`ComponentProps<typeof Link>["href"]`, which an app on 0.62 could use to name every
+view path, stopped compiling — `Property 'href' does not exist on type '{}'`, the
+same error the 0.63 → 0.64 notes below show. 0.64 exported `LinkProps` to replace
+it, but `LinkProps` takes the path as a type parameter, and the union to put there
+was not exported: the map behind it is internal.
+
+```ts
+import type { ViewPaths } from "gemi/client";
+
+// Every view path the app declares. `LinkProps<ViewPaths>["href"]` is the same
+// type, if you would rather derive it.
+function BackLink({ to }: { to: ViewPaths }) { /* ... */ }
+```
+
+Two things about it are worth knowing before you put it in a signature.
+
+**It is `never` in a file where the app's route augmentation does not resolve.**
+`ViewPaths` is built from an interface `gemi.d.ts` augments against
+`@/app/http/routes/view`, so a shared package in a monorepo, an app on a `src/`
+layout, an app using a different alias and a playground all see an empty union
+rather than a permissive one. A component in a shared package declaring `to:
+ViewPaths` compiles there and fails at every call site with "not assignable to
+type `never`". That is not new — `Link` itself is unusable in those files for the
+same reason — but it is the first time the type has a name you can put in your
+own code, so it is the first time it will be read as a bug in yours.
+
+**Its members are route patterns, not URLs.** `/orgs/:orgId/reports` is a member.
+It is what `Link`, `Redirect`, `useNavigate` and `Url` take, alongside the
+`params` that fill it in; it is not something to put in an `href` directly.
+
+## Navigating to a path built at runtime compiles again — behaviour unchanged
+
+`push`, `replace` and the prefetcher accept a path your code built — what
+`useIntendedUrl()` returns, a redirect target off an API response — and that
+stopped compiling as soon as an app declared its first parameterised route:
+`TS2554: Expected 2 arguments, but got 1`. It is fixed, and nothing about how a
+route is navigated changed.
+
+One narrowing comes with it. The options for a runtime-built path take
+`params?: Record<string, string | number | undefined>`, so passing an **array**
+is now a `TS2322` where it used to compile:
+
+```ts
+const path: string = "/docs/:rest*/edit";
+push(path, { params: { rest: ["a", "b"] } });   // TS2322 since 0.65
+push(path, { params: { rest: "a/b" } });        // and this is what you wanted
+```
+
+That call was already broken. `applyParams` does `String(value)`, so the array
+produced `/docs/a,b/edit` — a comma, not a path. The spelling on the second line
+is the one that builds the url you wanted, and it compiled before this release
+too; what changed is that the array no longer does. Only runtime-typed paths are
+affected: a declared wildcard route still takes `params: { rest: string[] }` and
+still requires it.
+
 # Upgrading from 0.63 to 0.64
 
 This release fixes session and account-recovery tokens that could be computed
