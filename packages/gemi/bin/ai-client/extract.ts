@@ -250,6 +250,17 @@ class TypeMapper {
 
   private union(type: TS.UnionType, name: string, where: string): TypeRef {
     const { ts } = this;
+    // `JsonValue` — what `s.json()` infers to — is a union of every JSON shape,
+    // so it reaches the unsupported branch below and warns "a union that is not
+    // told apart by one string member". That is true and misdescribes it: the
+    // field is free-form on purpose, and raw JSON is the right answer rather than
+    // a fallback. Same mapping, without telling an app its deliberate choice
+    // could not be mapped.
+    //
+    // Matched by alias name, which is all that is available and is enough: an
+    // app's own `JsonValue` would map to `json` here too, and that is the answer
+    // either way — only the warning differs.
+    if (type.aliasSymbol?.name === "JsonValue") return { kind: "json" };
     let nullable = false;
     const members = type.types.filter((member) => {
       if (member.flags & ts.TypeFlags.Null) nullable = true;

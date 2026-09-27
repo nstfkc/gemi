@@ -50,6 +50,12 @@
     "**/*.test.ts",
     "**/*.test.tsx",
     "**/*.spec.ts",
-    "**/*.spec.tsx"
+    "**/*.spec.tsx",
+    // Emitted two test-d declaration files into `dist/` as well. Safe to exclude
+    // here: this config is only ever used to emit (`build:client-types`), never
+    // to check — `vitest --typecheck` and `bun run typecheck` both go through
+    // `tsconfig.json`, which still sees them. See `tsconfig.build.json`.
+    "**/*.test-d.ts",
+    "**/*.test-d.tsx"
   ]
 }

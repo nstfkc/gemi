@@ -33,6 +33,19 @@ type OutputOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { output: in
   : unknown;
 
 /**
+ * The extra body fields the route's controller declared, or an open record for
+ * one that declared none.
+ *
+ * The fallback is not just for an undeclared body: it also covers a route
+ * whose `RPC` entry predates this field, which is every entry in an app that
+ * has not regenerated its types yet. Falling back to the old signature there
+ * is the difference between an upgrade that compiles and one that does not.
+ */
+type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer B }
+  ? B
+  : Record<string, unknown>;
+
+/**
  * What the UI is waiting on.
  *
  * `awaiting-input` is its own state rather than a flavour of idle: the run is
@@ -78,9 +91,24 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * `runId` of its own. Defaults to true.
    */
   attach?: boolean;
-  /** Merged into the request body, for anything the agent's controller reads
-   *  off the request that is not a message. */
-  body?: Record<string, unknown>;
+  /**
+   * Merged into the request body, and read back on the server in
+   * `instructions(req, { body })` and on every tool's `ctx.body`.
+   *
+   * Typed by the controller: a controller written as `AgentController<typeof
+   * agent, { pageId: string }>` has this checked against that shape, and one
+   * that declares no body leaves it the open record it has always been. It
+   * stays optional either way — a required field of a declared body is enforced
+   * when `body` is given, not by forcing every caller to pass one.
+   *
+   * The four names the turn envelope owns — `turn`, `clientRunId`, `threadId`,
+   * `messages` — are written after this, so naming one here sends it and is
+   * ignored rather than replacing the framework's. It is also not stripped from
+   * what the server reads first: `threadId` and `turn` are taken off the top
+   * level before the app's fields are separated out, which is why the envelope
+   * has to win rather than merely be tidied up afterwards.
+   */
+  body?: BodyOf<P>;
   headers?: Record<string, string>;
   onFinish?: (message: AgentMessage<ToolsOf<P>, OutputOf<P>>) => void;
   onError?: (error: AgentError) => void;
@@ -675,14 +703,34 @@ export function useChat<P extends keyof AgentRoutes>(
 
       try {
         const payload: AgentRequestBody = {
+          // The app's fields FIRST, so the envelope below wins every collision.
+          // Spread last, `body: { threadId: someRecordId }` replaced the real
+          // thread id on the wire — and the server reads `body.threadId`,
+          // `turn`, `clientRunId` and `messages` straight off the top level
+          // before it ever separates the app's fields out, so a stateless chat
+          // was routed into the threaded branch and answered
+          // `thread_not_found`. These four names belong to the turn envelope;
+          // an app naming one now sends it and is ignored, which is what the
+          // docblock on `body` has always claimed.
+          // Cast for the same reason `Body` is `object`: an `interface` has no
+          // index signature, and a spread of an unresolved type parameter is
+          // refused without one.
+          ...(body as Record<string, unknown> | undefined),
           turn,
           clientRunId,
-          ...(stateRef.current!.threadId
-            ? { threadId: stateRef.current!.threadId }
-            : // Stripped of the progress logs, which no part of the server
-              // reads and which every later turn would otherwise re-upload.
-              { messages: forWire(history) }),
-          ...body,
+          // BOTH KEYS, ALWAYS, one of them `undefined` — which `JSON.stringify`
+          // omits, so the wire carries exactly one of them as before.
+          //
+          // Written as a ternary that produced one key or the other, only that
+          // one overwrote the app's `body`, and the other was left to it. So a
+          // stateless turn sending `body: { threadId: someRecordId }` still put
+          // a real-looking thread id on the wire and answered
+          // `thread_not_found` — the exact case the reorder was supposed to
+          // close, with a comment claiming it had.
+          threadId: stateRef.current!.threadId,
+          // Stripped of the progress logs, which no part of the server reads and
+          // which every later turn would otherwise re-upload.
+          messages: stateRef.current!.threadId ? undefined : forWire(history),
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {
