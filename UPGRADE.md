@@ -3,11 +3,12 @@
 ## The union of every view path is exported as `ViewPaths`
 
 `Link` became overloaded in 0.63 so that it could accept an external URL as well
-as a route, and an overloaded component has no single `ComponentProps` — so
-`ComponentProps<typeof Link>["href"]`, which an app on 0.62 could use to name
-every view path, came out `never`. 0.64 exported `LinkProps` to replace it, but
-`LinkProps` takes the path as a type parameter, and the union to put there was
-not exported: the map behind it is internal.
+as a route, and an overloaded component has no single `ComponentProps`. So
+`ComponentProps<typeof Link>["href"]`, which an app on 0.62 could use to name every
+view path, stopped compiling — `Property 'href' does not exist on type '{}'`, the
+same error the 0.63 → 0.64 notes below show. 0.64 exported `LinkProps` to replace
+it, but `LinkProps` takes the path as a type parameter, and the union to put there
+was not exported: the map behind it is internal.
 
 ```ts
 import type { ViewPaths } from "gemi/client";

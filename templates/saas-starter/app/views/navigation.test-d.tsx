@@ -48,8 +48,14 @@ describe("ViewPaths", () => {
     void nowhere;
   });
 
-  test("is the domain Link accepts, so the two cannot drift", () => {
+  test("is the domain Link accepts, in both directions, so the two cannot drift", () => {
+    // `toEqualTypeOf` alone pins only that `ViewPaths` is no WIDER than what
+    // `Link` takes. `Link` is typed against a private map rather than against
+    // `ViewPaths`, so it could gain a route this union does not name and nothing
+    // would notice — which is the drift worth watching.
     expectTypeOf<LinkProps<ViewPaths>["href"]>().toEqualTypeOf<ViewPaths>();
+    expectTypeOf<ViewPaths>().toExtend<LinkProps<ViewPaths>["href"]>();
+    expectTypeOf<LinkProps<ViewPaths>["href"]>().toExtend<ViewPaths>();
   });
 });
 
