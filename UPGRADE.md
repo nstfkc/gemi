@@ -1,5 +1,39 @@
 # Upgrading from 0.64 to 0.65
 
+## The union of every view path is exported as `ViewPaths`
+
+`Link` became overloaded in 0.63 so that it could accept an external URL as well
+as a route, and an overloaded component has no single `ComponentProps`. So
+`ComponentProps<typeof Link>["href"]`, which an app on 0.62 could use to name every
+view path, stopped compiling — `Property 'href' does not exist on type '{}'`, the
+same error the 0.63 → 0.64 notes below show. 0.64 exported `LinkProps` to replace
+it, but `LinkProps` takes the path as a type parameter, and the union to put there
+was not exported: the map behind it is internal.
+
+```ts
+import type { ViewPaths } from "gemi/client";
+
+// Every view path the app declares. `LinkProps<ViewPaths>["href"]` is the same
+// type, if you would rather derive it.
+function BackLink({ to }: { to: ViewPaths }) { /* ... */ }
+```
+
+Two things about it are worth knowing before you put it in a signature.
+
+**It is `never` in a file where the app's route augmentation does not resolve.**
+`ViewPaths` is built from an interface `gemi.d.ts` augments against
+`@/app/http/routes/view`, so a shared package in a monorepo, an app on a `src/`
+layout, an app using a different alias and a playground all see an empty union
+rather than a permissive one. A component in a shared package declaring `to:
+ViewPaths` compiles there and fails at every call site with "not assignable to
+type `never`". That is not new — `Link` itself is unusable in those files for the
+same reason — but it is the first time the type has a name you can put in your
+own code, so it is the first time it will be read as a bug in yours.
+
+**Its members are route patterns, not URLs.** `/orgs/:orgId/reports` is a member.
+It is what `Link`, `Redirect`, `useNavigate` and `Url` take, alongside the
+`params` that fill it in; it is not something to put in an `href` directly.
+
 ## Navigating to a path built at runtime compiles again — behaviour unchanged
 
 `push`, `replace` and the prefetcher accept a path your code built — what

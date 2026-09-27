@@ -7,6 +7,7 @@ import {
   usePrefetch,
   type ExternalLinkProps,
   type LinkProps,
+  type ViewPaths,
 } from "gemi/client";
 
 /**
@@ -130,6 +131,30 @@ describe("useNavigate over a declared route", () => {
 
     // @ts-expect-error — `orgId` is missing.
     usePrefetch()("/partial/:orgId/reports");
+  });
+});
+
+describe("ViewPaths", () => {
+  test("names the app's own routes, and nothing else", () => {
+    // Asserted against a real route rather than `not.toEqualTypeOf<never>()`,
+    // for the reason the `ExternalLinkProps` test below gives: a negative
+    // assertion passes for the wrong reasons.
+    expectTypeOf<"/dashboard">().toExtend<ViewPaths>();
+    expectTypeOf<"/partial/:orgId/reports">().toExtend<ViewPaths>();
+
+    // @ts-expect-error — no such route.
+    const nowhere: ViewPaths = "/nowhere";
+    void nowhere;
+  });
+
+  test("is the domain Link accepts, in both directions, so the two cannot drift", () => {
+    // `toEqualTypeOf` alone pins only that `ViewPaths` is no WIDER than what
+    // `Link` takes. `Link` is typed against a private map rather than against
+    // `ViewPaths`, so it could gain a route this union does not name and nothing
+    // would notice — which is the drift worth watching.
+    expectTypeOf<LinkProps<ViewPaths>["href"]>().toEqualTypeOf<ViewPaths>();
+    expectTypeOf<ViewPaths>().toExtend<LinkProps<ViewPaths>["href"]>();
+    expectTypeOf<LinkProps<ViewPaths>["href"]>().toExtend<ViewPaths>();
   });
 });
 

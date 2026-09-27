@@ -63,8 +63,11 @@ export interface ProviderStreamParams {
   systemPrompt?: string;
   tools?: (ProviderToolSpec | ProviderToolNamespace)[];
   /** Set when the agent declares an `output` schema; the provider turns it into
-   *  whatever its own strict-JSON parameter is. */
-  output?: { name: string; schema: JSONSchema };
+   *  whatever its own strict-JSON parameter is. `strict` comes from the schema —
+   *  false when it contains an `s.json()` node, which strict mode cannot
+   *  express — and is required rather than defaulted so that a new caller has to
+   *  answer it instead of inheriting a 400. */
+  output?: { name: string; schema: JSONSchema; strict: boolean };
   /** Optional: silently dropped by a provider whose `capabilities.reasoning`
    *  is false, since a model that cannot reason should not fail a request. */
   reasoning?: ReasoningEffort;

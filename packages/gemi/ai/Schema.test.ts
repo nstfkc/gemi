@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { s, type JSONSchema } from "./Schema";
+import { s, supportsStrict, type JSONSchema } from "./Schema";
 
 /**
  * The invariants OpenAI's strict structured output actually enforces, checked
@@ -390,6 +390,330 @@ describe("strict-mode invariants", () => {
         },
       ],
     });
+  });
+});
+
+describe("json()", () => {
+  test("emits the empty schema, which constrains nothing", () => {
+    expect(s.json().toJSONSchema()).toEqual({});
+  });
+
+  test("carries a description, the only thing the model is told about it", () => {
+    expect(s.json().describe("A kyte ApplicationDefinition").toJSONSchema()).toEqual({
+      description: "A kyte ApplicationDefinition",
+    });
+  });
+
+  test("does not grow an anyOf when made optional or nullable", () => {
+    // `{}` already admits null. Widening it would emit `anyOf: [{}, null]`,
+    // whose second branch is a narrower repeat of its first.
+    expect(s.json().optional().toJSONSchema()).toEqual({});
+    expect(s.json().nullable().toJSONSchema()).toEqual({});
+  });
+
+  test.each([
+    ["an object with arbitrary keys", { a: 1, b: { c: [true, null] } }],
+    ["a mixed-type tuple", ["div", { id: "x" }, ["hello"]]],
+    ["a bare scalar", "text"],
+    ["a number", 0],
+    ["false", false],
+    ["null", null],
+    ["a deeply recursive document", { t: "a", c: [{ t: "b", c: [{ t: "c", c: [] }] }] }],
+  ])("passes %s straight through", (_what, value) => {
+    expect(s.json().parse(value)).toEqual(value);
+  });
+
+  test("hands back the very same object, not a copy", () => {
+    // The agent loop signs the parsed input and later verifies the signature
+    // against it. A rebuild would also have to be exactly faithful; identity
+    // cannot be anything else.
+    const value = { state: {}, root: ["div", {}, []] };
+    expect(s.json().parse(value)).toBe(value);
+  });
+
+  test("keeps a key whose value is an empty object, which a rebuild would drop", () => {
+    const value = { state: { count: 0 }, empty: {} };
+    expect(s.json().parse(value)).toEqual(value);
+  });
+
+  describe("rejects what JSON cannot carry", () => {
+    test.each([
+      ["a function", () => {}, "a function"],
+      ["a bigint", 1n, "a bigint"],
+      ["a symbol", Symbol("x"), "a symbol"],
+      ["NaN", NaN, "NaN"],
+      ["Infinity", Infinity, "Infinity"],
+    ])("%s", (_what, value, reported) => {
+      expect(s.json().safeParse(value)).toEqual({
+        ok: false,
+        errors: [`expected a JSON value, got ${reported}`],
+      });
+    });
+
+    test("naming where it found it", () => {
+      const result = s.json().safeParse({ root: ["div", { onClick: () => {} }] });
+      expect(result).toEqual({
+        ok: false,
+        errors: ["root[1].onClick: expected a JSON value, got a function"],
+      });
+    });
+
+    test("a cycle, rather than walking it forever", () => {
+      const value: any = { name: "root" };
+      value.self = value;
+      expect(s.json().safeParse(value)).toEqual({
+        ok: false,
+        errors: ["self: expected a JSON value, got a circular reference"],
+      });
+    });
+
+    test("but not the same object twice side by side, which is not a cycle", () => {
+      // The walk has to un-mark a node on the way out. Left marked, this is
+      // reported as a cycle — and `JSON.stringify` writes it out quite happily.
+      const shared = { shared: true };
+      expect(s.json().safeParse({ a: shared, b: shared })).toEqual({
+        ok: true,
+        value: { a: shared, b: shared },
+      });
+    });
+
+    test("undefined, where the field is not optional", () => {
+      expect(s.object({ doc: s.json() }).safeParse({})).toEqual({
+        ok: false,
+        errors: ["doc: expected a JSON value, got undefined"],
+      });
+    });
+
+    test("but drops the key instead when it is", () => {
+      expect(s.object({ doc: s.json().optional() }).parse({})).toEqual({});
+      expect(s.object({ doc: s.json().optional() }).parse({ doc: null })).toEqual({});
+    });
+  });
+
+  test("allows undefined below the root, where JSON.stringify has its own answer", () => {
+    // A dropped property and a `null` element are what `JSON.stringify` does
+    // with these. Refusing them here would mean refusing an object built by
+    // spreading optional fields.
+    const value = { a: undefined, b: [undefined] };
+    expect(s.json().safeParse(value)).toEqual({ ok: true, value });
+  });
+
+  test("checks what a toJSON returns, not the object behind it", () => {
+    // Writing a `toJSON` is exactly what one does about a field JSON cannot
+    // carry, so walking the wrapper's own fields refused values
+    // `JSON.stringify` serializes without complaint.
+    const money = { cents: 5n, toJSON: () => "5" };
+    expect(s.json().safeParse({ total: money })).toEqual({
+      ok: true,
+      value: { total: money },
+    });
+    expect(JSON.stringify({ total: money })).toBe('{"total":"5"}');
+  });
+
+  test("still refuses a value whose toJSON returns something JSON cannot carry", () => {
+    const bad = { toJSON: () => ({ nested: () => {} }) };
+    expect(s.json().safeParse({ bad })).toEqual({
+      ok: false,
+      errors: ["bad.nested: expected a JSON value, got a function"],
+    });
+  });
+
+  /**
+   * A `toJSON` is arbitrary code, so every one of these was a way to make the
+   * walk not terminate. The cycle guard sits above the `toJSON` call for that
+   * reason; below it, the first case here hung `safeParse` forever and the second
+   * threw `RangeError` out of a function documented to return a result.
+   *
+   * Two of them are values `JSON.stringify` would have written as `{}`. Refusing
+   * them is an over-rejection, taken deliberately: the alternative is following
+   * arbitrary code until it stops, and no real value has this shape.
+   */
+  describe("refuses a toJSON that will not terminate", () => {
+    test("two objects whose toJSON return each other", () => {
+      const a: any = {};
+      const b: any = {};
+      a.toJSON = () => b;
+      b.toJSON = () => a;
+
+      // Terminates, and says something. The value is sendable in principle —
+      // `JSON.stringify(a)` is `"{}"` — so this is the deliberate trade.
+      expect(s.json().safeParse(a)).toEqual({
+        ok: false,
+        errors: ["toJSON: expected a JSON value, got a function"],
+      });
+    });
+
+    test("a toJSON returning a fresh object that points back at it", () => {
+      const a: any = {};
+      a.toJSON = () => ({ self: a });
+
+      expect(s.json().safeParse(a)).toEqual({
+        ok: false,
+        errors: ["self: expected a JSON value, got a circular reference"],
+      });
+    });
+
+    test("a toJSON that hands back its own object", () => {
+      const loop: any = {};
+      loop.toJSON = () => loop;
+
+      expect(s.json().safeParse(loop)).toEqual({
+        ok: false,
+        errors: ["expected a JSON value, got a circular reference"],
+      });
+    });
+  });
+
+  test("refuses a toJSON that returns undefined, which is nothing to send", () => {
+    // `JSON.stringify({ toJSON: () => undefined })` is `undefined` — there is no
+    // JSON value at all. `read` guards a bare `undefined` at a json node, and the
+    // `toJSON` path used to walk straight past that guard.
+    expect(s.json().safeParse({ toJSON: () => undefined })).toEqual({
+      ok: false,
+      errors: ["expected a JSON value, got a toJSON that returns undefined"],
+    });
+  });
+
+  test("applies toJSON once per position, as JSON.stringify does", () => {
+    // The replacement is checked with `toJSON` switched off for that position,
+    // which is what stops a chain of them being followed. Its nested values still
+    // get their own.
+    const inner = { cents: 5n, toJSON: () => "5" };
+    const outer = { toJSON: () => ({ nested: inner }) };
+    expect(s.json().safeParse(outer)).toEqual({ ok: true, value: outer });
+  });
+
+  test("allows a value with a toJSON, rather than refusing a Date to catch a Map", () => {
+    const value = { at: new Date("2026-01-01T00:00:00.000Z") };
+    expect(s.json().safeParse(value)).toEqual({ ok: true, value });
+  });
+
+  test("composes as an ordinary field, and the object around it stays sealed", () => {
+    const schema = s.object({
+      name: s.string(),
+      definition: s.json().describe("The UI document"),
+    });
+    expect(schema.toJSONSchema()).toEqual({
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        definition: { description: "The UI document" },
+      },
+      required: ["name", "definition"],
+      additionalProperties: false,
+    });
+  });
+
+  test("is still subject to the surrounding object dropping undeclared keys", () => {
+    const schema = s.object({ definition: s.json() });
+    expect(schema.parse({ definition: { a: 1 }, stray: 2 })).toEqual({ definition: { a: 1 } });
+  });
+
+  test("matches in a union without the other members getting a say", () => {
+    const schema = s.union([s.object({ kind: s.literal("ref"), id: s.string() }), s.json()]);
+    expect(schema.parse({ kind: "ref", id: "r1" })).toEqual({ kind: "ref", id: "r1" });
+    // The literal member fails, the json member cannot — so no "no matching
+    // variant", which is the whole reason to reach for this in a union.
+    expect(schema.parse({ anything: [1, 2] })).toEqual({ anything: [1, 2] });
+  });
+
+  test("is the variant blamed when nothing matches, being the closest", () => {
+    // The only way both members fail: a value that is not JSON at all. The
+    // json node scores as a match here so that the report names the reason the
+    // value was refused, rather than the discriminant of a variant the model
+    // was never aiming at.
+    const schema = s.union([s.object({ kind: s.literal("ref"), id: s.string() }), s.json()]);
+    expect(schema.safeParse(() => {})).toEqual({
+      ok: false,
+      errors: ["no matching variant; closest: expected a JSON value, got a function"],
+    });
+  });
+});
+
+describe("supportsStrict", () => {
+  test("is true for every schema built out of the strict subset", () => {
+    for (const schema of [
+      s.string(),
+      s.number().optional(),
+      s.boolean().nullable(),
+      s.literal("x"),
+      s.enum(["x", "y"]),
+      s.object({}),
+      s.object({ a: s.array(s.object({ b: s.string() })) }),
+      s.union([s.object({ a: s.string() }), s.object({ b: s.number() })]),
+    ]) {
+      expect(supportsStrict(schema), JSON.stringify(schema.toJSONSchema())).toBe(true);
+    }
+  });
+
+  test("is false for a json node, wherever it is buried", () => {
+    for (const schema of [
+      s.json(),
+      s.json().optional(),
+      s.object({ doc: s.json() }),
+      s.array(s.json()),
+      s.array(s.object({ doc: s.json().describe("x") })),
+      s.object({ a: s.object({ b: s.array(s.object({ c: s.json() })) }) }),
+      s.union([s.object({ a: s.string() }), s.object({ b: s.json() })]),
+      s.union([s.object({ a: s.string() }), s.json()]),
+    ]) {
+      expect(supportsStrict(schema), JSON.stringify(schema.toJSONSchema())).toBe(false);
+    }
+  });
+
+  /**
+   * The hole this closes. `McpRegistry.combineSchemas` casts a hand-built object
+   * into `Schema<T>` and spreads `meta.input.toJSONSchema()` into it — so an
+   * `s.json()` field an app declared on an `mcp` route reaches the provider
+   * while the tree that would have reported it is discarded. Every
+   * MCP-projected tool was sent `strict: true` with an empty subschema inside.
+   */
+  test("reads the emitted schema when there is no tree, so a foreign one cannot hide a json node", () => {
+    const merged = {
+      toJSONSchema: () => ({
+        type: "object" as const,
+        properties: {
+          // What `s.json().describe(...)` emits, surviving the merge.
+          definition: { description: "A UI document" },
+          orgId: { type: "string" },
+        },
+        required: ["definition", "orgId"],
+        additionalProperties: false as const,
+      }),
+      parse: (v: unknown) => v,
+      safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+    } as never;
+
+    expect(supportsStrict(merged)).toBe(false);
+  });
+
+  test("finds an unconstrained node at any depth of an emitted schema", () => {
+    const at = (properties: Record<string, unknown>) =>
+      ({
+        toJSONSchema: () => ({ type: "object", properties, required: Object.keys(properties) }),
+        parse: (v: unknown) => v,
+        safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+      }) as never;
+
+    expect(supportsStrict(at({ a: { type: "array", items: {} } }))).toBe(false);
+    expect(supportsStrict(at({ a: { anyOf: [{ type: "string" }, {}] } }))).toBe(false);
+    expect(
+      supportsStrict(at({ a: { type: "object", properties: { b: { description: "x" } } } })),
+    ).toBe(false);
+    // And true when every node says something about its value.
+    expect(supportsStrict(at({ a: { type: "array", items: { type: "string" } } }))).toBe(true);
+  });
+
+  test("answers true for a hand-built schema, which has no tree to walk", () => {
+    // `questionSchema` in `ai/Agent.ts` and the merged one in `services/mcp`
+    // are cast into `Schema<T>` rather than built with `s`. Throwing here would
+    // have broken `Agent.ask` at construction.
+    const foreign = {
+      toJSONSchema: () => ({ type: "object" as const }),
+      parse: (v: unknown) => v,
+      safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+    } as never;
+    expect(supportsStrict(foreign)).toBe(true);
   });
 });
 
