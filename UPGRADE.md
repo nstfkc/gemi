@@ -1,3 +1,36 @@
+# Upgrading from 0.66 to 0.67
+
+## The default `FileSystemDriver` folder moves out of `undefined/`
+
+`new FileSystemDriver()` with no argument used to write to `./undefined/storage`.
+Its constructor default was `` `${process.env.ROOT_DIR}/storage` ``, evaluated
+while `app/config/filesystem.ts` was being read — which happens *before* the
+server sets `ROOT_DIR` — so the string interpolated `undefined` and froze that
+way for the life of the process.
+
+It failed silently, which is why it lasted: reads and writes agreed on the same
+wrong folder, so nothing threw and nothing 404'd. Files simply accumulated in a
+stray `undefined/` directory beside the project.
+
+The folder is now resolved per access from `projectRoot()`, the same rule the
+server computes `ROOT_DIR` from, so an app that configured nothing gets
+`<project>/storage` — the directory it always meant.
+
+**What to do.** If you have a `undefined/` directory at your project root, its
+contents are files this bug put there. Move them into `storage/` and delete it:
+
+```
+mv undefined/storage/* storage/ && rmdir -p undefined/storage
+```
+
+Most apps will find only development uploads there. Nothing needs doing in
+production unless you deployed with the default driver and are serving files it
+wrote.
+
+**If you passed a folder explicitly** — including the
+`new FileSystemDriver(`${process.cwd()}/storage`)` workaround — nothing changes.
+An explicit path still wins and is never overridden.
+
 # Upgrading from 0.65 to 0.66
 
 Additive, with one exception that only touches test code. Nothing in an app's

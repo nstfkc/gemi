@@ -1,20 +1,41 @@
-import type {
-  PutFileOptions,
-  PutFileParams,
-  ReadFileParams,
-  ReadResult,
-} from "./types";
+import type { PutFileOptions, PutFileParams, ReadFileParams, ReadResult } from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
 import { readdir } from "fs/promises";
 import { resolveRange } from "../../../http/range";
-import {
-  FileNotFoundError,
-  RangeNotSatisfiableError,
-} from "../../../http/errors";
+import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
+import { projectRoot } from "../../../support/discover";
 
 export class FileSystemDriver extends FileStorageDriver {
-  constructor(private folderPath: string = `${process.env.ROOT_DIR}/storage`) {
+  private readonly configured?: string;
+
+  constructor(folderPath?: string) {
     super();
+    this.configured = folderPath;
+  }
+
+  /**
+   * Computed per read, not baked into a constructor default.
+   *
+   * This is the second time this exact bug has been written in this repository,
+   * and `LogManager.logsDirPath` carries the first one's post-mortem: a driver
+   * is constructed when `app/config/filesystem.ts` is evaluated, and that
+   * happens *before* the http layer sets `ROOT_DIR`. So the old default,
+   * `` `${process.env.ROOT_DIR}/storage` ``, interpolated `undefined` and froze
+   * it — measured, `new FileSystemDriver().folderPath` was `"undefined/storage"`
+   * with `ROOT_DIR` unset, and stayed `"undefined/storage"` after the server set
+   * it a moment later.
+   *
+   * It fails quietly, which is what makes it worth a comment rather than a
+   * one-line fix: reads and writes both used the same wrong folder, so nothing
+   * threw and nothing 404'd. Files simply accumulated in a stray `undefined/`
+   * directory beside the project, and the only way to notice was to look.
+   *
+   * `projectRoot()` is the same rule `httpProd` computes `ROOT_DIR` from, so an
+   * explicit folder still wins and an app that configured nothing now gets the
+   * directory it always meant.
+   */
+  private get folderPath(): string {
+    return this.configured ?? `${projectRoot()}/storage`;
   }
 
   async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
