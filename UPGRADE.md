@@ -19,10 +19,11 @@ push(path, { params: { rest: "a/b" } });        // and this is what you wanted
 ```
 
 That call was already broken. `applyParams` does `String(value)`, so the array
-produced `/docs/a,b/edit` — a comma, not a path. The spelling that works
-type-checks now and did not before. Only runtime-typed paths are affected: a
-declared wildcard route still takes `params: { rest: string[] }` and still
-requires it.
+produced `/docs/a,b/edit` — a comma, not a path. The spelling on the second line
+is the one that builds the url you wanted, and it compiled before this release
+too; what changed is that the array no longer does. Only runtime-typed paths are
+affected: a declared wildcard route still takes `params: { rest: string[] }` and
+still requires it.
 
 # Upgrading from 0.63 to 0.64
 

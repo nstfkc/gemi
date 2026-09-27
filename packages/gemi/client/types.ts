@@ -77,17 +77,19 @@ export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
  * Distributing, not tupled, and that is the whole of what it buys over the
  * obvious spelling. `[any] extends [ViewPaths]` is an ordinary assignability
  * check with no special rule for `any`, so it answers `true` — and
- * `UrlParser<any>` takes its `string extends T` arm and reports every route's
- * params as required. An `any`-typed path therefore hit the exact `TS2554` this
- * type exists to remove: `JSON.parse(body).to`, a field off an untyped API
- * response, anything that has lost its type on the way here. Distributing sends
- * `any` down both arms, which resolves to `boolean`, which fails `extends true`
- * — the loose branch, which is the right answer for a path nothing knows
- * anything about.
+ * `UrlParser<any>` takes its `string extends T` arm, which is
+ * `Record<string, string>`: not assignable to `Record<string, never>`, so the
+ * required-options branch is chosen. An `any`-typed path therefore hit the exact
+ * `TS2554` this type exists to remove: `JSON.parse(body).to`, a field off an
+ * untyped API response, anything that has lost its type on the way here.
+ * Distributing sends `any` down both arms, which resolves to `boolean`, which
+ * fails `extends true` — the loose branch, which is the right answer for a path
+ * nothing knows anything about.
  *
- * Unions are unaffected, which is why this costs nothing: a union of declared
- * routes distributes to `true | true`, and a mixed one to `boolean`, exactly as
- * the tupled form answered.
+ * Unions are unaffected, which is why this costs nothing. A union of declared
+ * routes distributes to `true | true` and the tupled form answers `true`; a mixed
+ * one distributes to `boolean` and the tupled form answers `false`. Different
+ * types, same branch — only `extends true` is asked, and neither satisfies it.
  *
  * Measured, so the comment does not have to be believed: `any` is the ONLY input
  * the two spellings disagree on. Distributing gives it the loose branch and
