@@ -51,3 +51,12 @@ app/models/prisma-client/
 /dev.db-journal
 /dev.db-wal
 /dev.db-shm
+
+# SQLite's sidecars beside the fixture, which is where the dev server writes now
+# that a relative url resolves against the schema directory. The database itself
+# is NOT here — it is the committed fixture above — but a journal, a WAL and a
+# shared-memory file are pure run artifacts, and unlike the root copy they appear
+# on every `gemi dev` in this template.
+prisma/dev.db-journal
+prisma/dev.db-wal
+prisma/dev.db-shm
