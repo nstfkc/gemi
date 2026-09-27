@@ -285,4 +285,66 @@ describe("requestWithRetry()", () => {
 
     expect(error).toBeInstanceOf(ProviderTimeoutError);
   });
+
+  /**
+   * `retryTimeouts: false` — for a call whose timer bounds the work rather than
+   * the handshake. A measured `gpt-image-2` render at `high`/1536x1024 takes
+   * 117.8s against a 120s default, so this is the difference between one billed
+   * image and three. See `RequestOptions.retryTimeouts`.
+   */
+  test("a timeout is not retried when the caller says a retry would cost twice", async () => {
+    const slept: number[] = [];
+    let calls = 0;
+
+    const error = await requestWithRetry(
+      "https://api.example/images/generations",
+      { method: "POST" },
+      {
+        maxRetries: 2,
+        timeoutMs: 5,
+        retryTimeouts: false,
+        fetchImpl: async (_url, init) => {
+          calls++;
+          return await new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              const e = new Error("aborted");
+              e.name = "AbortError";
+              reject(e);
+            });
+          });
+        },
+        sleep: async (ms) => void slept.push(ms),
+        random: () => 1,
+      },
+    ).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ProviderTimeoutError);
+    // The point of the flag: one render paid for, not three.
+    expect(calls).toBe(1);
+    expect(slept).toEqual([]);
+  });
+
+  test("and that opt-out is narrow — a 429 on the same call is still retried", async () => {
+    // Otherwise the flag reads as "do not retry", and a rate limit would be
+    // surfaced to the user as a failure on a request that never ran at all.
+    const slept: number[] = [];
+    let calls = 0;
+
+    const response = await requestWithRetry(
+      "https://api.example/images/generations",
+      { method: "POST" },
+      {
+        maxRetries: 2,
+        timeoutMs: 0,
+        retryTimeouts: false,
+        fetchImpl: async () => (calls++ === 0 ? res(429, "") : res(200, "ok")),
+        sleep: async (ms) => void slept.push(ms),
+        random: () => 1,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(slept).toEqual([500]);
+  });
 });
