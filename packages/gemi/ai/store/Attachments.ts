@@ -297,6 +297,29 @@ export class ScopedAttachments {
    *
    * Buffers, and says so. `read()` is there for anything large enough that
    * buffering it is the wrong call.
+   *
+   * THIS IS ALSO HOW AN ATTACHMENT OUTLIVES THE RUN, and it is `file()` rather
+   * than `read()` that composes for it:
+   *
+   *     const file = await ctx.attachments.file(id);
+   *     await Storage.put({ name: `pages/${pageId}/hero.png`, body: file });
+   *
+   * `read()` answers a `ReadResult` whose `body` is `ReadableStream | Blob |
+   * null`, and `PutFileParams.body` is `Blob | File | Buffer` — a stream body
+   * has nowhere to go without being drained first.
+   *
+   * Two things that bite on the way out, both silent:
+   *
+   * - **Do not keep a `gemi_att_` id as an app's durable handle to a file.**
+   *   The default record store is `MemoryAttachmentStore`, so the id→object
+   *   mapping dies with the process while the bytes stay in storage. Copy the
+   *   file under a key of the app's own and keep that.
+   * - **Put an extension on that key.** `FileSystemDriver` — the default —
+   *   ignores `contentType` on write and re-derives the type from the stored
+   *   path on read, so an extensionless object serves as
+   *   `application/octet-stream` and an `<img>` pointed at it renders nothing,
+   *   with no error anywhere. `attachmentObjectName` carries one over for this
+   *   module's own writes; an app's key is the app's to name.
    */
   async file(id: string): Promise<File> {
     const record = await this.get(id);
