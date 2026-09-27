@@ -75,15 +75,51 @@ function parseFileTypeString(type: string) {
   }
 }
 
+/** The length of the things that have one — `undefined` for everything else,
+ *  rather than the `undefined` that arithmetic silently turns into `false`. */
+function lengthOf(value: any): number | undefined {
+  if (typeof value === "string" || Array.isArray(value)) return value.length;
+  return undefined;
+}
+
+function isNumber(value: any): value is number {
+  return typeof value === "number" && !Number.isNaN(value);
+}
+
 function validate(ruleName: string) {
   const [rule, param] = ruleName.split(":");
   switch (rule) {
+    /**
+     * Present. Not "non-empty for the two types that happen to have `.length`".
+     *
+     * This used to end in `value?.length > 0`, which is `undefined > 0` — so
+     * `false` — for every value that is not a string, an array or a Blob. A
+     * number failed it. A boolean failed it. A plain object failed it, which on
+     * a typed `HttpRequest<{ theme: { … } }>` is the ordinary case, and the app
+     * saw a 400 on a request that was correct.
+     *
+     * `0` and `false` PASS. They are values someone sent, and a rule called
+     * `required` asks whether the field is there, not whether it is truthy —
+     * conflating those is how a checkbox set to "no" and a quantity of zero get
+     * rejected as missing. Emptiness is still emptiness where the concept
+     * applies: `""` and `[]` fail, as they did before, and so does a zero-byte
+     * upload.
+     *
+     * `{}` passes. It is an object that was sent; whether its contents are
+     * adequate is a question for the rules on its fields, not for this one.
+     */
     case "required":
       return (value: any) => {
         if (value instanceof Blob) {
           return value.size > 0;
         }
-        return value !== null && value !== undefined && value?.length > 0;
+        if (value === null || value === undefined) {
+          return false;
+        }
+        if (typeof value === "string" || Array.isArray(value)) {
+          return value.length > 0;
+        }
+        return true;
       };
     case "password":
       return (value: any) => {
@@ -91,8 +127,7 @@ function validate(ruleName: string) {
         // at least one uppercase letter,
         // at least one lowercase letter and one number
         // at least one special character
-        const passwordRegex =
-          /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).{8,}$/;
+        const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).{8,}$/;
         return passwordRegex.test(value);
       };
 
@@ -102,14 +137,35 @@ function validate(ruleName: string) {
 
         return !Number.isNaN(value);
       };
+    /**
+     * Length, and only length. `min:3` is "at least three characters", never
+     * "at least three".
+     *
+     * ONE NAME, ONE COMPARISON, deliberately. The tempting fix was to overload
+     * these by runtime type — length for a string, magnitude for a number — and
+     * that is the shape `required` was already in: a rule whose meaning depends
+     * on what it is handed, which reads fine until the value's type is not the
+     * one the author pictured. `gte` / `lte` below say which comparison they
+     * make in their names, so nothing has to be inferred.
+     *
+     * Written out rather than left as `value?.length >= n` so that a number
+     * fails here for a stated reason instead of by arithmetic on `undefined`.
+     */
     case "min":
       return (value: any) => {
-        return value?.length >= Number.parseInt(param);
+        const length = lengthOf(value);
+        return length !== undefined && length >= Number.parseInt(param);
       };
     case "max":
       return (value: any) => {
-        return value?.length <= Number.parseInt(param);
+        const length = lengthOf(value);
+        return length !== undefined && length <= Number.parseInt(param);
       };
+    /** Magnitude, for numbers. The counterpart `min` / `max` deliberately are not. */
+    case "gte":
+      return (value: any) => isNumber(value) && value >= Number(param);
+    case "lte":
+      return (value: any) => isNumber(value) && value <= Number(param);
     case "email":
       return (value: any) => {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -139,38 +195,53 @@ function validate(ruleName: string) {
   }
 }
 
+/**
+ * The rule table, for `http/validate.test.ts`.
+ *
+ * Exported under this name rather than as `validate` because it is not part of
+ * the framework's surface — nothing outside this file should be building
+ * predicates by hand — and because a rule table whose only test goes through a
+ * constructed `HttpRequest` is one whose gaps are invisible. The bug this
+ * guards against was a predicate that was wrong for every type but two.
+ */
+export const __validateForTests = validate;
+
 type StringType = "string";
 type NumberType = "number";
 type BooleanType = "boolean";
 type MinLengthType = `min:${number}`;
 type MaxLengthType = `max:${number}`;
+/** Magnitude, for numbers — see `validate`'s `min` case for why these are not
+ *  the same rule wearing different names. */
+type GreaterOrEqualType = `gte:${number}`;
+type LessOrEqualType = `lte:${number}`;
 type RequiredType = "required";
 type FileType = "file";
-type FileTypeType = "fileType:${string}";
-type FileSizeType = "fileSize:${string}";
+// Backticks, not quotes. These two were written with double quotes, which makes
+// them the *literal text* `fileType:${string}` rather than a template literal
+// type — so `fileType:image/png`, the only way anyone would ever write the rule,
+// did not typecheck, while the runtime handled it perfectly well.
+type FileTypeType = `fileType:${string}`;
+type FileSizeType = `fileSize:${string}`;
 type SchemaKey =
   | StringType
   | NumberType
   | BooleanType
   | MinLengthType
   | MaxLengthType
+  | GreaterOrEqualType
+  | LessOrEqualType
   | RequiredType
   | FileType
   | FileTypeType
   | FileSizeType;
 
-export type Schema<T extends Body> = Record<
-  keyof T,
-  Partial<Record<SchemaKey, string>>
->;
+export type Schema<T extends Body> = Record<keyof T, Partial<Record<SchemaKey, string>>>;
 
 export type Body = Record<string, any>;
 export type HttpRequestKind = "view" | "api";
 
-export class HttpRequest<
-  T extends Body = Record<string, never>,
-  Params = Record<string, never>,
-> {
+export class HttpRequest<T extends Body = Record<string, never>, Params = Record<string, never>> {
   kind: HttpRequestKind;
   rawRequest: Request;
   headers: Omit<Headers, "set" | "delete">;
@@ -188,12 +259,7 @@ export class HttpRequest<
    */
   domain: ResolvedDomain | null;
 
-  constructor(
-    req?: Request,
-    params?: any,
-    kind?: HttpRequestKind,
-    routePath?: string,
-  ) {
+  constructor(req?: Request, params?: any, kind?: HttpRequestKind, routePath?: string) {
     if (!req) {
       const _req = RequestContext.getStore().req;
       this.params = _req.params as any;
@@ -270,19 +336,12 @@ export class HttpRequest<
       const body = await this.rawRequest.json();
       inputMap = new Input<T>(body as T);
     }
-    if (
-      this.rawRequest.headers.get("Content-Type") ===
-      "application/x-www-form-urlencoded"
-    ) {
+    if (this.rawRequest.headers.get("Content-Type") === "application/x-www-form-urlencoded") {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       inputMap = new Input<T>(body as T);
     }
 
-    if (
-      this.rawRequest.headers
-        .get("Content-Type")
-        ?.startsWith("multipart/form-data")
-    ) {
+    if (this.rawRequest.headers.get("Content-Type")?.startsWith("multipart/form-data")) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       const _inputMap = new Map<string, any>();
       for (const [key, value] of body.entries()) {
@@ -339,9 +398,7 @@ export class HttpRequest<
       }
     }
 
-    for (const [key, value] of Object.entries(
-      this.refine(input.toJSON()) ?? {},
-    )) {
+    for (const [key, value] of Object.entries(this.refine(input.toJSON()) ?? {})) {
       if (!errors[key]) {
         errors[key] = [];
       }
