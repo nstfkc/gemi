@@ -103,11 +103,16 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * when `body` is given, not by forcing every caller to pass one.
    *
    * The four names the turn envelope owns — `turn`, `clientRunId`, `threadId`,
-   * `messages` — are written after this, so naming one here sends it and is
-   * ignored rather than replacing the framework's. It is also not stripped from
-   * what the server reads first: `threadId` and `turn` are taken off the top
-   * level before the app's fields are separated out, which is why the envelope
-   * has to win rather than merely be tidied up afterwards.
+   * `messages` — are written after this, so naming one here has no effect: the
+   * framework's value replaces yours. Two of them are not even ignored on
+   * arrival: exactly one of `threadId` and `messages` is written as `undefined`
+   * on any given turn — `threadId` on a turn with no thread yet, `messages` once
+   * there is one — and `JSON.stringify` drops the key, so a value you put there
+   * never reaches the server at all. Pick another name for anything it must see.
+   *
+   * The envelope has to win rather than be tidied up afterwards, because
+   * `threadId` and `turn` are read off the top level before the app's fields are
+   * separated out.
    */
   body?: BodyOf<P>;
   headers?: Record<string, string>;
@@ -638,10 +643,15 @@ export function useChat<P extends keyof AgentRoutes>(
           }
         } else if (event.type === "tool-result") {
           // The same guard `onFinish` needs, keyed on what identifies a result.
-          // `seq` catches an ordinary redelivery, but a run replayed from the
-          // top onto a restored transcript is all new to the cursor — and the
-          // reducer upserts a result by `toolCallId`, so a second delivery is
-          // the same value written twice and must not be announced twice.
+          // `seq` catches an ordinary redelivery, but a run replayed from the top
+          // onto a restored transcript is all new to the cursor.
+          //
+          // Deliberately broader than the reducer's own dedupe, which upserts
+          // within one message (`withMessage(state, event.messageId, …)`): a
+          // result redelivered under a different `messageId` becomes a second
+          // part in the transcript, and this still will not announce it. An app
+          // writing to a database here wants the broader rule — announcing once
+          // per `toolCallId` is what makes the write safe to leave un-deduped.
           const had = previous.messages.some((message: AgentMessage) =>
             message.content.some(
               (part) => part.type === "tool-result" && part.toolCallId === event.part.toolCallId,
@@ -749,9 +759,9 @@ export function useChat<P extends keyof AgentRoutes>(
           // `turn`, `clientRunId` and `messages` straight off the top level
           // before it ever separates the app's fields out, so a stateless chat
           // was routed into the threaded branch and answered
-          // `thread_not_found`. These four names belong to the turn envelope;
-          // an app naming one now sends it and is ignored, which is what the
-          // docblock on `body` has always claimed.
+          // `thread_not_found`. These four names belong to the turn envelope, so
+          // an app naming one loses it: overwritten here, and for whichever of
+          // `threadId`/`messages` is `undefined` this turn, dropped from the wire.
           // Cast for the same reason `Body` is `object`: an `interface` has no
           // index signature, and a spread of an unresolved type parameter is
           // refused without one.
