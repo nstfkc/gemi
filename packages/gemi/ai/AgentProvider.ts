@@ -1,7 +1,17 @@
 import type { ReasoningEffort } from "./Agent";
-import { responsesEndpoint, streamResponses, uploadFile, type ResponsesEndpoint } from "./providers/call";
+import {
+  responsesEndpoint,
+  streamResponses,
+  uploadFile,
+  type ResponsesEndpoint,
+} from "./providers/call";
 import { capabilitiesForModel } from "./providers/capabilities";
-import { azureTarget, openAITarget, type AzureConfig, type ProviderConfig } from "./providers/endpoints";
+import {
+  azureTarget,
+  openAITarget,
+  type AzureConfig,
+  type ProviderConfig,
+} from "./providers/endpoints";
 import { normalizeProviderError } from "./providers/errors";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
@@ -258,7 +268,6 @@ export class OpenAIProvider extends AgentProvider {
     return responsesEndpoint(openAITarget(this.config));
   }
 }
-
 
 /**
  * Its own class rather than a flag on `OpenAIProvider`: Azure names the

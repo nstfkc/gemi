@@ -102,6 +102,29 @@ export type {
 // projection, here because an agent's tools are declared beside the agent.
 export { toAgentTools } from "../services/mcp/toAgentTools";
 
+// --- images ---------------------------------------------------------------
+//
+// A separate provider hierarchy from the agent one, deliberately: an image
+// deployment has no `stream()` and `capabilitiesForModel` would grant an
+// unrecognised id every text capability it does not have. See `ImageProvider`.
+export { ImageModel } from "./ImageModel";
+export type {
+  CreateImageModelParams,
+  EditImageParams,
+  GeneratedImage,
+  GenerateImageParams,
+  ImageBackground,
+  ImageFormat,
+  ImageInput,
+  ImageQuality,
+  ImageSize,
+} from "./ImageModel";
+export { AzureOpenAIImageProvider, ImageProvider, OpenAIImageProvider } from "./ImageProvider";
+export type { ImageProviderEditParams, ImageProviderParams } from "./ImageProvider";
+// The failure an app branches on. `code` is the same normalized
+// `AgentErrorCode` a text call reports, so `rate_limited` means one thing.
+export { ImageRequestError } from "./providers/images";
+
 // --- providers ------------------------------------------------------------
 export { AgentProvider, AzureOpenAIProvider, OpenAIProvider } from "./AgentProvider";
 export type {

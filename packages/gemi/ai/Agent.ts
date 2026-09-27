@@ -1145,6 +1145,12 @@ function addUsage(total: Usage, next: Usage | undefined): Usage {
   if (next.cachedInputTokens !== undefined || total.cachedInputTokens !== undefined) {
     merged.cachedInputTokens = (total.cachedInputTokens ?? 0) + (next.cachedInputTokens ?? 0);
   }
+  if (next.imageInputTokens !== undefined || total.imageInputTokens !== undefined) {
+    merged.imageInputTokens = (total.imageInputTokens ?? 0) + (next.imageInputTokens ?? 0);
+  }
+  if (next.imageOutputTokens !== undefined || total.imageOutputTokens !== undefined) {
+    merged.imageOutputTokens = (total.imageOutputTokens ?? 0) + (next.imageOutputTokens ?? 0);
+  }
   return merged;
 }
 

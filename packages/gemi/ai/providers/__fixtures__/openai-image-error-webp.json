@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Invalid value: 'webp'. Supported values are: 'png' and 'jpeg'.",
+    "type": "invalid_request_error",
+    "param": "output_format",
+    "code": "invalid_value"
+  }
+}

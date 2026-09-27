@@ -160,12 +160,14 @@ export function azurePath(apiVersion: string): string {
 /** Overrides for a call whose deadline is not a streaming handshake's. */
 export type TargetDefaults = { timeoutMs?: number };
 
-export function openAITarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
-  const base = (
-    config.baseURL ??
-    env("OPENAI_BASE_URL") ??
-    "https://api.openai.com/v1"
-  ).replace(/\/+$/, "");
+export function openAITarget(
+  config: ProviderConfig,
+  defaults: TargetDefaults = {},
+): ProviderTarget {
+  const base = (config.baseURL ?? env("OPENAI_BASE_URL") ?? "https://api.openai.com/v1").replace(
+    /\/+$/,
+    "",
+  );
 
   return {
     base,
