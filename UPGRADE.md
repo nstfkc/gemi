@@ -1,12 +1,87 @@
 # Upgrading from 0.64 to 0.65
 
+## A relative SQLite `DATABASE_URL` now means what Prisma means by it — behaviour change
+
+`DATABASE_URL=file:./dev.db` used to open two different files. Prisma resolves a
+relative SQLite path against the directory holding the schema, so `prisma migrate`
+wrote `prisma/dev.db`; gemi resolved it against the process working directory and
+opened `./dev.db`, which SQLite then created, empty. Every query failed with
+`no such table` against a database that had connected fine.
+
+gemi resolves it the way Prisma does now. **For most apps this is the fix and
+nothing else**: keep `file:./dev.db` and both tools open `prisma/dev.db`.
+
+Two cases need action.
+
+**If you worked around this by hand.** Anyone who hit it wrote either
+`file:./prisma/dev.db` for gemi, or a second variable pointing the two tools at one
+file. Both stop being workarounds and become wrong: `file:./prisma/dev.db` now
+resolves to `prisma/prisma/dev.db`. gemi refuses to start rather than open the
+empty file — `AmbiguousSqlitePathError`, naming both paths — when the location it
+used to open still holds a database. Point `DATABASE_URL` at `file:./dev.db` and
+delete the extra variable.
+
+**If you keep a second SQLite connection.** Only the url your Prisma datasource
+actually names is resolved. A connection declared under `connections` with some
+other url is left exactly as it was, because Prisma has never migrated it.
+
+Untouched either way: `:memory:` in every spelling, an absolute path, every
+networked dialect, and any app with no `prisma/schema.prisma` or whose datasource
+is not SQLite.
+
+## A run cut off by the output ceiling hands back no output — behaviour change
+
+`Agent.create` takes `maxOutputTokens` and `temperature` now, and a run that hits
+either the cap you set or the model's own ends with `finishReason: "length"` and
+**no `output` value**.
+
+That is a change for an app that declares an `output` schema, whether or not it
+sets a cap — `length` has always been reachable from the model's own ceiling:
+
+- `result().output` is `undefined` on a truncated run. It used to be the
+  best-effort parse of the half-written JSON, which for a loose schema (anything
+  built with `s.json()`) parsed cleanly and was indistinguishable from a finished
+  answer. That is the reason for the change.
+- The schema-mismatch `error` event a truncated prefix used to raise when it
+  failed `safeParse` is gone. One answer for every schema now: no output, and a
+  finish reason that says why.
+
+Branch on `finishReason === "length"` where you were reading `output` or
+listening for that error:
+
+```ts
+const result = await agent.stream({ ... }).result();
+if (result.finishReason === "length") {
+  // Ask again, more compactly. There is no partial answer to salvage.
+}
+```
+
+The transcript agrees with `result()`: a truncated message carries no `output`
+part, and `outputTruncated: true` is set on the `message-end` frame **and on the
+message itself**, so a live client and a transcript restored from `onMessage`
+answer the same way. It is the field to render "the answer was cut short" from,
+and it exists because `finishReason` cannot say it — a step that hits the ceiling
+while also calling a tool closes its message `awaiting-input` or `max-steps`.
+If you have ported the reducer yourself, that is the one frame field to add.
+
+## `ProviderStreamParams.output` requires `strict`
+
+Only relevant if you build a `ProviderStreamParams` yourself — a custom provider,
+a recorded-request harness. `output` went from `{ name, schema }` to
+`{ name, schema, strict }`.
+
+`strict` is derived from the schema rather than chosen: a schema containing an
+`s.json()` node cannot be sent under a provider's strict mode. It is required
+rather than defaulted so that a new caller has to answer it instead of inheriting a
+400 from the API. `supportsStrict(schema)` from `gemi/ai` gives the right value.
+
 ## The union of every view path is exported as `ViewPaths`
 
 `Link` became overloaded in 0.63 so that it could accept an external URL as well
 as a route, and an overloaded component has no single `ComponentProps`. So
 `ComponentProps<typeof Link>["href"]`, which an app on 0.62 could use to name every
 view path, stopped compiling — `Property 'href' does not exist on type '{}'`, the
-same error the 0.63 → 0.64 notes below show. 0.64 exported `LinkProps` to replace
+same error the 0.62 → 0.63 notes below show. 0.64 exported `LinkProps` to replace
 it, but `LinkProps` takes the path as a type parameter, and the union to put there
 was not exported: the map behind it is internal.
 

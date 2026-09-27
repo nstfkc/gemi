@@ -1856,6 +1856,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const outputTruncated = this.outputTruncated;
     this.outputTruncated = false;
     message.finishReason = reason;
+    // On the message and not only on the frame. The frame reaches a live client,
+    // which is half the audience: `onMessage` persists this object and
+    // `result().messages` hands it back, and a transcript restored through
+    // `useChat({ initialMessages })` has nothing else to read. `finishReason`
+    // cannot answer it — a step that ran out of budget while calling a tool
+    // closes `awaiting-input`, which is the case this exists for.
+    if (outputTruncated) message.outputTruncated = true;
     // Before the message is handed to `onMessage` to be persisted and before it
     // reaches `result()` — the two places it stops being written and starts
     // being kept. Every exit lands here, aborted and errored runs included.

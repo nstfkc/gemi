@@ -205,6 +205,27 @@ function specifier(from: string, to: string): string {
 }
 
 /**
+ * gemi's own `JsonValue` — the type `s.json()` infers to — rather than any type
+ * of that name.
+ *
+ * Identified by the file the alias is declared in: `gemi/ai/Schema.ts`, which is
+ * `packages/gemi/ai/Schema.ts` in this repo and `node_modules/gemi/ai/Schema.ts`
+ * in an app, since the package's exports point at source. `.d.ts` is matched too
+ * for an app resolving the built declarations instead.
+ *
+ * `JsonValue` is a common name — Prisma and type-fest each export one — and an
+ * app's own may well be a shape this generator maps to a named type. Matching by
+ * name alone would take that mapping away and say nothing.
+ */
+function isFrameworkJsonValue(type: TS.Type): boolean {
+  const alias = type.aliasSymbol;
+  if (alias?.name !== "JsonValue") return false;
+  return (alias.declarations ?? []).some((declaration) =>
+    /\/gemi\/ai\/Schema\.(d\.)?ts$/.test(declaration.getSourceFile().fileName),
+  );
+}
+
+/**
  * Checker types to the model. Every shape it does not map becomes `json` with
  * a warning naming where it was, so a generated client never silently claims
  * to know a type it does not.
@@ -257,10 +278,12 @@ class TypeMapper {
     // a fallback. Same mapping, without telling an app its deliberate choice
     // could not be mapped.
     //
-    // Matched by alias name, which is all that is available and is enough: an
-    // app's own `JsonValue` would map to `json` here too, and that is the answer
-    // either way — only the warning differs.
-    if (type.aliasSymbol?.name === "JsonValue") return { kind: "json" };
+    // Matched by where the alias is declared, not by its name alone. `JsonValue`
+    // is a common name — Prisma and type-fest both export one — and an app's own
+    // could be a discriminated union or a set of string literals, which this
+    // generator maps to a named type. Suppressing the warning by name would take
+    // that mapping away silently.
+    if (isFrameworkJsonValue(type)) return { kind: "json" };
     let nullable = false;
     const members = type.types.filter((member) => {
       if (member.flags & ts.TypeFlags.Null) nullable = true;

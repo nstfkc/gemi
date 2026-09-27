@@ -27,9 +27,12 @@ export type RemoveGroupPrefix<T extends string> = T extends `${infer P}(${string
  * Not a permissive fallback like `FeatureKey`'s, and deliberately so: widening it
  * to `string` would widen `Redirect`, `useNavigate`, `usePrefetch` and
  * `Url.absolute`, which are typed against this. (`Link` would not move — it is
- * typed against a private map in `Link.tsx` and never names this type, which is
- * the drift the template's type test watches for.) A component in a shared package typed `to: ViewPaths` compiles and then
- * fails at every call site against `never`.
+ * typed against a private map in `Link.tsx` and never names this type. Nothing
+ * asserts the other direction, either: a route added to that private map would
+ * be accepted by `Link` and absent from this union, and the template's type test
+ * cannot see it, because `LinkProps<T>["href"]` is `T` by construction.)
+ * A component in a shared package typed `to: ViewPaths` compiles and then fails
+ * at every call site against `never`.
  *
  * And its members are route **patterns**: `/orgs/:orgId/reports` is one. They go
  * where a path pattern goes, alongside the `params` that fill it in — not into

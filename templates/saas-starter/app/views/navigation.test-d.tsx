@@ -147,14 +147,17 @@ describe("ViewPaths", () => {
     void nowhere;
   });
 
-  test("is the domain Link accepts, in both directions, so the two cannot drift", () => {
-    // `toEqualTypeOf` alone pins only that `ViewPaths` is no WIDER than what
-    // `Link` takes. `Link` is typed against a private map rather than against
-    // `ViewPaths`, so it could gain a route this union does not name and nothing
-    // would notice — which is the drift worth watching.
+  test("is no wider than the domain Link accepts", () => {
+    // ONE DIRECTION, which is all an app can assert. `LinkProps<T>["href"]` is
+    // `T` by construction, so this trips on `T extends keyof Views` and pins that
+    // every member of `ViewPaths` is a route `Link` takes. Measured: adding
+    // `| "/not-a-route"` to `ViewPaths` fails this line.
+    //
+    // The other direction — `Link` gaining a route this union does not name — is
+    // the drift worth watching and is NOT watched here. `Views` is private to
+    // `Link.tsx`, and adding a route to it leaves this file fully green. Asserting
+    // it would mean exporting that map.
     expectTypeOf<LinkProps<ViewPaths>["href"]>().toEqualTypeOf<ViewPaths>();
-    expectTypeOf<ViewPaths>().toExtend<LinkProps<ViewPaths>["href"]>();
-    expectTypeOf<LinkProps<ViewPaths>["href"]>().toExtend<ViewPaths>();
   });
 });
 

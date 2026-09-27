@@ -28,6 +28,7 @@ let classifier: AgentModel;
 let odd: AgentModel;
 let e2e: AgentModel;
 let awkward: AgentModel;
+let jsonValue: AgentModel;
 
 const read = (file: string, exportName: string, name?: string) =>
   extractAgent(ts, { file: `${FIXTURES}/${file}`, exportName }, { cwd: PACKAGE, name });
@@ -38,6 +39,7 @@ beforeAll(async () => {
   classifier = read("support.ts", "classifier");
   odd = read("unsupported.ts", "oddAgent");
   awkward = read("awkward.ts", "awkwardAgent");
+  jsonValue = read("jsonValue.ts", "jsonValueAgent");
   // The agent behind the Swift client's end-to-end server, whose generated
   // file those tests decode real traffic through.
   e2e = extractAgent(
@@ -251,6 +253,40 @@ describe("what it will not pretend to know", () => {
     expect(renderSwift(odd)).toContain(
       'case "branch": self = .branch(try JSONValue(from: decoder))',
     );
+  });
+});
+
+/**
+ * `s.json()` is the one shape that is raw JSON *by design*, so it is the one
+ * shape that must not warn — and the framework type it infers to is called
+ * `JsonValue`, a name Prisma and type-fest each also export.
+ *
+ * Both halves are asserted, because the suppression is a two-sided bet: match
+ * too loosely and an app's own `JsonValue` loses the type it had earned,
+ * silently, which is the failure the generator exists to prevent.
+ */
+describe("a free-form field, and a name that collides with it", () => {
+  test("`s.json()` is raw JSON and says nothing, being the deliberate case", () => {
+    const output = type(jsonValue, "StoreOutput");
+    expect(output.kind === "object" && output.properties.map((p) => [p.key, p.type])).toEqual([
+      ["definition", { kind: "json" }],
+    ]);
+    expect(jsonValue.warnings).toEqual([]);
+  });
+
+  test("an app's own `JsonValue` keeps the mapping it earns", () => {
+    // A string-literal union, which is an enum on the phone. Matching the
+    // framework type by name alone made this `{ kind: "json" }` with no warning:
+    // the app loses `PublishOutputStatus` and is told nothing about it.
+    const output = type(jsonValue, "PublishOutput");
+    expect(output.kind === "object" && output.properties.map((p) => [p.key, p.type])).toEqual([
+      ["status", { kind: "named", name: "PublishOutputStatus" }],
+    ]);
+    expect(type(jsonValue, "PublishOutputStatus")).toEqual({
+      kind: "enum",
+      name: "PublishOutputStatus",
+      values: ["draft", "published", "archived"],
+    });
   });
 });
 

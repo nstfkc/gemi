@@ -16,6 +16,13 @@
   // checking nothing. `bun run typecheck` lost them too. So the emit config is a
   // separate file, and `tsconfig.json` still sees every test.
   //
+  // `ai/example.ts` is here for the same reason and is not a test: it is the
+  // module's acceptance test written as an application, it augments
+  // `../client/rpc` to give itself a route, and nothing imports it. Its docblock
+  // argues the emitted declaration is unreachable from an app — probably true,
+  // and it does not need to be true. Typechecking it is the whole point and
+  // `tsconfig.json` still does; shipping it was never the point.
+  //
   // `exclude` REPLACES the parent's rather than extending it, so the inherited
   // entries are repeated here on purpose. A new exclusion in `tsconfig.json` has
   // to be copied down.
@@ -29,6 +36,7 @@
     "**/*.spec.tsx",
     "**/__fixtures__/**",
     "**/*.test-d.ts",
-    "**/*.test-d.tsx"
+    "**/*.test-d.tsx",
+    "ai/example.ts"
   ]
 }

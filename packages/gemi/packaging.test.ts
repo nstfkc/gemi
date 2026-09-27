@@ -205,6 +205,42 @@ afterAll(async () => {
   if (fixture) await rm(fixture, { recursive: true, force: true });
 });
 
+describe("what the tarball must not carry", () => {
+  /**
+   * Both of these are one edit away from coming back, and neither shows up as a
+   * failing test anywhere else — the leak is silent in this package and lands in
+   * the consumer.
+   *
+   * `tsconfig.build.json` is what keeps them out, and it is fragile by
+   * construction: its `exclude` replaces the parent's rather than extending it,
+   * and moving the same exclusion up into `tsconfig.json` (which is where it
+   * started) disables the type-test suite instead — 102 tests reported green
+   * while checking nothing. So the property is asserted on the packed artefact,
+   * where neither mistake can hide.
+   */
+  test("no type-test declarations, and no augmentation of a consumer's RPC", async () => {
+    const installed = join(fixture, "node_modules/gemi");
+
+    const testDeclarations = (await $`find ${installed} -name "*.test-d.d.ts"`.quiet()).text();
+    expect(
+      testDeclarations.trim(),
+      "a *.test-d.d.ts reached the tarball: check tsconfig.build.json still excludes them, " +
+        "and that build:types uses it",
+    ).toBe("");
+
+    // `declare module "../client/rpc"` in a shipped declaration adds routes to
+    // the interface an app's own routes augment. The type tests each write one to
+    // give themselves a route to assert against, and so does `ai/example.ts`.
+    const augmenting = (
+      await $`grep -rl ${'declare module "../client/rpc"'} ${installed}`.nothrow().quiet()
+    ).text();
+    expect(
+      augmenting.trim(),
+      `a shipped declaration augments the consumer's RPC:\n${augmenting}`,
+    ).toBe("");
+  });
+});
+
 describe("the published package, installed into an app", () => {
   test("resolves every type entry point the scaffold points at", () => {
     // TS2688 is a configuration error, and `tsc` abandons the run on one — so
