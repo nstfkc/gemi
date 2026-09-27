@@ -417,6 +417,10 @@ describe("the rest of the event union", () => {
 
     expect(cut.messages[0]!.content).toEqual([]);
     expect(cut.messages[0]!.finishReason).toBe("awaiting-input");
+    // And the reason is legible to a UI: with the part gone and the finish reason
+    // saying `awaiting-input`, this flag is the only thing that distinguishes a
+    // cut-off answer from a message that never had a structured one.
+    expect(cut.messages[0]!.outputTruncated).toBe(true);
   });
 
   test("and leaves everything else on the message alone", () => {

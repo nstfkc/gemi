@@ -231,6 +231,12 @@ extension ChatState {
         // it — a step that hit the ceiling and also called a tool ends the
         // message `awaiting-input` or `max-steps`. `length` is still honoured for
         // a server that predates the field.
+        // Kept on the message, not merely acted on: dropping the partial output
+        // leaves a UI unable to tell a cut-off answer from a message that never
+        // had one, and the finish reason cannot say which.
+        if event["outputTruncated"]?.boolValue == true {
+          message["outputTruncated"] = .bool(true)
+        }
         if event["outputTruncated"]?.boolValue == true
           || event.string("finishReason") == "length"
         {

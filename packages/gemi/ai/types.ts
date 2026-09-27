@@ -278,6 +278,17 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * it simply stopped talking.
    */
   finishReason?: FinishReason;
+  /**
+   * The model ran out of output budget while writing this message's structured
+   * answer, so there is no `output` part and never will be.
+   *
+   * Kept on the message rather than only used to drop the part, because dropping
+   * it alone left a UI unable to tell "cut off" from "no structured answer here" —
+   * and `finishReason` cannot say it: a step that hits the ceiling while also
+   * calling a tool closes its message `awaiting-input` or `max-steps`. This is the
+   * flag to render "the answer was cut short" from.
+   */
+  outputTruncated?: true;
   usage?: Usage;
 };
 

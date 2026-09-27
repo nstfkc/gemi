@@ -218,7 +218,14 @@ public data class ChatState(
           // for a server that predates the field.
           val truncated =
             event["outputTruncated"].bool() == true || event.string("finishReason") == "length"
-          message
+          // Kept on the message, not merely acted on: dropping the partial output
+          // leaves a UI unable to tell a cut-off answer from a message that never
+          // had one, and the finish reason cannot say which.
+          val flagged =
+            if (event["outputTruncated"].bool() == true) {
+              message.with("outputTruncated", JsonPrimitive(true))
+            } else message
+          flagged
             .with("finishReason", event["finishReason"])
             .with(
               "content",

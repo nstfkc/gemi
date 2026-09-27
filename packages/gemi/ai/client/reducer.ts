@@ -361,6 +361,10 @@ function reduce<T extends ToolShapes, O>(
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         finishReason: event.finishReason,
+        // Kept, not merely acted on. Dropping the partial output leaves a UI
+        // unable to tell a cut-off answer from a message that never had one, and
+        // the finish reason cannot say which — see `AgentMessage.outputTruncated`.
+        ...(event.outputTruncated ? { outputTruncated: true as const } : {}),
         content:
           // A run cut off by the output ceiling has no answer, and the partial
           // output part is dropped rather than completed.
