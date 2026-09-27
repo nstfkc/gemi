@@ -5,6 +5,7 @@ import { Agent, AgentTool, type ToolContext } from "./Agent";
 import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
+import { ApiRouter } from "../http/ApiRouter";
 import type { UseChatParams } from "./useChat";
 
 /**
@@ -106,6 +107,25 @@ describe("a controller that declares its body", () => {
       }
     }
     expectTypeOf<Typed>().toExtend<AgentController<typeof pageAgent, PageBody>>();
+  });
+
+  test("mounts on a router, which is the thing every app must do with it", () => {
+    // The assertions below read `AgentRouteRPC["body"]` and `UseChatParams`, and
+    // both are reachable without ever mounting the controller — so the first
+    // version of this fix looked complete while `this.agent(InterfaceController)`
+    // was a `TS2345`: `ApiRouter.agent`, `createAgentRouteHandlers` and
+    // `AgentRoute` were all still `AgentController<any>`, i.e. `Body =
+    // Record<string, unknown>`, which an interface cannot satisfy. Relaxing the
+    // class bound had only moved the error to the route definition.
+    class Api extends ApiRouter {
+      routes = {
+        "/typed": this.agent(PageBuilderController),
+        "/iface": this.agent(InterfaceController),
+        "/plain": this.agent(PlainController),
+        "/legacy": this.agent(LegacyOverrideController),
+      };
+    }
+    expectTypeOf<Api["routes"]["/iface"]>().not.toBeNever();
   });
 
   test("takes a body declared as an interface, not only a type alias", () => {

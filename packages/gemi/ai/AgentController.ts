@@ -1718,7 +1718,7 @@ export type AgentRouteMethod = "stream" | "attach" | "stop" | "upload";
 
 export type AgentMiddlewareConfig = Partial<Record<AgentRouteMethod, MiddlewareInput>>;
 
-export type AgentRoute<T extends new () => AgentController<any>> = {
+export type AgentRoute<T extends new () => AgentController<any, any>> = {
   __internal_brand: "AgentRoute";
   controller: T;
   middleware(config: AgentMiddlewareConfig): AgentRoute<T>;
