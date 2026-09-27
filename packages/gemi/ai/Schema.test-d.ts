@@ -110,6 +110,32 @@ describe("Infer over arrays and unions", () => {
 });
 
 describe("Infer over json()", () => {
+  /**
+   * IN THE POSITION IT IS ACTUALLY USED, which the test below could not see.
+   *
+   * Binding `const doc = s.json()` gives the call no contextual type. Inside
+   * `s.object({ ... })` it has one — the shape is constrained to
+   * `Record<string, AnySchema>`, i.e. `Schema<any>` — and a `<T = JsonValue>`
+   * default lost to it, so the field came out `any`: type checking off around the
+   * one field this feature exists for. Every other assertion in this file spelled
+   * an explicit type argument, so none of them touched it.
+   */
+  test("is JsonValue as a property of an object, not any", () => {
+    const schema = s.object({ definition: s.json(), name: s.string() });
+    expectTypeOf<Infer<typeof schema>>().toEqualTypeOf<{
+      definition: JsonValue;
+      name: string;
+    }>();
+  });
+
+  test("and as a member of a union or an array", () => {
+    const list = s.array(s.json());
+    expectTypeOf<Infer<typeof list>>().toEqualTypeOf<JsonValue[]>();
+
+    const either = s.union([s.object({ kind: s.literal("ref") }), s.json()]);
+    expectTypeOf<Infer<typeof either>>().toEqualTypeOf<{ kind: "ref" } | JsonValue>();
+  });
+
   test("defaults to JsonValue, which is every shape JSON can hold", () => {
     // Written as a call rather than `ReturnType<typeof s.json>`: that form
     // instantiates the signature with the type parameter's *constraint*, so it

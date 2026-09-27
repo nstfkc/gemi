@@ -618,13 +618,25 @@ export const s: {
    * the way it would any other bad argument. `describe()` is where you tell it
    * the format; with no constraints to read, that prose is all it gets.
    *
-   * `ai:generate-client` maps it to the native `JSONValue`, which is right, and
-   * may also print "a union that is not told apart by one string member" naming
-   * `JsonValue` — because that is what the default output type is. Cosmetic, and
-   * inconsistent: measured, it warns for a `json()` field declared beside another
-   * field and not for one declared alone. Tracked separately.
+   * TWO CALL SIGNATURES, NOT A DEFAULT TYPE PARAMETER, and that is load-bearing.
+   * Written `json<T = JsonValue>()`, the default lost to the surrounding
+   * contextual type in the position this is actually used: `s.object`'s shape is
+   * constrained to `Record<string, AnySchema>` — `Schema<any>` — which supplies
+   * `any` as an inference candidate, and a candidate beats a default. So
+   * `s.object({ definition: s.json() })` inferred `{ definition: any }`, which is
+   * type checking switched off around exactly the field this exists for, and the
+   * opposite of what the default was written to prevent. An overload with no type
+   * parameter has nothing to infer, so `s.json()` is `JsonValue` wherever it is
+   * written.
+   *
+   * `ai:generate-client` maps it to the native `JSONValue` and says nothing about
+   * it. `JsonValue` is a union of every JSON shape, so it used to reach the
+   * generator's "a union that is not told apart by one string member" warning —
+   * true, and a misdescription of a field that is free-form on purpose. The
+   * extractor recognises it now.
    */
-  json<T = JsonValue>(): SchemaBuilder<T>;
+  json(): SchemaBuilder<JsonValue>;
+  json<T>(): SchemaBuilder<T>;
 } = {
   string: () => make<string>(leaf({ kind: "string" })),
   number: () => make<number>(leaf({ kind: "number" })),
