@@ -1,3 +1,54 @@
+# Upgrading from 0.65 to 0.66
+
+Additive, with one exception that only touches test code. Nothing in an app's
+runtime behaviour changes.
+
+## New: image generation and editing in `gemi/ai`
+
+`ImageModel.create({ name, provider, size, quality })` with `.generate()` and
+`.edit()`, over `OpenAIImageProvider` / `AzureOpenAIImageProvider`. Inside an
+agent tool, use `ctx.generateImage(model, params)` and `ctx.editImage(...)`
+instead of calling the model directly — they memoize the render against the tool
+call, so a tool that escalates and is replayed does not pay for the image twice.
+
+They answer an `Attachment` rather than bytes for that reason: the memo lives in
+the message history and cannot hold an image. `ctx.attachments.file(id)` hands the
+bytes back, and copying them under a storage key of your own is what makes a
+generated image outlive the run.
+
+Nothing existing calls any of this, so upgrading changes nothing until you do.
+
+## `ToolContext` gained two members — a compile error in hand-built contexts only
+
+`generateImage` and `editImage` are required members of `ToolContext`. The
+framework builds every real one, so this cannot fail at runtime; what it can
+break is a **test** that constructs a `ToolContext` literal to exercise a tool's
+`execute` in isolation. Such a literal now fails to typecheck.
+
+Add the two members, or — simpler and what we would suggest anyway — type the
+helper as `Partial<ToolContext>` and cast at the call, since a test that does not
+generate images has no business supplying those two.
+
+## `Usage` gained `imageInputTokens` and `imageOutputTokens`
+
+Both optional, both absent on usage from a text call. They are a **breakdown** of
+`inputTokens` / `outputTokens`, not a separate bucket — the provider's own totals
+already contain them, the same way `reasoningTokens` sits inside `outputTokens`.
+Anything summing the existing fields keeps working and keeps being correct.
+
+## A timed-out provider request is no longer always retried
+
+`requestWithRetry` gained `retryTimeouts`, defaulting to the previous behaviour,
+and only the image path passes `false`. Streaming calls are unaffected: their
+timer covers the handshake, so a timeout there means nothing was generated and
+retrying is free. For a call that returns its whole result in one body the timer
+bounds the work, and a retry pays for it again — measured, a `quality: "high"`
+1536x1024 render takes 117.8 seconds against a 120-second default, so one request
+could become three billed renders and then an error.
+
+If you call `requestWithRetry` directly — you almost certainly do not; it is not
+exported from `gemi/ai` — the default is unchanged.
+
 # Upgrading from 0.64 to 0.65
 
 ## A relative SQLite `DATABASE_URL` now means what Prisma means by it — behaviour change
