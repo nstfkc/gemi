@@ -279,14 +279,18 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    */
   finishReason?: FinishReason;
   /**
-   * The model ran out of output budget while writing this message's structured
-   * answer, so there is no `output` part and never will be.
+   * The model ran out of output budget on this message: the provider stopped it
+   * at `length`, whether that was the cap the app set or the model's own.
+   *
+   * Set for any agent, not only one with an `output` schema — an agent that just
+   * writes text is cut short the same way, and this is the flag to render "the
+   * answer was cut short" from either way. For an agent that *does* declare an
+   * `output` schema it also means there is no `output` part and never will be.
    *
    * Kept on the message rather than only used to drop the part, because dropping
    * it alone left a UI unable to tell "cut off" from "no structured answer here" —
    * and `finishReason` cannot say it: a step that hits the ceiling while also
-   * calling a tool closes its message `awaiting-input` or `max-steps`. This is the
-   * flag to render "the answer was cut short" from.
+   * calling a tool closes its message `awaiting-input` or `max-steps`.
    */
   outputTruncated?: true;
   usage?: Usage;
@@ -493,9 +497,9 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    */
   | { type: "awaiting-input"; runId: string; pending: PendingToolCall<T>[] }
   /**
-   * `outputTruncated` says the model ran out of output budget while writing this
-   * message's structured answer, whatever the message's finish reason turned out
-   * to be.
+   * `outputTruncated` says the model ran out of output budget on this message —
+   * the provider stopped it at `length` — whatever the message's finish reason
+   * turned out to be, and whether or not the agent declares an `output` schema.
    *
    * It needs its own field because `finishReason` cannot carry it: a step that
    * hits the ceiling *and* calls a tool ends the message `awaiting-input` or

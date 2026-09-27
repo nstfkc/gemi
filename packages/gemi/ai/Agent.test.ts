@@ -1372,6 +1372,69 @@ describe("a run cut off by the output ceiling", () => {
   });
 
   /**
+   * The other half of the same signal, and the half a live client does not need:
+   * `onMessage` persists this object and `result().messages` hands it back, so a
+   * transcript restored through `useChat({ initialMessages })` reads the flag
+   * here or not at all. The frame is gone by then.
+   */
+  test("and on the message itself, which is what is persisted and restored", async () => {
+    const persisted: any[] = [];
+    const provider = fakeProvider([
+      { type: "output-delta", delta: half },
+      { type: "finish", reason: "length", usage: usage(10, 5) },
+    ]);
+    const agent = Agent.create({ name: "gen", provider, output: OUTPUT });
+    const run = agent.stream({
+      messages: [],
+      req,
+      onMessage: (message) => {
+        // Cloned as it arrives rather than read back afterwards: the point is
+        // what the hook is handed, not what the object became later.
+        persisted.push(structuredClone(message));
+      },
+    });
+    for await (const _event of run) void _event;
+    const result = await run.result();
+
+    expect(persisted.at(-1)!.outputTruncated).toBe(true);
+    expect(result.messages.at(-1)!.outputTruncated).toBe(true);
+  });
+
+  test("and the next message starts with no opinion, the flag being per-message", async () => {
+    // The reset in `finalizeMessage`. Deleting it left the whole suite green,
+    // so a run whose first step was truncated marked every later message too.
+    const truncatingTool = AgentTool.create({
+      name: "again",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async () => ({ ok: true }),
+    });
+    const provider = fakeProvider(
+      [
+        { type: "output-delta", delta: half },
+        toolCall("c1", "again", { pattern: "x" }),
+        { type: "finish", reason: "length", usage: usage(10, 5) },
+      ],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const agent = Agent.create({
+      name: "gen",
+      provider,
+      tools: [truncatingTool],
+      output: OUTPUT,
+    });
+    const run = agent.stream({ messages: [], req });
+    for await (const _event of run) void _event;
+    const result = await run.result();
+
+    const flags = result.messages
+      .filter((message: any) => message.role === "assistant")
+      .map((message: any) => message.outputTruncated);
+    expect(flags).toEqual([true, undefined]);
+  });
+
+  /**
    * The case the flag exists for, and the one a finish reason cannot express: the
    * step that ran out of output budget also called a tool, so the message closes
    * `awaiting-input` while the output was still withheld.
