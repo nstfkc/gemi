@@ -30,7 +30,13 @@ app/models/generated-lists/
 # `generator client` block, which is what lets an app install `prisma` alone.
 app/models/prisma-client/
 
-# The root `dev.db` only, and deliberately not `prisma/dev.db`.
+# The root `dev.db` only — hence the LEADING SLASH on each pattern.
+#
+# Without it these matched at every depth, so `prisma/dev.db` was tracked and
+# ignored at the same time: `git add -A` after a delete-and-recreate stages the
+# deletion and silently drops the file. Two earlier revisions of this comment
+# asserted that a bare pattern matched the root alone. It does not, and the
+# fixture below is the thing that breaks when it is believed.
 #
 # `prisma/dev.db` is a COMMITTED FIXTURE: `app/models/User.test.ts` copies it to
 # a temp file and runs the whole ORM pipeline against the template's real schema.
@@ -41,7 +47,7 @@ app/models/prisma-client/
 # resolved it against the schema directory, so the dev server created an empty
 # `dev.db` here and queried it. Nothing writes it now, and the entry stays so an
 # upgrading checkout does not suddenly show one.
-dev.db
-dev.db-journal
-dev.db-wal
-dev.db-shm
+/dev.db
+/dev.db-journal
+/dev.db-wal
+/dev.db-shm
