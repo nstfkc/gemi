@@ -206,16 +206,44 @@ public data class ChatState(
 
       "message-end" ->
         withMessage(event.string("messageId") ?: "", now) { message ->
-          message
+          // A run cut off by the output ceiling has no answer, so the partial
+          // output part is dropped rather than completed. `snapshot` is a
+          // best-effort parse that closes whatever brackets are open, so the
+          // last partial looks like a whole document — completing it presented a
+          // half-written object as the finished one, and the server withholds
+          // its own output part for the same reason.
+          // `outputTruncated` first: it is the fact, and the finish reason is
+          // not it — a step that hit the ceiling and also called a tool ends the
+          // message `awaiting-input` or `max-steps`. `length` is still honoured
+          // for a server that predates the field.
+          val truncated =
+            event["outputTruncated"].bool() == true || event.string("finishReason") == "length"
+          // Kept on the message, not merely acted on: dropping the partial output
+          // leaves a UI unable to tell a cut-off answer from a message that never
+          // had one, and the finish reason cannot say which.
+          val flagged =
+            if (event["outputTruncated"].bool() == true) {
+              message.with("outputTruncated", JsonPrimitive(true))
+            } else message
+          flagged
             .with("finishReason", event["finishReason"])
             .with(
               "content",
               JsonArray(
-                message.content().map { value ->
-                  val part = value.obj()
-                  if (part != null && part.string("type") == "output" && part["partial"].bool() == true) {
-                    part.with("partial", JsonPrimitive(false))
-                  } else value
+                if (truncated) {
+                  message.content().filter { value ->
+                    val part = value.obj()
+                    !(part != null &&
+                      part.string("type") == "output" &&
+                      part["partial"].bool() == true)
+                  }
+                } else {
+                  message.content().map { value ->
+                    val part = value.obj()
+                    if (part != null && part.string("type") == "output" && part["partial"].bool() == true) {
+                      part.with("partial", JsonPrimitive(false))
+                    } else value
+                  }
                 }
               ),
             )

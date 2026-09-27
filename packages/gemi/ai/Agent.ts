@@ -1,9 +1,5 @@
 import type { HttpRequest } from "../http";
-import type {
-  AgentProvider,
-  ProviderToolNamespace,
-  ProviderToolSpec,
-} from "./AgentProvider";
+import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import { supportsStrict } from "./Schema";
 import type { Infer, Schema } from "./Schema";
 import {
@@ -183,10 +179,7 @@ export interface ToolContext {
    * makes; it is written here in plain words rather than solved with a
    * checkpoint API, because that is a much larger feature than this one.
    */
-  runAgent<A extends AnyAgent>(
-    agent: A,
-    params?: RunAgentParams,
-  ): Promise<NestedRunResult>;
+  runAgent<A extends AnyAgent>(agent: A, params?: RunAgentParams): Promise<NestedRunResult>;
 }
 
 /**
@@ -280,6 +273,16 @@ export interface RunAgentParams {
    * the user is only worth making if the whole subtree keeps it.
    */
   onPending?: "escalate" | "deny";
+  /**
+   * Override the sub-agent's own ceiling for this run.
+   *
+   * Not inherited from the parent. A sub-agent is a different job with a
+   * different output size — a generator writing a document against a router
+   * answering one word — and silently handing down the caller's ceiling would
+   * either strangle the one or fail to bound the other.
+   */
+  maxOutputTokens?: number;
+  temperature?: number;
 }
 
 /**
@@ -325,9 +328,7 @@ export class PendingEscalation extends Error {
   readonly nested: NestedRun;
 
   constructor(params: { pending: PendingToolCall[]; path: string[]; nested: NestedRun }) {
-    super(
-      `A nested agent run is waiting on the user for ${params.pending.length} tool call(s).`,
-    );
+    super(`A nested agent run is waiting on the user for ${params.pending.length} tool call(s).`);
     this.name = "PendingEscalation";
     this.pending = params.pending;
     this.path = params.path;
@@ -510,7 +511,11 @@ const questionSchema = {
     return result.value;
   },
   safeParse(value: unknown) {
-    if (typeof value !== "object" || value === null || typeof (value as any).question !== "string") {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as any).question !== "string"
+    ) {
       return { ok: false as const, errors: ["question: expected a string"] };
     }
     return { ok: true as const, value: { question: (value as any).question } };
@@ -548,12 +553,7 @@ export class ToolNamespace<
    */
   readonly deferred: boolean;
 
-  private constructor(params: {
-    name: Name;
-    description: string;
-    tools: T;
-    deferred?: boolean;
-  }) {
+  private constructor(params: { name: Name; description: string; tools: T; deferred?: boolean }) {
     this.name = params.name;
     this.description = params.description;
     this.tools = params.tools;
@@ -704,6 +704,34 @@ export interface CreateAgentParams<
    */
   maxDepth?: number;
   reasoning?: ReasoningEffort;
+  /**
+   * A ceiling on the tokens one model call may produce, passed to the provider
+   * as its own `max_output_tokens`.
+   *
+   * It bounds a degenerate generation. A model asked for non-strict JSON can
+   * fall into emitting the same character until something stops it, and with
+   * no cap the only thing that does is the client giving up — a turn that
+   * never ends rather than one that fails. The cap turns that into a run
+   * ending with `finishReason: "length"`, which an app can retry.
+   *
+   * Per model call, not per run: a run of four steps may produce four times
+   * this. `maxSteps` is the bound on the run.
+   */
+  maxOutputTokens?: number;
+  /**
+   * Passed to the provider unchanged. Lower is steadier, which is worth having
+   * for a generation whose shape matters more than its phrasing.
+   *
+   * SENT WHENEVER SET, and not capability-gated the way `reasoning` is.
+   * `ProviderCapabilities` carries no flag for it, so `buildResponsesRequest`
+   * writes it whenever it is a number and never drops it. That matters because
+   * the newer reasoning models reject the parameter outright: setting this for
+   * one is a 400 rather than a quietly degraded request. It is the same bargain
+   * `output` takes in `request.ts` — an explicit choice is sent and the API gets
+   * to say no, because silently dropping one leaves an app believing something
+   * about its request that is not true.
+   */
+  temperature?: number;
 }
 
 /**
@@ -738,6 +766,11 @@ export interface AgentStreamParams {
   provider?: AgentProvider;
   maxSteps?: number;
   reasoning?: ReasoningEffort;
+  /** Overrides the agent's own for this run. A generation whose size varies by
+   *  request — a page with ten components against one with two — is the case
+   *  a fixed ceiling on the agent cannot serve. */
+  maxOutputTokens?: number;
+  temperature?: number;
   /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
@@ -870,6 +903,8 @@ type RunConfig = {
   maxSteps: number;
   maxDepth: number;
   reasoning?: ReasoningEffort;
+  maxOutputTokens?: number;
+  temperature?: number;
 };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -916,6 +951,8 @@ export class Agent<
       maxSteps: this.maxSteps,
       maxDepth: this.maxDepth,
       reasoning: this.reasoning,
+      maxOutputTokens: params.maxOutputTokens,
+      temperature: params.temperature,
     };
   }
 
@@ -933,11 +970,10 @@ export class Agent<
       provider: params.provider ?? this.config.provider,
       maxSteps: params.maxSteps ?? this.config.maxSteps,
       reasoning: params.reasoning ?? this.config.reasoning,
+      maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
+      temperature: params.temperature ?? this.config.temperature,
     };
-    return new AgentRunImpl(config, params) as unknown as AgentRun<
-      ToolShapesOf<T>,
-      OutputOf<O>
-    >;
+    return new AgentRunImpl(config, params) as unknown as AgentRun<ToolShapesOf<T>, OutputOf<O>>;
   }
 }
 
@@ -973,7 +1009,10 @@ function toolSpec(resolved: ResolvedTool): ProviderToolSpec {
 function lowerTools(
   entries: readonly ToolEntry[],
   skills: readonly Skill[],
-): { registry: Map<string, ResolvedTool>; providerTools: (ProviderToolSpec | ProviderToolNamespace)[] } {
+): {
+  registry: Map<string, ResolvedTool>;
+  providerTools: (ProviderToolSpec | ProviderToolNamespace)[];
+} {
   const registry = new Map<string, ResolvedTool>();
   const providerTools: (ProviderToolSpec | ProviderToolNamespace)[] = [];
 
@@ -1048,9 +1087,7 @@ function skillTool(skill: Skill): AnyAgentTool {
     // should not read twelve files to answer "hello".
     execute: async () => {
       const body =
-        typeof skill.instructions === "function"
-          ? await skill.instructions()
-          : skill.instructions;
+        typeof skill.instructions === "function" ? await skill.instructions() : skill.instructions;
       const sections = [body];
       for (const file of skill.files ?? []) {
         sections.push(`--- ${file} ---\n${await readSkillFile(file)}`);
@@ -1497,6 +1534,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private history: AgentMessage[] = [];
   private produced: AgentMessage[] = [];
   private current: AgentMessage | null = null;
+  /**
+   * Whether a step of the message now open ran out of output budget.
+   *
+   * Separate from `finishReason` because they are different facts: a step that
+   * hits the ceiling and also calls a tool closes its message `awaiting-input` or
+   * `max-steps`. Cleared as each message is finalized.
+   */
+  private outputTruncated = false;
 
   /** Messages from an earlier run this one has amended, by id. Cloned once and
    *  reused, so two results for the same message do not fork it. */
@@ -1806,6 +1851,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const message = this.current;
     if (!message) return;
     this.current = null;
+    // Read and cleared together: it describes the message being closed, and the
+    // next one starts with no opinion.
+    const outputTruncated = this.outputTruncated;
+    this.outputTruncated = false;
     message.finishReason = reason;
     // Before the message is handed to `onMessage` to be persisted and before it
     // reaches `result()` — the two places it stops being written and starts
@@ -1815,7 +1864,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         if (typeof part.text === "string") part.text = resolveRope(part.text);
       }
     }
-    this.emit({ type: "message-end", messageId: message.id, finishReason: reason });
+    this.emit({
+      type: "message-end",
+      messageId: message.id,
+      finishReason: reason,
+      // Only when true, so the frame an ordinary message ends with is unchanged.
+      ...(outputTruncated ? { outputTruncated: true as const } : {}),
+    });
     await this.report(message);
     // After it, never before: a file a tool showed during this message belongs
     // below the message whose tool call produced it, in the hook exactly as it
@@ -1859,6 +1914,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           }
         : undefined,
       reasoning: this.config.reasoning,
+      maxOutputTokens: this.config.maxOutputTokens,
+      temperature: this.config.temperature,
       signal,
     });
 
@@ -1876,7 +1933,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "reasoning-delta": {
           appendReasoning(message, event.id, event.delta);
-          this.emit({ type: "reasoning-delta", messageId: message.id, delta: event.delta, id: event.id });
+          this.emit({
+            type: "reasoning-delta",
+            messageId: message.id,
+            delta: event.delta,
+            id: event.id,
+          });
           break;
         }
         case "output-delta": {
@@ -1958,7 +2020,36 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.emit({ type: "tool-call", messageId: message.id, part });
     }
 
-    if (this.config.output && outputText && !outcome.error) {
+    // `length` is excluded, and it is the reason `maxOutputTokens` is worth
+    // having at all. A cut-off answer is a prefix of the JSON the model meant
+    // to write, and `bestEffortParse` closes whatever brackets are open — so a
+    // truncated document arrives at `safeParse` looking like a whole one. For
+    // a schema of `s.json()` fields it then *passes*, and the app is handed a
+    // half-written page with nothing to distinguish it from a finished one.
+    //
+    // So a run that hit the ceiling produces no `output` part and ends with
+    // `finishReason: "length"`, which is the channel for "not an error, and not
+    // a finished answer" — the argument `max-steps` already makes in the
+    // `FinishReason` type.
+    //
+    // No error is emitted, and that is a deliberate change rather than a
+    // consequence of the cap. `length` does not mean the app set one: the
+    // provider reports it from the model's own ceiling too, which is how this
+    // was reachable before `maxOutputTokens` existed at all. Before this, a
+    // truncated run fell through to `safeParse`, and a schema with required
+    // keys among the missing ones failed it and raised a schema-mismatch error.
+    // That diagnostic is gone on purpose — it described the truncation as a
+    // model mistake, and it never fired for a schema loose enough to accept the
+    // repaired prefix, which is the case that actually needed saying. What
+    // replaces it is one answer for every schema: no output, and a finish
+    // reason that says why.
+    const truncated = outcome.reason === "length";
+    // Recorded on the run rather than inferred from the message's finish reason,
+    // which is not this: a step that hits the ceiling and also calls a tool ends
+    // the message `awaiting-input` or `max-steps`. The client needs the fact
+    // itself, or it completes a partial output the server withheld.
+    if (truncated) this.outputTruncated = true;
+    if (this.config.output && outputText && !outcome.error && !truncated) {
       const parsed = this.config.output.safeParse(bestEffortParse(outputText));
       if (parsed.ok === true) {
         this.output = parsed.value;
@@ -2063,7 +2154,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           name: call.name,
           input: parsed.value,
           kind,
-          signature: signPendingCall(this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value)),
+          signature: signPendingCall(
+            this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value),
+          ),
           ...(this.pathPrefix.length > 0 ? { path: [...this.pathPrefix] } : {}),
         });
         continue;
@@ -2100,7 +2193,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       );
     }
 
-    await raceAbort(Promise.all(running).then(() => undefined), this.controller.signal);
+    await raceAbort(
+      Promise.all(running).then(() => undefined),
+      this.controller.signal,
+    );
     return pending;
   }
 
@@ -2350,11 +2446,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // and honouring it would replay a first turn the sub-agent has already
       // had. The persisted transcript already contains it.
       messages: resuming ? recorded.messages : (params.messages ?? []),
-      turn: resuming
-        ? { toolResults: mine }
-        : params.prompt
-          ? { text: params.prompt }
-          : undefined,
+      turn: resuming ? { toolResults: mine } : params.prompt ? { text: params.prompt } : undefined,
       req: this.params.req,
       // The same scope, down the whole tree. A sub-agent runs on behalf of the
       // caller who started the parent — that is the only reason it is allowed
@@ -2374,6 +2466,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       signal: this.controller.signal,
       threadId: this.params.threadId,
       instructions: params.instructions,
+      maxOutputTokens: params.maxOutputTokens,
+      temperature: params.temperature,
       // Kept across turns so the transcript the client already has keeps its
       // identity when the run continues.
       runId: resuming ? recorded.runId : undefined,
@@ -3374,7 +3468,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         return reject(`"${name}" is approved, not answered: the server produces its result.`);
       }
       const schema = resolved.tool.outputSchema;
-      const parsed = schema ? schema.safeParse(answer.output) : { ok: true as const, value: answer.output };
+      const parsed = schema
+        ? schema.safeParse(answer.output)
+        : { ok: true as const, value: answer.output };
       if (parsed.ok === false) {
         return {
           type: "tool-result",
@@ -3611,5 +3707,7 @@ function appendReasoning(message: AgentMessage, id: string | undefined, delta: s
     last.text = (last.text ?? "") + delta;
     return;
   }
-  message.content.push(id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta });
+  message.content.push(
+    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
+  );
 }

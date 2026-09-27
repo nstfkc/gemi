@@ -58,9 +58,11 @@ export const azureConfigured =
  * run and a re-run one produce the same messages. The only difference is
  * whether a request was made, so the test counts requests.
  *
- * `maxOutputTokens` is a cap `Agent` has no way to set: `AgentStreamParams`
- * carries no token budget, deliberately, and `ProviderStreamParams` does. So
- * the cap goes on the seam between them. Without it a reasoning model asked a
+ * `maxOutputTokens` is the harness's own cap, and it WINS over the agent's.
+ * `AgentStreamParams` carries one since the option was exposed to apps, and
+ * `stream` below spreads `params` before it rather than merging — so a live test
+ * cannot raise the ceiling past what the suite is willing to pay for, however
+ * its agent was built. That is the point of putting it on the seam. Without it a reasoning model asked a
  * puzzle can spend thousands of tokens deciding how to say "nine".
  */
 export class RecordingProvider implements AgentProvider {
