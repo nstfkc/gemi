@@ -20,13 +20,13 @@ generator gemi {
   output   = "../app/models/generated"
 }
 
-// `PRISMA_DATABASE_URL`, not `DATABASE_URL`, and the two are the same file
-// written from different directories: Prisma resolves a relative SQLite path
-// from this schema's directory, the app resolves one from the project root. See
-// `.env.example`.
+// One url for both, since 0.65. A relative SQLite path means the same file to
+// gemi as to Prisma — this schema's directory — so `file:./dev.db` is
+// `prisma/dev.db` either way. Before that they disagreed, and this template
+// carried the same file under two variable names to paper over it.
 datasource db {
   provider = "sqlite"
-  url      = env("PRISMA_DATABASE_URL")
+  url      = env("DATABASE_URL")
 }
 
 model Organization {

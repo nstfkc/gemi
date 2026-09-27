@@ -1,0 +1,233 @@
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+
+import type { Dialect } from "./dialect";
+
+/**
+ * Where a relative SQLite `DATABASE_URL` actually points.
+ *
+ * ## The disagreement
+ *
+ * `DATABASE_URL=file:./dev.db` is the template's default and Prisma's own
+ * convention. Prisma resolves it **relative to the directory holding the schema
+ * file**, so `prisma migrate dev` writes `prisma/dev.db`. Bun's `SQL` client
+ * resolves it relative to the process working directory, so gemi opened
+ * `./dev.db` — a different file, which SQLite then *created*, empty. Every
+ * query failed with `no such table`, and the 0-byte file left behind looked
+ * like a database rather than the symptom.
+ *
+ * The two had to agree and did not, which is the same class of bug as the
+ * `foreign_keys` pragma in `Connection.configure`: development ran under rules
+ * the migrations did not share. This resolves the path the way Prisma does, so
+ * one relative URL means one file.
+ *
+ * ## What is left alone
+ *
+ * Everything that is not ambiguous. `:memory:`, an absolute path, and a
+ * networked dialect all pass through untouched, and so does a relative path in
+ * an app with no `prisma/schema.prisma` — there is no schema directory to be
+ * relative *to*, so the working directory is the only answer available and
+ * stays the answer it always was.
+ */
+
+/** Prisma's default schema location, relative to the project root. */
+const SCHEMA_PATH = join("prisma", "schema.prisma");
+
+/**
+ * The url moved, and the file it used to name holds data.
+ *
+ * Thrown rather than warned, and rather than choosing. The app was reading the
+ * working-directory file until now and that file has rows in it; the resolved one
+ * is where Prisma migrates. Which of them matters is not knowable from here — the
+ * resolved file may not even exist yet — and the failure mode of guessing is
+ * silent: the app runs, against an empty database or against the wrong half of
+ * its own history.
+ */
+export class AmbiguousSqlitePathError extends Error {
+  constructor(url: string, resolved: string, stranded: string) {
+    super(
+      `"${url}" now resolves to ${resolved}, which is where Prisma migrates it. ` +
+        `gemi used to open ${stranded} instead, and that file holds data — so ` +
+        `opening the resolved one would quietly leave it behind. gemi will not ` +
+        `choose. Move ${stranded} onto ${resolved} if it is the database you ` +
+        `want, or point DATABASE_URL at an absolute path to say so explicitly.`,
+    );
+    this.name = "AmbiguousSqlitePathError";
+  }
+}
+
+export type SqliteResolution = {
+  /** The URL to hand to the client, in the form it arrived in. */
+  url: string;
+  /** Set when the path was rewritten: where it used to point, and where it
+   *  points now. `undefined` when nothing changed. */
+  moved?: { from: string; to: string };
+};
+
+/**
+ * Splits a SQLite URL into the prefix to put back and the file path itself.
+ *
+ * `null` for a URL with no file path to resolve — an in-memory database, or a
+ * form this does not recognise, both of which are handed on untouched.
+ */
+function splitSqliteUrl(url: string): { prefix: string; file: string } | null {
+  const trimmed = url.trim();
+
+  // The prefix is sliced off first, and `:memory:` tested after — the other way
+  // round, only the three exact spellings written out longhand were recognised,
+  // and `sqlite::memory:` and `file::memory:?cache=shared` (both of which Bun
+  // opens in memory) were resolved as if `:memory:` were a file name. That
+  // produced a real file called `:memory:` inside `prisma/`, silently, with
+  // nothing stranded for the guard below to notice.
+  //
+  // The original casing is kept rather than the matched constant, so a URL is
+  // handed back as it arrived.
+  let prefix = "";
+  let file = trimmed;
+  for (const candidate of ["file://", "file:", "sqlite://", "sqlite:"]) {
+    if (trimmed.slice(0, candidate.length).toLowerCase() === candidate) {
+      prefix = trimmed.slice(0, candidate.length);
+      file = trimmed.slice(candidate.length);
+      break;
+    }
+  }
+
+  // In memory, however it was spelled and whatever query string follows. Not a
+  // path, and `resolve` would happily turn it into one.
+  if (file === ":memory:" || file.startsWith(":memory:?")) {
+    return null;
+  }
+
+  return { prefix, file };
+}
+
+/**
+ * The file a SQLite URL names, resolved the way Prisma resolves it.
+ *
+ * `cwd` is a parameter rather than read here so the tests can point it at a
+ * fixture directory instead of the process's own.
+ */
+export function resolveSqliteUrl(
+  url: string,
+  dialect: Dialect,
+  cwd: string = process.cwd(),
+): SqliteResolution {
+  if (dialect !== "sqlite") {
+    return { url };
+  }
+
+  const split = splitSqliteUrl(url);
+  if (!split || split.file === "") {
+    return { url };
+  }
+
+  // An absolute path says exactly what it means; there is nothing to resolve
+  // and nothing the two tools could disagree about.
+  //
+  // Unobservable, and kept anyway: `path.resolve` ignores its base for an
+  // absolute segment, so the `from === to` check below reaches the same answer
+  // and no test can tell the two apart. This states the intent where a reader
+  // looks for it, and saves a `statSync` on every connection that has one.
+  if (isAbsolute(split.file)) {
+    return { url };
+  }
+
+  // Query parameters — `?mode=ro`, Prisma's `?connection_limit=` — belong to
+  // the URL, not to the file name.
+  const query = split.file.indexOf("?");
+  const file = query === -1 ? split.file : split.file.slice(0, query);
+  const suffix = query === -1 ? "" : split.file.slice(query);
+
+  const schemaDirectory = join(cwd, "prisma");
+  if (!prismaMigratesThisUrl(cwd, url)) {
+    // Not the database Prisma migrates — no schema at all, a datasource that is
+    // not SQLite, or a connection whose url is simply a different one. Nothing
+    // else has an opinion about where this points, so it is left as it arrived.
+    return { url };
+  }
+
+  const from = resolve(cwd, file);
+  const to = resolve(schemaDirectory, file);
+  if (from === to) {
+    return { url };
+  }
+
+  return { url: `${split.prefix}${to}${suffix}`, moved: { from, to } };
+}
+
+/**
+ * Whether THIS url is the one Prisma migrates.
+ *
+ * Not "does a Prisma schema exist", and not "is its datasource SQLite" — both
+ * are questions about the project, and the answer was being applied to every
+ * connection. A project has one Prisma datasource and may open any number of
+ * SQLite connections through `connections`; a secondary one is not something
+ * Prisma has ever seen, so repointing it into `prisma/` either produced an empty
+ * database or an `AmbiguousSqlitePathError` whose message — "the file Prisma
+ * migrates" — was false about that file.
+ *
+ * So the datasource's own url is read and compared. `url = env("DATABASE_URL")`
+ * resolves through the environment, a quoted literal is taken as written, and a
+ * connection whose url is neither is left exactly as it arrived.
+ *
+ * Read with a regex rather than Prisma's parser: this needs two fields out of
+ * one block, and the dependency would be a poor trade. Line comments are
+ * stripped first, so a commented-out datasource cannot answer for the live one.
+ * Anything unreadable answers no, which lands on the old behaviour.
+ */
+function prismaMigratesThisUrl(cwd: string, url: string): boolean {
+  const schema = join(cwd, SCHEMA_PATH);
+  if (!existsSync(schema)) return false;
+  let source: string;
+  try {
+    source = readFileSync(schema, "utf8");
+  } catch {
+    return false;
+  }
+  // `//` to end of line. Prisma has no block comments, and a `//` inside the
+  // quoted url would be part of a protocol this function does not act on.
+  const live = source.replace(/^\s*\/\/.*$/gm, "");
+  const datasource = live.match(/datasource\s+\w+\s*\{([\s\S]*?)\}/);
+  if (!datasource) return false;
+  const block = datasource[1]!;
+  if (!/provider\s*=\s*["']sqlite["']/.test(block)) return false;
+
+  const fromEnv = block.match(/url\s*=\s*env\(\s*["']([^"']+)["']\s*\)/);
+  if (fromEnv) {
+    const value = process.env[fromEnv[1]!];
+    return typeof value === "string" && value.trim() === url.trim();
+  }
+  const literal = block.match(/url\s*=\s*["']([^"']+)["']/);
+  return literal ? literal[1]!.trim() === url.trim() : false;
+}
+
+/**
+ * The database an app was opening before this resolution moved it, when that
+ * file holds data.
+ *
+ * A 0-byte file is the artifact of the bug — SQLite creates an empty file for a
+ * path that does not exist — so finding one is the expected case and says
+ * nothing. A file with pages in it is the other thing entirely: two databases,
+ * one URL, and no way to tell from here which one the app meant. Choosing
+ * silently would be choosing somebody's data.
+ */
+export function strandedDatabase(moved: { from: string; to: string }): string | null {
+  try {
+    // The same file reached two ways is not two databases. `statSync` follows
+    // symlinks, so an app that had already worked around this by symlinking the
+    // old path onto the real database would otherwise be refused for finding
+    // its own data where it put it.
+    if (realpathSync(moved.from) === realpathSync(moved.to)) return null;
+  } catch {
+    // One of the two is not there, which is the ordinary case — fall through and
+    // let the stat below decide.
+  }
+  try {
+    const stats = statSync(moved.from);
+    return stats.isFile() && stats.size > 0 ? moved.from : null;
+  } catch {
+    // Not there at all, which is the ordinary case for an app that has only
+    // ever run migrations.
+    return null;
+  }
+}

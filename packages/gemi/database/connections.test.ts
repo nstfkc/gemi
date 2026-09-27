@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
+  Connection,
   CrossConnectionTransactionError,
   DEFAULT_CONNECTION,
   ReservedConnectionNameError,
@@ -94,9 +95,7 @@ describe("named connections", () => {
 
     const here = (await db.sql.unsafe(`select count(*) as c from t`)) as any;
     expect(here[0].c).toBe(1);
-    await expect(analytics.sql.unsafe(`select * from t`)).rejects.toThrow(
-      /no such table/i,
-    );
+    await expect(analytics.sql.unsafe(`select * from t`)).rejects.toThrow(/no such table/i);
 
     await db.close();
   });
@@ -163,9 +162,7 @@ describe("named connections", () => {
    */
   test("the slow-transaction threshold is inherited, and overridable", async () => {
     const inherited = pair();
-    expect(
-      inherited.connection("analytics").config.slowTransactionThreshold,
-    ).toBeUndefined();
+    expect(inherited.connection("analytics").config.slowTransactionThreshold).toBeUndefined();
     await inherited.close();
 
     const dir = workspace();
@@ -184,9 +181,7 @@ describe("named connections", () => {
     expect(db.connection("analytics").config.slowTransactionThreshold).toBe(
       SLOW_TRANSACTION_THRESHOLD,
     );
-    expect(db.connection("digest").config.slowTransactionThreshold).toBe(
-      60_000,
-    );
+    expect(db.connection("digest").config.slowTransactionThreshold).toBe(60_000);
 
     await db.close();
   });
@@ -221,9 +216,7 @@ describe("named connections", () => {
     await db.ready;
 
     for (const name of db.connectionNames) {
-      const rows = (await db
-        .connection(name)
-        .sql.unsafe(`pragma foreign_keys`)) as any;
+      const rows = (await db.connection(name).sql.unsafe(`pragma foreign_keys`)) as any;
       expect(rows[0].foreign_keys, `${name} enforces foreign keys`).toBe(1);
     }
 
@@ -253,5 +246,76 @@ describe("named connections", () => {
     expect(error.message).toContain(`"analytics"`);
     expect(error.open).toBe("default");
     expect(error.requested).toBe("analytics");
+  });
+});
+
+/**
+ * The resolution applied where it decides something: at the connection, before
+ * the client exists. `sqlitePath.test.ts` covers the rule itself; this covers
+ * that a `Connection` is built on it.
+ */
+describe("a relative SQLite url on a connection", () => {
+  const projects: string[] = [];
+
+  const project = () => {
+    // `realpathSync`, because `process.cwd()` reports the resolved path and
+    // macOS puts the temp directory behind a `/var` -> `/private/var` symlink.
+    // Without it the expectation and the connection disagree about a prefix.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "gemi-conn-sqlite-")));
+    projects.push(root);
+    mkdirSync(join(root, "prisma"), { recursive: true });
+    // `provider = "sqlite"` is the gate: an app whose datasource is Postgres
+    // may still open a side SQLite connection, which Prisma never migrates.
+    writeFileSync(
+      join(root, "prisma", "schema.prisma"),
+      'datasource db {\n  provider = "sqlite"\n  url = env("DATABASE_URL")\n}',
+    );
+    return root;
+  };
+
+  afterEach(() => {
+    for (const root of projects.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("is opened where Prisma migrates it, not where the process happens to be", async () => {
+    const root = project();
+    const cwd = process.cwd();
+    const url = process.env.DATABASE_URL;
+    process.chdir(root);
+    // The gate compares against the url the datasource names, so this has to be
+    // the one the fixture's `env("DATABASE_URL")` resolves to.
+    process.env.DATABASE_URL = "file:./dev.db";
+    try {
+      const connection = new Connection("default", { url: "file:./dev.db" });
+      expect(connection.url).toBe(`file:${join(root, "prisma", "dev.db")}`);
+      await connection.ready;
+      // The file the URL now names is the one that exists; nothing was created
+      // beside it in the working directory.
+      expect(existsSync(join(root, "prisma", "dev.db"))).toBe(true);
+      expect(existsSync(join(root, "dev.db"))).toBe(false);
+      await connection.close();
+    } finally {
+      process.chdir(cwd);
+      if (url === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = url;
+    }
+  });
+
+  test("refuses to choose when the old location holds a database of its own", () => {
+    const root = project();
+    writeFileSync(join(root, "dev.db"), "SQLite format 3\0pages and pages");
+    const cwd = process.cwd();
+    const url = process.env.DATABASE_URL;
+    process.chdir(root);
+    process.env.DATABASE_URL = "file:./dev.db";
+    try {
+      expect(() => new Connection("default", { url: "file:./dev.db" })).toThrow(/will not choose/);
+    } finally {
+      process.chdir(cwd);
+      if (url === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = url;
+    }
   });
 });

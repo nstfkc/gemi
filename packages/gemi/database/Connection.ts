@@ -1,6 +1,7 @@
 import { SQL } from "bun";
 import type { ConnectionConfig } from "./config";
 import { MissingDatabaseUrlError, inferDialect, type Dialect } from "./dialect";
+import { AmbiguousSqlitePathError, resolveSqliteUrl, strandedDatabase } from "./sqlitePath";
 
 /**
  * The name of the connection an application gets without asking for one: the
@@ -141,14 +142,27 @@ export class Connection implements DatabaseConnection {
       throw new MissingDatabaseUrlError(name);
     }
 
-    this.url = url;
     // An explicit `dialect` wins, for URLs whose protocol we can't read (a
     // pooler on a custom scheme). Otherwise infer, which throws rather than
     // guessing — see the note in dialect.ts.
     this.dialect = config.dialect ?? inferDialect(url);
+
+    // Before the client is built, because this decides which file the client
+    // opens — and SQLite creates whatever it is pointed at, so getting it
+    // wrong leaves a convincing empty database rather than an error. See
+    // `sqlitePath.ts` for why gemi and Prisma disagreed about it.
+    const resolved = resolveSqliteUrl(url, this.dialect);
+    if (resolved.moved) {
+      const stranded = strandedDatabase(resolved.moved);
+      if (stranded) {
+        throw new AmbiguousSqlitePathError(url, resolved.moved.to, stranded);
+      }
+    }
+
+    this.url = resolved.url;
     this.sql = config.options
-      ? new SQL(url, config.options as any)
-      : new SQL(url);
+      ? new SQL(this.url, config.options as any)
+      : new SQL(this.url);
     this.ready = this.configure();
   }
 
