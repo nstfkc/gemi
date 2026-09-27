@@ -15,10 +15,7 @@ import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
 import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 
 import { ServerDataContext } from "./ServerDataProvider";
-import {
-  ClientRouterContext,
-  ClientRouterProvider,
-} from "./ClientRouterContext";
+import { ClientRouterContext, ClientRouterProvider } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
 import {
   ComponentsContext,
@@ -26,19 +23,11 @@ import {
   loadViewModule,
   subscribeViewModules,
 } from "./ComponentContext";
-import {
-  QueryManagerContext,
-  QueryManagerProvider,
-  type QueryConfig,
-} from "./QueryManagerContext";
+import { QueryManagerContext, QueryManagerProvider, type QueryConfig } from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { useNavigate } from "./useNavigate";
-import {
-  type PageData,
-  type RouteState,
-  RouteStateProvider,
-} from "./RouteStateContext";
+import { type PageData, type RouteState, RouteStateProvider } from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
 import { useRouteData } from "./useRouteData";
@@ -137,11 +126,7 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const ErrorFallback = mod?.Error ?? DefaultQueryErrorFallback;
 
   return (
-    <ErrorBoundary
-      FallbackComponent={ErrorFallback}
-      resetKeys={[pathname]}
-      onReset={clearErrors}
-    >
+    <ErrorBoundary FallbackComponent={ErrorFallback} resetKeys={[pathname]} onReset={clearErrors}>
       <Suspense fallback={Loading ? <Loading /> : null}>
         {/* Keyed by view path so swapping views remounts the view (fresh
             state), while the boundary above — keyed by tree slot in `Tree` —
@@ -155,12 +140,7 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 });
 
 export const Tree = memo(
-  (props: {
-    action: Action;
-    tree: ComponentTree;
-    entries: string[];
-    pathname: string;
-  }) => {
+  (props: { action: Action; tree: ComponentTree; entries: string[]; pathname: string }) => {
     const { entries, tree, pathname, action } = props;
 
     return (
@@ -186,12 +166,7 @@ export const Tree = memo(
                   componentPath={path}
                   pathname={pathname}
                 >
-                  <Tree
-                    action={action}
-                    tree={subtree}
-                    entries={entries}
-                    pathname={pathname}
-                  />
+                  <Tree action={action} tree={subtree} entries={entries} pathname={pathname} />
                 </Route>
               );
             }
@@ -343,7 +318,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           if (isExternalRedirect(directive?.path)) {
             window.location.replace(directive.path);
           } else if (directive?.path) {
-            replace(directive.path, { params: {} } as unknown);
+            // `directive.path` is a concrete url the server built, not a route
+            // pattern, so there is nothing to substitute. It used to need an
+            // empty `params` and an `as unknown` to get past the signature —
+            // the framework's own copy of the bug apps hit.
+            replace(directive.path);
           }
 
           return;
@@ -409,14 +388,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [
-    routerSubject,
-    fetchRouteCSS,
-    preloadRouteModules,
-    takePrefetched,
-    replace,
-    hydrate,
-  ]);
+  }, [routerSubject, fetchRouteCSS, preloadRouteModules, takePrefetched, replace, hydrate]);
 
   return (
     <RouteTransitionProvider
@@ -462,10 +434,7 @@ export const ClientRouter = (props: {
       <I18nProvider>
         <WebSocketContextProvider>
           <QueryManagerProvider queryConfig={props.queryConfig}>
-            <ComponentsProvider
-              viewImportMap={props.viewImportMap}
-              modules={props.viewModules}
-            >
+            <ComponentsProvider viewImportMap={props.viewImportMap} modules={props.viewModules}>
               <ClientRouterProvider
                 cssManifest={cssManifest}
                 modulePreloadManifest={modulePreloadManifest}

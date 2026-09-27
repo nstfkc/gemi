@@ -595,7 +595,10 @@ describe("attach on mount", () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 }),
     );
-    const { box } = mount({ threadId: "th_9", onAttachMiss: (p: { threadId: string }) => seen.push(p) });
+    const { box } = mount({
+      threadId: "th_9",
+      onAttachMiss: (p: { threadId: string }) => seen.push(p),
+    });
 
     await act(async () => {
       await Promise.resolve();
@@ -1741,5 +1744,90 @@ describe("onToolResult", () => {
 
     expect(box.api.status).toBe("idle");
     expect(box.api.messages).toHaveLength(2);
+  });
+});
+
+/**
+ * The turn envelope wins every collision with the app's `body`.
+ *
+ * Spread last, an app-supplied `threadId` replaced the real one on the wire —
+ * and the server reads `body.threadId` and `toClientTurn(body)` off the top
+ * level before it separates the app's fields out, so a stateless chat naming
+ * that key was routed into the threaded branch and answered
+ * `thread_not_found`. The docblock said naming one of these changed nothing.
+ */
+describe("an app body that collides with the turn envelope", () => {
+  test("does not replace the thread id", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false, body: { threadId: "my-record-id" } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(rawBodyOf(0).threadId).toBe("th_9");
+  });
+
+  /**
+   * The case the first version of this fix missed, and the one its own comment
+   * claimed to have closed. `threadId` and `messages` were written by a ternary,
+   * so only one of them overwrote the app's `body` and the other was left to it:
+   * a stateless turn naming `threadId` still put a real-looking thread id on the
+   * wire, and the server answered `thread_not_found` before `instructions()` ran.
+   */
+  test("does not invent a thread id on a stateless turn", async () => {
+    const { box } = mount({ attach: false, body: { threadId: "my-record-id" } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const sent = rawBodyOf(0);
+    expect("threadId" in sent).toBe(false);
+    // And the stateless turn still carries its history.
+    expect(Array.isArray(sent.messages)).toBe(true);
+  });
+
+  test("does not let an app's messages stand in for the thread's", async () => {
+    // The mirror image: on a threaded turn the payload writes no `messages` key,
+    // so an app naming it owned that field outright.
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      body: { messages: [{ id: "forged" }] },
+    });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const sent = rawBodyOf(0);
+    expect("messages" in sent).toBe(false);
+    expect(sent.threadId).toBe("th_9");
+  });
+
+  test("does not replace the turn, the messages, or the correlation id", async () => {
+    const { box } = mount({
+      attach: false,
+      body: { turn: { text: "not this" }, messages: [{ id: "nope" }], clientRunId: "forged" },
+    });
+
+    await act(async () => {
+      await box.api.sendMessage("the real message");
+    });
+
+    const sent = rawBodyOf(0);
+    expect(sent.turn).toEqual({ text: "the real message" });
+    expect(sent.messages).toEqual([]);
+    expect(sent.clientRunId).not.toBe("forged");
+  });
+
+  test("and still sends every field the envelope does not own", async () => {
+    const { box } = mount({ attach: false, body: { pageId: "page_7", turn: { text: "no" } } });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(rawBodyOf(0).pageId).toBe("page_7");
   });
 });

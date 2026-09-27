@@ -185,6 +185,15 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       params: { orgId: orgOf },
       files: { image: "input" },
     }),
+    // A free-form field on an MCP route. `combineSchemas` casts its result into
+    // `Schema<T>` without a definition tree, so this is the path on which
+    // `supportsStrict` used to answer `true` and send an empty subschema under
+    // `strict: true`.
+    "import-layout": this.fromApiRoute("POST", "/:orgId/products", {
+      description: "Import a layout document",
+      input: s.object({ name: s.string(), layout: s.json().describe("Any JSON") }),
+      params: { orgId: orgOf },
+    }),
     "create-product-from-upload": this.fromApiRoute("POST", "/:orgId/products", {
       description: "Create a product from the image the user attached",
       input: s.object({ name: s.string(), price: s.number() }),
@@ -394,6 +403,28 @@ describe("an agent calling the app's routes", () => {
     expect(Object.keys(spec.parameters.properties!)).toEqual(["status"]);
   });
 
+  /**
+   * The strict flag on an MCP-projected tool.
+   *
+   * `combineSchemas` merges the app's `input` with the bound-param extras and
+   * casts the result into `Schema<T>` — so the projected tool has no definition
+   * tree, and `supportsStrict` has to read the emitted schema instead. Before
+   * it did, an `s.json()` field here went to the provider as an empty subschema
+   * under `strict: true`, which is a 400 on every turn.
+   */
+  test("a free-form field on an mcp route turns strict off for that tool alone", async () => {
+    const { offered } = await runTool(alice, "list-orders", { status: "open" });
+
+    const loose = offered.find((tool) => tool.name === "import-layout")!;
+    expect(loose.strict).toBe(false);
+    expect(loose.parameters.properties!.layout).toEqual({ description: "Any JSON" });
+
+    // Its neighbours are unaffected — the flag is per tool, read off each one's
+    // own schema.
+    expect(offered.find((tool) => tool.name === "list-orders")!.strict).toBe(true);
+    expect(offered.find((tool) => tool.name === "create-product")!.strict).toBe(true);
+  });
+
   test("an unexposed route is not in the tool list, and cannot be called by name", async () => {
     const { result, offered } = await runTool(alice, "wipe", {});
 
@@ -402,6 +433,7 @@ describe("an agent calling the app's routes", () => {
       "create-product",
       "create-product-from-upload",
       "flaky",
+      "import-layout",
       "list-orders",
       "my-orders",
       "refund-order",
@@ -649,7 +681,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(9);
+    expect(registry().list(caller)).toHaveLength(10);
   });
 
   test("a remote caller is typed and refused", async () => {

@@ -238,8 +238,54 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
  */
 const pendingTurns = new Map<string, { cancelled: boolean }>();
 
-export abstract class AgentController<A extends AnyAgent = AnyAgent> extends ControllerBase {
+/**
+ * The key that carries `Body` on the instance type.
+ *
+ * A `declare const` unique symbol, so it exists only in the type layer — the
+ * same device `Schema.ts` uses for its output type, and for the same reason: a
+ * real property would be one an app could see, serialise or depend on.
+ */
+declare const BODY: unique symbol;
+
+export abstract class AgentController<
+  A extends AnyAgent = AnyAgent,
+  /**
+   * The extra fields `useChat`'s `body` option sends with every turn, as they
+   * arrive in `instructions()` and on `ctx.body`.
+   *
+   * Declaring it also types the client: `useChat` reads it back off the route
+   * through `AgentRouteRPC`, so a `body` the controller does not expect is a
+   * compile error at the call site rather than an `undefined` three layers
+   * into a tool. It types the shape, not the contents — see `instructions`.
+   *
+   * Constrained to `object`, not `Record<string, unknown>`: an `interface` gets
+   * no implicit index signature, so the tighter bound refused
+   * `interface PageBody { pageId: string }` with a `TS2344` that names the
+   * constraint and not the reason. An interface is how most apps write a request
+   * shape, and turning that into a puzzle about `type` versus `interface` is a
+   * poor first impression of the feature.
+   */
+  Body extends object = Record<string, unknown>,
+> extends ControllerBase {
   static kind = "agent-controller" as const;
+
+  /**
+   * `Body`, in a position nothing can shorten away.
+   *
+   * It has to appear on the instance type for `AgentRouteRPC` to infer it, and
+   * `instructions`'s second parameter is not a safe place to leave that job:
+   * TypeScript's parameter-wise inference stops at the shorter signature, so a
+   * controller overriding `instructions(req)` — which is every override written
+   * before this existed, since that was the only signature — supplied no
+   * candidate and silently fell back to the open record. The client-side
+   * checking then vanished on the most ordinary upgrade path, with nothing to
+   * read.
+   *
+   * `declare` so it emits no field: there is no value here, only a type for
+   * `infer B` to find. Optional and never assigned, so no subclass has to
+   * mention it.
+   */
+  declare readonly [BODY]?: Body;
 
   /** The agent this controller serves. A property rather than a constructor
    *  argument so `Router.agent(ChatController)` can take the class, matching how
@@ -303,10 +349,23 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    */
   protected hookHoldMs = 30_000;
 
-  /** Appended to the agent's static instructions for this request — the user's
-   *  name, tenant, today's date. */
-  instructions(req: HttpRequest<any, any>): string | Promise<string> | void {
+  /**
+   * Appended to the agent's static instructions for this request — the user's
+   * name, tenant, today's date.
+   *
+   * `body` is what `useChat`'s `body` option sent, with the four keys the wire
+   * format owns removed. It is the only way to read it here: this controller
+   * consumes the request body itself, so `await req.input()` answers `Body
+   * already used` and takes the whole turn down with it.
+   *
+   * It is client-controlled, exactly like any request body. `Body` types what
+   * arrives, it does not check it — a client can send anything, and a tenant id
+   * read from here is the client's claim about which tenant it wants, not the
+   * middleware's finding about who it is.
+   */
+  instructions(req: HttpRequest<any, any>, extra: { body: Body }): string | Promise<string> | void {
     void req;
+    void extra;
   }
 
   /**
@@ -434,7 +493,8 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
       }
 
-      const instructions = (await this.instructions(req)) || undefined;
+      const extraBody = appBody<Body>(body);
+      const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -465,6 +525,16 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // tools still get an object, and it throws with a sentence naming
         // `attachmentScope()`.
         attachments,
+        // The same object `instructions()` was handed, so the two cannot
+        // disagree about what the client sent — and carried on the run rather
+        // than read from `ctx.req`, because a run outlives the request that
+        // started it. By the time a tool executes, the body is long gone.
+        // Cast because `Body` is constrained to `object` so an `interface` can be
+        // used, and an interface has no index signature to satisfy
+        // `Record<string, unknown>`. The value is a parsed JSON object either
+        // way; the constraint is about what an app may declare, not about what
+        // arrives.
+        body: extraBody as Record<string, unknown>,
       }) as AgentRun;
 
       const ctx: AgentHookContext = { req, runId: run.runId, threadId };
@@ -1207,6 +1277,59 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
 // --- request plumbing ----------------------------------------------------
 
 /**
+ * The keys of the turn envelope itself, which `useChat` puts in the same JSON
+ * object as an app's `body`.
+ *
+ * Listed so `appBody` can take them back out. Sharing one object was the right
+ * wire choice — a nested `body` field would be a second envelope for every
+ * client, including the Swift and Kotlin ones — but it does mean the app's
+ * fields and the framework's are mixed together on arrival, and handing an app
+ * `turn` and `messages` would invite reading them. They are this module's to
+ * change; an app that depended on their shape would break on a release that
+ * never mentioned them.
+ */
+const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages"] as const;
+
+/**
+ * The turn's own fields, which `toClientTurn` reads off the top level when the
+ * body carries no `turn` object. Reserved in that form and only that form —
+ * with an envelope present, a top-level `text` is the app's.
+ */
+const BARE_TURN_KEYS = ["text", "files", "toolResults"] as const;
+
+/**
+ * An app's own fields, out of the parsed turn body.
+ *
+ * A fresh object rather than a `delete` on the parsed one. Nothing reads the
+ * body after this today — `turn`, `threadId`, `clientRunId` and `messages` are
+ * all pulled out above — so this is not load-bearing and no test pins it. It is
+ * how a helper that takes a parsed body should behave regardless: the next
+ * reader to move a line above this one should not have to know that the body
+ * was quietly hollowed out.
+ */
+function appBody<Body extends object>(body: Record<string, any>): Body {
+  const reserved: readonly string[] = hasTurnEnvelope(body)
+    ? ENVELOPE_KEYS
+    : [...ENVELOPE_KEYS, ...BARE_TURN_KEYS];
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (reserved.includes(key)) continue;
+    // `JSON.parse` produces `__proto__` as an own property, and `Object.entries`
+    // hands it over like any other. Assigning it with `[]` goes through
+    // `Object.prototype`'s setter and changes the prototype of the object an app
+    // is about to read — from a value the client chose. `defineProperty` writes
+    // the key itself, which is what "the fields the client sent" means.
+    Object.defineProperty(extra, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return extra as Body;
+}
+
+/**
  * A body, or the reason there is not one.
  *
  * Deliberately one shape with an optional `error` rather than a discriminated
@@ -1325,6 +1448,19 @@ function invalidRequest(parsed: ParsedBody): Response {
 }
 
 /**
+ * Whether the turn arrived in a `turn` object of its own, rather than spread
+ * across the top level of the body.
+ *
+ * Both forms are accepted, and which one it is decides what belongs to the app:
+ * a top-level `text` is the user's message in the bare form and an app's own
+ * field in the enveloped one. `toClientTurn` and `appBody` have to agree about
+ * that, so they ask the same question here rather than each testing it.
+ */
+function hasTurnEnvelope(body: Record<string, any>): boolean {
+  return Boolean(body.turn) && typeof body.turn === "object";
+}
+
+/**
  * The client's turn, accepting both `{ turn: {...} }` and the flattened
  * `{ text, files, toolResults }` — the second is what a hand-written `fetch`
  * writes, and refusing it buys nothing.
@@ -1335,7 +1471,7 @@ function invalidRequest(parsed: ParsedBody): Response {
  * runs — see `toTurnFiles`.
  */
 function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: string } {
-  const source = body.turn && typeof body.turn === "object" ? body.turn : body;
+  const source = hasTurnEnvelope(body) ? body.turn : body;
   const turn: ClientTurn = {};
   if (typeof source.text === "string") {
     turn.text = source.text;
@@ -1582,7 +1718,7 @@ export type AgentRouteMethod = "stream" | "attach" | "stop" | "upload";
 
 export type AgentMiddlewareConfig = Partial<Record<AgentRouteMethod, MiddlewareInput>>;
 
-export type AgentRoute<T extends new () => AgentController<any>> = {
+export type AgentRoute<T extends new () => AgentController<any, any>> = {
   __internal_brand: "AgentRoute";
   controller: T;
   middleware(config: AgentMiddlewareConfig): AgentRoute<T>;
@@ -1590,12 +1726,23 @@ export type AgentRoute<T extends new () => AgentController<any>> = {
 
 /** What `CreateRPC` should produce for an agent route: enough for the client to
  *  type its messages, and nothing that drags server code into the bundle. */
-export type AgentRouteRPC<T extends new () => AgentController<any>> = {
+export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
   __agent: true;
   tools: InstanceType<T>["agent"] extends AnyAgent
     ? ToolShapesOf<InstanceType<T>["agent"]["tools"]>
     : ToolShapes;
   output: unknown;
+  /**
+   * The controller's `Body`, so `useChat` can check what it sends against what
+   * the controller declared.
+   *
+   * Read off the phantom key rather than by matching the class, which is what
+   * made this fail: `Body` used to reach the instance type only through
+   * `instructions`'s second parameter, and a controller overriding
+   * `instructions(req)` — the pre-existing signature, so every existing
+   * override — gave inference nothing to work with and got the open record.
+   */
+  body: InstanceType<T> extends { [BODY]?: infer B } ? B : Record<string, unknown>;
 };
 
 /** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */

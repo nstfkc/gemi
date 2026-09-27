@@ -4,7 +4,7 @@ import { applyParams } from "../utils/applyParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import { I18nContext } from "./I18nContext";
 import { useLocation } from "./useLocation";
-import type { UrlParser, ViewPaths } from "./types";
+import type { IsViewPath, UrlParser, ViewPaths } from "./types";
 
 type Search = Record<string, string | number | boolean | undefined | null>;
 
@@ -25,7 +25,7 @@ function connectionRefusesPrefetch() {
   return ["slow-2g", "2g"].includes(connection.effectiveType);
 }
 
-type Options<T extends ViewPaths> =
+type Options<T extends string> =
   UrlParser<T> extends Record<string, never>
     ? {
         search?: Search;
@@ -36,6 +36,22 @@ type Options<T extends ViewPaths> =
         params: UrlParser<T>;
         locale?: string;
       };
+
+/** The options for a URL built at runtime — see `useNavigate`'s copy. */
+type RuntimeOptions = {
+  search?: Search;
+  params?: Record<string, string | number | undefined>;
+  locale?: string;
+};
+
+/** Required for a declared route that has params, optional otherwise. See
+ *  `IsViewPath` — prefetch took `ViewPaths | (string & {})` and so had the
+ *  same inference fault `useNavigate` did. */
+type PrefetchArgs<P extends string> = IsViewPath<P> extends true
+  ? UrlParser<P> extends Record<string, never>
+    ? [options?: Options<P>]
+    : [options: Options<P>]
+  : [options?: RuntimeOptions];
 
 /**
  * Warms a route ahead of the navigation to it: its page data, its stylesheets
@@ -55,11 +71,9 @@ export function usePrefetch() {
   const currentLocale = location.locale;
 
   return useCallback(
-    async <T extends ViewPaths>(
-      path: T | (string & {}),
-      ...args: UrlParser<T> extends Record<string, never>
-        ? [options?: Options<T>]
-        : [options: Options<T>]
+    async <P extends ViewPaths | (string & {})>(
+      path: P,
+      ...args: PrefetchArgs<P>
     ) => {
       if (typeof window === "undefined" || !prefetchRoute) {
         return;

@@ -391,7 +391,7 @@ export class ApiRouter {
    * the run that follows — as a not-found, indistinguishable from an id the
    * model made up. See `AgentController.attachmentScope`.
    */
-  public agent<T extends new () => AgentController<any>>(Controller: T): AgentRoute<T> {
+  public agent<T extends new () => AgentController<any, any>>(Controller: T): AgentRoute<T> {
     return createAgentRouteHandlers(Controller, this) as unknown as AgentRoute<T>;
   }
 
@@ -454,7 +454,7 @@ export class ApiRouter {
  * `routes` is read off an instance the dispatcher constructs later. Rebuilding
  * them per instance would quietly drop every per-method middleware.
  */
-function createAgentRouteHandlers<T extends new () => AgentController<any>>(
+function createAgentRouteHandlers<T extends new () => AgentController<any, any>>(
   Controller: T,
   owner: ApiRouter,
 ) {

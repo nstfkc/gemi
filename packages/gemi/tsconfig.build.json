@@ -1,0 +1,34 @@
+{
+  // The declaration build, and the ONLY place type tests are excluded.
+  //
+  // `*.test-d.ts` files were being emitted into `dist/`, which is harmless for
+  // most of them and not for one that augments a global interface:
+  // `ai/useChat.test-d.ts` and `ai/AgentController.body.test-d.ts` each
+  // `declare module "../client/rpc"` to give themselves a route to assert
+  // against, so shipping those declarations puts phantom agent routes on the
+  // `RPC` of any consumer whose file set reaches into `node_modules/gemi/dist`.
+  //
+  // THE EXCLUSION CANNOT LIVE IN `tsconfig.json`, and putting it there was worse
+  // than the leak. `vitest --typecheck` spawns a bare `tsc --noEmit` with its cwd
+  // in this package and no `-p`, so it resolves `tsconfig.json` and honours its
+  // `exclude` — excluding the files there removed them from the only compilation
+  // that checks them, and all 102 type tests across 10 files reported green while
+  // checking nothing. `bun run typecheck` lost them too. So the emit config is a
+  // separate file, and `tsconfig.json` still sees every test.
+  //
+  // `exclude` REPLACES the parent's rather than extending it, so the inherited
+  // entries are repeated here on purpose. A new exclusion in `tsconfig.json` has
+  // to be copied down.
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/__fixtures__/**",
+    "**/*.test-d.ts",
+    "**/*.test-d.tsx"
+  ]
+}
