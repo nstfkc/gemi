@@ -1,5 +1,45 @@
 # Upgrading from 0.66 to 0.67
 
+## `required` accepts values it used to reject — behaviour change
+
+`required` tested `.length`, which is `undefined` for anything that is not a
+string, an array or a Blob. So a number failed it, a boolean failed it, and a
+plain object failed it — a 400 on a correct request, from the rule meant to catch
+the incorrect ones.
+
+It now asks whether the field is present:
+
+| value | before | now |
+|---|---|---|
+| `{ a: 1 }`, `5`, `true` | rejected | **accepted** |
+| `0`, `false` | rejected | **accepted** |
+| `"hi"`, `["x"]` | accepted | accepted |
+| `""`, `[]`, `null`, empty upload | rejected | rejected |
+
+**`0` and `false` now pass.** If you were relying on `required` to reject them —
+which is to say relying on this bug — add an explicit rule instead: `gte:1` for a
+quantity that must be positive, or your own check for a flag that must be true.
+`required` means present, not truthy.
+
+Two smaller changes in the same rule table:
+
+- **`min` / `max` read length only from strings and arrays.** They always meant
+  length and still do; what changed is that a value which merely *has* a `length`
+  property no longer satisfies them. A JSON body of `{"tags": {"length": 5}}`
+  used to pass `min:3`, because the client picks the field names.
+- **`gte:` and `lte:` are new**, for numeric magnitude. Additive; nothing existing
+  changes meaning. `min:3` on a string is still three characters, and `gte:3` on a
+  number is three.
+
+Unchanged and worth knowing: `string` and `boolean` appear in the schema key type
+but have no implementation, so they check nothing. Making them enforce would start
+rejecting requests apps accept today, so it is left for a deliberate decision.
+
+`fileType:` and `fileSize:` also now typecheck. They were declared with quotes
+instead of backticks, making them the literal text `` `fileType:${string}` ``
+rather than template literal types, so `fileType:image/png` was a type error while
+the runtime handled it fine. If you cast around that, you can drop the cast.
+
 ## The default `FileSystemDriver` folder moves out of `undefined/`
 
 `new FileSystemDriver()` with no argument used to write to `./undefined/storage`.
