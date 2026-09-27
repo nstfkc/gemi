@@ -1348,6 +1348,62 @@ describe("a run cut off by the output ceiling", () => {
     expect(result.output).toBeUndefined();
   });
 
+  /**
+   * The server half of the client's signal, which nothing pinned: deleting either
+   * the flag's assignment or its spread left the whole suite green, so the seam
+   * this field exists for was asserted on neither side of the wire.
+   */
+  test("says so on the message-end frame, which is what the client reads", async () => {
+    const { events } = await truncatedRun("length");
+
+    const end = events.find((event) => event.type === "message-end");
+    expect(end).toMatchObject({ finishReason: "length", outputTruncated: true });
+  });
+
+  test("and says nothing on a message that was not truncated", async () => {
+    const { events } = await truncatedRun("stop");
+
+    const end = events.find((event) => event.type === "message-end");
+    expect(end!.outputTruncated).toBeUndefined();
+  });
+
+  /**
+   * The case the flag exists for, and the one a finish reason cannot express: the
+   * step that ran out of output budget also called a tool, so the message closes
+   * `awaiting-input` while the output was still withheld.
+   */
+  test("says so even when the message ends for another reason entirely", async () => {
+    const pendingTool = AgentTool.create({
+      name: "askUser",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      answeredBy: "client",
+    });
+    const provider = fakeProvider([
+      { type: "output-delta", delta: '{"state":{"a":1}' },
+      toolCall("c1", "askUser", { pattern: "x" }),
+      { type: "finish", reason: "length", usage: usage(10, 5) },
+    ]);
+    const agent = Agent.create({
+      name: "gen",
+      provider,
+      tools: [pendingTool],
+      output: anything(),
+    });
+    const run = agent.stream({ messages: [], req });
+    const events: any[] = [];
+    for await (const event of run) events.push(event);
+    const result = await run.result();
+
+    const end = events.find((event) => event.type === "message-end");
+    expect(end).toMatchObject({ outputTruncated: true });
+    // The message's own reason is not `length`, which is exactly why the flag has
+    // to exist.
+    expect(end!.finishReason).not.toBe("length");
+    expect(result.output).toBeUndefined();
+  });
+
   test("whereas the same half-written document on a normal finish still parses", async () => {
     // Not an endorsement of the value — it shows why the `length` case cannot
     // be left to the schema. `s.json()` constrains nothing, so the repaired
