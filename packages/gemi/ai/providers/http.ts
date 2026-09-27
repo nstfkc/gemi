@@ -17,6 +17,34 @@ export type RequestOptions = {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   now?: () => number;
+  /**
+   * Whether a timeout is worth another attempt. Defaults to `true`.
+   *
+   * THE ANSWER DEPENDS ON WHAT THE TIMER BOUNDS, which is why this is a
+   * parameter and not a policy. For a streamed call the timer covers getting a
+   * response and is cleared once the headers land (see `requestWithRetry`), so a
+   * timeout means the provider never started answering: nothing was generated,
+   * nothing was billed, and retrying is both cheap and likely to work.
+   *
+   * For a call that returns its whole result in one body, the same timer bounds
+   * the *work*. A timeout there means the work probably happened and we hung up
+   * before hearing about it — so a retry pays for it a second time, at the same
+   * latency, and most likely times out again.
+   *
+   * MEASURED, because the margin is what makes this urgent rather than
+   * theoretical. One `gpt-image-2` render at `quality: "high"`, `1536x1024`,
+   * against a real Azure deployment: **117.8 seconds**, against a
+   * `DEFAULT_TIMEOUT_MS` of 120_000. Two seconds of headroom, about 2%. Any
+   * variance crosses it, and with retries on, one such request becomes three
+   * two-minute renders, six minutes of waiting, three images billed, and a
+   * `ProviderTimeoutError` returned to the caller. (For scale: the same model at
+   * `low`/1024² answers in 15s, and an edit in 14–20s.)
+   *
+   * So the image path passes `false` and the streaming path leaves it alone. A
+   * 429 or a 5xx is still retried in both cases: those say the request did not
+   * run, which is the opposite of what a timeout says here.
+   */
+  retryTimeouts?: boolean;
 };
 
 /** The floor of the backoff. Doubling from here gives 0.5s, 1s, 2s, 4s — long
@@ -172,6 +200,10 @@ export async function requestWithRetry(
       // try three more times".
       if (options.signal?.aborted) throw error;
       lastError = timedOut ? new ProviderTimeoutError(options.timeoutMs) : error;
+      // Checked before the attempt count, because this is not "no attempts
+      // left" — it is "another attempt is the wrong thing to do". See
+      // `RequestOptions.retryTimeouts`.
+      if (timedOut && options.retryTimeouts === false) throw lastError;
       if (attempt === maxRetries) throw lastError;
       await wait(backoffDelayMs(attempt, random));
       continue;

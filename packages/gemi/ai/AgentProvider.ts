@@ -1,6 +1,17 @@
 import type { ReasoningEffort } from "./Agent";
-import { streamResponses, uploadFile, type ResponsesEndpoint } from "./providers/call";
+import {
+  responsesEndpoint,
+  streamResponses,
+  uploadFile,
+  type ResponsesEndpoint,
+} from "./providers/call";
 import { capabilitiesForModel } from "./providers/capabilities";
+import {
+  azureTarget,
+  openAITarget,
+  type AzureConfig,
+  type ProviderConfig,
+} from "./providers/endpoints";
 import { normalizeProviderError } from "./providers/errors";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
@@ -134,24 +145,13 @@ export type ProviderEvent =
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
 
-export type ProviderConfig = {
-  apiKey?: string;
-  baseURL?: string;
-  timeoutMs?: number;
-  maxRetries?: number;
-  headers?: Record<string, string>;
-};
-
-
-/** Long enough for a reasoning model to think before it says anything, short
- *  enough that a hung connection is not mistaken for a slow one. Only covers
- *  getting a response; the stream that follows has no deadline. */
-const DEFAULT_TIMEOUT_MS = 120_000;
-const DEFAULT_MAX_RETRIES = 2;
-
-function env(name: string): string | undefined {
-  return typeof process === "undefined" ? undefined : process.env?.[name];
-}
+/**
+ * Re-exported rather than declared here. What these configure is the *vendor*,
+ * not the Responses API, and the images path resolves the same host, credential
+ * and api-version from the same fields — see `providers/endpoints.ts` for why
+ * that resolution lives in one place and what happens when it does not.
+ */
+export type { AzureConfig, ProviderConfig } from "./providers/endpoints";
 
 export abstract class AgentProvider {
   abstract readonly model: string;
@@ -264,121 +264,9 @@ export class OpenAIProvider extends AgentProvider {
     return uploadFile(this.endpoint(), file);
   }
 
-  protected baseURL(): string {
-    return (this.config.baseURL ?? env("OPENAI_BASE_URL") ?? "https://api.openai.com/v1").replace(
-      /\/+$/,
-      "",
-    );
-  }
-
   protected endpoint(): ResponsesEndpoint {
-    const base = this.baseURL();
-    const config = this.config;
-    return {
-      responsesUrl: `${base}/responses`,
-      filesUrl: `${base}/files`,
-      headers: async () => {
-        const apiKey = config.apiKey ?? env("OPENAI_API_KEY");
-        return {
-          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-          ...config.headers,
-        };
-      },
-      timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-    };
+    return responsesEndpoint(openAITarget(this.config));
   }
-}
-
-export type AzureConfig = ProviderConfig & {
-  /**
-   * The resource host, with or without a trailing `/openai`. Both spellings
-   * work — `https://<resource>.cognitiveservices.azure.com` and
-   * `https://<resource>.openai.azure.com` — and neither is rewritten, because
-   * only one of them exists for a resource that was not created as
-   * kind=OpenAI. See `azureBase` for what is done to it.
-   */
-  endpoint?: string;
-  /**
-   * Just the resource name, when there is no endpoint to hand. `<name>` is
-   * expanded to `https://<name>.cognitiveservices.azure.com/openai`.
-   */
-  resourceName?: string;
-  apiVersion?: string;
-  /**
-   * The deployment to call, when it is not named after the model. Azure lets
-   * whoever ran the template call it anything, and plenty of them are called
-   * `prod` — this is the override the class comment promises.
-   */
-  deployment?: string;
-  /**
-   * For Entra ID instead of a key. A function, not a token, because these
-   * expire mid-conversation.
-   */
-  getToken?: () => Promise<string>;
-};
-
-/**
- * `preview` selects Azure's `/openai/v1` surface, which is the OpenAI-shaped
- * one — same request body, same SSE frames, same `model` field naming the
- * deployment — and it is the only surface the Responses API has that gemi's
- * request builder can talk to unchanged. It takes no dated version: sending
- * `api-version=2025-04-01-preview` to `/openai/v1/responses` answers
- * `400 {"code":"BadRequest","message":"API version not supported"}`.
- *
- * A dated version is still honoured, and routes to the older
- * `/openai/responses` path instead — see `azurePath`. So an app that pinned
- * one keeps working, which is the promise the old comment here made and could
- * not keep once the paths diverged.
- */
-const AZURE_API_VERSION = "preview";
-
-/**
- * Where an Azure Responses call goes, worked out live rather than from docs.
- *
- * THE PROBLEM THIS SOLVES. `AZURE_OPENAI_ENDPOINT` is conventionally written
- * with `/openai` already on the end, and the old code appended `/openai` again
- * and then a deployment path, producing
- * `…/openai/openai/deployments/<dep>/responses` — a 404 on every request, for
- * every app that configured the provider the documented way. Two separate
- * mistakes were stacked there, and only measuring told them apart.
- *
- * WHAT WAS MEASURED, against a real resource, POSTing a Responses body:
- *
- *   404  {endpoint}/openai/deployments/gpt-5.4/responses?api-version=2025-04-01-preview
- *   404  {host}/openai/deployments/gpt-5.4/responses?api-version=2025-04-01-preview
- *   404  {host}/openai/deployments/gpt-5.4/responses?api-version=preview
- *   400  {host}/openai/v1/responses?api-version=2025-04-01-preview   ("API version not supported")
- *   200  {host}/openai/v1/responses?api-version=preview
- *   200  {host}/openai/v1/responses                                   (no api-version at all)
- *   200  {host}/openai/responses?api-version=2025-04-01-preview
- *
- * for {host} in BOTH `https://<resource>.cognitiveservices.azure.com` and
- * `https://<resource>.openai.azure.com` — both spellings answered identically,
- * so the host was never the variable. The deployment-in-the-URL path is the
- * Chat Completions shape and the Responses API does not serve it at all; the
- * deployment goes in the body's `model`, which is what `buildResponsesRequest`
- * already puts there.
- *
- * `/openai/v1/files?api-version=preview` and
- * `/openai/files?api-version=2025-04-01-preview` were both checked too (200,
- * empty list), so uploads follow the same fork.
- */
-function azureBase(raw: string): string {
-  const trimmed = raw.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  // A configured endpoint may or may not already carry `/openai`, and may even
-  // carry `/openai/v1` if someone copied a full URL. Normalize down to the
-  // resource base and put exactly one `/openai` back, rather than appending
-  // blind — appending blind is the bug.
-  const base = trimmed.replace(/\/openai(?:\/v1)?$/i, "");
-  return `${base}/openai`;
-}
-
-/** Dated versions belong to the older path; `preview` (and anything that is not
- *  a date) belongs to `/v1`. Both were verified above. */
-function azurePath(apiVersion: string): string {
-  return /^\d{4}-\d{2}-\d{2}/.test(apiVersion) ? "" : "/v1";
 }
 
 /**
@@ -440,49 +328,7 @@ export class AzureOpenAIProvider extends AgentProvider {
     return this.config.deployment ?? this.model;
   }
 
-  /**
-   * The resource base, `<host>/openai`, from whichever of the three ways it was
-   * configured. A bare resource name expands to the `cognitiveservices` host
-   * rather than the `openai.azure.com` one: both answer for a resource created
-   * as kind=OpenAI, only `cognitiveservices` answers for an AI Foundry or
-   * multi-service resource, so it is the spelling that is right more often. An
-   * app on the other one sets `endpoint` and nothing rewrites it.
-   */
-  protected base(): string {
-    const config = this.config;
-    const configured = config.baseURL ?? config.endpoint ?? env("AZURE_OPENAI_ENDPOINT");
-    if (configured) return azureBase(configured);
-    const resource =
-      config.resourceName ?? env("AZURE_OPENAI_RESOURCE_NAME") ?? env("AZURE_RESOURCE_NAME");
-    return resource ? azureBase(`https://${resource.trim()}.cognitiveservices.azure.com`) : "";
-  }
-
   protected endpoint(): ResponsesEndpoint {
-    const config = this.config;
-    const base = this.base();
-    const apiVersion = config.apiVersion ?? env("AZURE_OPENAI_API_VERSION") ?? AZURE_API_VERSION;
-    const path = azurePath(apiVersion);
-    const query = `?api-version=${encodeURIComponent(apiVersion)}`;
-    return {
-      // No deployment in the URL: the Responses API does not serve that path,
-      // and `buildResponsesRequest` already sends the deployment as `model`.
-      responsesUrl: `${base}${path}/responses${query}`,
-      // Files are resource-scoped, not deployment-scoped: an upload is not
-      // addressed to a model.
-      filesUrl: `${base}${path}/files${query}`,
-      headers: async () => {
-        // Called per request, not per provider: an Entra token minted when the
-        // app booted is expired by the time a long conversation reaches step
-        // nine, and that failure looks like a random 401 in the middle of a
-        // working feature.
-        if (config.getToken) {
-          return { authorization: `Bearer ${await config.getToken()}`, ...config.headers };
-        }
-        const apiKey = config.apiKey ?? env("AZURE_OPENAI_API_KEY");
-        return { ...(apiKey ? { "api-key": apiKey } : {}), ...config.headers };
-      },
-      timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-    };
+    return responsesEndpoint(azureTarget(this.config));
   }
 }

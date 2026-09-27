@@ -4,7 +4,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
-import { fakeProvider } from "./providers/fakeProvider";
+import { fakeImageProvider, fakeProvider } from "./providers/fakeProvider";
+import { ImageModel } from "./ImageModel";
 import { toResponsesInput } from "./providers/request";
 // The real builder, imported alongside `schemaOf` below rather than instead of
 // it: the tests in "strict mode follows the schema" are about what `s` produces,
@@ -3470,6 +3471,199 @@ describe("a tool that parks bytes", () => {
     expect(records[0].attachment).toMatchObject({ name: "first.png" });
     expect(records[1].attachment.id).toBe(parked[1].attachment.id);
     expect(store.size).toBe(2);
+  });
+});
+
+describe("a tool that generates an image", () => {
+  const imageModel = (provider: any) =>
+    ImageModel.create({ name: "banner", provider, size: "1024x1024" });
+
+  test("renders once, parks the bytes, and answers an id rather than the image", async () => {
+    const { store, scoped } = scopedFor();
+    const images = fakeImageProvider();
+    const banner = imageModel(images);
+    let answered: any;
+    const tool = makerTool("draw", async (ctx) => {
+      answered = await ctx.generateImage(banner, { prompt: "a market street" });
+      return { imageId: answered.attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "draw", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    expect(images.generated).toEqual([{ prompt: "a market street", size: "1024x1024" }]);
+    expect(answered.size).toBe("1024x1024");
+    expect(answered.mimeType).toBe("image/png");
+    // Parked, under a name derived from the model, and stored rather than sent
+    // to the vendor — nothing asked for `showModel`.
+    expect(answered.attachment).toMatchObject({ name: "banner.png", destination: "storage" });
+    expect(store.size).toBe(1);
+    // The bytes are in storage and reachable by the id, which is what makes a
+    // generated image able to outlive the run.
+    const records = callPartOf(result.messages, "c1").attachments;
+    expect(records[0].generated).toEqual({ size: "1024x1024", usage: answered.usage });
+  });
+
+  test("and the render is counted against the run, not lost", async () => {
+    const { scoped } = scopedFor();
+    const banner = imageModel(fakeImageProvider());
+    const tool = makerTool("draw", async (ctx) => {
+      await ctx.generateImage(banner, { prompt: "x" });
+      return { ok: true };
+    });
+    const provider = fakeProvider([toolCall("c1", "draw", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    // The image's tokens are in the run total, with the image share still
+    // legible inside it — which is what `imageOutputTokens` is for. Two model
+    // calls at usage(10, 5) each, plus the render.
+    expect(result.usage.outputTokens).toBe(5 + 5 + 196);
+    expect(result.usage.imageOutputTokens).toBe(196);
+  });
+
+  test("a replay does not render again — the id the model already read still names the same bytes", async () => {
+    // The expensive one. An escalating tool is re-entered from the top, so
+    // without the memo this renders twice: two minutes and two invoice lines
+    // for an image the model has already been told the id of.
+    const { store, scoped } = scopedFor();
+    const images = fakeImageProvider();
+    const banner = imageModel(images);
+    const sub = askingAgent("researcher", "which colour?");
+    const tool = makerTool("draw", async (ctx) => {
+      const made = await ctx.generateImage(banner, { prompt: "a market street" });
+      await ctx.runAgent(sub.agent, { prompt: "pick" });
+      return { imageId: made.attachment.id };
+    });
+
+    const opening = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "draw", {}), finish()]),
+      tools: [tool],
+    }).stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const opened = collect(opening);
+    const first = await opening.result();
+    await opened.done;
+    const awaiting = opened.events.find((event) => event.type === "awaiting-input") as any;
+    const parked = callPartOf(first.messages, "c1").attachments;
+
+    expect(images.generated).toHaveLength(1);
+
+    const result = await Agent.create({
+      name: "lead",
+      provider: fakeProvider([finish()]),
+      tools: [tool],
+    })
+      .stream({
+        messages: first.messages,
+        req,
+        attachments: scoped,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: awaiting.pending[0].signature,
+              path: awaiting.pending[0].path,
+              output: { answer: "blue" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    // Rendered once across both turns, stored once, same id.
+    expect(images.generated).toHaveLength(1);
+    expect(store.size).toBe(1);
+    const records = callPartOf(result.messages, "c1").attachments;
+    expect(records[0].attachment.id).toBe(parked[0].attachment.id);
+    expect(records[0].generated.size).toBe("1024x1024");
+  });
+
+  test("editing resolves an attachment id through the scope, so the model cannot name someone else's", async () => {
+    const { scoped } = scopedFor();
+    const other = scopedFor("user:someone-else");
+    const images = fakeImageProvider();
+    const banner = imageModel(images);
+    // A file that exists, under a different subject. The id is perfectly real.
+    const theirs = await other.scoped.put(png("not-yours"), { name: "theirs.png" });
+
+    let refused = "";
+    const tool = makerTool("edit", async (ctx) => {
+      const mine = await ctx.generateImage(banner, { prompt: "first" });
+      await ctx.editImage(banner, { prompt: "warmer", images: [mine.attachment.id] });
+      try {
+        await ctx.editImage(banner, { prompt: "steal", images: [theirs.id] });
+      } catch (error) {
+        refused = (error as Error).name;
+      }
+      return { ok: true };
+    });
+    const provider = fakeProvider([toolCall("c1", "edit", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+
+    await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    expect(images.edited).toEqual([{ prompt: "warmer", images: 1, mask: false }]);
+    expect(refused).toBe("AttachmentNotFoundError");
+  });
+
+  test("a slot that was a put on the first attempt and an image on the replay is refused", async () => {
+    // The memo is indexed by call order across all three of put, generateImage
+    // and editImage, so a body whose sequence changes between turns cannot be
+    // replayed. Silently, `generateImage` would hand back a file nobody
+    // rendered.
+    const { scoped } = scopedFor();
+    const banner = imageModel(fakeImageProvider());
+    const sub = askingAgent("researcher", "which colour?");
+    let resumed = false;
+    const tool = makerTool("draw", async (ctx) => {
+      if (resumed) await ctx.generateImage(banner, { prompt: "x" });
+      else await ctx.attachments.put(png(), { name: "chart.png" });
+      await ctx.runAgent(sub.agent, { prompt: "pick" });
+      return { ok: true };
+    });
+
+    const opening = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "draw", {}), finish()]),
+      tools: [tool],
+    }).stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const opened = collect(opening);
+    const first = await opening.result();
+    await opened.done;
+    const awaiting = opened.events.find((event) => event.type === "awaiting-input") as any;
+
+    resumed = true;
+    const result = await Agent.create({
+      name: "lead",
+      provider: fakeProvider([finish()]),
+      tools: [tool],
+    })
+      .stream({
+        messages: first.messages,
+        req,
+        attachments: scoped,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: awaiting.pending[0].signature,
+              path: awaiting.pending[0].path,
+              output: { answer: "blue" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    const failure = partsOf(result.messages, "tool-result").find(
+      (part: any) => part.toolCallId === "c1",
+    ) as any;
+    expect(failure.status).toBe("error");
+    expect(failure.error.code).toBe("tool_error");
+    expect(failure.error.message).toMatch(/was a stored file on the first attempt/);
   });
 });
 

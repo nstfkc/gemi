@@ -69,6 +69,11 @@ function reaches(entry: string): Set<string> {
 /** The files whose evaluation in a browser bundle is the thing being prevented. */
 const SERVER_ONLY = [
   "ai/AgentProvider.ts",
+  // The same reason as the line above it: it resolves an API key and a resource
+  // host. `ai/providers/*` is already covered wholesale by the second test, but
+  // this one sits at the top level beside the agent classes, where a stray
+  // client import is an easy mistake to make.
+  "ai/ImageProvider.ts",
   "ai/signing.ts",
   "ai/Agent.ts",
   "ai/AgentController.ts",

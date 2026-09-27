@@ -3,6 +3,7 @@ import type {
   ReadFileParams,
   ReadResult,
 } from "../../services/file-storage/drivers/types";
+import type { Usage } from "../types";
 
 /**
  * The bytes of an upload, kept by gemi, and the scope that says whose they are.
@@ -296,6 +297,29 @@ export class ScopedAttachments {
    *
    * Buffers, and says so. `read()` is there for anything large enough that
    * buffering it is the wrong call.
+   *
+   * THIS IS ALSO HOW AN ATTACHMENT OUTLIVES THE RUN, and it is `file()` rather
+   * than `read()` that composes for it:
+   *
+   *     const file = await ctx.attachments.file(id);
+   *     await Storage.put({ name: `pages/${pageId}/hero.png`, body: file });
+   *
+   * `read()` answers a `ReadResult` whose `body` is `ReadableStream | Blob |
+   * null`, and `PutFileParams.body` is `Blob | File | Buffer` — a stream body
+   * has nowhere to go without being drained first.
+   *
+   * Two things that bite on the way out, both silent:
+   *
+   * - **Do not keep a `gemi_att_` id as an app's durable handle to a file.**
+   *   The default record store is `MemoryAttachmentStore`, so the id→object
+   *   mapping dies with the process while the bytes stay in storage. Copy the
+   *   file under a key of the app's own and keep that.
+   * - **Put an extension on that key.** `FileSystemDriver` — the default —
+   *   ignores `contentType` on write and re-derives the type from the stored
+   *   path on read, so an extensionless object serves as
+   *   `application/octet-stream` and an `<img>` pointed at it renders nothing,
+   *   with no error anywhere. `attachmentObjectName` carries one over for this
+   *   module's own writes; an app's key is the app's to name.
    */
   async file(id: string): Promise<File> {
     const record = await this.get(id);
@@ -454,6 +478,34 @@ export interface ToolAttachments {
 export type ToolAttachmentPut = {
   /** What `put` answered, replayed verbatim. */
   attachment: Attachment;
+  /**
+   * Set when this slot was filled by `ctx.generateImage` / `ctx.editImage`
+   * rather than a plain `put`, carrying what the render reported and the
+   * attachment record cannot.
+   *
+   * WHY THE RENDER IS MEMOIZED AT ALL, and why it is memoized *here*. An
+   * escalating tool is re-entered from the top on the next turn, so a render
+   * that is not written down is paid for again — and unlike a `put`, the thing
+   * being repeated costs money at the vendor and about two minutes of wall
+   * clock. The memo cannot hold the image: this record lives in the message
+   * history, which goes over the wire and into a store on every turn, and a
+   * megabyte of base64 per generated image would go with it. So what is
+   * recorded is the attachment id, and the bytes live in storage where they
+   * were going anyway.
+   *
+   * That is the whole reason `ctx.generateImage` answers an `Attachment`
+   * instead of a `Blob` while `ImageModel.generate` answers the bytes: outside
+   * a run there is nothing to replay and nowhere to park, and inside one there
+   * has to be both.
+   *
+   * `size` is the pixel dimensions the model actually produced — read off the
+   * response, which does not always echo the request — and is not derivable
+   * from `Attachment.size`, which is a byte count.
+   */
+  generated?: {
+    size: string;
+    usage: Usage;
+  };
   /** Set when `showModel` was asked for. See above. */
   shown?: {
     /** The provider's file id — what the injected `FilePart` carries. */

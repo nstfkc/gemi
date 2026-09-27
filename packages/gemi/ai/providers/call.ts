@@ -1,4 +1,5 @@
 import type { ProviderEvent } from "../AgentProvider";
+import type { ProviderTarget } from "./endpoints";
 import { normalizeProviderError } from "./errors";
 import { requestWithRetry, type FetchLike } from "./http";
 import type { ResponsesRequest } from "./request";
@@ -23,6 +24,26 @@ export type ResponsesEndpoint = {
   maxRetries: number;
   fetchImpl?: FetchLike;
 };
+
+/**
+ * The Responses paths for a resolved vendor.
+ *
+ * The two URLs are all that distinguishes this from any other call to the same
+ * host, which is why the host, the credential and the api-version are worked out
+ * by `providers/endpoints.ts` and appended to here rather than resolved twice.
+ * Files are resource-scoped rather than deployment-scoped on Azure — an upload
+ * is not addressed to a model — and the deployment goes in the body's `model`,
+ * which `buildResponsesRequest` already does.
+ */
+export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
+  return {
+    responsesUrl: `${target.base}/responses${target.query}`,
+    filesUrl: `${target.base}/files${target.query}`,
+    headers: target.headers,
+    timeoutMs: target.timeoutMs,
+    maxRetries: target.maxRetries,
+  };
+}
 
 /**
  * Errors reach the consumer as events, not exceptions.

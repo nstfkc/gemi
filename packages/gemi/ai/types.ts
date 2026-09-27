@@ -37,6 +37,32 @@ export type Usage = {
   /** Billed separately by OpenAI and worth surfacing on its own. */
   reasoningTokens?: number;
   cachedInputTokens?: number;
+  /**
+   * How much of `inputTokens` / `outputTokens` was image rather than text, on a
+   * generation or an edit.
+   *
+   * A BREAKDOWN, NOT A SEPARATE BUCKET — the same relationship `reasoningTokens`
+   * has to `outputTokens` and `cachedInputTokens` has to `inputTokens`. This was
+   * worth getting right rather than assuming: the design note for this field
+   * argued they should be kept *out* of the totals so nothing could price image
+   * tokens at a text rate, and the measurement says the vendor does not work
+   * that way. An edit reports `input_tokens: 1038` with
+   * `input_tokens_details: { image_tokens: 1024, text_tokens: 14 }` — 1038 is
+   * the sum, not the text half. Subtracting here to invent a separate bucket
+   * would produce a `totalTokens` that disagrees with the provider's own.
+   *
+   * So the totals stay the provider's, and these say what they are made of. A
+   * caller pricing a run can subtract; a caller that does not care is unaffected.
+   *
+   * MEASURED, `gpt-image-2` on Azure: a generation reports `image_tokens: 0` on
+   * the input side and all of `outputTokens` as image — 196 at `low`/1024², 5488
+   * at `high`/1536x1024. An edit reports 1024 input image tokens per 1024x1024
+   * input image, and 2048 for two.
+   *
+   * Absent on usage from a text call, exactly like `reasoningTokens`.
+   */
+  imageInputTokens?: number;
+  imageOutputTokens?: number;
   totalTokens: number;
 };
 
