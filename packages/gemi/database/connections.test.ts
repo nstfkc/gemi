@@ -311,7 +311,7 @@ describe("a relative SQLite url on a connection", () => {
     process.chdir(root);
     process.env.DATABASE_URL = "file:./dev.db";
     try {
-      expect(() => new Connection("default", { url: "file:./dev.db" })).toThrow(/will not pick/);
+      expect(() => new Connection("default", { url: "file:./dev.db" })).toThrow(/will not choose/);
     } finally {
       process.chdir(cwd);
       if (url === undefined) delete process.env.DATABASE_URL;

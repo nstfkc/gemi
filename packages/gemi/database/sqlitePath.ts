@@ -34,22 +34,23 @@ import type { Dialect } from "./dialect";
 const SCHEMA_PATH = join("prisma", "schema.prisma");
 
 /**
- * Two databases, one URL.
+ * The url moved, and the file it used to name holds data.
  *
- * Thrown rather than warned, and rather than picking. The app was reading the
- * working-directory file until now, and that file has data in it; the schema's
- * own file is what the migrations have been going to. Either could be the one
- * that matters, nothing here can tell, and the failure mode of guessing is
- * silent — the app runs, against the wrong half of its own history.
+ * Thrown rather than warned, and rather than choosing. The app was reading the
+ * working-directory file until now and that file has rows in it; the resolved one
+ * is where Prisma migrates. Which of them matters is not knowable from here — the
+ * resolved file may not even exist yet — and the failure mode of guessing is
+ * silent: the app runs, against an empty database or against the wrong half of
+ * its own history.
  */
 export class AmbiguousSqlitePathError extends Error {
   constructor(url: string, resolved: string, stranded: string) {
     super(
-      `"${url}" now resolves to ${resolved}, the file Prisma migrates, ` +
-        `rather than to ${stranded}, which gemi opened before this and which ` +
-        `holds data. Two databases and one URL, so gemi will not pick. Point ` +
-        `DATABASE_URL at an absolute path, or move ${stranded} onto ` +
-        `${resolved} if it is the one you want and delete the other.`,
+      `"${url}" now resolves to ${resolved}, which is where Prisma migrates it. ` +
+        `gemi used to open ${stranded} instead, and that file holds data — so ` +
+        `opening the resolved one would quietly leave it behind. gemi will not ` +
+        `choose. Move ${stranded} onto ${resolved} if it is the database you ` +
+        `want, or point DATABASE_URL at an absolute path to say so explicitly.`,
     );
     this.name = "AmbiguousSqlitePathError";
   }
