@@ -9,7 +9,7 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 
-import { s, type Infer } from "./Schema";
+import { s, type Infer, type JsonValue } from "./Schema";
 
 describe("Infer over the leaves", () => {
   test("reads scalars back", () => {
@@ -106,6 +106,78 @@ describe("Infer over arrays and unions", () => {
   test("refuses a union of one, which is just the member", () => {
     // @ts-expect-error a union needs at least two members
     s.union([s.string()]);
+  });
+});
+
+describe("Infer over json()", () => {
+  /**
+   * IN THE POSITION IT IS ACTUALLY USED, which the test below could not see.
+   *
+   * Binding `const doc = s.json()` gives the call no contextual type. Inside
+   * `s.object({ ... })` it has one — the shape is constrained to
+   * `Record<string, AnySchema>`, i.e. `Schema<any>` — and a `<T = JsonValue>`
+   * default lost to it, so the field came out `any`: type checking off around the
+   * one field this feature exists for. Every other assertion in this file spelled
+   * an explicit type argument, so none of them touched it.
+   */
+  test("is JsonValue as a property of an object, not any", () => {
+    const schema = s.object({ definition: s.json(), name: s.string() });
+    expectTypeOf<Infer<typeof schema>>().toEqualTypeOf<{
+      definition: JsonValue;
+      name: string;
+    }>();
+  });
+
+  test("and as a member of a union or an array", () => {
+    const list = s.array(s.json());
+    expectTypeOf<Infer<typeof list>>().toEqualTypeOf<JsonValue[]>();
+
+    const either = s.union([s.object({ kind: s.literal("ref") }), s.json()]);
+    expectTypeOf<Infer<typeof either>>().toEqualTypeOf<{ kind: "ref" } | JsonValue>();
+  });
+
+  test("defaults to JsonValue, which is every shape JSON can hold", () => {
+    // Written as a call rather than `ReturnType<typeof s.json>`: that form
+    // instantiates the signature with the type parameter's *constraint*, so it
+    // would read `unknown` and pass whatever the default said.
+    const doc = s.json();
+    expectTypeOf<Infer<typeof doc>>().toEqualTypeOf<JsonValue>();
+    // Not `any`: the default has to make an app narrow before it indexes, or
+    // `s.json()` would quietly switch type checking off around every use.
+    expectTypeOf<JsonValue>().not.toEqualTypeOf<any>();
+    expectTypeOf<{ a: [1, "two", { b: null }] }>().toExtend<JsonValue>();
+    expectTypeOf<{ at: Date }>().not.toExtend<JsonValue>();
+  });
+
+  test("takes the app's own type when it names one", () => {
+    // The assertion the app makes and then validates itself, in `execute`. The
+    // emitted schema constrains nothing, so nothing else can check this.
+    type Element = [tag: string, props: Record<string, JsonValue>, children: Element[]];
+    const definition = s.json<Element>().describe("A kyte ApplicationDefinition");
+    expectTypeOf<Infer<typeof definition>>().toEqualTypeOf<Element>();
+    expectTypeOf(definition.parse({})).toEqualTypeOf<Element>();
+  });
+
+  test("survives describe(), optional() and nullable() like any other builder", () => {
+    expectTypeOf<Infer<ReturnType<typeof s.json<number>>>>().toEqualTypeOf<number>();
+    const schema = s.object({
+      required: s.json<{ a: string }>(),
+      maybe: s.json<{ b: string }>().optional(),
+      nothing: s.json<{ c: string }>().nullable(),
+    });
+    expectTypeOf<Infer<typeof schema>>().toEqualTypeOf<{
+      required: { a: string };
+      maybe?: { b: string };
+      nothing: { c: string } | null;
+    }>();
+  });
+
+  test("composes into arrays and unions as a member type", () => {
+    const list = s.array(s.json<{ id: string }>());
+    expectTypeOf<Infer<typeof list>>().toEqualTypeOf<{ id: string }[]>();
+
+    const either = s.union([s.object({ kind: s.literal("ref"), id: s.string() }), s.json<null>()]);
+    expectTypeOf<Infer<typeof either>>().toEqualTypeOf<{ kind: "ref"; id: string } | null>();
   });
 });
 
