@@ -3,6 +3,7 @@ import type {
   ReadFileParams,
   ReadResult,
 } from "../../services/file-storage/drivers/types";
+import type { Usage } from "../types";
 
 /**
  * The bytes of an upload, kept by gemi, and the scope that says whose they are.
@@ -454,6 +455,34 @@ export interface ToolAttachments {
 export type ToolAttachmentPut = {
   /** What `put` answered, replayed verbatim. */
   attachment: Attachment;
+  /**
+   * Set when this slot was filled by `ctx.generateImage` / `ctx.editImage`
+   * rather than a plain `put`, carrying what the render reported and the
+   * attachment record cannot.
+   *
+   * WHY THE RENDER IS MEMOIZED AT ALL, and why it is memoized *here*. An
+   * escalating tool is re-entered from the top on the next turn, so a render
+   * that is not written down is paid for again — and unlike a `put`, the thing
+   * being repeated costs money at the vendor and about two minutes of wall
+   * clock. The memo cannot hold the image: this record lives in the message
+   * history, which goes over the wire and into a store on every turn, and a
+   * megabyte of base64 per generated image would go with it. So what is
+   * recorded is the attachment id, and the bytes live in storage where they
+   * were going anyway.
+   *
+   * That is the whole reason `ctx.generateImage` answers an `Attachment`
+   * instead of a `Blob` while `ImageModel.generate` answers the bytes: outside
+   * a run there is nothing to replay and nowhere to park, and inside one there
+   * has to be both.
+   *
+   * `size` is the pixel dimensions the model actually produced — read off the
+   * response, which does not always echo the request — and is not derivable
+   * from `Attachment.size`, which is a byte count.
+   */
+  generated?: {
+    size: string;
+    usage: Usage;
+  };
   /** Set when `showModel` was asked for. See above. */
   shown?: {
     /** The provider's file id — what the injected `FilePart` carries. */

@@ -1,5 +1,6 @@
 import type { HttpRequest } from "../http";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
+import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
 import { supportsStrict } from "./Schema";
 import type { Infer, Schema } from "./Schema";
 import {
@@ -180,7 +181,66 @@ export interface ToolContext {
    * checkpoint API, because that is a much larger feature than this one.
    */
   runAgent<A extends AnyAgent>(agent: A, params?: RunAgentParams): Promise<NestedRunResult>;
+
+  /**
+   * Renders an image and parks it, in one step, wired into this tool call.
+   *
+   * THE SPELLING DIFFERS FROM `ImageModel.generate` ON PURPOSE, and the reason
+   * is the same one behind `ctx.runAgent`: an escalating tool is re-entered
+   * from the top on the next turn, so a render reached by a bare
+   * `model.generate()` inside a tool body is paid for again on every replay —
+   * two minutes and an invoice line, for an image whose id the model has
+   * already read. This memoizes the render against the tool call, exactly as
+   * `ctx.attachments.put` memoizes a store.
+   *
+   * IT ANSWERS AN `Attachment`, NOT BYTES, and that is forced rather than
+   * chosen: the memo lives in the message history, so it cannot hold an image.
+   * The bytes are in the app's Storage, which is where a generated image was
+   * going anyway; `ctx.attachments.file(id)` hands them back, and copying them
+   * under a key of the app's own is what makes the image outlive the run.
+   *
+   * `showModel: true` puts the result in front of the model as an input-role
+   * message once this call settles, so an agent can look at what it made and
+   * try again.
+   */
+  generateImage(model: ImageModel, params: ToolGenerateImageParams): Promise<GeneratedAttachment>;
+
+  /**
+   * Edits images and parks the result. Everything above applies.
+   *
+   * `images` takes attachment ids as well as bytes, and the ids are the point:
+   * the image to change is usually the one the model just named ("make that one
+   * warmer"), so it arrives with exactly the trust of a request body. Ids are
+   * resolved through this call's `ctx.attachments`, which applies #489's scope
+   * checks; there is no spelling here that reaches an id outside them.
+   */
+  editImage(model: ImageModel, params: ToolEditImageParams): Promise<GeneratedAttachment>;
 }
+
+/** What an image parked by a tool answers. See `ToolContext.generateImage`. */
+export type GeneratedAttachment = {
+  attachment: Attachment;
+  /** The pixel dimensions the model produced, read off the response. */
+  size: string;
+  mimeType: string;
+  usage: Usage;
+};
+
+type ToolImageSettings = Omit<GenerateImageParams, "prompt" | "signal">;
+
+export type ToolGenerateImageParams = ToolImageSettings & {
+  prompt: string;
+  /** The filename to store it under. Defaults to `<model name>.<extension>`. */
+  name?: string;
+  /** Also show the model its own output, once this tool call settles. */
+  showModel?: boolean;
+};
+
+export type ToolEditImageParams = ToolGenerateImageParams & {
+  /** Attachment ids, or raw bytes. At least one. */
+  images: [ImageInput | string, ...(ImageInput | string)[]];
+  mask?: ImageInput | string;
+};
 
 /**
  * The files of the turn a tool call belongs to, as data the model cannot write.
@@ -2264,6 +2324,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     step: number,
     resume?: { answers: ClientToolResult[] },
   ): Promise<ToolResultPart> {
+    // One object, because the three of them share a memo — see `toolFiles`.
+    const files = this.toolFiles(call);
     const ctx: ToolContext = {
       req: this.params.req,
       // `{}` rather than undefined, so a tool can read a field without a guard
@@ -2277,7 +2339,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       step,
       depth: this.depth,
       resumed: resume !== undefined,
-      attachments: this.toolAttachments(call),
+      attachments: files.attachments,
+      generateImage: files.generateImage,
+      editImage: files.editImage,
       turn: this.toolTurn(messageId),
       runAgent: this.nestedRunner(messageId, call, resume),
     };
@@ -2630,7 +2694,22 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * Nth attachment of this tool call" — so the object that counts them has to
    * belong to the call, not to the run.
    */
-  private toolAttachments(call: ToolCallPart): ToolAttachments {
+  /**
+   * The file half of a tool's context: `ctx.attachments`, `ctx.generateImage`
+   * and `ctx.editImage`.
+   *
+   * BUILT TOGETHER BECAUSE THEY SHARE ONE MEMO, and sharing it is not an
+   * optimization. `ToolCallPart.attachments` is a list indexed by the order the
+   * puts happened in, and a generated image *is* a put — so two `ReplayMemo`s
+   * over the same list would each start at zero and hand out the same slots,
+   * and a tool that both stored a file and generated one would replay the wrong
+   * record for each. One list, one cursor.
+   */
+  private toolFiles(call: ToolCallPart): {
+    attachments: ToolAttachments;
+    generateImage: ToolContext["generateImage"];
+    editImage: ToolContext["editImage"];
+  } {
     const scoped = this.params.attachments ?? null;
     const memo = new ReplayMemo<ToolAttachmentRecord>(
       () => call.attachments,
@@ -2666,95 +2745,208 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       return scoped;
     };
 
-    return {
-      get: (id: string) => scopeOrThrow().get(id),
-      read: (id: string) => scopeOrThrow().read(id),
-      file: (id: string) => scopeOrThrow().file(id),
-      put: async (blob: Blob, params: PutAttachmentParams = {}): Promise<Attachment> => {
-        const { at, recorded, write } = memo.next();
+    /**
+     * Everything a filled slot needs, with nothing of the memo in it.
+     *
+     * Shared by `put` and by the two image calls, which differ only in where the
+     * bytes came from and in whether a `generated` record rides along. The
+     * upload-then-store ordering, the `fileInput` refusal and the minted message
+     * id are one copy for all three.
+     */
+    const park = async (
+      blob: Blob,
+      params: PutAttachmentParams,
+      generated?: ToolAttachmentPut["generated"],
+    ): Promise<ToolAttachmentPut> => {
+      const attachments = scopeOrThrow();
+      const mimeType = params.mimeType || blob.type || "";
+      // A name is settled here rather than left to `ScopedAttachments.put`,
+      // which falls back to the attachment id. The provider's upload wants a
+      // filename, the injected `FilePart` carries one, and the stored record
+      // has one — three copies that have to agree, so there is one value.
+      const name = params.name ?? (blob instanceof File ? blob.name : "attachment");
 
-        // A `failed` record is a slot an earlier turn took and could not fill,
-        // so there is nothing to replay and the work is done again.
-        if (recorded && "attachment" in recorded) {
-          const mismatch = putMismatch(recorded, blob, params);
-          if (mismatch) {
-            throw new Error(
-              `Attachment ${at} of "${String(call.name)}" ${mismatch}. ` +
-                `ctx.attachments.put is memoized by call index within a tool call, so a body whose put calls depend on a condition that changed between turns cannot be replayed — the model would be shown a file under an id that names different bytes. ` +
-                `Make the sequence of put calls the same every time this tool runs, or branch on ctx.resumed.`,
-            );
-          }
-          // Nothing is stored and nothing is uploaded. What IS repeated is the
-          // queueing: the first attempt escalated before its result attached,
-          // so the message was queued and never flushed, and this turn is the
-          // one where the call finally settles. `settleShown` refuses a message
-          // id the history already holds, which is what makes queueing twice
-          // safe rather than merely unlikely.
-          if (recorded.shown) this.queueShown(call.toolCallId, recorded);
-          return recorded.attachment;
+      let fileId: string | undefined;
+      if (params.showModel) {
+        const provider = this.config.provider;
+        if (!provider.capabilities.fileInput) {
+          // Refused before a byte moves. `toResponsesInput` drops a file part
+          // for a provider that cannot read one, so without this the tool
+          // pays for an upload, stores a record claiming the model was shown
+          // the file, and the model answers about an image that never reached
+          // the wire — with nothing in the transcript, the logs or the bill
+          // saying which of those three things went wrong.
+          throw new Error(
+            `"${String(call.name)}" asked to show a file to ${provider.model}, which does not accept file input. Drop \`showModel\` for this provider, or run this agent on a model that takes files — \`capabilities.fileInput\` is what says which do.`,
+          );
         }
+        // The provider first, storage second — the opposite of `upload`'s
+        // order in `AgentController`, deliberately.
+        //
+        // That route stores first because either failure fails the request
+        // and the only question is whose orphan it becomes. Here there is a
+        // second question and it decides: the record this writes claims
+        // `destination: "both"`, and a record cannot claim the vendor has a
+        // copy before the vendor says so. Uploading first also means a file
+        // the vendor refuses — a type it will not take, a size over its cap —
+        // costs no storage write at all, and `showModel` is exactly the path
+        // where that refusal is likeliest. The orphan when storage fails
+        // afterwards is a file at the vendor with no record here, which is
+        // the same orphan `AgentController.upload` accepts in the other
+        // direction.
+        fileId = await provider.upload(new File([blob], name, { type: mimeType || undefined }));
+      }
 
-        const attachments = scopeOrThrow();
-        const mimeType = params.mimeType || blob.type || "";
-        // A name is settled here rather than left to `ScopedAttachments.put`,
-        // which falls back to the attachment id. The provider's upload wants a
-        // filename, the injected `FilePart` carries one, and the stored record
-        // has one — three copies that have to agree, so there is one value.
-        const name = params.name ?? (blob instanceof File ? blob.name : "attachment");
+      const attachment = await attachments.put(blob, { name, mimeType, fileId });
+      return {
+        attachment,
+        ...(generated ? { generated } : {}),
+        ...(fileId
+          ? {
+              shown: {
+                fileId,
+                // Minted here and written down, not derived later. The next
+                // turn replays this record and has to produce the same
+                // message — same id, same timestamp — or a reattached client
+                // and a live one hold two copies of one image.
+                messageId: `msg_${crypto.randomUUID()}`,
+                createdAt: new Date().toISOString(),
+              },
+            }
+          : {}),
+      };
+    };
 
-        let fileId: string | undefined;
-        if (params.showModel) {
-          const provider = this.config.provider;
-          if (!provider.capabilities.fileInput) {
-            // Refused before a byte moves. `toResponsesInput` drops a file part
-            // for a provider that cannot read one, so without this the tool
-            // pays for an upload, stores a record claiming the model was shown
-            // the file, and the model answers about an image that never reached
-            // the wire — with nothing in the transcript, the logs or the bill
-            // saying which of those three things went wrong.
-            throw new Error(
-              `"${String(call.name)}" asked to show a file to ${provider.model}, which does not accept file input. Drop \`showModel\` for this provider, or run this agent on a model that takes files — \`capabilities.fileInput\` is what says which do.`,
-            );
-          }
-          // The provider first, storage second — the opposite of `upload`'s
-          // order in `AgentController`, deliberately.
-          //
-          // That route stores first because either failure fails the request
-          // and the only question is whose orphan it becomes. Here there is a
-          // second question and it decides: the record this writes claims
-          // `destination: "both"`, and a record cannot claim the vendor has a
-          // copy before the vendor says so. Uploading first also means a file
-          // the vendor refuses — a type it will not take, a size over its cap —
-          // costs no storage write at all, and `showModel` is exactly the path
-          // where that refusal is likeliest. The orphan when storage fails
-          // afterwards is a file at the vendor with no record here, which is
-          // the same orphan `AgentController.upload` accepts in the other
-          // direction.
-          fileId = await provider.upload(new File([blob], name, { type: mimeType || undefined }));
-        }
+    /**
+     * A slot that was filled by a different call than the one asking for it now.
+     *
+     * The sequence of file calls inside a tool body is the memo's only key, so a
+     * body that stored a file on the first attempt and generates one at the same
+     * index on the replay has changed in a way nothing can reconcile — and the
+     * failure without this check is silent and expensive: `generateImage` would
+     * hand back an attachment nobody rendered, or `put` would return the id of a
+     * generated image in place of the bytes it was given.
+     */
+    const assertKind = (recorded: ToolAttachmentPut, wanted: "put" | "image", at: number) => {
+      const was = recorded.generated ? "image" : "put";
+      if (was === wanted) return;
+      throw new Error(
+        `Attachment ${at} of "${String(call.name)}" was ${was === "image" ? "a generated image" : "a stored file"} on the first attempt and is ${wanted === "image" ? "a generated image" : "a stored file"} now. ` +
+          `ctx.attachments.put, ctx.generateImage and ctx.editImage share one memo indexed by call order within a tool call, so the sequence has to be the same every time this tool runs. Branch on ctx.resumed if it cannot be.`,
+      );
+    };
 
-        const attachment = await attachments.put(blob, { name, mimeType, fileId });
-        const record: ToolAttachmentPut = {
-          attachment,
-          ...(fileId
-            ? {
-                shown: {
-                  fileId,
-                  // Minted here and written down, not derived later. The next
-                  // turn replays this record and has to produce the same
-                  // message — same id, same timestamp — or a reattached client
-                  // and a live one hold two copies of one image.
-                  messageId: `msg_${crypto.randomUUID()}`,
-                  createdAt: new Date().toISOString(),
-                },
-              }
-            : {}),
+    const runImage = async (
+      model: ImageModel,
+      params: ToolGenerateImageParams,
+      render: () => Promise<GeneratedImage>,
+    ): Promise<GeneratedAttachment> => {
+      const { at, recorded, write } = memo.next();
+
+      // Read BEFORE the render, which is the whole point of memoizing this
+      // rather than letting it fall through to `ctx.attachments.put`. `put`
+      // checks its memo when it is called, and by then the image has been
+      // rendered and paid for — its own docblock says so: "Work before a `put`
+      // still runs again." Here the expensive part is the work before.
+      if (recorded && "attachment" in recorded) {
+        assertKind(recorded, "image", at);
+        if (recorded.shown) this.queueShown(call.toolCallId, recorded);
+        return {
+          attachment: recorded.attachment,
+          size: recorded.generated!.size,
+          mimeType: recorded.attachment.mimeType,
+          usage: recorded.generated!.usage,
         };
-        // The slot is filled only now, with everything that could throw behind
-        // it: a put that fails leaves the tool call exactly as it found it.
-        write(record);
-        if (record.shown) this.queueShown(call.toolCallId, record);
-        return attachment;
+      }
+
+      const image = await render();
+      // Counted against the run exactly as a nested agent's is, so
+      // `AgentRunResult.usage` is the whole cost of the turn and not only its
+      // text. `imageInputTokens` keeps the image share legible inside it.
+      this.usage = addUsage(this.usage, image.usage);
+
+      const extension = image.mimeType === "image/jpeg" ? "jpg" : "png";
+      const record = await park(
+        image.image,
+        {
+          name: params.name ?? `${model.name}.${extension}`,
+          mimeType: image.mimeType,
+          ...(params.showModel ? { showModel: true } : {}),
+        },
+        { size: image.size, usage: image.usage },
+      );
+
+      write(record);
+      if (record.shown) this.queueShown(call.toolCallId, record);
+      return {
+        attachment: record.attachment,
+        size: image.size,
+        mimeType: image.mimeType,
+        usage: image.usage,
+      };
+    };
+
+    /** An attachment id resolves through the scope; bytes pass through. */
+    const asInput = async (input: ImageInput | string): Promise<ImageInput> =>
+      typeof input === "string" ? await scopeOrThrow().file(input) : input;
+
+    return {
+      generateImage: (model, params) =>
+        runImage(model, params, () =>
+          model.generate({ ...params, signal: this.controller.signal }),
+        ),
+
+      editImage: (model, params) =>
+        runImage(model, params, async () => {
+          // `images` and `mask` are peeled off rather than spread over: both
+          // may be attachment ids here and neither is one by the time it
+          // reaches `ImageModel`, so letting the originals through would type
+          // as `string | Blob` and ship an id where bytes belong.
+          const { images, mask, ...rest } = params;
+          return await model.edit({
+            ...rest,
+            images: (await Promise.all(images.map(asInput))) as [ImageInput, ...ImageInput[]],
+            ...(mask ? { mask: await asInput(mask) } : {}),
+            signal: this.controller.signal,
+          });
+        }),
+
+      attachments: {
+        get: (id: string) => scopeOrThrow().get(id),
+        read: (id: string) => scopeOrThrow().read(id),
+        file: (id: string) => scopeOrThrow().file(id),
+        put: async (blob: Blob, params: PutAttachmentParams = {}): Promise<Attachment> => {
+          const { at, recorded, write } = memo.next();
+
+          // A `failed` record is a slot an earlier turn took and could not fill,
+          // so there is nothing to replay and the work is done again.
+          if (recorded && "attachment" in recorded) {
+            assertKind(recorded, "put", at);
+            const mismatch = putMismatch(recorded, blob, params);
+            if (mismatch) {
+              throw new Error(
+                `Attachment ${at} of "${String(call.name)}" ${mismatch}. ` +
+                  `ctx.attachments.put is memoized by call index within a tool call, so a body whose put calls depend on a condition that changed between turns cannot be replayed — the model would be shown a file under an id that names different bytes. ` +
+                  `Make the sequence of put calls the same every time this tool runs, or branch on ctx.resumed.`,
+              );
+            }
+            // Nothing is stored and nothing is uploaded. What IS repeated is the
+            // queueing: the first attempt escalated before its result attached,
+            // so the message was queued and never flushed, and this turn is the
+            // one where the call finally settles. `settleShown` refuses a message
+            // id the history already holds, which is what makes queueing twice
+            // safe rather than merely unlikely.
+            if (recorded.shown) this.queueShown(call.toolCallId, recorded);
+            return recorded.attachment;
+          }
+
+          const record = await park(blob, params);
+          // The slot is filled only now, with everything that could throw behind
+          // it: a put that fails leaves the tool call exactly as it found it.
+          write(record);
+          if (record.shown) this.queueShown(call.toolCallId, record);
+          return record.attachment;
+        },
       },
     };
   }
