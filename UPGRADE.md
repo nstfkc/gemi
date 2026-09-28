@@ -1,5 +1,8 @@
 # Upgrading from 0.67 to 0.68
 
+One breaking change and one addition. The breaking one is the first section
+below: an agent run no longer takes a request.
+
 ## Agent runs take a `context`, not a `req` — breaking
 
 `Agent.stream()` no longer accepts `req`, and tools no longer get `ctx.req`.
@@ -62,6 +65,45 @@ What to change:
   dispatching.
 - **Controller hooks** (`AgentHookContext`) still get `req`: they belong to the
   request, not the run.
+
+## New: `useChat`'s `onToolProgress`, the per-yield sibling of `onToolResult`
+
+A tool whose `execute` is an async generator can now be reacted to per yield,
+not only when it returns:
+
+```tsx
+const { messages } = useChat("/chat", {
+  onToolProgress: (progress) => {
+    if (progress.name === "buildPage") refetchSection(progress.data.section);
+  },
+});
+```
+
+It is for a tool that **saves its work in stages**. One that builds a page
+section by section has something worth refetching after each section, and
+`onToolResult` does not arrive until the last one is done — until then the user
+is looking at a page the server has already moved past.
+
+`progress` is `{ toolCallId, name, data }`, discriminated on `name` exactly as
+`onToolResult`'s part is: checking it narrows `data` to what that tool yields.
+A tool whose `execute` returns a promise cannot yield, so its `data` is `never`.
+The type is exported as `ToolProgress` from `gemi/ai/client` for apps that write
+the handler as a named function.
+
+Three things it deliberately does not do:
+
+- **It does not fire for progress this client already had.** A reattach, or a
+  run replayed onto a restored transcript, redelivers yields — and an app
+  refetching in here would refetch on every refresh. It fires only when the
+  value actually joined the call's log.
+- **A sub-agent's yields do not fire it**, the same line `onToolResult` draws.
+  They belong to the parent tool call that started the sub-run and are reduced
+  into that call's own nested transcript.
+- **It is not needed to render the log.** Yields are in the transcript already,
+  on the tool call's `progress` array. This is for *acting* on one.
+
+This one is purely additive: nothing about `useChat` changes until you pass the
+callback.
 
 # Upgrading from 0.66 to 0.67
 

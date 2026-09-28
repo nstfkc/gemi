@@ -52,6 +52,11 @@ export type {
   ReasoningPart,
   TextPart,
   ToolCallPart,
+  // Not a content part, unlike everything around it: the single value
+  // `onToolProgress` is handed. Exported here because that is the callback's
+  // parameter type, and an app writing the handler as a named function needs to
+  // be able to spell it.
+  ToolProgress,
   ToolResultPart,
   ToolShape,
   ToolShapes,

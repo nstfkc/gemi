@@ -249,6 +249,34 @@ export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
   };
 }[keyof T];
 
+/**
+ * One value a tool yielded, as `useChat`'s `onToolProgress` hands it over.
+ *
+ * NOT A CONTENT PART — nothing in a transcript has this shape. A tool's yields
+ * live as the `progress` array on its `ToolCallPart`; this is the single value
+ * that was just appended to one, carrying the call it belongs to and the tool's
+ * name so that `name === "buildPage"` narrows `data` to what *that* tool
+ * yields. The name is not on the `tool-progress` frame, which carries only an
+ * id and an opaque value — the hook reads it off the part the value landed on,
+ * which is also why a frame for a call the client does not have announces
+ * nothing.
+ *
+ * `data` is `never` for a tool whose `execute` returns a promise rather than
+ * yielding. That is the honest answer — such a tool cannot produce progress —
+ * and it is what makes the narrowing worth having over an `unknown` the app
+ * would cast.
+ *
+ * It lives here rather than beside `useChat` so that the name is reachable from
+ * both halves of the module, like every other shape the two ends share.
+ */
+export type ToolProgress<T extends ToolShapes = ToolShapes> = {
+  [K in keyof T]: {
+    toolCallId: string;
+    name: K;
+    data: T[K]["progress"];
+  };
+}[keyof T];
+
 export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
   [K in keyof T]: {
     type: "tool-result";
