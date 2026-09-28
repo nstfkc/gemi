@@ -29,6 +29,14 @@ type ToolsOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { tools: infe
     : ToolShapes
   : ToolShapes;
 
+/**
+ * One value a tool yielded, discriminated by the tool's name so that checking
+ * `name` narrows `data` to that tool's own progress type.
+ */
+export type ToolProgress<T extends ToolShapes = ToolShapes> = {
+  [K in keyof T]: { toolCallId: string; name: K; data: T[K]["progress"] };
+}[keyof T];
+
 type OutputOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { output: infer O }
   ? O
   : unknown;
@@ -141,6 +149,23 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * called.
    */
   onToolResult?: (part: ToolResultPart<ToolsOf<P>>) => void;
+  /**
+   * Fires once for each value a tool yields, as it arrives.
+   *
+   * `onToolResult` for tools that finish in stages: a tool that saves its work
+   * piece by piece and yields after each piece is worth refetching for after
+   * each yield, not only when it returns. `name` narrows `data` to what that
+   * tool yields.
+   *
+   * ONLY FOR VALUES THAT ARE NEW HERE, for the reason `onToolResult` gives. A
+   * redelivered frame, or one for a call whose message already finished, is
+   * dropped by the reducer, and this fires only when the call's `progress`
+   * actually grew.
+   *
+   * A SUB-AGENT'S TOOLS DO NOT FIRE IT, like `onToolResult`: their progress
+   * arrives inside nested frames and belongs to the call that started them.
+   */
+  onToolProgress?: (progress: ToolProgress<ToolsOf<P>>) => void;
   onError?: (error: AgentError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
@@ -473,6 +498,15 @@ function forWire(messages: AgentMessage[]): AgentMessage[] {
  * carried through `Agent`, `AgentRoute` and `RPC` instead of being erased at the
  * first boundary.
  */
+function findToolCall(messages: AgentMessage[], toolCallId: string) {
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call" && part.toolCallId === toolCallId) return part;
+    }
+  }
+  return undefined;
+}
+
 export function useChat<P extends keyof AgentRoutes>(
   path: P,
   params: UseChatParams<P> = {},
@@ -486,6 +520,7 @@ export function useChat<P extends keyof AgentRoutes>(
     headers,
     onFinish,
     onToolResult,
+    onToolProgress,
     onError,
     onAwaitingInput,
     onAttachMiss,
@@ -529,8 +564,22 @@ export function useChat<P extends keyof AgentRoutes>(
   const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
-  const handlers = useRef({ onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss });
-  handlers.current = { onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss };
+  const handlers = useRef({
+    onFinish,
+    onToolResult,
+    onToolProgress,
+    onError,
+    onAwaitingInput,
+    onAttachMiss,
+  });
+  handlers.current = {
+    onFinish,
+    onToolResult,
+    onToolProgress,
+    onError,
+    onAwaitingInput,
+    onAttachMiss,
+  };
   const requestRef = useRef({ base, headers, extraBody });
   requestRef.current = { base, headers, extraBody };
 
@@ -659,6 +708,19 @@ export function useChat<P extends keyof AgentRoutes>(
           );
           if (!had) {
             handlers.current.onToolResult?.(event.part as ToolResultPart<ToolsOf<P>>);
+          }
+        } else if (event.type === "tool-progress") {
+          // A new `seq` makes a new state even when the reducer dropped the
+          // value as a replay, so what proves the value is new is that the
+          // call's progress grew.
+          const before = findToolCall(previous.messages, event.toolCallId);
+          const after = findToolCall(next.messages, event.toolCallId);
+          if (after && (after.progress?.length ?? 0) > (before?.progress?.length ?? 0)) {
+            handlers.current.onToolProgress?.({
+              toolCallId: after.toolCallId,
+              name: after.name,
+              data: event.data,
+            } as ToolProgress<ToolsOf<P>>);
           }
         } else if (event.type === "awaiting-input") {
           handlers.current.onAwaitingInput?.(event.pending as PendingToolCall<ToolsOf<P>>[]);

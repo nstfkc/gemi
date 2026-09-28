@@ -25,6 +25,7 @@ export type {
   AgentRequestBody,
   AgentStopBody,
   ChatStatus,
+  ToolProgress,
   UseChatParams,
   UseChatResult,
 } from "../useChat";

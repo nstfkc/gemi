@@ -1748,6 +1748,106 @@ describe("onToolResult", () => {
 });
 
 /**
+ * One call of a tool that yields after each section it saves, then returns.
+ */
+const BUILD: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_6", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m6", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-call",
+      messageId: "m6",
+      part: { type: "tool-call", toolCallId: "tc_p", name: "buildPage", input: {} },
+    },
+  },
+  { seq: 3, event: { type: "tool-progress", toolCallId: "tc_p", data: { section: "Hero" } } },
+  { seq: 4, event: { type: "tool-progress", toolCallId: "tc_p", data: { section: "Footer" } } },
+  {
+    seq: 5,
+    event: {
+      type: "tool-result",
+      messageId: "m6",
+      part: { type: "tool-result", toolCallId: "tc_p", name: "buildPage", status: "ok", output: { ok: true } },
+    },
+  },
+  { seq: 6, event: { type: "message-end", messageId: "m6", finishReason: "stop" } },
+  { seq: 7, event: { type: "run-end", runId: "run_6", finishReason: "stop" } },
+];
+
+describe("onToolProgress", () => {
+  test("fires once per yielded value, in order, before the result", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(BUILD));
+    const order: string[] = [];
+    const onToolProgress = vi.fn((progress: any) => order.push(`progress:${progress.data.section}`));
+    const onToolResult = vi.fn(() => order.push("result"));
+    const { box } = mount({ attach: false, onToolProgress, onToolResult });
+
+    await act(async () => {
+      await box.api.sendMessage("build the page");
+    });
+
+    expect(onToolProgress.mock.calls[0]![0]).toEqual({
+      toolCallId: "tc_p",
+      name: "buildPage",
+      data: { section: "Hero" },
+    });
+    expect(order).toEqual(["progress:Hero", "progress:Footer", "result"]);
+  });
+
+  test("does not fire for progress on a message the client already finished", async () => {
+    // A run replayed from the top onto a restored transcript: every frame is
+    // new to a client without a cursor, but the reducer leaves a finished
+    // message alone, so the call's progress does not grow.
+    fetchMock.mockResolvedValueOnce(streamed(BUILD));
+    const onToolProgress = vi.fn();
+    mount({
+      threadId: "th_9",
+      onToolProgress,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "" },
+        {
+          id: "m6",
+          role: "assistant",
+          createdAt: "",
+          finishReason: "stop",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc_p",
+              name: "buildPage",
+              input: {},
+              progress: [{ section: "Hero" }, { section: "Footer" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+  });
+
+  test("does not fire again for a redelivered frame", async () => {
+    fetchMock.mockResolvedValueOnce(streamed([...BUILD.slice(0, 4), BUILD[3]!, ...BUILD.slice(4)]));
+    const onToolProgress = vi.fn();
+    const { box } = mount({ attach: false, onToolProgress });
+
+    await act(async () => {
+      await box.api.sendMessage("build the page");
+    });
+
+    expect(onToolProgress.mock.calls.map(([progress]: any[]) => progress.data.section)).toEqual([
+      "Hero",
+      "Footer",
+    ]);
+  });
+});
+
+/**
  * The turn envelope wins every collision with the app's `body`.
  *
  * Spread last, an app-supplied `threadId` replaced the real one on the wire —
