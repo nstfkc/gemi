@@ -32,10 +32,21 @@ const renamePage = AgentTool.create({
   execute: async () => ({ title: "x" }),
 });
 
+const buildPage = AgentTool.create({
+  name: "buildPage",
+  description: "Build the page section by section",
+  inputSchema: s.object({ sections: s.array(s.string()) }),
+  outputSchema: s.object({ ok: s.boolean() }),
+  execute: async function* () {
+    yield { section: "Hero", ok: true };
+    return { ok: true };
+  },
+});
+
 const pageAgent = Agent.create({
   name: "page-builder",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [editComponent, renamePage],
+  tools: [editComponent, renamePage, buildPage],
 });
 
 class PageBuilderController extends AgentController<typeof pageAgent> {
@@ -66,7 +77,7 @@ type Part = Parameters<OnToolResult>[0];
 
 describe("onToolResult", () => {
   test("takes the agent's tool results, discriminated by name", () => {
-    expectTypeOf<Part["name"]>().toEqualTypeOf<"editComponent" | "renamePage">();
+    expectTypeOf<Part["name"]>().toEqualTypeOf<"editComponent" | "renamePage" | "buildPage">();
   });
 
   test("narrows the output on the tool name", () => {
@@ -77,7 +88,7 @@ describe("onToolResult", () => {
       if (part.status !== "ok") return;
       if (part.name === "editComponent") {
         expectTypeOf(part.output).toEqualTypeOf<{ ok: boolean; revision: number }>();
-      } else {
+      } else if (part.name === "renamePage") {
         expectTypeOf(part.output).toEqualTypeOf<{ title: string }>();
       }
     };
@@ -108,6 +119,46 @@ describe("onToolResult", () => {
       }
       if (part.status === "denied") {
         expectTypeOf(part.cause).toEqualTypeOf<"refused" | "stopped">();
+      }
+    };
+    void handler;
+  });
+});
+
+type OnToolProgress = NonNullable<UseChatParams<"/on-tool-result">["onToolProgress"]>;
+
+type Progress = Parameters<OnToolProgress>[0];
+
+describe("onToolProgress", () => {
+  test("is discriminated by tool name, like a result", () => {
+    expectTypeOf<Progress["name"]>().toEqualTypeOf<"editComponent" | "renamePage" | "buildPage">();
+  });
+
+  test("carries the call id, so several calls of one tool stay apart", () => {
+    expectTypeOf<Progress["toolCallId"]>().toEqualTypeOf<string>();
+  });
+
+  test("refuses a tool the agent does not have", () => {
+    const handler: OnToolProgress = (progress) => {
+      // @ts-expect-error `deletePage` is not one of this agent's tools.
+      if (progress.name === "deletePage") return;
+    };
+    void handler;
+  });
+
+  test("narrows the yielded value on the tool name", () => {
+    const handler: OnToolProgress = (progress) => {
+      if (progress.name === "buildPage") {
+        expectTypeOf(progress.data).toEqualTypeOf<{ section: string; ok: boolean }>();
+      }
+    };
+    void handler;
+  });
+
+  test("gives a tool that never yields nothing to read", () => {
+    const handler: OnToolProgress = (progress) => {
+      if (progress.name === "editComponent") {
+        expectTypeOf(progress.data).toEqualTypeOf<never>();
       }
     };
     void handler;

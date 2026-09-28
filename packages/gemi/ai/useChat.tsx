@@ -9,6 +9,8 @@ import type {
   ClientToolResult,
   ClientTurn,
   PendingToolCall,
+  ToolCallPart,
+  ToolProgress,
   ToolResultPart,
   ToolShapes,
 } from "./types";
@@ -141,6 +143,23 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * called.
    */
   onToolResult?: (part: ToolResultPart<ToolsOf<P>>) => void;
+  /**
+   * Fires once for each value a tool yields, as it arrives.
+   *
+   * `onToolResult` for tools that finish in stages: a tool that saves its work
+   * piece by piece and yields after each piece is worth refetching for after
+   * each yield, not only when it returns. `name` narrows `data` to what that
+   * tool yields.
+   *
+   * ONLY FOR VALUES THAT ARE NEW HERE, for the reason `onToolResult` gives. A
+   * redelivered frame, or one for a call whose message already finished, is
+   * dropped by the reducer, and this fires only when the call's `progress`
+   * actually grew.
+   *
+   * A SUB-AGENT'S TOOLS DO NOT FIRE IT, like `onToolResult`: their progress
+   * arrives inside nested frames and belongs to the call that started them.
+   */
+  onToolProgress?: (progress: ToolProgress<ToolsOf<P>>) => void;
   onError?: (error: AgentError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
@@ -464,6 +483,31 @@ function forWire(messages: AgentMessage[]): AgentMessage[] {
 }
 
 /**
+ * The tool call an id names, searched from the newest message back.
+ *
+ * A `tool-progress` frame names a call and no message, so the message has to be
+ * found rather than told — the same scan `withToolCall` does in the reducer,
+ * and newest-first for the same reason it gives: the call being worked on is
+ * the one that just arrived, and this runs twice per yield on a log a tool
+ * decides the length of.
+ *
+ * A second copy rather than an export of the reducer's, deliberately.
+ * `ai/client/index.ts` documents `reducer.ts` as `useChat`'s internals, and the
+ * two want different things anyway: that one takes an updater and rebuilds the
+ * state around it, while this is a read — it answers which tool yielded, off a
+ * state the reducer has already finished with.
+ */
+function findToolCall(messages: AgentMessage[], toolCallId: string): ToolCallPart | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const part = messages[i]!.content.find(
+      (candidate) => candidate.type === "tool-call" && candidate.toolCallId === toolCallId,
+    );
+    if (part) return part as ToolCallPart;
+  }
+  return undefined;
+}
+
+/**
  * The path is the agent's route, exactly as mounted:
  *
  *   const { messages, sendMessage } = useChat("/chat")
@@ -486,6 +530,7 @@ export function useChat<P extends keyof AgentRoutes>(
     headers,
     onFinish,
     onToolResult,
+    onToolProgress,
     onError,
     onAwaitingInput,
     onAttachMiss,
@@ -529,8 +574,22 @@ export function useChat<P extends keyof AgentRoutes>(
   const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
-  const handlers = useRef({ onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss });
-  handlers.current = { onFinish, onToolResult, onError, onAwaitingInput, onAttachMiss };
+  const handlers = useRef({
+    onFinish,
+    onToolResult,
+    onToolProgress,
+    onError,
+    onAwaitingInput,
+    onAttachMiss,
+  });
+  handlers.current = {
+    onFinish,
+    onToolResult,
+    onToolProgress,
+    onError,
+    onAwaitingInput,
+    onAttachMiss,
+  };
   const requestRef = useRef({ base, headers, extraBody });
   requestRef.current = { base, headers, extraBody };
 
@@ -659,6 +718,31 @@ export function useChat<P extends keyof AgentRoutes>(
           );
           if (!had) {
             handlers.current.onToolResult?.(event.part as ToolResultPart<ToolsOf<P>>);
+          }
+        } else if (event.type === "tool-progress") {
+          // FIRES ON THE APPEND, NOT ON THE FRAME.
+          //
+          // `next !== previous` above is not the guard here, because it cannot
+          // be: `applyFrame` stamps the new `seq` onto a fresh object whatever
+          // the reducer decided, so a value the reducer *refused* still arrives
+          // as a changed state. It refuses one for a call inside a finished
+          // message — a run replayed from the top onto a transcript that
+          // already holds it — which is exactly the redelivery this hook must
+          // not announce, and the only evidence that it happened is that the
+          // log did not grow.
+          //
+          // The same comparison covers the other frame `withToolCall` drops on
+          // purpose: one naming a tool call this transcript does not have, the
+          // mid-run `/attach` case. There is no part to read a tool name off,
+          // so there is nothing to announce either.
+          const before = findToolCall(previous.messages, event.toolCallId);
+          const after = findToolCall(next.messages, event.toolCallId);
+          if (after && (after.progress?.length ?? 0) > (before?.progress?.length ?? 0)) {
+            handlers.current.onToolProgress?.({
+              toolCallId: after.toolCallId,
+              name: after.name,
+              data: event.data,
+            } as ToolProgress<ToolsOf<P>>);
           }
         } else if (event.type === "awaiting-input") {
           handlers.current.onAwaitingInput?.(event.pending as PendingToolCall<ToolsOf<P>>[]);
