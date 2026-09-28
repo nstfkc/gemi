@@ -32,6 +32,23 @@ const renamePage = AgentTool.create({
   execute: async () => ({ title: "x" }),
 });
 
+/**
+ * The yielding form. `Progress` is inferred from the generator and written down
+ * nowhere, which is the property the tests below are really about — an app
+ * declares what a tool yields by yielding it.
+ */
+const buildPage = AgentTool.create({
+  name: "buildPage",
+  description: "Build a page, one section at a time",
+  inputSchema: s.object({ id: s.string() }),
+  outputSchema: s.object({ ok: s.boolean() }),
+  execute: async function* (input: { id: string }) {
+    yield { section: "hero", of: 2 };
+    yield { section: "pricing", of: 2 };
+    return { ok: Boolean(input.id) };
+  },
+});
+
 const pageAgent = Agent.create({
   name: "page-builder",
   provider: OpenAIProvider.model("gpt-5.4"),
@@ -40,6 +57,23 @@ const pageAgent = Agent.create({
 
 class PageBuilderController extends AgentController<typeof pageAgent> {
   agent = pageAgent;
+}
+
+/**
+ * A second agent rather than a third tool on the first one.
+ *
+ * `onToolResult`'s assertions below name the exact union of `pageAgent`'s tool
+ * names, so adding a yielding tool there would have made those tests fail for a
+ * reason that has nothing to do with what they check.
+ */
+const progressAgent = Agent.create({
+  name: "page-progress",
+  provider: OpenAIProvider.model("gpt-5.4"),
+  tools: [buildPage, renamePage],
+});
+
+class PageProgressController extends AgentController<typeof progressAgent> {
+  agent = progressAgent;
 }
 
 /**
@@ -54,10 +88,14 @@ class PageBuilderController extends AgentController<typeof pageAgent> {
  * It costs nothing to avoid and is confusing to diagnose, so the key names the
  * file rather than the thing: `/page-builder` is what a second test file would
  * also have picked.
+ *
+ * Two keys in *this* file is not the same thing and is fine — the clash is
+ * between files, and one interface may declare as many properties as it likes.
  */
 declare module "../client/rpc" {
   interface RPC {
     "/on-tool-result": AgentRouteRPC<typeof PageBuilderController>;
+    "/on-tool-progress": AgentRouteRPC<typeof PageProgressController>;
   }
 }
 
@@ -109,6 +147,53 @@ describe("onToolResult", () => {
       if (part.status === "denied") {
         expectTypeOf(part.cause).toEqualTypeOf<"refused" | "stopped">();
       }
+    };
+    void handler;
+  });
+});
+
+type OnToolProgress = NonNullable<UseChatParams<"/on-tool-progress">["onToolProgress"]>;
+type Progress = Parameters<OnToolProgress>[0];
+
+describe("onToolProgress", () => {
+  test("is discriminated by tool name, like a result", () => {
+    expectTypeOf<Progress["name"]>().toEqualTypeOf<"buildPage" | "renamePage">();
+  });
+
+  test("narrows `data` to what that tool yields, inferred from the generator", () => {
+    const handler: OnToolProgress = (progress) => {
+      if (progress.name === "buildPage") {
+        expectTypeOf(progress.data).toEqualTypeOf<{ section: string; of: number }>();
+      }
+    };
+    void handler;
+  });
+
+  test("a tool that cannot yield has `never` to yield", () => {
+    // `renamePage`'s `execute` returns a promise, so there is no yield type to
+    // infer and `Progress` lands on `never`. Worth asserting rather than
+    // assuming: the alternative a conditional type would have produced is a
+    // missing member, which under this package's `strict: false` is
+    // indistinguishable from an optional one — see `ToolShapesOf`.
+    const handler: OnToolProgress = (progress) => {
+      if (progress.name === "renamePage") {
+        expectTypeOf(progress.data).toEqualTypeOf<never>();
+      }
+    };
+    void handler;
+  });
+
+  test("refuses a tool the agent does not have", () => {
+    const handler: OnToolProgress = (progress) => {
+      // @ts-expect-error `editComponent` belongs to the other agent.
+      if (progress.name === "editComponent") return;
+    };
+    void handler;
+  });
+
+  test("carries the call id, so several calls of one tool stay apart", () => {
+    const handler: OnToolProgress = (progress) => {
+      expectTypeOf(progress.toolCallId).toEqualTypeOf<string>();
     };
     void handler;
   });

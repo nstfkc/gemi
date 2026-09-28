@@ -120,6 +120,70 @@ const EDITS: AgentStreamFrame[] = [
   { seq: 6, event: { type: "run-end", runId: "run_3", finishReason: "stop" } },
 ];
 
+/**
+ * One tool that yields twice and then returns. The shape the `onToolProgress`
+ * tests need: a `tool-call` for the progress to land on, two yields, and a
+ * result after them.
+ */
+const BUILDING: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_6", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m6", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-call",
+      messageId: "m6",
+      part: { type: "tool-call", toolCallId: "tc_p", name: "buildPage", input: { id: "p1" } },
+    },
+  },
+  { seq: 3, event: { type: "tool-progress", toolCallId: "tc_p", data: { section: "hero" } } },
+  { seq: 4, event: { type: "tool-progress", toolCallId: "tc_p", data: { section: "pricing" } } },
+  {
+    seq: 5,
+    event: {
+      type: "tool-result",
+      messageId: "m6",
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_p",
+        name: "buildPage",
+        status: "ok",
+        output: { ok: true },
+      },
+    },
+  },
+  { seq: 6, event: { type: "message-end", messageId: "m6", finishReason: "stop" } },
+  { seq: 7, event: { type: "run-end", runId: "run_6", finishReason: "stop" } },
+];
+
+/**
+ * `BUILDING` as a client that has seen part or all of it would hold it.
+ *
+ * `finishReason` is what separates the two redelivery cases: a finished message
+ * is a run being replayed from the top, while one still open is a client that
+ * attached mid-run and holds the yields up to its cursor.
+ */
+function builtTranscript(options: { progress: unknown[]; finishReason?: string }) {
+  return [
+    { id: "u6", role: "user", content: [{ type: "text", text: "build it" }], createdAt: "" },
+    {
+      id: "m6",
+      role: "assistant",
+      createdAt: "",
+      ...(options.finishReason ? { finishReason: options.finishReason } : {}),
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "tc_p",
+          name: "buildPage",
+          input: { id: "p1" },
+          progress: options.progress,
+        },
+      ],
+    },
+  ];
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function mount(params: Record<string, unknown> = {}) {
@@ -1744,6 +1808,196 @@ describe("onToolResult", () => {
 
     expect(box.api.status).toBe("idle");
     expect(box.api.messages).toHaveLength(2);
+  });
+});
+
+/**
+ * Acting on a yield without waiting for the tool to return.
+ *
+ * A tool that saves its work in stages has something to refetch per stage, and
+ * `onToolResult` does not come until the last one is done. The datum is in the
+ * transcript either way — this is the hook for acting on one rather than
+ * rendering it.
+ */
+describe("onToolProgress", () => {
+  test("fires per yield, in order, before the result", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(BUILDING));
+    const order: string[] = [];
+    const onToolProgress = vi.fn((p: any) => order.push(`progress:${p.data.section}`));
+    const onToolResult = vi.fn((p: any) => order.push(`result:${p.toolCallId}`));
+    const { box } = mount({ attach: false, onToolProgress, onToolResult });
+
+    await act(async () => {
+      await box.api.sendMessage("build the page");
+    });
+
+    expect(onToolProgress).toHaveBeenCalledTimes(2);
+    // The tool name is not on a `tool-progress` frame — it carries an id and an
+    // opaque datum — so it being here at all is the lookup working.
+    expect(onToolProgress.mock.calls[0]![0]).toEqual({
+      toolCallId: "tc_p",
+      name: "buildPage",
+      data: { section: "hero" },
+    });
+    expect(order).toEqual(["progress:hero", "progress:pricing", "result:tc_p"]);
+  });
+
+  test("does not fire for a run replayed onto a transcript that already holds it", async () => {
+    // The case `seq` cannot catch: every frame is new to a client that restored
+    // messages without a cursor, so the state object changes on each one. What
+    // says this is replay is that the reducer refused to append — the call sits
+    // in a finished message — and the only evidence of that is the log not
+    // growing.
+    fetchMock.mockResolvedValueOnce(streamed(BUILDING));
+    const onToolProgress = vi.fn();
+    const { box } = mount({
+      threadId: "th_9",
+      onToolProgress,
+      initialMessages: builtTranscript({
+        progress: [{ section: "hero" }, { section: "pricing" }],
+        finishReason: "stop",
+      }),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+    // And the log was not doubled either, which is the reducer's half of the
+    // same guard — a test that only checked the callback would pass against a
+    // transcript showing every section twice.
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.toolCallId === "tc_p" && part.type === "tool-call");
+    expect(call.progress).toEqual([{ section: "hero" }, { section: "pricing" }]);
+  });
+
+  test("delivers the tail of a redelivered run, and only the tail", async () => {
+    // Attaching mid-run: this client saw the first yield, the server replays
+    // from the top, and only the second yield is news. A different guard from
+    // the one above and it fails differently — here the frames never reach the
+    // reducer at all, because `applyFrame` returns the same state object for a
+    // `seq` at or below the cursor and the loop skips the frame whole.
+    //
+    // The message is deliberately left open, so the reducer's finished-message
+    // check is not also covering this. With the cursor ignored, `hero` appends
+    // a second time and fires a second time — which is both halves of the bug
+    // at once, a doubled log and a doubled refetch.
+    fetchMock.mockResolvedValueOnce(streamed(BUILDING));
+    const onToolProgress = vi.fn();
+    const { box } = mount({
+      threadId: "th_9",
+      cursor: { runId: "run_6", seq: 3 },
+      onToolProgress,
+      initialMessages: builtTranscript({ progress: [{ section: "hero" }] }),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onToolProgress.mock.calls.map(([p]: any[]) => p.data.section)).toEqual(["pricing"]);
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.toolCallId === "tc_p" && part.type === "tool-call");
+    expect(call.progress).toEqual([{ section: "hero" }, { section: "pricing" }]);
+  });
+
+  test("a sub-agent's yields do not fire it", async () => {
+    // They belong to the parent tool call that started the sub-run, not to this
+    // conversation — the same line `onToolResult` draws. They arrive wrapped in
+    // `nested-event`, so the hook never sees a `tool-progress` for them.
+    const nested = (event: unknown) => ({
+      type: "nested-event",
+      toolCallId: "tc_n",
+      runId: "sub_1",
+      agent: "researcher",
+      event,
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_7", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m7", role: "assistant" } },
+        {
+          seq: 2,
+          event: {
+            type: "tool-call",
+            messageId: "m7",
+            part: { type: "tool-call", toolCallId: "tc_n", name: "research", input: {} },
+          },
+        },
+        { seq: 3, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+        {
+          seq: 4,
+          event: nested({
+            type: "tool-call",
+            messageId: "n1",
+            part: { type: "tool-call", toolCallId: "tc_inner", name: "fetchDocs", input: {} },
+          }),
+        },
+        {
+          seq: 5,
+          event: nested({ type: "tool-progress", toolCallId: "tc_inner", data: { page: 1 } }),
+        },
+        { seq: 6, event: { type: "message-end", messageId: "m7", finishReason: "stop" } },
+        { seq: 7, event: { type: "run-end", runId: "run_7", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolProgress = vi.fn();
+    const { box } = mount({ attach: false, onToolProgress });
+
+    await act(async () => {
+      await box.api.sendMessage("research it");
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+    // The yield did land, in the sub-run's own transcript. Without this the test
+    // would also pass against a client that dropped the nested frames entirely,
+    // which is the wrong reason to be silent.
+    const outer: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.toolCallId === "tc_n");
+    expect(outer.nested[0].messages[0].content[0].progress).toEqual([{ page: 1 }]);
+  });
+
+  test("a yield for a tool call this client never saw announces nothing", async () => {
+    // The mid-run `/attach` case. The reducer drops the frame rather than
+    // inventing a tool call it has no name or input for, so there is no tool
+    // name to report and nothing to report it about.
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_8", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m8", role: "assistant" } },
+        { seq: 2, event: { type: "tool-progress", toolCallId: "tc_gone", data: { x: 1 } } },
+        { seq: 3, event: { type: "message-end", messageId: "m8", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_8", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolProgress = vi.fn();
+    const { box } = mount({ attach: false, onToolProgress });
+
+    await act(async () => {
+      await box.api.sendMessage("go");
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("is optional, and its absence changes nothing", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(BUILDING));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("build the page");
+    });
+
+    expect(box.api.status).toBe("idle");
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.type === "tool-call");
+    expect(call.progress).toEqual([{ section: "hero" }, { section: "pricing" }]);
   });
 });
 
