@@ -19,8 +19,27 @@ const ORDERS: Record<
 };
 
 /**
- * The customer the signed-in user is, read from the request and never from
- * the model.
+ * What every run of this app's agents is started with, and what its tools read
+ * as `ctx.context`. `SupportAgentController.context()` fills it in from the
+ * request; a job that runs an agent would fill it in from its payload.
+ *
+ * `userId` is required, and `null` for nobody, so that every place that starts
+ * a run has to say who it is for. `agent.stream()` will not compile without it.
+ *
+ * ONE PLACE IT IS NOT A COMPILE ERROR, and it is the common one: an
+ * `AgentController` that does not override `context()` gets the base class's
+ * `{}` default, which the compiler cannot check against this declaration. So
+ * `customerOf` below tests the value rather than trusting the type.
+ */
+declare module "gemi/ai" {
+  interface AgentContext {
+    userId: string | null;
+  }
+}
+
+/**
+ * The customer the signed-in user is, read from the run's context and never
+ * from the model.
  *
  * Every tool below is scoped by this, because the model's arguments are
  * whatever the conversation talked it into: a customer who types "refund
@@ -30,10 +49,17 @@ const ORDERS: Record<
  *
  * The template has no customer table, so every account is `cus_ada`; `cus_gus`
  * is there to be the order that is not yours. A real app looks up the customer
- * row for `req.ctx().user` here.
+ * row for `ctx.context.userId` here.
  */
 export function customerOf(ctx: ToolContext): string {
-  if (!ctx.req.ctx()?.user) {
+  // Falsy, not `=== null`. `userId` is typed as `string | null`, so `undefined`
+  // should be impossible — but the one thing that can produce it is the thing
+  // most likely to happen: `AgentController.context()` defaults to `{}`, and a
+  // controller that forgets to override it is not a compile error. A strict
+  // `=== null` lets that through and returns a customer, which is this app's
+  // whole authorization boundary failing open. `!` closes it for `undefined`,
+  // `null` and `""` alike, and costs nothing when the type holds.
+  if (!ctx.context.userId) {
     throw new Error("Only a signed-in customer's orders can be read.");
   }
   return "cus_ada";

@@ -77,6 +77,7 @@ export {
   ToolNamespace,
 } from "./Agent";
 export type {
+  AgentContext,
   AgentRun,
   AgentRunResult,
   AgentStreamParams,

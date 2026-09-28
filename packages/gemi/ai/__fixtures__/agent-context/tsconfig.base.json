@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": { "gemi/ai": ["../../index.ts"] }
+  }
+}

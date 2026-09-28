@@ -12,11 +12,21 @@ import type {
 import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
 
 /**
- * Who a tool call runs as. Always an argument, never read from ambient state.
+ * Who a tool call runs as. Always an argument to the registry, never read from
+ * ambient state by it.
  *
  * `local` is an agent running in this server, and `req` is the request that
- * started its run — `ctx.req` at the moment the tool executes, not when the
- * tool was built, which is what lets one set of tools serve every user's run.
+ * started its run — read by `toAgentTools` at the moment the tool executes,
+ * not when the tool was built, which is what lets one set of tools serve every
+ * user's run.
+ *
+ * That producer *does* read ambient state, since a run no longer carries a
+ * request (see `AgentContext`), and the boundary is what keeps that from
+ * mattering here: the registry is handed a caller and dispatches as that
+ * caller, so a second producer — a job, a test, v2's remote client — supplies
+ * one however it likes, and a run with no ambient request is refused by
+ * `toAgentTools` before the registry is reached rather than dispatching as
+ * nobody.
  * The call is dispatched with that request's credentials, so it runs as that
  * user, through that route's middleware.
  *

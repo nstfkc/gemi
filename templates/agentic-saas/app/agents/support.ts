@@ -108,6 +108,16 @@ export class SupportAgentController extends AgentController<typeof supportAgent>
   }
 
   /**
+   * Who this turn's run acts for, and the only thing its tools learn about the
+   * request: a run is not handed the request itself, so it can be started just
+   * as well from a job that has none. See `AgentContext` in `tools.ts`.
+   */
+  context(req: HttpRequest<any, any>) {
+    const user = req.ctx().user;
+    return { userId: user ? String(user.id) : null };
+  }
+
+  /**
    * Fires for every completed message, the customer's turns as well as the
    * agent's, and it is where an app that is not relying on `store` writes them
    * down. A hook that throws is reported and the run carries on, so this is

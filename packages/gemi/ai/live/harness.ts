@@ -229,7 +229,3 @@ export function collectFrames(run: { frames(from?: number): AsyncIterable<AgentS
   })();
   return { wire, live, done };
 }
-
-/** The request that has no user in it: these tests call `Agent.stream` directly
- *  rather than through the controller, and no tool here reads the request. */
-export const req = {} as any;

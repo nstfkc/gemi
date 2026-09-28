@@ -1,6 +1,70 @@
 # Upgrading from 0.67 to 0.68
 
-Additive. Nothing existing changes behaviour or type.
+One breaking change and one addition. The breaking one is the first section
+below: an agent run no longer takes a request.
+
+## Agent runs take a `context`, not a `req` — breaking
+
+`Agent.stream()` no longer accepts `req`, and tools no longer get `ctx.req`.
+A run is given an `AgentContext` instead: the data and functions its tools need,
+such as who the run is for, the ids it is about, and callbacks like a notifier.
+The app declares the shape once:
+
+```ts
+declare module "gemi/ai" {
+  interface AgentContext {
+    userId: string | null;
+    notify?: (message: string) => Promise<void>;
+  }
+}
+```
+
+Tools read it as `ctx.context`, and every sub-run started with `ctx.runAgent`
+gets the same object. If the interface has a required field, `Agent.stream()`
+refuses to compile without a `context`. With none, `context` is optional and
+defaults to `{}`.
+
+Why: a run needed an `HttpRequest`, and one could not be built outside a request.
+`new HttpRequest()` in a queued job throws before a model is ever called, so an
+agent could only run from a controller. Now a job passes what it knows:
+
+```ts
+await agent.stream({ messages, turn: { text }, context: { userId: job.userId } }).result();
+```
+
+What to change:
+
+- **`AgentController`:** override the new `context(req, { body })` and move there
+  whatever your tools read off the request. It runs once per turn, after
+  `authorizeRequest()`. The default returns `{}`, so if your `AgentContext` has a
+  required field, you must override it. The compiler cannot see that for you.
+
+  ```ts
+  context(req: HttpRequest<any, any>) {
+    const user = req.ctx().user;
+    return { userId: user ? String(user.id) : null };
+  }
+  ```
+
+- **Tools:** replace `ctx.req.ctx().user` and similar with `ctx.context.<field>`.
+  During a run started from an **api** route, ambient request state such as
+  `Auth.user()` and policied queries still works, because the run executes
+  inside that request and holds it open until it settles.
+
+  Do not rely on that anywhere else. Only api routes honour the hold: a view
+  request ends regardless, so a run started from a view loader has its request
+  torn down mid-run and a tool's `Auth.user()` will re-resolve from the token or
+  throw. A run from a job has no request at all. Putting what the tools need in
+  `context` is the rule; ambient state is a convenience that happens to survive
+  in one case.
+- **Direct `agent.stream({ ..., req })` calls:** drop `req` and pass `context`
+  if your tools need it.
+- **MCP tools (`toAgentTools`):** no change. They act as the user by that user's
+  credentials, so they read the request the run is executing inside. From a
+  run with no request they now return a tool error that says so, rather than
+  dispatching.
+- **Controller hooks** (`AgentHookContext`) still get `req`: they belong to the
+  request, not the run.
 
 ## New: `useChat`'s `onToolProgress`, the per-yield sibling of `onToolResult`
 
@@ -38,7 +102,8 @@ Three things it deliberately does not do:
 - **It is not needed to render the log.** Yields are in the transcript already,
   on the tool call's `progress` array. This is for *acting* on one.
 
-Nothing else changed, so upgrading changes nothing until you pass the callback.
+This one is purely additive: nothing about `useChat` changes until you pass the
+callback.
 
 # Upgrading from 0.66 to 0.67
 

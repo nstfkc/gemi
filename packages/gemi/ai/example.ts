@@ -48,9 +48,11 @@ const chargeTool = AgentTool.create({
   inputSchema: s.object({ amountCents: s.number(), reason: s.string() }),
   outputSchema: s.object({ receiptId: s.string() }),
   requiresApproval: true,
-  // `ctx.req` is the request this run started from, which is what lets a tool
-  // read the caller. The identity itself comes off the `Auth` facade, the same
-  // way every other gemi controller reads it — `HttpRequest` has no `user()`.
+  // A run started by a controller executes inside its request, so the `Auth`
+  // facade still finds the caller, the same way every other gemi controller
+  // reads it. A tool meant to run from a job as well reads who it acts for
+  // from `ctx.context` instead — see `AgentContext` — since a job has no user
+  // for `Auth` to find.
   execute: async (input, ctx) => {
     ctx.signal.throwIfAborted();
     const user = await Auth.user();

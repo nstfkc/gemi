@@ -1,4 +1,4 @@
-import type { HttpRequest } from "../http";
+import { RequestContext } from "../http/requestContext";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
 import { supportsStrict } from "./Schema";
@@ -42,24 +42,75 @@ import type {
 // --- tools ---------------------------------------------------------------
 
 /**
- * Everything a tool needs from the request it is running inside.
+ * What the app hands a run for its tools to use: who it is for, the ids it is
+ * about, and functions the tools call back into — a notifier, a scoped
+ * repository, a progress sink.
  *
- * Tools are created once at module scope and shared by every request, so they
+ * Empty here, and filled in by the app, once, with declaration merging:
+ *
+ * ```ts
+ * declare module "gemi/ai" {
+ *   interface AgentContext {
+ *     userId: string;
+ *     notify?: (message: string) => Promise<void>;
+ *   }
+ * }
+ * ```
+ *
+ * WHY IT REPLACED `req`. A run used to be handed the HTTP request that started
+ * it, and tools read the user off it. That tied every run to a request, and a
+ * run started anywhere else — a queued job, a cron, a script — had nothing to
+ * pass: `new HttpRequest()` outside a request throws before a model is called.
+ * A run needs to know who it is acting for, not how the ask arrived, so the
+ * caller now says that directly. `AgentController` builds it from its request
+ * in `context()`; a job builds it from its payload.
+ *
+ * ONE SHAPE FOR THE APP, NOT ONE PER AGENT. Tools are module-scope singletons
+ * that any agent may mount, so there is no agent whose type a tool could be
+ * checked against. A field only some runs have is optional, and the tool that
+ * needs it checks.
+ *
+ * TRUSTED. Unlike `ctx.body`, nothing here came from the client unless the
+ * caller put it there: it is what the server decided the run is for.
+ */
+// oxlint-disable-next-line no-empty-interface
+export interface AgentContext {}
+
+/**
+ * Required from a caller when the app's `AgentContext` has a required field,
+ * optional when it has none — so an app that never declares one is not made to
+ * pass `{}`, and an app that does cannot start a run that forgets it.
+ */
+type ContextParam = {} extends AgentContext
+  ? { context?: AgentContext }
+  : { context: AgentContext };
+
+/**
+ * Everything a tool needs from the run it is part of.
+ *
+ * Tools are created once at module scope and shared by every run, so they
  * cannot close over a user or an abort signal — and anything mutable stored on
- * the tool itself would leak across requests. That is why the run's state
- * arrives as an argument instead: the tool stays a singleton and the context is
- * per call.
+ * the tool itself would leak across runs. That is why the run's state arrives
+ * as an argument instead: the tool stays a singleton and the context is per
+ * call.
  */
 export interface ToolContext {
-  req: HttpRequest<any, any>;
+  /**
+   * What the caller of `Agent.stream` handed the run. See `AgentContext`.
+   *
+   * The same object for every tool of the run and every sub-run started with
+   * `ctx.runAgent` — a sub-agent acts for the same caller, so it is given the
+   * same one. `{}` for a run started without one.
+   */
+  context: AgentContext;
   /**
    * The app's own fields from the turn's request body — what `useChat`'s
    * `body` option sent, minus the keys the turn envelope owns.
    *
-   * Here rather than behind `ctx.req.input()`, and not because that would be
-   * inconvenient: `AgentController` has already consumed the body, and a run
-   * outlives the request anyway, so by the time a tool executes there is
-   * nothing left to read. The values are copied onto the run when it starts.
+   * Carried on the run because `AgentController` has already consumed the
+   * body, and a run outlives the request anyway, so by the time a tool
+   * executes there is nothing left to read. The values are copied onto the run
+   * when it starts.
    *
    * `{}` for a run started with none. Untyped on purpose — a tool is a
    * module-scope singleton that any controller may mount, so there is no one
@@ -799,13 +850,14 @@ export interface CreateAgentParams<
  * approval take the same path, because they are the same thing: the next turn
  * of a conversation.
  */
-export interface AgentStreamParams {
+export type AgentStreamParams = AgentStreamParamsBase & ContextParam;
+
+interface AgentStreamParamsBase {
   /** Prior turns. The controller loads these from its store, or takes what the
    *  client sent when running stateless. */
   messages: AgentMessage[];
   /** The client's turn: text, answers to pending calls, or both. */
   turn?: ClientTurn;
-  req: HttpRequest<any, any>;
   /** Aborted by an explicit `stop`, not by a disconnect. */
   signal?: AbortSignal;
   runId?: string;
@@ -816,10 +868,9 @@ export interface AgentStreamParams {
    * The app's own fields from the turn's request body, handed to every tool of
    * this run as `ctx.body`.
    *
-   * Carried on the run rather than left to be read from `ctx.req`: a run
-   * outlives the request that started it, so that a refresh can reattach, and
-   * by the time a tool executes there is no body left to read. See
-   * `AgentController`'s `Body`.
+   * Carried on the run because a run outlives the request that started it, so
+   * that a refresh can reattach, and by the time a tool executes there is no
+   * body left to read. See `AgentController`'s `Body`.
    */
   body?: Record<string, unknown>;
   /** Per-request model choice, e.g. letting a user pick. */
@@ -1589,6 +1640,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private readonly config: RunConfig;
   private readonly params: AgentStreamParams;
+  /** `params.context`, or `{}` for a run started without one. See `AgentContext`. */
+  private readonly context: AgentContext;
   private readonly controller = new AbortController();
 
   private readonly buffer: AgentStreamFrame<ToolShapes, unknown>[] = [];
@@ -1669,6 +1722,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   constructor(config: RunConfig, params: AgentStreamParams) {
     this.config = config;
     this.params = params;
+    // Cast because an app whose `AgentContext` has required fields makes `{}`
+    // unassignable here — and such an app cannot reach this default, since
+    // `ContextParam` makes it pass one.
+    this.context = params.context ?? ({} as AgentContext);
     this.runId = params.runId ?? `run_${crypto.randomUUID()}`;
     this.history = [...params.messages];
 
@@ -1689,12 +1746,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // it, so nothing may depend on someone being attached — a client that
     // never reads still gets its tools run and its messages persisted.
     this.settled = this.execute();
-    // And the request that started it stays open until it settles. Its tools
-    // read the user from that request's context, and a client that leaves
-    // mid-run cancels the response body without stopping the run — ending the
-    // request there would take the user away from step four's tool call.
-    // `ctx()` is the ambient request store: undefined outside a request.
-    params.req?.ctx?.()?.waitUntil(this.settled);
+    // And a request that started it stays open until it settles. A tool may
+    // still read ambient request state — `Auth.user()`, a policied query — and
+    // a client that leaves mid-run cancels the response body without stopping
+    // the run; ending the request there would take the user away from step
+    // four's tool call. Read ambiently rather than from a param because a run
+    // need not come from a request at all: in a job or a script there is no
+    // store, and nothing to hold open.
+    RequestContext.getStore()?.waitUntil(this.settled);
   }
 
   // --- event plumbing ----------------------------------------------------
@@ -2327,7 +2386,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // One object, because the three of them share a memo — see `toolFiles`.
     const files = this.toolFiles(call);
     const ctx: ToolContext = {
-      req: this.params.req,
+      context: this.context,
       // `{}` rather than undefined, so a tool can read a field without a guard
       // and get the same answer — absent — whether the client sent nothing or
       // the run was started without a body at all.
@@ -2524,7 +2583,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // had. The persisted transcript already contains it.
       messages: resuming ? recorded.messages : (params.messages ?? []),
       turn: resuming ? { toolResults: mine } : params.prompt ? { text: params.prompt } : undefined,
-      req: this.params.req,
+      // The same caller, so the same context. See `ToolContext.context`.
+      context: this.context,
       // The same scope, down the whole tree. A sub-agent runs on behalf of the
       // caller who started the parent — that is the only reason it is allowed
       // to run at all — so it reads and writes the caller's attachments, and a
