@@ -44,10 +44,16 @@ What to change:
   ```
 
 - **Tools:** replace `ctx.req.ctx().user` and similar with `ctx.context.<field>`.
-  During a controller-started run, ambient request state such as `Auth.user()`
-  and policied queries still works, because the run still executes inside the
-  request and holds it open until it settles. It only fails for runs started
-  from a job.
+  During a run started from an **api** route, ambient request state such as
+  `Auth.user()` and policied queries still works, because the run executes
+  inside that request and holds it open until it settles.
+
+  Do not rely on that anywhere else. Only api routes honour the hold: a view
+  request ends regardless, so a run started from a view loader has its request
+  torn down mid-run and a tool's `Auth.user()` will re-resolve from the token or
+  throw. A run from a job has no request at all. Putting what the tools need in
+  `context` is the rule; ambient state is a convenience that happens to survive
+  in one case.
 - **Direct `agent.stream({ ..., req })` calls:** drop `req` and pass `context`
   if your tools need it.
 - **MCP tools (`toAgentTools`):** no change. They act as the user by that user's

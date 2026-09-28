@@ -1458,11 +1458,12 @@ describe("the agent context a controller builds", () => {
   test("is built from the request and body, and handed to the run", async () => {
     const run = new StubAgentRun("run_context");
     const { agent, calls } = stubAgent(run);
-    const seen: { req?: unknown; body?: unknown } = {};
+    const seen: { req?: unknown; body?: unknown; times: number } = { times: 0 };
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
       context(req: any, extra: { body: Record<string, unknown> }) {
+        seen.times += 1;
         seen.req = req;
         seen.body = extra.body;
         return { tenant: req.headers.get("x-tenant"), pageId: extra.body.pageId } as any;
@@ -1477,6 +1478,41 @@ describe("the agent context a controller builds", () => {
     expect(calls[0]!.context).toEqual({ tenant: "acme", pageId: "page_7" });
     // And nothing request-shaped rides along beside it.
     expect(calls[0]).not.toHaveProperty("req");
+    // Counted, not just captured. `seen` is overwritten on each call, so
+    // without this a second invocation would look identical to one — and the
+    // docblock promises once per turn to an app that may be doing real work in
+    // here, a user lookup or a tenant resolve.
+    expect(seen.times).toBe(1);
+    run.finish();
+  });
+
+  test("runs after authorizeRequest, so it never sees a turn that was refused", async () => {
+    // The docblock's other promise, and the load-bearing half: `context()` is
+    // where an app reads the user the middleware authenticated, and where it is
+    // invited to do real work — a user lookup, a tenant resolve. Running it
+    // before the turn is vetted would do that work for a caller who is about to
+    // be refused, and a reordering fails no other test in this file.
+    //
+    // Asserted through a refusal rather than a pair of pushes, because that is
+    // the consequence that matters: `authorizeRequest` refuses by throwing.
+    const run = new StubAgentRun("run_context_order");
+    const { agent } = stubAgent(run);
+    let contextRan = false;
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeRequest() {
+        throw new Error("nope");
+      }
+      context() {
+        contextRan = true;
+        return {} as any;
+      }
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } })).catch(() => {});
+
+    expect(contextRan).toBe(false);
     run.finish();
   });
 
