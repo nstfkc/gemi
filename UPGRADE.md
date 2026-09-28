@@ -1,3 +1,62 @@
+# Upgrading from 0.67 to 0.68
+
+## Agent runs take a `context`, not a `req` — breaking
+
+`Agent.stream()` no longer accepts `req`, and tools no longer get `ctx.req`.
+A run is given an `AgentContext` instead: the data and functions its tools need,
+such as who the run is for, the ids it is about, and callbacks like a notifier.
+The app declares the shape once:
+
+```ts
+declare module "gemi/ai" {
+  interface AgentContext {
+    userId: string | null;
+    notify?: (message: string) => Promise<void>;
+  }
+}
+```
+
+Tools read it as `ctx.context`, and every sub-run started with `ctx.runAgent`
+gets the same object. If the interface has a required field, `Agent.stream()`
+refuses to compile without a `context`. With none, `context` is optional and
+defaults to `{}`.
+
+Why: a run needed an `HttpRequest`, and one could not be built outside a request.
+`new HttpRequest()` in a queued job throws before a model is ever called, so an
+agent could only run from a controller. Now a job passes what it knows:
+
+```ts
+await agent.stream({ messages, turn: { text }, context: { userId: job.userId } }).result();
+```
+
+What to change:
+
+- **`AgentController`:** override the new `context(req, { body })` and move there
+  whatever your tools read off the request. It runs once per turn, after
+  `authorizeRequest()`. The default returns `{}`, so if your `AgentContext` has a
+  required field, you must override it. The compiler cannot see that for you.
+
+  ```ts
+  context(req: HttpRequest<any, any>) {
+    const user = req.ctx().user;
+    return { userId: user ? String(user.id) : null };
+  }
+  ```
+
+- **Tools:** replace `ctx.req.ctx().user` and similar with `ctx.context.<field>`.
+  During a controller-started run, ambient request state such as `Auth.user()`
+  and policied queries still works, because the run still executes inside the
+  request and holds it open until it settles. It only fails for runs started
+  from a job.
+- **Direct `agent.stream({ ..., req })` calls:** drop `req` and pass `context`
+  if your tools need it.
+- **MCP tools (`toAgentTools`):** no change. They act as the user by that user's
+  credentials, so they read the request the run is executing inside. From a
+  run with no request they now return a tool error that says so, rather than
+  dispatching.
+- **Controller hooks** (`AgentHookContext`) still get `req`: they belong to the
+  request, not the run.
+
 # Upgrading from 0.66 to 0.67
 
 ## `required` accepts values it used to reject — behaviour change

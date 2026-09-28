@@ -52,7 +52,6 @@ import {
   LIVE_MODEL,
   openaiConfigured,
   partsOf,
-  req,
   TARGETS,
   textOf,
   transcriptText,
@@ -165,7 +164,6 @@ function battery(target: LiveTarget) {
         });
         const run = agent.stream({
           messages: [],
-          req,
           turn: { text: "What is the capital of France?" },
         });
         const events: AgentStreamEvent[] = [];
@@ -201,7 +199,6 @@ function battery(target: LiveTarget) {
         const result = await agent
           .stream({
             messages: [],
-            req,
             turn: { text: "How many units of AB-1 are in stock?" },
           })
           .result();
@@ -241,7 +238,6 @@ function battery(target: LiveTarget) {
         const result = await agent
           .stream({
             messages: [],
-            req,
             turn: { text: "Stock for AB-1 and for CD-2?" },
           })
           .result();
@@ -277,7 +273,6 @@ function battery(target: LiveTarget) {
         });
         const run = agent.stream({
           messages: [],
-          req,
           turn: { text: "The invoice arrived late again and support never replied." },
         });
         const events: AgentStreamEvent[] = [];
@@ -336,7 +331,6 @@ function battery(target: LiveTarget) {
         });
         const run = agent.stream({
           messages: [],
-          req,
           turn: { text: "What is the total on order ord_1?" },
         });
         const events: AgentStreamEvent[] = [];
@@ -414,7 +408,6 @@ function battery(target: LiveTarget) {
       const result = await agent
         .stream({
           messages: [],
-          req,
           turn: {
             text:
               "Three people pay 30 for a room; the clerk refunds 5, the bellhop keeps 2 and " +
@@ -490,7 +483,6 @@ function battery(target: LiveTarget) {
         });
         const run = agent.stream({
           messages: [],
-          req,
           turn: { text: "Refund order ord_7 in full." },
         });
         const events: AgentStreamEvent[] = [];
@@ -517,7 +509,6 @@ function battery(target: LiveTarget) {
         const resumed = await agent
           .stream({
             messages: parked.messages,
-            req,
             provider: second,
             turn: {
               toolResults: [
@@ -594,7 +585,7 @@ function battery(target: LiveTarget) {
       });
 
       const userText = "What is the population of Ashgrove Hollow?";
-      const run = lead.stream({ messages: [], req, turn: { text: userText } });
+      const run = lead.stream({ messages: [], turn: { text: userText } });
       const { wire, live, done } = collectFrames(run);
       const result = await run.result();
       await done;
@@ -744,7 +735,6 @@ function battery(target: LiveTarget) {
 
         const run = lead.stream({
           messages: [],
-          req,
           turn: { text: "Settle order ord_7." },
         });
         const events: AgentStreamEvent[] = [];
@@ -787,7 +777,6 @@ function battery(target: LiveTarget) {
         const resumed = await lead
           .stream({
             messages: parked.messages,
-            req,
             provider: resumeProvider,
             turn: {
               toolResults: [
@@ -987,7 +976,6 @@ const QUADRANTS_PNG_BASE64 =
       });
       const run = agent.stream({
         messages: [],
-        req,
         turn: {
           text: "The attachment is split into four equal quadrants, each one solid colour. Name all four colours.",
           files: [{ fileId, name: file.name, mimeType: file.type }],

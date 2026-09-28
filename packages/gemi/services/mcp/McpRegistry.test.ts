@@ -293,11 +293,10 @@ async function runTool(
     tools: toAgentTools(resolve(McpRegistry)),
   });
   let messages: AgentMessage[] = [];
-  inside = async (req) => {
+  inside = async () => {
     const result = await agent
       .stream({
         messages: [],
-        req,
         turn: options.turn ?? { text: "go" },
         attachments: options.attachments ?? null,
       })
@@ -340,8 +339,8 @@ async function streamTool(
     tools: toAgentTools(resolve(McpRegistry)),
   });
   let run!: AgentRun;
-  streamed = (req) => {
-    run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: null }) as AgentRun;
+  streamed = () => {
+    run = agent.stream({ messages: [], turn: { text: "go" }, attachments: null }) as AgentRun;
     return run.toResponse();
   };
   const res = await app.fetch(
@@ -377,6 +376,30 @@ describe("an agent calling the app's routes", () => {
 
     expect(result).toMatchObject({ status: "ok", output: { id: 1, modelOriginated: true } });
     expect(handled).toEqual([{ route: "me", user: 1 }]);
+  });
+
+  /**
+   * A job or a script. The run no longer carries a request, and these tools
+   * are the one kind that cannot do without one: they act as a user by that
+   * user's credentials. Refused with a sentence, not dispatched as nobody.
+   */
+  test("a run started outside any request is told so, and nothing is dispatched", async () => {
+    const agent = Agent.create({
+      name: "shop",
+      provider: fakeProvider([toolCall("c1", "whoami", {}), finish()], [finish()]),
+      tools: toAgentTools(resolve(McpRegistry)),
+    });
+
+    const { messages } = await agent.stream({ messages: [], turn: { text: "go" } }).result();
+    const result = messages
+      .flatMap((message) => message.content)
+      .find((part: any) => part.type === "tool-result" && part.toolCallId === "c1") as any;
+
+    expect(result.status).toBe("error");
+    expect(result.error.message).toBe(
+      '"whoami" calls an api route as the user who started this run, and this run was not started inside a request. Run it from an AgentController, or give this agent tools that do not go through the MCP registry.',
+    );
+    expect(handled).toEqual([]);
   });
 
   test("an auth-guarded route rejects an anonymous run, and the handler never runs", async () => {

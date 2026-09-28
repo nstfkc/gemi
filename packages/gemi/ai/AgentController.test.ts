@@ -1451,6 +1451,51 @@ describe("AgentController.instructions", () => {
 });
 
 /**
+ * `context()` — where the controller turns its request into what the run's
+ * tools are given, since the run is not given the request.
+ */
+describe("the agent context a controller builds", () => {
+  test("is built from the request and body, and handed to the run", async () => {
+    const run = new StubAgentRun("run_context");
+    const { agent, calls } = stubAgent(run);
+    const seen: { req?: unknown; body?: unknown } = {};
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      context(req: any, extra: { body: Record<string, unknown> }) {
+        seen.req = req;
+        seen.body = extra.body;
+        return { tenant: req.headers.get("x-tenant"), pageId: extra.body.pageId } as any;
+      }
+    }
+    const req = jsonRequest({ turn: { text: "hi" }, pageId: "page_7" }, { "x-tenant": "acme" });
+
+    await new Chat().stream(req);
+
+    expect(seen.req).toBe(req);
+    expect(seen.body).toEqual({ pageId: "page_7" });
+    expect(calls[0]!.context).toEqual({ tenant: "acme", pageId: "page_7" });
+    // And nothing request-shaped rides along beside it.
+    expect(calls[0]).not.toHaveProperty("req");
+    run.finish();
+  });
+
+  test("is an empty object when the controller does not override it", async () => {
+    const run = new StubAgentRun("run_context_default");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
+
+    expect(calls[0]!.context).toEqual({});
+    run.finish();
+  });
+});
+
+/**
  * `useChat`'s `body` option, arriving where an app can read it.
  *
  * It is documented as "merged into the request body, for anything the agent's

@@ -19,8 +19,23 @@ const ORDERS: Record<
 };
 
 /**
- * The customer the signed-in user is, read from the request and never from
- * the model.
+ * What every run of this app's agents is started with, and what its tools read
+ * as `ctx.context`. `SupportAgentController.context()` fills it in from the
+ * request; a job that runs an agent would fill it in from its payload.
+ *
+ * `userId` is required, and `null` for nobody, so that every place that starts
+ * a run has to say who it is for — forgetting is a compile error, not a tool
+ * that quietly acts for no one.
+ */
+declare module "gemi/ai" {
+  interface AgentContext {
+    userId: string | null;
+  }
+}
+
+/**
+ * The customer the signed-in user is, read from the run's context and never
+ * from the model.
  *
  * Every tool below is scoped by this, because the model's arguments are
  * whatever the conversation talked it into: a customer who types "refund
@@ -30,10 +45,10 @@ const ORDERS: Record<
  *
  * The template has no customer table, so every account is `cus_ada`; `cus_gus`
  * is there to be the order that is not yours. A real app looks up the customer
- * row for `req.ctx().user` here.
+ * row for `ctx.context.userId` here.
  */
 export function customerOf(ctx: ToolContext): string {
-  if (!ctx.req.ctx()?.user) {
+  if (ctx.context.userId === null) {
     throw new Error("Only a signed-in customer's orders can be read.");
   }
   return "cus_ada";

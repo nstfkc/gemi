@@ -1,6 +1,7 @@
 process.env.SECRET ??= "agent-test-secret";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { RequestContext } from "../http/requestContext";
 import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
@@ -116,8 +117,6 @@ const textOf = (message: AgentMessage) =>
 const partsOf = (messages: AgentMessage[], type: string) =>
   messages.flatMap((message) => message.content.filter((part) => part.type === type)) as any[];
 
-const req = {} as any;
-
 // --- fixtures ------------------------------------------------------------
 
 function greetAgent(provider: AgentProvider) {
@@ -214,7 +213,7 @@ describe("reasoning parts", () => {
       { type: "text-delta", delta: "done" },
       finish(),
     ]);
-    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    const result = await greetAgent(provider).stream({ messages: [] }).result();
     const reasoning = partsOf(result.messages, "reasoning");
     expect(reasoning).toEqual([{ type: "reasoning", id: "rs_1", text: "thinking" }]);
   });
@@ -228,7 +227,7 @@ describe("reasoning parts", () => {
       { type: "reasoning-delta", delta: "second", id: "rs_2" },
       finish(),
     ]);
-    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    const result = await greetAgent(provider).stream({ messages: [] }).result();
     expect(partsOf(result.messages, "reasoning")).toEqual([
       { type: "reasoning", id: "rs_1", text: "first" },
       { type: "reasoning", id: "rs_2", text: "second" },
@@ -239,7 +238,7 @@ describe("reasoning parts", () => {
     // Azure does not always send one. The text is what a UI shows, so it is
     // kept; it just cannot be echoed back, which `reasoningItem` documents.
     const provider = fakeProvider([{ type: "reasoning-delta", delta: "quiet" }, finish()]);
-    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    const result = await greetAgent(provider).stream({ messages: [] }).result();
     expect(partsOf(result.messages, "reasoning")).toEqual([{ type: "reasoning", text: "quiet" }]);
   });
 });
@@ -251,7 +250,7 @@ describe("a plain run", () => {
       { type: "text-delta", delta: "lo" },
       finish(),
     ]);
-    const run = greetAgent(provider).stream({ messages: [], req, turn: { text: "hi" } });
+    const run = greetAgent(provider).stream({ messages: [], turn: { text: "hi" } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -269,7 +268,6 @@ describe("a plain run", () => {
     const provider = fakeProvider([finish()]);
     const run = greetAgent(provider).stream({
       messages: [],
-      req,
       instructions: "Today is Tuesday.",
     });
     await run.result();
@@ -286,7 +284,7 @@ describe("a provider error", () => {
       { type: "error", error: { code: "content_filtered", message: "blocked", retryable: false } },
       finish(),
     ]);
-    const run = greetAgent(provider).stream({ messages: [], req, turn: { text: "hi" } });
+    const run = greetAgent(provider).stream({ messages: [], turn: { text: "hi" } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -308,7 +306,7 @@ describe("a tool call", () => {
       [{ type: "text-delta", delta: "found it" }, finish()],
     );
     const agent = Agent.create({ name: "coder", provider, tools: [grep] });
-    const run = agent.stream({ messages: [], req, turn: { text: "search" } });
+    const run = agent.stream({ messages: [], turn: { text: "search" } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -331,7 +329,7 @@ describe("a tool call", () => {
       [{ type: "text-delta", delta: "sorry, retrying" }, finish()],
     );
     const agent = Agent.create({ name: "coder", provider, tools: [grep] });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     const errors = partsOf(result.messages, "tool-result");
     expect(errors[0].status).toBe("error");
@@ -352,7 +350,7 @@ describe("a tool call", () => {
     });
     const provider = fakeProvider([toolCall("c1", "boom", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "coder", provider, tools: [boom] });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
       status: "error",
@@ -374,7 +372,7 @@ describe("a tool call", () => {
     });
     const provider = fakeProvider([toolCall("c1", "bash", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "coder", provider, tools: [streaming] });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -392,7 +390,7 @@ describe("a tool call", () => {
     const script = () => [toolCall(`c${Math.random()}`, "grep", { pattern: "x" }), finish()];
     const provider = fakeProvider(script(), script(), script());
     const agent = Agent.create({ name: "looper", provider, tools: [grep], maxSteps: 2 });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     expect(result.finishReason).toBe("max-steps");
     expect(provider.calls.length).toBe(2);
@@ -417,7 +415,7 @@ async function askForApproval() {
     toolCall("c1", "refundOrder", { orderId: "ord_1" }),
     finish(),
   ]);
-  const run = agent.stream({ messages: [], req, turn: { text: "refund it" } });
+  const run = agent.stream({ messages: [], turn: { text: "refund it" } });
   const { events, done } = collect(run);
   const result = await run.result();
   await done;
@@ -452,7 +450,7 @@ describe("an approval", () => {
     const provider = fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]);
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const result = await agent
-      .stream({ messages: first.result.messages, req, turn: { toolResults: [answer] } })
+      .stream({ messages: first.result.messages, turn: { toolResults: [answer] } })
       .result();
 
     expect(refundCalls).toEqual(["ord_1"]);
@@ -475,7 +473,6 @@ describe("an approval", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -504,7 +501,6 @@ describe("an approval", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: { text: "actually, what is my balance?" },
       })
       .result();
@@ -529,7 +525,6 @@ describe("an approval", () => {
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [{ toolCallId: "c1", signature: first.pending[0].signature, approve: true }],
       },
@@ -555,7 +550,6 @@ describe("an approval", () => {
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [
           {
@@ -584,7 +578,7 @@ describe("an approval", () => {
       finish(),
     ]);
     const agent = Agent.create({ name: "support", provider, tools: [annotateOrder] });
-    const first = agent.stream({ messages: [], req, turn: { text: "refund it" } });
+    const first = agent.stream({ messages: [], turn: { text: "refund it" } });
     const { events, done } = collect(first);
     const asked = await first.result();
     await done;
@@ -600,7 +594,6 @@ describe("an approval", () => {
     });
     const second = answering.stream({
       messages: asked.messages,
-      req,
       turn: { toolResults: [{ toolCallId: "c1", signature: pending[0].signature, approve: true }] },
     });
     const replay = collect(second);
@@ -627,7 +620,6 @@ describe("an approval", () => {
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       // A retried submit, or a double-clicked button.
       turn: { toolResults: [answer, answer] },
     });
@@ -663,7 +655,6 @@ describe("an approval", () => {
         // The history from *before* the approval — in stateless mode this comes
         // from the browser, so rewinding it is the client's to do.
         messages: first.result.messages,
-        req,
         turn: { toolResults: [answer] },
       });
 
@@ -692,7 +683,6 @@ describe("an approval", () => {
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [
           { toolCallId: "c1", signature: first.pending[0].signature, approve: false },
@@ -722,7 +712,7 @@ async function askQuestion() {
     toolCall("c1", "ask", { question: "which invoice?" }),
     finish(),
   ]);
-  const run = agent.stream({ messages: [], req, turn: { text: "refund something" } });
+  const run = agent.stream({ messages: [], turn: { text: "refund something" } });
   const { events, done } = collect(run);
   const result = await run.result();
   await done;
@@ -744,7 +734,6 @@ describe("a client-answered tool", () => {
     const bad = await answering
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             { toolCallId: "c1", signature: first.pending[0].signature, output: { answer: 42 } },
@@ -761,7 +750,6 @@ describe("a client-answered tool", () => {
     const good = await answering
       .stream({
         messages: second.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -805,7 +793,6 @@ describe("stop()", () => {
     const messages: AgentMessage[] = [];
     const run = agent.stream({
       messages: [],
-      req,
       onMessage: (message) => {
         messages.push(message);
       },
@@ -855,7 +842,7 @@ describe("stop()", () => {
       provider: fakeProvider([toolCall("c1", "holdOn", {}), finish()]),
       tools,
     });
-    const first = asking.stream({ messages: [], req, turn: { text: "do it" } });
+    const first = asking.stream({ messages: [], turn: { text: "do it" } });
     const asked = collect(first);
     const before = await first.result();
     await asked.done;
@@ -866,7 +853,6 @@ describe("stop()", () => {
     const answering = Agent.create({ name: "slow", provider: fakeProvider([finish()]), tools });
     const run = answering.stream({
       messages: before.messages,
-      req,
       turn: { toolResults: [{ toolCallId: "c1", signature: pending[0].signature, approve: true }] },
       onMessage: (message) => {
         persisted.push(message);
@@ -912,7 +898,7 @@ describe("stop()", () => {
     const controller = new AbortController();
     const provider = fakeProvider([toolCall("c1", "hang2", {}), finish()]);
     const agent = Agent.create({ name: "slow", provider, tools: [hang] });
-    const run = agent.stream({ messages: [], req, signal: controller.signal });
+    const run = agent.stream({ messages: [], signal: controller.signal });
     await started.promise;
     controller.abort();
     expect((await run.result()).finishReason).toBe("aborted");
@@ -930,7 +916,7 @@ describe("a run outliving its request", () => {
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "patient", provider, tools: [slow] });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
 
     const response = run.toResponse();
     expect(response.headers.get("Content-Type")).toContain("text/event-stream");
@@ -949,7 +935,7 @@ describe("a run outliving its request", () => {
       { type: "text-delta", delta: "c" },
       finish(),
     ]);
-    const run = greetAgent(provider).stream({ messages: [], req });
+    const run = greetAgent(provider).stream({ messages: [] });
     await run.result();
 
     const all: number[] = [];
@@ -964,7 +950,7 @@ describe("a run outliving its request", () => {
 
   test("toResponse writes the cursor into the SSE id field", async () => {
     const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
-    const run = greetAgent(provider).stream({ messages: [], req });
+    const run = greetAgent(provider).stream({ messages: [] });
     await run.result();
 
     const body = await run.toResponse({ from: 2 }).text();
@@ -1013,7 +999,7 @@ describe("toResponse keepalive", () => {
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "patient", provider, tools: [slow] });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
 
     const reader = run.toResponse().body!.getReader();
     const bytes = new TextDecoder();
@@ -1047,7 +1033,7 @@ describe("toResponse keepalive", () => {
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "patient", provider, tools: [slow] });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
 
     const response = run.toResponse();
     expect(vi.getTimerCount()).toBe(1);
@@ -1079,7 +1065,7 @@ describe("skills", () => {
     // twelve files to answer "hello".
     expect(instructions).not.toHaveBeenCalled();
 
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
     expect(instructions).toHaveBeenCalledTimes(1);
 
     const namespaces = provider.calls[0].tools as any[];
@@ -1130,7 +1116,7 @@ describe("namespaces", () => {
     });
     const provider = fakeProvider([finish()]);
     const agent = Agent.create({ name: "support", provider, tools: [grep, crm] });
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
 
     const tools = provider.calls[0].tools as any[];
     expect(tools[0]).toMatchObject({ name: "grep", deferred: false });
@@ -1160,8 +1146,8 @@ describe("namespaces", () => {
     const agentA = Agent.create({ name: "a", provider: first, tools: [crm] });
     const agentB = Agent.create({ name: "b", provider: second, tools: [billing] });
 
-    await agentA.stream({ messages: [], req }).result();
-    await agentB.stream({ messages: [], req }).result();
+    await agentA.stream({ messages: [] }).result();
+    await agentB.stream({ messages: [] }).result();
 
     const groupOf = (provider: typeof first) =>
       (provider.calls[0].tools as any[]).map((entry) => ({
@@ -1186,7 +1172,7 @@ describe("maxOutputTokens and temperature", () => {
   const sent = async (create: Record<string, unknown> = {}, run: Record<string, unknown> = {}) => {
     const provider = fakeProvider([finish()]);
     const agent = Agent.create({ name: "a", provider, ...create });
-    await agent.stream({ messages: [], req, ...run }).result();
+    await agent.stream({ messages: [], ...run }).result();
     return provider.calls[0];
   };
 
@@ -1246,7 +1232,7 @@ describe("maxOutputTokens and temperature", () => {
       maxOutputTokens: 9999,
     });
 
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
 
     // The parent's ceiling is the parent's. A generator writing a document and
     // a router answering one word are different jobs.
@@ -1272,7 +1258,7 @@ describe("maxOutputTokens and temperature", () => {
       tools: [outer],
     });
 
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
 
     expect(subProvider.calls[0]).toMatchObject({ maxOutputTokens: 4096, temperature: 0.1 });
   });
@@ -1301,7 +1287,7 @@ describe("a run cut off by the output ceiling", () => {
       { type: "finish", reason, usage: usage(10, 5) },
     ]);
     const agent = Agent.create({ name: "gen", provider, output: OUTPUT });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     const events: any[] = [];
     for await (const event of run) events.push(event);
     return { result: await run.result(), events };
@@ -1331,7 +1317,7 @@ describe("a run cut off by the output ceiling", () => {
       { type: "finish", reason: "length", usage: usage(10, 5) },
     ]);
     const agent = Agent.create({ name: "gen", provider, output: strict });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     const events: any[] = [];
     for await (const event of run) events.push(event);
     const result = await run.result();
@@ -1387,7 +1373,6 @@ describe("a run cut off by the output ceiling", () => {
     const agent = Agent.create({ name: "gen", provider, output: OUTPUT });
     const run = agent.stream({
       messages: [],
-      req,
       onMessage: (message) => {
         // Cloned as it arrives rather than read back afterwards: the point is
         // what the hook is handed, not what the object became later.
@@ -1425,7 +1410,7 @@ describe("a run cut off by the output ceiling", () => {
       tools: [truncatingTool],
       output: OUTPUT,
     });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     for await (const _event of run) void _event;
     const result = await run.result();
 
@@ -1459,7 +1444,7 @@ describe("a run cut off by the output ceiling", () => {
       tools: [pendingTool],
       output: anything(),
     });
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     const events: any[] = [];
     for await (const event of run) events.push(event);
     const result = await run.result();
@@ -1486,10 +1471,10 @@ describe("a run cut off by the output ceiling", () => {
 /**
  * `ctx.body` — the fields the client sent with the turn, reaching the tools.
  *
- * Carried on the run rather than read back off `ctx.req`, and that is the whole
- * point of it existing: `AgentController` consumes the body to find the turn,
- * and a run outlives the request anyway so a refresh can reattach. By the time
- * a tool executes there is nothing left to read.
+ * Carried on the run, and that is the whole point of it existing:
+ * `AgentController` consumes the body to find the turn, and a run outlives the
+ * request anyway so a refresh can reattach. By the time a tool executes there
+ * is nothing left to read.
  */
 describe("the request body on a tool's context", () => {
   const recorder = () => {
@@ -1512,7 +1497,7 @@ describe("the request body on a tool's context", () => {
     const provider = fakeProvider([toolCall("c1", "recordBody", { pattern: "x" })], [finish()]);
     const agent = Agent.create({ name: "a", provider, tools: [tool] });
 
-    await agent.stream({ messages: [], req, body: { pageId: "page_7" } }).result();
+    await agent.stream({ messages: [], body: { pageId: "page_7" } }).result();
 
     expect(seen).toEqual([{ pageId: "page_7" }]);
   });
@@ -1522,7 +1507,7 @@ describe("the request body on a tool's context", () => {
     const provider = fakeProvider([toolCall("c1", "recordBody", { pattern: "x" })], [finish()]);
     const agent = Agent.create({ name: "a", provider, tools: [tool] });
 
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
 
     // `{}` rather than undefined, so a tool reads a missing field the same way
     // whether the client sent nothing or the run carried no body at all.
@@ -1559,9 +1544,115 @@ describe("the request body on a tool's context", () => {
       tools: [outer],
     });
 
-    await agent.stream({ messages: [], req, body: { pageId: "page_7" } }).result();
+    await agent.stream({ messages: [], body: { pageId: "page_7" } }).result();
 
     expect(seen).toEqual([{ pageId: "page_7" }]);
+  });
+});
+
+/**
+ * `ctx.context` — what the caller hands a run for its tools, in place of the
+ * request a run used to be given.
+ *
+ * The case it exists for is the last test: a run started where there is no
+ * request at all. Every other test in this file runs outside one too, but only
+ * that one says so, and only it would fail if the run reached for a request
+ * again.
+ */
+describe("the agent context on a tool's context", () => {
+  const recorder = () => {
+    const seen: unknown[] = [];
+    const tool = AgentTool.create({
+      name: "recordContext",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        seen.push(ctx.context);
+        return { ok: true };
+      },
+    });
+    return { seen, tool };
+  };
+
+  test("is the object the run was started with, functions and all", async () => {
+    const notified: string[] = [];
+    const context = {
+      userId: "u_1",
+      notify: async (message: string) => void notified.push(message),
+    };
+    const tool = AgentTool.create({
+      name: "notify",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (input: any, ctx: any) => {
+        await ctx.context.notify(`${ctx.context.userId}: ${input.pattern}`);
+        return { ok: true };
+      },
+    });
+    const provider = fakeProvider([toolCall("c1", "notify", { pattern: "done" })], [finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [tool] });
+
+    await agent.stream({ messages: [], context }).result();
+
+    expect(notified).toEqual(["u_1: done"]);
+  });
+
+  test("is an empty object for a run started without one", async () => {
+    const { seen, tool } = recorder();
+    const provider = fakeProvider([toolCall("c1", "recordContext", { pattern: "x" })], [finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [tool] });
+
+    await agent.stream({ messages: [] }).result();
+
+    expect(seen).toEqual([{}]);
+  });
+
+  test("is the same object in a sub-agent's tools, acting for the same caller", async () => {
+    const { seen, tool } = recorder();
+    const sub = Agent.create({
+      name: "sub",
+      provider: fakeProvider([toolCall("s1", "recordContext", { pattern: "x" })], [finish()]),
+      tools: [tool],
+    });
+    const outer = AgentTool.create({
+      name: "outer",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        await ctx.runAgent(sub, { prompt: "go" });
+        return { ok: true };
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "outer", { pattern: "x" })], [finish()]),
+      tools: [outer],
+    });
+    const context = { userId: "u_1" };
+
+    await agent.stream({ messages: [], context }).result();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(context);
+  });
+
+  /**
+   * The job case. Asserted against the request store rather than assumed from
+   * the test runner, because "no request" is the property the test is about.
+   */
+  test("runs a tool outside any request", async () => {
+    const { seen, tool } = recorder();
+    const provider = fakeProvider([toolCall("c1", "recordContext", { pattern: "x" })], [finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [tool] });
+
+    expect(RequestContext.getStore()).toBeUndefined();
+    const result = await agent.stream({ messages: [], context: { jobId: "j_1" } }).result();
+
+    expect(result.finishReason).toBe("stop");
+    expect(seen).toEqual([{ jobId: "j_1" }]);
   });
 });
 
@@ -1591,7 +1682,7 @@ describe("strict mode follows the schema", () => {
       provider,
       tools: [toolWith("t", inputSchema)],
     });
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
     return (provider.calls[0].tools as any[])[0];
   };
 
@@ -1624,7 +1715,7 @@ describe("strict mode follows the schema", () => {
         toolWith("loose", s.object({ doc: s.json() })),
       ],
     });
-    await agent.stream({ messages: [], req }).result();
+    await agent.stream({ messages: [] }).result();
 
     expect((provider.calls[0].tools as any[]).map((tool) => [tool.name, tool.strict])).toEqual([
       ["plain", true],
@@ -1641,7 +1732,7 @@ describe("strict mode follows the schema", () => {
   test("an output schema carries its own answer to the provider", async () => {
     const run = async (output: Schema<any>) => {
       const provider = fakeProvider([finish()]);
-      await Agent.create({ name: "a", provider, output }).stream({ messages: [], req }).result();
+      await Agent.create({ name: "a", provider, output }).stream({ messages: [] }).result();
       return provider.calls[0].output;
     };
 
@@ -1674,7 +1765,7 @@ describe("strict mode follows the schema", () => {
     });
 
     const events: any[] = [];
-    const run = agent.stream({ messages: [], req });
+    const run = agent.stream({ messages: [] });
     for await (const event of run) events.push(event);
     const result = await run.result();
 
@@ -1764,7 +1855,7 @@ describe("a sub-agent that runs to completion", () => {
       [{ type: "text-delta", delta: "done" }, finish()],
     );
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { frames, done } = collectFrames(run);
     const result = await run.result();
     await done;
@@ -1819,7 +1910,7 @@ describe("a sub-agent that runs to completion", () => {
     grepCalls.length = 0;
     const provider = fakeProvider([toolCall("c1", "grep", { pattern: "x" }), finish()], [finish()]);
     const agent = Agent.create({ name: "coder", provider, tools: [grep] });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
     // An always-present `nested: []` would be a wire and store change paid for
     // by every app that has no sub-agents.
     expect("nested" in callPartOf(result.messages, "c1")).toBe(false);
@@ -1830,7 +1921,7 @@ describe("a sub-agent that runs to completion", () => {
 async function escalate(build: { tool: any }) {
   const provider = fakeProvider([toolCall("c1", build.tool.name, {}), finish()]);
   const agent = Agent.create({ name: "lead", provider, tools: [build.tool] });
-  const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+  const run = agent.stream({ messages: [], turn: { text: "go" } });
   const { events, done } = collect(run);
   const result = await run.result();
   await done;
@@ -1861,9 +1952,7 @@ describe("text accumulated across many deltas", () => {
       pieces.map((delta) => ({ type: "text-delta" as const, delta })).concat([finish()]),
     );
     const agent = Agent.create({ name: "s", provider, tools: [] });
-    const result = await agent
-      .stream({ messages: [], req, turn: { text: "where is it?" } })
-      .result();
+    const result = await agent.stream({ messages: [], turn: { text: "where is it?" } }).result();
 
     const text = textOf(result.messages[result.messages.length - 1]);
     expect(text).toBe(pieces.join(""));
@@ -1926,7 +2015,6 @@ describe("a sub-agent that asks the user a question", () => {
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [
           {
@@ -1985,7 +2073,6 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2066,7 +2153,6 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     const second = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2131,7 +2217,6 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2174,7 +2259,6 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2210,7 +2294,6 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2250,7 +2333,7 @@ describe('onPending: "deny"', () => {
       [{ type: "text-delta", delta: "done" }, finish()],
     );
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -2297,7 +2380,7 @@ describe('onPending: "deny"', () => {
     }));
     const provider = fakeProvider([toolCall("c1", "outer", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [outer] });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     expect(result.finishReason).toBe("stop");
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
@@ -2340,7 +2423,7 @@ describe("a sibling tool running beside an escalating one", () => {
       finish(),
     ]);
     const agent = Agent.create({ name: "lead", provider, tools: [research, grep] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { events, done } = collect(run);
     const first = await run.result();
     await done;
@@ -2364,7 +2447,6 @@ describe("a sibling tool running beside an escalating one", () => {
     const second = await nextAgent
       .stream({
         messages: first.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -2401,7 +2483,7 @@ describe("a sibling tool running beside an escalating one", () => {
     const provider = fakeProvider([{ type: "text-delta", delta: "moving on" }, finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
     const result = await agent
-      .stream({ messages: first.result.messages, req, turn: { text: "never mind" } })
+      .stream({ messages: first.result.messages, turn: { text: "never mind" } })
       .result();
 
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
@@ -2436,7 +2518,7 @@ describe("stopping a run with a sub-agent in flight", () => {
 
     const provider = fakeProvider([toolCall("c1", "research", {}), finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { events, done } = collect(run);
     await started.promise;
     run.stop({ reason: "user cancelled" });
@@ -2477,7 +2559,7 @@ describe("depth and cycles", () => {
     );
     self = Agent.create({ name: "ouroboros", provider, tools: [recurse] });
 
-    const result = await self.stream({ messages: [], req }).result();
+    const result = await self.stream({ messages: [] }).result();
 
     const failure = partsOf(result.messages, "tool-result")[0];
     expect(failure.status).toBe("error");
@@ -2504,7 +2586,7 @@ describe("depth and cycles", () => {
     const provider = fakeProvider([toolCall("c1", "outer", {}), finish()], [finish()]);
     // One level of nesting allowed, so `middle` runs and `bottom` does not.
     const agent = Agent.create({ name: "lead", provider, tools: [outer], maxDepth: 1 });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     expect(bottom.provider.calls.length).toBe(0);
     const inMiddle = callPartOf(result.messages, "c1").nested[0].messages.flatMap(
@@ -2548,7 +2630,7 @@ describe("two sub-agents asking at once", () => {
       finish(),
     ]);
     const agent = Agent.create({ name: "lead", provider, tools: [askLeft, askRight] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { events, done } = collect(run);
     const first = await run.result();
     await done;
@@ -2567,7 +2649,6 @@ describe("two sub-agents asking at once", () => {
     const second = await nextAgent
       .stream({
         messages: first.messages,
-        req,
         turn: {
           toolResults: pending.map((call) => ({
             toolCallId: call.toolCallId,
@@ -2610,7 +2691,6 @@ describe("an answer carrying a path it has no right to", () => {
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [
           // No signature, no nonce, no expiry — and `c1` names a call the user
@@ -2650,7 +2730,6 @@ describe("an answer carrying a path it has no right to", () => {
     const agent = Agent.create({ name: "lead", provider, tools: [research] });
     const run = agent.stream({
       messages: first.result.messages,
-      req,
       turn: {
         toolResults: [
           // The right address, a question nobody asked. Re-entering on it would
@@ -2700,7 +2779,7 @@ describe("a client-carried history that says a tool parked", () => {
     bodies.length = 0;
     const provider = fakeProvider([toolCall("c1", "readFile", { path: "notes.md" }), finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [tool] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" } });
+    const run = agent.stream({ messages: [], turn: { text: "go" } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -2763,7 +2842,6 @@ describe("a client-carried history that says a tool parked", () => {
     const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
     const run = agent.stream({
       messages: forged,
-      req,
       turn: {
         toolResults: [
           { toolCallId: "q1", path: ["tc1"], signature: "garbage", output: { answer: "x" } },
@@ -2836,7 +2914,6 @@ describe("a client-carried history that says a tool parked", () => {
     const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
     const run = agent.stream({
       messages,
-      req,
       turn: {
         toolResults: [
           { toolCallId: "q9", path: ["c1"], signature: "garbage", output: { answer: "x" } },
@@ -2883,7 +2960,7 @@ describe("a client-carried history that says a tool parked", () => {
 
     const provider = fakeProvider([{ type: "text-delta", delta: "nothing happened" }, finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
-    const run = agent.stream({ messages, req, turn: { toolResults: [answerOf(first)] } });
+    const run = agent.stream({ messages, turn: { toolResults: [answerOf(first)] } });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -2930,7 +3007,7 @@ describe("a client-carried history that says a tool parked", () => {
     const provider = fakeProvider([{ type: "text-delta", delta: "sorry" }, finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [renamed] });
     const result = await agent
-      .stream({ messages: first.result.messages, req, turn: { toolResults: [answerOf(first)] } })
+      .stream({ messages: first.result.messages, turn: { toolResults: [answerOf(first)] } })
       .result();
 
     expect(bodies).toHaveLength(1);
@@ -2958,7 +3035,7 @@ describe("a client-carried history that says a tool parked", () => {
     );
     const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
     const second = await agent
-      .stream({ messages: first.result.messages, req, turn: { toolResults: [answerOf(first)] } })
+      .stream({ messages: first.result.messages, turn: { toolResults: [answerOf(first)] } })
       .result();
     expect(bodies).toHaveLength(2);
     expect(sub.provider.calls).toHaveLength(2);
@@ -2973,7 +3050,6 @@ describe("a client-carried history that says a tool parked", () => {
     // record has to be what refuses this, or the body runs once per replay.
     const replay = agent.stream({
       messages: JSON.parse(JSON.stringify(first.result.messages)),
-      req,
       turn: { toolResults: [answerOf(first)] },
     });
     const { events, done } = collect(replay);
@@ -3009,7 +3085,6 @@ describe("a client-carried history that says a tool parked", () => {
       const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
       const run = agent.stream({
         messages: first.result.messages,
-        req,
         turn: { toolResults: [answerOf(first)] },
       });
       const { events, done } = collect(run);
@@ -3053,7 +3128,7 @@ describe("an approved tool whose own sub-agent asks a question", () => {
       name: "lead",
       provider: fakeProvider([toolCall("c1", "escalatingApproval", {}), finish()]),
       tools,
-    }).stream({ messages: [], req, turn: { text: "go" } });
+    }).stream({ messages: [], turn: { text: "go" } });
     const parked = collect(parking);
     const first = await parking.result();
     await parked.done;
@@ -3069,7 +3144,6 @@ describe("an approved tool whose own sub-agent asks a question", () => {
     const second = Agent.create({ name: "lead", provider: fakeProvider([finish()]), tools }).stream(
       {
         messages: first.messages,
-        req,
         turn: { toolResults: [{ toolCallId: "c1", signature: approval.signature, approve: true }] },
       },
     );
@@ -3102,7 +3176,6 @@ describe("an approved tool whose own sub-agent asks a question", () => {
     })
       .stream({
         messages: result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -3162,7 +3235,6 @@ describe("a runAgent loop whose list comes back in a different order", () => {
     })
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -3219,7 +3291,6 @@ describe("a sub-run started from a message list", () => {
     })
       .stream({
         messages: first.result.messages,
-        req,
         turn: {
           toolResults: [
             {
@@ -3317,7 +3388,7 @@ describe("a tool that parks bytes", () => {
     });
     const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     expect(id).toMatch(/^gemi_att_/);
     // The default is the cheap one. `showModel` is what costs money, so it is
@@ -3344,7 +3415,7 @@ describe("a tool that parks bytes", () => {
     grepCalls.length = 0;
     const provider = fakeProvider([toolCall("c1", "grep", { pattern: "x" }), finish()], [finish()]);
     const agent = Agent.create({ name: "coder", provider, tools: [grep] });
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
     // Same bargain `nested` makes: an always-present empty array would be a wire
     // and store change paid for by every app that never attaches anything.
     expect("attachments" in callPartOf(result.messages, "c1")).toBe(false);
@@ -3359,7 +3430,7 @@ describe("a tool that parks bytes", () => {
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
     // No `attachments`: an unauthenticated, thread-less chat. #489's rule is
     // that such a request gets no attachment ids, and this is a tool meeting it.
-    const result = await agent.stream({ messages: [], req }).result();
+    const result = await agent.stream({ messages: [] }).result();
 
     const failed = partsOf(result.messages, "tool-result")[0];
     expect(failed.status).toBe("error");
@@ -3393,7 +3464,7 @@ describe("a tool that parks bytes", () => {
     const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
     (provider as any).capabilities = { ...provider.capabilities, fileInput: false };
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     const records = callPartOf(result.messages, "c1").attachments;
     expect(records).toHaveLength(2);
@@ -3431,7 +3502,6 @@ describe("a tool that parks bytes", () => {
     const lead = Agent.create({ name: "lead", provider: firstProvider, tools: [tool] });
     const opening = lead.stream({
       messages: [],
-      req,
       turn: { text: "go" },
       attachments: scoped,
     });
@@ -3448,7 +3518,6 @@ describe("a tool that parks bytes", () => {
     const result = await agent
       .stream({
         messages: first.messages,
-        req,
         attachments: scoped,
         turn: {
           toolResults: [
@@ -3490,7 +3559,7 @@ describe("a tool that generates an image", () => {
     const provider = fakeProvider([toolCall("c1", "draw", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
 
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     expect(images.generated).toEqual([{ prompt: "a market street", size: "1024x1024" }]);
     expect(answered.size).toBe("1024x1024");
@@ -3515,7 +3584,7 @@ describe("a tool that generates an image", () => {
     const provider = fakeProvider([toolCall("c1", "draw", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
 
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     // The image's tokens are in the run total, with the image share still
     // legible inside it — which is what `imageOutputTokens` is for. Two model
@@ -3542,7 +3611,7 @@ describe("a tool that generates an image", () => {
       name: "lead",
       provider: fakeProvider([toolCall("c1", "draw", {}), finish()]),
       tools: [tool],
-    }).stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    }).stream({ messages: [], turn: { text: "go" }, attachments: scoped });
     const opened = collect(opening);
     const first = await opening.result();
     await opened.done;
@@ -3558,7 +3627,6 @@ describe("a tool that generates an image", () => {
     })
       .stream({
         messages: first.messages,
-        req,
         attachments: scoped,
         turn: {
           toolResults: [
@@ -3603,7 +3671,7 @@ describe("a tool that generates an image", () => {
     const provider = fakeProvider([toolCall("c1", "edit", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
 
-    await agent.stream({ messages: [], req, attachments: scoped }).result();
+    await agent.stream({ messages: [], attachments: scoped }).result();
 
     expect(images.edited).toEqual([{ prompt: "warmer", images: 1, mask: false }]);
     expect(refused).toBe("AttachmentNotFoundError");
@@ -3629,7 +3697,7 @@ describe("a tool that generates an image", () => {
       name: "lead",
       provider: fakeProvider([toolCall("c1", "draw", {}), finish()]),
       tools: [tool],
-    }).stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    }).stream({ messages: [], turn: { text: "go" }, attachments: scoped });
     const opened = collect(opening);
     const first = await opening.result();
     await opened.done;
@@ -3643,7 +3711,6 @@ describe("a tool that generates an image", () => {
     })
       .stream({
         messages: first.messages,
-        req,
         attachments: scoped,
         turn: {
           toolResults: [
@@ -3685,7 +3752,6 @@ describe("a file a tool asks the model to look at", () => {
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
     const run = agent.stream({
       messages: [],
-      req,
       attachments: scoped,
       onMessage: (message) => {
         reported.push(message);
@@ -3747,7 +3813,7 @@ describe("a file a tool asks the model to look at", () => {
     // that never reached the wire.
     (provider as any).capabilities = { ...provider.capabilities, fileInput: false };
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     const failed = partsOf(result.messages, "tool-result")[0];
     expect(failed.status).toBe("error");
@@ -3771,7 +3837,7 @@ describe("a file a tool asks the model to look at", () => {
       [finish()],
     );
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
 
     // Two iterations, two uploads, two images in the transcript.
     expect(provider.uploads).toHaveLength(2);
@@ -3811,7 +3877,6 @@ describe("a file a tool asks the model to look at", () => {
     await agent
       .stream({
         messages: [],
-        req,
         attachments: scoped,
         turn: { text: "fix this", files: [{ fileId: "user_upload_1", name: "photo.jpg" }] },
       })
@@ -3845,7 +3910,7 @@ describe("a file a tool asks the model to look at", () => {
       ],
       createdAt: new Date().toISOString(),
     };
-    await agent.stream({ messages: [posted], req, attachments: scoped }).result();
+    await agent.stream({ messages: [posted], attachments: scoped }).result();
 
     const second = filePartsOf(provider.calls[1].messages);
     expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
@@ -3867,7 +3932,7 @@ describe("a file a tool asks the model to look at", () => {
       [finish()],
     );
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
-    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const result = await agent.stream({ messages: [], attachments: scoped }).result();
     const [dropped, kept] = filePartsOf(result.messages).map((part) => part.attachmentId);
 
     const texts = toResponsesInput(provider.calls[2].messages, provider.capabilities)
@@ -3898,7 +3963,6 @@ describe("a file a tool asks the model to look at", () => {
     const result = await agent
       .stream({
         messages: [],
-        req,
         attachments: scoped,
         onMessage: (message) => {
           reported.push(message);
@@ -3939,7 +4003,6 @@ describe("a file a tool asks the model to look at", () => {
     const agent = Agent.create({ name: "designer", provider, tools: [tool] });
     const run = agent.stream({
       messages: [],
-      req,
       attachments: scoped,
       onMessage: (message) => {
         reported.push(message);
@@ -4012,7 +4075,7 @@ describe("a tool that shows a file and then escalates", () => {
   async function turnOne(tool: any, scoped: any) {
     const provider = fakeProvider([toolCall("c1", "render", {}), finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [tool] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const run = agent.stream({ messages: [], turn: { text: "go" }, attachments: scoped });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -4038,7 +4101,6 @@ describe("a tool that shows a file and then escalates", () => {
     const agent = Agent.create({ name: "lead", provider, tools: [tool] });
     const second = agent.stream({
       messages: first.result.messages,
-      req,
       attachments: scoped,
       turn: {
         toolResults: [
@@ -4090,7 +4152,6 @@ describe("a tool that shows a file and then escalates", () => {
     const result = await agent
       .stream({
         messages: first.result.messages,
-        req,
         attachments: scoped,
         turn: {
           toolResults: [
@@ -4135,7 +4196,7 @@ describe("a file shown inside a sub-run", () => {
       [{ type: "text-delta", delta: "done" }, finish()],
     );
     const agent = Agent.create({ name: "lead", provider, tools: [delegate] });
-    const run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const run = agent.stream({ messages: [], turn: { text: "go" }, attachments: scoped });
     const { events, done } = collect(run);
     const result = await run.result();
     await done;
@@ -4183,7 +4244,6 @@ describe("a file the user attached, and its attachment id", () => {
     await agent
       .stream({
         messages: [],
-        req,
         turn: {
           text: "make a product from these",
           files: [
@@ -4250,7 +4310,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     await agent
       .stream({
         messages: [],
-        req,
         turn: {
           text: "use these",
           files: [
@@ -4290,7 +4349,7 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
         createdAt: new Date().toISOString(),
       },
     ];
-    await agent.stream({ messages: history, req }).result();
+    await agent.stream({ messages: history }).result();
     expect(seen).toEqual([["gemi_att_ok"]]);
   });
 
@@ -4314,7 +4373,7 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
         finishReason: "stop",
       },
     ];
-    await agent.stream({ messages: history, req, turn: { text: "now make it blue" } }).result();
+    await agent.stream({ messages: history, turn: { text: "now make it blue" } }).result();
     expect(seen).toEqual([[]]);
   });
 
@@ -4335,7 +4394,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     const result = await agent
       .stream({
         messages: [],
-        req,
         attachments: scoped,
         turn: { text: "chart this", files: [{ attachmentId: "gemi_att_data", name: "d.csv" }] },
       })
@@ -4375,7 +4433,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
 
     const run1 = agentWith([toolCall("c1", "plan", {}), finish()]).stream({
       messages: [],
-      req,
       turn: { text: "ship this", files: [{ attachmentId: "gemi_att_first", name: "a.png" }] },
     });
     const { events: events1, done: done1 } = collect(run1);
@@ -4386,7 +4443,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
 
     const run2 = agentWith().stream({
       messages: first.messages,
-      req,
       turn: {
         files: [{ attachmentId: "gemi_att_second", name: "b.png" }],
         toolResults: [
@@ -4418,7 +4474,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     const third = await agentWith([{ type: "text-delta", delta: "done" }, finish()])
       .stream({
         messages: history2,
-        req,
         turn: {
           toolResults: [
             {
@@ -4465,7 +4520,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     const result = await agent
       .stream({
         messages: [],
-        req,
         attachments: mine,
         turn: {
           files: [
@@ -4500,7 +4554,6 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     await agent
       .stream({
         messages: [],
-        req,
         turn: { text: "go", files: [{ attachmentId: "gemi_att_parent", name: "p.png" }] },
       })
       .result();

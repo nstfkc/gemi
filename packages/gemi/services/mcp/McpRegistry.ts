@@ -15,8 +15,9 @@ import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
  * Who a tool call runs as. Always an argument, never read from ambient state.
  *
  * `local` is an agent running in this server, and `req` is the request that
- * started its run — `ctx.req` at the moment the tool executes, not when the
- * tool was built, which is what lets one set of tools serve every user's run.
+ * started its run — read by `toAgentTools` at the moment the tool executes,
+ * not when the tool was built, which is what lets one set of tools serve every
+ * user's run.
  * The call is dispatched with that request's credentials, so it runs as that
  * user, through that route's middleware.
  *

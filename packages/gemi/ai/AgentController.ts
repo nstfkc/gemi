@@ -2,7 +2,7 @@ import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import type { MiddlewareInput } from "../http/middlewareList";
-import type { AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
+import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
@@ -369,6 +369,30 @@ export abstract class AgentController<
   }
 
   /**
+   * What every tool of this turn's run gets as `ctx.context` — the user, the
+   * tenant, functions the tools call back into. See `AgentContext`.
+   *
+   * The run is not given the request, so this is where the request's facts
+   * become the run's: read the user the middleware authenticated here, and a
+   * tool reads it from `ctx.context` instead of reaching for `req`. Runs after
+   * `authorizeRequest()`, once per turn, and before anything is asked of the
+   * model.
+   *
+   * The default is `{}`. An app that gives `AgentContext` a required field must
+   * override this: the type of the default cannot see the app's declaration,
+   * so forgetting is a tool that finds the field missing, not a compile error.
+   *
+   * Values from `body` are the client's claim, exactly as in `instructions()`;
+   * putting one here does not make it any more trustworthy, only easier to
+   * mistake for something the server decided.
+   */
+  context(req: HttpRequest<any, any>, extra: { body: Body }): AgentContext | Promise<AgentContext> {
+    void req;
+    void extra;
+    return {} as AgentContext;
+  }
+
+  /**
    * Refuse a turn that arrives without a `threadId`, with a 400
    * `thread_required`, before anything runs.
    *
@@ -495,6 +519,7 @@ export abstract class AgentController<
 
       const extraBody = appBody<Body>(body);
       const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
+      const context = await this.context(req, { body: extraBody });
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -514,9 +539,12 @@ export abstract class AgentController<
       const run = this.agent.stream({
         messages,
         turn,
-        req,
         threadId,
         instructions,
+        // Built from this request once, here, and the only thing the run knows
+        // about who asked. The run has no request of its own — see
+        // `AgentContext` — so a tool that needs the user reads it from this.
+        context,
         // Resolved once, above, and handed to every tool of the run as
         // `ctx.attachments`. It is derived from the request — the user the
         // middleware authenticated, or the thread — and never from anything the
@@ -526,9 +554,9 @@ export abstract class AgentController<
         // `attachmentScope()`.
         attachments,
         // The same object `instructions()` was handed, so the two cannot
-        // disagree about what the client sent — and carried on the run rather
-        // than read from `ctx.req`, because a run outlives the request that
-        // started it. By the time a tool executes, the body is long gone.
+        // disagree about what the client sent — and carried on the run
+        // because a run outlives the request that started it. By the time a
+        // tool executes, the body is long gone.
         // Cast because `Body` is constrained to `object` so an `interface` can be
         // used, and an interface has no index signature to satisfy
         // `Record<string, unknown>`. The value is a parsed JSON object either
