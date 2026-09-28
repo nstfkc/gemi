@@ -127,7 +127,25 @@ describe("onToolResult", () => {
 
 type OnToolProgress = NonNullable<UseChatParams<"/on-tool-result">["onToolProgress"]>;
 
+type Progress = Parameters<OnToolProgress>[0];
+
 describe("onToolProgress", () => {
+  test("is discriminated by tool name, like a result", () => {
+    expectTypeOf<Progress["name"]>().toEqualTypeOf<"editComponent" | "renamePage" | "buildPage">();
+  });
+
+  test("carries the call id, so several calls of one tool stay apart", () => {
+    expectTypeOf<Progress["toolCallId"]>().toEqualTypeOf<string>();
+  });
+
+  test("refuses a tool the agent does not have", () => {
+    const handler: OnToolProgress = (progress) => {
+      // @ts-expect-error `deletePage` is not one of this agent's tools.
+      if (progress.name === "deletePage") return;
+    };
+    void handler;
+  });
+
   test("narrows the yielded value on the tool name", () => {
     const handler: OnToolProgress = (progress) => {
       if (progress.name === "buildPage") {

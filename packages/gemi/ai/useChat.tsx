@@ -9,6 +9,8 @@ import type {
   ClientToolResult,
   ClientTurn,
   PendingToolCall,
+  ToolCallPart,
+  ToolProgress,
   ToolResultPart,
   ToolShapes,
 } from "./types";
@@ -28,14 +30,6 @@ type ToolsOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { tools: infe
     ? T
     : ToolShapes
   : ToolShapes;
-
-/**
- * One value a tool yielded, discriminated by the tool's name so that checking
- * `name` narrows `data` to that tool's own progress type.
- */
-export type ToolProgress<T extends ToolShapes = ToolShapes> = {
-  [K in keyof T]: { toolCallId: string; name: K; data: T[K]["progress"] };
-}[keyof T];
 
 type OutputOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { output: infer O }
   ? O
@@ -489,6 +483,31 @@ function forWire(messages: AgentMessage[]): AgentMessage[] {
 }
 
 /**
+ * The tool call an id names, searched from the newest message back.
+ *
+ * A `tool-progress` frame names a call and no message, so the message has to be
+ * found rather than told — the same scan `withToolCall` does in the reducer,
+ * and newest-first for the same reason it gives: the call being worked on is
+ * the one that just arrived, and this runs twice per yield on a log a tool
+ * decides the length of.
+ *
+ * A second copy rather than an export of the reducer's, deliberately.
+ * `ai/client/index.ts` documents `reducer.ts` as `useChat`'s internals, and the
+ * two want different things anyway: that one takes an updater and rebuilds the
+ * state around it, while this is a read — it answers which tool yielded, off a
+ * state the reducer has already finished with.
+ */
+function findToolCall(messages: AgentMessage[], toolCallId: string): ToolCallPart | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const part = messages[i]!.content.find(
+      (candidate) => candidate.type === "tool-call" && candidate.toolCallId === toolCallId,
+    );
+    if (part) return part as ToolCallPart;
+  }
+  return undefined;
+}
+
+/**
  * The path is the agent's route, exactly as mounted:
  *
  *   const { messages, sendMessage } = useChat("/chat")
@@ -498,15 +517,6 @@ function forWire(messages: AgentMessage[]): AgentMessage[] {
  * carried through `Agent`, `AgentRoute` and `RPC` instead of being erased at the
  * first boundary.
  */
-function findToolCall(messages: AgentMessage[], toolCallId: string) {
-  for (const message of messages) {
-    for (const part of message.content) {
-      if (part.type === "tool-call" && part.toolCallId === toolCallId) return part;
-    }
-  }
-  return undefined;
-}
-
 export function useChat<P extends keyof AgentRoutes>(
   path: P,
   params: UseChatParams<P> = {},
@@ -710,9 +720,21 @@ export function useChat<P extends keyof AgentRoutes>(
             handlers.current.onToolResult?.(event.part as ToolResultPart<ToolsOf<P>>);
           }
         } else if (event.type === "tool-progress") {
-          // A new `seq` makes a new state even when the reducer dropped the
-          // value as a replay, so what proves the value is new is that the
-          // call's progress grew.
+          // FIRES ON THE APPEND, NOT ON THE FRAME.
+          //
+          // `next !== previous` above is not the guard here, because it cannot
+          // be: `applyFrame` stamps the new `seq` onto a fresh object whatever
+          // the reducer decided, so a value the reducer *refused* still arrives
+          // as a changed state. It refuses one for a call inside a finished
+          // message — a run replayed from the top onto a transcript that
+          // already holds it — which is exactly the redelivery this hook must
+          // not announce, and the only evidence that it happened is that the
+          // log did not grow.
+          //
+          // The same comparison covers the other frame `withToolCall` drops on
+          // purpose: one naming a tool call this transcript does not have, the
+          // mid-run `/attach` case. There is no part to read a tool name off,
+          // so there is nothing to announce either.
           const before = findToolCall(previous.messages, event.toolCallId);
           const after = findToolCall(next.messages, event.toolCallId);
           if (after && (after.progress?.length ?? 0) > (before?.progress?.length ?? 0)) {

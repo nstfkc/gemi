@@ -1801,7 +1801,7 @@ describe("onToolProgress", () => {
     // message alone, so the call's progress does not grow.
     fetchMock.mockResolvedValueOnce(streamed(BUILD));
     const onToolProgress = vi.fn();
-    mount({
+    const { box } = mount({
       threadId: "th_9",
       onToolProgress,
       initialMessages: [
@@ -1829,6 +1829,60 @@ describe("onToolProgress", () => {
     });
 
     expect(onToolProgress).not.toHaveBeenCalled();
+    // And the log was not doubled either, which is the reducer's half of the
+    // same guard — a test that only checked the callback would pass against a
+    // transcript showing every section twice.
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.type === "tool-call" && part.toolCallId === "tc_p");
+    expect(call.progress).toEqual([{ section: "Hero" }, { section: "Footer" }]);
+  });
+
+  test("delivers the tail of a run replayed against a cursor, and only the tail", async () => {
+    // The other redelivery: this client attached mid-run, saw `Hero`, and the
+    // server replays from the top. A different guard from the two above and it
+    // fails differently — here the frames never reach the reducer at all,
+    // because `applyFrame` returns the same state object for a `seq` at or
+    // below the cursor and the loop skips the frame whole.
+    //
+    // The message is deliberately left open, so the finished-message check is
+    // not also covering this. With the cursor ignored, `Hero` appends a second
+    // time and fires a second time — both halves of the bug at once, a doubled
+    // log and a doubled refetch.
+    fetchMock.mockResolvedValueOnce(streamed(BUILD));
+    const onToolProgress = vi.fn();
+    const { box } = mount({
+      threadId: "th_9",
+      cursor: { runId: "run_6", seq: 3 },
+      onToolProgress,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "" },
+        {
+          id: "m6",
+          role: "assistant",
+          createdAt: "",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc_p",
+              name: "buildPage",
+              input: {},
+              progress: [{ section: "Hero" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onToolProgress.mock.calls.map(([p]: any[]) => p.data.section)).toEqual(["Footer"]);
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.type === "tool-call" && part.toolCallId === "tc_p");
+    expect(call.progress).toEqual([{ section: "Hero" }, { section: "Footer" }]);
   });
 
   test("does not fire again for a redelivered frame", async () => {
@@ -1844,6 +1898,102 @@ describe("onToolProgress", () => {
       "Hero",
       "Footer",
     ]);
+  });
+
+  test("a sub-agent's yields do not fire it", async () => {
+    // They belong to the parent tool call that started the sub-run, not to this
+    // conversation — the same line `onToolResult` draws. They arrive wrapped in
+    // `nested-event`, so the hook never sees a `tool-progress` for them.
+    const nested = (event: unknown) => ({
+      type: "nested-event",
+      toolCallId: "tc_n",
+      runId: "sub_1",
+      agent: "researcher",
+      event,
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_7", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m7", role: "assistant" } },
+        {
+          seq: 2,
+          event: {
+            type: "tool-call",
+            messageId: "m7",
+            part: { type: "tool-call", toolCallId: "tc_n", name: "research", input: {} },
+          },
+        },
+        { seq: 3, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+        {
+          seq: 4,
+          event: nested({
+            type: "tool-call",
+            messageId: "n1",
+            part: { type: "tool-call", toolCallId: "tc_inner", name: "fetchDocs", input: {} },
+          }),
+        },
+        {
+          seq: 5,
+          event: nested({ type: "tool-progress", toolCallId: "tc_inner", data: { page: 1 } }),
+        },
+        { seq: 6, event: { type: "message-end", messageId: "m7", finishReason: "stop" } },
+        { seq: 7, event: { type: "run-end", runId: "run_7", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolProgress = vi.fn();
+    const { box } = mount({ attach: false, onToolProgress });
+
+    await act(async () => {
+      await box.api.sendMessage("research it");
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+    // The yield did land, in the sub-run's own transcript. Without this the
+    // test would also pass against a client that dropped the nested frames
+    // entirely, which is the wrong reason to be silent.
+    const outer: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.toolCallId === "tc_n");
+    expect(outer.nested[0].messages[0].content[0].progress).toEqual([{ page: 1 }]);
+  });
+
+  test("a yield for a tool call this client never saw announces nothing", async () => {
+    // The mid-run `/attach` case. The reducer drops the frame rather than
+    // inventing a tool call it has no name or input for, so there is no tool
+    // name to report and nothing to report it about.
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_8", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m8", role: "assistant" } },
+        { seq: 2, event: { type: "tool-progress", toolCallId: "tc_gone", data: { x: 1 } } },
+        { seq: 3, event: { type: "message-end", messageId: "m8", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_8", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const onToolProgress = vi.fn();
+    const { box } = mount({ attach: false, onToolProgress });
+
+    await act(async () => {
+      await box.api.sendMessage("go");
+    });
+
+    expect(onToolProgress).not.toHaveBeenCalled();
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("is optional, and its absence changes nothing", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(BUILD));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("build the page");
+    });
+
+    expect(box.api.status).toBe("idle");
+    const call: any = box.api.messages
+      .flatMap((message: any) => message.content)
+      .find((part: any) => part.type === "tool-call");
+    expect(call.progress).toEqual([{ section: "Hero" }, { section: "Footer" }]);
   });
 });
 
