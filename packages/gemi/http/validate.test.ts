@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { __validateForTests as validate } from "./HttpRequest";
+import { validate } from "./validate";
 
 /**
  * The rule table, over every shape a JSON body can hand it.
