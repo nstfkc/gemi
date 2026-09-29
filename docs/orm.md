@@ -2027,7 +2027,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 
 | Error | Raised when |
 | --- | --- |
-| `RecordNotFoundError` | An `…OrThrow` operation matched nothing. |
+| `RecordNotFoundError` | An `…OrThrow` operation matched nothing — also `update` and `delete` on a row that is not there. Uncaught in an api route, it answers 404 `{ "error": { "message": "Not found" } }` with `Cache-Control: no-store`; the model and the operation stay out of the response and go to the log. It is not reported to `onRequestFail`, because a route keyed on an id from the url answers it for every stale link. |
 | `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. It is gemi's own error and carries no Prisma `code` — see below if a `"P2002"` check is what you have today. |
 | `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. Uncaught in an api route, it answers 403 `{ "error": { "message": "Forbidden" } }` for both reasons; the message, written for you rather than the client, goes to `onRequestFail` and the log. |
 | `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
