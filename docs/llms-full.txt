@@ -7527,9 +7527,9 @@ The twenty-five methods, all overridable:
 | `createUser(args)` | Create a user row. |
 | `updateUserPassword(args)` | Set a new (hashed) password by user id. |
 | `findUserByEmailAddress(email, verifyEmail)` | Look up a user; when `verifyEmail` is true, only return verified users. |
-| `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). |
-| `updateSession(args)` | Push a session's `expiresAt` forward. |
-| `findSession(args)` | Load a session (+ its user) by token. |
+| `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). A sign-in reads the new session back through `findSession`. |
+| `updateSession(args)` | Push a session's `expiresAt` forward. Only the `expiresAt` it returns is used. |
+| `findSession(args)` | Load a session (+ its user) by token. The one place a session's shape comes from — see [Shaping the session](#shaping-the-session). |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
 | `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |
 | `findUserByVerificationToken(token)` / `verifyUser(email)` | Email-verification lookup / marking verified. |
@@ -7571,6 +7571,34 @@ export class SoftDeleteUserProvider extends UserProvider {
 `this.models` holds the resolved model classes if an override needs one the base does not
 reach for. `protected run(fn)` is the `asSystem` wrapper every built-in method goes through —
 call it in an override that queries directly, or it will run under policies.
+
+#### Shaping the session
+
+Every session `AuthManager` hands out comes from `findSession`: the one `getSession` serves on
+each request, the one it serves after sliding the expiry forward (only the new `expiresAt` is
+taken from `updateSession`), and the one a sign-in returns (read back after `createSessionV2`
+writes it). So a provider that orders `user.accounts`, filters them, or adds a field does it in
+`findSession` alone, and can build on the base query rather than repeat it:
+
+```typescript
+import { UserProvider } from "gemi/kernel";
+import type { FindSessionArgs, SessionWithUser } from "gemi/kernel";
+
+export class OrderedAccountsUserProvider extends UserProvider {
+  async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
+    const session = await super.findSession(args);
+    if (session?.user) {
+      session.user.accounts = [...session.user.accounts].sort(
+        (a, b) => a.organization.name.localeCompare(b.organization.name),
+      );
+    }
+    return session;
+  }
+}
+```
+
+Up to 0.69, a renewed session carried `updateSession`'s row and a sign-in returned
+`createSessionV2`'s, so this also needed both of those overridden to match.
 
 Because there is no config field, bind the subclass by rebinding `AuthManager` in the
 container from a service provider — it takes the provider as its second constructor

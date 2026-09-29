@@ -15,6 +15,7 @@ export type {
   CreateSessionArgs,
   CreateSocialAccountArgs,
   CreateUserArgs,
+  FindSessionArgs,
   Invitation,
   Organization,
   PasswordResetToken,
