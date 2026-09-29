@@ -164,6 +164,17 @@ export class AuthManager {
     return req?.cookies.get("access_token") === token ? req : null;
   }
 
+  /**
+   * Pushes `session`'s idle expiry forward when half its window has gone.
+   *
+   * **The session returned is the one `findSession` built**, with only the new
+   * `expiresAt` taken from the write. `findSession` is where a provider shapes
+   * a session — orders `user.accounts`, drops a soft-deleted membership,
+   * selects an extra field — and returning `updateSession`'s row instead
+   * served a differently shaped session for the same token once it was old
+   * enough to slide (#619). Merging the expiry also keeps the renewal to the
+   * one write it already was; nothing is re-read.
+   */
   private async slideSession(session: SessionWithUser, now: number) {
     const window = this.config.sessionExpiresInHours * 3_600_000;
     if (new Date(session.expiresAt).getTime() - now >= window / 2) {
@@ -186,7 +197,10 @@ export class AuthManager {
           this.accessTokenCookieOptions(req, expiresAt),
         );
     }
-    return updated ?? session;
+    if (!updated) {
+      return session;
+    }
+    return { ...session, expiresAt: updated.expiresAt ?? expiresAt };
   }
 
   private freshLifetime(now: number) {
@@ -251,6 +265,16 @@ export class AuthManager {
    * checking whose it was, so a user who took over a freed email address was
    * handed its previous owner's session. Every sign-in now mints its own token
    * and its own row, bound to the id of the user who just authenticated.
+   *
+   * **The session returned is read back through `findSession`**, so a sign-in
+   * hands out the same shape every later request gets from `getSession`. The
+   * row `createSessionV2` returns has the base select and none of a provider's
+   * `findSession` shaping, and every sign-in path returns this to the client or
+   * passes its `user` to `extendSession` (#619). One extra lookup by its unique
+   * token, on sign-in only. Should the read come back empty — a `findSession`
+   * that caught a database error, or one that filters more narrowly than the
+   * row just written — the created row is returned rather than failing a
+   * sign-in that has already succeeded.
    */
   async createOrUpdateSession(user: { email: string; id?: number }) {
     const req = new HttpRequest();
@@ -262,15 +286,22 @@ export class AuthManager {
       throw new AuthenticationError();
     }
 
-    return await this.userProvider.createSessionV2({
-      token: mintSessionToken(userId),
+    const userAgent =
+      process.env.NODE_ENV === "development"
+        ? "local"
+        : req.headers.get("User-Agent");
+    const token = mintSessionToken(userId);
+    const created = await this.userProvider.createSessionV2({
+      token,
       userId,
-      userAgent:
-        process.env.NODE_ENV === "development"
-          ? "local"
-          : req.headers.get("User-Agent"),
+      userAgent,
       ...this.freshLifetime(Date.now()),
     });
+    const found = await this.userProvider.findSession({
+      token,
+      userAgent: userAgent ?? "",
+    });
+    return found?.user ? found : created;
   }
 
   async createMagicLinkToken(email: string) {

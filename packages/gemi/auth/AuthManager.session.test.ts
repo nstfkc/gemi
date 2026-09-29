@@ -289,3 +289,110 @@ describe("the other tokens", () => {
     }
   });
 });
+
+/**
+ * `findSession` is where a provider shapes a session, and every session gemi
+ * hands out has to carry that shape — not only the one `getSession` serves
+ * before a renewal. #619: renewal served `updateSession`'s row and sign-in
+ * served `createSessionV2`'s, both in storage order, so a client opening
+ * `accounts[0]` landed somewhere else depending on how old its token was.
+ */
+describe("a provider that shapes the session in findSession", () => {
+  const STORED = [1, 2, 3];
+  const SHAPED = [3, 2, 1];
+
+  class ShapingProvider extends MemoryProvider {
+    users = [
+      { id: 1, email: "a@example.com", accounts: STORED.map((id) => ({ id })) },
+      { id: 2, email: "b@example.com", accounts: [] as { id: number }[] },
+    ];
+    async findSession(args: { token: string }) {
+      const session = await super.findSession(args);
+      if (session?.user) {
+        session.user = { ...session.user, accounts: [...session.user.accounts].reverse() };
+      }
+      return session;
+    }
+  }
+
+  const accountIds = (session: any) => session.user.accounts.map((a: { id: number }) => a.id);
+  let extended: unknown[];
+
+  beforeEach(() => {
+    provider = new ShapingProvider();
+    extended = [];
+    auth = new AuthManager(
+      {
+        extendSession: async (user: any) => {
+          extended.push(accountIds({ user }));
+          return null;
+        },
+      },
+      provider as never,
+    );
+  });
+
+  async function seed(expiresInHours: number) {
+    const token = `v2.${"a".repeat(64)}`;
+    provider.rows.set(token, {
+      token,
+      userId: 1,
+      userAgent: UA,
+      expiresAt: new Date(Date.now() + expiresInHours * HOUR),
+      absoluteExpiresAt: new Date(Date.now() + 90 * 24 * HOUR),
+    });
+    return token;
+  }
+
+  test("a fresh session", async () => {
+    const token = await seed(auth.config.sessionExpiresInHours);
+    const { result } = await inRequest({ access_token: token }, () => auth.getSession(token, UA));
+    expect(accountIds(result)).toEqual(SHAPED);
+    expect(extended).toEqual([SHAPED]);
+  });
+
+  test("a session renewed on this request, with the new expiry", async () => {
+    const token = await seed(1);
+    const updateSession = vi.spyOn(provider, "updateSession");
+
+    const { result } = await inRequest({ access_token: token }, () => auth.getSession(token, UA));
+
+    expect(updateSession).toHaveBeenCalledOnce();
+    expect(accountIds(result)).toEqual(SHAPED);
+    expect(extended).toEqual([SHAPED]);
+    expect(result!.expiresAt.getTime()).toBe(provider.rows.get(token)!.expiresAt.getTime());
+    expect(result!.expiresAt.getTime()).toBeGreaterThan(Date.now() + HOUR);
+  });
+
+  test("createOrUpdateSession", async () => {
+    const { result } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    expect(accountIds(result)).toEqual(SHAPED);
+    expect(provider.rows.has(result.token)).toBe(true);
+  });
+
+  test("createOrUpdateSessionV2, and what it hands extendSession", async () => {
+    const { result } = await inRequest({}, () =>
+      auth.createOrUpdateSessionV2({ email: "a@example.com" }),
+    );
+    expect(accountIds(result)).toEqual(SHAPED);
+    expect(extended).toEqual([SHAPED]);
+  });
+
+  test("authenticate, and what it hands extendSession", async () => {
+    const { result, cookies } = await inRequest({}, () => auth.authenticate("a@example.com"));
+    expect(accountIds(result)).toEqual(SHAPED);
+    expect(extended).toEqual([SHAPED]);
+    expect(accessTokenCookie(cookies)).toBe(result!.token);
+  });
+
+  test("a sign-in whose read-back finds nothing still returns the session it created", async () => {
+    vi.spyOn(provider, "findSession").mockResolvedValue(null);
+    const { result } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    expect(result.token).toMatch(/^v2\./);
+    expect(accountIds(result)).toEqual(STORED);
+  });
+});

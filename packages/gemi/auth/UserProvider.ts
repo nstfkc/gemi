@@ -269,6 +269,11 @@ export class UserProvider {
     );
   }
 
+  /**
+   * `AuthManager` reads a new session back through `findSession` before
+   * handing it out, so an override that shapes the session there need not
+   * repeat the shaping here.
+   */
   async createSessionV2(args: CreateSessionArgs): Promise<SessionWithUser> {
     return await this.run(() =>
       this.models.Session.create({
@@ -278,6 +283,14 @@ export class UserProvider {
     );
   }
 
+  /**
+   * **The shape of every session `AuthManager` hands out.** It serves this
+   * result on each request, keeps it when `updateSession` slides the expiry
+   * (taking only the new `expiresAt`), and reads a sign-in's new row back
+   * through it. So an override here — ordering `user.accounts`, filtering
+   * them, adding a field — is the only one a provider needs to shape a
+   * session; it can call `super.findSession` and post-process the result.
+   */
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     if (!args.token) return null;
 
@@ -308,6 +321,11 @@ export class UserProvider {
     }
   }
 
+  /**
+   * `AuthManager` takes only `expiresAt` from the result and keeps the session
+   * `findSession` returned, so the user selected here is not what a request
+   * sees.
+   */
   async updateSession(
     args: UpdateSessionArgs,
   ): Promise<SessionWithUser | null> {
