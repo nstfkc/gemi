@@ -2,10 +2,11 @@ import { app } from "../../foundation/app";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { HttpRequest } from "../../http/HttpRequest";
 import { type CarriedContext, RequestContext } from "../../http/requestContext";
-import { isPolicyDeniedError } from "../../orm/errors";
+import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { breakResponse, mergeContextIntoResponse } from "./ApiRouteDispatcher";
 import { isApiPath } from "./apiPath";
+import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { viewBreakResponse, viewDataBreakResponse } from "./ViewRouteDispatcher";
 
@@ -108,6 +109,14 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
             ? viewDataBreakResponse(err.payload.viewData ?? err.payload.api)
             : viewBreakResponse(err.payload.view);
         return { refusal: apply(refusal), apply, carried: null };
+      }
+      // A global middleware that resolves the request's tenant or workspace by
+      // an id from the url asks the same question a route handler does, and a
+      // miss is the same 404. Only for the two json-shaped requests here: a
+      // full page load should render the application's `404` view rather than
+      // a bare body, and that is #614's to do.
+      if (isRecordNotFoundError(err) && (isApi || isViewData)) {
+        return { refusal: apply(notFoundResponse()), apply, carried: null };
       }
       if (isPolicyDeniedError(err)) {
         console.error(err);

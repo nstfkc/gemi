@@ -16,8 +16,9 @@ import { setRequestDomain } from "../../http/requestDomain";
 import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
-import { isPolicyDeniedError } from "../../orm/errors";
+import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
 import { apiPath } from "./apiPath";
+import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse } from "./policyDenied";
 
 class DebugRouter extends ApiRouter {
@@ -268,6 +269,13 @@ export class ApiRouteDispatcher {
         // after the middleware rejected the request.
         return breakResponse(err.payload.api);
       } else {
+        // Before `onRequestFail`, for the reason a `RequestBreakerError` is:
+        // the record not existing is the answer to the request, not a failure
+        // of it. A middleware that loads the record the route is about — the
+        // membership row, the tenant — asks the same question the handler does.
+        if (isRecordNotFoundError(err)) {
+          return notFoundResponse();
+        }
         this.onRequestFail(httpRequest, err);
         console.error(err);
         // A middleware can load a policied model, a membership check say, and
@@ -292,6 +300,13 @@ export class ApiRouteDispatcher {
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
         return breakResponse(err.payload.api);
+      }
+      // Before `onRequestFail` and the log, unlike a policy denial below. A
+      // route keyed on an id from the url answers this for every stale link
+      // and every crawler, so reporting it would drown the failures that are
+      // the server's. It is a 404 in the access log like any other.
+      if (isRecordNotFoundError(err)) {
+        return notFoundResponse();
       }
       this.onRequestFail(ctx.req, err);
       console.error(err);

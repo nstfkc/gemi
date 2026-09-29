@@ -185,6 +185,32 @@ export class RecordNotFoundError extends Error {
 }
 
 /**
+ * The dispatchers' test for a lookup that matched nothing and should be
+ * answered with a 404.
+ *
+ * Matches the name as well as the class for the reason `isPolicyDeniedError`
+ * and `isUniqueConstraintError` do: `instanceof` compares against *this*
+ * module instance's class object, so a second copy of `gemi/orm` — two
+ * versions in one dependency tree, a linked package beside a bundled one —
+ * throws an error this would not recognise, and the request would go back to
+ * being a 500 carrying the model's name in its body.
+ *
+ * The name is the identity here, so an application error that calls itself
+ * `RecordNotFoundError` is deliberately matched too. That is the same bargain
+ * the other two predicates make, and the failure it trades against — a 500
+ * where a 404 was meant — is the worse one.
+ */
+export function isRecordNotFoundError(error: unknown): error is RecordNotFoundError {
+  if (error instanceof RecordNotFoundError) return true;
+
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "RecordNotFoundError"
+  );
+}
+
+/**
  * Thrown when a write violates a unique constraint.
  *
  * DECISION — gemi defines its own error rather than mirroring Prisma's codes.

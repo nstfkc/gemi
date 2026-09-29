@@ -5,6 +5,7 @@ import {
   RecordNotFoundError,
   UniqueConstraintError,
   isPolicyDeniedError,
+  isRecordNotFoundError,
   isUniqueConstraintError,
 } from "./errors";
 
@@ -127,5 +128,41 @@ describe("isPolicyDeniedError", () => {
     expect(isPolicyDeniedError(new UniqueConstraintError("Order", "create", ["id"]))).toBe(false);
     expect(isPolicyDeniedError("PolicyDeniedError")).toBe(false);
     expect(isPolicyDeniedError(null)).toBe(false);
+  });
+});
+
+describe("isRecordNotFoundError", () => {
+  test("matches the class, and a second copy's error by its name", () => {
+    expect(isRecordNotFoundError(new RecordNotFoundError("Page", "findUniqueOrThrow"))).toBe(true);
+
+    // The case the name test exists for: a duplicate `gemi/orm` in the tree
+    // throws an error that is not `instanceof` this module's class. Failing
+    // here sends a missing record back to being a 500.
+    const duplicate = Object.assign(new Error("No Page found (Page.findUniqueOrThrow)."), {
+      name: "RecordNotFoundError",
+    });
+    expect(isRecordNotFoundError(duplicate)).toBe(true);
+  });
+
+  test("matches every operation that raises it", () => {
+    for (const operation of ["findFirstOrThrow", "findUniqueOrThrow", "update", "delete"]) {
+      expect(isRecordNotFoundError(new RecordNotFoundError("Page", operation))).toBe(true);
+    }
+  });
+
+  test("does not match anything else", () => {
+    // The message alone must not be enough, or an app error quoting a failed
+    // lookup would start answering 404.
+    expect(isRecordNotFoundError(new Error("No Page found (Page.findUniqueOrThrow)."))).toBe(false);
+    expect(isRecordNotFoundError(new PolicyDeniedError("Page", "read"))).toBe(false);
+    expect(isRecordNotFoundError(new UniqueConstraintError("Page", "create", ["id"]))).toBe(false);
+    expect(isRecordNotFoundError("RecordNotFoundError")).toBe(false);
+    expect(isRecordNotFoundError(null)).toBe(false);
+    expect(isRecordNotFoundError(undefined)).toBe(false);
+  });
+
+  test("is exported from gemi/orm", async () => {
+    const orm = await import("./index");
+    expect(orm.isRecordNotFoundError).toBe(isRecordNotFoundError);
   });
 });

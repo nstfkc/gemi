@@ -109,6 +109,7 @@ export {
   InvalidArgumentError,
   UnsupportedByDesignError,
   UnsupportedQueryError,
+  isRecordNotFoundError,
   isUniqueConstraintError,
 } from "./errors";
 
