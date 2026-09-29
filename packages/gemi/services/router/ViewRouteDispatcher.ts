@@ -31,7 +31,7 @@ import { FeatureManager } from "../features/FeatureManager";
 import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
-import { isPolicyDeniedError } from "../../orm/errors";
+import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
 import { QueryError } from "../../client/QueryError";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
@@ -977,7 +977,21 @@ export class ViewRouteDispatcher {
       ensureSessionId();
 
       try {
-        await app(MiddlewareRegistry).runMiddleware(middlewares);
+        // A view middleware can resolve the record the route is about — the
+        // workspace named in the path, the membership it implies — and raise
+        // `RecordNotFoundError` doing it. That means here what it means in a
+        // loader, so it is caught rather than left to the break path below:
+        // the answer is not a refusal, it is this request becoming an
+        // unmatched one.
+        let recordMissing = false;
+        try {
+          await app(MiddlewareRegistry).runMiddleware(middlewares);
+        } catch (err) {
+          if (!isRecordNotFoundError(err)) {
+            throw err;
+          }
+          recordMissing = true;
+        }
 
         // After middleware, not at match time: `auth` is what puts the user on
         // the request context, and a route gated on a flag that targets signed-in
@@ -991,7 +1005,15 @@ export class ViewRouteDispatcher {
         // from one that was never defined — status, view and component tree
         // included. A `RequestBreakerError` here would instead return a bare
         // text body, which both looks broken and confirms the route exists.
-        if (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates))) {
+        //
+        // A missing record joins the gate here rather than getting a branch of
+        // its own, because the outcome is the same one and it is spelled in
+        // exactly these three assignments. Short-circuited: a request whose
+        // middleware already found nothing must not go on to evaluate flags.
+        if (
+          recordMissing ||
+          (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates)))
+        ) {
           currentPathName = null;
           handlers = [];
           // `routePath` too, and not only for tidiness: it is what selects this
@@ -1065,7 +1087,31 @@ export class ViewRouteDispatcher {
         // dropped), and both response shapes stream whatever is still in
         // flight — the document as interleaved payload scripts, the `.json`
         // navigation payload as NDJSON lines (#290).
-        const data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
+        // The loader's own lookup — `Page.findUniqueOrThrow(...)` guarding the
+        // route — lands here. Becoming an unmatched request is the whole
+        // answer: `currentPathName` being null is what makes the framework
+        // render the application's `404` view, under a 404 for a page load and
+        // under `is404` in a `.json` navigation's envelope. Same three
+        // assignments as the gate above; this one cannot be folded into it
+        // because a loader only runs after that decision is made.
+        //
+        // What it does NOT do is clear `ctx.serverQueries`. A loader that
+        // prefetched before it threw keeps those results in the payload — they
+        // ran as this user, under this request's policies, so it is waste
+        // rather than a leak, and the guard belongs at the top of the loader
+        // where the issue's example puts it.
+        let data: unknown[];
+        try {
+          data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
+        } catch (err) {
+          if (!isRecordNotFoundError(err)) {
+            throw err;
+          }
+          currentPathName = null;
+          handlers = [];
+          httpRequest.routePath = "";
+          data = [];
+        }
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
