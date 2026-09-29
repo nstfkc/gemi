@@ -8,6 +8,7 @@ import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { GEMI_EXTERNAL_SPECIFIERS } from "../internal/gemiExternals";
 import { createDevFetch, sendErrorToClient, ssrRunner } from "./devFetch";
+import { resolveHmrPort } from "./hmrPort";
 
 export { viteErrorPayload } from "./devFetch";
 
@@ -34,6 +35,10 @@ if (!globalThis.__gemiErrorHooked) {
 }
 
 export async function httpDev(app: App, instrumentation: Instrumentation) {
+  // Same override the prod server honors (`httpProd.ts`). Read here rather than
+  // inline at `Bun.serve` because the HMR port is derived from it.
+  const httpPort = Number(process.env.PORT) || 5173;
+
   // `bun --hot` re-runs this module on every server-code change, so keep a
   // single Vite server on `globalThis` instead of spawning a new one (and a new
   // HMR socket) on each reload.
@@ -47,6 +52,16 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     plugins: [gemiVite()],
     server: {
       middlewareMode: true,
+      // In middleware mode Vite stands up a second HTTP server for the HMR
+      // websocket, and defaults it to a fixed port — so two `gemi dev` processes
+      // fight over one socket and the loser silently hot-reloads on the winner's
+      // file changes. Name the port instead; see `hmrPort.ts` for how it is
+      // chosen. `ws` and not the older `hmr`: `server.hmr.{port,host,…}` is
+      // deprecated in Vite 8 and warns. An app overriding either one in
+      // `gemi.config.ts` still wins — plugin config (where `gemi.config.ts`'s
+      // `vite` block is applied) is merged over this inline config, and Vite's
+      // own `hmr`→`ws` compat shim forwards the deprecated spelling here.
+      ws: { port: resolveHmrPort(httpPort) },
       // Vite answers any host other than `localhost` and `*.localhost` with a
       // 403, which would block a `route.domains` root such as `lvh.me` and
       // every custom domain pointed here from `/etc/hosts`.
@@ -97,8 +112,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   process.env.APP_DIR = appDir;
 
   const server = Bun.serve({
-    // Same override the prod server honors (`httpProd.ts`).
-    port: process.env.PORT || 5173,
+    port: httpPort,
     fetch: createDevFetch(app, instrumentation, vite),
   });
 
