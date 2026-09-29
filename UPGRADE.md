@@ -1,3 +1,112 @@
+# Upgrading from 0.68 to 0.69
+
+Two behaviour changes, both of them statuses that used to be wrong. Nothing to
+rewrite unless you were relying on one of them.
+
+## A missing record answers 404, not 500 — behaviour change
+
+`findUniqueOrThrow`, `findFirstOrThrow`, and `update`/`delete` on a row that is
+not there raise the ORM's `RecordNotFoundError`. It is a plain `Error`, and the
+HTTP layer gave a non-500 status only to a `RequestBreakerError` — so the most
+ordinary route there is answered **500** for an id that simply does not exist:
+
+```ts
+// GET /api/pages/:pageId
+"/pages/:pageId": this.get((req) =>
+  Page.findUniqueOrThrow({ where: { publicId: req.params.pageId } })),
+```
+
+The 500 carried `No Page found (Page.findUniqueOrThrow).` as its body, which
+also told anyone who could guess a url what the model was called.
+
+It is now a 404 with the body `FileNotFoundError` and an unmatched api route
+already answer — `{ "error": { "message": "Not found" } }` — under
+`Cache-Control: no-store`, because creating the record changes the answer at the
+same url. The model name and the operation stay out of the response and go to
+the log.
+
+**It is no longer reported to `onRequestFail`.** A route keyed on an id answers
+this for every stale link and every crawler, and reporting them buries the
+failures that really are the server's. It is still a 404 in the access log. If
+you were counting on the report to catch an `update` against a wrong id, that
+one is now quiet — catch it at the call site instead:
+
+```ts
+try {
+  await Page.update({ where: { id }, data })
+} catch (error) {
+  if (!isRecordNotFoundError(error)) throw error
+  // your own handling
+}
+```
+
+`isRecordNotFoundError` is exported from `gemi/orm`. Use it rather than
+`instanceof`: it also matches across a duplicate copy of `gemi/orm`, which is
+the same reason `isUniqueConstraintError` exists.
+
+**What to check:** a client that branched on 500 for a missing record, and any
+alerting keyed on `onRequestFail` for these.
+
+## A view whose record is missing renders your `404` view — behaviour change
+
+`ViewRouteDispatcher` set `is404` only when no route matched the *path*, so
+`/pages/:pageId` with an unknown id rendered the page anyway: the prefetch
+failed during SSR, the server fell back to client rendering, the browser retried
+the same failing query, and the status told crawlers the page exists.
+
+A `RecordNotFoundError` from a view middleware or a loader now makes the request
+an unmatched one, which is exactly what a gated route (`.feature()`) already
+does — so you get the application's `404` view, a 404 status on a page load, and
+the `404` view on a client navigation, indistinguishable from a path that was
+never routed.
+
+Guard the route at the top of the loader:
+
+```ts
+"/pages/:pageId": this.view("PageBuilder", async (req) => {
+  await Page.findUniqueOrThrow({
+    where: { publicId: req.params.pageId },
+    select: { id: true },
+  });
+  Query.prefetch("/pages/:pageId", { params: { pageId: req.params.pageId } });
+}),
+```
+
+Two details worth knowing:
+
+- **A `.json` client navigation answers 200 carrying `is404`, not a 404 status.**
+  That is not an oversight: the client's payload loader treats any non-ok
+  response as "nothing usable came back" and leaves the current route on screen,
+  so a 404 status there would strand the browser on the previous page. The 404
+  travels in the envelope, the same way an unmatched path and a gated route
+  already reach the client router.
+- **A prefetch that 404s does not make the view a 404.** A prefetch for a
+  secondary panel should not hide the whole page; the explicit check in the
+  handler is what decides.
+
+## Two dev servers can run side by side
+
+`gemi dev` used to leave Vite's HMR websocket on its default port, so every dev
+server bound 24678. `PORT` moved the HTTP server and nothing else, and a second
+one logged `WebSocket server error: Port undefined is already in use` and then
+hot-reloaded on the *other* checkout's file changes.
+
+gemi now picks the port, derived from `PORT` so two servers differ before either
+binds: `5173` still gets `24678`, and a single dev server on the default port is
+unchanged.
+
+**One thing to check:** a dev server on a *non-default* `PORT` now gets a
+non-default HMR port — `PORT=3000` derives 22505. If a container mapping, proxy
+or firewall rule pins 24678 for such a setup, set it explicitly:
+
+```ts
+// gemi.config.ts
+vite: { server: { ws: { port: 24678 } } }
+```
+
+`server.ws`, not `server.hmr` — the latter's port/host/path options are
+deprecated in Vite 8 and warn on every boot.
+
 # Upgrading from 0.67 to 0.68
 
 One breaking change and one addition. The breaking one is the first section
