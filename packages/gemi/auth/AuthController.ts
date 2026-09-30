@@ -407,21 +407,16 @@ export class AuthController extends Controller {
     const token =
       req.cookies.get("access_token") ?? req.headers.get("access_token");
 
-    const { userProvider, config } = app(AuthManager);
+    const auth = app(AuthManager);
+    const { config } = auth;
 
     // Looked up, rather than resolved through `Auth.user()`. Two reasons: it
     // reads the cookie alone, and it goes through `getSession`, which slides a
     // session past half its window and writes the cookie again — a second
     // `Set-Cookie` for `access_token` racing the one below that clears it,
     // since a request's cookies are a set of serialized strings, not a map.
-    const session = token
-      ? await userProvider.findSession({
-          token,
-          userAgent: req.headers.get("User-Agent"),
-        })
-      : null;
-
-    await userProvider.deleteSession({ token });
+    // `revokeSession` also ends the session a pre-0.64 token was converted to.
+    const session = await auth.revokeSession(token, req.headers.get("User-Agent"));
 
     req
       .ctx()

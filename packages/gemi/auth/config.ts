@@ -63,6 +63,8 @@ export interface AuthConfig {
    * cookie on this response — whether the old one arrived as the cookie or as
    * the header. The old token keeps resolving to the new session for 10 to 20
    * minutes, for requests already in flight with it, and then grants nothing.
+   * Signing out with the old token in that time ends the converted session
+   * too, and a sign-out and a conversion of one token never interleave.
    *
    * The row's expiry is not checked for you. Before 0.64 nothing enforced or
    * extended `expiresAt`, so a row in daily use can carry one long past; decide

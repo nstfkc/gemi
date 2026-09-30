@@ -7823,6 +7823,15 @@ export default defineAuthConfig({
   It keeps resolving to the converted session for 10 to 20 minutes, for requests that were
   already in flight with it or a client that lost the response carrying the new cookie,
   and then grants nothing.
+- **Signing out with the old token ends the converted session.** For as long as the old
+  token resolves to the converted session, signing out with it — a second tab, a client that
+  never picked up the new cookie — deletes that session too. Once it no longer resolves to
+  it, it no longer revokes it either: only the new token can then.
+- **A sign-out and a conversion never interleave.** Both run in one transaction under a lock
+  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, a
+  queue in the process on SQLite), and a conversion writes the new session only if it is the
+  one that deleted the old row. A sign-out that lands while a request is converting the same
+  token either ends the session that request wrote or leaves it nothing to write.
 - **Concurrent requests share one session.** Requests converting the same token at once all
   land in the same new session, and all of them send its cookie. That is why a converted
   token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
@@ -7837,7 +7846,9 @@ export default defineAuthConfig({
   lookup, exactly as before.
 
 Signing out deletes the row for the token the request carried, whether it arrived as the
-cookie or the `access_token` header, and clears the cookie. It answers `{}` even when there
+cookie or the `access_token` header, and clears the cookie — and, with `migrateLegacySession`
+set, the session an old token was converted to (above). It goes through
+`AuthManager.revokeSession(token, userAgent)`. It answers `{}` even when there
 was no session to revoke, so a client can always discard a token it no longer wants.
 
 ## User provider
@@ -7906,7 +7917,7 @@ It expects the following models (field names matter, they are queried directly):
 
 ### Methods
 
-The twenty-five query methods, all overridable, and the `select` the session queries share:
+The twenty-six query methods, all overridable, and the `select` the session queries share:
 
 | Method | Purpose |
 | --- | --- |
@@ -7918,6 +7929,7 @@ The twenty-five query methods, all overridable, and the `select` the session que
 | `findSession(args)` | Load a session (+ its user) by token. The one place a session's shape comes from — see [Shaping the session](#shaping-the-session). |
 | `sessionSelect()` *(protected)* | The `select` `findSession`, `updateSession` and `createSessionV2` share. Override it to add a column or order/filter `accounts` — see [Changing the session query](#changing-the-session-query). |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
+| `claimLegacySession(args)` | Delete a pre-0.64 session row and answer whether this call deleted it; a conversion writes the new session only on `true`. |
 | `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |
 | `findUserByVerificationToken(token)` / `verifyUser(email)` | Email-verification lookup / marking verified. |
 | `createPasswordResetToken(args)` / `findPasswordResetToken(args)` / `deletePasswordResetToken(args)` | Password-reset token lifecycle. |
@@ -7929,7 +7941,9 @@ The twenty-five query methods, all overridable, and the `select` the session que
 One more method is not a query: `transaction(fn)` runs `fn` inside a transaction on the
 connection the `User` model lives on. `AuthController` uses it to write a user and everything
 that has to exist beside it — the invited `Account`, the OAuth `SocialAccount`, and whatever
-[`onUserCreated`](#onusercreated) writes — atomically.
+[`onUserCreated`](#onusercreated) writes — atomically. `withLegacySessionLock(token, fn)` runs
+`fn` in such a transaction, serialized against every other conversion or revocation of the
+pre-0.64 `token`; see [Converting sessions from before 0.64](#converting-sessions-from-before-064).
 
 ### Changing a query
 

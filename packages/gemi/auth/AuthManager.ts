@@ -36,6 +36,14 @@ function expiryMs(value: Date | string | number | null | undefined): number {
  */
 const LEGACY_TOKEN_GRACE_MS = 10 * 60_000;
 
+/**
+ * The tokens a pre-0.64 `token` may have been converted to that it still
+ * resolves to: this grace bucket's and the previous one's.
+ */
+function legacyCandidates(token: string, bucket: number): string[] {
+  return [migratedSessionToken(token, bucket), migratedSessionToken(token, bucket - 1)];
+}
+
 export class AuthManager {
   static token = "auth";
 
@@ -185,11 +193,17 @@ export class AuthManager {
    * old row deleted, so the old token cannot convert twice or be handed to a
    * second client as a session of its own.
    *
+   * **Only if the old row is still there to take.** The delete and the write
+   * are one transaction under `withLegacySessionLock`, the lock `revokeSession`
+   * takes too, and the new row is written only when this transaction is the
+   * one that deleted the old. A sign-out that landed after the read above and
+   * before that has already deleted it, and nothing is created (#638).
+   *
    * **Concurrent requests converge.** The new token is derived from the old one
    * and the current `LEGACY_TOKEN_GRACE_MS` bucket (`migratedSessionToken`), not
    * random, so every request converting the same token at once computes the
-   * same one. The token column is unique: one `createSessionV2` wins, and the
-   * others' fails and they read the winner's row back. A request that arrives
+   * same one. One of them takes the old row and writes the new; the others
+   * find the old row gone and read the winner's back. A request that arrives
    * after the old row is gone looks for that row under this bucket's token and
    * the previous one's, so the old token keeps resolving to the new session for
    * between one and two buckets and grants nothing after that.
@@ -218,24 +232,28 @@ export class AuthManager {
       if (!(await migrate(legacy, { token, req, userAgent }))) {
         return null;
       }
-      converted = migratedSessionToken(token, bucket);
-      try {
+      const candidate = migratedSessionToken(token, bucket);
+      const userId = legacy.user.id;
+      const claimed = await this.userProvider.withLegacySessionLock(token, async () => {
+        if (!(await this.userProvider.claimLegacySession({ token }))) {
+          return false;
+        }
         await this.userProvider.createSessionV2({
-          token: converted,
-          userId: legacy.user.id,
+          token: candidate,
+          userId,
           userAgent,
           ...this.freshLifetime(now),
         });
-      } catch (error) {
-        // Another request converting the same token got there first.
-        if (!(await this.userProvider.findSession({ token: converted, userAgent }))?.user) {
-          throw error;
-        }
+        return true;
+      });
+      if (claimed) {
+        converted = candidate;
       }
-      await this.userProvider.deleteSession({ token });
-    } else {
-      for (const b of [bucket, bucket - 1]) {
-        const candidate = migratedSessionToken(token, b);
+    }
+    // Converted before this request, or by one that took the old row between
+    // this one's read and its claim — or signed out, and then there is nothing.
+    if (!converted) {
+      for (const candidate of legacyCandidates(token, bucket)) {
         if ((await this.userProvider.findSession({ token: candidate, userAgent }))?.user) {
           converted = candidate;
           break;
@@ -257,6 +275,56 @@ export class AuthManager {
         );
     }
     return session;
+  }
+
+  /**
+   * Signs `token` out: deletes the session it names and returns that session,
+   * or null when there was none. What `AuthController.signOut` revokes with.
+   *
+   * Looked up with `findSession` rather than `getSession`, which would slide
+   * the session and write the cookie that a sign-out is clearing.
+   *
+   * **A pre-0.64 token, when `auth.migrateLegacySession` is set**, also ends
+   * the session it was converted to (#638). For the grace window the old token
+   * still resolves to that session, so a client that never picked up the new
+   * cookie — a second tab, a lost response — signs out with the old one, and
+   * deleting only the old row, long gone, ended nothing. The converted tokens
+   * deleted are the ones `getSession` would resolve it to — this bucket's and
+   * the previous one's — so once the old token no longer grants the session
+   * it no longer revokes it either.
+   *
+   * The lookup and the deletes run under `withLegacySessionLock`, the lock a
+   * conversion of the same token takes, so the two cannot interleave: either
+   * the conversion commits first and this deletes what it wrote, or this
+   * deletes the old row first and the conversion writes nothing.
+   *
+   * Without the option, or for a `v2.` token, this is the lookup and delete it
+   * always was.
+   */
+  async revokeSession(token: string | null | undefined, userAgent: string) {
+    if (!token) {
+      await this.userProvider.deleteSession({ token });
+      return null;
+    }
+    if (isSessionToken(token) || !this.config.migrateLegacySession) {
+      const session = await this.userProvider.findSession({ token, userAgent });
+      await this.userProvider.deleteSession({ token });
+      return session;
+    }
+    const bucket = Math.floor(Date.now() / LEGACY_TOKEN_GRACE_MS);
+    const converted = legacyCandidates(token, bucket);
+    return this.userProvider.withLegacySessionLock(token, async () => {
+      let session = await this.userProvider.findSession({ token, userAgent });
+      for (const candidate of converted) {
+        if (session?.user) break;
+        session = await this.userProvider.findSession({ token: candidate, userAgent });
+      }
+      await this.userProvider.deleteSession({ token });
+      for (const candidate of converted) {
+        await this.userProvider.deleteSession({ token: candidate });
+      }
+      return session;
+    });
   }
 
   /** The current request, when `token` arrived as its `access_token` cookie. */

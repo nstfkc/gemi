@@ -54,6 +54,17 @@ class MemoryProvider {
   async deleteSession({ token }: { token: string }) {
     this.rows.delete(token);
   }
+  async claimLegacySession({ token }: { token: string }) {
+    return this.rows.delete(token);
+  }
+  // One at a time, as the real lock makes them; there is no transaction to
+  // roll back here.
+  private tail: Promise<unknown> = Promise.resolve();
+  withLegacySessionLock<T>(_token: string, fn: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(fn, fn);
+    this.tail = result.catch(() => {});
+    return result;
+  }
 }
 
 const legacyToken = (email: string) => createHash("sha256").update(`${email}${UA}`).digest("hex");
@@ -241,6 +252,22 @@ describe("a token from before the upgrade, when the app has not opted in", () =>
     }
     expect(findSession).not.toHaveBeenCalled();
     expect(provider.rows.size).toBe(1);
+  });
+
+  test("signing out with it deletes its row and nothing else, as before", async () => {
+    const legacy = seedLegacy(1, "a@example.com", {
+      expiresAt: new Date(Date.now() + 24 * HOUR),
+      absoluteExpiresAt: new Date(Date.now() + 24 * HOUR),
+    });
+    const findSession = vi.spyOn(provider, "findSession");
+    const lock = vi.spyOn(provider, "withLegacySessionLock");
+
+    const revoked = await auth.revokeSession(legacy, UA);
+
+    expect(revoked!.user.id).toBe(1);
+    expect(findSession.mock.calls.map(([args]) => args.token)).toEqual([legacy]);
+    expect(lock).not.toHaveBeenCalled();
+    expect(provider.rows.size).toBe(0);
   });
 });
 
@@ -535,6 +562,81 @@ describe("converting a token from before the upgrade, when the app opts in", () 
     expect(newRows()).toEqual([...tokens]);
     for (const { cookies } of results) expect(accessTokenCookie(cookies)).toBe([...tokens][0]);
     expect(provider.rows.has(legacy)).toBe(false);
+  });
+
+  test("signing out with the old token ends the converted session, within the grace window", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    // Converted early in a grace bucket, so ten minutes on is the next one.
+    const start = Math.floor(Date.now() / 600_000) * 600_000 + 1000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    const { result } = await inRequest({ access_token: legacy }, () => auth.getSession(legacy, UA));
+
+    // The next bucket, where the old token still resolves to it.
+    clock.mockReturnValue(start + 10 * 60_000);
+    const { result: revoked } = await inRequest({ access_token: legacy }, () =>
+      auth.revokeSession(legacy, UA),
+    );
+
+    expect(revoked!.user.id).toBe(1);
+    expect(provider.rows.size).toBe(0);
+    const { result: after } = await inRequest({ access_token: result!.token }, () =>
+      auth.getSession(result!.token as string, UA),
+    );
+    expect(after).toBeNull();
+  });
+
+  test("after the grace window the old token revokes nothing: it no longer names the session", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    const { result } = await inRequest({ access_token: legacy }, () => auth.getSession(legacy, UA));
+
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 21 * 60_000);
+    const { result: revoked } = await inRequest({}, () => auth.revokeSession(legacy, UA));
+
+    expect(revoked).toBeNull();
+    expect(newRows()).toEqual([result!.token]);
+  });
+
+  test("a sign-out that lands between the conversion's read and its write leaves no session", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    let reach!: () => void;
+    const reached = new Promise<void>((resolve) => (reach = resolve));
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    auth = new AuthManager(
+      {
+        migrateLegacySession: async () => {
+          reach();
+          await opened;
+          return true;
+        },
+      },
+      provider as never,
+    );
+
+    const converting = inRequest({ access_token: legacy }, () => auth.getSession(legacy, UA));
+    await reached;
+    await inRequest({}, () => auth.revokeSession(legacy, UA));
+    open();
+    const { result, cookies } = await converting;
+
+    expect(result).toBeNull();
+    expect(accessTokenCookie(cookies)).toBeUndefined();
+    expect(provider.rows.size).toBe(0);
+  });
+
+  test("a v2 token signs out as it always did", async () => {
+    const { result: session } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    const findSession = vi.spyOn(provider, "findSession");
+    const lock = vi.spyOn(provider, "withLegacySessionLock");
+
+    await auth.revokeSession(session.token as string, UA);
+
+    expect(findSession.mock.calls.map(([args]) => args.token)).toEqual([session.token]);
+    expect(lock).not.toHaveBeenCalled();
+    expect(provider.rows.size).toBe(0);
   });
 
   test("outside a request nothing is converted", async () => {
