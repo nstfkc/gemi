@@ -132,7 +132,15 @@ export function useMutation<
   const [inputs = {}, config] = args ?? [];
   const options: Config<T> = { ...defaultOptions, ...config };
 
-  async function trigger(input?: U): Promise<T> {
+  // Resolves `undefined` rather than rejecting whenever there is no result to
+  // hand back: a non-2xx response or a network failure (both already reported
+  // through `onError` and `error`), a `cancel()`, and a request superseded by a
+  // newer `trigger`. It was typed `Promise<T>`, so `const r = await trigger()`
+  // read `r.id` off `undefined` with nothing in the types to say it could.
+  // Rejecting instead would turn every `onClick={() => trigger()}` — and
+  // `<Form>`'s own submit — into an unhandled rejection, so the type changed
+  // and the behaviour did not (issue #623).
+  async function trigger(input?: U): Promise<T | undefined> {
     const controller = new AbortController();
     abortController.current = controller;
     const requestId = ++latestRequest.current;
@@ -210,7 +218,7 @@ export function useMutation<
         loading: false,
       });
 
-      return data as any;
+      return data as T;
     } catch (error) {
       if (!isLatest()) return;
 
@@ -324,7 +332,11 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
     }
   };
 
-  const trigger = async (fileList: FileList | null | File): Promise<T> => {
+  // `undefined` for no file, a failed upload (reported through `onError`) or
+  // a network error, the same contract as `useMutation`'s `trigger`.
+  const trigger = async (
+    fileList: FileList | null | File,
+  ): Promise<T | undefined> => {
     if (!fileList) {
       return;
     }

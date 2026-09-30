@@ -21,6 +21,21 @@ import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 import { isPlainObject } from "./isPlainObject";
 
+/**
+ * A DOM event or React's synthetic one. Never a plain object, so a cached
+ * value that happens to have a `nativeEvent` key is not mistaken for one.
+ */
+function isEventLike(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || isPlainObject(value)) {
+    return false;
+  }
+  if (typeof Event !== "undefined" && value instanceof Event) return true;
+  return (
+    "nativeEvent" in value &&
+    typeof (value as { preventDefault?: unknown }).preventDefault === "function"
+  );
+}
+
 interface Config<T> {
   fallbackData?: T;
   /**
@@ -582,6 +597,12 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>,
   ): void;
   function mutate(fn?: any) {
+    // `onClick={mutate}` hands React's event to `mutate` as if it were the
+    // new data. It is not a plain object, so the shape check below threw —
+    // and where the data is untyped nothing caught it at compile time. An
+    // event carries no data to write, so it means what a bare `mutate()`
+    // means: refetch.
+    if (isEventLike(fn)) fn = undefined;
     // Either form ends in a fetch whose result the component renders, so a
     // lazy query mutated by hand is as focus-eligible as a triggered one.
     focusEligibleRef.current = true;

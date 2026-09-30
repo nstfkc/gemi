@@ -289,4 +289,56 @@ describe("useMutation", () => {
       await waitFor(() => expect(result.current.loading).toBe(false));
     });
   });
+  /**
+   * Issue #623. `trigger` is typed `Promise<T | undefined>` because it
+   * resolves `undefined` whenever there is no result — and it must keep
+   * resolving rather than rejecting: `<Form>` and every
+   * `onClick={() => trigger()}` call it without a `catch`, so a rejection
+   * would surface as an unhandled one. The failure is reported where it
+   * always was, through `onError` and `error`.
+   */
+  describe("what trigger resolves to", () => {
+    test("the response body on a 2xx", async () => {
+      vi.stubGlobal("fetch", fetchStub(respond(200, { id: 1 })));
+      const { result } = renderHook(() => useMutation("POST" as never, "/agents" as never));
+
+      let resolved: unknown;
+      await act(async () => {
+        resolved = await result.current.trigger({} as never);
+      });
+      expect(resolved).toEqual({ id: 1 });
+    });
+
+    test("undefined, not a rejection, on a non-2xx", async () => {
+      const onError = vi.fn();
+      vi.stubGlobal("fetch", fetchStub(respond(422, { error: validationError })));
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, { onError } as never),
+      );
+
+      let settled!: Promise<unknown>;
+      await act(async () => {
+        settled = result.current.trigger({} as never);
+        await settled.catch(() => {});
+      });
+      await expect(settled).resolves.toBeUndefined();
+      expect(onError).toHaveBeenCalledWith(validationError);
+    });
+
+    test("undefined, not a rejection, on a network failure", async () => {
+      const onError = vi.fn();
+      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, { onError } as never),
+      );
+
+      let settled!: Promise<unknown>;
+      await act(async () => {
+        settled = result.current.trigger({} as never);
+        await settled.catch(() => {});
+      });
+      await expect(settled).resolves.toBeUndefined();
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+  });
 });
