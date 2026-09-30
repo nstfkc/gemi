@@ -61,7 +61,8 @@ export interface MutationMessageError {
  *   with a message of its own arrives as that message.
  * - `Error` — raised in the browser: a `TypeError` when the request never got
  *   an answer (offline, DNS, CORS), a `SyntaxError` when the answer was not
- *   JSON (a proxy's HTML error page, say).
+ *   JSON (a proxy's HTML error page, say). A throw from an `onSuccess` of
+ *   yours is reported through `onError` as well, as whatever it threw.
  *
  * A cancelled request is not an error: `onCanceled` runs and `error` stays
  * `null`. A route that answers an error body of its own shape is outside this
