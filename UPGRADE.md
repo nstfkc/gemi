@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.79 to 0.80
 
 ## `gemi dev` shuts the replaced application down on every reload (#652)
 
