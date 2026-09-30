@@ -2,9 +2,13 @@ import { randomBytes } from "crypto";
 import { HttpRequest } from "../http";
 import { AuthenticationError } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
-import { isSessionToken, mintSessionToken } from "./sessionToken";
+import { isSessionToken, migratedSessionToken, mintSessionToken } from "./sessionToken";
 import type { SessionWithUser } from "./types";
-import { authConfigDefaults, type AuthConfig } from "./config";
+import {
+  authConfigDefaults,
+  type AuthConfig,
+  type LegacySessionMigrator,
+} from "./config";
 import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
 import { app } from "../foundation/app";
@@ -25,6 +29,12 @@ function expiryMs(value: Date | string | number | null | undefined): number {
   const ms = new Date(value ?? 0).getTime();
   return Number.isFinite(ms) ? ms : 0;
 }
+
+/**
+ * How long a converted pre-0.64 token keeps resolving to its new session: at
+ * least this, at most twice it. See `convertLegacySession`.
+ */
+const LEGACY_TOKEN_GRACE_MS = 10 * 60_000;
 
 export class AuthManager {
   static token = "auth";
@@ -128,12 +138,18 @@ export class AuthManager {
    *
    * **A token from before minted tokens is no session.** It was computable
    * (see `sessionToken.ts`), so it is refused before the lookup; its row is
-   * left for the operator to delete. Its user signs in again.
+   * left for the operator to delete. Its user signs in again — unless the app
+   * set `auth.migrateLegacySession`, which converts it instead.
    */
   async getSession(token: string, userAgent: string) {
     // `Auth.user()` asks with no token at all when the request carried none.
-    if (!token || !isSessionToken(token)) {
+    if (!token) {
       return null;
+    }
+    if (!isSessionToken(token)) {
+      return this.config.migrateLegacySession
+        ? this.convertLegacySession(token, userAgent, this.config.migrateLegacySession)
+        : null;
     }
     const session = await this.userProvider.findSession({
       token,
@@ -156,6 +172,88 @@ export class AuthManager {
 
     current.user["extension"] = await this.config.extendSession(current.user);
     return current;
+  }
+
+  /**
+   * The session a pre-0.64 `token` converts to, or null. Only reached when the
+   * app set `auth.migrateLegacySession`.
+   *
+   * **Single use.** The converted session is written under a new token and the
+   * old row deleted, so the old token cannot convert twice or be handed to a
+   * second client as a session of its own.
+   *
+   * **Concurrent requests converge.** The new token is derived from the old one
+   * and the current `LEGACY_TOKEN_GRACE_MS` bucket (`migratedSessionToken`), not
+   * random, so every request converting the same token at once computes the
+   * same one. The token column is unique: one `createSessionV2` wins, and the
+   * others' fails and they read the winner's row back. A request that arrives
+   * after the old row is gone looks for that row under this bucket's token and
+   * the previous one's, so the old token keeps resolving to the new session for
+   * between one and two buckets and grants nothing after that.
+   *
+   * **The lifetime is new.** Before 0.64 no expiry was enforced or extended on
+   * use, so the old row's expiry says nothing about whether it is still in
+   * use; the application's predicate decides what is too old to convert.
+   */
+  private async convertLegacySession(
+    token: string,
+    userAgent: string,
+    migrate: LegacySessionMigrator,
+  ) {
+    // Without a response the client would never learn the new token, and the
+    // old one stops working after the grace window.
+    const req = RequestContext.getStore()?.req;
+    if (!req) {
+      return null;
+    }
+    const now = Date.now();
+    const bucket = Math.floor(now / LEGACY_TOKEN_GRACE_MS);
+
+    let converted: string | null = null;
+    const legacy = await this.userProvider.findSession({ token, userAgent });
+    if (legacy?.user) {
+      if (!(await migrate(legacy, { token, req, userAgent }))) {
+        return null;
+      }
+      converted = migratedSessionToken(token, bucket);
+      try {
+        await this.userProvider.createSessionV2({
+          token: converted,
+          userId: legacy.user.id,
+          userAgent,
+          ...this.freshLifetime(now),
+        });
+      } catch (error) {
+        // Another request converting the same token got there first.
+        if (!(await this.userProvider.findSession({ token: converted, userAgent }))?.user) {
+          throw error;
+        }
+      }
+      await this.userProvider.deleteSession({ token });
+    } else {
+      for (const b of [bucket, bucket - 1]) {
+        const candidate = migratedSessionToken(token, b);
+        if ((await this.userProvider.findSession({ token: candidate, userAgent }))?.user) {
+          converted = candidate;
+          break;
+        }
+      }
+    }
+    if (!converted) {
+      return null;
+    }
+
+    const session = await this.getSession(converted, userAgent);
+    if (session) {
+      req
+        .ctx()
+        .setCookie(
+          "access_token",
+          converted,
+          this.accessTokenCookieOptions(req, new Date(session.expiresAt)),
+        );
+    }
+    return session;
   }
 
   /** The current request, when `token` arrived as its `access_token` cookie. */
