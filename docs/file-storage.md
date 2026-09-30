@@ -129,6 +129,17 @@ Lists the objects under a folder/prefix. The shape of the result depends on the 
 const files = await Storage.list("avatars/");
 ```
 
+### `delete(params | string)`
+
+Removes a stored object, by name or by `{ name, bucket? }`. Deleting an object that does not exist resolves without throwing, so a cleanup path can safely run twice or after an upload that never landed. Any other failure (permissions, network) still rejects.
+
+```typescript
+await Storage.delete("avatars/old.png");
+await Storage.delete({ name: "report.pdf", bucket: "exports" });
+```
+
+Every built-in driver implements it: `FileSystemDriver` unlinks the file (and refuses a name that resolves outside its storage folder), `S3Driver` sends `DeleteObject`, and `AzureBlobDriver` deletes the blob.
+
 ### `metadata(blob | file)`
 
 Reads image metadata (width, height, format, etc.) from a `Blob`/`File` using Sharp. Returns a partial metadata object, or `{}` if the bytes aren't a decodable image — useful for validating an upload before storing it.
@@ -139,8 +150,6 @@ if ((meta.width ?? 0) > 4096) {
   // reject oversized image
 }
 ```
-
-> **Note:** `Storage.delete()` is currently a no-op placeholder — deletion is not yet implemented at the facade level.
 
 ## Configuration: `app/config/filesystem.ts`
 
@@ -270,11 +279,12 @@ The container comes from `params.bucket`, then the `container` config, then `pro
 
 ### Writing a custom driver
 
-Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`, `fetch` and `list`:
+Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`, `fetch`, `list` and `delete`:
 
 ```typescript
 import {
   FileStorageDriver,
+  type DeleteFileParams,
   type PutFileOptions,
   type PutFileParams,
   type ReadFileParams,
@@ -293,8 +303,13 @@ class MyDriver extends FileStorageDriver {
   async list(folder: string): Promise<any> {
     /* ... */
   }
+  async delete(params: DeleteFileParams | string): Promise<void> {
+    /* ...remove the object; resolve, don't throw, if it is already gone... */
+  }
 }
 ```
+
+`delete()` is not abstract, so a driver written before it existed still compiles, but its default throws `<Driver> does not implement delete()` rather than pretending the object is gone. Override it.
 
 `read()` and `size()` already have working defaults, so a driver that implements only the three methods above still compiles and gains range support — but the default `read()` buffers the whole object to serve a range, which saves no bandwidth from the backend.
 

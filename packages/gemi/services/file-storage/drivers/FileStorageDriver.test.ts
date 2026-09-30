@@ -78,3 +78,13 @@ describe("FileStorageDriver's default read()", () => {
     expect(await driver.size("file.txt")).toBe(10);
   });
 });
+
+describe("FileStorageDriver's default delete()", () => {
+  test("throws and names the driver, rather than resolving as if it deleted", async () => {
+    // A driver written before delete() existed. Resolving quietly here would be
+    // the very bug #608 fixed at the facade: the caller believes it is gone.
+    await expect(new LegacyDriver().delete("file.txt")).rejects.toThrow(
+      /LegacyDriver does not implement delete\(\)/,
+    );
+  });
+});

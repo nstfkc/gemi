@@ -8,6 +8,7 @@ import {
 import { parseContentRange, resolveRange } from "../../../http/range";
 import { FileStorageDriver } from "./FileStorageDriver";
 import type {
+  DeleteFileParams,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -306,7 +307,7 @@ export class AzureBlobDriver extends FileStorageDriver {
     }
   }
 
-  async delete(params: ReadFileParams | string) {
+  async delete(params: DeleteFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
     const bucket = typeof params === "string" ? undefined : params.bucket;
 
@@ -314,8 +315,9 @@ export class AzureBlobDriver extends FileStorageDriver {
     try {
       await blob.delete();
     } catch (err: any) {
+      // Already gone is the outcome the caller asked for.
       if (isNotFound(err)) {
-        throw new FileNotFoundError(name);
+        return;
       }
       throw err;
     }

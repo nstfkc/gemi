@@ -18,18 +18,21 @@ function fakeAzure(
     download?: (offset?: number, count?: number) => any;
     properties?: any;
     blobs?: string[];
+    deleteError?: Error;
   } = {},
 ) {
   const calls: {
     downloads: Downloaded[];
     getProperties: number;
     uploads: any[];
+    deletes: number;
     containers: string[];
     blobs: string[];
   } = {
     downloads: [],
     getProperties: 0,
     uploads: [],
+    deletes: 0,
     containers: [],
     blobs: [],
   };
@@ -59,7 +62,10 @@ function fakeAzure(
     async uploadData(data: any, opts: any) {
       calls.uploads.push({ data, opts });
     },
-    async delete() {},
+    async delete() {
+      calls.deletes += 1;
+      if (options.deleteError) throw options.deleteError;
+    },
   };
 
   const serviceClient = {
@@ -411,6 +417,47 @@ describe("AzureBlobDriver.list()", () => {
       "photos/a.png",
       "photos/b.png",
     ]);
+  });
+});
+
+describe("AzureBlobDriver.delete()", () => {
+  test("deletes the named blob in the configured container", async () => {
+    const { driver, calls } = driverWith();
+
+    await driver.delete("photos/a.png");
+
+    expect(calls.deletes).toBe(1);
+    expect(calls.containers).toEqual(["media"]);
+    expect(calls.blobs).toEqual(["photos/a.png"]);
+  });
+
+  test("honours an explicit bucket as the container", async () => {
+    const { driver, calls } = driverWith();
+
+    await driver.delete({ name: "a.png", bucket: "uploads" });
+
+    expect(calls.containers).toEqual(["uploads"]);
+  });
+
+  test("resolves for a blob that is not there, so cleanup can retry", async () => {
+    const { driver } = driverWith({
+      deleteError: Object.assign(new Error("The specified blob does not exist."), {
+        statusCode: 404,
+        details: { errorCode: "BlobNotFound" },
+      }),
+    });
+
+    await expect(driver.delete("gone.png")).resolves.toBeUndefined();
+  });
+
+  test("still throws any other failure", async () => {
+    const { driver } = driverWith({
+      deleteError: Object.assign(new Error("AuthorizationFailure"), {
+        statusCode: 403,
+      }),
+    });
+
+    await expect(driver.delete("a.png")).rejects.toThrow(/AuthorizationFailure/);
   });
 });
 

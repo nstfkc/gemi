@@ -1,5 +1,6 @@
 import { FileNotFoundError } from "../../../http/errors";
 import type {
+  DeleteFileParams,
   IFileStorageDriver,
   PutFileOptions,
   PutFileParams,
@@ -14,6 +15,21 @@ export abstract class FileStorageDriver implements IFileStorageDriver {
     options?: PutFileOptions,
   ): Promise<string>;
   abstract list(folder: string): Promise<any>;
+
+  /**
+   * Removes an object. A missing object is not an error: the promise resolves,
+   * so cleanup can run twice, or after a write that never landed.
+   *
+   * Not abstract, for the same reason `read()` is not: a custom driver written
+   * before `delete()` existed keeps compiling. It must not keep *working* as if
+   * it deleted, though — silently resolving here is exactly the bug `delete()`
+   * used to have (#608) — so the default throws and names the driver.
+   */
+  async delete(_params: DeleteFileParams | string): Promise<void> {
+    throw new Error(
+      `${this.constructor.name} does not implement delete(). Override it to remove objects from this backend.`,
+    );
+  }
 
   /**
    * Default `read()` for drivers that only implement `fetch()`.
