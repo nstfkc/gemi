@@ -1,3 +1,71 @@
+# Upgrading from 0.74 to 0.75
+
+Additive, apart from one error code. Nothing to rewrite.
+
+## New: `generate()` and `ctx.generate()` — one model call with an output schema (#594)
+
+A typed answer without an agent: no tool loop, no nested transcript streamed to
+the browser, nothing written to the thread.
+
+```ts
+import { generate, s } from "gemi/ai";
+
+const result = await generate({
+  provider,
+  instructions,
+  prompt: `The business: ${description}`, // or `messages`, or both
+  output: s.object({ copies: s.array(s.object({ headline: s.string(), cta: s.string() })) }),
+  temperature: 0.9,
+  // maxOutputTokens, reasoning, signal
+});
+
+if (result.ok) save(result.output); // typed from the schema
+```
+
+Inside an agent tool, call `ctx.generate({ ... })` instead. It is the same
+function with the turn bound in: it aborts when the user stops the turn, and its
+usage counts toward the turn's `usage`, the way a sub-agent's does. A `signal`
+you pass (say `AbortSignal.timeout(30_000)`) is combined with the turn's.
+
+**A bad answer is returned, not thrown.** The result is
+`{ ok: true, output, messages, usage, finishReason }` or
+`{ ok: false, error, messages, usage, finishReason }`:
+
+- `messages` is the whole transcript (what you passed, the prompt, the model's
+  reply) on both arms. On failure the reply holds the raw text the model wrote,
+  so a retry continues the conversation:
+
+  ```ts
+  let messages: AgentMessage[] = [];
+  let prompt = `The business: ${description}`;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = await generate({ provider, instructions, messages, prompt, output });
+    if (result.ok) return result.output;
+    messages = result.messages;
+    prompt = `Your output was rejected:\n${result.error.message}\nReturn it again, fixed.`;
+  }
+  ```
+
+- `usage` is on both arms, because a failed answer was still billed.
+- `error.code` is `invalid_output` (did not match the schema, cut off at
+  `maxOutputTokens` — then `finishReason` is `"length"` — or missing), `aborted`
+  (the signal fired; `retryable` is true for a timeout), or the provider's
+  normalized code (`rate_limited`, `content_filtered`, ...).
+
+An `s.json()` schema works as it does for an agent: it is sent non-strict.
+
+`ctx.generate` is **not memoized**. `ctx.runAgent` and `ctx.generateImage` replay
+from what they recorded on the tool call when an escalating tool is re-entered;
+`ctx.generate` records nothing, so a re-entered tool calls the model again.
+
+## An agent's schema mismatch reports `invalid_output`, not `unknown` — behaviour change
+
+`AgentErrorCode` gained `invalid_output`. When an agent's final answer does not
+match its `output` schema, the `error` event it emits now has
+`code: "invalid_output"` instead of `"unknown"`; the message is unchanged. Only
+code that matched on `"unknown"` to detect this needs updating. An exhaustive
+`switch` over `AgentErrorCode` needs the new case.
+
 # Upgrading from 0.73 to 0.74
 
 One addition. Nothing to rewrite unless a `proxy()` route relied on forwarding

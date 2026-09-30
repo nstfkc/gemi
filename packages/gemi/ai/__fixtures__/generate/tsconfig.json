@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": { "gemi/ai": ["../../index.ts"] }
+  },
+  "include": ["narrowing.ts"]
+}

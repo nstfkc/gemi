@@ -97,6 +97,13 @@ export type {
   ToolTurn,
 } from "./Agent";
 
+// --- one model call --------------------------------------------------------
+//
+// A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same
+// function bound to the turn — see `ToolContext.generate`.
+export { generate } from "./generate";
+export type { GenerateParams, GenerateResult } from "./generate";
+
 // --- an app's API routes as tools ------------------------------------------
 //
 // The registry itself is `McpRegistry` in `gemi/services`; this is its one v1
