@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { CustomDomainConfig, DomainGroupConfig, DomainsConfig } from "./config";
 
 /** The group key the apex itself is served under. */
@@ -20,10 +21,85 @@ export interface ResolvedDomain {
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const MAX_CACHE_ENTRIES = 10_000;
 const LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
-const MIN_ASK_SECRET_LENGTH = 16;
+const MIN_SECRET_LENGTH = 16;
+/** An RFC 9110 field name. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const DEFAULT_HOST_HEADER = "x-forwarded-host";
 
 function isParamSubdomain(subdomain: string) {
   return subdomain.startsWith(":");
+}
+
+/**
+ * Compares in constant time, so a secret cannot be recovered a character at a
+ * time. The length is compared first and leaks, which `timingSafeEqual`
+ * requires and which tells an attacker nothing they can walk.
+ */
+export function secretMatches(given: string | null, expected: string): boolean {
+  if (given === null) {
+    return false;
+  }
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** `trustProxy` in one shape: which header, and the secret that unlocks it. */
+interface HostTrust {
+  header: string;
+  secret: { header: string; value: string } | null;
+}
+
+function hostTrustOf(trustProxy: DomainsConfig["trustProxy"]): HostTrust | null {
+  if (!trustProxy) {
+    return null;
+  }
+  if (trustProxy === true) {
+    return { header: DEFAULT_HOST_HEADER, secret: null };
+  }
+  return {
+    header: (trustProxy.hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase(),
+    secret: trustProxy.secret
+      ? { header: trustProxy.secret.header.toLowerCase(), value: trustProxy.secret.value }
+      : null,
+  };
+}
+
+function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
+  if (!trustProxy || trustProxy === true) {
+    return;
+  }
+  const { hostHeader, secret } = trustProxy;
+  // One header, not a list: every header gemi reads the host from is one a
+  // client may have got through, so each has to be one the proxy overwrites.
+  if (
+    hostHeader !== undefined &&
+    (typeof hostHeader !== "string" || !HEADER_NAME.test(hostHeader))
+  ) {
+    throw new Error(
+      `\`route.domains.trustProxy.hostHeader\` must be a single header name, e.g. "x-forwarded-host". Got ${JSON.stringify(hostHeader)}.`,
+    );
+  }
+  if (!secret) {
+    return;
+  }
+  if (typeof secret.header !== "string" || !HEADER_NAME.test(secret.header)) {
+    throw new Error(
+      `\`route.domains.trustProxy.secret.header\` must be a header name. Got "${secret.header}".`,
+    );
+  }
+  if (secret.header.toLowerCase() === (hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase()) {
+    throw new Error(
+      "`route.domains.trustProxy.secret.header` names the same header as `hostHeader`; the secret needs a header of its own.",
+    );
+  }
+  // An unset environment variable lands here as `undefined`, and has to fail
+  // the boot rather than quietly trust nothing — or, worse, anything.
+  if (typeof secret.value !== "string" || secret.value.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `\`route.domains.trustProxy.secret.value\` must be at least ${MIN_SECRET_LENGTH} characters. A guessable one lets any client name its own host.`,
+    );
+  }
 }
 
 /** Lowercased hostname without port or trailing dot; `null` if unparseable. */
@@ -76,11 +152,12 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
       `\`route.domains.custom.cacheTtlMs\` is ${config.custom.cacheTtlMs}; it cannot be negative. Use 0 to disable the cache.`,
     );
   }
-  if (config.ask && config.ask.secret.length < MIN_ASK_SECRET_LENGTH) {
+  if (config.ask && config.ask.secret.length < MIN_SECRET_LENGTH) {
     throw new Error(
-      `\`route.domains.ask.secret\` must be at least ${MIN_ASK_SECRET_LENGTH} characters. A guessable one is worse than leaving \`ask\` out.`,
+      `\`route.domains.ask.secret\` must be at least ${MIN_SECRET_LENGTH} characters. A guessable one is worse than leaving \`ask\` out.`,
     );
   }
+  assertValidTrustProxy(config.trustProxy);
   const seen = new Set<string>();
   let paramGroup: DomainGroupConfig | null = null;
   for (const group of config.groups ?? []) {
@@ -135,7 +212,7 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
  */
 export class DomainResolver {
   readonly root: string;
-  private readonly trustProxy: boolean;
+  private readonly hostTrust: HostTrust | null;
   private readonly fixed = new Map<string, DomainGroupConfig>();
   private readonly param: (DomainGroupConfig & { name: string }) | null = null;
   private readonly custom: CustomDomainConfig | null;
@@ -148,11 +225,13 @@ export class DomainResolver {
   private readonly inFlight = new Map<string, Promise<Record<string, string> | null>>();
   /** The `ask` secret, or `null` when the endpoint is not served. */
   readonly askSecret: string | null;
+  /** The header `trustProxy.secret` arrives in, or `null` when there is none. */
+  readonly proxySecretHeader: string | null;
 
   constructor(config: DomainsConfig) {
     assertValidDomainsConfig(config);
     this.root = normalizeHost(config.root)!;
-    this.trustProxy = config.trustProxy ?? false;
+    this.hostTrust = hostTrustOf(config.trustProxy);
     for (const group of config.groups ?? []) {
       if (isParamSubdomain(group.subdomain)) {
         this.param = { ...group, name: group.subdomain.slice(1) };
@@ -163,31 +242,45 @@ export class DomainResolver {
     this.custom = config.custom ?? null;
     this.cacheTtlMs = this.custom?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     this.askSecret = config.ask?.secret ?? null;
+    this.proxySecretHeader = this.hostTrust?.secret?.header ?? null;
+  }
+
+  /**
+   * The host the trusted proxy says the client addressed — the first entry of
+   * `trustProxy`'s host header, as sent — or `null` when there is no trusted
+   * proxy, its secret is missing or wrong, or it sent no host.
+   *
+   * A request without the secret is not refused, just routed by its own host:
+   * that is a host the client could have sent anyway, so it gains nothing, and
+   * the platform's health checks and its own domain for the app keep working.
+   */
+  private forwardedHost(req: Request): string | null {
+    const trust = this.hostTrust;
+    if (!trust) {
+      return null;
+    }
+    if (trust.secret && !secretMatches(req.headers.get(trust.secret.header), trust.secret.value)) {
+      return null;
+    }
+    return req.headers.get(trust.header)?.split(",")[0]?.trim() || null;
   }
 
   /** The hostname the request is addressed to, honouring `trustProxy`. */
   hostOf(req: Request): string | null {
-    if (this.trustProxy) {
-      const forwarded = req.headers.get("x-forwarded-host")?.split(",")[0];
-      const host = normalizeHost(forwarded);
-      if (host) {
-        return host;
-      }
-    }
-    return normalizeHost(new URL(req.url).host);
+    return normalizeHost(this.forwardedHost(req)) ?? normalizeHost(new URL(req.url).host);
   }
 
   /**
    * The origin the client addressed, port included — behind a trusted proxy,
    * the forwarded one rather than the one the proxy reached the app on.
    *
-   * The scheme follows `X-Forwarded-Proto` whether or not `trustProxy` is set,
-   * and the host only when it is. They are gated differently because the
-   * hazards are: a forged host sends a link to somewhere the attacker chose,
-   * while a forged scheme only spoils the attacker's own links. TLS is almost
-   * always terminated by a proxy that reaches the app over plain http, so
-   * reading the scheme is what keeps a cross-host URL from coming out `http://`
-   * on an `https://` page.
+   * The scheme follows `X-Forwarded-Proto` whether or not `trustProxy` is set
+   * and its secret matches, and the host only when both are. They are gated
+   * differently because the hazards are: a forged host sends a link to
+   * somewhere the attacker chose, while a forged scheme only spoils the
+   * attacker's own links. TLS is almost always terminated by a proxy that
+   * reaches the app over plain http, so reading the scheme is what keeps a
+   * cross-host URL from coming out `http://` on an `https://` page.
    */
   publicOrigin(req: Request): string {
     const url = new URL(req.url);
@@ -199,13 +292,10 @@ export class DomainResolver {
       forwardedProto === "http" || forwardedProto === "https"
         ? forwardedProto
         : url.protocol.replace(/:$/, "");
-    if (!this.trustProxy) {
-      return `${proto}://${url.host}`;
-    }
     // Through `normalizeHost` so userinfo, whitespace and an unparseable header
     // cannot ride into the origin — and back through `URL` so the port
     // survives, which `normalizeHost` drops.
-    const forwardedHost = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    const forwardedHost = this.forwardedHost(req);
     const host = forwardedHost && normalizeHost(forwardedHost) ? hostAndPort(forwardedHost) : null;
     return `${proto}://${host ?? url.host}`;
   }
