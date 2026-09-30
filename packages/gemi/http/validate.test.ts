@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { validate } from "./validate";
+import { InvalidValidationRuleError, RULES, validate } from "./validate";
 
 /**
  * The rule table, over every shape a JSON body can hand it.
@@ -116,30 +116,151 @@ describe("gte and lte measure magnitude, and say so in their names", () => {
   });
 });
 
-describe("the rules that were already right", () => {
-  test("number", () => {
+describe("number", () => {
+  test("accepts numbers, and not NaN", () => {
     expect(accepts("number")).toEqual(["number 5", "number 0", "number -1"]);
+    expect(validate("number")(Number.NaN)).toBe(false);
+    expect(validate("number")("5")).toBe(false);
+  });
+});
+
+describe("string and boolean check the JSON type (#609)", () => {
+  test("string accepts strings, empty included, and nothing else", () => {
+    // `""` passes: `string` asks for the type. Emptiness is `required`'s and
+    // `min`'s business.
+    expect(accepts("string")).toEqual(["string 'hi'", "string ''"]);
   });
 
+  test("boolean accepts true and false, and nothing else", () => {
+    expect(accepts("boolean")).toEqual(["boolean true", "boolean false"]);
+  });
+
+  test("neither coerces", () => {
+    expect(validate("boolean")("true")).toBe(false);
+    expect(validate("boolean")("on")).toBe(false);
+    expect(validate("boolean")(1)).toBe(false);
+    expect(validate("string")(42)).toBe(false);
+  });
+});
+
+describe("the regex rules", () => {
   test("email", () => {
     expect(validate("email")("a@b.co")).toBe(true);
     expect(validate("email")("a@b")).toBe(false);
   });
 
-  test("file", () => {
-    expect(validate("file")(new Blob([]))).toBe(true);
-    expect(validate("file")("not a file")).toBe(false);
+  test("password", () => {
+    expect(validate("password")("Str0ng!pass")).toBe(true);
+    expect(validate("password")("weakpass")).toBe(false);
+  });
+
+  test("only test strings, where `RegExp#test` would stringify an array", () => {
+    expect(validate("email")(["a@b.co"])).toBe(false);
+    expect(validate("password")(["Str0ng!pass"])).toBe(false);
+    expect(accepts("email")).toEqual([]);
   });
 });
 
-describe("a rule nobody implemented", () => {
-  test("accepts everything, which is worth knowing about `string` and `boolean`", () => {
-    // `SchemaKey` offers `string` and `boolean` and `validate` has no case for
-    // either, so both fall to the `default` arm and check nothing. That is not
-    // changed here: enforcing them would start rejecting requests that apps
-    // currently accept, which is a behaviour change and not a bug fix. This test
-    // records the state so the change, when it is made, is made deliberately.
-    expect(accepts("string")).toEqual(Object.keys(shapes));
-    expect(accepts("boolean")).toEqual(Object.keys(shapes));
+describe("the file rules", () => {
+  const png = new Blob(["x".repeat(2048)], { type: "image/png" });
+
+  test("file", () => {
+    expect(validate("file")(new Blob([]))).toBe(true);
+    expect(validate("file")("not a file")).toBe(false);
+    expect(accepts("file")).toEqual([]);
+  });
+
+  test("fileType matches the MIME type, or its family", () => {
+    expect(validate("fileType:png")(png)).toBe(true);
+    expect(validate("fileType:image")(png)).toBe(true);
+    expect(validate("fileType:pdf")(png)).toBe(false);
+    expect(accepts("fileType:png")).toEqual([]);
+  });
+
+  test("fileSize is a ceiling", () => {
+    expect(validate("fileSize:2KB")(png)).toBe(true);
+    expect(validate("fileSize:1KB")(png)).toBe(false);
+    expect(accepts("fileSize:1MB")).toEqual([]);
+  });
+
+  test("they answer false, not undefined, for a value that is not a file", () => {
+    expect(validate("fileType:png")("x.png")).toBe(false);
+    expect(validate("fileSize:1MB")("x")).toBe(false);
+  });
+});
+
+/**
+ * One case per rule, each run against the full shape table. The completeness
+ * check at the bottom fails when `RULES` gains a rule this table does not
+ * cover; `validate.test-d.ts` fails when `SchemaKey` and `RULES` disagree.
+ */
+const everyRule: Record<(typeof RULES)[number], { rule: string; accepts: string[] }> = {
+  required: {
+    rule: "required",
+    accepts: [
+      "object {a:1}",
+      "object {}",
+      "number 5",
+      "number 0",
+      "number -1",
+      "boolean true",
+      "boolean false",
+      "string 'hi'",
+      "array ['x']",
+    ],
+  },
+  string: { rule: "string", accepts: ["string 'hi'", "string ''"] },
+  boolean: { rule: "boolean", accepts: ["boolean true", "boolean false"] },
+  number: { rule: "number", accepts: ["number 5", "number 0", "number -1"] },
+  email: { rule: "email", accepts: [] },
+  password: { rule: "password", accepts: [] },
+  min: { rule: "min:1", accepts: ["string 'hi'", "array ['x']"] },
+  max: { rule: "max:1", accepts: ["string ''", "array ['x']", "array []"] },
+  gte: { rule: "gte:0", accepts: ["number 5", "number 0"] },
+  lte: { rule: "lte:0", accepts: ["number 0", "number -1"] },
+  file: { rule: "file", accepts: [] },
+  fileType: { rule: "fileType:png", accepts: [] },
+  fileSize: { rule: "fileSize:1MB", accepts: [] },
+};
+
+describe("every rule is implemented", () => {
+  test.each(Object.entries(everyRule))("%s", (_name, { rule, accepts: expected }) => {
+    expect(accepts(rule)).toEqual(expected);
+  });
+
+  test("and the table above covers every rule", () => {
+    expect(Object.keys(everyRule).sort()).toEqual([...RULES].sort());
+  });
+});
+
+describe("a rule the table does not have", () => {
+  test("throws, naming the rule and the ones that exist", () => {
+    // It used to answer `() => true`, which is how `string` and `boolean` sat
+    // in `SchemaKey` checking nothing.
+    expect(() => validate("different")).toThrow(InvalidValidationRuleError);
+    expect(() => validate("different")).toThrow(
+      /Unknown validation rule "different"\. Known rules: required, string, boolean/,
+    );
+    expect(() => validate("requried")).toThrow(InvalidValidationRuleError);
+    expect(() => validate("")).toThrow(InvalidValidationRuleError);
+  });
+
+  test("and so does a parameter the rule cannot read", () => {
+    // Each of these used to build a predicate that failed every value — NaN
+    // for the numeric ones, a 0-byte ceiling for `fileSize`.
+    for (const rule of [
+      "min",
+      "min:",
+      "max:abc",
+      "gte:x",
+      "lte:",
+      "fileType",
+      "fileSize:5mb",
+      "fileSize:1.5MB",
+      "fileSize",
+    ]) {
+      expect(() => validate(rule), rule).toThrow(InvalidValidationRuleError);
+    }
+    expect(validate("fileSize:0B")(new Blob([]))).toBe(true);
   });
 });

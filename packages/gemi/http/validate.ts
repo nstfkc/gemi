@@ -84,6 +84,45 @@ function isNumber(value: any): value is number {
   return typeof value === "number" && !Number.isNaN(value);
 }
 
+/** Every rule `validate` implements. `SchemaKey` in `HttpRequest.ts` offers
+ *  these and only these; `validate.test.ts` checks the two lists agree. */
+export const RULES = [
+  "required",
+  "string",
+  "boolean",
+  "number",
+  "email",
+  "password",
+  "min",
+  "max",
+  "gte",
+  "lte",
+  "file",
+  "fileType",
+  "fileSize",
+] as const;
+
+/**
+ * A schema names a rule `validate` does not have, or gives one a parameter it
+ * cannot use. Thrown when the request is validated, not when the body is bad:
+ * it is a bug in the schema, so it is a 500 and not a 400.
+ */
+export class InvalidValidationRuleError extends Error {
+  name = "InvalidValidationRuleError";
+}
+
+/** `min:3` → 3. A parameter that is not a number throws, instead of becoming
+ *  `NaN` and quietly failing every value. */
+function numericParam(rule: string, param: string | undefined): number {
+  const n = param === undefined || param.trim() === "" ? Number.NaN : Number(param);
+  if (Number.isNaN(n)) {
+    throw new InvalidValidationRuleError(
+      `Validation rule "${rule}:${param ?? ""}" needs a number, e.g. "${rule}:3"`,
+    );
+  }
+  return n;
+}
+
 export function validate(ruleName: string) {
   const [rule, param] = ruleName.split(":");
   switch (rule) {
@@ -119,6 +158,23 @@ export function validate(ruleName: string) {
         }
         return true;
       };
+    /**
+     * The JSON types, checked with `typeof` like `number`. No coercion: `"true"`
+     * is not a boolean and `42` is not a string. A form-encoded or multipart
+     * body only ever carries strings (and files), so `boolean` and `number` are
+     * rules for JSON bodies.
+     */
+    case "string":
+      return (value: any) => typeof value === "string";
+    case "boolean":
+      return (value: any) => typeof value === "boolean";
+    case "number":
+      return (value: any) => isNumber(value);
+    /**
+     * `RegExp.prototype.test` stringifies its argument, so without the `typeof`
+     * check `["a@b.co"]` passed `email` and an array holding a strong password
+     * passed `password`.
+     */
     case "password":
       return (value: any) => {
         // min 8 characters
@@ -126,14 +182,7 @@ export function validate(ruleName: string) {
         // at least one lowercase letter and one number
         // at least one special character
         const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).{8,}$/;
-        return passwordRegex.test(value);
-      };
-
-    case "number":
-      return (value: any) => {
-        if (typeof value !== "number") return false;
-
-        return !Number.isNaN(value);
+        return typeof value === "string" && passwordRegex.test(value);
       };
     /**
      * Length, and only length. `min:3` is "at least three characters", never
@@ -149,46 +198,68 @@ export function validate(ruleName: string) {
      * Written out rather than left as `value?.length >= n` so that a number
      * fails here for a stated reason instead of by arithmetic on `undefined`.
      */
-    case "min":
+    case "min": {
+      const min = numericParam(rule, param);
       return (value: any) => {
         const length = lengthOf(value);
-        return length !== undefined && length >= Number.parseInt(param);
+        return length !== undefined && length >= min;
       };
-    case "max":
+    }
+    case "max": {
+      const max = numericParam(rule, param);
       return (value: any) => {
         const length = lengthOf(value);
-        return length !== undefined && length <= Number.parseInt(param);
+        return length !== undefined && length <= max;
       };
+    }
     /** Magnitude, for numbers. The counterpart `min` / `max` deliberately are not. */
-    case "gte":
-      return (value: any) => isNumber(value) && value >= Number(param);
-    case "lte":
-      return (value: any) => isNumber(value) && value <= Number(param);
+    case "gte": {
+      const bound = numericParam(rule, param);
+      return (value: any) => isNumber(value) && value >= bound;
+    }
+    case "lte": {
+      const bound = numericParam(rule, param);
+      return (value: any) => isNumber(value) && value <= bound;
+    }
     case "email":
       return (value: any) => {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        return emailRegex.test(value);
+        return typeof value === "string" && emailRegex.test(value);
       };
     case "file":
       return (value: any) => {
         return value instanceof Blob;
       };
-    case "fileType":
-      return (value: Blob) => {
-        if (value instanceof Blob) {
-          const parsedType = parseFileTypeString(param);
-          return value.type.startsWith(parsedType);
-        }
-      };
-
-    case "fileSize":
-      return (value: Blob) => {
-        if (value instanceof Blob) {
-          const absoluteSize = parseFileSizeString(param);
-          return value.size <= absoluteSize;
-        }
-      };
+    case "fileType": {
+      if (!param) {
+        throw new InvalidValidationRuleError(
+          `Validation rule "fileType" needs a type, e.g. "fileType:png" or "fileType:image"`,
+        );
+      }
+      const parsedType = parseFileTypeString(param);
+      return (value: any) => value instanceof Blob && value.type.startsWith(parsedType);
+    }
+    case "fileSize": {
+      // `parseFileSizeString` answers 0 for anything it cannot read, and a
+      // 0-byte ceiling rejects every upload — so `fileSize:5mb` or
+      // `fileSize:1.5MB` looked like a limit and was a wall.
+      const absoluteSize = parseFileSizeString(param ?? "");
+      if (absoluteSize === 0 && !/^0+(B|KB|MB|GB|TB)$/.test(param ?? "")) {
+        throw new InvalidValidationRuleError(
+          `Validation rule "fileSize:${param ?? ""}" needs a whole size in B, KB, MB, GB or TB, e.g. "fileSize:5MB"`,
+        );
+      }
+      return (value: any) => value instanceof Blob && value.size <= absoluteSize;
+    }
+    /**
+     * Not `() => true`. That default is how `string` and `boolean` shipped in
+     * `SchemaKey` checking nothing (#609): a rule the table does not
+     * know looks, from the schema, exactly like one it does. A typo'd or
+     * unimplemented rule is a bug in the schema, so it throws.
+     */
     default:
-      return () => true;
+      throw new InvalidValidationRuleError(
+        `Unknown validation rule "${ruleName}". Known rules: ${RULES.join(", ")}`,
+      );
   }
 }
