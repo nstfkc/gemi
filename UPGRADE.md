@@ -1,3 +1,37 @@
+# Upgrading from 0.74 to 0.75
+
+## `useQuery` stops retrying client errors — behaviour change (#421, #643)
+
+A non-suspense `useQuery` used to retry a failed request forever, every 10s,
+whatever the status. So `useUser` on a public page polled `/auth/me` for as long
+as the page was open.
+
+- **Not retried:** 4xx except 408 and 429 (400, 401, 403, 404, 410, 422, …). The
+  error is returned once.
+- **Retried:** network failures, a 2xx body that isn't JSON, 408, 429 and 5xx.
+  At most 3 retries in a row, waiting 1s, 2s and 4s (capped at 30s). A
+  `Retry-After` header on 429/503 sets the wait (`QueryError.retryAfter`).
+- **Reconnect:** when the browser comes back online, a query whose last failure
+  is retryable is fetched again. `revalidateOnFocus` is unchanged.
+- **Non-JSON error bodies** (e.g. a proxy's HTML 502) are now a `QueryError`
+  with the status and `body: null`, instead of a `SyntaxError`.
+
+**Config:**
+- `retry` per call: a number, `false`/`0`, `true` (uncapped, still never 4xx),
+  or `(failureCount, error) => boolean`.
+- `retryDelay` per call: ms, or a function of the failure count.
+- Both are also accepted app-wide in `queryConfig`.
+- `retryIntervalOnError` is deprecated. It now only sets the backoff's base
+  delay.
+- `useUser(config?)` and `queryConfig.user` accept `staleTime`, `retry`,
+  `retryDelay`, `revalidateOnFocus`, `focusThrottleInterval` and
+  `refreshInterval`. Example: `queryConfig: { user: { staleTime: 30 * 60_000 } }`
+  stops refetching `/auth/me` on every navigation.
+
+**What to check:** code that relied on a query eventually recovering from a 4xx
+by retrying. Call `refetch()` (or `mutate()`) when the condition changes
+instead.
+
 # Upgrading from 0.74.0 to 0.74.1
 
 ## Password sign-in never 500s on a missing or unreadable hash (#276, #642)
