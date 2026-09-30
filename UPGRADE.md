@@ -1,3 +1,40 @@
+# Upgrading from 0.69 to 0.70
+
+One behaviour change in `<Form>`, and new, opt-in session-token APIs. Nothing to
+rewrite unless a `<Form>` of yours passes `onSubmit` or `ref`.
+
+## `<Form onSubmit>` no longer replaces gemi's submit, and `ref` works — behaviour change
+
+An `onSubmit` passed to `<Form>` used to replace gemi's handler, so the browser
+submitted the form natively and no request was sent. It is now called alongside
+gemi's handler, after the default is prevented, and the request is sent. It
+cannot cancel the request, and calling `event.preventDefault()` in it changes
+nothing. To skip a request, return `false` from the new
+`onSubmitStart(formData, form)`, which runs just before the request with the
+exact `FormData` that will be sent. `onSettled(form)` runs after `onSuccess` or
+`onError`.
+
+A `ref` passed to `<Form>` used to replace gemi's internal ref, so every submit
+returned early. It now receives the `<form>` element and submits still send.
+
+**What to check:** a `<Form>` that passed `onSubmit` in order to take over the
+submit itself. That never worked as a `Form`, because no request was sent. Move
+the logic into `onSubmitStart` (and return `false` if the request should not
+go), or use `usePost` and friends directly. (#622, #628)
+
+## Session tokens: public helpers and an opt-in migration from pre-0.64 tokens
+
+`mintSessionToken`, `isSessionToken` and `SESSION_TOKEN_PREFIX` are now exported
+from `gemi/services`.
+
+Apps upgrading from before 0.64 can convert old session tokens on first use
+instead of signing everyone out. Set `auth.migrateLegacySession`, a function
+that gets the old session and answers `true` to convert it. gemi then writes a
+`v2.` session, deletes the old row and rotates the cookie. Leaving it `null`,
+the default, keeps today's behaviour: a non-`v2.` token is refused without a
+lookup. See "Converting sessions from before 0.64" in the authentication docs.
+(#621, #629)
+
 # Upgrading from 0.68 to 0.69
 
 Two behaviour changes, both of them statuses that used to be wrong. Nothing to
