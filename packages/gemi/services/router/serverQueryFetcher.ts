@@ -1,5 +1,6 @@
 import { QueryError } from "../../client/QueryError";
 import { HttpRequest } from "../../http/HttpRequest";
+import { isHttpResponse } from "../../http/HttpResponse";
 import { RequestContext } from "../../http/requestContext";
 import { kernelContext } from "../../kernel/context";
 import { applyParams } from "../../utils/applyParams";
@@ -48,6 +49,20 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
           // `QueryError` the browser's fetch would produce — otherwise the
           // entry "resolves" and the view renders with a Response object for
           // data.
+          // A handler's `HttpResponse`: its body is the data, and a status
+          // outside 2xx is the same `QueryError` the browser's fetch makes of
+          // it, body included.
+          if (isHttpResponse(data)) {
+            if (!data.ok) {
+              throw new QueryError(
+                applyParams(patternPath, params),
+                searchParams.toString(),
+                data.status,
+                data.body,
+              );
+            }
+            return data.body;
+          }
           if (data instanceof Response) {
             const body = await data.json().catch(() => null);
             if (!data.ok) {

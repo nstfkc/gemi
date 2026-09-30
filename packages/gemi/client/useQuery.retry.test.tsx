@@ -180,6 +180,47 @@ describe("deterministic client errors are not retried", () => {
   });
 });
 
+/**
+ * A status of the route's own, from `HttpResponse.json(data, { status })`: a
+ * 2xx is data, and an error status is a `QueryError` carrying the JSON body,
+ * retried or not by the same rule as gemi's own errors.
+ */
+describe("a route's own status", () => {
+  test("a 201 is data", async () => {
+    net.script({ status: 201, body: [{ id: 1 }] });
+    const screen = renderTodos();
+    await advance(0);
+
+    expect(screen.queryByText('data:[{"id":1}] error:none loading:false')).not.toBeNull();
+  });
+
+  test("a 409 is a QueryError with the body, not retried", async () => {
+    let caught: unknown;
+    function Capture() {
+      const { error } = useQuery("/todos" as any, {}, { suspense: false } as any);
+      caught = error;
+      return null;
+    }
+    net.script({ status: 409, body: { message: "Taken", code: "conflict" } });
+    render(
+      <Providers>
+        <Capture />
+      </Providers>,
+    );
+    await advance(0);
+
+    expect(caught).toBeInstanceOf(QueryError);
+    expect(caught).toMatchObject({
+      status: 409,
+      message: "Taken",
+      body: { message: "Taken", code: "conflict" },
+    });
+
+    await advance(LATER);
+    expect(net.calls()).toBe(1);
+  });
+});
+
 describe("transient failures are retried, capped, with backoff", () => {
   test("5xx: three retries at 1s, 2s and 4s, then it stops", async () => {
     net.script({ status: 503, body: { message: "down" } });

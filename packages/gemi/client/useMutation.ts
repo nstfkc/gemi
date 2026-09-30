@@ -5,7 +5,7 @@ import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
-import type { MutationError } from "./MutationError";
+import { mutationErrorFromBody, type MutationError } from "./MutationError";
 
 type Methods = {
   POST: {
@@ -172,19 +172,22 @@ export function useMutation<
       formData.current = new FormData();
 
       if (!response.ok) {
+        // `data.error` rather than the envelope around it: `onError` is typed
+        // `(error: MutationError) => void`, and the envelope has no `kind` to
+        // branch on. A body without one — an app's own `HttpResponse.json` —
+        // is handed over whole.
+        const error = mutationErrorFromBody(data, response.status);
+
         // `data` is the last result the caller was given, and a rejected
         // submit did not replace it — the same reason the pending state above
         // keeps it.
         setState((prev) => ({
           data: prev.data,
-          error: data.error,
+          error,
           loading: false,
         }));
 
-        // `data.error` rather than the envelope around it: `onError` is typed
-        // `(error: MutationError) => void`, and the envelope has no `kind` to
-        // branch on.
-        options.onError(data.error);
+        options.onError(error);
         return;
       }
 
@@ -383,7 +386,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
         };
         try {
           const data = await result.json();
-          error = data.error;
+          error = mutationErrorFromBody(data, result.status);
         } catch (e) {
           // do nothing
         }

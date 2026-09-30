@@ -2,6 +2,7 @@ import type { RemoveGroupPrefix } from "../client/types";
 import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { contentDisposition } from "./contentDisposition";
+import { isHttpResponse } from "./HttpResponse";
 import type { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
 import type { FeatureKey } from "../client/rpc";
@@ -266,6 +267,20 @@ export class FileRoute<Input, Params> {
   }
 }
 
+/**
+ * A view's handler answers its props, which gemi renders; it has no status or
+ * headers of its own to give. Spread into props, an `HttpResponse` rendered the
+ * view with `kind`, `body` and `status` for data, and no error anywhere.
+ */
+function assertNotHttpResponse<T>(data: T, viewPath: string): T {
+  if (isHttpResponse(data)) {
+    throw new Error(
+      `The handler of view "${viewPath}" returned an HttpResponse. HttpResponse is for api routes; a view handler returns its props.`,
+    );
+  }
+  return data;
+}
+
 export class ViewRoute<Input, Output, Params> {
   middlewares: string[] = [];
   featureGates: string[] = [];
@@ -290,7 +305,7 @@ export class ViewRoute<Input, Output, Params> {
   }
 
   async run(req: HttpRequest<Input, Params>, path: string) {
-    const data = await this.handler(req);
+    const data = assertNotHttpResponse(await this.handler(req), this.viewPath);
 
     return {
       [this.viewPath]: {
@@ -380,7 +395,7 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
   }
 
   async run(req: HttpRequest<Input, Params>, path: string) {
-    const data = await this.handler(req);
+    const data = assertNotHttpResponse(await this.handler(req), this.viewPath);
 
     return {
       [this.viewPath]: {

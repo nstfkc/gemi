@@ -79,6 +79,18 @@ export default class extends ApiRouter {
 
 > **Note:** The generic parameters of `HttpRequest<Body, Params>` flow through the router types, so the client network layer (`useQuery`/`Form`) is typed end to end from the handler you write here. Type the request body and params on the handler and you get client-side type safety for free.
 
+To answer with a status or headers of your own, return `HttpResponse.json(data, { status, headers })` instead of `data`. The route stays typed as `data`, and the response keeps the cookies and headers the request set. See [Controllers → Status and headers](./controllers.md#status-and-headers-httpresponsejson).
+
+```typescript
+import { ApiRouter, HttpResponse } from "gemi/http";
+
+export default class extends ApiRouter {
+  routes = {
+    "/posts": this.post(async () => HttpResponse.json({ id: 1 }, { status: 201 })),
+  };
+}
+```
+
 ### Grouping methods at one path
 
 To serve several methods from the **same** path, use an object whose keys are lowercase method names:
