@@ -16,4 +16,14 @@ export class RedisServiceProvider extends ServiceProvider {
         ),
     );
   }
+
+  /**
+   * Closes the client, if anything built one. Under `gemi dev` this is what
+   * keeps each `bun --hot` reload from leaving a Redis connection behind; see
+   * `DatabaseServiceProvider.shutdown`.
+   */
+  shutdown() {
+    if (!this.app.resolved(RedisManager)) return;
+    this.app.make(RedisManager).close();
+  }
 }
