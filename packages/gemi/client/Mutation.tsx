@@ -16,6 +16,11 @@ import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ServerDataContext } from "./ServerDataProvider";
 import { Subject } from "../utils/Subject";
+import {
+  isFormError,
+  isValidationError,
+  type MutationError,
+} from "./MutationError";
 
 type Any = any;
 
@@ -80,7 +85,13 @@ interface FormProps<
   method?: M;
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
-  onError?: (error: Any, form: HTMLFormElement) => void;
+  /**
+   * Called when the request fails. `error` is a `MutationError`; narrow it
+   * with `isValidationError`, `isPermissionError` and the other guards from
+   * `gemi/client`. Validation and form errors are already rendered by
+   * `<ValidationErrors>` and `<FormError>`.
+   */
+  onError?: (error: MutationError, form: HTMLFormElement) => void;
   /**
    * Called when a submit is about to send its request, with the exact
    * `FormData` that will be sent (after `dynamicInputs`). Return `false` to
@@ -237,10 +248,9 @@ export function Form<
     trigger(formData as any);
   };
 
-  const validationErrors =
-    error?.kind === "validation_error" ? error.messages : {};
+  const validationErrors = isValidationError(error) ? error.messages : {};
 
-  const formError = error?.kind === "form_error" ? error.message : null;
+  const formError = isFormError(error) ? error.message : null;
 
   return (
     <MutationContext.Provider

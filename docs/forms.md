@@ -44,7 +44,7 @@ export default function CreateUser() {
 | `params` | Fills dynamic segments in `action` (e.g. `/user/:id`). Inherits current route params if omitted. |
 | `search` | Query-string values appended to the request. |
 | `onSuccess(result, form)` | Called on success with the typed response and the `HTMLFormElement`. |
-| `onError(error, form)` | Called on failure with the error and the form element. |
+| `onError(error, form)` | Called on failure with a `MutationError` and the form element. See [Handling errors in `onError`](#handling-errors-in-onerror). |
 | `onSubmitStart(formData, form)` | Called just before the request is sent, with the `FormData` that will be sent. Return `false` to skip the request. |
 | `onSettled(form)` | Called after `onSuccess` or `onError`, whichever ran. |
 | `dynamicInputs(formData)` | Return extra key/value pairs to append at submit time (values not in the DOM). |
@@ -174,6 +174,32 @@ that aren't tied to a specific field (e.g. "Invalid credentials"):
 ```
 
 Renders nothing when there is no form error.
+
+### Handling errors in `onError`
+
+`ValidationErrors` and `FormError` render the errors that belong to a field or to
+the form. Everything else — a refusal, a missing record, a dropped connection — is
+yours to show, and `onError` receives it as a `MutationError`. Narrow it with the
+guards from `gemi/client` rather than reading fields off it:
+
+```tsx
+import { Form, isPermissionError, isValidationError } from "gemi/client";
+
+<Form
+  action="/admin/users/:userId"
+  method="PUT"
+  onError={(error) => {
+    if (isValidationError(error)) return; // already under its fields
+    if (isPermissionError(error)) toast("You can't edit this account");
+    else toast("Something went wrong");
+  }}
+>
+  {/* fields… */}
+</Form>;
+```
+
+The error types, the full list of guards and `mutationErrorKind` are in
+[Data Fetching](./data-fetching.md#errors).
 
 ### `FormFieldContainer`
 

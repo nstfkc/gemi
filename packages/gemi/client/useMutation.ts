@@ -5,6 +5,7 @@ import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
+import type { MutationError } from "./MutationError";
 
 type Methods = {
   POST: {
@@ -55,28 +56,6 @@ type Body<
   M extends keyof Methods,
   K extends keyof Methods[M],
 > = Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
-
-type MutationError =
-  | {
-      kind: "validation_error";
-      messages: Record<string, any>;
-    }
-  | {
-      kind: "form_error";
-      message: string;
-    }
-  | {
-      kind: "server_error";
-      message: string;
-    }
-  | {
-      kind: "not_authorized";
-      message: string;
-    }
-  | {
-      kind: "insufficient_permissions";
-      message: string;
-    };
 
 type ParseParams<T> = UrlParser<`${T & string}`>;
 
@@ -231,6 +210,8 @@ export function useMutation<
         setState((prev) => ({ ...prev, loading: false }));
         return;
       }
+      // A `TypeError` from `fetch` (no answer) or a `SyntaxError` from
+      // `response.json()` (an answer that was not JSON) — both `Error`s.
       options.onError(error as MutationError);
       setState({
         data: null,
@@ -246,7 +227,7 @@ export function useMutation<
 
   return {
     data: state.data as T,
-    error: state.error as any,
+    error: state.error,
     loading: state.loading,
     formData: formData.current,
     cancel: () => {
@@ -416,7 +397,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
       return json;
     } catch (error) {
       setState("error");
-      options?.onError?.(error);
+      options?.onError?.(error as MutationError);
       return;
     }
   };
