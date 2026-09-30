@@ -44,11 +44,6 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
           // The api of the page's own host group — on `admin.` that is the
           // admin api, which may not share a single route with the root's.
           const data = await app(DomainRouter).dispatchers(domain).api.getRouteData(patternPath);
-          // A handler that broke (`RequestBreakerError`) comes back as an
-          // error `Response`, not a throw. Surface it as the same
-          // `QueryError` the browser's fetch would produce — otherwise the
-          // entry "resolves" and the view renders with a Response object for
-          // data.
           // A handler's `HttpResponse`: its body is the data, and a status
           // outside 2xx is the same `QueryError` the browser's fetch makes of
           // it, body included.
@@ -63,6 +58,11 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
             }
             return data.body;
           }
+          // A handler that broke (`RequestBreakerError`) comes back as an
+          // error `Response`, not a throw. Surface it as the same
+          // `QueryError` the browser's fetch would produce — otherwise the
+          // entry "resolves" and the view renders with a Response object for
+          // data.
           if (data instanceof Response) {
             const body = await data.json().catch(() => null);
             if (!data.ok) {
