@@ -1,3 +1,19 @@
+# Upgrading from 0.74.0 to 0.74.1
+
+## Password sign-in never 500s on a missing or unreadable hash (#276, #642)
+
+Signing in with a password for a user who has none (e.g. OAuth-only), or whose
+stored hash is empty or unreadable, used to throw inside `Bun.password.verify`
+and answer 500. It now answers `invalid_credentials`, like a wrong password.
+`changePassword` answers its existing "Incorrect password" validation error
+instead of a 500.
+
+No password, unknown address and wrong password now take about the same time:
+gemi runs `verifyPassword` against a decoy hash in the first two cases. As a
+result, a sign-in for an unknown address costs one hash check, like a wrong
+password. A custom `verifyPassword` is never called with a null hash, and its
+type is unchanged. The default is exported as `verifyPasswordHash`.
+
 # Upgrading from 0.73 to 0.74
 
 One addition. Nothing to rewrite unless a `proxy()` route relied on forwarding
