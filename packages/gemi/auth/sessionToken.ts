@@ -25,7 +25,12 @@ import { createHmac, randomBytes } from "node:crypto";
  * nothing else, so anything not starting with `v2.` is refused — an old token,
  * which was bare hex, and any other string alike. `AuthManager.getSession`
  * refuses it without looking it up, so the rows still holding old tokens grant
- * nothing whether or not they have been deleted.
+ * nothing whether or not they have been deleted — unless the application opts
+ * in to converting them with `auth.migrateLegacySession`.
+ *
+ * `SESSION_TOKEN_PREFIX`, `isSessionToken` and `mintSessionToken` are exported
+ * from `gemi/services`, for an application that writes session rows of its own
+ * (#621).
  */
 export const SESSION_TOKEN_PREFIX = "v2.";
 
@@ -52,5 +57,28 @@ export function sessionTokenSecret(): string {
 export function mintSessionToken(userId: number): string {
   const nonce = randomBytes(16).toString("hex");
   const mac = createHmac("sha256", sessionTokenSecret()).update(`${userId}:${nonce}`).digest("hex");
+  return `${SESSION_TOKEN_PREFIX}${mac}`;
+}
+
+/**
+ * The token a legacy session is converted to, the same for every request that
+ * converts `legacyToken` within one `window` bucket.
+ *
+ * Random tokens would make a conversion a race nobody but the winner can see
+ * the outcome of: two requests carrying the same old cookie — a page's parallel
+ * fetches — would each mint their own, and the one that lost could not find the
+ * session the other made. Derived from the old token, every request computes the
+ * token the winner wrote, so the losers read it back instead. The bucket is what
+ * ends that: once it and the next have passed, the old token no longer names the
+ * converted session, which is how it stops working at all.
+ *
+ * It is keyed with the secret like a minted token, so knowing the old token is
+ * not enough to compute it — only to present the old token to gemi within the
+ * bucket, which `AuthManager` bounds.
+ */
+export function migratedSessionToken(legacyToken: string, bucket: number): string {
+  const mac = createHmac("sha256", sessionTokenSecret())
+    .update(`legacy-session:${bucket}:${legacyToken}`)
+    .digest("hex");
   return `${SESSION_TOKEN_PREFIX}${mac}`;
 }

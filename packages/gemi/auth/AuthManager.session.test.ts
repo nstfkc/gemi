@@ -226,7 +226,7 @@ describe("expiry", () => {
   });
 });
 
-describe("a token from before the upgrade", () => {
+describe("a token from before the upgrade, when the app has not opted in", () => {
   test("is no session, however live its row", async () => {
     const legacy = seedLegacy(1, "a@example.com", {
       expiresAt: new Date(Date.now() + 24 * HOUR),
@@ -394,5 +394,164 @@ describe("a provider that shapes the session in findSession", () => {
     );
     expect(result.token).toMatch(/^v2\./);
     expect(accountIds(result)).toEqual(STORED);
+  });
+});
+
+/**
+ * `auth.migrateLegacySession` (#621): an app that cannot sign everybody out on
+ * the upgrade converts the old tokens on first use instead.
+ */
+describe("converting a token from before the upgrade, when the app opts in", () => {
+  let asked: { session: any; token: string }[];
+  let answer: boolean;
+
+  beforeEach(() => {
+    asked = [];
+    answer = true;
+    auth = new AuthManager(
+      {
+        migrateLegacySession: (session, { token }) => {
+          asked.push({ session, token });
+          return answer;
+        },
+      },
+      provider as never,
+    );
+  });
+
+  const newRows = () => [...provider.rows.keys()].filter((t) => t.startsWith("v2."));
+
+  test("converts it: a v2 session for the same user, the old row gone, the new cookie out", async () => {
+    // Its expiry columns were never enforced before 0.64 and are long past.
+    const legacy = seedLegacy(1, "a@example.com");
+
+    const { result, cookies } = await inRequest({ Cookie: `access_token=${legacy}` }, () =>
+      auth.getSession(legacy, UA),
+    );
+
+    expect(result!.user.id).toBe(1);
+    expect(result!.token).toMatch(/^v2\.[0-9a-f]{64}$/);
+    expect(accessTokenCookie(cookies)).toBe(result!.token);
+    expect(provider.rows.has(legacy)).toBe(false);
+    expect(newRows()).toEqual([result!.token]);
+    expect(provider.rows.get(result!.token)!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(asked).toHaveLength(1);
+    expect(asked[0].token).toBe(legacy);
+    expect(asked[0].session.user.id).toBe(1);
+  });
+
+  test("writes the cookie for a token that arrived as the header too", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    const { result, cookies } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+    expect(accessTokenCookie(cookies)).toBe(result!.token);
+  });
+
+  test("a row the app refuses is no session, and is left alone", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    answer = false;
+
+    const { result, cookies } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+
+    expect(result).toBeNull();
+    expect(accessTokenCookie(cookies)).toBeUndefined();
+    expect(provider.rows.has(legacy)).toBe(true);
+    expect(newRows()).toEqual([]);
+  });
+
+  test("a token with no row is no session, and the app is not asked", async () => {
+    const { result } = await inRequest({ access_token: "f".repeat(64) }, () =>
+      auth.getSession("f".repeat(64), UA),
+    );
+    expect(result).toBeNull();
+    expect(asked).toEqual([]);
+  });
+
+  test("is single use: the old token resolves to the same session for the grace window, then to nothing", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    const { result: first } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+
+    // A request that was already in flight with the old cookie.
+    const { result: late, cookies } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+    expect(late!.token).toBe(first!.token);
+    expect(accessTokenCookie(cookies)).toBe(first!.token);
+    expect(newRows()).toEqual([first!.token]);
+    expect(asked).toHaveLength(1);
+
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 21 * 60_000);
+    const { result: after } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+    expect(after).toBeNull();
+    // The converted session itself is untouched.
+    const { result: current } = await inRequest({ access_token: first!.token }, () =>
+      auth.getSession(first!.token as string, UA),
+    );
+    expect(current!.user.id).toBe(1);
+  });
+
+  test("the old token does not outlive signing out of the new session", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    const { result } = await inRequest({ access_token: legacy }, () => auth.getSession(legacy, UA));
+    await provider.deleteSession({ token: result!.token as string });
+
+    const { result: again } = await inRequest({ access_token: legacy }, () =>
+      auth.getSession(legacy, UA),
+    );
+    expect(again).toBeNull();
+    expect(newRows()).toEqual([]);
+  });
+
+  test("requests converting the same token at once all land in one session", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    // Every request reads the old row before any of them writes.
+    const findSession = provider.findSession.bind(provider);
+    let reads = 0;
+    let release!: () => void;
+    const allRead = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(provider, "findSession").mockImplementation(async (args) => {
+      const found = await findSession(args);
+      if (args.token === legacy && ++reads === 3) release();
+      if (args.token === legacy) await allRead;
+      return found;
+    });
+
+    const results = await Promise.all(
+      [1, 2, 3].map(() =>
+        inRequest({ access_token: legacy }, () => auth.getSession(legacy, UA)),
+      ),
+    );
+
+    const tokens = new Set(results.map(({ result }) => result!.token));
+    expect(tokens.size).toBe(1);
+    expect(newRows()).toEqual([...tokens]);
+    for (const { cookies } of results) expect(accessTokenCookie(cookies)).toBe([...tokens][0]);
+    expect(provider.rows.has(legacy)).toBe(false);
+  });
+
+  test("outside a request nothing is converted", async () => {
+    const legacy = seedLegacy(1, "a@example.com");
+    expect(await auth.getSession(legacy, UA)).toBeNull();
+    expect(provider.rows.has(legacy)).toBe(true);
+    expect(asked).toEqual([]);
+  });
+
+  test("a v2 token never reaches the app's function", async () => {
+    const { result: session } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    const { result } = await inRequest({ access_token: session.token }, () =>
+      auth.getSession(session.token as string, UA),
+    );
+    expect(result!.user.id).toBe(1);
+    expect(asked).toEqual([]);
   });
 });

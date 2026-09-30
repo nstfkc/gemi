@@ -7420,6 +7420,7 @@ a binding into the container, and a facade resolves it.**
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
+| `migrateLegacySession` | `(session, { token, req, userAgent }) => boolean \| Promise<boolean>` \| `null` | `null` | Converts a session token from before 0.64 instead of refusing it. See [Converting sessions from before 0.64](#converting-sessions-from-before-064). |
 | `redirectPath` | `string` | `"/dashboard"` | Where to send users after a successful login when there is no [intended URL](#returning-to-the-intended-page) — the fallback of `Auth.intendedUrl()` and of the OAuth callback's `redirectTo`. |
 | `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
@@ -7448,7 +7449,65 @@ looked up, not verified against the secret, so changing the secret changes new t
 signs nobody out.
 
 Tokens issued before 0.64 were derived from the email and the User-Agent and could be
-computed. They are refused, so their users sign in again; see [UPGRADE.md](../UPGRADE.md).
+computed. They are refused without being looked up, so their users sign in again; see
+[UPGRADE.md](../UPGRADE.md) — unless the app converts them, below.
+
+The token helpers are exported from `gemi/services`, for code that writes session rows of its
+own (an import, a fixture, a migration of your own) and should mint exactly what a sign-in
+does:
+
+```typescript
+import { AuthManager, SESSION_TOKEN_PREFIX, isSessionToken, mintSessionToken } from "gemi/services";
+
+const token = mintSessionToken(user.id); // "v2." + 64 hex characters; needs SECRET
+isSessionToken(token); // true — the prefix is the whole test
+```
+
+The cookie such a token is written as comes from `AuthManager.accessTokenCookieOptions(req,
+expiresAt)`, which every `access_token` write in gemi goes through (`Secure` from the scheme
+the client addressed, `HttpOnly`, and `cookieDomain`).
+
+#### Converting sessions from before 0.64
+
+Signing everybody out on the upgrade is not always acceptable. `migrateLegacySession` converts
+an old token on its first use instead: gemi looks it up with `findSession`, hands a row that
+has a user to your function, and on `true` writes the session again under a new `v2.` token
+with a fresh lifetime, deletes the old row, and sends the new token as the `access_token`
+cookie on that response — whether the old one came as the cookie or the header.
+
+```typescript
+// app/config/auth.ts
+const SUNSET = new Date("2026-11-01T00:00:00Z");
+
+export default defineAuthConfig({
+  // Remove once the sunset has passed; old tokens are then refused unread again.
+  migrateLegacySession: (session) =>
+    Date.now() < SUNSET.getTime() &&
+    new Date(session.absoluteExpiresAt).getTime() > Date.now(),
+});
+```
+
+- **Your function decides what is too old.** Before 0.64 nothing enforced or extended
+  `expiresAt`, so a row in daily use can carry one long past; gemi does not refuse on it.
+  The example above keeps the rows whose absolute cap has not passed; drop that check if
+  your rows' caps are no better a signal than their `expiresAt`. A converted session gets the
+  lifetime a sign-in gets, `sessionAbsoluteExpiresInHours` from the conversion.
+- **Single use.** The old row is gone once converted, so the old token cannot convert twice.
+  It keeps resolving to the converted session for 10 to 20 minutes, for requests that were
+  already in flight with it or a client that lost the response carrying the new cookie,
+  and then grants nothing.
+- **Concurrent requests share one session.** Requests converting the same token at once all
+  land in the same new session, and all of them send its cookie. That is why a converted
+  token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
+  window), so every request converting it computes the same one, and nobody without `SECRET`
+  can.
+- **Only inside a request.** Outside one — a broadcasting connection — there is no response
+  to carry the new cookie, so the token is refused until the client's next request converts it.
+- **A client that sends the `access_token` header** has to take the new token from the
+  response's `Set-Cookie`, as it does on every sign-in; otherwise it is signed out when the
+  grace window ends.
+- Without the option — the default — a token without the `v2.` prefix is refused before any
+  lookup, exactly as before.
 
 Signing out deletes the row for the token the request carried, whether it arrived as the
 cookie or the `access_token` header, and clears the cookie. It answers `{}` even when there

@@ -122,6 +122,14 @@ export { AuthServiceProvider } from "../auth/AuthServiceProvider";
 // the only supported way to install one — `AuthConfig` has no field for it —
 // and `docs/authentication.md` documents it against this entrypoint.
 export { AuthManager } from "../auth/AuthManager";
+// For an application that writes session rows of its own — a migration, an
+// import, a test fixture — rather than copying the crypto and the prefix (#621).
+// Every `v2.` token is looked up, so one minted here is as good as a sign-in's.
+export {
+  SESSION_TOKEN_PREFIX,
+  isSessionToken,
+  mintSessionToken,
+} from "../auth/sessionToken";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
 export { OAuthProvider } from "../auth/oauth/OAuthProvider";
@@ -277,6 +285,7 @@ export {
   defineAuthConfig,
   authConfigDefaults,
   type AuthConfig,
+  type LegacySessionMigrator,
 } from "../auth/config";
 export {
   defineTranslationConfig,

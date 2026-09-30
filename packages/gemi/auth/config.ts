@@ -1,8 +1,22 @@
 import { randomBytes } from "node:crypto";
 import type { HttpRequest } from "../http/HttpRequest";
-import type { User } from "./types";
+import type { SessionWithUser, User } from "./types";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
 import { SignUpRequest } from "./requests";
+
+/**
+ * Decides whether a pre-0.64 session is converted to a `v2.` one. See
+ * `AuthConfig.migrateLegacySession`.
+ */
+export type LegacySessionMigrator = (
+  session: SessionWithUser,
+  ctx: {
+    /** The old token, as the request carried it. */
+    token: string;
+    req: HttpRequest<any, any>;
+    userAgent: string;
+  },
+) => boolean | Promise<boolean>;
 
 // Config key: `auth`.
 export interface AuthConfig {
@@ -35,6 +49,32 @@ export interface AuthConfig {
    * cookie to the host that set it.
    */
   cookieDomain?: "root" | (string & {}) | null;
+
+  /**
+   * Converts a session token from before 0.64 instead of refusing it, so an
+   * upgrade need not sign everybody out. `null`, the default, refuses such a
+   * token without looking it up, as `getSession` always has.
+   *
+   * When set, a token without the `v2.` prefix is looked up with
+   * `findSession`; a row that has a user is handed to this function, and
+   * `true` converts it. The conversion is gemi's, not the function's: the
+   * session is written again under a minted `v2.` token with a fresh lifetime,
+   * the old row is deleted, and the new token goes out as the `access_token`
+   * cookie on this response — whether the old one arrived as the cookie or as
+   * the header. The old token keeps resolving to the new session for 10 to 20
+   * minutes, for requests already in flight with it, and then grants nothing.
+   *
+   * The row's expiry is not checked for you. Before 0.64 nothing enforced or
+   * extended `expiresAt`, so a row in daily use can carry one long past; decide
+   * here what is too old, from `session.absoluteExpiresAt` or your own columns.
+   * This is also where a sunset belongs — answer `false` after it — and once
+   * it has passed, remove the option.
+   *
+   * Only a request is converted: outside one, as on a broadcasting
+   * connection, there is no response to carry the new cookie, and the token is
+   * refused until the client's next request converts it.
+   */
+  migrateLegacySession?: LegacySessionMigrator | null;
 
   signUpRequest?: new () => HttpRequest<any, any>;
   oauthProviders?: Record<string, OAuthProvider>;
@@ -143,6 +183,7 @@ export function authConfigDefaults(
     sessionExpiresInHours: 24,
     sessionAbsoluteExpiresInHours: 24 * 7 * 4,
     cookieDomain: null,
+    migrateLegacySession: null,
 
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},

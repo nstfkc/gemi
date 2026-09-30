@@ -520,6 +520,11 @@ in once more after the deploy and gets a minted token.
 If your native app has no path back to its sign-in screen when a request
 answers `401`, ship one before you deploy.
 
+If signing everybody out is not acceptable, a later release lets the app convert
+the old tokens on first use instead: set `auth.migrateLegacySession`, described in
+[Authentication](./docs/authentication.md#converting-sessions-from-before-064),
+and delete the rows below once its sunset has passed.
+
 The old rows grant nothing, but they still hold computable tokens. Delete
 them:
 
