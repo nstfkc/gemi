@@ -166,6 +166,7 @@ export type {
   AttachmentScope,
   AttachmentStorage,
   AttachmentStore,
+  AuthorizeRequestParams,
   LiveRuns,
   PutAttachmentParams,
   ToolAttachmentPut,

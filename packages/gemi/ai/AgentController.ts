@@ -1,5 +1,6 @@
 import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
+import { RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
@@ -255,6 +256,20 @@ const pendingTurns = new Map<string, { cancelled: boolean }>();
  */
 declare const BODY: unique symbol;
 
+/**
+ * What `authorizeRequest` is told about the request, per route.
+ *
+ * A union on `route` because `body` exists on only two of them: `stream` and
+ * `upload` carry the client's `body` option, `attach` and `stop` carry none.
+ * Typing it optional everywhere would make every reader of `body.pageId` on
+ * `stream` write a check for a case that cannot happen there; narrowing on
+ * `route` says which case it is. An override written against the older
+ * `{ route; threadId? }` shape still accepts every member.
+ */
+export type AuthorizeRequestParams<Body extends object = Record<string, unknown>> =
+  | { route: "stream" | "upload"; threadId?: string; body: Body }
+  | { route: "attach" | "stop"; threadId?: string; body?: undefined };
+
 export abstract class AgentController<
   A extends AnyAgent = AnyAgent,
   /**
@@ -431,10 +446,18 @@ export abstract class AgentController<
    * keeps a thread's live answer, its stop button and its attachments to its
    * owner. It is `undefined` when the request names no thread: a stateless
    * turn, an upload without one, a stop by `runId` or `clientRunId`.
+   *
+   * `body` is the client's `body` option — the same object `instructions()`,
+   * `context()` and `attachmentScope()` get — on the two routes that carry it,
+   * `stream` and `upload` (#603). A chat with no thread and no user names its
+   * subject there (a page id, say), and this is where to check that the caller
+   * may touch it. `attach` and `stop` carry no body, so it is absent on them;
+   * narrow on `route` to read it. Like `threadId` it is the client's claim,
+   * unchecked.
    */
   protected authorizeRequest(
     req: HttpRequest<any, any>,
-    params: { route: "stream" | "attach" | "stop" | "upload"; threadId?: string },
+    params: AuthorizeRequestParams<Body>,
   ): void | Promise<void> {
     void req;
     void params;
@@ -460,6 +483,11 @@ export abstract class AgentController<
     }
     const turn = parsedTurn.turn;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
+    // The app's fields, separated once and handed to every method that reads
+    // them — `authorizeRequest`, `instructions`, `context`, `attachmentScope` —
+    // so none of them can disagree about what the client sent. They cannot read
+    // it themselves: `readJsonBody` has consumed the request's body by now.
+    const extraBody = appBody<Body>(body);
 
     // Before `pendingTurns`, so a refused turn leaves nothing for `/stop` to
     // find. It does not yield, unlike `authorizeRequest` below.
@@ -530,7 +558,6 @@ export abstract class AgentController<
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
       }
 
-      const extraBody = appBody<Body>(body);
       const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
       const context = await this.context(req, { body: extraBody });
       // Above the cancel check, not below it, and that placement is the whole
@@ -539,7 +566,7 @@ export abstract class AgentController<
       // `register`, and an `await` for the app's `attachmentScope()` — a
       // database read, in any app that has one — is exactly the yield a stop
       // would land in and be missed.
-      const attachments = await this.attachmentsFor(req, threadId);
+      const attachments = await this.attachmentsFor(req, threadId, { body: extraBody });
 
       if (pending?.cancelled) {
         // Stopped while it waited. Nothing has been asked of the model and
@@ -626,7 +653,7 @@ export abstract class AgentController<
       // a database read, typically — and a stop pressed during it has to find
       // this turn. Before the thread's lock, which ends the thread's previous
       // run, so a refused or stopped turn does not end it either.
-      await this.authorizeRequest(req, { route: "stream", threadId });
+      await this.authorizeRequest(req, { route: "stream", threadId, body: extraBody });
       if (pending?.cancelled) {
         return stoppedBeforeStart();
       }
@@ -917,13 +944,62 @@ export abstract class AgentController<
    * exist here — not even behind a `console.warn`. So the answer is the
    * documentation you are reading and the identical error, not a probe.
    *
+   * THE BODY, AND THE ONE RULE FOR READING IT (#603). The third argument is the
+   * client's `body` option — what `instructions()` gets — on both routes that
+   * resolve a scope: `stream`, and `upload`, where `useChat.uploadFile` sends
+   * the same option beside the file. It exists for the chat that has neither a
+   * user nor a thread, a stateless page builder say, whose subject is only in
+   * the body:
+   *
+   *   protected async attachmentScope(req, threadId, { body }) {
+   *     const scope = await super.attachmentScope(req, threadId);
+   *     if (scope) return scope;
+   *     if (typeof body.pageId !== "string") return null;
+   *     const page = await Page.findFirst({ where: { publicId: body.pageId } });
+   *     return page ? { key: `page:${page.publicId}` } : null;
+   *   }
+   *
+   * The `typeof` line is not tidiness. `Body` types the shape, not the contents,
+   * and to an ORM `{ publicId: undefined }` is no filter at all: a request that
+   * leaves `pageId` out would find the first page in the table and be filed
+   * under it, along with every other request that leaves it out.
+   *
+   * A body field is a value the caller chose, which is exactly what the
+   * `sessionId()` paragraph above refuses. What separates the keys this may be
+   * built from is not whether the client sent them — `threadId` is sent by the
+   * client too — but WHETHER THE VALUE IS AN UNGUESSABLE CAPABILITY WHOSE
+   * EXISTENCE THE SERVER CHECKS. A page `publicId` that is looked up, as above,
+   * is one, on the same footing as a `threadId` that `loadThread` finds: holding
+   * it is what entitles the caller to the page, and an id nobody minted resolves
+   * to nothing. `body.orgId` in an app with users is NOT one, and passing the
+   * body is precisely what makes `` { key: `org:${body.orgId}` } `` spellable: an
+   * org id is enumerable and the caller may not belong to that org, so that is
+   * every tenant's files handed to whoever types another tenant's id. A tenant
+   * comes from `req.ctx().user`, never from here. And a value interpolated
+   * without being looked up is the `sessionId()` mistake again, however
+   * unguessable it looks — an anonymous caller then mints a fresh scope per
+   * request. Look it up, and key on what the lookup returned.
+   *
+   * The same skew rule as above applies to the body, and more quietly: the key
+   * must come out the same on `upload` and on `stream`. `useChat` sends the one
+   * `body` option to both, so a key derived from a field that stays put for the
+   * whole conversation — the page, not the selected element — agrees by
+   * construction. One derived from a field that changes between the upload and
+   * the turn does not, and fails as that same `AttachmentNotFoundError`.
+   *
+   * The third argument is new, and the method keeps its first two, so an
+   * override written as `attachmentScope(req, threadId)` works unchanged; one
+   * that calls `super.attachmentScope(req, threadId)` may leave it off too.
+   *
    * The key is opaque and compared with `===`. It is never sent to the client
    * and never shown to the model.
    */
   protected attachmentScope(
     req: HttpRequest<any, any>,
     threadId?: string,
+    extra?: { body: Body },
   ): AttachmentScope | null | Promise<AttachmentScope | null> {
+    void extra;
     const user = req.ctx()?.user;
     const userId = user?.id ?? user?.publicId;
     if (userId !== undefined && userId !== null && String(userId) !== "") {
@@ -990,8 +1066,9 @@ export abstract class AgentController<
   protected async attachmentsFor(
     req: HttpRequest<any, any>,
     threadId?: string,
+    extra: { body: Body } = { body: {} as Body },
   ): Promise<ScopedAttachments | null> {
-    const scope = await this.attachmentScope(req, threadId);
+    const scope = await this.attachmentScope(req, threadId, extra);
     if (!scope) {
       return null;
     }
@@ -1033,6 +1110,13 @@ export abstract class AgentController<
     const name = file instanceof File && file.name ? file.name : "upload";
     const mimeType = file.type || "application/octet-stream";
 
+    // The client's `body` option, as one JSON part beside the file (#603), so
+    // `authorizeRequest` and `attachmentScope` see here what they see on
+    // `stream`. Read off the form already parsed: the request's body is
+    // consumed, and an override cannot read it again. A malformed part is
+    // refused before anything else runs, as a malformed turn is on `stream`.
+    const extraBody = uploadAppBody<Body>(form.get("body"));
+
     // The client's thread, read here only so an unauthenticated chat has
     // something to scope to. It is the client's own handle — `stream` already
     // takes it on trust for the whole conversation — and it is not the model's:
@@ -1049,6 +1133,7 @@ export abstract class AgentController<
     await this.authorizeRequest(req, {
       route: "upload",
       threadId: typeof threadField === "string" && threadField.length > 0 ? threadField : undefined,
+      body: extraBody,
     });
     const threadId =
       typeof threadField === "string" &&
@@ -1060,7 +1145,7 @@ export abstract class AgentController<
     const policy = await this.attachmentDestination(file as File, req);
     const destination = narrowDestination(policy, form.get("destination"));
 
-    const scope = await this.attachmentScope(req, threadId);
+    const scope = await this.attachmentScope(req, threadId, { body: extraBody });
 
     // The app's policy wanted a copy of these bytes and the request has no
     // subject to file them under. Recorded rather than merely warned about,
@@ -1449,10 +1534,12 @@ const BARE_TURN_KEYS = ["text", "files", "toolResults"] as const;
  * reader to move a line above this one should not have to know that the body
  * was quietly hollowed out.
  */
-function appBody<Body extends object>(body: Record<string, any>): Body {
-  const reserved: readonly string[] = hasTurnEnvelope(body)
+function appBody<Body extends object>(
+  body: Record<string, any>,
+  reserved: readonly string[] = hasTurnEnvelope(body)
     ? ENVELOPE_KEYS
-    : [...ENVELOPE_KEYS, ...BARE_TURN_KEYS];
+    : [...ENVELOPE_KEYS, ...BARE_TURN_KEYS],
+): Body {
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     if (reserved.includes(key)) continue;
@@ -1469,6 +1556,57 @@ function appBody<Body extends object>(body: Record<string, any>): Body {
     });
   }
   return extra as Body;
+}
+
+/**
+ * The app's fields from an upload's `body` form part — the JSON of
+ * `useChat`'s `body` option — in the shape `stream` hands out.
+ *
+ * One JSON part rather than a form field per key: a form field is a string, so
+ * `{ count: 3 }` would arrive as `"3"` and `Body` would lie on this route and
+ * not the other. A missing part is `{}`, as a turn with no app fields is.
+ *
+ * Only the envelope's four names are taken back out, not the bare-turn ones:
+ * `useChat` always sends a `turn` envelope, so on `stream` an app's `text` is
+ * the app's, and it has to be here as well.
+ *
+ * Anything else — a file where the JSON should be, JSON that does not parse,
+ * JSON that is not an object — is a 400, not `{}`. Read as empty, the scope
+ * would quietly resolve to `null` and the upload downgrade, and the reason
+ * would be a missing page rather than a broken client.
+ */
+function uploadAppBody<Body extends object>(part: FormDataEntryValue | null): Body {
+  if (part === null) {
+    return {} as Body;
+  }
+  let parsed: unknown;
+  if (typeof part === "string") {
+    try {
+      parsed = JSON.parse(part);
+    } catch {
+      throw new InvalidUploadError("The upload's `body` field is not valid JSON.");
+    }
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new InvalidUploadError("The upload's `body` field must be a JSON object.");
+  }
+  return appBody<Body>(parsed as Record<string, any>, ENVELOPE_KEYS);
+}
+
+/**
+ * A 400 from `upload`, which answers `UploadResult` and so rejects by throwing.
+ * The payload is the shape `stream`'s own 400s have, so a client reads both the
+ * same way.
+ */
+class InvalidUploadError extends RequestBreakerError {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidUploadError";
+    this.payload = {
+      api: { status: 400, data: { error: { code: "invalid_request", message } } },
+      view: {},
+    };
+  }
 }
 
 /**

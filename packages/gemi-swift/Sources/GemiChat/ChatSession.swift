@@ -470,6 +470,18 @@ public final class ChatSession<Agent: AgentSchema> {
   public func upload(_ data: Data, name: String, mimeType: String) async throws -> ChatUpload {
     let boundary = "gemi-\(UUID().uuidString)"
     var form = Data()
+    // `body`, as one JSON part beside the file, so the controller's
+    // `attachmentScope` and `authorizeRequest` see on an upload what they see
+    // on a turn (gemi #603). JSON rather than a part per key, so a number is
+    // still a number on arrival. Left out when empty, which the server reads
+    // the same way.
+    if !body.isEmpty {
+      form.append(Data("--\(boundary)\r\n".utf8))
+      form.append(Data("Content-Disposition: form-data; name=\"body\"\r\n".utf8))
+      form.append(Data("Content-Type: application/json\r\n\r\n".utf8))
+      form.append(try JSONValue.object(body).jsonData())
+      form.append(Data("\r\n".utf8))
+    }
     form.append(Data("--\(boundary)\r\n".utf8))
     // Escaped as `FormData` escapes it: a quote would end the filename early,
     // and a line break would start a header of the file's own choosing.

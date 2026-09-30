@@ -1724,7 +1724,7 @@ describe("refusing a turn", () => {
       InsufficientPermissionsError,
     );
 
-    expect(seen).toEqual([{ route: "stream", threadId }]);
+    expect(seen).toEqual([{ route: "stream", threadId, body: {} }]);
     // Ahead of the load: a refused caller does not learn whether it exists.
     expect(loaded).toBe(false);
     expect(calls).toHaveLength(0);
@@ -1821,7 +1821,7 @@ describe("refusing a turn", () => {
     expect(seen).toEqual([
       { route: "attach", threadId },
       { route: "stop", threadId },
-      { route: "upload", threadId },
+      { route: "upload", threadId, body: {} },
     ]);
     expect(loaded).toBe(false);
     expect(run.stopped).toBe(false);
@@ -2637,5 +2637,252 @@ describe("a turn written as it runs", () => {
       }));
     expect(shape(threaded)).toEqual(shape(stateless));
     expect(JSON.stringify(threaded)).not.toMatch(/interrupted/);
+  });
+});
+
+/**
+ * #603. A stateless chat with no user names its subject only in `body` — a page
+ * builder posting `{ pageId }` — so `attachmentScope` and `authorizeRequest`
+ * are handed that body, on `stream` and on `upload` both.
+ */
+describe("the client's body reaches attachmentScope and authorizeRequest", () => {
+  /** The pages that exist. A `publicId` is a capability: holding it is access. */
+  const PAGES = new Set(["pg_live"]);
+
+  /**
+   * The documented pattern: the id is looked up, and the key is built from what
+   * the lookup returned — never interpolated straight from the body.
+   */
+  function PageChat(agent: any) {
+    return class extends AgentController<any, { pageId?: string; selected?: string }> {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage: FakeStorage = new FakeStorage();
+      scopeCalls: unknown[][] = [];
+      authorized: unknown[] = [];
+
+      protected async attachmentScope(
+        req: HttpRequest<any, any>,
+        threadId?: string,
+        extra?: { body: { pageId?: string } },
+      ) {
+        this.scopeCalls.push([threadId, extra]);
+        const scope = await super.attachmentScope(req, threadId);
+        if (scope) return scope;
+        const pageId = extra?.body.pageId;
+        return pageId && PAGES.has(pageId) ? { key: `page:${pageId}` } : null;
+      }
+
+      protected authorizeRequest(_req: HttpRequest<any, any>, params: unknown) {
+        this.authorized.push(params);
+      }
+    };
+  }
+
+  function uploadWithBody(body: unknown, f = file("hero.png", "image/png", "PNG")) {
+    const form = new FormData();
+    form.set("body", typeof body === "string" ? body : JSON.stringify(body));
+    return uploadRequest(f, form);
+  }
+
+  test("stream hands both the app's fields, with the envelope taken out", async () => {
+    const run = new StubAgentRun("run_603a");
+    const { agent, calls } = stubAgent(run);
+    const Chat = PageChat(agent);
+    const controller = new Chat();
+
+    await controller.stream(
+      jsonRequest({ turn: { text: "hi" }, clientRunId: "c1", pageId: "pg_live", text: "mine" }),
+    );
+    run.finish();
+
+    // `text` is the app's here: the turn came in an envelope.
+    const body = { pageId: "pg_live", text: "mine" };
+    expect(controller.authorized).toEqual([{ route: "stream", threadId: undefined, body }]);
+    expect(controller.scopeCalls).toEqual([[undefined, { body }]]);
+    // The same object instructions and the tools get, so they cannot disagree.
+    expect((controller.scopeCalls[0]![1] as { body: unknown }).body).toBe(calls[0]!.body);
+    expect(calls[0]!.attachments).not.toBeNull();
+  });
+
+  test("upload parses its body part into the same shape and hands it over", async () => {
+    const run = new StubAgentRun("run_603b");
+    const { agent } = stubAgent(run);
+    const Chat = PageChat(agent);
+    const controller = new Chat();
+
+    const result = await controller.upload(
+      uploadWithBody({ pageId: "pg_live", count: 3, threadId: "not-a-thread", text: "mine" }),
+    );
+
+    // The envelope's names are the framework's on this route too, so an app
+    // field called `threadId` never shows up here and not on `stream`. `text`
+    // is kept, as it is on an enveloped turn.
+    const body = { pageId: "pg_live", count: 3, text: "mine" };
+    expect(controller.authorized).toEqual([{ route: "upload", threadId: undefined, body }]);
+    expect(controller.scopeCalls).toEqual([[undefined, { body }]]);
+    expect(result.attachmentId).toMatch(/^gemi_att_/);
+    expect(result.downgraded).toBeUndefined();
+    run.finish();
+  });
+
+  test("an upload and the turn after it, both naming the page, resolve the same file", async () => {
+    // The whole feature: no user, no thread, and the id minted on upload is one
+    // a tool of the next turn can read. Neither route could see the page before.
+    const run = new StubAgentRun("run_603c");
+    const { agent, calls } = stubAgent(run);
+    const controller = new (PageChat(agent))();
+
+    const upload = await controller.upload(uploadWithBody({ pageId: "pg_live" }));
+    await controller.stream(
+      jsonRequest({ turn: { text: "use it" }, pageId: "pg_live", selected: "hero" }),
+    );
+    run.finish();
+
+    const file = await calls[0]!.attachments!.file(upload.attachmentId!);
+    expect(await file.text()).toBe("PNG");
+  });
+
+  test("a scope derived from a different body is a miss, not a leak", async () => {
+    const run = new StubAgentRun("run_603d");
+    const { agent, calls } = stubAgent(run);
+    PAGES.add("pg_other");
+    const controller = new (PageChat(agent))();
+
+    const upload = await controller.upload(uploadWithBody({ pageId: "pg_live" }));
+    await controller.stream(jsonRequest({ turn: { text: "x" }, pageId: "pg_other" }));
+    run.finish();
+    PAGES.delete("pg_other");
+
+    await expect(calls[0]!.attachments!.file(upload.attachmentId!)).rejects.toBeInstanceOf(
+      AttachmentNotFoundError,
+    );
+  });
+
+  test("a page nobody minted is no scope, so the upload downgrades as before", async () => {
+    const run = new StubAgentRun("run_603e");
+    const { agent } = stubAgent(run);
+    const controller = new (PageChat(agent))();
+
+    const result = await controller.upload(uploadWithBody({ pageId: "pg_invented" }));
+    expect(result.attachmentId).toBeUndefined();
+    expect(result.downgraded).toBe("no_scope");
+    run.finish();
+  });
+
+  test("no body part is an empty body, and the upload is what it was", async () => {
+    const run = new StubAgentRun("run_603f");
+    const { agent } = stubAgent(run);
+    const controller = new (PageChat(agent))();
+
+    const result = await controller.upload(uploadRequest(file("a.png", "image/png", "PNG")));
+    expect(controller.scopeCalls).toEqual([[undefined, { body: {} }]]);
+    expect(controller.authorized).toEqual([{ route: "upload", threadId: undefined, body: {} }]);
+    expect(result.downgraded).toBe("no_scope");
+    run.finish();
+  });
+
+  test.each([
+    ["JSON that does not parse", "{pageId:", /not valid JSON/],
+    ["an array", "[1,2]", /must be a JSON object/],
+    ["null", "null", /must be a JSON object/],
+    ["a string", '"pg_live"', /must be a JSON object/],
+  ])(
+    "a body part that is %s is a 400, before authorization and before any bytes move",
+    async (_, part, message) => {
+      const run = new StubAgentRun("run_603g");
+      const { agent, uploads } = stubAgent(run);
+      const controller = new (PageChat(agent))();
+
+      const error = await controller.upload(uploadWithBody(part)).catch((err) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(message);
+      // A request breaker, so the router answers it as a 400 in the shape
+      // `stream`'s own 400s have, not as a 500.
+      expect(error.payload.api).toEqual({
+        status: 400,
+        data: { error: { code: "invalid_request", message: error.message } },
+      });
+      expect(controller.authorized).toEqual([]);
+      expect(controller.scopeCalls).toEqual([]);
+      expect(uploads).toHaveLength(0);
+      expect(controller.attachmentStorage.objects.size).toBe(0);
+      run.finish();
+    },
+  );
+
+  test("a file where the body part should be is a 400 too", async () => {
+    const run = new StubAgentRun("run_603h");
+    const { agent } = stubAgent(run);
+    const controller = new (PageChat(agent))();
+    const form = new FormData();
+    form.set("body", file("body.json", "application/json", '{"pageId":"pg_live"}'));
+
+    await expect(
+      controller.upload(uploadRequest(file("a.png", "image/png", "PNG"), form)),
+    ).rejects.toThrow(/must be a JSON object/);
+    run.finish();
+  });
+
+  test("the body arrives as an argument because the request's own is spent", async () => {
+    // The ordering this change exists for: by the time either method runs, the
+    // route has read the body, and reading it again throws. The argument is
+    // the only way to it.
+    const run = new StubAgentRun("run_603i");
+    const { agent } = stubAgent(run);
+    const spent: boolean[] = [];
+    class Chat extends PageChat(agent) {
+      protected async attachmentScope(
+        req: HttpRequest<any, any>,
+        threadId?: string,
+        extra?: { body: { pageId?: string } },
+      ) {
+        spent.push(req.rawRequest.bodyUsed);
+        return super.attachmentScope(req, threadId, extra);
+      }
+    }
+    const controller = new Chat();
+
+    await controller.stream(jsonRequest({ turn: { text: "hi" }, pageId: "pg_live" }));
+    await controller.upload(uploadWithBody({ pageId: "pg_live" }));
+    run.finish();
+
+    expect(spent).toEqual([true, true]);
+    expect(controller.scopeCalls.map((c) => (c[1] as { body: unknown }).body)).toEqual([
+      { pageId: "pg_live" },
+      { pageId: "pg_live" },
+    ]);
+  });
+
+  test("the pre-#603 workaround, cloning the body in a stream override, keeps working", async () => {
+    // What kyte shipped while this was open. An app upgrading must not break
+    // before it gets round to deleting it.
+    const run = new StubAgentRun("run_603j");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+      private pageId?: string;
+
+      async stream(req: HttpRequest<any, any>) {
+        this.pageId = (await req.rawRequest.clone().json())?.pageId;
+        return super.stream(req);
+      }
+
+      protected async attachmentScope() {
+        return this.pageId ? { key: `page:${this.pageId}` } : null;
+      }
+    }
+
+    const response = await new Chat().stream(
+      jsonRequest({ turn: { text: "hi" }, pageId: "pg_live" }),
+    );
+    run.finish();
+    expect(response.status).toBe(200);
+    expect(calls[0]!.body).toEqual({ pageId: "pg_live" });
+    expect(calls[0]!.attachments).not.toBeNull();
   });
 });

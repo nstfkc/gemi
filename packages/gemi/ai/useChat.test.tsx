@@ -2081,3 +2081,55 @@ describe("an app body that collides with the turn envelope", () => {
     expect(rawBodyOf(0).pageId).toBe("page_7");
   });
 });
+
+/**
+ * #603. A chat with no user and no thread names its subject only in `body`, so
+ * the upload has to carry it too, or `attachmentScope` sees a page on `stream`
+ * and nothing on `/files`.
+ */
+describe("uploadFile sends the body option", () => {
+  test("as one JSON part beside the file, the same object a turn carries", async () => {
+    const { box } = mount({ attach: false, body: { pageId: "pg_1", count: 3 } });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(new File(["x"], "a.png", { type: "image/png" }));
+    });
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const form = calls()[0]![1]!.body as FormData;
+    expect(form.get("file")).toBeInstanceOf(File);
+    // A number stays a number: the part is JSON, not a field per key.
+    expect(JSON.parse(form.get("body") as string)).toEqual({ pageId: "pg_1", count: 3 });
+    expect(bodyOf(1)).toMatchObject({ pageId: "pg_1", count: 3 });
+  });
+
+  test("the current body, not the one the hook mounted with", async () => {
+    const box: { api: Api } = { api: null as unknown as Api };
+    function Harness({ pageId }: { pageId: string }) {
+      box.api = (useChat as any)("/chat", { attach: false, body: { pageId } });
+      return null;
+    }
+    const rendered = render(<Harness pageId="pg_1" />);
+    rendered.rerender(<Harness pageId="pg_2" />);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(new File(["x"], "a.png", { type: "image/png" }));
+    });
+
+    const form = calls()[0]![1]!.body as FormData;
+    expect(JSON.parse(form.get("body") as string)).toEqual({ pageId: "pg_2" });
+  });
+
+  test("no body option, no part: the upload is what it was", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(new File(["x"], "a.png", { type: "image/png" }));
+    });
+
+    const form = calls()[0]![1]!.body as FormData;
+    expect([...form.keys()]).toEqual(["file"]);
+  });
+});

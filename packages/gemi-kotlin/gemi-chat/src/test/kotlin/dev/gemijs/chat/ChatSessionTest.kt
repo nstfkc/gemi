@@ -436,6 +436,27 @@ class ChatSessionTest {
     val form = request.body.decodeToString()
     assertTrue(form.contains("""name="file"; filename="invoice.pdf""""))
     assertTrue(form.contains("%PDF"))
+    // No `body`, no part: the upload is what it was before gemi #603.
+    assertTrue(!form.contains("""name="body""""))
+  }
+
+  /** gemi #603: the controller's `attachmentScope` reads the page off the body
+   *  on an upload too, so the body travels with the file, as one JSON part. */
+  @Test
+  fun anUploadCarriesTheBodyAsOneJsonPart() = runTest {
+    val transport = FakeTransport { jsonResponse(200, """{"fileId":"file_1"}""") }
+    val chat = session(transport, body = jsonOf("""{"pageId":"pg_1","count":3}""").body)
+
+    chat.upload("PNG".toByteArray(), "a.png", "image/png")
+
+    val form = transport.requests[0].request.body.decodeToString()
+    assertTrue(
+      form.contains(
+        "Content-Disposition: form-data; name=\"body\"\r\nContent-Type: application/json\r\n\r\n{\"pageId\":\"pg_1\",\"count\":3}\r\n",
+      ),
+      form,
+    )
+    assertTrue(form.contains("""name="file"; filename="a.png""""))
   }
 
   @Test
