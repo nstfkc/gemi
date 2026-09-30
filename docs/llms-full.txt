@@ -3247,6 +3247,10 @@ you want to keep it). It must keep the same shape as the current data: return an
 object when the data is an object, an array when it's an array. After the optimistic
 write, `mutate` always refetches so the cache reconciles with the server.
 
+Passed straight to an event handler — `onClick={mutate}` — `mutate` receives the
+event, not data. An event is ignored and the call is a plain refetch, the same as
+`mutate()`. Prefer `refetch` for that, which says what it does.
+
 `mutate(fn)` on a query whose data hasn't loaded yet (including a `lazy` query) has
 nothing to update optimistically, so it falls through to a refetch rather than doing
 nothing.
@@ -3366,7 +3370,7 @@ These hooks return:
 
 | field | description |
 | --- | --- |
-| `trigger(input?)` | Fire the request. `input` may be a typed JSON body or a `FormData`; returns the response. |
+| `trigger(input?)` | Fire the request. `input` may be a typed JSON body or a `FormData`. Resolves to the response body, or `undefined` when there is none (see below) — it never rejects. |
 | `trigger.formData(fd)` | Convenience for submitting a `FormData`. |
 | `data` | The response body after success. |
 | `error` | A `MutationError` on failure (see below). |
@@ -3377,6 +3381,31 @@ These hooks return:
 Options mirror the query hooks — `{ params, search }` in the second argument (e.g.
 `usePatch("/todos/:id", { params: { id } })`), and a config object (`onSuccess`,
 `onError`, `onCanceled`, `autoInvalidate`) in the third.
+
+### What `trigger` resolves to
+
+`trigger` returns `Promise<T | undefined>`. It resolves to the response body on a
+2xx, and to `undefined` when there is no body to hand back:
+
+- a non-2xx response or a network failure — reported through `onError` and
+  `error`, exactly as before;
+- a `cancel()`;
+- a request superseded by a newer `trigger` from the same hook.
+
+It does not reject, so `onClick={() => trigger()}` and `<Form>` never produce an
+unhandled rejection. Narrow the result before reading from it:
+
+```tsx
+const { trigger } = usePost("/todos");
+
+async function onClick() {
+  const todo = await trigger({ title: "Buy milk" });
+  if (!todo) return; // failed, cancelled or superseded; `onError` has the error
+  console.log("created", todo.id);
+}
+```
+
+`useUpload`'s `trigger` follows the same contract.
 
 ### Errors
 
