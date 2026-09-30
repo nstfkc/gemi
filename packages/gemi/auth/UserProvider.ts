@@ -108,6 +108,14 @@ function registryModels(): AuthModels {
   });
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /**
  * The user shape the rest of `auth/` expects on a session.
  *
@@ -154,7 +162,50 @@ const SESSION_USER = {
   },
 } as const;
 
-export class UserProvider {
+/**
+ * The `select` all three session queries — `findSession`, `updateSession` and
+ * `createSessionV2` — run with, unless a provider's `sessionSelect()` returns
+ * another.
+ *
+ * Exported so that an override can **build on it rather than copy it**. A copy
+ * made field for field goes stale silently: it is how an application came to
+ * keep selecting `User.organizationId` after gemi stopped (#346), and a schema
+ * error inside `findSession` is caught and reads as "signed out", not as a bug.
+ * Spread this, and the columns gemi adds later arrive on their own.
+ *
+ * Frozen, because it is shared: assigning into it would change every
+ * provider's session, the default one's included, from wherever the
+ * assignment happened to run.
+ */
+export const SESSION_SELECT = deepFreeze({
+  token: true,
+  expiresAt: true,
+  absoluteExpiresAt: true,
+  updatedAt: true,
+  location: true,
+  userAgent: true,
+  user: SESSION_USER,
+} as const);
+
+/**
+ * What `sessionSelect()` returns: a `select` on `Session`, in the ORM's
+ * grammar. Loose on purpose — the framework does not know an application's
+ * models, so it cannot name their columns. Check an override against them
+ * with `satisfies SelectInput<SessionTypes>` from the app's generated models.
+ */
+export type SessionSelect = { readonly [field: string]: unknown };
+
+/**
+ * `TSession` is the session the three session queries return. It defaults to
+ * `SessionWithUser`, so a provider that does not override `sessionSelect()`
+ * types exactly as before. One that does names the shape its select produces —
+ * derived from the select itself with the ORM's `Payload`, so the type cannot
+ * drift from the query:
+ *
+ *     type AppSession = Payload<SessionTypes, { select: typeof APP_SESSION_SELECT }>;
+ *     class AppUserProvider extends UserProvider<AppSession> { … }
+ */
+export class UserProvider<TSession = SessionWithUser> {
   /**
    * Defaults to the ORM registry, so an application needs no configuration to
    * get working authentication. Pass models explicitly to test against fixtures
@@ -172,6 +223,30 @@ export class UserProvider {
    */
   protected run<T>(fn: () => Promise<T>): Promise<T> {
     return this.models.User.asSystem(fn);
+  }
+
+  /**
+   * **The session query's `select`, shared by `findSession`, `updateSession`
+   * and `createSessionV2`.** Override it to change what a session carries
+   * without owning those queries: select an extra column (`deletedAt`), order
+   * or filter `user.accounts` with an `orderBy` or `where` on the relation.
+   * Start from `SESSION_SELECT` and spread it, so the fields gemi selects keep
+   * coming along:
+   *
+   *     protected sessionSelect() {
+   *       return APP_SESSION_SELECT; // `{ ...SESSION_SELECT, user: … }`
+   *     }
+   *
+   * The order or filter lives *in the query*, so every session gemi hands
+   * out — to the web app and to a native client alike — has it, and nothing
+   * re-queries `Account` on the auth hot path to recover a field.
+   *
+   * Keep the fields the default selects, the ones `AuthManager` reads above
+   * all: `token`, `expiresAt`, `absoluteExpiresAt` and `user`. A row that
+   * lacks an expiry is treated as expired.
+   */
+  protected sessionSelect(): SessionSelect {
+    return SESSION_SELECT;
   }
 
   /**
@@ -272,14 +347,11 @@ export class UserProvider {
   /**
    * `AuthManager` reads a new session back through `findSession` before
    * handing it out, so an override that shapes the session there need not
-   * repeat the shaping here.
+   * repeat the shaping here. Selects with `sessionSelect()`, as that does.
    */
-  async createSessionV2(args: CreateSessionArgs): Promise<SessionWithUser> {
+  async createSessionV2(args: CreateSessionArgs): Promise<TSession> {
     return await this.run(() =>
-      this.models.Session.create({
-        data: args,
-        select: { token: true, expiresAt: true, absoluteExpiresAt: true, updatedAt: true, location: true, userAgent: true, user: SESSION_USER },
-      }),
+      this.models.Session.create({ data: args, select: this.sessionSelect() }),
     );
   }
 
@@ -287,11 +359,13 @@ export class UserProvider {
    * **The shape of every session `AuthManager` hands out.** It serves this
    * result on each request, keeps it when `updateSession` slides the expiry
    * (taking only the new `expiresAt`), and reads a sign-in's new row back
-   * through it. So an override here — ordering `user.accounts`, filtering
-   * them, adding a field — is the only one a provider needs to shape a
-   * session; it can call `super.findSession` and post-process the result.
+   * through it. So this is the only method a provider needs to shape a
+   * session. What can be said in the query — an extra column, an order or a
+   * filter on `user.accounts` — belongs in `sessionSelect()`, which this
+   * reads with; what cannot, an override here does by calling
+   * `super.findSession` and post-processing the result.
    */
-  async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
+  async findSession(args: FindSessionArgs): Promise<TSession | null> {
     if (!args.token) return null;
 
     // `findUnique` returns null on no match rather than raising, so the
@@ -304,15 +378,7 @@ export class UserProvider {
       return await this.run(() =>
         this.models.Session.findUnique({
           where: { token: args.token },
-          select: {
-            token: true,
-            expiresAt: true,
-            absoluteExpiresAt: true,
-            updatedAt: true,
-            location: true,
-            userAgent: true,
-            user: SESSION_USER,
-          },
+          select: this.sessionSelect(),
         }),
       );
     } catch (error) {
@@ -324,24 +390,15 @@ export class UserProvider {
   /**
    * `AuthManager` takes only `expiresAt` from the result and keeps the session
    * `findSession` returned, so the user selected here is not what a request
-   * sees.
+   * sees. Selects with `sessionSelect()` all the same, so that a caller
+   * reading this row gets the shape every other session has.
    */
-  async updateSession(
-    args: UpdateSessionArgs,
-  ): Promise<SessionWithUser | null> {
+  async updateSession(args: UpdateSessionArgs): Promise<TSession | null> {
     return await this.run(() =>
       this.models.Session.update({
         where: { token: args.token },
         data: { expiresAt: args.expiresAt },
-        select: {
-          token: true,
-          expiresAt: true,
-          absoluteExpiresAt: true,
-          updatedAt: true,
-          location: true,
-          userAgent: true,
-          user: SESSION_USER,
-        },
+        select: this.sessionSelect(),
       }),
     );
   }

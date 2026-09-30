@@ -5,7 +5,8 @@ export { frameworkProviders } from "./providers";
 // change a query — not to select between implementations, of which there is now
 // one. `AuthManager` constructs it itself; `app/config/auth.ts` says nothing
 // about it.
-export { UserProvider } from "../auth/UserProvider";
+export { SESSION_SELECT, UserProvider } from "../auth/UserProvider";
+export type { SessionSelect } from "../auth/UserProvider";
 export type {
   Account,
   AuthModels,
@@ -15,11 +16,13 @@ export type {
   CreateSessionArgs,
   CreateSocialAccountArgs,
   CreateUserArgs,
+  DeleteSessionArgs,
   FindSessionArgs,
   Invitation,
   Organization,
   PasswordResetToken,
   SessionWithUser,
+  UpdateSessionArgs,
   UpdateUserPasswordArgs,
   User,
 } from "../auth/types";

@@ -235,7 +235,7 @@ It expects the following models (field names matter, they are queried directly):
 
 ### Methods
 
-The twenty-five methods, all overridable:
+The twenty-five query methods, all overridable, and the `select` the session queries share:
 
 | Method | Purpose |
 | --- | --- |
@@ -245,6 +245,7 @@ The twenty-five methods, all overridable:
 | `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). A sign-in reads the new session back through `findSession`. |
 | `updateSession(args)` | Push a session's `expiresAt` forward. Only the `expiresAt` it returns is used. |
 | `findSession(args)` | Load a session (+ its user) by token. The one place a session's shape comes from — see [Shaping the session](#shaping-the-session). |
+| `sessionSelect()` *(protected)* | The `select` `findSession`, `updateSession` and `createSessionV2` share. Override it to add a column or order/filter `accounts` — see [Changing the session query](#changing-the-session-query). |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
 | `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |
 | `findUserByVerificationToken(token)` / `verifyUser(email)` | Email-verification lookup / marking verified. |
@@ -292,8 +293,12 @@ call it in an override that queries directly, or it will run under policies.
 Every session `AuthManager` hands out comes from `findSession`: the one `getSession` serves on
 each request, the one it serves after sliding the expiry forward (only the new `expiresAt` is
 taken from `updateSession`), and the one a sign-in returns (read back after `createSessionV2`
-writes it). So a provider that orders `user.accounts`, filters them, or adds a field does it in
-`findSession` alone, and can build on the base query rather than repeat it:
+writes it).
+
+What can be said in the query — an extra column, an order or a filter on `user.accounts` —
+goes in [`sessionSelect()`](#changing-the-session-query). Anything else — an order that needs
+code, a computed field — goes in `findSession` alone, building on the base query rather than
+repeating it:
 
 ```typescript
 import { UserProvider } from "gemi/kernel";
@@ -314,6 +319,62 @@ export class OrderedAccountsUserProvider extends UserProvider {
 
 Up to 0.69, a renewed session carried `updateSession`'s row and a sign-in returned
 `createSessionV2`'s, so this also needed both of those overridden to match.
+
+#### Changing the session query
+
+`findSession`, `updateSession` and `createSessionV2` all read with one `select`, returned by
+the protected `sessionSelect()`. Its default is `SESSION_SELECT`, exported from `gemi/kernel`.
+Override it to change what a session carries without owning the three queries — for example
+to put a member's memberships in a stable order, and to select `deletedAt` so a removed one can
+be told apart:
+
+```typescript
+// app/auth/AppUserProvider.ts
+import { SESSION_SELECT, UserProvider } from "gemi/kernel";
+import type { Payload, SelectInput } from "gemi/orm";
+import type { SessionTypes } from "@/app/models/generated";
+
+const ACCOUNTS = SESSION_SELECT.user.select.accounts;
+
+const APP_SESSION_SELECT = {
+  ...SESSION_SELECT,
+  user: {
+    select: {
+      ...SESSION_SELECT.user.select,
+      accounts: {
+        ...ACCOUNTS,
+        orderBy: { id: "asc" },
+        // where: { deletedAt: null },  // or leave removed memberships out
+        select: { ...ACCOUNTS.select, deletedAt: true },
+      },
+    },
+  },
+} as const satisfies SelectInput<SessionTypes>;
+
+export type AppSession = Payload<SessionTypes, { select: typeof APP_SESSION_SELECT }>;
+
+export class AppUserProvider extends UserProvider<AppSession> {
+  protected sessionSelect() {
+    return APP_SESSION_SELECT;
+  }
+}
+```
+
+- **Spread `SESSION_SELECT`, do not copy it.** A copy goes stale when gemi changes its select,
+  and a column the schema does not have makes `findSession` catch, log and return `null` —
+  which reads as "signed out", not as a bug. Keep the fields it selects; `AuthManager` reads
+  `token`, `expiresAt`, `absoluteExpiresAt` and `user`, and clients decode the rest.
+- **The type comes from the select.** `satisfies SelectInput<SessionTypes>` checks every
+  column, relation, `orderBy` and `where` against your schema, and `Payload` turns the same
+  literal into the session type. `UserProvider<AppSession>` makes `findSession`,
+  `updateSession` and `createSessionV2` return it, so `super.findSession(args)` in an override
+  sees `accounts[].deletedAt` as `Date | null`. Without a type argument a provider types as
+  before, with `SessionWithUser`.
+- **The order is in the query**, so every session gemi hands out has it — the web app's and a
+  native client's alike — and nothing re-queries `Account` on each request to recover a field.
+
+Bind it as below. An order that needs code — say, invited organizations before the user's
+own — still sorts in a `findSession` override, now on the field the select brought along.
 
 Because there is no config field, bind the subclass by rebinding `AuthManager` in the
 container from a service provider — it takes the provider as its second constructor

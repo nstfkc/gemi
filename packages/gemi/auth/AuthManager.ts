@@ -41,7 +41,10 @@ export class AuthManager {
 
   readonly config: Required<AuthConfig>;
 
-  private readonly provider: UserProvider;
+  // `<any>`: a provider typed with its own session (see `sessionSelect`) is
+  // still the provider this manager drives — it reads only the expiry and the
+  // user off what comes back.
+  private readonly provider: UserProvider<any>;
 
   /**
    * The provider is a constructor argument rather than a config field, and the
@@ -60,7 +63,7 @@ export class AuthManager {
    */
   constructor(
     config: AuthConfig = {},
-    provider: UserProvider = new UserProvider(),
+    provider: UserProvider<any> = new UserProvider(),
   ) {
     this.config = withDefaults(authConfigDefaults(config), config);
     this.provider = provider;
