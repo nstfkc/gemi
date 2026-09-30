@@ -4,7 +4,7 @@ import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { requestDomain } from "./requestDomain";
 import { ValidationError } from "./Router";
-import { validate } from "./validate";
+import { InvalidValidationRuleError, validate } from "./validate";
 import type { ResolvedDomain } from "../services/router/DomainResolver";
 
 class Input<T> {
@@ -40,7 +40,11 @@ type FileType = "file";
 // did not typecheck, while the runtime handled it perfectly well.
 type FileTypeType = `fileType:${string}`;
 type FileSizeType = `fileSize:${string}`;
-type SchemaKey =
+type EmailType = "email";
+type PasswordType = "password";
+/** One entry per rule in `validate`'s `RULES`; `validate.test-d.ts` holds them
+ *  to each other, so an offered rule cannot go unimplemented again (#609). */
+export type SchemaKey =
   | StringType
   | NumberType
   | BooleanType
@@ -51,7 +55,9 @@ type SchemaKey =
   | RequiredType
   | FileType
   | FileTypeType
-  | FileSizeType;
+  | FileSizeType
+  | EmailType
+  | PasswordType;
 
 export type Schema<T extends Body> = Record<keyof T, Partial<Record<SchemaKey, string>>>;
 
@@ -181,37 +187,61 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
 
   private validateInput(input: Input<T>) {
     const errors: Record<string, string[]> = {};
-    for (const [key, rules] of Object.entries(this.schema)) {
-      for (const [rule, message] of Object.entries(rules)) {
-        const validator = validate(rule);
+    const fields = Object.entries(this.schema as Record<string, Record<string, unknown>>).map(
+      ([key, rules]) => ({
+        key,
+        // Every rule is looked up before any value is checked, so a schema that
+        // names an unknown rule throws on every request, whatever the body —
+        // not only on the ones whose earlier rules happened to pass. A function
+        // is its own validator: its key is a label, and is not looked up.
+        rules: Object.entries(rules).map(([rule, message]) => ({
+          rule,
+          message,
+          check: typeof message === "function" ? null : this.ruleFor(key, rule),
+        })),
+      }),
+    );
 
+    for (const { key, rules } of fields) {
+      const value = input.get(key as keyof T);
+      const isRequired = rules.some(({ rule }) => rule === "required");
+      // Absent: skipped unless `required`. `0` and `false` are values, and are
+      // checked like any other — skipping every falsy value let `0` and `false` through a
+      // `string` rule and `0` through a `boolean` one.
+      const isAbsent = value === undefined || value === null || (value as unknown) === "";
+      const messages: string[] = [];
+
+      for (const { rule, message, check } of rules) {
         let _message = message;
         let _isValid = false;
         if (typeof message === "function") {
-          _message = message(input.get(key));
+          _message = message(value);
           _isValid = typeof _message === "undefined";
         } else {
-          _isValid = validator(input.get(key));
+          _isValid = check!(value);
         }
 
         if (_isValid) {
           continue;
         }
 
-        if (!input.get(key) && !Object.keys(rules).includes("required")) {
+        if (isAbsent && !isRequired) {
           continue;
-        }
-
-        if (!errors[key]) {
-          errors[key] = [];
         }
 
         if (rule === "required") {
-          errors[key] = [String(_message)];
-          continue;
+          // A missing field reports that it is missing, and only that — not
+          // also that `undefined` is not a string. Wherever `required` sits
+          // among the field's rules.
+          messages.splice(0, messages.length, String(_message));
+          break;
         }
 
-        errors[key].push(String(_message));
+        messages.push(String(_message));
+      }
+
+      if (messages.length > 0) {
+        errors[key] = messages;
       }
     }
 
@@ -227,6 +257,19 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     }
 
     return input;
+  }
+
+  private ruleFor(key: string, rule: string) {
+    try {
+      return validate(rule);
+    } catch (err) {
+      if (err instanceof InvalidValidationRuleError) {
+        throw new InvalidValidationRuleError(
+          `${this.constructor.name}.schema.${key}: ${err.message}`,
+        );
+      }
+      throw err;
+    }
   }
 
   async input(): Promise<Input<T>> {

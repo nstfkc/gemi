@@ -2227,9 +2227,9 @@ export class CustomerController extends ResourceController {
 }
 ```
 
-The schema is a map of field → `{ rule: message }`. Built-in rules include `required`, `email`, `number`, `password`, `min:N`, `max:N`, `file`, `fileType:png|jpg|pdf|…`, and `fileSize:5MB`. A rule value may also be a function for custom messages, and `refine()` can be overridden for cross-field checks. When you need errors without throwing, use `await req.safeInput()`, which returns `{ isValid, errors, input }`. See [Forms](./forms.md).
+The schema is a map of field → `{ rule: message }`. The built-in rules are `required`, `string`, `boolean`, `number`, `email`, `password`, `min:N` / `max:N` (length of a string or array), `gte:N` / `lte:N` (size of a number), `file`, `fileType:png|jpg|pdf|…`, and `fileSize:5MB`. `string`, `boolean` and `number` check the JSON type and do not coerce, so `"true"` is not a boolean; a form-encoded or multipart body carries only strings and files. A rule name the list does not have, or a parameter it cannot read (`min:abc`, `fileSize:5mb`), throws `InvalidValidationRuleError` when the request is validated, instead of passing silently. A rule value may also be a function for custom messages (its key is then only a label), and `refine()` can be overridden for cross-field checks. When you need errors without throwing, use `await req.safeInput()`, which returns `{ isValid, errors, input }`. See [Forms](./forms.md).
 
-> **Note:** Fields with no value and no `required` rule are skipped, so optional fields (e.g. an omitted `email`) don't fail their format rules. This makes partial-update schemas easy — leave `required` off `update` fields.
+> **Note:** Fields with no value (missing, `null` or `""`) and no `required` rule are skipped, so optional fields (e.g. an omitted `email`) don't fail their format rules. `0` and `false` are values and are checked. A field that fails `required` reports only the `required` message. This makes partial-update schemas easy — leave `required` off `update` fields.
 
 ### Auth and other errors
 

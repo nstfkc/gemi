@@ -36,6 +36,7 @@ export {
 } from "./range";
 export { ValidationError } from "./Router";
 export { HttpRequest } from "./HttpRequest";
+export { InvalidValidationRuleError } from "./validate";
 export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
 export { RequestBreakerError } from "./Error";
