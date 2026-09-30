@@ -7,9 +7,9 @@ tags: controller, errors, validation, client-contract
 
 ## Throw the Framework's Errors, Do Not Invent a Response Shape
 
-The client's mutation hooks and `<Form>` branch on a tagged error object —
-`validation_error`, `form_error`, `server_error`, `not_authorized`,
-`insufficient_permissions`. Returning an ad-hoc `{ error: "…" }` from a controller
+The client's mutation hooks and `<Form>` hand these errors to `onError` as a
+`MutationError`, which apps narrow with `isValidationError`, `isPermissionError` and
+the other guards from `gemi/client`. Returning an ad-hoc `{ error: "…" }` from a controller
 produces a **200 with a body the client reads as success**, so the UI shows nothing
 and the failure disappears.
 

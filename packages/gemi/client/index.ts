@@ -15,6 +15,26 @@ export { QueryError } from "./QueryError";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export { useMutate } from "./useMutate";
 export {
+  isValidationError,
+  isFormError,
+  isAuthenticationError,
+  isPermissionError,
+  isCsrfError,
+  isNotFoundError,
+  isRateLimitError,
+  isServerError,
+  isNetworkError,
+  mutationErrorKind,
+} from "./MutationError";
+export type {
+  MutationError,
+  MutationErrorKind,
+  MutationValidationError,
+  MutationFormError,
+  MutationServerError,
+  MutationMessageError,
+} from "./MutationError";
+export {
   Form,
   FormError,
   useMutationStatus,
