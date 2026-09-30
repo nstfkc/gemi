@@ -85,7 +85,8 @@ function isNumber(value: any): value is number {
 }
 
 /** Every rule `validate` implements. `SchemaKey` in `HttpRequest.ts` offers
- *  these and only these; `validate.test.ts` checks the two lists agree. */
+ *  these and only these: `validate.test-d.ts` checks the two lists agree, and
+ *  `validate.test.ts` that each one has a case. */
 export const RULES = [
   "required",
   "string",
