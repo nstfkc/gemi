@@ -1,3 +1,32 @@
+# Upgrading from 0.73 to 0.74
+
+One addition. Nothing to rewrite unless a `proxy()` route relied on forwarding
+your proxy-secret header.
+
+## `route.domains.trustProxy`: read the host from a configurable header (#607, #640)
+
+`trustProxy` accepts an object as well as `true`:
+
+```ts
+trustProxy: {
+  hostHeader: "x-kyte-host",                       // default "x-forwarded-host"
+  secret: { header: "x-kyte-proxy-secret", value: process.env.PROXY_SECRET! },
+}
+```
+
+`hostHeader` replaces `X-Forwarded-Host` (which is then not read). With
+`secret`, the host header is trusted only when the secret header matches, using
+a constant-time comparison. A missing or wrong secret falls back to the
+request's own `Host`; the request isn't rejected. The trusted host feeds domain
+matching, `req.domain.host`, the cookie domain, `Url.forDomain` and
+`useDomain().url()`. `X-Forwarded-Proto` is unchanged and independent.
+`trustProxy: true` behaves exactly as before.
+
+Checked at boot: both header names must be valid, the secret header must differ
+from the host header, and `secret.value` must be a string of at least 16
+characters, so an unset env var fails the boot. `proxy()` routes no longer
+forward the configured secret header upstream.
+
 # Upgrading from 0.72 to 0.73
 
 ## Request validation: `string` / `boolean` are checked, unknown rules throw — behaviour change (#609, #637)
