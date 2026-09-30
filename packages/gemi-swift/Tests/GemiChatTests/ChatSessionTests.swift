@@ -522,6 +522,25 @@ func eventually(_ condition: () -> Bool) async {
     let form = String(decoding: request.httpBody!, as: UTF8.self)
     #expect(form.contains(#"name="file"; filename="invoice.pdf""#))
     #expect(form.contains("%PDF"))
+    // No `body`, no part: the upload is what it was before gemi #603.
+    #expect(!form.contains(#"name="body""#))
+  }
+
+  /// gemi #603: the controller's `attachmentScope` reads the page off the body
+  /// on an upload too, so the body travels with the file, as one JSON part.
+  @Test func anUploadCarriesTheBodyAsOneJSONPart() async throws {
+    let transport = FakeTransport { _ in json(status: 200, ["fileId": "file_1"]) }
+    let chat = UntypedChatSession(
+      endpoint: endpoint, body: ["pageId": "pg_1", "count": 3], transport: transport)
+
+    _ = try await chat.upload(Data("PNG".utf8), name: "a.png", mimeType: "image/png")
+
+    let form = String(decoding: transport.requests[0].request.httpBody!, as: UTF8.self)
+    #expect(
+      form.contains(
+        "Content-Disposition: form-data; name=\"body\"\r\nContent-Type: application/json\r\n\r\n{\"count\":3,\"pageId\":\"pg_1\"}\r\n"
+      ))
+    #expect(form.contains(#"name="file"; filename="a.png""#))
   }
 
   @Test func anUploadsFilenameIsEscapedAsFormDataEscapesIt() async throws {

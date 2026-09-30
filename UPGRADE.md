@@ -1,3 +1,57 @@
+# Upgrading from 0.77 to the next release
+
+## `attachmentScope` and `authorizeRequest` get the request body (#603)
+
+A chat with no signed-in user and no thread (a stateless page builder that
+sends `useChat("/page-builder", { body: { pageId } })`) had no attachment scope,
+so `ctx.attachments` threw and `ctx.generateImage` could not run in it. The page
+was in the body, and neither method could see it: the route has already read
+the body by the time they run.
+
+- **`attachmentScope(req, threadId, { body })`.** A new third argument, the same
+  `body` `instructions()` gets, typed as the controller's `Body`. It is passed on
+  `stream` and on `upload`. The first two arguments are unchanged, so existing
+  overrides (`attachmentScope(req, threadId)`, `attachmentScope()`) and
+  `super.attachmentScope(req, threadId)` keep working.
+- **`authorizeRequest(req, { route, threadId, body })`.** `body` is set on
+  `stream` and `upload` and absent on `attach` and `stop`, which carry none.
+  The params type is exported as `AuthorizeRequestParams<Body>`; narrow on
+  `route` to read `body`. Overrides typed against the old `{ route, threadId }`
+  still compile.
+- **`useChat.uploadFile` sends the `body` option** as a `body` form part (one
+  JSON object) beside the file. The GemiChat (Swift) and `dev.gemijs.chat`
+  (Kotlin) `upload` do the same with the session's `body` when it is not empty.
+  So an upload resolves the same scope as the turn that uses it.
+- **A malformed `body` part is a 400** (`invalid_request`) from `/files`, before
+  `authorizeRequest` runs and before any bytes are stored or sent. A missing
+  part is `{}`, as before. The envelope's names (`turn`, `clientRunId`,
+  `threadId`, `messages`) are taken out of it, as they are on `stream`.
+
+Only key a scope on a body value the server looks up and that works as a
+capability, like a thread id: an unguessable page `publicId` that you find in
+the database, keyed on what the lookup returned.
+
+```ts
+protected async attachmentScope(req, threadId, { body }) {
+  const scope = await super.attachmentScope(req, threadId);
+  if (scope) return scope;
+  // Checked first: to an ORM, `{ publicId: undefined }` is no filter at all.
+  if (typeof body.pageId !== "string") return null;
+  const page = await Page.findFirst({ where: { publicId: body.pageId } });
+  return page ? { key: `page:${page.publicId}` } : null;
+}
+```
+
+Never ``{ key: `org:${body.orgId}` }``: an org id can be guessed, and the caller
+may not belong to that org. A tenant comes from `req.ctx().user`. Derive the
+key from a field that stays the same for the whole conversation (the page, not
+the selected element). A key that differs between the upload and the turn makes
+the upload's id an `AttachmentNotFoundError` in the turn.
+
+If you worked around this by overriding `stream` to read
+`req.rawRequest.clone().json()` into a field, that still works. You can delete
+it and read `body` in `attachmentScope` instead, which also covers `upload`.
+
 # Upgrading from 0.76 to 0.77
 
 ## `HttpResponse.json(data, { status?, headers? })` (#646, #647)
