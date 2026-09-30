@@ -193,7 +193,7 @@ export class FeatureManager {
     const actor = normalizeActor(options.actor);
     const source = this.config.source;
     if (typeof source.write !== "function") {
-      throw new FeatureSourceReadOnlyError(source.constructor?.name ?? "unknown");
+      throw new FeatureSourceReadOnlyError(source.constructor?.name || "an anonymous source");
     }
 
     const { actorRecorded } = await source.write(key, active, { actor });

@@ -700,6 +700,19 @@ describe("set", () => {
     expect(error.message).toMatch(/ReadOnly/);
   });
 
+  test("a read-only source with no class name still gets a readable message", async () => {
+    const source = new (class extends FeatureFlagSource {
+      async load() {
+        return [];
+      }
+    })();
+    Object.defineProperty(source.constructor, "name", { value: "" });
+
+    await expect(manager({}, { source }).set("new-checkout", true)).rejects.toThrow(
+      /\(an anonymous source\) is read-only/,
+    );
+  });
+
   test("records the actor, and list() reports who changed it and when", async () => {
     const features = manager();
 
