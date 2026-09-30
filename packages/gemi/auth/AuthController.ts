@@ -52,7 +52,11 @@ async function passwordMatches(
   if (typeof hash === "string" && hash !== "") {
     return await config.verifyPassword(password, hash);
   }
-  await config.verifyPassword(password, await decoyHash(config.hashPassword));
+  // Only the time is wanted, so a failure here is no reason to fail the
+  // request: the answer is `false` whatever the decoy check does.
+  try {
+    await config.verifyPassword(password, await decoyHash(config.hashPassword));
+  } catch {}
   return false;
 }
 
