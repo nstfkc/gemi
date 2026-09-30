@@ -1,3 +1,34 @@
+# Unreleased
+
+## `gemi dev` shuts the replaced application down on every reload (#652)
+
+Each `bun --hot` reload of server code boots a new application, and nothing
+stopped the one it replaced. Its database pool stayed open, so every save left
+10 idle Postgres connections behind (Bun's default pool size). After a few
+saves the dev server used up `max_connections`, and every process sharing that
+Postgres then failed with `too many clients already`.
+
+Now, once the new application is serving, the replaced one gets up to 10
+seconds to finish its requests and then runs its providers' `shutdown()`
+hooks. That closes its database pool and its Redis client, stops its cron
+schedule and drains its queue. The reload doesn't wait for any of this, and a
+failure in it is logged instead of shown in the error overlay.
+
+What changes for an app:
+
+- **Your providers' `shutdown()` runs in development too**, on each reload,
+  for the application being replaced. If a hook closes something you keep on
+  `globalThis` so that it survives reloads, it now closes it under the new
+  application as well. Leave shared state like that alone in `shutdown()`.
+- **The database pool and the Redis client are closed at shutdown** in every
+  mode: when `gemi start` or `gemi queue:work` is stopped, and on a dev reload.
+  Before, only the process exit closed them. The database closes last, after
+  the queue and the scheduler have waited for their jobs.
+- **A memory-queue job still waiting when you save is dropped** with the old
+  application, as it would be on a restart. Before, the old application's
+  queue kept running it on the old code. Jobs on the database driver are
+  unaffected: the new application already took over their loop.
+
 # Upgrading from 0.78 to 0.79
 
 ## A tool input or agent output must be an object at the root (#478)

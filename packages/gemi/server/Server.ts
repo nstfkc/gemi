@@ -1,6 +1,7 @@
 import { App } from "../app";
 import { Kernel } from "../kernel";
 import { projectRoot } from "../support/discover";
+import { DevGeneration, devRetireDefaults, replaceDevGeneration } from "./devReload";
 import {
   drain,
   installShutdownSignals,
@@ -83,7 +84,18 @@ export class Server {
     // Phase two of the boot. `new App({ kernel })` already ran every provider's
     // synchronous `register()`; this awaits their `boot()` before the first
     // request is served.
-    await this.app.waitForBoot();
+    try {
+      await this.app.waitForBoot();
+    } catch (error) {
+      // A `bun --hot` reload whose boot threw: the previous application keeps
+      // serving, and this one never will, so whatever its providers opened
+      // before the throw (the feature flags' warm-up, when they are on, has
+      // opened the database pool by then) is closed now rather than left open
+      // for good (#652). Production exits on a failed boot, which closes
+      // everything anyway.
+      if (!production) void this.app.shutdown({ timeoutMs: devRetireDefaults.providerTimeoutMs });
+      throw error;
+    }
 
     // Dynamic import so each mode only pulls in its own code: `httpDev` drags in
     // Vite (dev-only) and `httpProd` reads the built `dist/` manifests — neither
@@ -99,7 +111,13 @@ export class Server {
       // the server now, not after a drain.
       watchEnv();
       const { httpDev } = await import("./httpDev.js");
-      this.server = await httpDev(this.app, this.instrumentation.bind(this));
+      const generation = new DevGeneration(this.app);
+      this.server = await httpDev(this.app, generation.track(this.instrumentation.bind(this)));
+      // Only now, with the new fetch handler live, has the application this
+      // reload replaced stopped receiving requests; it is shut down once the
+      // ones it is serving finish (#652). Not awaited, so the reload is not
+      // held up by it.
+      void replaceDevGeneration(generation);
     }
     return this.server;
   }
