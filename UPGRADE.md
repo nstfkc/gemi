@@ -1,3 +1,36 @@
+# Upgrading from 0.72 to 0.73
+
+## Request validation: `string` / `boolean` are checked, unknown rules throw — behaviour change (#609, #637)
+
+`string` and `boolean` schema rules were accepted but never checked. They now
+check `typeof` (no coercion: `"true"` is not a boolean). `email` and `password`
+accept strings only. An optional field is skipped only when it is missing,
+`null` or `""`, so `0` and `false` are now validated. A field that fails
+`required` reports only that message.
+
+**Unknown rule names and malformed rule parameters now throw**
+`InvalidValidationRuleError` (exported from `gemi/http`) instead of silently
+passing. Examples are a typo like `requried`, `min:abc`, `lte:`, `fileType`
+with no type, and `fileSize:5mb`. All rules are resolved before any value is
+checked, so a schema with a bad rule makes every request to that endpoint
+answer 500, from both `input()` and `safeInput()`.
+
+**What to check:** grep your request schemas for rule names gemi doesn't
+define. A rule whose value is a function is still treated as a custom check
+under any name.
+
+## `migrateLegacySession`: sign-out revokes converted sessions, and conversion can't race sign-out (#638, #639)
+
+This only matters if `auth.migrateLegacySession` is set. Conversion and
+sign-out for the same old token are now serialized (a Postgres advisory lock;
+an in-process queue on SQLite; the row lock on MySQL). A conversion creates the
+new session only if it claimed the old row. Signing out with an old token also
+revokes the session it was converted to, within the grace window. Sign-out now
+goes through `AuthManager.revokeSession`. A conversion deletes the old row
+through `UserProvider.claimLegacySession`, not `deleteSession`, so a
+`deleteSession` override (e.g. for cache invalidation) isn't called for that
+one delete. Without the hook, nothing changes.
+
 # Upgrading from 0.72.0 to 0.72.1
 
 ## `Storage.delete()` deletes — behaviour change for Azure (#608, #636)
