@@ -22,9 +22,23 @@ export class FeatureReloadError extends Error {
   }
 }
 
+/**
+ * Who last changed a switch, and when — read off the row, for an admin screen.
+ *
+ * Only what the row actually carries. `updatedBy` is `undefined` when the table
+ * has no `updatedBy` column (or no row), and `null` when the column exists and
+ * the last write named nobody — two different answers to "who did this".
+ */
+export interface FlagAudit {
+  updatedBy?: string | null;
+  updatedAt?: Date;
+}
+
 export interface FlagSnapshot {
   /** `key -> active`. A key absent from the map has no row, and is off. */
   active: Map<string, boolean>;
+  /** `key -> last change`, for the rows that carry one. Never read by evaluation. */
+  audit: Map<string, FlagAudit>;
   loadedAt: number;
   /** True only while nothing has *ever* loaded successfully. */
   unavailable: boolean;
@@ -162,8 +176,10 @@ export class FeatureFlagStore {
   private async load(): Promise<FlagSnapshot> {
     try {
       const rows = await this.source.load();
+      const { active, audit } = this.readRows(rows);
       this.snapshot = {
-        active: this.readSwitches(rows),
+        active,
+        audit,
         loadedAt: Date.now(),
         unavailable: false,
       };
@@ -184,8 +200,12 @@ export class FeatureFlagStore {
    * before it reaches production. A bad row is logged and skipped, never thrown:
    * a typo in a column must not take the process down at boot.
    */
-  private readSwitches(rows: Record<string, unknown>[]): Map<string, boolean> {
+  private readRows(rows: Record<string, unknown>[]): {
+    active: Map<string, boolean>;
+    audit: Map<string, FlagAudit>;
+  } {
     const active = new Map<string, boolean>();
+    const audit = new Map<string, FlagAudit>();
 
     for (const row of rows ?? []) {
       const key = typeof row?.key === "string" ? row.key : null;
@@ -205,9 +225,12 @@ export class FeatureFlagStore {
       }
 
       active.set(key, row.active === true);
+
+      const entry = readAudit(row);
+      if (entry) audit.set(key, entry);
     }
 
-    return active;
+    return { active, audit };
   }
 
   private handleFailure(error: unknown): FlagSnapshot {
@@ -227,7 +250,35 @@ export class FeatureFlagStore {
 
     if (this.snapshot) return this.snapshot;
 
-    this.snapshot = { active: new Map(), loadedAt: now, unavailable: true };
+    this.snapshot = {
+      active: new Map(),
+      audit: new Map(),
+      loadedAt: now,
+      unavailable: true,
+    };
     return this.snapshot;
   }
+}
+
+/**
+ * The audit columns off one row, tolerating their absence and their shape.
+ *
+ * `updatedAt` arrives as a `Date` from the ORM, but as a string or a number
+ * from a source that serialized it; anything unparseable is dropped rather than
+ * shown as "Invalid Date" on somebody's admin screen.
+ */
+function readAudit(row: Record<string, unknown>): FlagAudit | null {
+  const entry: FlagAudit = {};
+
+  const by = row.updatedBy;
+  if (typeof by === "string") entry.updatedBy = by;
+  else if (by === null) entry.updatedBy = null;
+
+  const at = row.updatedAt;
+  if (at instanceof Date || typeof at === "string" || typeof at === "number") {
+    const date = at instanceof Date ? at : new Date(at);
+    if (!Number.isNaN(date.getTime())) entry.updatedAt = date;
+  }
+
+  return "updatedBy" in entry || "updatedAt" in entry ? entry : null;
 }

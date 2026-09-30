@@ -20,6 +20,31 @@ export abstract class FeatureFlagSource {
    * switch-off.
    */
   abstract load(): Promise<Record<string, unknown>[]>;
+
+  /**
+   * Writes one switch — what `Features.set()` calls.
+   *
+   * Optional. A source that does not implement it is **read-only**, and
+   * `Features.set()` refuses with `FeatureSourceReadOnlyError` rather than
+   * pretending: a control plane or a config service owns its own writes, and an
+   * admin screen that appeared to flip a switch it cannot reach would be worse
+   * than one that says so.
+   *
+   * `actor` is already normalized to a string, or `null` for a write nobody was
+   * named for. Return whether it was recorded, so a store with nowhere to put it
+   * can be reported once instead of silently dropping every audit entry.
+   */
+  write?(key: string, active: boolean, meta: FeatureWriteMeta): Promise<FeatureWriteResult>;
+}
+
+export interface FeatureWriteMeta {
+  /** Who made the change, or `null`. Recorded only by a source that has somewhere to keep it. */
+  actor: string | null;
+}
+
+export interface FeatureWriteResult {
+  /** Whether the source kept `actor`. `false` for a table with no `updatedBy` column. */
+  actorRecorded: boolean;
 }
 
 /** Raised when the application never added the model this source reads. */
@@ -29,6 +54,17 @@ export class FeatureModelMissingError extends Error {
   constructor(readonly modelName: string) {
     super(
       `No "${modelName}" model is registered, so every feature stays off. Add the model to prisma/schema.prisma and export it from app/models — see docs/feature-flags.md.`,
+    );
+  }
+}
+
+/** Raised by `Features.set()` when the configured source has no `write()`. */
+export class FeatureSourceReadOnlyError extends Error {
+  readonly kind = "FeatureSourceReadOnly";
+
+  constructor(readonly sourceName: string) {
+    super(
+      `The feature source (${sourceName}) is read-only, so Features.set() cannot write to it. Change the switch where that source reads from, or give the source a write() method.`,
     );
   }
 }

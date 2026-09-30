@@ -3,8 +3,38 @@ import type { ResolvedFeaturesConfig } from "./config";
 import { contextFromRequest, contextFromSubject, type FeatureSubject } from "./context";
 import type { Feature, FeatureRegistry } from "./defineFeature";
 import { evaluateFeature } from "./evaluate";
-import { FeatureFlagStore } from "./FeatureFlagStore";
+import { type FlagAudit, FeatureFlagStore } from "./FeatureFlagStore";
+import { FeatureSourceReadOnlyError } from "./sources/FeatureFlagSource";
 import type { FeatureContext, FeatureEvaluation, FeatureListing } from "./types";
+
+/**
+ * Who made a change, for `Features.set(key, active, { actor })`.
+ *
+ * A string is recorded as given. A user — anything with a `publicId` or an
+ * `id`, which is what `Auth.user()` returns — is recorded by `publicId`,
+ * falling back to `id`: an identifier that can be joined back to a name at
+ * render time, rather than a name copied into a configuration table that goes
+ * stale when the person renames themselves.
+ */
+export type FeatureActor =
+  | string
+  | { publicId?: string | null; id?: string | number | null; [key: string]: unknown };
+
+export interface FeatureSetOptions {
+  /** Recorded as the row's `updatedBy` when the source keeps one. */
+  actor?: FeatureActor | null;
+}
+
+/** Raised by `Features.set()` for a key `app/features` does not declare. */
+export class UndeclaredFeatureError extends Error {
+  readonly kind = "UndeclaredFeature";
+
+  constructor(readonly key: string) {
+    super(
+      `"${key}" is not declared in app/features, so it cannot be switched. A row for it would be ignored — declare the feature first.`,
+    );
+  }
+}
 
 /**
  * Evaluation bound to one explicit context — what `Features.for(...)` returns.
@@ -39,6 +69,7 @@ export class FeatureManager {
   readonly store: FeatureFlagStore;
   private readonly declared: FeatureRegistry;
   private warnedAboutSize = false;
+  private warnedAboutActor = false;
 
   constructor(
     readonly config: ResolvedFeaturesConfig,
@@ -69,7 +100,7 @@ export class FeatureManager {
    * experiment, which is a fact about the population and not for the browser.
    */
   async list(): Promise<FeatureListing> {
-    const { active, unavailable } = await this.switches();
+    const { active, audit, unavailable } = await this.switches();
 
     return {
       unavailable,
@@ -81,6 +112,7 @@ export class FeatureManager {
         serverOnly: feature.serverOnly,
         salt: feature.salt,
         active: active.get(key),
+        ...audit.get(key),
       })),
     };
   }
@@ -129,6 +161,51 @@ export class FeatureManager {
       // successful one.
       RequestContext.getStore()?.featureEvaluations?.clear();
     }
+  }
+
+  /**
+   * Writes one switch through the configured source, then `invalidate()`s.
+   *
+   * Validates before touching the source: an undeclared key throws
+   * `UndeclaredFeatureError` (a row for it would be ignored by every read, so
+   * writing one creates a switch that looks live and does nothing), a
+   * non-boolean `active` throws a `TypeError` (the value usually comes straight
+   * off a request body), and a source with no `write()` throws
+   * `FeatureSourceReadOnlyError`.
+   *
+   * Writes even when `config.enabled` is `false` — the table is still the truth
+   * about the switch, and turning features back on should find it — but there
+   * is then nothing cached to invalidate.
+   *
+   * Throws `FeatureReloadError`, like `invalidate()`, when the write landed and
+   * the reload did not.
+   */
+  async set(key: string, active: boolean, options: FeatureSetOptions = {}): Promise<void> {
+    if (typeof key !== "string" || !Object.hasOwn(this.declared, key)) {
+      throw new UndeclaredFeatureError(String(key));
+    }
+    if (typeof active !== "boolean") {
+      throw new TypeError(
+        `Features.set("${key}", …) takes a boolean, not ${active === null ? "null" : typeof active}.`,
+      );
+    }
+
+    const actor = normalizeActor(options.actor);
+    const source = this.config.source;
+    if (typeof source.write !== "function") {
+      throw new FeatureSourceReadOnlyError(source.constructor?.name || "an anonymous source");
+    }
+
+    const { actorRecorded } = await source.write(key, active, { actor });
+
+    if (actor !== null && !actorRecorded && !this.warnedAboutActor) {
+      this.warnedAboutActor = true;
+      this.log(
+        `Features.set() was given an actor, but the feature source has nowhere to record it. For the database source, add a nullable \`updatedBy String?\` column to the feature flag model to keep "last changed by".`,
+      );
+    }
+
+    await this.invalidate();
   }
 
   async enabled(key: string): Promise<boolean> {
@@ -245,17 +322,21 @@ export class FeatureManager {
    */
   private async switches(): Promise<{
     active: Map<string, boolean>;
+    audit: Map<string, FlagAudit>;
     unavailable: boolean;
   }> {
     // Not `unavailable`: the application turned features off deliberately, and
     // the declarations are still the truth about what exists.
-    if (!this.config.enabled) return { active: new Map(), unavailable: false };
-    if (Object.keys(this.declared).length === 0) {
-      return { active: new Map(), unavailable: false };
+    if (!this.config.enabled || Object.keys(this.declared).length === 0) {
+      return { active: new Map(), audit: new Map(), unavailable: false };
     }
 
     const snapshot = await this.store.get();
-    return { active: snapshot.active, unavailable: snapshot.unavailable };
+    return {
+      active: snapshot.active,
+      audit: snapshot.audit,
+      unavailable: snapshot.unavailable,
+    };
   }
 
   private async switchFor(
@@ -327,4 +408,27 @@ export class FeatureManager {
       `${count} client-visible features are embedded in every document. Mark the ones only the server reads with \`serverOnly: true\` to keep them out of the payload.`,
     );
   }
+}
+
+/**
+ * `FeatureActor` to the string a source stores, or `null` for nobody.
+ *
+ * Throws on an actor that is present but identifies no one — an object with
+ * neither `publicId` nor `id`, an empty string — because recording `null` for
+ * it would read later as "changed by nobody" when the caller meant somebody.
+ */
+function normalizeActor(actor: FeatureActor | null | undefined): string | null {
+  if (actor === undefined || actor === null) return null;
+
+  if (typeof actor === "string") {
+    if (actor.length > 0) return actor;
+  } else if (typeof actor === "object") {
+    const { publicId, id } = actor;
+    if (typeof publicId === "string" && publicId.length > 0) return publicId;
+    if ((typeof id === "string" && id.length > 0) || typeof id === "number") return String(id);
+  }
+
+  throw new TypeError(
+    "Features.set() was given an `actor` that identifies nobody. Pass a string, or a user with a `publicId` or an `id`.",
+  );
 }

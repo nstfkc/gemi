@@ -155,6 +155,27 @@ describe.each([
       expect(await features.explain("not-declared")).toMatchObject({ reason: "undeclared" });
     });
 
+    test("set() upserts: creates the row a never-switched feature lacks, then flips it", async () => {
+      const features = manager();
+
+      await features.set("new-checkout", true);
+      expect(await features.enabled("new-checkout")).toBe(true);
+
+      await features.set("new-checkout", false, { actor: "usr_1" });
+      expect(await features.enabled("new-checkout")).toBe(false);
+
+      const rows = await FeatureFlagModel.asSystem(() => FeatureFlagModel.findMany());
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ key: "new-checkout", active: false });
+
+      // This schema has no `updatedBy` column, so the actor is not recorded and
+      // the listing makes no claim about who changed it.
+      const listing = await features.list();
+      const descriptor = listing.features.find((f) => f.key === "new-checkout");
+      expect(descriptor?.updatedBy).toBeUndefined();
+      expect(descriptor?.updatedAt).toBeInstanceOf(Date);
+    });
+
     test("the client payload carries booleans only", async () => {
       await seed("new-checkout", true);
       await seed("internal-tools", true);
