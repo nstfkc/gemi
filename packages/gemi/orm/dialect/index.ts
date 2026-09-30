@@ -1,5 +1,6 @@
 import type { Dialect } from "../../database/dialect";
 import type { Binder, Fragment } from "../compile/fragment";
+import type { RowLockClause } from "../compile/lock";
 import type { FieldSchema, ScalarType } from "../schema";
 import { PostgresDialect } from "./postgres";
 import { SqliteDialect } from "./sqlite";
@@ -399,6 +400,29 @@ export interface SqlDialect {
    * a `Fragment` because everything the compiler emits is one.
    */
   ignoreConflicts(): Fragment | null;
+
+  /**
+   * The clause a locking read ends with — `lock: "update"` on a `findMany` —
+   * naming `table` as the only table whose rows are locked.
+   *
+   * Scoped to the root table (`for update of "User"`) rather than left bare,
+   * because a folded `include` puts a lateral subquery in the `from` clause and
+   * Postgres refuses to lock through one (`FOR UPDATE is not allowed with
+   * aggregate functions`). Scoping it also matches the documented contract on
+   * both strategies: the root rows are locked, related rows never are.
+   *
+   * **Empty on SQLite, and that is a decision.** SQLite has no row locks, and
+   * does not need them for what a locking read is for: its transactions are
+   * serializable, with one writer at a time on the whole database, so the lost
+   * update a row lock prevents cannot happen there. Two transactions that race
+   * wait on (or fail with `SQLITE_BUSY` on) the database lock instead of the
+   * row's, and `skipLocked` / `noWait` have no row lock to react to. Refusing
+   * would stop code that runs on Postgres in production from running against
+   * SQLite in development and tests, for no gain. The one misuse that matters
+   * on both — a lock outside a transaction — is refused in `Model.$execute`
+   * on every dialect.
+   */
+  rowLock(lock: RowLockClause, table: string): Fragment;
 
   /**
    * Recognise a driver error as a constraint violation, and say which columns

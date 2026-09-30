@@ -7,6 +7,7 @@ import {
   param,
   sql,
 } from "../compile/fragment";
+import type { RowLockClause } from "../compile/lock";
 import { DecodeError } from "../errors";
 import { jsonNullKind } from "../json-null";
 import type { FieldSchema } from "../schema";
@@ -289,6 +290,13 @@ export class SqliteDialect implements SqlDialect {
   // on the one dialect where the differential harness could no longer check it.
   ignoreConflicts(): Fragment | null {
     return null;
+  }
+
+  // Nothing to emit: SQLite has no row locks, and its transactions are already
+  // serializable at the database level. See `SqlDialect.rowLock` for why this is a no-op
+  // rather than a refusal.
+  rowLock(_lock: RowLockClause, _table: string): Fragment {
+    return sql("");
   }
 
   // SQLite cannot parse `offset` without a preceding `limit`, so a bare `skip`

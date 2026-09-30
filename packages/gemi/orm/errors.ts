@@ -892,3 +892,31 @@ export class MissingModelSchemaError extends Error {
     this.name = "MissingModelSchemaError";
   }
 }
+
+/**
+ * A `lock` asked for outside a transaction.
+ *
+ * A row lock is held until the transaction that took it ends. Outside one, the
+ * statement is its own transaction, so the lock is released the moment the row
+ * comes back — before the write it was meant to guard has even been issued. The
+ * read would succeed and protect nothing, which is the failure this refuses: the
+ * race the lock was written to close stays open, silently.
+ *
+ * Raised on SQLite too, where the lock itself compiles to nothing, so code that
+ * forgot its transaction fails in development rather than first on Postgres.
+ */
+export class LockOutsideTransactionError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+  ) {
+    super(
+      `${model}.${operation} was given 'lock' outside a transaction. A row ` +
+        `lock lasts until the transaction that took it ends, so outside one it ` +
+        `is released as soon as the row is read and protects nothing. Run the ` +
+        `read and the writes it guards inside Model.transaction(async () => { ` +
+        `... }).`,
+    );
+    this.name = "LockOutsideTransactionError";
+  }
+}

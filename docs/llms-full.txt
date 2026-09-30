@@ -6144,6 +6144,79 @@ still compiles to one statement and opens nothing, and inside a transaction you 
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
 you need it to make *several separate calls* whole.
 
+### Locking rows
+
+A read inside a transaction can lock the rows it returns until the transaction ends. `findUnique`,
+`findFirst`, `findMany` and their `OrThrow` variants take a `lock`:
+
+```ts
+await Model.transaction(async () => {
+  const job = await AsyncJob.findUnique({
+    where: { publicId },
+    select: { publicId: true, status: true, payload: true },
+    lock: "update",
+  })
+  if (job === null || job.status !== "running") return
+  await AsyncJob.update({ where: { publicId }, data: { status: "completed" } })
+})
+```
+
+`job` is typed from the `select`, as on any read. Nobody else can lock, update or delete the row
+until the transaction commits or rolls back, so two requests that both take this path settle it
+once: the second one waits at the `findUnique`, then reads the committed status and returns.
+
+| `lock` | Postgres | When another transaction holds the row |
+| --- | --- | --- |
+| `"update"` | `for update` | waits for it |
+| `"share"` | `for share` | waits if that transaction holds it `"update"`; other `"share"` readers go ahead |
+| `{ mode: "update", skipLocked: true }` | `for update skip locked` | leaves the row out of the result |
+| `{ mode: "update", noWait: true }` | `for update nowait` | fails the statement at once (SQLSTATE `55P03`) |
+
+`mode` takes `"share"` in the object form too. `skipLocked` and `noWait` cannot both be set.
+
+`skipLocked` is how a queue hands each row to one worker. Every worker runs the same claim, and each
+gets a different row instead of queueing behind the first:
+
+```ts
+await Model.transaction(async () => {
+  const [reservation] = await Reservation.findMany({
+    where: { status: "reserved", expiresAt: { lte: new Date() } },
+    orderBy: [{ expiresAt: "asc" }, { publicId: "asc" }],
+    take: 1,
+    lock: { mode: "update", skipLocked: true },
+  })
+  if (!reservation) return
+  await release(reservation)   // its queries are in the transaction, and the row stays locked
+})
+```
+
+`noWait` suits a request that would rather answer "busy, try again" than hold a connection while it
+waits. On Postgres the failed statement aborts the transaction, so catch the error outside
+`Model.transaction` (or around a nested one, as [above](#two-things-that-will-bite-you)).
+
+**Only the queried model's rows are locked.** The clause is `for update of "AsyncJob"`, so an
+`include` or a `select` of a relation reads the related rows without locking them, and a relation
+node given its own `lock` is refused. To lock related rows, read them with their own `lock` in the
+same transaction, and take locks in the same order everywhere to avoid deadlocks.
+
+**Outside a transaction it throws `LockOutsideTransactionError`.** A row lock lasts until the
+transaction that took it ends. Outside one, the statement is its own transaction, so the lock would
+be released as soon as the row came back, before the write it was meant to guard. The read would
+succeed and protect nothing, so gemi throws instead. `DB.transaction` counts: it opens the same
+ambient transaction `Model.transaction` does.
+
+**On SQLite, `lock` compiles to nothing.** SQLite has no row locks, and it does not need them for
+this: its transactions are serializable, with one writer at a time on the whole database, so the
+lost update a row lock prevents cannot happen. Concurrent transactions wait on (or fail with
+`SQLITE_BUSY` on) the database lock instead of the row's, and `skipLocked` and `noWait` have no row
+lock to react to. So code written for Postgres runs unchanged against SQLite in development and
+tests. The value is still validated, and the outside-a-transaction check applies on SQLite too, so
+a forgotten transaction fails in development.
+
+What `lock` does not cover — `for no key update`, `for key share`, locking rows of a joined table,
+or a claim ordered by an expression — is still a raw `select … for update` through `DB.query`
+inside the same transaction ([Raw SQL](#raw-sql)).
+
 ### Keep slow work out of the callback
 
 The reserved connection is held for as long as the callback runs, whether or not it is running
@@ -6619,6 +6692,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
 | `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
 | `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
+| `LockOutsideTransactionError` | A read was given `lock` outside a transaction, where the lock would be released before anything it guards could run. Wrap the read and its writes in `Model.transaction`. See [Locking rows](#locking-rows). |
 | `TransactionDependencyError` | A statement issued on the transaction for you, without your awaiting it, failed — today, a job the database queue driver wrote on it ([Jobs & Queues](./jobs-and-queues.md#dispatching-inside-a-transaction)) — so the transaction rolled back instead of committing. The statement's own error is its `cause`. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |

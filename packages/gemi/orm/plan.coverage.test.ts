@@ -75,6 +75,10 @@ const PROBES: Record<string, [unknown, unknown]> = {
   update: [{ update: { name: "a" } }, { update: { name: "a", locale: "l" } }],
   cursor: [{ cursor: { id: 1 } }, { cursor: { id: 2 } }],
   distinct: [{ distinct: ["email"] }, { distinct: ["name"] }],
+  // A no-op on the SQLite dialect this file compiles with, so the pair
+  // compiles alike here; `compile/lock.test.ts` checks the key on Postgres,
+  // where the two statements differ.
+  lock: [{ lock: "update" }, { lock: "share" }],
 };
 
 /** What each operation needs beside the argument under test to compile at all. */

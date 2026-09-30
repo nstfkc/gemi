@@ -25,6 +25,7 @@ import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
+  LockOutsideTransactionError,
   MissingModelSchemaError,
   RecordNotFoundError,
   UnsupportedQueryError,
@@ -80,6 +81,15 @@ import type { ModelSchema } from "./schema";
  * Framework internals take a `$` prefix so they cannot collide with anything an
  * application author adds to a model.
  */
+
+/** The reads that take `lock` — `READ_ARGS` in `compile/read.ts` agrees. */
+const LOCKING_READS = new Set([
+  "findMany",
+  "findFirst",
+  "findFirstOrThrow",
+  "findUnique",
+  "findUniqueOrThrow",
+]);
 
 /** Operations Prisma raises on when nothing matched, rather than returning null. */
 const ORTHROW = new Set([
@@ -647,6 +657,20 @@ export abstract class Model {
     // `executor.query` closure below, which captures this binding rather than
     // its value — has to run on the new handle rather than back on the pool.
     let conn = currentTransaction() ?? db.sql;
+
+    // A row lock outlives its statement only inside a transaction; outside one
+    // it is released as the row comes back, before the write it was meant to
+    // guard. Refused on every dialect — including SQLite, where the lock
+    // compiles to nothing — so a missing transaction fails in development
+    // rather than first under load on Postgres. After `runOnConnection`, so a
+    // transaction on another connection has already been refused as such.
+    if (
+      args?.lock !== undefined &&
+      LOCKING_READS.has(op) &&
+      currentTransaction() === undefined
+    ) {
+      throw new LockOutsideTransactionError(schema.name, op);
+    }
 
     // POLICIES, AND THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THE ORM.
     //

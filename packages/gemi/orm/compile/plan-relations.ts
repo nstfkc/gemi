@@ -6,6 +6,7 @@ import {
   RelationDepthExceededError,
   UnknownRelationError,
   UnregisteredRelationTargetError,
+  UnsupportedByDesignError,
   UnsupportedQueryError,
 } from "../errors";
 import { assertPageArgument } from "./paginate";
@@ -561,6 +562,20 @@ function assertNodeArgs(
       continue;
     }
     if (many ? RELATION_ARGS.has(key) : TO_ONE_ARGS.has(key)) continue;
+
+    // A lock is taken on the root rows only, and saying so beats listing the
+    // arguments a node does take: the caller's intent is clear and the answer
+    // is a second query, not a spelling fix.
+    if (key === "lock") {
+      throw new UnsupportedByDesignError(
+        `${node.as}.lock`,
+        schema.name,
+        operation,
+        `'lock' locks the rows of the model being queried, not an included ` +
+          `relation's. Lock the related rows with their own locking read in ` +
+          `the same transaction.`,
+      );
+    }
 
     // A to-one relation is at most one row, so ordering it is meaningless and
     // Prisma rejects it outright — `Unknown argument 'orderBy'`, listing

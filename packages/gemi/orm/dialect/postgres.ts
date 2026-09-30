@@ -6,6 +6,7 @@ import {
   param,
   sql,
 } from "../compile/fragment";
+import type { RowLockClause } from "../compile/lock";
 import { DecodeError } from "../errors";
 import type { FieldSchema, ScalarType } from "../schema";
 import type { ConstraintViolation, SqlDialect } from "./index";
@@ -361,6 +362,22 @@ export class PostgresDialect implements SqlDialect {
   // got wrong, and it falls out rather than needing a second count.
   ignoreConflicts(): Fragment {
     return sql(" on conflict do nothing");
+  }
+
+  // `of <table>`, so a lateral include in the same statement is not asked to
+  // lock too — see `SqlDialect.rowLock`. The clause is built from constants
+  // and a schema identifier only; nothing here comes from a value.
+  rowLock(lock: RowLockClause, table: string): Fragment {
+    const onLocked =
+      lock.onLocked === "skipLocked"
+        ? " skip locked"
+        : lock.onLocked === "noWait"
+          ? " nowait"
+          : "";
+    return sql(
+      ` for ${lock.mode === "share" ? "share" : "update"} of ` +
+        `${this.quoteIdent(table)}${onLocked}`,
+    );
   }
 
   // Unlike SQLite, Postgres accepts `offset` on its own, so neither clause has

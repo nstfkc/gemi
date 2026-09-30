@@ -949,11 +949,39 @@ interface Selection<M extends ModelTypeInfo> {
   omit?: OmitInput<M>;
 }
 
+/**
+ * The two row-lock strengths: `FOR UPDATE` and `FOR SHARE`.
+ *
+ * `"update"` is the one a read-then-write wants: nobody else can lock, update
+ * or delete the row until this transaction ends. `"share"` lets other `share`
+ * readers in and keeps writers out.
+ */
+export type RowLockMode = "update" | "share";
+
+/**
+ * The `lock` argument of `findUnique` / `findFirst` / `findMany` (and their
+ * `OrThrow` variants): lock the rows the query returns until the enclosing
+ * transaction ends. Only allowed inside `Model.transaction` / `DB.transaction`.
+ *
+ * - `"update"` / `"share"` wait for a row another transaction holds.
+ * - `{ mode, skipLocked: true }` leaves such rows out of the result instead,
+ *   which is how a queue hands each job to one worker.
+ * - `{ mode, noWait: true }` fails the statement at once instead of waiting.
+ *
+ * Postgres only; on SQLite, which has no row locks, it compiles to nothing.
+ * Only the root model's rows are locked, never an `include`d relation's.
+ */
+export type RowLock =
+  | RowLockMode
+  | { mode: RowLockMode; skipLocked?: boolean; noWait?: false }
+  | { mode: RowLockMode; noWait: true; skipLocked?: false };
+
 export interface FindManyArgs<M extends ModelTypeInfo> extends Selection<M> {
   where?: WhereInput<M>;
   orderBy?: OrderByInput<M> | OrderByInput<M>[];
   skip?: number;
   take?: number;
+  lock?: RowLock;
 }
 
 export type FindFirstArgs<M extends ModelTypeInfo> = FindManyArgs<M>;
@@ -961,6 +989,7 @@ export type FindFirstOrThrowArgs<M extends ModelTypeInfo> = FindManyArgs<M>;
 
 export interface FindUniqueArgs<M extends ModelTypeInfo> extends Selection<M> {
   where: WhereUniqueInput<M>;
+  lock?: RowLock;
 }
 
 export type FindUniqueOrThrowArgs<M extends ModelTypeInfo> = FindUniqueArgs<M>;
