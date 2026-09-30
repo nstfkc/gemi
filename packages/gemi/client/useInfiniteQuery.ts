@@ -206,20 +206,25 @@ export function useInfiniteQuery<
   const staleTimeRef = useRef(staleTime);
   staleTimeRef.current = staleTime;
   // Each page is read once when it joins the list — fetched when missing,
-  // revalidated when stale — not again on every later `fetchNextPage`.
-  const ensuredRef = useRef(new Set<string>());
+  // revalidated when stale — not again on every later `fetchNextPage`. A new
+  // list (params/search change) starts a new record, so returning to a filter
+  // revalidates its pages again as they are loaded.
+  const ensuredRef = useRef({ listKey, keys: new Set<string>() });
   useEffect(() => {
     if (!laterKeysId) return;
+    if (ensuredRef.current.listKey !== listKey) {
+      ensuredRef.current = { listKey, keys: new Set() };
+    }
+    const ensured = ensuredRef.current.keys;
     const keys = laterKeysId.split("\n");
     const releases = keys.map((key) => resource.retain(key));
     for (const key of keys) {
-      const id = `${resource.key}?${key}`;
-      if (ensuredRef.current.has(id)) continue;
-      ensuredRef.current.add(id);
+      if (ensured.has(key)) continue;
+      ensured.add(key);
       resource.getVariant(key, staleTimeRef.current);
     }
     return () => releases.forEach((release) => release());
-  }, [resource, laterKeysId]);
+  }, [resource, listKey, laterKeysId]);
 
   // Until this list's page 1 is cached, show what `useQuery` shows. During a
   // variant change under `keepPreviousData` that is the previous list's
