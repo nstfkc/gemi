@@ -1,3 +1,42 @@
+# Upgrading from 0.70 to 0.71
+
+Three additions and no behaviour changes. Nothing to rewrite.
+
+## `Features.set(key, active, { actor })` (#625, #631)
+
+Writes a feature switch through the configured `FeatureFlagSource` and
+invalidates the snapshot. An undeclared key throws `UndeclaredFeatureError`, a
+read-only source throws `FeatureSourceReadOnlyError`, and a reload failure after
+the write throws `FeatureReloadError`. The database source upserts the row, so a
+switch that was never written gets created. Custom sources gain an optional
+`write()`; sources without it are read-only.
+
+To record who changed a switch, add an optional `updatedBy String?` column to
+your flag model. `Features.list()` then carries `updatedBy` and `updatedAt`.
+Without the column the write still happens, and a warning is logged once.
+
+## Row locks: `lock` on `find*` queries (#627, #632)
+
+`findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow` and
+`findMany` accept `lock: "update" | "share"`, or
+`{ mode, skipLocked: true }` / `{ mode, noWait: true }`, inside
+`Model.transaction` / `DB.transaction`. On Postgres the query ends with
+`FOR UPDATE|SHARE OF "<table>"`, so only the queried model's rows are locked.
+Included relations are not locked. Outside a transaction a locking read throws
+`LockOutsideTransactionError`. On SQLite the lock is validated but does nothing,
+since SQLite transactions already run one writer at a time. Results are typed
+exactly as the same read without a lock.
+
+## Changing the session query: `UserProvider.sessionSelect()` (#349, #633)
+
+`findSession`, `updateSession` and `createSessionV2` now all query with
+`select: this.sessionSelect()`. The default returns `SESSION_SELECT`, now
+exported from `gemi/kernel`, which is the same select as before. Override it to
+add columns or order or filter `accounts`, spreading `SESSION_SELECT`. Type the
+provider as `UserProvider<AppSession>` (derived with `Payload<...>`), so all
+three queries return the extra fields typed. `AuthManager` accepts any
+`UserProvider<...>`. Existing providers compile and behave unchanged.
+
 # Upgrading from 0.69 to 0.70
 
 One behaviour change in `<Form>`, and new, opt-in session-token APIs. Nothing to
