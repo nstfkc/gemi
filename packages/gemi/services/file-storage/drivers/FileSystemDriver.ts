@@ -1,7 +1,7 @@
 import type { DeleteFileParams, PutFileOptions, PutFileParams, ReadFileParams, ReadResult } from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
 import { readdir, unlink } from "fs/promises";
-import { relative, resolve, isAbsolute } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
 import { projectRoot } from "../../../support/discover";
@@ -163,7 +163,7 @@ export class FileSystemDriver extends FileStorageDriver {
     const root = resolve(this.folderPath);
     const path = resolve(root, name);
     const rel = relative(root, path);
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error(`Refusing to delete "${name}": it is outside the storage folder`);
     }
 

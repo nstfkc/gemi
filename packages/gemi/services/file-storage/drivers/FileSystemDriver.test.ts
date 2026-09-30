@@ -119,3 +119,19 @@ describe("FileSystemDriver.delete()", () => {
     }
   });
 });
+
+describe("FileSystemDriver.delete() containment", () => {
+  test("still deletes a file whose name merely starts with two dots", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "gemi-fs-delete-"));
+    try {
+      const driver = new FileSystemDriver(folder);
+      await driver.put({ name: "..notes.txt", body: new Blob(["x"]) });
+
+      await driver.delete("..notes.txt");
+
+      expect(await Bun.file(join(folder, "..notes.txt")).exists()).toBe(false);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+});
