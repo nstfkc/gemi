@@ -65,6 +65,8 @@ let modelGate: Promise<void> | null = null;
 let holdMs = 30_000;
 /** Set by a test whose model call fails outright. */
 let modelFails = false;
+/** Held by a test, to keep `onError` from settling until it says so. */
+let errorGate: Promise<void> | null = null;
 
 const threads = new MemoryAgentStore();
 const liveRuns = new MemoryLiveRuns();
@@ -104,8 +106,7 @@ class Chat extends AgentController {
   }
 
   protected async onError(_: unknown, ctx: AgentHookContext) {
-    // Slower than the hooks after the run put together.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (errorGate) await errorGate;
     log.push(`error:${userOf(ctx)}`);
   }
 
@@ -222,12 +223,65 @@ async function until(done: () => boolean) {
 
 const ends = () => log.filter((entry) => entry.startsWith("end:"));
 
+/**
+ * `hookHoldMs` for the tests that are about the bound itself. No other timer
+ * in this file, or on the request path, uses it.
+ */
+const HOLD_MS = 4_321;
+
+/**
+ * The `hookHoldMs` bound, on a clock the test turns by hand.
+ *
+ * Only the timer the controller arms for the bound is taken over: `setTimeout`
+ * with exactly `HOLD_MS`. Every other timer — `tick`, the request plumbing —
+ * runs on the real clock as before. With a real 30ms bound these tests raced
+ * three 5ms hook timers against it, and a runner that stalled the event loop
+ * for 30ms ended the request between two hooks (#649). Here the bound lapses
+ * when, and only when, the test calls `lapse()`, so how long the hooks take in
+ * wall-clock time no longer matters.
+ */
+function holdClock() {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const pending = new Map<object, () => void>();
+
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    fn: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    if (ms !== HOLD_MS) return realSetTimeout(fn, ms, ...args);
+    const handle = {};
+    pending.set(handle, () => fn(...args));
+    return handle;
+  }) as typeof setTimeout);
+
+  vi.spyOn(globalThis, "clearTimeout").mockImplementation(((handle?: unknown) => {
+    if (handle && pending.delete(handle as object)) return;
+    realClearTimeout(handle as Parameters<typeof clearTimeout>[0]);
+  }) as typeof clearTimeout);
+
+  return {
+    /** Bounds armed and not yet cleared or lapsed. */
+    get armed() {
+      return pending.size;
+    },
+    /** `hookHoldMs` passes for every bound armed so far. */
+    lapse() {
+      const due = [...pending.values()];
+      pending.clear();
+      for (const fire of due) fire();
+    },
+  };
+}
+
 beforeEach(() => {
   log = [];
   messageGate = null;
   modelGate = null;
   holdMs = 30_000;
   modelFails = false;
+  errorGate = null;
   liveRuns.clear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -267,8 +321,20 @@ describe("AgentController hooks, inside the request that started the run", () =>
 
   test("an onError for a failed run sees the user, even when it outlasts the hooks after the run", async () => {
     modelFails = true;
+    let release!: () => void;
+    errorGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
 
     await (await send({ text: "hi" })).text();
+    // Every hook after the run is done, and `onError` is not: the request is
+    // still open for it. Held by a gate rather than a longer timer, which a
+    // stalled event loop could fire before the hooks' own.
+    await until(() => log.includes("complete:1"));
+    await tick();
+    expect(ends()).toEqual([]);
+
+    release();
     await until(() => ends().length > 0);
     await tick();
 
@@ -318,30 +384,44 @@ describe("AgentController hooks, inside the request that started the run", () =>
   });
 
   test("a hook that never settles holds the request for hookHoldMs, and no longer", async () => {
-    holdMs = 30;
+    holdMs = HOLD_MS;
+    const hold = holdClock();
     messageGate = new Promise<void>(() => {});
 
     await (await send({ text: "hi" })).text();
+    // The run has settled and the bound is running, and the hook never will:
+    // nothing but the bound can end the request now.
+    await until(() => hold.armed === 1);
     await tick();
     expect(ends()).toEqual([]);
 
+    hold.lapse();
     await until(() => ends().length === 1);
     expect(log).toEqual(["end:/api/chat"]);
   });
 
   test("a run longer than hookHoldMs is not a hung hook: the bound starts once it settles", async () => {
-    holdMs = 30;
+    holdMs = HOLD_MS;
+    const hold = holdClock();
     let open!: () => void;
     modelGate = new Promise<void>((resolve) => {
       open = resolve;
     });
 
     const res = await send({ text: "hi" });
-    setTimeout(() => open(), 80);
+    await tick();
+    // The run is still going, and has now outlasted `hookHoldMs`: a bound that
+    // started with it would lapse here, and end the request before the hooks.
+    hold.lapse();
+    expect(ends()).toEqual([]);
+
+    open();
     await res.text();
     await until(() => ends().length > 0);
     await tick();
 
+    // The bound armed once the run settled never lapses, so the hooks take
+    // however long they take.
     expect(log).toEqual(["message:user:1", "message:assistant:1", "complete:1", "end:/api/chat"]);
   });
 
