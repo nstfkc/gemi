@@ -1,3 +1,21 @@
+# Upgrading from 0.72.0 to 0.72.1
+
+## `Storage.delete()` deletes — behaviour change for Azure (#608, #636)
+
+`Storage.delete(name | { name, bucket })` was a no-op. It now forwards to the
+configured driver: `FileSystemDriver` unlinks the file (a name that resolves
+outside the storage folder is refused), `S3Driver` sends `DeleteObject`, and
+`AzureBlobDriver` deletes the blob. Deleting an object that doesn't exist
+resolves on every driver; other failures (e.g. a 403) still reject.
+
+**Azure:** `AzureBlobDriver.delete()` used to throw `FileNotFoundError` for a
+missing blob. It now resolves. Code that called the driver directly and relied
+on that throw must check existence itself.
+
+**Custom drivers:** `delete()` is not abstract. A custom driver that doesn't
+implement it now throws "`<Driver>` does not implement delete()" when
+`Storage.delete()` is called, instead of silently doing nothing.
+
 # Upgrading from 0.71 to 0.72
 
 Two additions, one of them type-only. No runtime behaviour changes. The typed
