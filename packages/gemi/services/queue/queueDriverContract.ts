@@ -32,8 +32,12 @@ import type { QueueDriver } from "./QueueDriver";
  *
  * The timing tests use real, short leases and delays rather than fake timers,
  * because a driver measuring time on its database's clock cannot be faked from
- * here. `LEASE` and `SHORT` leave a wide margin; a flake under heavy load is a
- * margin to widen, not a driver bug to chase.
+ * here. Waiting for a delay or a lease to pass is safe on any runner: the
+ * sleep only ever makes it longer. Asserting that one has *not* passed yet is
+ * not, because a loaded runner can take longer than `SHORT` between two
+ * statements, and then handing the job out is right. Those assertions go
+ * through `notYet`, which makes them only when the client saw too little time
+ * pass for the driver to be allowed to — see there.
  */
 export function queueDriverContract(
   name: string,
@@ -53,6 +57,33 @@ export function queueDriverContract(
   const LEASE = { visibilityTimeoutMs: 60_000, registered };
   const SHORT = 150;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * Starts a clock on the client, read as milliseconds since the call.
+   * Started before a statement is sent, it bounds the database's clock from
+   * both sides: that statement ran after the start, and any statement that
+   * has returned by the time it is read ran before the reading. So the
+   * database saw at most the reading pass between the two, whatever offset
+   * its clock runs at from the client's.
+   */
+  const stopwatch = () => {
+    const start = Date.now();
+    return () => Date.now() - start;
+  };
+
+  /**
+   * `claimed` must be empty if less than `ms` can have passed on the
+   * database since `elapsed` started, read after `claimed` came back. Past
+   * that, the runner was slow enough that the job may rightly be due, and a
+   * driver is allowed either answer. The 2 ms is the rounding of two
+   * millisecond clocks, the database's and the client's.
+   *
+   * A driver that hands a job out early still fails on any runner that is not
+   * starved, which is every run but the one that flaked.
+   */
+  const notYet = (claimed: unknown[], elapsed: () => number, ms: number) => {
+    if (elapsed() + 2 < ms) expect(claimed).toEqual([]);
+  };
 
   const withDriver = (body: (driver: QueueDriver) => Promise<void>) => async () => {
     const driver = await create();
@@ -113,15 +144,31 @@ export function queueDriverContract(
     test(
       "concurrent claims never share a job",
       withDriver(async (driver) => {
+        const enqueued: string[] = [];
         for (let i = 0; i < 20; i++) {
-          await driver.enqueue({ name: "A", args: `[${i}]` });
+          enqueued.push(await driver.enqueue({ name: "A", args: `[${i}]` }));
         }
 
-        const batches = await Promise.all(Array.from({ length: 5 }, () => driver.claim(8, LEASE)));
-        const ids = batches.flat().map((job) => job.id);
+        // Not all 20 in one round: a claimer that meets a row another holds
+        // skips it, which is what `SKIP LOCKED` is for, and leaves it for the
+        // next claim — on MySQL routinely, where one claimer can hold rows it
+        // is not taking. So rounds, as workers polling would. Every round
+        // that finds work claims some of it, so 20 rounds is far more than
+        // enough, and a queue that stops draining fails below rather than
+        // spinning.
+        const ids: string[] = [];
+        for (let round = 0; round < 20 && ids.length < 20; round++) {
+          const batches = await Promise.all(
+            Array.from({ length: 5 }, () => driver.claim(8, LEASE)),
+          );
+          ids.push(...batches.flat().map((job) => job.id));
+        }
 
-        expect(ids).toHaveLength(20);
-        expect(new Set(ids).size).toBe(20);
+        // Never shared: the property this is named for.
+        expect(new Set(ids).size).toBe(ids.length);
+        // And none lost: every job enqueued was handed out, and nothing else.
+        expect([...ids].sort()).toEqual([...enqueued].sort());
+        expect(await driver.claim(8, LEASE)).toEqual([]);
       }),
     );
 
@@ -144,12 +191,14 @@ export function queueDriverContract(
         const id = await driver.enqueue({ name: "A", args: "[7]" });
         const [job] = await driver.claim(1, LEASE);
 
+        const elapsed = stopwatch();
         await driver.fail(job!, { error: "boom", retryInMs: SHORT });
 
-        expect(await driver.claim(1, LEASE)).toEqual([]);
-        await sleep(SHORT * 2);
+        const early = await driver.claim(1, LEASE);
+        notYet(early, elapsed, SHORT);
+        if (!early.length) await sleep(SHORT * 2);
 
-        const [again] = await driver.claim(1, LEASE);
+        const [again] = early.length ? early : await driver.claim(1, LEASE);
         expect(again).toMatchObject({ id, name: "A", args: "[7]", attempt: 2 });
       }),
     );
@@ -182,15 +231,19 @@ export function queueDriverContract(
     test(
       "enqueue with a delay is not claimable until it has passed",
       withDriver(async (driver) => {
+        const elapsed = stopwatch();
         const id = await driver.enqueue({
           name: "A",
           args: "[]",
           delayMs: SHORT,
         });
 
-        expect(await driver.claim(1, LEASE)).toEqual([]);
-        await sleep(SHORT * 2);
-        expect((await driver.claim(1, LEASE)).map((job) => job.id)).toEqual([id]);
+        const early = await driver.claim(1, LEASE);
+        notYet(early, elapsed, SHORT);
+        if (!early.length) await sleep(SHORT * 2);
+
+        const claimed = early.length ? early : await driver.claim(1, LEASE);
+        expect(claimed.map((job) => job.id)).toEqual([id]);
       }),
     );
 
@@ -203,17 +256,24 @@ export function queueDriverContract(
         // actually been waiting — goes first. A driver ordering by creation
         // time gets the opposite answer, and a job asked to wait five minutes
         // then jumps ahead of everything enqueued during those five minutes.
+        //
+        // Only while `immediate` really was enqueued before `delayed` came
+        // due: on a runner slow enough to take `SHORT` between the two, it
+        // was not, and either order can be the right one.
+        const elapsed = stopwatch();
         const delayed = await driver.enqueue({
           name: "A",
           args: "[]",
           delayMs: SHORT,
         });
         const immediate = await driver.enqueue({ name: "B", args: "[]" });
+        const raced = elapsed() + 2 >= SHORT;
 
         await sleep(SHORT * 2);
 
-        const claimed = await driver.claim(10, LEASE);
-        expect(claimed.map((job) => job.id)).toEqual([immediate, delayed]);
+        const claimed = (await driver.claim(10, LEASE)).map((job) => job.id);
+        if (raced) expect([...claimed].sort()).toEqual([immediate, delayed].sort());
+        else expect(claimed).toEqual([immediate, delayed]);
       }),
     );
 
@@ -238,27 +298,31 @@ export function queueDriverContract(
         await driver.enqueue({ name: "A", args: "[]" });
         const [stale] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
         await sleep(SHORT * 2);
-        const [current] = await driver.claim(1, { visibilityTimeoutMs: SHORT, registered });
+        const [current] = await driver.claim(1, LEASE);
 
         // The slow first claimer finishes late. No report of its may end the
         // claim that now holds the job, or two processes would each believe
         // the other's outcome.
         //
-        // The retry is checked first, and while the second lease is at its
-        // freshest, because it is the branch a driver is likeliest to get
-        // wrong: the other two delete the row, and an author who puts the
-        // attempt check on the delete and not on the update that sends a row
-        // back to waiting passes every other test here. In production that
-        // driver re-opens a job another worker is running right now — two live
-        // runs at one attempt, which is the whole of what `attempt` is for. So
-        // the second claim must still be exclusive afterwards.
+        // The retry is checked first because it is the branch a driver is
+        // likeliest to get wrong: the other two delete the row, and an author
+        // who puts the attempt check on the delete and not on the update that
+        // sends a row back to waiting passes every other test here. In
+        // production that driver re-opens a job another worker is running
+        // right now — two live runs at one attempt, which is the whole of what
+        // `attempt` is for. So the second claim must still be exclusive
+        // afterwards.
         await driver.fail(stale!, { error: "late", retryInMs: 0 });
         expect(await driver.claim(1, LEASE)).toEqual([]);
 
         await driver.complete(stale!);
         await driver.fail(stale!, { error: "late", retryInMs: null });
-        await sleep(SHORT * 2);
 
+        // The job is still there, still held by the second claim, and still
+        // counting from it: that claim's own report is honoured, as the
+        // third attempt. Deleted or dead-lettered by a stale report, there
+        // would be nothing to claim.
+        await driver.fail(current!, { error: "boom", retryInMs: 0 });
         const [third] = await driver.claim(1, LEASE);
         expect(third).toMatchObject({ id: current!.id, attempt: 3 });
       }),
@@ -270,14 +334,16 @@ export function queueDriverContract(
         const id = await driver.enqueue({ name: "A", args: "[7]" });
         const [job] = await driver.claim(1, LEASE);
 
+        const elapsed = stopwatch();
         await driver.release(job!, { retryInMs: SHORT });
 
-        expect(await driver.claim(1, LEASE)).toEqual([]);
-        await sleep(SHORT * 2);
+        const early = await driver.claim(1, LEASE);
+        notYet(early, elapsed, SHORT);
+        if (!early.length) await sleep(SHORT * 2);
 
         // Attempt 1 again: the claim that was given back never ran it, so a
         // job allowed one attempt still has it.
-        const [again] = await driver.claim(1, LEASE);
+        const [again] = early.length ? early : await driver.claim(1, LEASE);
         expect(again).toMatchObject({ id, name: "A", args: "[7]", attempt: 1 });
 
         // And the count moves on from there, rather than having been reset.
@@ -360,18 +426,21 @@ export function queueDriverContract(
       test(
         "a job under an unknown name is handed out once it has been claimable for the grace window",
         withDriver(async (driver) => {
+          const elapsed = stopwatch();
           const id = await driver.enqueue({ name: "Removed", args: "[]" });
           const lease = {
             visibilityTimeoutMs: 60_000,
             registered: { names: ["A"], graceMs: SHORT },
           };
 
-          expect(await driver.claim(1, lease)).toEqual([]);
-          await sleep(SHORT * 2);
+          const early = await driver.claim(1, lease);
+          notYet(early, elapsed, SHORT);
+          if (!early.length) await sleep(SHORT * 2);
 
           // Past the window the name is taken to be gone, and the claimer gets
           // it so that it can be dead-lettered rather than wait forever.
-          expect(await driver.claim(1, lease)).toMatchObject([{ id, attempt: 1 }]);
+          const claimed = early.length ? early : await driver.claim(1, lease);
+          expect(claimed).toMatchObject([{ id, attempt: 1 }]);
         }),
       );
 
@@ -380,6 +449,8 @@ export function queueDriverContract(
         withDriver(async (driver) => {
           // Delayed past the window. Due now, it has been waiting for no time
           // at all, and a replica that knows the name may be about to take it.
+          // Due at 2, out of the window at 4, in units of SHORT.
+          const elapsed = stopwatch();
           await driver.enqueue({ name: "Delayed", args: "[]", delayMs: SHORT * 2 });
           await sleep(SHORT * 3);
           const lease = {
@@ -387,9 +458,10 @@ export function queueDriverContract(
             registered: { names: ["A"], graceMs: SHORT * 2 },
           };
 
-          expect(await driver.claim(1, lease)).toEqual([]);
-          await sleep(SHORT * 3);
-          expect(await driver.claim(1, lease)).toHaveLength(1);
+          const early = await driver.claim(1, lease);
+          notYet(early, elapsed, SHORT * 4);
+          if (!early.length) await sleep(SHORT * 3);
+          expect(early.length ? early : await driver.claim(1, lease)).toHaveLength(1);
         }),
       );
 
@@ -403,7 +475,9 @@ export function queueDriverContract(
           // or `claimed_at` it would already be handed out.
           const id = await driver.enqueue({ name: "NewRelease", args: "[]" });
           await sleep(SHORT * 2);
-          // A replica that knew the name claimed it and died.
+          // A replica that knew the name claimed it and died. Out of the
+          // window at 4 after this claim.
+          const elapsed = stopwatch();
           await driver.claim(1, {
             visibilityTimeoutMs: SHORT * 2,
             registered: { names: ["NewRelease"], graceMs: 60_000 },
@@ -414,10 +488,11 @@ export function queueDriverContract(
             visibilityTimeoutMs: 60_000,
             registered: { names: ["A"], graceMs: SHORT * 2 },
           };
-          expect(await driver.claim(1, old)).toEqual([]);
+          const early = await driver.claim(1, old);
+          notYet(early, elapsed, SHORT * 4);
+          if (!early.length) await sleep(SHORT * 2);
 
-          await sleep(SHORT * 2);
-          const [again] = await driver.claim(1, old);
+          const [again] = early.length ? early : await driver.claim(1, old);
           expect(again).toMatchObject({ id, attempt: 2 });
         }),
       );
@@ -429,15 +504,25 @@ export function queueDriverContract(
         if (!driver.heartbeat) return;
         await driver.enqueue({ name: "A", args: "[]" });
         const short = { visibilityTimeoutMs: SHORT * 2, registered };
+        // Each lease, the claim's or a beat's, has to be renewed before it
+        // runs out: `widest` is the most the database can have seen pass
+        // between one and the next, by the reasoning at `stopwatch`.
+        let elapsed = stopwatch();
+        let widest = 0;
         const [job] = await driver.claim(1, short);
 
         // Kept alive past two whole lease lengths, by beats inside each.
         for (let i = 0; i < 4; i++) {
           await sleep(SHORT);
+          const next = stopwatch();
           await driver.heartbeat([job!], short);
+          widest = Math.max(widest, elapsed());
+          elapsed = next;
         }
 
-        expect(await driver.claim(1, LEASE)).toEqual([]);
+        const claimed = await driver.claim(1, LEASE);
+        widest = Math.max(widest, elapsed());
+        notYet(claimed, () => widest, SHORT * 2);
         await driver.complete(job!);
       }),
     );
