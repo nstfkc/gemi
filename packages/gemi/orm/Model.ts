@@ -19,12 +19,14 @@ import {
   type RelationStrategy,
   attachRelations,
 } from "./compile/plan-relations";
+import { READ_ARGS } from "./compile/read";
 import { resolveStrategy } from "./compile/strategy";
 import { matchUniqueKey } from "./compile/unique";
 import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
+  LockOutsideTransactionError,
   MissingModelSchemaError,
   RecordNotFoundError,
   UnsupportedQueryError,
@@ -647,6 +649,20 @@ export abstract class Model {
     // `executor.query` closure below, which captures this binding rather than
     // its value — has to run on the new handle rather than back on the pool.
     let conn = currentTransaction() ?? db.sql;
+
+    // A row lock outlives its statement only inside a transaction; outside one
+    // it is released as the row comes back, before the write it was meant to
+    // guard. Refused on every dialect — including SQLite, where the lock
+    // compiles to nothing — so a missing transaction fails in development
+    // rather than first under load on Postgres. After `runOnConnection`, so a
+    // transaction on another connection has already been refused as such.
+    if (
+      args?.lock !== undefined &&
+      READ_ARGS[op]?.has("lock") &&
+      currentTransaction() === undefined
+    ) {
+      throw new LockOutsideTransactionError(schema.name, op);
+    }
 
     // POLICIES, AND THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THE ORM.
     //

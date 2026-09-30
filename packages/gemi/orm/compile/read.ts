@@ -25,13 +25,37 @@ import { planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { assertUniqueWhere } from "./unique";
 import { compileAggregate } from "./aggregate";
+import { parseRowLock } from "./lock";
 import { pagination } from "./paginate";
 import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
+//
+// `lock` is gemi's, not Prisma's: Prisma has no row locks, which is why folio
+// grew raw `select … for update` statements with hand-written row types (#627).
+// It changes only the statement's tail, so every other argument keeps its
+// Prisma meaning. See `compile/lock.ts`.
 export const READ_ARGS: Record<string, Set<string>> = {
-  findMany: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
-  findFirst: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
+  findMany: new Set([
+    "where",
+    "orderBy",
+    "skip",
+    "take",
+    "select",
+    "include",
+    "omit",
+    "lock",
+  ]),
+  findFirst: new Set([
+    "where",
+    "orderBy",
+    "skip",
+    "take",
+    "select",
+    "include",
+    "omit",
+    "lock",
+  ]),
   findFirstOrThrow: new Set([
     "where",
     "orderBy",
@@ -40,9 +64,10 @@ export const READ_ARGS: Record<string, Set<string>> = {
     "select",
     "include",
     "omit",
+    "lock",
   ]),
-  findUnique: new Set(["where", "select", "include", "omit"]),
-  findUniqueOrThrow: new Set(["where", "select", "include", "omit"]),
+  findUnique: new Set(["where", "select", "include", "omit", "lock"]),
+  findUniqueOrThrow: new Set(["where", "select", "include", "omit", "lock"]),
   // `select` on a count returns an object of per-field counts rather than a
   // number — `{ _all: 3, email: 2 }`. It was refused here while there was no
   // aggregate to put it beside; now there is, and `compileAggregate` owns it,
@@ -252,6 +277,11 @@ export function compileRead(
   );
   const order = compileOrderBy(terms, dialect, qualifier);
 
+  // Last, after `limit`/`offset`, where Postgres requires it. Only the root
+  // table is named, so a folded include's lateral subquery is not locked (and
+  // could not be); a batched include's child queries carry no lock at all.
+  const lock = parseRowLock(args?.lock, schema.name, op);
+
   const statement = concat(
     sql("select "),
     columns,
@@ -260,6 +290,7 @@ export function compileRead(
     whereClause,
     order ? concat(sql(" order by "), order) : sql(""),
     paginationClause,
+    lock ? dialect.rowLock(lock, schema.table) : sql(""),
   );
 
   const { text, binders } = render(statement, dialect, {

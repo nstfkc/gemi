@@ -671,7 +671,25 @@ export function planKey(
     args,
     false,
     dialect.bindsListAsOneParameter,
-  )}`;
+  )}${lockKey(args)}`;
+}
+
+/**
+ * A read's `lock`, verbatim, because its value is the statement's tail:
+ * `"update"` and `"share"` both shape to `string`, and sharing one entry would
+ * hand the second caller the first one's lock — a `for share` where
+ * `for update` was asked for, or `skip locked` where the caller wanted to wait.
+ *
+ * Read here, at the top level only, rather than added to `LITERAL_KEYS`.
+ * `LITERAL_KEYS` matches by name at any depth, so a model with a column called
+ * `lock` would record every `where: { lock: … }` value verbatim — user data in
+ * a long-lived map and one plan per distinct value. `lock` is only an argument
+ * at the root of a read; a relation node refuses it.
+ */
+function lockKey(args: unknown): string {
+  if (args === null || typeof args !== "object") return "";
+  const lock = (args as { lock?: unknown }).lock;
+  return lock === undefined ? "" : `:lock=${canonicalShape(lock, true)}`;
 }
 
 export function getOrCompile(
