@@ -23,6 +23,7 @@ import {
 } from "./store/LiveRuns";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { sseResponse } from "./store/sse";
+import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import type {
   AgentError,
   AgentMessage,
@@ -78,6 +79,13 @@ export interface AgentStore {
    * lookup already but still needs an insert-or-update rather than a plain
    * insert, which would fail on the key; a store that is a list has to look
    * before it pushes.
+   *
+   * It is also called while a turn runs, not only when it ends (#617): with the
+   * user's message as the run starts, with the assistant message in progress
+   * (no `finishReason`, the run's id in `runId`) as it opens and at each tool
+   * call and result, and with each message again once it is finished. The
+   * same message arrives several times, and the last write is the one to
+   * keep. Calls for one run never overlap: each waits for the one before.
    */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
 }
@@ -512,7 +520,12 @@ export abstract class AgentController<
             message: `Thread ${threadId} does not exist here, or has expired.`,
           });
         }
-        messages = history;
+        // A message a dead run left unfinished is closed here, and written
+        // back, before the run is handed the history: the model then reads it
+        // as interrupted, and its open calls have results. Under the thread's
+        // lock and after the previous run's transcript is stored, so the only
+        // unfinished message left is one no run in this process owns.
+        messages = await this.settleThread(threadId, history, { write: true });
       } else {
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
       }
@@ -536,10 +549,21 @@ export abstract class AgentController<
         return stoppedBeforeStart();
       }
 
+      // Only a threaded turn has anywhere to be written as it runs. See
+      // `TurnJournal`.
+      const journal = threadId
+        ? new TurnJournal(this.store, threadId, messages, (err) => this.reportHookFailure(err))
+        : null;
+
       const run = this.agent.stream({
         messages,
         turn,
         threadId,
+        // The run reports each message as it finishes it, the user's turn
+        // first and before the model is asked anything. Only the store hears
+        // about it here: the app's `onMessage` still runs after the run, in
+        // `notifyRun`, as it always has.
+        ...(journal ? { onMessage: (message: AgentMessage) => journal.finish(message) } : {}),
         instructions,
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
@@ -580,12 +604,14 @@ export abstract class AgentController<
         onInternalError: (err) => this.reportHookFailure(err),
       });
 
+      if (journal) this.follow(run, journal);
+
       // Kept, not just fired: the next turn on this thread has to know when
       // this one's transcript is in the store. See `withThread`. The request
       // waits for more than the thread does — the hooks as well — so that
       // `onMessage` still finds the user who sent the message; the thread
       // waits only for the store, so a slow hook is not a slow next turn.
-      const { stored, hooks } = this.persistRun(run, ctx, eventHooks);
+      const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal);
       persisted.set(run, stored);
       // Registered now, while the request is certainly open: `waitUntil` is
       // ignored once it has ended, and the run settling can end it before a
@@ -1202,6 +1228,82 @@ export abstract class AgentController<
   }
 
   /**
+   * The thread as a client should see it: the store's history, with any
+   * assistant message a dead run left unfinished marked `interrupted` (#617).
+   *
+   * For the app's own route that hands a thread to `useChat` (or a native
+   * session) as its initial messages. A message whose run is still going here
+   * is left as it is, still being written, so the client attaches to it. `null`
+   * for a thread the store does not have, as `loadThread` answers.
+   *
+   * It does not write: the next turn on the thread settles the same messages
+   * the same way and stores them then, under the thread's lock.
+   */
+  async readThread(threadId: string): Promise<AgentMessage[] | null> {
+    const history = await this.store.loadThread(threadId);
+    return history ? await this.settleThread(threadId, history, { write: false }) : null;
+  }
+
+  /**
+   * Whether the run that was writing a message is still going, so the message
+   * is in progress rather than interrupted.
+   *
+   * The default asks this process's `liveRuns`, which is the whole answer on a
+   * single instance: a run lives in the process that started it, and a run
+   * that is not there died with an earlier one. A finished run still within
+   * `ttlMs` counts as live, since its final write may not have landed yet.
+   *
+   * Behind several instances it is not the whole answer. A run on another
+   * instance is not in this map, so its message reads as interrupted here
+   * until that run's own writes replace it. Knowing better needs a lasting
+   * record of running runs (#459); override this to consult one.
+   */
+  protected isRunLive(runId: string, threadId: string): boolean | Promise<boolean> {
+    void threadId;
+    return this.liveRuns.get(runId) !== null;
+  }
+
+  private async settleThread(
+    threadId: string,
+    history: AgentMessage[],
+    { write }: { write: boolean },
+  ): Promise<AgentMessage[]> {
+    const { messages, settled } = await settleInterrupted(history, (runId) =>
+      this.isRunLive(runId, threadId),
+    );
+    if (write && settled.length > 0) {
+      try {
+        await this.store.appendMessages(threadId, settled);
+      } catch (err) {
+        // The run still gets the settled history. The store keeps the
+        // unfinished copy, and the next turn settles it the same way again.
+        this.reportHookFailure(err);
+      }
+    }
+    return messages;
+  }
+
+  /**
+   * Feeds the run's frames to its journal as they are emitted.
+   *
+   * A subscriber of its own on `run.frames()` rather than a ride on the
+   * `onEvent` chain: that chain waits for the app's hooks, and a slow
+   * `onToolCall` must not be what decides whether a tool call was stored
+   * before the process died. `frames()` is a read of the run's own buffer, the
+   * one `toResponse` already reads beside `liveRuns`, so a third reader costs a
+   * cursor and nothing else.
+   */
+  private follow(run: AgentRun, journal: TurnJournal): void {
+    void (async () => {
+      try {
+        for await (const frame of run.frames()) journal.frame(frame);
+      } catch (err) {
+        this.reportHookFailure(err);
+      }
+    })();
+  }
+
+  /**
    * Runs after the stream is over, whether or not anyone was still watching it.
    *
    * The messages come from `result()` rather than from the event stream because
@@ -1230,6 +1332,7 @@ export abstract class AgentController<
     run: AgentRun,
     ctx: AgentHookContext,
     eventHooks: Promise<void>,
+    journal: TurnJournal | null = null,
   ): { stored: Promise<void>; hooks: Promise<void> } {
     // Assigned before `stored` settles, on every path, so `hooks` below reads
     // the chain this run actually started.
@@ -1240,6 +1343,11 @@ export abstract class AgentController<
       try {
         result = await run.result();
       } catch (err) {
+        // What was written while it ran stays: it is the most the store can
+        // know about a run that did not settle, and the next read marks it
+        // interrupted once the run is gone.
+        journal?.close();
+        await journal?.settled();
         notified = this.safely(() =>
           this.onError(
             {
@@ -1254,6 +1362,12 @@ export abstract class AgentController<
       }
 
       const messages = result.messages as AgentMessage[];
+
+      // The writes made while it ran land first, then the transcript whole: the
+      // same messages under the same ids, now final, so this replaces every
+      // in-progress copy rather than adding to them.
+      journal?.close(messages);
+      await journal?.settled();
 
       if (ctx.threadId && messages.length > 0) {
         try {

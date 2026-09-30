@@ -513,6 +513,44 @@ describe("the rest of the event union", () => {
     expect(after.messages.map((message) => message.finishReason)).toEqual([undefined, "stop"]);
   });
 
+  test("a restored interrupted message stays interrupted through the next run", () => {
+    // What a thread read after a restart holds (#617): the turn a dead run was
+    // writing, closed by the server as `interrupted`, its open call denied. It
+    // is finished, so a late delta for it is replay and the next run's
+    // `run-end` is not about it.
+    const interrupted: AgentMessage = {
+      id: "m1",
+      role: "assistant",
+      runId: "run_1",
+      finishReason: "interrupted",
+      createdAt: NOW,
+      content: [
+        { type: "text", text: "Building" },
+        { type: "tool-call", toolCallId: "tc_1", name: "buildPage", input: { title: "Home" } },
+        {
+          type: "tool-result",
+          toolCallId: "tc_1",
+          name: "buildPage",
+          status: "denied",
+          cause: "interrupted",
+        },
+      ],
+    };
+    const restored = initialChatState({ messages: [interrupted] });
+
+    const after = fold(restored, [
+      { seq: 0, event: { type: "run-start", runId: "run_2" } },
+      { seq: 1, event: { type: "text-delta", messageId: "m1", delta: " the page" } },
+      { seq: 2, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+      { seq: 3, event: { type: "text-delta", messageId: "m2", delta: "It was saved." } },
+      { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+    ]);
+
+    expect(after.messages[0]).toEqual(interrupted);
+    expect(after.messages.map((message) => message.finishReason)).toEqual(["interrupted", "stop"]);
+    expect(markAborted(restored).messages[0]).toEqual(interrupted);
+  });
+
   test("usage with no assistant message of its own is dropped, not put on the user's turn", () => {
     // A run that errors after the provider counted input tokens, or one whose
     // only output is a tool call the client has to resolve, emits `usage` while

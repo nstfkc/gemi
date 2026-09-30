@@ -76,7 +76,16 @@ export type FinishReason =
    *  give it. The conversation continues with an ordinary turn. */
   | "awaiting-input"
   | "aborted"
-  | "error";
+  | "error"
+  /**
+   * The message's run died before it finished it: a restart, a crash, a
+   * deploy. Never on a live frame — no run is left to send one. It is set on a
+   * message the store kept from a run that is no longer live, when the thread
+   * is read (`AgentController.readThread`) or when the next turn starts, and a
+   * tool call the message left open gets a `denied` result with
+   * `cause: "interrupted"`. See `AgentMessage.runId`.
+   */
+  | "interrupted";
 
 export type AgentErrorCode =
   | "provider_error"
@@ -290,13 +299,17 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
      * answering something else instead; `stopped` is a cancel that landed while
      * the call was in flight.
      *
-     * Both are told to the model rather than dropped, and for the same reason:
+     * `interrupted` is a call whose run died while it was in flight (see
+     * `FinishReason`). Unlike `stopped` it may have run, in part or in full:
+     * nobody was left to record its result, not to stop it.
+     *
+     * All three are told to the model rather than dropped, and for the same reason:
      * a history holding a tool call with no result is one the provider rejects,
      * so an abort has to leave a conversation that can still be continued. It
      * also happens to be true — the model asked for something and did not get
      * it, and the next turn goes better for knowing which.
      */
-    | { status: "denied"; cause: "refused" | "stopped"; reason?: string }
+    | { status: "denied"; cause: "refused" | "stopped" | "interrupted"; reason?: string }
   );
 }[keyof T];
 
@@ -348,6 +361,19 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    */
   outputTruncated?: true;
   usage?: Usage;
+  /**
+   * The run writing this message, on a copy the controller stored while the
+   * run was still going: a threaded turn is written to the store as it runs
+   * (the user's message, then each assistant message from its start), so a
+   * restart mid-run leaves the turn behind instead of nothing.
+   *
+   * Only on a message with no `finishReason`, plus the `interrupted` one it may
+   * become. The finished message replaces it by id and does not carry it. It is
+   * how a reader tells "still being written" from "its run is gone": the
+   * controller asks whether this run is live (`isRunLive`), and marks the
+   * message `interrupted` when it is not.
+   */
+  runId?: string;
 };
 
 // --- what the client sends ----------------------------------------------

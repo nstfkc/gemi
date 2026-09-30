@@ -26,6 +26,11 @@ public struct FinishReason: RawRepresentable, Hashable, Sendable, Codable,
   public static let awaitingInput: FinishReason = "awaiting-input"
   public static let aborted: FinishReason = "aborted"
   public static let error: FinishReason = "error"
+  /// The run writing this message died before finishing it (a server restart,
+  /// a crash). Only on a message read back from the server's store, never on a
+  /// live frame; its open tool calls carry a `denied` result with cause
+  /// `"interrupted"`.
+  public static let interrupted: FinishReason = "interrupted"
 }
 
 public struct Usage: Hashable, Sendable, Codable {
@@ -191,8 +196,9 @@ public struct ToolResultPart: JSONObjectView, Identifiable {
   public enum Outcome: Hashable, Sendable {
     case ok(JSONValue)
     case error(AgentError)
-    /// The call did not run: `"refused"` by the client, or `"stopped"` by a
-    /// cancel that landed while it was in flight.
+    /// The call did not complete: `"refused"` by the client, `"stopped"` by a
+    /// cancel that landed while it was in flight, or `"interrupted"` when the
+    /// server stopped mid-call (it may have run in part or in full).
     case denied(cause: String, reason: String?)
   }
 
