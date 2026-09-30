@@ -20,6 +20,7 @@ type State = {
 type Deferred = { promise: Promise<void>; resolve: () => void };
 
 export const DEFAULT_STALE_TIME = 5000;
+const MAX_TIMEOUT = 2 ** 31 - 1;
 
 export class QueryResource {
   store: Subject<Map<string, State>>;
@@ -312,6 +313,9 @@ export class QueryResource {
     if (this.retryTimers.has(variantKey) || this.inflight.has(variantKey)) {
       return;
     }
+    // `setTimeout` fires at once for a delay past 2^31 - 1 ms (~24.8 days), so
+    // a far-off `Retry-After` is clamped rather than retried immediately.
+    const wait = Math.min(Math.max(0, delay || 0), MAX_TIMEOUT);
     const timer = setTimeout(() => {
       this.retryTimers.delete(variantKey);
       if (!this.watchers.has(variantKey)) return;
@@ -321,7 +325,7 @@ export class QueryResource {
       // Loud (`loading: true`) only when there is no data to keep showing —
       // the same choice `getVariant` makes.
       this.resolveVariant(variantKey, state.hasData, true, true);
-    }, delay);
+    }, wait);
     this.retryTimers.set(variantKey, timer);
   }
 

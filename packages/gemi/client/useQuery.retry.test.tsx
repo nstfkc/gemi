@@ -659,3 +659,12 @@ describe("retryPolicy helpers", () => {
     expect(parseRetryAfter("", now)).toBeUndefined();
   });
 });
+
+describe("resource timer bounds", () => {
+  test("a Retry-After past setTimeout's range waits instead of firing at once", async () => {
+    net.script({ status: 503, retryAfter: String(60 * 60 * 24 * 40) });
+    renderTodos();
+    await advance(LATER);
+    expect(net.calls()).toBe(1);
+  });
+});
