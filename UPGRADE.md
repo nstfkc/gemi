@@ -1,4 +1,4 @@
-# Upgrading from 0.77 to the next release
+# Upgrading from 0.77 to 0.78
 
 ## `attachmentScope` and `authorizeRequest` get the request body (#603)
 
