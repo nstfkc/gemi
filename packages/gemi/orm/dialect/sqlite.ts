@@ -293,8 +293,8 @@ export class SqliteDialect implements SqlDialect {
   }
 
   // Nothing to emit: SQLite has no row locks, and its transactions are already
-  // serializable at the database level. See `SqlDialect.rowLock` for why this is a no-op
-  // rather than a refusal.
+  // serializable at the database level. See `SqlDialect.rowLock` for why this
+  // is a no-op rather than a refusal.
   rowLock(_lock: RowLockClause, _table: string): Fragment {
     return sql("");
   }

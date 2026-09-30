@@ -19,6 +19,7 @@ import {
   type RelationStrategy,
   attachRelations,
 } from "./compile/plan-relations";
+import { READ_ARGS } from "./compile/read";
 import { resolveStrategy } from "./compile/strategy";
 import { matchUniqueKey } from "./compile/unique";
 import { upsertAbsentConflictKey } from "./compile/write";
@@ -81,15 +82,6 @@ import type { ModelSchema } from "./schema";
  * Framework internals take a `$` prefix so they cannot collide with anything an
  * application author adds to a model.
  */
-
-/** The reads that take `lock` — `READ_ARGS` in `compile/read.ts` agrees. */
-const LOCKING_READS = new Set([
-  "findMany",
-  "findFirst",
-  "findFirstOrThrow",
-  "findUnique",
-  "findUniqueOrThrow",
-]);
 
 /** Operations Prisma raises on when nothing matched, rather than returning null. */
 const ORTHROW = new Set([
@@ -666,7 +658,7 @@ export abstract class Model {
     // transaction on another connection has already been refused as such.
     if (
       args?.lock !== undefined &&
-      LOCKING_READS.has(op) &&
+      READ_ARGS[op]?.has("lock") &&
       currentTransaction() === undefined
     ) {
       throw new LockOutsideTransactionError(schema.name, op);
