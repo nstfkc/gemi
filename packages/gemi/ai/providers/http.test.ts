@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { ProviderHttpError, ProviderTimeoutError } from "./errors";
 import {
@@ -152,8 +152,8 @@ describe("requestWithRetry()", () => {
    */
   test("an abort during the backoff settles at once instead of finishing the wait", async () => {
     const controller = new AbortController();
-    const started = Date.now();
     let calls = 0;
+    let finishWait!: () => void;
 
     const promise = requestWithRetry(
       "https://api.example/responses",
@@ -166,38 +166,78 @@ describe("requestWithRetry()", () => {
           calls++;
           return res(503);
         },
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // Ignores the signal, and waits until the test says so: the abort
+        // lands mid-backoff, and the wait is still going when it is checked.
+        sleep: () => {
+          queueMicrotask(() => controller.abort());
+          return new Promise<void>((resolve) => {
+            finishWait = resolve;
+          });
+        },
         random: () => 1,
       },
     );
+    let settled = false;
+    const outcome = promise.then(
+      () => null,
+      (e) => e,
+    );
+    void outcome.finally(() => (settled = true));
 
-    setTimeout(() => controller.abort(), 20);
-    const error = await promise.catch((e) => e);
+    // A macrotask later: every continuation the abort set off has run, and
+    // the backoff has not finished — only an abort that won the race with it
+    // could have settled the request by now.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const settledDuringWait = settled;
+    finishWait();
 
-    expect((error as Error).name).toBe("AbortError");
-    expect(Date.now() - started).toBeLessThan(400);
+    expect(settledDuringWait).toBe(true);
+    expect(((await outcome) as Error).name).toBe("AbortError");
     expect(calls).toBe(1);
   });
 
   test("the default backoff is itself abortable", async () => {
-    const controller = new AbortController();
-    const started = Date.now();
+    // The default sleep is a real `setTimeout`. On a clock that never moves,
+    // the request can only settle by the abort cutting that wait short.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const controller = new AbortController();
+      let settled = false;
 
-    const promise = requestWithRetry(
-      "https://api.example/responses",
-      { method: "POST" },
-      {
-        maxRetries: 3,
-        timeoutMs: 0,
-        signal: controller.signal,
-        fetchImpl: async () => res(503),
-        random: () => 1,
-      },
-    );
+      const promise = requestWithRetry(
+        "https://api.example/responses",
+        { method: "POST" },
+        {
+          maxRetries: 3,
+          timeoutMs: 0,
+          signal: controller.signal,
+          fetchImpl: async () => res(503),
+          random: () => 1,
+        },
+      );
+      const outcome = promise.then(
+        () => null,
+        (e) => e,
+      );
+      void outcome.finally(() => (settled = true));
 
-    setTimeout(() => controller.abort(), 20);
-    await expect(promise).rejects.toThrow();
-    expect(Date.now() - started).toBeLessThan(400);
+      // Into the backoff: its timer is the only one there is.
+      for (let i = 0; i < 50 && vi.getTimerCount() === 0; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(vi.getTimerCount()).toBe(1);
+
+      controller.abort();
+      // Nothing here advances the clock; draining microtasks is all it gets.
+      for (let i = 0; i < 50 && !settled; i++) await Promise.resolve();
+
+      expect(settled).toBe(true);
+      expect(((await outcome) as Error).name).toBe("AbortError");
+      // And the wait it cut short is gone, not left to fire later.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("a network failure is retried", async () => {
