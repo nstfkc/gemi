@@ -1,3 +1,32 @@
+# Upgrading from 0.76 to 0.77
+
+## `HttpResponse.json(data, { status?, headers? })` (#646, #647)
+
+Return a JSON response with a custom status or headers from an API route
+without losing the route's type:
+
+```ts
+import { HttpResponse } from "gemi/http";
+return HttpResponse.json(post, { status: 201 });
+return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+```
+
+- The route's client type is `data`'s type, as if `data` had been returned
+  directly (a union with plain returns works too).
+- It goes through the same path as a plain return, so cookies, `ctx().setHeaders()`
+  headers and middleware headers (CORS, `cache`) are kept. `options.headers`
+  override by name, and `Set-Cookie` accumulates. `Content-Type` defaults to
+  `application/json`. A status of 400 or more gets `Cache-Control: no-store`
+  unless you set one.
+- `status` defaults to 200. 204, 205, 304 and anything outside 200–599 throw a
+  `RangeError`. API routes only: returning it from a view handler throws.
+
+**Behaviour change, client:** a non-2xx JSON body with no `error` field is now
+passed to `onError` / `error` whole. Before, it came through as `undefined`. A
+JSON `null` error body becomes `{ message: "Request failed with status N" }`
+instead of throwing a TypeError. Bodies shaped `{ error: … }` behave exactly as
+before.
+
 # Upgrading from 0.75 to 0.76
 
 ## A threaded turn is stored as it runs, and a lost one reads as `interrupted` (#617)
