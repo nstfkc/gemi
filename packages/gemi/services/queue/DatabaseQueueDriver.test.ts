@@ -266,20 +266,42 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
 
     // The worker that dies: it claims, and never reports or heartbeats again.
     const [lost] = await driver().claim(1, { visibilityTimeoutMs: lease });
-    const claimedAt = Date.now();
     expect(lost).toMatchObject({ attempt: 1 });
+    const [leased] = await rows();
+    const expiresAt = Number(leased!.lease_expires_at);
+    // The whole lease, or the check below would pass for a driver that
+    // ignored it and let the survivor take the job at once.
+    expect(expiresAt - Number(leased!.claimed_at)).toBe(lease);
 
-    const runs: Array<{ n: number; worker: string }> = [];
-    const survivor = worker(driver(), [recorder("RecordRun", "survivor", runs)]);
-    survivor.start();
-
-    await sleep(lease / 2);
-    expect(runs).toEqual([]);
+    // Each run with the row as it stood during it: the survivor's claim,
+    // read from inside the run, before its `complete` deletes the row.
+    const runs: Array<{ n: number; row: Record<string, unknown> }> = [];
+    class RecordRow extends Job {
+      static name = "RecordRun";
+      async run(n: number) {
+        const [row] = await rows();
+        runs.push({ n, row: row! });
+      }
+    }
+    worker(driver(), [RecordRow]).start();
 
     await until(() => runs.length === 1);
-    expect(Date.now() - claimedAt).toBeGreaterThanOrEqual(lease - 50);
+    // Not before the lease ran out, on the one clock that set it and that
+    // the survivor's claim was checked against. The client's clock cannot
+    // tell: the lease starts when the claim's UPDATE runs, and the claim
+    // returns — through its commit and, on MySQL, two more round trips — a
+    // loaded runner's while later. That is what `expected 347 to be greater
+    // than or equal to 350` was (#618).
+    const [{ n, row }] = runs as [(typeof runs)[number]];
+    expect(n).toBe(1);
+    expect(Number(row.claimed_at)).toBeGreaterThanOrEqual(expiresAt);
+    // Run by the survivor as the next attempt: the dead one was counted.
+    expect(row).toMatchObject({ id: lost!.id, status: "claimed" });
+    expect(Number(row.attempts)).toBe(2);
+
+    // And to the end, once.
     await until(async () => (await rows()).length === 0);
-    expect(runs).toEqual([{ n: 1, worker: "survivor" }]);
+    expect(runs).toHaveLength(1);
   });
 
   test("a job whose last attempt died with its worker is dead-lettered, and the row says why", async () => {
