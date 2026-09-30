@@ -7,8 +7,10 @@ import {
 } from "../../../http/errors";
 import { parseContentRange, resolveRange } from "../../../http/range";
 import { FileStorageDriver } from "./FileStorageDriver";
+import { abortableBody } from "./abortableBody";
 import type {
   DeleteFileParams,
+  FetchFileOptions,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -23,6 +25,7 @@ interface BlobClientLike {
   download(
     offset?: number,
     count?: number,
+    options?: { abortSignal?: AbortSignal },
   ): Promise<{
     readableStreamBody?: NodeJS.ReadableStream;
     blobBody?: Promise<Blob>;
@@ -203,11 +206,17 @@ export class AzureBlobDriver extends FileStorageDriver {
     return names;
   }
 
-  async fetch(params: ReadFileParams | string) {
-    const result = await this.read(
+  async fetch(
+    params: ReadFileParams | string,
+    { signal }: FetchFileOptions = {},
+  ) {
+    signal?.throwIfAborted();
+
+    const result = await this.download(
       typeof params === "string"
         ? { name: params }
         : { name: params.name, bucket: params.bucket },
+      signal,
     );
 
     return new Response(result.body as BodyInit, {
@@ -222,10 +231,19 @@ export class AzureBlobDriver extends FileStorageDriver {
   }
 
   async read(input: ReadFileParams | string): Promise<ReadResult> {
-    const params = typeof input === "string" ? { name: input } : input;
+    return this.download(typeof input === "string" ? { name: input } : input);
+  }
+
+  /** `read()`, plus the signal that `fetch()` takes. */
+  private async download(
+    params: ReadFileParams,
+    signal?: AbortSignal,
+  ): Promise<ReadResult> {
     const { name, bucket, range = null } = params;
 
     const blob = await this.blob(name, bucket);
+    // Checked again: resolving the client may have loaded the SDK.
+    signal?.throwIfAborted();
 
     // Azure's `download()` takes an absolute offset rather than a Range header,
     // and only emits one when the offset is non-zero or a count is given. Two
@@ -262,7 +280,11 @@ export class AzureBlobDriver extends FileStorageDriver {
 
     let result: Awaited<ReturnType<BlobClientLike["download"]>>;
     try {
-      result = await blob.download(offset, count);
+      result = await blob.download(
+        offset,
+        count,
+        signal ? { abortSignal: signal } : undefined,
+      );
     } catch (err: any) {
       if (isInvalidRange(err)) {
         throw new RangeNotSatisfiableError(await this.size({ name, bucket }));
@@ -278,8 +300,16 @@ export class AzureBlobDriver extends FileStorageDriver {
     const partial = Boolean(contentRange);
     const total = contentRange?.total ?? result.contentLength ?? 0;
 
+    let body = await toBody(result);
+    if (body instanceof ReadableStream) {
+      body = abortableBody(body, signal);
+    }
+    // An abort the SDK let through, or one that landed while the browser
+    // build buffered the blob: the wrapper has cancelled any stream already.
+    signal?.throwIfAborted();
+
     return {
-      body: await toBody(result),
+      body,
       start: contentRange?.start ?? 0,
       end: contentRange?.end ?? total - 1,
       total,

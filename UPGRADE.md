@@ -1,3 +1,17 @@
+# Unreleased
+
+## `Storage.fetch` takes an abort signal (#654)
+
+`Storage.fetch(params, { signal })` now accepts an `AbortSignal`, as
+`Storage.put` already did. An abort rejects `fetch()`, or errors the returned
+body if it lands later, so `await res.arrayBuffer()` rejects instead of
+hanging on a stalled read. Existing calls are unaffected.
+
+A custom driver's `fetch()` receives the options as its second argument
+(`FetchFileOptions`, exported from `gemi/services`). A driver that ignores it
+keeps working, and `Storage.fetch` still rejects a signal that is already
+aborted before calling it.
+
 # Upgrading from 0.79 to 0.80
 
 ## `gemi dev` shuts the replaced application down on every reload (#652)

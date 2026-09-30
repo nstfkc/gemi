@@ -354,3 +354,99 @@ describe("S3Driver.delete()", () => {
     await expect(driver.delete("a.png")).rejects.toThrow(/AccessDenied/);
   });
 });
+
+describe("S3Driver.fetch() with a signal", () => {
+  beforeEach(() => {
+    process.env.BUCKET_NAME = "test-bucket";
+  });
+
+  /** A body that yields one chunk and then stalls, like a hung connection. */
+  function stallingBody() {
+    const state = { cancelled: false };
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        }
+        return new Promise(() => {});
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    });
+    return { stream, state };
+  }
+
+  test("passes the abort signal through to GetObject", async () => {
+    let sendOptions: any;
+    const driver = driverWith(async (_command, options) => {
+      sendOptions = options;
+      return objectOutput();
+    });
+    const controller = new AbortController();
+
+    await driver.fetch("a.png", { signal: controller.signal });
+
+    expect(sendOptions.abortSignal).toBe(controller.signal);
+  });
+
+  test("sends nothing when the signal is already aborted", async () => {
+    let sent = false;
+    const driver = driverWith(async () => {
+      sent = true;
+      return objectOutput();
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      driver.fetch("a.png", { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(sent).toBe(false);
+  });
+
+  test("an abort mid-transfer rejects the body read and cancels the S3 stream", async () => {
+    const { stream, state } = stallingBody();
+    const driver = driverWith(async () =>
+      objectOutput({ Body: { transformToWebStream: () => stream } }),
+    );
+    const controller = new AbortController();
+
+    const res = await driver.fetch("a.png", { signal: controller.signal });
+    const buffered = res.arrayBuffer();
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(buffered).rejects.toMatchObject({ name: "AbortError" });
+    expect(state.cancelled).toBe(true);
+  });
+
+  test("rejects and cancels the body if the abort lands as the response arrives", async () => {
+    const { stream, state } = stallingBody();
+    const controller = new AbortController();
+    const driver = driverWith(async () => {
+      // An SDK that answered despite the abort.
+      controller.abort();
+      return objectOutput({ Body: { transformToWebStream: () => stream } });
+    });
+
+    await expect(
+      driver.fetch("a.png", { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(state.cancelled).toBe(true);
+  });
+
+  test("without a signal, fetch() still streams the whole object", async () => {
+    const driver = driverWith(async () =>
+      objectOutput({
+        Body: { transformToWebStream: () => new Blob(["abc"]).stream() },
+        ContentLength: 3,
+      }),
+    );
+
+    const res = await driver.fetch("a.png");
+
+    expect(await res.text()).toBe("abc");
+  });
+});

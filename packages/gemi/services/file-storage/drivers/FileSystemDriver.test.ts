@@ -135,3 +135,65 @@ describe("FileSystemDriver.delete() containment", () => {
     }
   });
 });
+
+describe("FileSystemDriver.fetch() with a signal", () => {
+  let folder: string;
+  // Large enough that Bun reads it in several chunks.
+  const SIZE = 8 * 1024 * 1024;
+
+  beforeEach(async () => {
+    folder = await mkdtemp(join(tmpdir(), "gemi-fs-fetch-"));
+    await writeFile(join(folder, "big.bin"), Buffer.alloc(SIZE, 7));
+  });
+
+  afterEach(async () => {
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  test("rejects at once for a signal that is already aborted", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(driver.fetch("big.bin", { signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+  });
+
+  test("an abort mid-read errors the body and stops reading the file", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    const received = first.value!.byteLength;
+    expect(received).toBeLessThan(SIZE);
+
+    controller.abort();
+
+    await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("a timeout surfaces as a rejected arrayBuffer()", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+    controller.abort(new DOMException("too slow", "TimeoutError"));
+
+    await expect(res.arrayBuffer()).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+  });
+
+  test("reads the whole file when the signal never fires", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+
+    expect((await res.arrayBuffer()).byteLength).toBe(SIZE);
+  });
+});

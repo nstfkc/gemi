@@ -1,5 +1,6 @@
 import type {
   DeleteFileParams,
+  FetchFileOptions,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -12,6 +13,7 @@ import type { S3Client } from "@aws-sdk/client-s3";
 
 import { Buffer } from "node:buffer";
 import { FileStorageDriver } from "./FileStorageDriver";
+import { abortableBody } from "./abortableBody";
 import { parseContentRange, toRangeHeaderValue } from "../../../http/range";
 import {
   FileNotFoundError,
@@ -145,7 +147,12 @@ export class S3Driver extends FileStorageDriver {
     return result;
   }
 
-  async fetch(params: ReadFileParams | string) {
+  async fetch(
+    params: ReadFileParams | string,
+    { signal }: FetchFileOptions = {},
+  ) {
+    signal?.throwIfAborted();
+
     let bucket = process.env.BUCKET_NAME;
     let name: string | undefined;
 
@@ -161,14 +168,25 @@ export class S3Driver extends FileStorageDriver {
     }
 
     const { sdk, client } = await this.connect();
+    // Checked again: loading the SDK awaits, and the SDK only watches the
+    // signal once the request is under way.
+    signal?.throwIfAborted();
     const result = await client.send(
       new sdk.GetObjectCommand({
         Bucket: bucket,
         Key: name,
       }),
+      { abortSignal: signal },
     );
 
-    return new Response(result.Body.transformToWebStream(), {
+    // The SDK's signal covers the request; the wrapper covers a caller still
+    // reading the body when the abort lands.
+    const body = abortableBody(result.Body.transformToWebStream(), signal);
+    // An abort during the request that the SDK let through: the wrapper has
+    // already cancelled the body, so reject rather than hand back a dead one.
+    signal?.throwIfAborted();
+
+    return new Response(body, {
       headers: {
         "Content-Type": result.ContentType,
         "Content-Length": result.ContentLength.toString(),

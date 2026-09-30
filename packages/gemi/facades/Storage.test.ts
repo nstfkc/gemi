@@ -34,3 +34,43 @@ describe("Storage.delete()", () => {
     await expect(Storage.delete("a.png")).rejects.toThrow("AccessDenied");
   });
 });
+
+describe("Storage.fetch()", () => {
+  function withDriverFetch() {
+    const fetch = vi.fn(async () => new Response("x"));
+    vi.spyOn(Storage, "getFacadeRoot").mockReturnValue({
+      driver: { fetch },
+    } as any);
+    return fetch;
+  }
+
+  test("forwards the signal to the driver, as put() does", async () => {
+    const fetch = withDriverFetch();
+    const controller = new AbortController();
+
+    await Storage.fetch("a.png", { signal: controller.signal });
+
+    expect(fetch).toHaveBeenCalledWith("a.png", { signal: controller.signal });
+  });
+
+  test("still works without options", async () => {
+    const fetch = withDriverFetch();
+
+    await Storage.fetch({ name: "a.png", bucket: "other" });
+
+    expect(fetch).toHaveBeenCalledWith({ name: "a.png", bucket: "other" }, {});
+  });
+
+  test("rejects an already-aborted signal before reaching the driver", async () => {
+    // A custom driver written before the option existed ignores it, so the
+    // facade refuses the read itself.
+    const fetch = withDriverFetch();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(Storage.fetch("a.png", { signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
