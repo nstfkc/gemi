@@ -1,9 +1,14 @@
-import { timingSafeEqual } from "node:crypto";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
-import { DomainResolver, FALLBACK_GROUP, ROOT_GROUP, type ResolvedDomain } from "./DomainResolver";
+import {
+  DomainResolver,
+  FALLBACK_GROUP,
+  ROOT_GROUP,
+  secretMatches,
+  type ResolvedDomain,
+} from "./DomainResolver";
 import type { ApiRouteConfig, DomainGroupRouters, DomainsConfig, ViewRouteConfig } from "./config";
-import { setRequestDomain } from "../../http/requestDomain";
+import { setRequestDomain, withholdFromUpstream } from "../../http/requestDomain";
 
 /**
  * Where a TLS proxy asks whether to issue a certificate for a host — Caddy's
@@ -11,20 +16,6 @@ import { setRequestDomain } from "../../http/requestDomain";
  * proxy calls it on whatever host it reaches the app by.
  */
 export const DOMAIN_ASK_PATH = "/__gemi__/domains/ask";
-
-/**
- * Compares in constant time, so the secret cannot be recovered a character at
- * a time. The length is compared first and leaks, which `timingSafeEqual`
- * requires and which tells an attacker nothing they can walk.
- */
-function secretMatches(given: string | null, expected: string): boolean {
-  if (given === null) {
-    return false;
-  }
-  const a = Buffer.from(given, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 
 export interface DomainDispatchers {
   api: ApiRouteDispatcher;
@@ -81,6 +72,11 @@ export class DomainRouter {
   async route(req: Request): Promise<DomainDispatchers | null> {
     if (!this.resolver) {
       return this.dispatchers(null);
+    }
+    // The proxy's secret is for this app alone; a `proxy()` route forwards the
+    // client's headers upstream, and must not hand it to whoever is there.
+    if (this.resolver.proxySecretHeader) {
+      withholdFromUpstream(req, this.resolver.proxySecretHeader);
     }
     const domain = await this.resolver.resolve(req);
     if (!domain) {

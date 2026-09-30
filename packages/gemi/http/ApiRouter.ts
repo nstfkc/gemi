@@ -19,6 +19,7 @@ import {
 import { RangeNotSatisfiableError } from "./errors";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
+import { withheldFromUpstream } from "./requestDomain";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -117,10 +118,14 @@ export class ProxyHandler {
 
   run() {
     const req = new HttpRequest();
+    const forwarded = req.headers.toJSON();
+    for (const header of withheldFromUpstream(req.rawRequest)) {
+      delete forwarded[header];
+    }
     return fetch(this.url, {
       method: req.rawRequest.method,
       headers: {
-        ...req.headers.toJSON(),
+        ...forwarded,
         ...this.headers,
       },
       body: req.rawRequest.body,

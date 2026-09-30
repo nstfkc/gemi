@@ -5,6 +5,8 @@ import type { DomainsConfig } from "./config";
 
 const req = (url: string, headers: Record<string, string> = {}) => new Request(url, { headers });
 
+const PROXY_SECRET = "proxy-secret-long-enough";
+
 function resolver(overrides: Partial<DomainsConfig> = {}) {
   return new DomainResolver({
     root: "example.com",
@@ -258,6 +260,69 @@ describe("assertValidDomainsConfig", () => {
       },
       /needs an `exists`/,
     ],
+    [
+      "a host header that is not a header name",
+      { root: "example.com", trustProxy: { hostHeader: "x kyte host" } },
+      /must be a single header name/,
+    ],
+    [
+      "a list of host headers",
+      {
+        root: "example.com",
+        trustProxy: { hostHeader: ["x-kyte-host", "x-forwarded-host"] as unknown as string },
+      },
+      /must be a single header name/,
+    ],
+    [
+      "a secret header that is not a header name",
+      {
+        root: "example.com",
+        trustProxy: { hostHeader: "x-kyte-host", secret: { header: "", value: PROXY_SECRET } },
+      },
+      /must be a header name/,
+    ],
+    [
+      "a guessable proxy secret",
+      {
+        root: "example.com",
+        trustProxy: {
+          hostHeader: "x-kyte-host",
+          secret: { header: "x-kyte-secret", value: "short" },
+        },
+      },
+      /at least 16 characters/,
+    ],
+    // An unset environment variable, e.g. `value: process.env.PROXY_SECRET`.
+    [
+      "a proxy secret that is not set",
+      {
+        root: "example.com",
+        trustProxy: {
+          hostHeader: "x-kyte-host",
+          secret: { header: "x-kyte-secret", value: undefined as unknown as string },
+        },
+      },
+      /at least 16 characters/,
+    ],
+    [
+      "a secret carried in the host header itself",
+      {
+        root: "example.com",
+        trustProxy: {
+          hostHeader: "X-Kyte-Host",
+          secret: { header: "x-kyte-host", value: PROXY_SECRET },
+        },
+      },
+      /needs a header of its own/,
+    ],
+    [
+      "a secret in `X-Forwarded-Host` when that is the host header by default",
+      {
+        root: "example.com",
+        trustProxy: { secret: { header: "x-forwarded-host", value: PROXY_SECRET } },
+      },
+      /needs a header of its own/,
+    ],
   ];
 
   for (const [name, config, message] of cases) {
@@ -388,5 +453,208 @@ describe("DomainResolver custom-domain cache", () => {
     await hit(r, "app.acme.com");
     await hit(r, "other.example.org");
     expect(resolve).toHaveBeenCalledTimes(5);
+  });
+});
+
+/**
+ * `trustProxy` naming its own header, as behind a CDN that terminates the
+ * customer's TLS in front of a platform that owns `X-Forwarded-Host`: the
+ * customer's host arrives only in the header the CDN adds.
+ */
+describe("trustProxy with a host header of its own", () => {
+  // What the app sees behind Cloudflare for SaaS and Railway: `Host` and
+  // `X-Forwarded-Host` both name the app's own domain.
+  const behindCdn = (headers: Record<string, string> = {}) =>
+    req("http://kyte.up.railway.app/", {
+      "x-forwarded-host": "kyte.up.railway.app",
+      "x-forwarded-proto": "https",
+      ...headers,
+    });
+  const customResolve = (host: string) => (host === "app.acme.com" ? { tenant: "acme" } : null);
+  const custom = { group: ":tenant", resolve: customResolve, cacheTtlMs: 0 };
+  const withHeader = (extra: Partial<DomainsConfig> = {}) =>
+    resolver({ trustProxy: { hostHeader: "x-kyte-host" }, custom, ...extra });
+  const withSecret = (extra: Partial<DomainsConfig> = {}) =>
+    resolver({
+      trustProxy: {
+        hostHeader: "x-kyte-host",
+        secret: { header: "x-kyte-proxy-secret", value: PROXY_SECRET },
+      },
+      custom,
+      ...extra,
+    });
+
+  test("routes by the named header", async () => {
+    const r = withHeader();
+    const domain = await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }));
+    expect(domain).toEqual({
+      host: "app.acme.com",
+      group: ":tenant",
+      params: { tenant: "acme" },
+      custom: true,
+    });
+    expect(r.publicOrigin(behindCdn({ "x-kyte-host": "app.acme.com" }))).toBe(
+      "https://app.acme.com",
+    );
+  });
+
+  test("the header is matched whatever its case in the config", async () => {
+    const r = resolver({ trustProxy: { hostHeader: "X-Kyte-Host" }, custom });
+    expect(await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }))).toMatchObject({
+      params: { tenant: "acme" },
+    });
+  });
+
+  test("is ignored without trustProxy", async () => {
+    const r = resolver({ custom });
+    const spoofed = req("http://acme.example.com/", { "x-kyte-host": "app.acme.com" });
+    expect(await r.resolve(spoofed)).toMatchObject({ host: "acme.example.com", custom: false });
+    expect(r.publicOrigin(spoofed)).toBe("http://acme.example.com");
+  });
+
+  // The named header replaces `X-Forwarded-Host` rather than adding to it: the
+  // platform writes that one, and trusting both would route by whichever the
+  // client managed to get through.
+  test("wins over X-Forwarded-Host, which is no longer read at all", async () => {
+    const r = withHeader();
+    expect(
+      await r.resolve(
+        req("http://example.com/", {
+          "x-kyte-host": "app.acme.com",
+          "x-forwarded-host": "admin.example.com",
+        }),
+      ),
+    ).toMatchObject({ host: "app.acme.com" });
+    const onlyForwarded = req("http://example.com/", { "x-forwarded-host": "admin.example.com" });
+    expect(await r.resolve(onlyForwarded)).toMatchObject({ host: "example.com", group: "" });
+    expect(r.publicOrigin(onlyForwarded)).toBe("http://example.com");
+  });
+
+  test("`true` still means X-Forwarded-Host, and ignores any other header", async () => {
+    const r = resolver({ trustProxy: true, custom });
+    expect(
+      await r.resolve(
+        req("http://example.com/", {
+          "x-forwarded-host": "admin.example.com",
+          "x-kyte-host": "app.acme.com",
+        }),
+      ),
+    ).toMatchObject({ host: "admin.example.com", group: "admin" });
+  });
+
+  test("an object without `hostHeader` reads X-Forwarded-Host", async () => {
+    const r = resolver({ trustProxy: {}, custom });
+    expect(
+      await r.resolve(req("http://example.com/", { "x-forwarded-host": "admin.example.com" })),
+    ).toMatchObject({ group: "admin" });
+  });
+
+  test("falls back to the request's host when the header is missing or unparseable", async () => {
+    const r = withHeader();
+    expect(await r.resolve(req("http://admin.example.com/"))).toMatchObject({ group: "admin" });
+    expect(await r.resolve(req("http://admin.example.com/", { "x-kyte-host": "]" }))).toMatchObject(
+      { group: "admin" },
+    );
+    expect(r.publicOrigin(req("http://admin.example.com:8080/", { "x-kyte-host": "" }))).toBe(
+      "http://admin.example.com:8080",
+    );
+  });
+
+  test("with the secret, the header is trusted", async () => {
+    const r = withSecret();
+    const proxied = behindCdn({
+      "x-kyte-host": "app.acme.com",
+      "x-kyte-proxy-secret": PROXY_SECRET,
+    });
+    expect(await r.resolve(proxied)).toMatchObject({ host: "app.acme.com", custom: true });
+    expect(r.publicOrigin(proxied)).toBe("https://app.acme.com");
+  });
+
+  // Someone who reaches the origin directly, around the CDN, names any host
+  // they like. Without the secret they are served by the host they connected
+  // to — one they could have sent anyway — never the one they claim.
+  test("a spoofed header without the secret is ignored", async () => {
+    const r = withSecret();
+    const spoofed = req("http://acme.example.com/", { "x-kyte-host": "app.acme.com" });
+    expect(await r.resolve(spoofed)).toMatchObject({
+      host: "acme.example.com",
+      params: { tenant: "acme" },
+      custom: false,
+    });
+    expect(r.publicOrigin(spoofed)).toBe("http://acme.example.com");
+    expect(await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }))).toBeNull();
+  });
+
+  test("a wrong secret is the same as none", async () => {
+    const r = withSecret();
+    const wrong = [
+      `${PROXY_SECRET}x`,
+      PROXY_SECRET.slice(0, -1),
+      PROXY_SECRET.toUpperCase(),
+      "",
+      `${PROXY_SECRET}, ${PROXY_SECRET}`,
+    ];
+    for (const secret of wrong) {
+      const spoofed = req("http://admin.example.com/", {
+        "x-kyte-host": "app.acme.com",
+        "x-kyte-proxy-secret": secret,
+      });
+      expect(await r.resolve(spoofed)).toMatchObject({ host: "admin.example.com" });
+      expect(r.publicOrigin(spoofed)).toBe("http://admin.example.com");
+    }
+  });
+
+  test("the secret in a different header is the same as none", async () => {
+    const spoofed = req("http://admin.example.com/", {
+      "x-kyte-host": "app.acme.com",
+      "x-forwarded-host": PROXY_SECRET,
+      "x-kyte-secret": PROXY_SECRET,
+    });
+    expect(await withSecret().resolve(spoofed)).toMatchObject({ host: "admin.example.com" });
+  });
+
+  test("the secret can gate X-Forwarded-Host too", async () => {
+    const r = resolver({
+      trustProxy: { secret: { header: "x-proxy-secret", value: PROXY_SECRET } },
+    });
+    const forwarded = { "x-forwarded-host": "admin.example.com" };
+    expect(await r.resolve(req("http://example.com/", forwarded))).toMatchObject({ group: "" });
+    expect(
+      await r.resolve(req("http://example.com/", { ...forwarded, "x-proxy-secret": PROXY_SECRET })),
+    ).toMatchObject({ group: "admin" });
+  });
+
+  // The scheme is not gated by `trustProxy` or its secret: a forged one only
+  // spoils the forger's own links, and gating it would put every link on an
+  // https page behind a TLS-terminating proxy back on http.
+  test("X-Forwarded-Proto is read whether or not the host header is trusted", () => {
+    const r = withSecret();
+    expect(r.publicOrigin(req("http://admin.example.com/", { "x-forwarded-proto": "https" }))).toBe(
+      "https://admin.example.com",
+    );
+    expect(
+      r.publicOrigin(
+        req("http://admin.example.com/", {
+          "x-forwarded-proto": "https",
+          "x-kyte-host": "app.acme.com",
+          "x-kyte-proxy-secret": "wrong-secret-long-enough",
+        }),
+      ),
+    ).toBe("https://admin.example.com");
+    expect(
+      r.publicOrigin(
+        req("http://admin.example.com/", {
+          "x-forwarded-proto": "javascript",
+          "x-kyte-host": "app.acme.com",
+          "x-kyte-proxy-secret": PROXY_SECRET,
+        }),
+      ),
+    ).toBe("http://app.acme.com");
+  });
+
+  test("exposes the secret header so it can be kept from upstreams", () => {
+    expect(withSecret().proxySecretHeader).toBe("x-kyte-proxy-secret");
+    expect(withHeader().proxySecretHeader).toBeNull();
+    expect(resolver({ trustProxy: true }).proxySecretHeader).toBeNull();
   });
 });

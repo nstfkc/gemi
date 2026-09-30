@@ -124,6 +124,35 @@ export interface CustomDomainConfig {
   fallback?: DomainGroupRouters;
 }
 
+/**
+ * `route.domains.trustProxy` in its long form: which header carries the host
+ * the client addressed, and what proves the proxy sent it.
+ */
+export interface TrustProxyConfig {
+  /**
+   * The header the host is read from — the one the proxy in front writes the
+   * client's host into. Defaults to `"x-forwarded-host"`.
+   *
+   * Name one the platform in front does not own. Behind a CDN that terminates
+   * the customer's TLS and then a host like Railway, Render, Fly or Heroku,
+   * the host overwrites `X-Forwarded-Host` with the `Host` it was reached by,
+   * which the CDN had to rewrite to the app's own domain; the customer's host
+   * only survives in a header the CDN adds, e.g. `X-Original-Host: ${http.host}`.
+   */
+  hostHeader?: string;
+
+  /**
+   * Trusts `hostHeader` only on a request that carries this header with this
+   * value — a shared secret the proxy adds, so a client that reaches the app
+   * directly, around the proxy, cannot name its own host. Without it the
+   * request is routed by its own host, exactly as with `trustProxy` left out.
+   *
+   * `value` must be at least 16 characters and is compared in constant time.
+   * The header is withheld from what a `proxy()` route forwards upstream.
+   */
+  secret?: { header: string; value: string };
+}
+
 // Config key: `route.domains`. Optional: without it every host is served by
 // the root routers, exactly as before.
 export interface DomainsConfig {
@@ -135,11 +164,17 @@ export interface DomainsConfig {
   root: string;
 
   /**
-   * Read the host from `X-Forwarded-Host` rather than the request URL. Only
-   * set it behind a proxy that overwrites the header, or a client picks its
-   * own host.
+   * Read the host from a header the proxy in front sets, rather than the
+   * request URL. Only set it behind a proxy that overwrites that header, or a
+   * client picks its own host.
+   *
+   * `true` reads `X-Forwarded-Host`. An object names the header, and can make
+   * trusting it depend on a shared secret the proxy sends — see
+   * {@link TrustProxyConfig}.
+   *
+   * The scheme is read from `X-Forwarded-Proto` whether or not this is set.
    */
-  trustProxy?: boolean;
+  trustProxy?: boolean | TrustProxyConfig;
 
   groups?: DomainGroupConfig[];
 

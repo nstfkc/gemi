@@ -1897,7 +1897,7 @@ export default defineRouteConfig({
 | Field | Type | Purpose |
 | --- | --- | --- |
 | `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
-| `trustProxy` | `boolean` (default `false`) | Read the host from `X-Forwarded-Host`. Only set it behind a proxy that overwrites the header, or a client picks its own host. The **scheme** is read from `X-Forwarded-Proto` either way, so a cross-host link on a page served through a TLS-terminating proxy comes out `https://` without this. |
+| `trustProxy` | `boolean \| { hostHeader?, secret? }` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
@@ -1909,8 +1909,9 @@ export default defineRouteConfig({
 
 A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
 path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
-that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, and `ask` on an app whose
-param group has no `exists`.
+that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, `ask` on an app whose
+param group has no `exists`, a `trustProxy` header that is not a header name, and a `trustProxy.secret.value`
+under 16 characters or unset.
 
 ## How a host is matched
 
@@ -1996,6 +1997,56 @@ Worth knowing before turning it on: a browser sends a cookie scoped to `example.
 
 The cookie is marked `Secure` when the request came in over `https` — through `X-Forwarded-Proto` if a proxy terminated TLS. Browsers drop a `Secure` cookie from a plain-http origin, so signing in over http works only on `localhost` and on the loopback roots below.
 
+## Behind a proxy
+
+Behind a proxy that rewrites `Host`, the request reaches the app addressed to the proxy's idea of it, not the client's. `trustProxy` tells gemi which header carries the host the client really addressed. That host then drives everything that reads the host: matching the group, `req.domain.host`, `useDomain()`, `Url.forDomain` and the session cookie's domain.
+
+```ts
+domains: {
+  root: "example.com",
+  trustProxy: true, // read the host from X-Forwarded-Host
+  // …
+}
+```
+
+**Only set it behind a proxy that overwrites the header.** gemi cannot tell a header the proxy wrote from one the client sent, so if the client's copy gets through, the client picks the host it is served as. Anyone who can reach the app directly, around the proxy, can do the same.
+
+The scheme is read from `X-Forwarded-Proto` whether or not `trustProxy` is set, so a cross-host link on a page served through a TLS-terminating proxy comes out `https://` without it. A forged scheme only spoils the forger's own links. Only `http` and `https` are accepted.
+
+### A header of its own, and a shared secret
+
+Some hosting platforms own `X-Forwarded-Host` themselves. Railway, Render, Fly and Heroku set it from the `Host` they were reached by. Put a CDN that terminates your customers' TLS in front of one, as with Cloudflare for SaaS, and the CDN has to rewrite `Host` to your app's own domain before the platform will route it. By the time the request reaches gemi, the customer's host is gone from both `Host` and `X-Forwarded-Host`.
+
+The CDN can pass it on in a header of your choosing, and `hostHeader` names that header:
+
+```ts
+domains: {
+  root: "example.com",
+  trustProxy: {
+    hostHeader: "x-original-host",
+    secret: { header: "x-proxy-secret", value: process.env.PROXY_SECRET! },
+  },
+  groups: [{ subdomain: ":site", exists: async ({ site }) => … }],
+  custom: { group: ":site", resolve: async (host) => … },
+}
+```
+
+In Cloudflare that is a Request Header Transform Rule on the zone that sets `X-Original-Host` to the dynamic value `http.host` and `X-Proxy-Secret` to the secret, next to the Origin Rule that rewrites `Host` to the platform's domain. "Set" replaces whatever the client sent in either header.
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `hostHeader` | `"x-forwarded-host"` | The header the host is read from. It replaces `X-Forwarded-Host` rather than adding to it: with `hostHeader` set, `X-Forwarded-Host` is not read at all. Only its first comma-separated entry counts. |
+| `secret.header` | — | The header the proxy sends the secret in. It must differ from `hostHeader`. |
+| `secret.value` | — | At least 16 characters, compared in constant time. A missing or short value fails the boot, so an unset environment variable cannot quietly turn the check off. |
+
+With `secret` set, `hostHeader` is trusted only on a request that carries the secret. **A request without it, or with a wrong one, is not refused: it is served by its own `Host`,** exactly as if `trustProxy` were left out. That is a host the client could have sent anyway, so it gains nothing, and the platform's health checks and its own domain for the app keep working. The platform's `*.up.railway.app` address, for instance, is outside `root` and no customer's, so it answers `404 Unknown host`, whatever `X-Original-Host` says.
+
+Without `secret`, the platform's direct address is a way around the CDN: anyone who finds it can send `X-Original-Host: any-customer.com`. Set one whenever the app can be reached other than through the proxy.
+
+The secret header is still visible to the app's own code. A `proxy()` route leaves it out of the headers it forwards upstream, but it forwards the client's other headers as before.
+
+If a proxy fails to send the host header, or sends one that does not parse, the request's own `Host` is used. So is it when `trustProxy` is set and the header is absent: a single deploy can be reached both through the CDN and directly on its own domains.
+
 ## On-demand TLS for custom domains
 
 `GET /__gemi__/domains/ask?domain=<host>` answers `200` when the app serves that host in its own right, and `404` otherwise. "In its own right" means the host is the root, a declared subdomain, a param subdomain that passes `exists`, or a custom domain that `custom.resolve` accepts. A host only the fallback would serve gets a `404`, so the endpoint never approves certificates for arbitrary hosts.
@@ -2032,7 +2083,7 @@ https:// {
 }
 ```
 
-Caddy appends `&domain=<host>` to whatever URL you give it, so the secret goes in the configured URL. Caddy also keeps the original `Host` when it proxies, so `trustProxy` is not needed here — set it behind a proxy that rewrites `Host` and sends `X-Forwarded-Host` instead.
+Caddy appends `&domain=<host>` to whatever URL you give it, so the secret goes in the configured URL. Caddy also keeps the original `Host` when it proxies, so `trustProxy` is not needed here — set it behind a proxy that rewrites `Host` (see [Behind a proxy](#behind-a-proxy)).
 
 A host served only by `custom.fallback` is never approved, by design. Under on-demand TLS that means the fallback is reachable only over plaintext or with a certificate you already hold.
 

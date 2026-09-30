@@ -15,3 +15,19 @@ export function setRequestDomain(req: Request, domain: ResolvedDomain) {
 export function requestDomain(req: Request): ResolvedDomain | null {
   return domains.get(req) ?? null;
 }
+
+// Headers meant for this app alone — `route.domains.trustProxy.secret` — that
+// a `proxy()` route must not forward upstream with the rest of the client's.
+const withheld = new WeakMap<Request, string[]>();
+
+export function withholdFromUpstream(req: Request, header: string) {
+  const headers = withheld.get(req) ?? [];
+  if (!headers.includes(header)) {
+    withheld.set(req, [...headers, header]);
+  }
+}
+
+/** The lowercased header names a `proxy()` route drops from `req` before forwarding it. */
+export function withheldFromUpstream(req: Request): readonly string[] {
+  return withheld.get(req) ?? [];
+}
