@@ -63,7 +63,7 @@ export class TurnJournal {
   finish(message: AgentMessage): void {
     if (this.closed) return;
     this.done.add(message.id);
-    this.write([snapshot(message)]);
+    this.write(() => [snapshot(message)]);
   }
 
   /** One frame of the run, in order. Writes the message it touched when the
@@ -79,7 +79,7 @@ export class TurnJournal {
         // Complete when it is made (see the event), so it is written whole. Not
         // marked done: the run reports it again once the message above it
         // closes, and that copy is the one that stays.
-        this.write([snapshot(event.message)]);
+        this.write(() => [snapshot(event.message)]);
         return;
       case "tool-call":
         if (event.part.partial) return;
@@ -114,14 +114,31 @@ export class TurnJournal {
     if (this.done.has(messageId)) return;
     const message = this.state.messages.find((held) => held.id === messageId);
     if (!message) return;
-    const copy = snapshot(message);
-    // Stamped only on a message still being written: the run's id is the thing
-    // a reader checks for liveness, and a finished message has nothing to check.
-    if (copy.finishReason === undefined && this.runId) copy.runId = this.runId;
-    this.write([copy]);
+    const runId = this.runId;
+    this.write(() => {
+      const copy = snapshot(message);
+      // Stamped only on a message still being written: the run's id is the
+      // thing a reader checks for liveness, and a finished message has nothing
+      // to check.
+      if (copy.finishReason === undefined && runId) copy.runId = runId;
+      return [copy];
+    });
   }
 
-  private write(messages: AgentMessage[]): void {
+  /**
+   * Queues one write. The copy is taken now, before anything else can change
+   * the message, and a copy that fails (a tool output that is not plain data)
+   * costs that one write, not the journal: the end-of-run write still stores
+   * the message.
+   */
+  private write(copy: () => AgentMessage[]): void {
+    let messages: AgentMessage[];
+    try {
+      messages = copy();
+    } catch (error) {
+      this.report(error);
+      return;
+    }
     this.chain = this.chain
       .then(() => this.store.appendMessages(this.threadId, messages))
       .catch((error) => this.report(error));
