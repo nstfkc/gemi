@@ -3257,6 +3257,90 @@ nothing.
 
 To update a query from **outside** the component that owns it, use `useMutate`.
 
+## Paged lists: `useInfiniteQuery`
+
+A "load more" list — pages appended as the user scrolls — is `useInfiniteQuery`.
+Its pages live in the same query cache as everything else: page 1 is a plain
+`useQuery` for the path and `search` you pass, and every further page is the same
+path with the page cursor added to the search, cached as its own variant.
+
+```tsx
+import { useInfiniteQuery } from "gemi/client";
+
+const PAGE_SIZE = 48;
+
+function Products({ orgId, query }: { orgId: string; query: string }) {
+  const { items, hasMore, fetchNextPage, isFetchingNextPage, loading } =
+    useInfiniteQuery(
+      "/app/:orgId/products",
+      { params: { orgId }, search: { query: query || null } },
+      {
+        getNextPage: (lastPage, pages) =>
+          lastPage.length === PAGE_SIZE ? pages.length + 1 : null,
+        getKey: (product) => product.publicId,
+      },
+    );
+
+  return (
+    <>
+      <Grid products={items} dimmed={loading} />
+      {hasMore && (
+        <button onClick={fetchNextPage} disabled={isFetchingNextPage}>
+          Load more
+        </button>
+      )}
+    </>
+  );
+}
+```
+
+The third argument takes:
+
+| option | description |
+| --- | --- |
+| `getNextPage(lastPage, pages)` | Required. The next page's cursor — a page number or a string cursor — or `null`/`undefined`/`false` when there is none. `hasMore` is whether it returned one. |
+| `pageParam` | The search key the cursor is sent under. Default `"page"`. |
+| `getItems(page)` | A page's rows, for a page that is an object (`(page) => page.rows`). Defaults to the page itself when it is an array. |
+| `getKey(item)` | An item's identity. With it, a row that shifts across a page boundary — something was created or deleted between two offset-based fetches — is shown once, at its first position. |
+| everything else | `useQuery`'s config (`suspense`, `staleTime`, `keepPreviousData`, `revalidateOnFocus`, …), applied to page 1. |
+
+It returns `pages` (every loaded page, in order), `items` (the pages' rows,
+flattened and de-duplicated), `hasMore`, `fetchNextPage()`, `isFetchingNextPage`,
+`loading` and `error` (page 1's, as `useQuery` reports them, or the failed next
+page's), and `refetch()` (every loaded page).
+
+What that buys:
+
+- **Page 1 behaves exactly like `useQuery`.** It suspends, it renders from a
+  `Query.prefetch` of the same path and `search` during SSR, and a `search`/`params`
+  change keeps the previous rows on screen under `keepPreviousData`. The first page
+  is requested **without** the page param, so `Query.prefetch("/app/:orgId/products",
+  { params, search: { query } })` in the view handler is all SSR needs. Later pages
+  are only ever loaded in the browser.
+- **A new `params` or `search` starts over from page 1.** The pages already loaded
+  for the old search stay cached, but the list asks for one page again rather than
+  resuming a page count whose earlier pages belong to another filter.
+- **Later pages load in the background** — they never suspend. `fetchNextPage()` is a
+  no-op while one is loading or when there is none, and retries a page that failed.
+- **Every page is an ordinary cache variant**, so `useMutate`'s search predicate (below)
+  updates and refetches all of them at once.
+
+On the server, read the page with [`paginate`](./orm.md#paginate), which turns the raw
+`?page=`/`?limit=` into integers that are always safe to bind — a `?page=1e300` cannot
+overflow the query's `OFFSET`:
+
+```ts
+import { paginate } from "gemi/orm";
+
+async list(req: HttpRequest) {
+  const { take, skip } = paginate(
+    { page: req.search.get("page"), perPage: req.search.get("limit") },
+    { perPage: 48, maxPerPage: 100 },
+  );
+  return await Product.findMany({ take, skip, orderBy: { createdAt: "desc" } });
+}
+```
+
 ## Reusing endpoints on the server: the `Query` facade
 
 The `Query` facade (`gemi/facades`) runs one of your API route handlers **on the
@@ -3459,6 +3543,35 @@ mutate({ path: "/todos" }, (todos) => [newTodo]);
 
 The signature is `mutate({ path, params?, search? }, fn?)`, with the same
 replace-then-refetch semantics as `useQuery`'s `mutate`.
+
+### Every search variant of a path
+
+`search` names one variant — the one a `useQuery` with that exact `search` reads.
+After a create or a delete, the stale data is usually spread over many: every
+filter the user tried, every page of a `useInfiniteQuery`. Pass a predicate
+instead, and the call applies to every cached variant of the path it accepts:
+
+```tsx
+// A product was deleted: drop it from every cached list, pages included.
+mutate(
+  { path: "/app/:orgId/products", params: { orgId }, search: () => true },
+  (products) => products.filter((p) => p.publicId !== deleted.publicId),
+);
+
+// A product was created: refetch every unfiltered variant.
+mutate({
+  path: "/app/:orgId/products",
+  params: { orgId },
+  search: (search) => !search.has("query"),
+});
+```
+
+The predicate receives each variant's search as `URLSearchParams`. The update
+(when given) is applied to every matching variant right away, and each is marked
+stale. Only the variants something is rendering refetch now; the rest refetch
+the next time they are read — even under `staleTime: Infinity`, and bypassing the
+browser's HTTP cache — so a path with dozens of cached searches does not put
+dozens of requests on the wire.
 
 ## Type safety
 

@@ -39,6 +39,14 @@ export class QueryResource {
    * without waiting on the wire.
    */
   private pending = new Map<string, Deferred>();
+  /**
+   * How many mounted readers are rendering each variant. A mounted variant is
+   * on screen, so an invalidation refetches it now; one nobody renders is only
+   * marked stale and revalidates when something reads it next — invalidating
+   * every search variant a user browsed through must not put each of them on
+   * the wire at once.
+   */
+  private watchers = new Map<string, number>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -251,7 +259,53 @@ export class QueryResource {
     }
   }
 
-  mutate(variantKey: string, fn: (data: any) => any = (data) => data) {
+  /**
+   * Mark a variant as rendered by a mounted reader until the returned release
+   * runs. `useQuery` and `useInfiniteQuery` hold one for every variant they
+   * put on screen.
+   */
+  retain(variantKey: string): () => void {
+    this.watchers.set(variantKey, (this.watchers.get(variantKey) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.watchers.get(variantKey) ?? 1) - 1;
+      if (count > 0) {
+        this.watchers.set(variantKey, count);
+      } else {
+        this.watchers.delete(variantKey);
+      }
+    };
+  }
+
+  /** Every variant key this resource holds state for, in insertion order. */
+  variantKeys(): string[] {
+    return [...this.store.getValue().keys()];
+  }
+
+  /**
+   * The many-variant counterpart of `mutate`. The update (when given) is
+   * applied to the variant's cached data right away, but only a variant a
+   * mounted reader is rendering refetches now; any other one is marked stale
+   * and revalidates — bypassing the HTTP cache — the next time it is read.
+   */
+  invalidate(variantKey: string, fn?: (data: any) => any) {
+    this.dropHttpCache(variantKey);
+    const store = this.store.getValue();
+    const state = store.get(variantKey);
+    if (fn && state?.hasData) {
+      this.store.next(
+        store.set(variantKey, { ...state, data: fn(state.data), error: null }),
+      );
+    }
+    this.staleVariants.add(variantKey);
+    if (this.watchers.has(variantKey)) {
+      this.resolveVariant(variantKey, false, false);
+    }
+  }
+
+  private dropHttpCache(variantKey: string) {
     const cacheKey = [
       typeof window !== "undefined" && window.location?.origin
         ? window.location.origin
@@ -265,7 +319,11 @@ export class QueryResource {
       if (caches) {
         caches?.delete(cacheKey);
       }
-    } catch (err) {}
+    } catch {}
+  }
+
+  mutate(variantKey: string, fn: (data: any) => any = (data) => data) {
+    this.dropHttpCache(variantKey);
 
     const store = this.store.getValue();
     const state = store.get(variantKey);
@@ -325,7 +383,10 @@ export class QueryResource {
       const fullUrl = [this.key, variantKey].filter((s) => s.length).join("?");
       try {
         response = await fetch(`/api${fullUrl}`, {
-          cache: cache ? "default" : "reload",
+          // A variant marked stale by `mutate`/`invalidate` is known to be out
+          // of date, so the browser's HTTP cache must not answer for it.
+          cache:
+            cache && !this.staleVariants.has(variantKey) ? "default" : "reload",
         });
         data = await response.json();
       } catch (error) {

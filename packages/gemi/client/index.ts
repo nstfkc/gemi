@@ -6,6 +6,11 @@
 
 export { useQuery } from "./useQuery";
 export type { QueryResult, GemiQueryDefaults } from "./useQuery";
+export { useInfiniteQuery } from "./useInfiniteQuery";
+export type {
+  InfiniteQueryConfig,
+  InfiniteQueryReturn,
+} from "./useInfiniteQuery";
 export { QueryError } from "./QueryError";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export { useMutate } from "./useMutate";
