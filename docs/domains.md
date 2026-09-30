@@ -200,7 +200,7 @@ Without `secret`, the platform's direct address is a way around the CDN: anyone 
 
 The secret header is still visible to the app's own code. A `proxy()` route leaves it out of the headers it forwards upstream, but it forwards the client's other headers as before.
 
-If a proxy fails to send the host header, or sends one that does not parse, the request's own `Host` is used. So is it when `trustProxy` is set and the header is absent: a single deploy can be reached both through the CDN and directly on its own domains.
+When the host header is absent or does not parse, the request's own `Host` is used. That lets one deploy be reached both through the CDN and directly on its own domains.
 
 ## On-demand TLS for custom domains
 
