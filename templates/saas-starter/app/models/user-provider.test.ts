@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { UserProvider } from "gemi/kernel";
+import { SESSION_SELECT, UserProvider } from "gemi/kernel";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import { clearPlanCache } from "gemi/orm";
@@ -388,6 +388,145 @@ function suite(label: string, url?: string) {
         created.absoluteExpiresAt.getTime(),
       );
       expect(updated.user.email).toBe("a@x.test");
+    });
+
+    // --- sessionSelect (#349) -----------------------------------------------
+
+    /**
+     * A provider changes what a session carries by overriding
+     * `sessionSelect()`, not the three queries. These pin that each of the
+     * three reads with it — a query that kept its own select would hand out a
+     * differently shaped session on exactly one path, which is the #619 bug
+     * again — and that the default is the select it always was.
+     */
+    const ACCOUNTS = SESSION_SELECT.user.select.accounts;
+
+    // Newest membership first, with the column an app needs to demote a
+    // removed one. Built on `SESSION_SELECT` rather than copied from it.
+    class OrderedProvider extends UserProvider {
+      protected sessionSelect() {
+        return {
+          ...SESSION_SELECT,
+          user: {
+            select: {
+              ...SESSION_SELECT.user.select,
+              accounts: {
+                ...ACCOUNTS,
+                orderBy: { id: "desc" },
+                select: { ...ACCOUNTS.select, deletedAt: true },
+              },
+            },
+          },
+        };
+      }
+    }
+
+    // Only live memberships.
+    class LiveAccountsProvider extends UserProvider {
+      protected sessionSelect() {
+        return {
+          ...SESSION_SELECT,
+          user: {
+            select: {
+              ...SESSION_SELECT.user.select,
+              accounts: { ...ACCOUNTS, where: { deletedAt: null } },
+            },
+          },
+        };
+      }
+    }
+
+    const withModels = <P extends UserProvider>(
+      Provider: new (models: any) => P,
+    ): P =>
+      new Provider({
+        User: UserModel,
+        Session: SessionModel,
+        Account: AccountModel,
+        PasswordResetToken: PasswordResetTokenModel,
+        MagicLinkToken: MagicLinkTokenModel,
+        OrganizationInvitation: OrganizationInvitationModel,
+        SocialAccount: SocialAccountModel,
+      });
+
+    // Three memberships, in insertion order Acme, Beta, Gamma; Beta removed.
+    async function memberOfThree() {
+      const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+      for (const name of ["Acme", "Beta", "Gamma"]) {
+        const org: any = await OrganizationModel.create({ data: { name } });
+        const account: any = await auth.createAccount({
+          userId: user.id,
+          organizationId: org.id,
+          organizationRole: 0,
+        });
+        if (name === "Beta") {
+          await AccountModel.update({
+            where: { id: account.id },
+            data: { deletedAt: new Date() },
+          });
+        }
+      }
+      return user;
+    }
+
+    // The session each of the three queries returns, in the order a sign-in
+    // and a later renewal reach them.
+    async function viaAllThree(provider: UserProvider<any>, userId: number) {
+      const created = await provider.createSessionV2(session(userId));
+      const found = await provider.findSession({ token: "tok", userAgent: "a" });
+      const updated = await provider.updateSession({
+        token: "tok",
+        expiresAt: new Date(Date.now() + 7_200_000),
+      });
+      return { created, found, updated };
+    }
+
+    const orgNames = (s: any) =>
+      s.user.accounts.map((a: any) => a.organization.name);
+
+    test("the default session select is unchanged", async () => {
+      const user = await memberOfThree();
+      const sessions = await viaAllThree(auth, user.id);
+
+      for (const s of Object.values(sessions) as any[]) {
+        expect(Object.keys(s).sort()).toEqual(
+          ["absoluteExpiresAt", "expiresAt", "location", "token", "updatedAt", "user", "userAgent"],
+        );
+        expect(Object.keys(s.user).sort()).toEqual(
+          ["accounts", "email", "globalRole", "id", "locale", "name", "publicId"],
+        );
+        // Insertion order, the removed membership included, no `deletedAt`.
+        expect(orgNames(s)).toEqual(["Acme", "Beta", "Gamma"]);
+        expect(Object.keys(s.user.accounts[0]).sort()).toEqual(
+          ["id", "organization", "organizationRole", "publicId"],
+        );
+      }
+    });
+
+    test("findSession, updateSession and createSessionV2 all order and extend accounts through sessionSelect", async () => {
+      const user = await memberOfThree();
+      const sessions = await viaAllThree(withModels(OrderedProvider), user.id);
+
+      for (const [query, s] of Object.entries(sessions) as [string, any][]) {
+        expect(orgNames(s), query).toEqual(["Gamma", "Beta", "Acme"]);
+        expect(
+          s.user.accounts.map((a: any) => a.deletedAt instanceof Date),
+          query,
+        ).toEqual([false, true, false]);
+        // What the base selects still comes along.
+        expect(s.user.email, query).toBe("a@x.test");
+        expect("password" in s.user, query).toBe(false);
+        expect(s.expiresAt, query).toBeInstanceOf(Date);
+      }
+    });
+
+    test("findSession, updateSession and createSessionV2 all filter accounts through sessionSelect", async () => {
+      const user = await memberOfThree();
+      const sessions = await viaAllThree(withModels(LiveAccountsProvider), user.id);
+
+      for (const [query, s] of Object.entries(sessions) as [string, any][]) {
+        expect(orgNames(s), query).toEqual(["Acme", "Gamma"]);
+      }
     });
 
     // `deleteMany` rather than `delete`, so signing out twice does not raise.
