@@ -102,6 +102,17 @@ export interface FeatureDescriptor {
    * it has ever been switched on.
    */
   active: boolean | undefined;
+  /**
+   * Who last changed the switch — the `actor` given to `Features.set()`.
+   *
+   * `undefined` when there is no row, or when the source keeps no actor (a
+   * `FeatureFlag` table without the optional `updatedBy` column). `null` when it
+   * does and the last write named nobody — including a write made outside
+   * `Features.set()` that cleared it. Server-side only, like the rest of this.
+   */
+  updatedBy?: string | null;
+  /** When the row last changed, if the source reports it. */
+  updatedAt?: Date;
 }
 
 /**

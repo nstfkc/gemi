@@ -366,3 +366,39 @@ describe("peek", () => {
     expect(store.peek()!.active.size).toBe(1);
   });
 });
+
+describe("audit columns", () => {
+  test("carries updatedBy and updatedAt for declared rows, never into `active`", async () => {
+    const at = new Date("2026-09-01T10:00:00Z");
+    const store = new FeatureFlagStore(
+      new ScriptedSource(async () => [
+        { key: "alpha", active: true, updatedBy: "usr_1", updatedAt: at },
+        { key: "beta", active: false, updatedBy: null, updatedAt: at.toISOString() },
+        { key: "gamma", active: true, updatedBy: "usr_2" },
+      ]),
+      declared,
+      1000,
+    );
+    const snapshot = await store.get();
+
+    expect(snapshot.audit.get("alpha")).toEqual({ updatedBy: "usr_1", updatedAt: at });
+    expect(snapshot.audit.get("beta")).toEqual({ updatedBy: null, updatedAt: at });
+    // Undeclared rows are ignored for the audit as for the switch.
+    expect(snapshot.audit.has("gamma")).toBe(false);
+  });
+
+  test("a row without audit columns has no entry, and a bad value is dropped", async () => {
+    const store = new FeatureFlagStore(
+      new ScriptedSource(async () => [
+        { key: "alpha", active: true },
+        { key: "beta", active: true, updatedBy: 42, updatedAt: "not a date" },
+      ]),
+      declared,
+      1000,
+    );
+    const snapshot = await store.get();
+
+    expect(snapshot.audit.has("alpha")).toBe(false);
+    expect(snapshot.audit.has("beta")).toBe(false);
+  });
+});

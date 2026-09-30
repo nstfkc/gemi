@@ -174,8 +174,9 @@ await Features.explain("new-checkout"); // { value, reason } — server only
 await Features.all(); // the client-visible map
 await Features.for({ user }).enabled("digest-v2");
 await Features.list(); // every declared feature and its switch
+await Features.set("new-checkout", true, { actor }); // write the switch, then invalidate
 await Features.refresh(); // reload this process now
-await Features.invalidate(); // reload after writing to the table
+await Features.invalidate(); // reload after writing to the table yourself
 ```
 
 Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
@@ -225,7 +226,7 @@ public async index() {
 
 ### Writing the switch
 
-The write is an ordinary `UPDATE` on your own model — the framework owns no mutation path, because the table is yours. What it does own is the cache in front of it:
+`Features.set()` is the write side:
 
 ```typescript
 public async update(
@@ -233,22 +234,83 @@ public async update(
 ) {
   const input = await request.input();
 
-  await FeatureFlag.update({
-    where: { key: request.params.key },
-    data: { active: input.get("active") },
+  await Features.set(request.params.key, input.get("active"), {
+    actor: await Auth.user(),
   });
-
-  await Features.invalidate();
 
   return await Features.list();
 }
 ```
 
+The key is any `string` — it is a route param here — and is checked at runtime; the declared keys still autocomplete. It writes through the configured source and then calls `invalidate()`, so the `list()` after it reflects the write. Against the database source the write is an **upsert** keyed on `key`: a feature that has been deployed but never switched on has no row at all, and that is exactly the state an admin screen exists to change.
+
+It checks before it writes, and throws rather than half-succeeding:
+
+| Situation                                   | Throws                       |
+| ------------------------------------------- | ---------------------------- |
+| A key `app/features` does not declare       | `UndeclaredFeatureError`     |
+| `active` is not a boolean                   | `TypeError`                  |
+| An `actor` with neither `publicId` nor `id` | `TypeError`                  |
+| A source with no `write()` (see below)      | `FeatureSourceReadOnlyError` |
+| The write landed, the reload did not        | `FeatureReloadError`         |
+
+An undeclared key is refused because a row for it would be ignored by every read — the write would create a switch that looks live and does nothing. `FeatureReloadError` is the same one `invalidate()` throws, for the same reason: see below.
+
+`set()` still writes when `enabled: false` in the config — the table is still the truth about the switch — but there is no cache to invalidate.
+
+#### Which sources can be written
+
+| Source                      | `set()`                                                  |
+| --------------------------- | -------------------------------------------------------- |
+| `DatabaseFeatureFlagSource` | upserts the row; records the actor if `updatedBy` exists |
+| `StaticFeatureFlagSource`   | in memory, actor always recorded — for tests             |
+| A custom source             | only if it implements `write()`; otherwise read-only     |
+
+A custom `FeatureFlagSource` opts in by implementing `write(key, active, { actor })` and returning `{ actorRecorded }`. One that does not is read-only: a control plane or a config service owns its own writes, and `set()` says so with `FeatureSourceReadOnlyError` instead of appearing to flip a switch it cannot reach.
+
+#### Recording who changed it
+
+Pass `actor` and add one optional column:
+
+```prisma
+model FeatureFlag {
+  // ...
+  /// Who last changed `active`, as passed to `Features.set(..., { actor })`.
+  updatedBy String?
+}
+```
+
+A string actor is stored as given; a user — anything with a `publicId` or an `id`, such as `await Auth.user()` — is stored by `publicId`, falling back to `id`. An identifier rather than a name, so the admin screen can join it back to whoever that is today.
+
+`Features.list()` then reports it, with the row's `updatedAt`, on each descriptor:
+
+```typescript
+{ key: "new-checkout", active: false, updatedBy: "usr_2x9f…", updatedAt: new Date("2026-09-30T02:14:00Z"), ... }
+```
+
+`updatedBy` is `undefined` when there is no row or no column, and `null` when the column exists and the last write named nobody. `set()` always writes the column when it exists — `null` for a write with no actor — because leaving the previous value would credit the last named person with a change they did not make.
+
+The column is optional. Without it the write still happens and the actor is dropped, with a warning logged once per process. This is the _last_ change, not a history; an app that wants a full trail records it next to the `set()` call, in its own activity log.
+
+#### Writing the table yourself
+
+The table is yours, so a plain `FeatureFlag.upsert(...)` is still fine — follow it with `Features.invalidate()`, which is the half `set()` does for you:
+
+```typescript
+await FeatureFlag.upsert({
+  where: { key },
+  create: { key, active },
+  update: { active },
+});
+
+await Features.invalidate();
+```
+
 `invalidate()` rather than `refresh()`, for two reasons that both amount to "the admin must see their own write". `refresh()` joins whatever load is already in flight, and that load may have queried before the update committed — so the screen could come back saying the switch is still off a moment after flipping it. And `invalidate()` clears the request's evaluation memo, so a feature this request already read is re-evaluated instead of answered from before the write.
 
-**It throws `FeatureReloadError` if the reload fails.** The write landed and the cache did not follow, so the switches in memory may still predate it, and returning normally would present them as the result of the update — worse than never having called it. This is the one call in the subsystem that fails loudly; everywhere else an outage means "keep serving what we have", which is right for evaluation and wrong for an operator watching their own change. Let it surface, or catch it and say the switch was saved but the cache is stale.
+**It throws `FeatureReloadError` if the reload fails.** The write landed and the cache did not follow, so the switches in memory may still predate it, and returning normally would present them as the result of the update — worse than never having called it. This is the one failure in the subsystem that is loud; everywhere else an outage means "keep serving what we have", which is right for evaluation and wrong for an operator watching their own change. Let it surface, or catch it and say the switch was saved but the cache is stale.
 
-It is **process-local**, like `refresh()`. Every other instance is still serving its own snapshot and converges within `ttl`. What this fixes is the one window that reads as a bug — the operator who flips a switch, reloads, and is told for the next thirty seconds that nothing happened.
+It is **process-local**, like `refresh()`, and so is `set()`. Every other instance is still serving its own snapshot and converges within `ttl`. What this fixes is the one window that reads as a bug — the operator who flips a switch, reloads, and is told for the next thirty seconds that nothing happened.
 
 ## Hiding a feature's existence
 
@@ -331,6 +393,9 @@ This replaces the _switch_, not the answer: rows still go through the same store
 | Row for a key you never declared             | ignored with a warning                            |
 | Row with a non-boolean `active`              | read as off                                       |
 | `Features.invalidate()` cannot reload        | throws `FeatureReloadError`; switches unchanged   |
+| `Features.set()` on an undeclared key        | throws `UndeclaredFeatureError`; nothing written  |
+| `Features.set()` on a read-only source       | throws `FeatureSourceReadOnlyError`               |
+| `actor` given, no `updatedBy` column         | written without it; logged once                   |
 | A `when` that throws                         | the feature reads off, logged once per evaluation |
 
 ## Related

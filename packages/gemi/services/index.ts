@@ -183,13 +183,26 @@ export {
   type ServerOnlyFeature,
 } from "./features/defineFeature";
 export { FeaturesServiceProvider } from "./features/FeaturesServiceProvider";
-export { FeatureManager, FeatureScope } from "./features/FeatureManager";
+export {
+  FeatureManager,
+  FeatureScope,
+  UndeclaredFeatureError,
+  type FeatureActor,
+  type FeatureSetOptions,
+} from "./features/FeatureManager";
 export {
   FeatureFlagStore,
   FeatureReloadError,
+  type FlagAudit,
   type FlagSnapshot,
 } from "./features/FeatureFlagStore";
-export { FeatureFlagSource, FeatureModelMissingError } from "./features/sources/FeatureFlagSource";
+export {
+  FeatureFlagSource,
+  FeatureModelMissingError,
+  FeatureSourceReadOnlyError,
+  type FeatureWriteMeta,
+  type FeatureWriteResult,
+} from "./features/sources/FeatureFlagSource";
 export { DatabaseFeatureFlagSource } from "./features/sources/DatabaseFeatureFlagSource";
 export { StaticFeatureFlagSource } from "./features/sources/StaticFeatureFlagSource";
 export { evaluateFeature, subjectFor } from "./features/evaluate";

@@ -3,7 +3,8 @@ import { RequestContext } from "../../http/requestContext";
 import { featuresConfigDefaults, type FeaturesConfig } from "./config";
 import { defineFeature } from "./defineFeature";
 import { FeatureReloadError } from "./FeatureFlagStore";
-import { FeatureManager } from "./FeatureManager";
+import { FeatureManager, UndeclaredFeatureError } from "./FeatureManager";
+import { FeatureFlagSource, FeatureSourceReadOnlyError } from "./sources/FeatureFlagSource";
 import { StaticFeatureFlagSource } from "./sources/StaticFeatureFlagSource";
 
 const AppFeatures = {
@@ -623,5 +624,186 @@ describe("invalidate", () => {
 
       expect(store.featureEvaluations?.size).toBe(0);
     });
+  });
+});
+
+describe("set", () => {
+  test("switches a feature on and the next read sees it", async () => {
+    const features = manager();
+    expect(await features.enabled("new-checkout")).toBe(false);
+
+    await features.set("new-checkout", true);
+
+    expect(await features.enabled("new-checkout")).toBe(true);
+    const listing = await features.list();
+    expect(listing.features.find((f) => f.key === "new-checkout")?.active).toBe(true);
+  });
+
+  test("switches a feature off — the kill switch", async () => {
+    const features = manager({ "new-checkout": true });
+    expect(await features.enabled("new-checkout")).toBe(true);
+
+    await features.set("new-checkout", false);
+
+    expect(await features.explain("new-checkout")).toEqual({
+      value: false,
+      reason: "inactive",
+    });
+  });
+
+  test("a feature read earlier in the same request is re-evaluated after the write", async () => {
+    const features = manager();
+
+    const result = await inRequest(async () => {
+      await features.enabled("new-checkout");
+      await features.set("new-checkout", true);
+      return features.enabled("new-checkout");
+    });
+
+    expect(result).toBe(true);
+  });
+
+  test("an undeclared key throws before anything is written", async () => {
+    const source = new StaticFeatureFlagSource();
+    const write = vi.spyOn(source, "write");
+    const features = manager({}, { source });
+
+    await expect(features.set("never-declared", true)).rejects.toBeInstanceOf(
+      UndeclaredFeatureError,
+    );
+    await expect(features.set("never-declared", true)).rejects.toThrow(/not declared/);
+    // Not fooled by a key that only exists on the prototype chain.
+    await expect(features.set("toString", true)).rejects.toBeInstanceOf(UndeclaredFeatureError);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test("a non-boolean `active` throws — it usually comes straight off a request body", async () => {
+    const source = new StaticFeatureFlagSource();
+    const write = vi.spyOn(source, "write");
+    const features = manager({}, { source });
+
+    await expect(features.set("new-checkout", "true" as any)).rejects.toThrow(TypeError);
+    await expect(features.set("new-checkout", null as any)).rejects.toThrow(/not null/);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test("a read-only source refuses rather than pretending", async () => {
+    class ReadOnly extends FeatureFlagSource {
+      async load() {
+        return [];
+      }
+    }
+    const features = manager({}, { source: new ReadOnly() });
+
+    const error = await features.set("new-checkout", true).catch((e) => e);
+    expect(error).toBeInstanceOf(FeatureSourceReadOnlyError);
+    expect(error.message).toMatch(/ReadOnly/);
+  });
+
+  test("records the actor, and list() reports who changed it and when", async () => {
+    const features = manager();
+
+    await features.set("new-checkout", true, { actor: "ops@example.test" });
+    await features.set("pricing-redesign", true, {
+      actor: { publicId: "usr_1", id: 7, email: "a@b.c" },
+    });
+    await features.set("internal-tools", true, { actor: { id: 7 } });
+    await features.set("admin-only", true);
+
+    const byKey = Object.fromEntries((await features.list()).features.map((f) => [f.key, f]));
+    expect(byKey["new-checkout"].updatedBy).toBe("ops@example.test");
+    expect(byKey["pricing-redesign"].updatedBy).toBe("usr_1");
+    expect(byKey["internal-tools"].updatedBy).toBe("7");
+    // Recorded as nobody, not left as whoever changed it before.
+    expect(byKey["admin-only"].updatedBy).toBeNull();
+    expect(byKey["new-checkout"].updatedAt).toBeInstanceOf(Date);
+  });
+
+  test("a later write without an actor clears the previous one", async () => {
+    const features = manager();
+
+    await features.set("new-checkout", true, { actor: "usr_1" });
+    await features.set("new-checkout", false);
+
+    const listing = await features.list();
+    expect(listing.features.find((f) => f.key === "new-checkout")?.updatedBy).toBeNull();
+  });
+
+  test("an actor that identifies nobody throws rather than recording null", async () => {
+    const features = manager();
+
+    await expect(features.set("new-checkout", true, { actor: {} })).rejects.toThrow(
+      /identifies nobody/,
+    );
+    await expect(features.set("new-checkout", true, { actor: "" })).rejects.toThrow(TypeError);
+  });
+
+  test("a source with nowhere to keep the actor still writes, and warns once", async () => {
+    class NoAudit extends FeatureFlagSource {
+      rows: Record<string, unknown>[] = [];
+      async load() {
+        return this.rows;
+      }
+      async write(key: string, active: boolean) {
+        this.rows = [...this.rows.filter((r) => r.key !== key), { key, active }];
+        return { actorRecorded: false };
+      }
+    }
+    const log = vi.fn();
+    const features = manager({}, { source: new NoAudit() }, log);
+
+    await features.set("new-checkout", true, { actor: "usr_1" });
+    await features.set("new-checkout", false, { actor: "usr_1" });
+    await features.set("new-checkout", true);
+
+    expect(await features.enabled("new-checkout")).toBe(true);
+    const warnings = log.mock.calls.filter(([m]) => /nowhere to record/.test(m));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0][0]).toMatch(/updatedBy String\?/);
+    const listing = await features.list();
+    // No column, so no claim either way about who changed it.
+    expect(listing.features.find((f) => f.key === "new-checkout")?.updatedBy).toBeUndefined();
+  });
+
+  test("throws FeatureReloadError when the write landed and the reload did not", async () => {
+    let fail = false;
+    class Flaky extends FeatureFlagSource {
+      async load() {
+        if (fail) throw new Error("connection reset");
+        return [];
+      }
+      async write() {
+        return { actorRecorded: true };
+      }
+    }
+    const features = manager({}, { source: new Flaky() });
+    await features.refresh();
+    fail = true;
+
+    await expect(features.set("new-checkout", true)).rejects.toBeInstanceOf(FeatureReloadError);
+  });
+
+  test("still writes when features are disabled, with nothing to reload", async () => {
+    const source = new StaticFeatureFlagSource();
+    const load = vi.spyOn(source, "load");
+    const features = manager({}, { source, enabled: false });
+
+    await features.set("new-checkout", true);
+
+    expect(load).not.toHaveBeenCalled();
+    expect(await source.load()).toEqual([
+      expect.objectContaining({ key: "new-checkout", active: true }),
+    ]);
+  });
+});
+
+describe("StaticFeatureFlagSource", () => {
+  test("copies the object it is given rather than writing into it", async () => {
+    const initial = { "new-checkout": false };
+    const features = manager(initial);
+
+    await features.set("new-checkout", true);
+
+    expect(initial).toEqual({ "new-checkout": false });
   });
 });

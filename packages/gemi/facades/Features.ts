@@ -1,6 +1,10 @@
 import type { FeatureKey } from "../client/rpc";
 import type { FeatureSubject } from "../services/features/context";
-import { FeatureManager, type FeatureScope } from "../services/features/FeatureManager";
+import {
+  FeatureManager,
+  type FeatureScope,
+  type FeatureSetOptions,
+} from "../services/features/FeatureManager";
 import type { FeatureEvaluation, FeatureListing } from "../services/features/types";
 import { Facade } from "./Facade";
 
@@ -98,13 +102,63 @@ export class Features extends Facade {
     return this.getFacadeRoot().list();
   }
 
+  /**
+   * Switches a feature on or off through the configured source, and
+   * `invalidate()`s so this process sees it immediately.
+   *
+   * ```ts
+   * public async update(
+   *   request: HttpRequest<{ active: boolean }, { key: string }>,
+   * ) {
+   *   const input = await request.input();
+   *
+   *   await Features.set(request.params.key, input.get("active"), {
+   *     actor: await Auth.user(),
+   *   });
+   *
+   *   return await Features.list();
+   * }
+   * ```
+   *
+   * The key accepts any `string`, unlike `enabled()`: the caller is almost
+   * always an admin route whose key is a route param, and the declared keys
+   * still autocomplete. A typo is caught at runtime instead, before anything is
+   * written. Throws:
+   *
+   * - `UndeclaredFeatureError` for a key `app/features` does not declare. A row
+   *   for it would be ignored, so the write would create a switch that looks
+   *   live and does nothing.
+   * - `TypeError` for an `active` that is not a boolean, or an `actor` that
+   *   identifies nobody.
+   * - `FeatureSourceReadOnlyError` when the configured source has no `write()`.
+   * - `FeatureReloadError` when the write landed and the reload did not — see
+   *   `invalidate()`.
+   *
+   * `actor` is recorded as the row's `updatedBy` — a string as given, a user by
+   * `publicId` (falling back to `id`) — when the source keeps one. The database
+   * source does when the model has the optional `updatedBy String?` column, and
+   * `list()` then reports it on each descriptor. Without the column the write
+   * still happens and the actor is dropped, with a warning logged once.
+   *
+   * **Process-local, like `invalidate()`.** Other instances converge within
+   * `ttl`.
+   */
+  static set(
+    key: FeatureKey | (string & {}),
+    active: boolean,
+    options?: FeatureSetOptions,
+  ): Promise<void> {
+    return this.getFacadeRoot().set(key, active, options);
+  }
+
   /** Reloads this process's snapshot now, rather than waiting for the TTL. */
   static refresh(): Promise<void> {
     return this.getFacadeRoot().refresh();
   }
 
   /**
-   * Call this after writing to the `FeatureFlag` table.
+   * Call this after writing to the `FeatureFlag` table yourself. `set()` calls
+   * it for you.
    *
    * ```ts
    * public async update(
