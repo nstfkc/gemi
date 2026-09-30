@@ -1,3 +1,44 @@
+# Upgrading from 0.71 to 0.72
+
+Two additions, one of them type-only. No runtime behaviour changes. The typed
+errors may surface type errors where an app reads fields off `onError`'s error
+without checking what it is. Those reads were already unsafe.
+
+## Typed mutation errors: `MutationError` and guards (#626, #635)
+
+`onError` on `<Form>` and every mutation hook, and the hooks' `error`, are now
+typed `MutationError` instead of `any`:
+`MutationValidationError | MutationFormError | MutationServerError |
+MutationMessageError | string | Error`. The runtime value is unchanged.
+
+Use the guards exported from `gemi/client` before reading fields:
+`isValidationError`, `isFormError`, `isAuthenticationError`,
+`isPermissionError`, `isCsrfError`, `isNotFoundError`, `isRateLimitError`,
+`isServerError`, `isNetworkError`, or switch on `mutationErrorKind(error)`.
+
+**What to fix:** code that read `.kind`, `.messages` or `.message` straight off
+the error, and callbacks annotated with a narrower hand-written error type.
+Narrow with a guard first, or annotate the parameter as `MutationError`.
+
+**Known limit:** most refusals reach the client as bare strings with no status.
+The string guards match gemi's default messages, so an `AuthorizationError`
+thrown with a custom message classifies as `"unknown"`.
+
+## Paged lists: `useInfiniteQuery`, and updating every search variant (#624, #634)
+
+`useInfiniteQuery(path, { params, search }, { getNextPage, getKey?, getItems?,
+pageParam? })` returns `pages`, `items`, `hasMore` and `fetchNextPage()`.
+Page 1 is a regular `useQuery`, so SSR prefetch, suspense and
+`keepPreviousData` behave as they do there. Later pages are cache variants of
+the same path. A change of params or search resets to page 1 while the previous
+list stays on screen.
+
+`useMutate` accepts a search predicate:
+`mutate({ path, params, search: (s) => boolean }, fn?)`. It updates every
+matching cached variant (`() => true` for all), refetches the ones on screen,
+and marks the rest stale. For clamping `page`/`limit` on the server, use the
+existing `paginate()` from `gemi/orm`.
+
 # Upgrading from 0.70 to 0.71
 
 Three additions and no behaviour changes. Nothing to rewrite.
