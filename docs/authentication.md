@@ -81,7 +81,7 @@ a binding into the container, and a facade resolves it.**
 | `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
-| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
+| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. `verifyPassword` is never handed a missing hash: for an account with no password (one created through OAuth) or an unknown address it runs against a throwaway hash from `hashPassword`, and the answer is `invalid_credentials`, as for a wrong password. The default also answers `false` for a stored value it cannot read as a hash. |
 | `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | 32 random bytes, hex | Token minting. Whatever you return must not be computable from the user's email or the time. |
 
 > **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
