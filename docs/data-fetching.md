@@ -175,7 +175,8 @@ const { data } = useQuery("/feed", {}, {
   fallbackData: [],        // initial data before the first fetch
   keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
-  retryIntervalOnError: 10000, // background retry — suspense: false only
+  retry: 3,                // background retries of a failed query — suspense: false only
+  retryDelay: (n) => 1000 * 2 ** (n - 1), // wait before retry n (default: 1s, 2s, 4s, capped at 30s)
   revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
   focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
@@ -221,6 +222,79 @@ Three things keep it from firing more than it should:
 A `lazy` query only becomes eligible once something has explicitly fetched it —
 `trigger()`, `refetch()` or `mutate()`. `prefetch()` deliberately does not
 count: it is "fetch once" for data the user may never look at.
+
+### Failed queries and retries
+
+With `suspense: false` a failed query returns its `error` and may retry in the
+background. Under suspense the error throws into the segment's error boundary
+instead, and resetting the boundary is the retry.
+
+Only failures another attempt might fix are retried: no answer at all (offline,
+a dropped connection), `408`, `429` and any `5xx`. Every other `4xx` — `400`,
+`401`, `403`, `404`, `410`, `422`, … — is returned once and never retried,
+because sending the same request again gets the same answer. That is what lets
+`useUser()` sit on a public page: the anonymous visitor's `401` from
+`/auth/me` is one request, not a poll.
+
+- **`retry`** (default `3`) — how many times in a row a retryable failure is
+  retried. `false` or `0` turns retries off, `true` removes the cap, and a
+  function `(failureCount, error) => boolean` decides alone, so it can also
+  retry a status the default never does. `failureCount` is 1 after the first
+  failure.
+- **`retryDelay`** — the wait before each retry, in ms, or
+  `(failureCount, error) => ms`. The default backs off exponentially: 1s, 2s,
+  4s, … capped at 30s.
+- **`Retry-After`** — when the failed response carries one (a `429` or `503`),
+  the retry waits exactly that long, whatever `retryDelay` says. It is also on
+  the error, in ms, as `error.retryAfter`. The retry still counts toward
+  `retry`.
+
+`error` is a `QueryError` (`status`, `body`, `retryAfter`) when the server
+answered, including with a non-JSON error page (`body` is then `null`), and the
+browser's `TypeError` when it did not. `isRetryableQueryError(error)` from
+`gemi/client` is the default's test, for building your own `retry`:
+
+```tsx
+import { isRetryableQueryError, QueryError } from "gemi/client";
+
+useQuery("/jobs/:id", { params: { id } }, {
+  suspense: false,
+  // A job that doesn't exist *yet* 404s: keep looking for a while.
+  retry: (n, error) =>
+    (error instanceof QueryError && error.status === 404 && n < 10) ||
+    (isRetryableQueryError(error) && n <= 3),
+  retryDelay: 2000,
+});
+```
+
+A run of retries ends at the first success. Unmounting every reader of the
+query cancels a pending retry. When the browser comes back `online`, a query
+whose last failure its policy would retry is fetched again, silently, with a
+fresh run of retries. `revalidateOnFocus` and `refetch()` fetch a failed query
+like any other.
+
+### App-wide defaults: `queryConfig`
+
+Set defaults for every `useQuery` once, where the roots are created. A call
+site's config still wins:
+
+```ts
+const queryConfig = { staleTime: 30_000, retry: 2, revalidateOnFocus: true };
+
+// app/config/route.ts — the server render
+view: { rootRouter: RootViewRouter, root: createRoot(RootLayout, { queryConfig }) },
+
+// app/client.tsx — the browser
+init(RootLayout, { queryConfig });
+```
+
+Pass the same value to both, so the server render and hydration agree.
+
+Accepted keys: `suspense`, `staleTime`, `keepPreviousData`, `retry`,
+`retryDelay`, `refreshInterval`, `revalidateOnFocus`, `focusThrottleInterval`
+(and the deprecated `retryIntervalOnError`). `lazy`, `fallbackData` and
+`refetchUntil` are call-site only. `useUser()` ignores these and reads
+`queryConfig.user` instead — see Authentication.
 
 ### Optimistic updates with `mutate`
 

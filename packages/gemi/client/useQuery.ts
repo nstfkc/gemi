@@ -20,6 +20,14 @@ import { toVariantKey } from "../utils/variantKey";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 import { isPlainObject } from "./isPlainObject";
+import {
+  DEFAULT_RETRY,
+  retryDelayFor,
+  shouldRetryQuery,
+  type QueryFailure,
+  type RetryDelayOption,
+  type RetryOption,
+} from "./retryPolicy";
 
 /**
  * A DOM event or React's synthetic one. Never a plain object, so a cached
@@ -48,6 +56,26 @@ export interface Config<T> {
    * stale rows would mislead). First mount always suspends either way.
    */
   keepPreviousData?: boolean;
+  /**
+   * Background retries for a failed `suspense: false` query (under suspense
+   * the error goes to the error boundary instead). Default `3`: network
+   * failures, 408, 429 and 5xx are retried up to three times in a row with
+   * exponential backoff; any other 4xx (401, 403, 404, 422, …) is returned
+   * once and never retried, because sending the same request again gets the
+   * same answer. `false` turns retries off, `true` removes the cap, and a
+   * function `(failureCount, error) => boolean` decides alone.
+   */
+  retry?: RetryOption;
+  /**
+   * The wait before each retry, in ms, or `(failureCount, error) => ms`.
+   * Default: `1000 * 2^(failureCount - 1)` capped at 30s — 1s, 2s, 4s. A
+   * `Retry-After` header on the failed response (a 429 or 503) wins.
+   */
+  retryDelay?: RetryDelayOption;
+  /**
+   * @deprecated Use `retryDelay`. Kept as the base of the default backoff:
+   * the first retry waits this long, each next one twice as long.
+   */
   retryIntervalOnError?: number;
   refreshInterval?: number;
   /**
@@ -86,7 +114,7 @@ type WithOptionalValues<T> = {
 const defaultConfig: Config<any> = {
   fallbackData: null,
   keepPreviousData: true,
-  retryIntervalOnError: 10000,
+  retry: DEFAULT_RETRY,
   refreshInterval: 999999,
   revalidateOnFocus: false,
   focusThrottleInterval: 5000,
@@ -211,7 +239,8 @@ export function useQuery<T extends keyof GetRPC>(
   // optional prop) must fall through to the provider default, not clobber it
   // — a plain spread would copy the `undefined` over it. The provider value
   // is already sanitized at the provider (see `QueryManagerProvider`).
-  const queryConfig = useContext(QueryConfigContext);
+  // `user` is `useUser`'s own section, not a query default.
+  const { user: _user, ...queryConfig } = useContext(QueryConfigContext) ?? {};
   const merged: Config<Data<T>> = { ...queryConfig };
   if (config) {
     for (const key of Object.keys(config) as Array<keyof Config<Data<T>>>) {
@@ -291,8 +320,6 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
-  const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryingMap = useRef<Map<string, boolean>>(new Map());
   const fetchedRef = useRef(!lazy);
   const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -417,20 +444,6 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     );
   }
 
-  const retry = useCallback(
-    (vk: string) => {
-      if (!retryingMap.current.get(vk)) {
-        if (configRef.current.debug) console.log("retrying", vk);
-        retryingMap.current.set(vk, true);
-        retryIntervalRef.current = setTimeout(() => {
-          resource.getVariant(vk, configRef.current.staleTime);
-          retryingMap.current.set(vk, false);
-        }, configRef.current.retryIntervalOnError);
-      }
-    },
-    [resource],
-  );
-
   // Mount / variant-change revalidation — unchanged semantics: `getVariant`
   // fetches when the variant is missing or stale, and now joins an in-flight
   // render-initiated read instead of racing it.
@@ -438,18 +451,43 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     if (fetchedRef.current) {
       resource.getVariant(variantKey, configRef.current.staleTime);
     }
-    return () => {
-      clearTimeout(retryIntervalRef.current);
-    };
   }, [variantKey, resource]);
 
-  // With `suspense: false` an error is returned and retried in the
-  // background; under suspense it throws below instead.
+  // With `suspense: false` an error is returned and, when the retry policy
+  // allows, retried in the background; under suspense it throws below
+  // instead. The resource owns the timer — one per variant however many
+  // readers render it — and drops it once none of them is mounted.
   useEffect(() => {
-    if (!suspense && snapshot?.error) {
-      retry(variantKey);
-    }
-  }, [snapshot, suspense, retry, variantKey]);
+    if (suspense || !snapshot?.error || snapshot.loading) return;
+    const cfg = configRef.current;
+    const error = snapshot.error as QueryFailure;
+    const failureCount = Math.max(1, resource.failureCount(variantKey));
+    if (!shouldRetryQuery(failureCount, error, cfg.retry)) return;
+    const delay = retryDelayFor(
+      failureCount,
+      error,
+      cfg.retryDelay,
+      cfg.retryIntervalOnError,
+    );
+    if (cfg.debug) console.log("retrying", variantKey, "in", delay);
+    resource.scheduleRetry(variantKey, delay);
+  }, [snapshot, suspense, resource, variantKey]);
+
+  // Coming back online retries a query that failed in a way another attempt
+  // might fix — e.g. one that ran out of retries while offline — as long as
+  // its retry policy would retry that error at all. Silent, and it starts a
+  // fresh run of failures.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onOnline = () => {
+      const state = resource.peek(variantKey);
+      if (!state?.error) return;
+      if (!shouldRetryQuery(1, state.error, configRef.current.retry)) return;
+      resource.retryNow(variantKey);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [resource, variantKey]);
 
   useEffect(() => {
     const cfg = configRef.current;
