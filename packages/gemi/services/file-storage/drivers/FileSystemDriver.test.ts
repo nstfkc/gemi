@@ -176,16 +176,21 @@ describe("FileSystemDriver.fetch() with a signal", () => {
     await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  test("a timeout surfaces as a rejected arrayBuffer()", async () => {
+  test("an abort's reason, e.g. a timeout, is what the body read rejects with", async () => {
     const driver = new FileSystemDriver(folder);
     const controller = new AbortController();
+    const reason = new DOMException("too slow", "TimeoutError");
 
     const res = await driver.fetch("big.bin", { signal: controller.signal });
-    controller.abort(new DOMException("too slow", "TimeoutError"));
+    controller.abort(reason);
 
-    await expect(res.arrayBuffer()).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
+    // Read from inside an async function, as callers do. On an already-errored
+    // body, Bun 1.3 throws from `arrayBuffer()` synchronously while newer Bun
+    // returns a rejected promise; both reach an `await` as the same rejection,
+    // but a bare `expect(res.arrayBuffer())` never gets a promise under 1.3.
+    const read = async () => res.arrayBuffer();
+
+    await expect(read()).rejects.toBe(reason);
   });
 
   test("reads the whole file when the signal never fires", async () => {
