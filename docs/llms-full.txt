@@ -3370,7 +3370,7 @@ These hooks return:
 
 | field | description |
 | --- | --- |
-| `trigger(input?)` | Fire the request. `input` may be a typed JSON body or a `FormData`. Resolves to the response body, or `undefined` when there is none (see below) — it never rejects. |
+| `trigger(input?)` | Fire the request. `input` may be a typed JSON body or a `FormData`. Resolves to the response body, or `undefined` when there is none (see below). A failed request does not reject. |
 | `trigger.formData(fd)` | Convenience for submitting a `FormData`. |
 | `data` | The response body after success. |
 | `error` | A `MutationError` on failure (see below). |
@@ -3392,7 +3392,7 @@ Options mirror the query hooks — `{ params, search }` in the second argument (
 - a `cancel()`;
 - a request superseded by a newer `trigger` from the same hook.
 
-It does not reject, so `onClick={() => trigger()}` and `<Form>` never produce an
+A failed request does not reject, so `onClick={() => trigger()}` and `<Form>` never produce an
 unhandled rejection. Narrow the result before reading from it:
 
 ```tsx
