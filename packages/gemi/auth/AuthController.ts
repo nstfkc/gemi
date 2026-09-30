@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Temporal } from "temporal-polyfill";
 
 import { Controller } from "../http/Controller";
@@ -10,6 +11,54 @@ import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
+
+/**
+ * A hash of a random password, for `passwordMatches` to verify against when
+ * there is no stored hash. Made with the configured `hashPassword`, so it costs
+ * what a real one does under whatever scheme the app uses, and once per
+ * `hashPassword`.
+ */
+const decoyHashes = new WeakMap<object, Promise<string>>();
+
+function decoyHash(hashPassword: (password: string) => Promise<string>) {
+  let hash = decoyHashes.get(hashPassword);
+  if (!hash) {
+    hash = hashPassword(randomBytes(32).toString("hex"));
+    decoyHashes.set(hashPassword, hash);
+    // A failure is not cached: the next attempt tries again.
+    hash.catch(() => decoyHashes.delete(hashPassword));
+  }
+  return hash;
+}
+
+/**
+ * Whether `password` matches the stored hash — `false` when there is none.
+ *
+ * A user created through OAuth has no password, and an unknown address has no
+ * user. Both answer the same as a wrong password, and take as long: a hash is
+ * verified either way, against a decoy when there is nothing stored, so
+ * neither the response nor its timing says which of the three it was (#276).
+ * `verifyPassword` is never handed a missing hash, so a custom one typed
+ * `(password, hash: string)` needs no guard of its own.
+ */
+async function passwordMatches(
+  config: {
+    verifyPassword: (password: string, hash: string) => Promise<boolean>;
+    hashPassword: (password: string) => Promise<string>;
+  },
+  password: string,
+  hash: string | null | undefined,
+): Promise<boolean> {
+  if (typeof hash === "string" && hash !== "") {
+    return await config.verifyPassword(password, hash);
+  }
+  // Only the time is wanted, so a failure here is no reason to fail the
+  // request: the answer is `false` whatever the decoy check does.
+  try {
+    await config.verifyPassword(password, await decoyHash(config.hashPassword));
+  } catch {}
+  return false;
+}
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
@@ -219,18 +268,15 @@ export class AuthController extends Controller {
       auth.config.verifyEmail,
     );
 
-    if (!user) {
-      throw new ValidationError({
-        invalid_credentials: ["Invalid credentials"],
-      });
-    }
-
-    const isPasswordValid = await auth.config.verifyPassword(
+    // An unknown address is checked too, against a decoy, so it answers like a
+    // wrong password in time as well as in body.
+    const isPasswordValid = await passwordMatches(
+      auth.config,
       password,
-      user.password,
+      user?.password,
     );
 
-    if (!isPasswordValid) {
+    if (!user || !isPasswordValid) {
       throw new ValidationError({
         invalid_credentials: ["Invalid credentials"],
       });
@@ -268,18 +314,15 @@ export class AuthController extends Controller {
       auth.config.verifyEmail,
     );
 
-    if (!user) {
-      throw new ValidationError({
-        invalid_credentials: ["Invalid credentials"],
-      });
-    }
-
-    const isPasswordValid = await auth.config.verifyPassword(
+    // An unknown address is checked too, against a decoy, so it answers like a
+    // wrong password in time as well as in body.
+    const isPasswordValid = await passwordMatches(
+      auth.config,
       password,
-      user.password,
+      user?.password,
     );
 
-    if (!isPasswordValid) {
+    if (!user || !isPasswordValid) {
       throw new ValidationError({
         invalid_credentials: ["Invalid credentials"],
       });
@@ -538,12 +581,16 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { oldPassword, newPassword } = input.toJSON();
 
-    const { password } = await userProvider.findUserByEmailAddress(
+    const stored = await userProvider.findUserByEmailAddress(
       user.email,
       config.verifyEmail,
     );
 
-    const isPasswordValid = await config.verifyPassword(oldPassword, password);
+    const isPasswordValid = await passwordMatches(
+      config,
+      oldPassword,
+      stored?.password,
+    );
 
     if (!isPasswordValid) {
       throw new ValidationError({

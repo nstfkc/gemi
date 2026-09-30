@@ -167,6 +167,32 @@ export interface AuthConfig {
   ) => Promise<void> | void;
 }
 
+/**
+ * The default `verifyPassword`: `false` for anything that is not a hash it can
+ * check, rather than an exception.
+ *
+ * `password` is nullable — a user created through OAuth has none — and
+ * `Bun.password.verify` throws `UnsupportedAlgorithm` for `null` and for any
+ * string it cannot read as a hash. Sign-in let that escape as a 500 where a
+ * wrong password answers `invalid_credentials`, which also told anyone asking
+ * that the address has an account (#276). A malformed hash is corrupt data
+ * rather than a wrong password, but the answer to "does this password match"
+ * is still no.
+ */
+export async function verifyPasswordHash(
+  password: string,
+  hash: string | null | undefined,
+): Promise<boolean> {
+  if (typeof hash !== "string" || hash === "") {
+    return false;
+  }
+  try {
+    return await Bun.password.verify(password, hash);
+  } catch {
+    return false;
+  }
+}
+
 export function defineAuthConfig(config: AuthConfig): AuthConfig {
   return config;
 }
@@ -190,8 +216,7 @@ export function authConfigDefaults(
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},
 
-    verifyPassword: async (password, hash) =>
-      await Bun.password.verify(password, hash),
+    verifyPassword: verifyPasswordHash,
     hashPassword: async (password) => await Bun.password.hash(password),
     // Random, not derived. These used to be sha256(email + Date.now()), which
     // anyone who asked for a reset could recompute: the email is theirs to
