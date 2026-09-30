@@ -1,4 +1,8 @@
 import * as registry from "../orm/registry";
+import { currentConnectionName, currentTransaction } from "../orm/context";
+import { DatabaseManager } from "../database/DatabaseManager";
+import type { DatabaseConnection } from "../database/Connection";
+import { app } from "../foundation/app";
 import type {
   Account,
   AuthModels,
@@ -37,7 +41,7 @@ import type {
  *
  * What the seam actually bought was reachable more cheaply. An application that
  * needs different behaviour subclasses this and overrides the methods it cares
- * about — the queries are twenty-five small independent methods, all funnelled
+ * about — the queries are twenty-six small independent methods, all funnelled
  * through `run`, precisely the shape that subclasses well. What it no longer
  * buys is a *different database*, and that is deliberate: an app on the ORM has
  * one.
@@ -107,6 +111,13 @@ function registryModels(): AuthModels {
     get: (_target, name: string) => registry.get(name),
   });
 }
+
+/**
+ * The tail of the last `withLegacySessionLock` on each SQLite connection. See
+ * that method for why SQLite queues in the process instead of locking in the
+ * database.
+ */
+const sqliteLegacySessionQueues = new WeakMap<DatabaseConnection, Promise<unknown>>();
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
@@ -271,6 +282,50 @@ export class UserProvider<TSession = SessionWithUser> {
   }
 
   /**
+   * Runs `fn` in a transaction that no other conversion or revocation of the
+   * pre-0.64 token `token` can overlap. `AuthManager` converts a legacy
+   * session and revokes one through here (`auth.migrateLegacySession`, #638),
+   * so a sign-out and a conversion of the same old token happen one after the
+   * other, each seeing what the other committed.
+   *
+   * - **Postgres**: `pg_advisory_xact_lock` on a key derived from the token,
+   *   taken as the transaction's first statement and held until it ends. A
+   *   row lock would not do: after a conversion the old row is gone, and there
+   *   is nothing left to lock.
+   * - **SQLite**: one writer at a time already, and Bun's client runs every
+   *   statement on one connection, where a second `BEGIN` while a transaction
+   *   is open fails outright. So these transactions queue in the process, one
+   *   after another per connection.
+   * - **MySQL / MariaDB**: the transaction alone. The conversion deletes the old
+   *   row before it writes the new one, and both sides' deletes of that row
+   *   wait on each other's row lock.
+   *
+   * Only the legacy-session paths use this; everything else is untouched.
+   */
+  withLegacySessionLock<T>(token: string, fn: () => Promise<T>): Promise<T> {
+    const name = this.models.User.$connection ?? currentConnectionName();
+    const connection = app(DatabaseManager).connection(name);
+    const locked = () =>
+      this.transaction(async () => {
+        if (connection.dialect === "postgres") {
+          const key = `gemi:legacy-session:${token}`;
+          await currentTransaction()!`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+        }
+        return fn();
+      });
+    // Inside a transaction already, this one is a savepoint and opens nothing
+    // for the queue to keep apart — and waiting on the queue there could wait
+    // on a transaction that cannot begin until this one's has ended.
+    if (connection.dialect !== "sqlite" || currentTransaction()) {
+      return locked();
+    }
+    const previous = sqliteLegacySessionQueues.get(connection) ?? Promise.resolve();
+    const result = previous.then(locked, locked);
+    sqliteLegacySessionQueues.set(connection, result.catch(() => {}));
+    return result;
+  }
+
+  /**
    * Note the password is **removed from the returned object**, matching Prisma's
    * adapter, which uses `omit: { password: true }`.
    *
@@ -415,6 +470,25 @@ export class UserProvider<TSession = SessionWithUser> {
     await this.run(() =>
       this.models.Session.deleteMany({ where: { token: args.token } }),
     );
+  }
+
+  /**
+   * Deletes the pre-0.64 row `token` names and answers whether this call is
+   * the one that deleted it. A conversion writes the new session only on
+   * `true` (#638): `false` means a sign-out, or another conversion, got to the
+   * row first — and a session written then would outlive the sign-out.
+   *
+   * `deleteMany`, whose count is exactly that answer; `delete` would raise on
+   * a row that is already gone.
+   */
+  async claimLegacySession(args: { token: string }): Promise<boolean> {
+    if (!args.token) {
+      return false;
+    }
+    const { count }: { count: number } = await this.run(() =>
+      this.models.Session.deleteMany({ where: { token: args.token } }),
+    );
+    return count > 0;
   }
 
   async deleteAllUserSessions(userId: number): Promise<void> {

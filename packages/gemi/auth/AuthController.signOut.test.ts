@@ -41,6 +41,9 @@ const auth = {
   config: { onSignOut, extendSession },
   userProvider: { findSession, deleteSession },
   getSession,
+  // The real one, against the fakes above: it is what signOut revokes with.
+  revokeSession: (...args: Parameters<AuthManager["revokeSession"]>) =>
+    AuthManager.prototype.revokeSession.apply(auth as never, args),
   accessTokenCookieOptions: (_req: unknown, expires: Date) => ({
     expires,
     httpOnly: true,
@@ -62,6 +65,7 @@ vi.mock("../facades", () => ({
 }));
 
 const { AuthController } = await import("./AuthController");
+const { AuthManager } = await import("./AuthManager");
 
 async function signOut(headers: Record<string, string>) {
   const req = new HttpRequest(
