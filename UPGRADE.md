@@ -1,3 +1,29 @@
+# Unreleased
+
+## A tool input or agent output must be an object at the root (#478)
+
+`AgentTool.create` now throws when a tool's `inputSchema` does not emit
+`type: "object"` at its root, and `Agent.create` does the same for `output`.
+Before, a root `s.union(...)` (which lowers to `anyOf`), a primitive, an array,
+`s.json()` or a `.nullable()` object was accepted and then failed at request
+time: OpenAI's strict function parameters and structured output reject `anyOf`
+or a non-object at the root, so the first turn carrying the schema was a 400.
+The error now happens at startup and names the tool or agent.
+
+To upgrade, wrap the schema in an object and read the field off the result:
+
+```ts
+// before
+output: s.union([s.object({ kind: s.literal("a") }), s.object({ kind: s.literal("b") })]),
+// after
+output: s.object({
+  value: s.union([s.object({ kind: s.literal("a") }), s.object({ kind: s.literal("b") })]),
+}),
+// ...and read `result.output.value`
+```
+
+A tool's `outputSchema` is never sent to the provider and is not checked.
+
 # Upgrading from 0.77 to 0.78
 
 ## `attachmentScope` and `authorizeRequest` get the request body (#603)

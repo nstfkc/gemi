@@ -2,7 +2,7 @@ import { RequestContext } from "../http/requestContext";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
 import { supportsStrict } from "./Schema";
-import type { Infer, Schema } from "./Schema";
+import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
   consumeNestedRun,
   consumePendingCall,
@@ -577,6 +577,10 @@ export class AgentTool<
   static create<const Name extends string, Input, Output, Progress = never>(
     params: ToolDefinition<Name, Input, Output, Progress>,
   ): AgentTool<Name, Input, Output, Progress> {
+    // Only the input: it is the one schema the provider is shown. The
+    // `outputSchema` validates what `execute` or the browser hands back and is
+    // never sent, so any shape is fine there.
+    assertObjectRoot(params.inputSchema, `The tool "${params.name}"`, "inputSchema");
     return new AgentTool(params);
   }
 
@@ -770,6 +774,36 @@ export const SKILLS_NAMESPACE = "skills";
 
 const SKILLS_NAMESPACE_DESCRIPTION =
   "Instructions this agent can load on demand. Load the relevant one before acting in the area it covers.";
+
+/**
+ * Throws unless `schema` emits an object at its root.
+ *
+ * Both places a schema reaches the provider — a tool's parameters and an
+ * agent's structured `output` — require one there: OpenAI's strict function
+ * parameters and strict `json_schema` reject `anyOf` at the root (it is legal
+ * only under a property), and a primitive or array root is not a parameter
+ * list at all. Left to the provider, that is a 400 on the first request that
+ * carries the schema, which an app then has to decode; checked here, it is an
+ * error at startup naming the tool or agent that declared it.
+ *
+ * Read off the emitted JSON Schema rather than the builder's tree, so that a
+ * hand-built schema (`questionSchema`, the skills' empty one, MCP's merged
+ * input) is held to the same rule as one built with `s`.
+ */
+function assertObjectRoot(schema: Schema<any>, owner: string, field: string): void {
+  const json: JSONSchema | undefined = schema?.toJSONSchema?.();
+  if (json?.type === "object") return;
+  const found = !json
+    ? "no JSON Schema"
+    : json.anyOf
+      ? "a union (`anyOf`) — `s.union(...)`"
+      : json.type !== undefined
+        ? `a schema of type ${JSON.stringify(json.type)}`
+        : "an unconstrained schema (`s.json()`)";
+  throw new Error(
+    `${owner} declares an \`${field}\` whose root is ${found}, but the provider only accepts an object there (OpenAI rejects \`anyOf\` or a non-object at the root of tool parameters and structured output). Wrap it in an object, e.g. \`s.object({ value: s.union([...]) })\`, and read \`.value\` off the result.`,
+  );
+}
 
 const EMPTY_PARAMETERS = {
   type: "object",
@@ -1072,6 +1106,9 @@ export class Agent<
     const S extends readonly Skill[],
     O extends Schema<any> | undefined = undefined,
   >(params: CreateAgentParams<T, S, O>): Agent<T, S, O> {
+    if (params.output) {
+      assertObjectRoot(params.output as Schema<any>, `The agent "${params.name}"`, "output");
+    }
     return new Agent(params);
   }
 

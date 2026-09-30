@@ -653,9 +653,10 @@ export const s: {
       }),
     ),
   array: (item) => make<Infer<typeof item>[]>(leaf({ kind: "array", item: definitionOf(item) })),
-  // A union is legal wherever a property is, but not as the root of a
-  // structured output: the provider wants an object there. That is the
-  // provider's check to make, not this one's.
+  // A union is legal wherever a property is, but not as the root of a tool's
+  // input or an agent's structured output: the provider wants an object there.
+  // `s` cannot know where a schema will be used, so `AgentTool.create` and
+  // `Agent.create` are what reject it at the root.
   union: (members) =>
     make<Infer<(typeof members)[number]>>(
       leaf({ kind: "union", members: members.map(definitionOf) }),
