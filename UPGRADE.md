@@ -1,4 +1,4 @@
-# Upgrading from 0.75 to the next release
+# Upgrading from 0.75 to 0.76
 
 ## A threaded turn is stored as it runs, and a lost one reads as `interrupted` (#617)
 
