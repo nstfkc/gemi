@@ -1,6 +1,7 @@
 import { AuthApiRouter } from "../../auth/routes";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
+import { HttpResponse, isHttpResponse } from "../../http/HttpResponse";
 import { I18nRouter } from "../../i18n/I18nRouter";
 import { type CarriedContext, RequestContext } from "../../http/requestContext";
 import { ImageOptimizationRouter } from "../image-optimization/ImageManager";
@@ -478,15 +479,17 @@ export class ApiRouteDispatcher {
           return response;
         }
 
-        headers.set("Content-Type", "application/json");
-
-        cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
+        // A plain return is `HttpResponse.json(data)`: one path writes the
+        // context's headers and cookies onto both, and an `HttpResponse` only
+        // adds its status and headers on top of them.
+        const response = (isHttpResponse(data) ? data : HttpResponse.json(data)).toResponse(
+          headers,
+          cookies,
+        );
 
         await end();
 
-        return new Response(JSON.stringify(data), {
-          headers,
-        });
+        return response;
       } catch (err) {
         // A middleware or handler that throws something other than a break or
         // a policy denial has already run onRequestFail, and its error goes on

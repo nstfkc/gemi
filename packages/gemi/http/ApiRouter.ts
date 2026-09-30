@@ -9,6 +9,7 @@ import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
+import type { ResponseData } from "./HttpResponse";
 import { type MiddlewareInput, toMiddlewareList } from "./middlewareList";
 import type { MiddlewareReturnType } from "./Router";
 import {
@@ -515,7 +516,10 @@ type TestControllerMethod<T extends new () => Controller, K extends string> =
 
 type RouteHandlerParser<T, Prefix extends string = ""> =
   T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
-    ? KeyAndValue<`${Method & string}:${Prefix & string}`, ApiRouterHandler<Input, Output, Params>>
+    ? KeyAndValue<
+        `${Method & string}:${Prefix & string}`,
+        ApiRouterHandler<Input, ResponseData<Output>, Params>
+      >
     : never;
 
 type RouteHandlersParser<T, Prefix extends string = ""> = T extends RouteHandlers
@@ -528,7 +532,7 @@ type RouteHandlersParser<T, Prefix extends string = ""> = T extends RouteHandler
       >
         ? KeyAndValue<
             `${Method & string}:${Prefix & string}`,
-            ApiRouterHandler<Input, Output, Params>
+            ApiRouterHandler<Input, ResponseData<Output>, Params>
           >
         : never;
     }[keyof T]

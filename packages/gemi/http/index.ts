@@ -40,6 +40,7 @@ export { InvalidValidationRuleError } from "./validate";
 export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
 export { RequestBreakerError } from "./Error";
+export { HttpResponse, type HttpResponseOptions } from "./HttpResponse";
 export {
   defineMiddlewareConfig,
   middlewareConfigDefaults,

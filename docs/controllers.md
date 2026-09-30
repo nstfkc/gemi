@@ -26,7 +26,56 @@ export class HomeController extends Controller {
 }
 ```
 
-To change the response (redirect, status, headers), use the facades and errors rather than constructing a `Response` yourself — see [Errors](#errors-and-validation) below and the [`Redirect`](./authentication.md) facade.
+To change the response, use `HttpResponse`, the facades and errors rather than constructing a `Response` yourself. `HttpResponse` sets a status or headers (below). For errors see [Errors](#errors-and-validation), and for redirects see the [`Redirect`](./authentication.md) facade.
+
+### Status and headers: `HttpResponse.json`
+
+To answer with a status other than 200, or with extra headers, return `HttpResponse.json(data, options?)` from `gemi/http`:
+
+```typescript
+import { Controller, HttpRequest, HttpResponse } from "gemi/http";
+
+export class PostController extends Controller {
+  async store(req: HttpRequest<{ title: string }>) {
+    const post = await Post.create({ data: (await req.input()).toJSON() });
+    return HttpResponse.json(post, { status: 201 });
+  }
+
+  async publish(req: HttpRequest<{}, { id: string }>) {
+    const post = await Post.findUniqueOrThrow({ where: { id: req.params.id } });
+    if (post.publishedAt) {
+      return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+    }
+    // ...
+    return HttpResponse.json(post, { headers: { "X-Post-Version": String(post.version) } });
+  }
+}
+```
+
+`options` is `{ status?: number; headers?: HeadersInit }`, and `status` defaults to 200. A status the JSON body cannot go with is refused with a `RangeError`: one outside 200–599, or 204, 205 or 304.
+
+**It stays typed.** The route's client type is `data`'s type, as if the handler had returned `data`. A handler that returns `HttpResponse.json(post, { status: 201 })` gives `usePost`, `useQuery` and `Query.instant` the type `Post`. A handler that returns a plain object on one branch and `HttpResponse.json` on another is typed as the union of the two. A hand-built `Response` has no type, and returning one also loses the route's type.
+
+**It keeps what the request set.** It goes through the same path as a plain return, so the response also carries:
+
+- cookies set during the request, such as a refreshed session or `req.ctx().setCookie()`;
+- headers set with `req.ctx().setHeaders()`;
+- whatever middleware added, such as CORS headers or `cache`'s `Cache-Control`.
+
+On top of those, `options.headers` apply as follows:
+
+- A header named in `options.headers` replaces the one the request set.
+- A `Set-Cookie` in `options.headers` is added to the request's cookies. It does not replace them.
+- `Content-Type` is `application/json` unless `options.headers` names another one, such as `application/problem+json`.
+- A status of 400 or more is sent `Cache-Control: no-store` unless `options.headers` sets `Cache-Control`. gemi's own errors do the same, so a shared cache cannot replay one client's 404 to everyone from behind `cache`.
+
+**What the client sees.** Any 2xx is data: `useQuery` stores it, and a mutation calls `onSuccess` with it. A 4xx or 5xx is an error, handled as gemi's own errors are:
+
+- `useQuery` gets a `QueryError` whose `status` is the status and whose `body` is the JSON. The default retry policy applies, so a 4xx other than 408 and 429 is not retried.
+- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. A body with no `error` field is handed over whole.
+- A loader's `Query.instant` or `Query.prefetch` on the server behaves the same as the browser. A 2xx resolves to the data, and an error status rejects with the same `QueryError`.
+
+`HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
 
 ## HttpRequest
 

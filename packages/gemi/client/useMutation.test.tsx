@@ -233,6 +233,77 @@ describe("useMutation", () => {
   });
 
   /**
+   * An app's own status, from `HttpResponse.json(data, { status })`. A 2xx
+   * other than 200 is a success like any other, and an error body is handed
+   * over as gemi's own are: the `error` field when there is one, else the body
+   * whole — read as `body.error` it was `undefined`, and `error` then looked
+   * like no error at all.
+   */
+  describe("a route's own status", () => {
+    test("a 201 is a success", async () => {
+      const onSuccess = vi.fn();
+      const onError = vi.fn();
+      vi.stubGlobal("fetch", fetchStub(respond(201, { id: 1 })));
+
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, {
+          onSuccess,
+          onError,
+        } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+
+      expect(onSuccess).toHaveBeenCalledWith({ id: 1 });
+      expect(onError).not.toHaveBeenCalled();
+      expect(result.current.data).toEqual({ id: 1 });
+    });
+
+    test("a 409 with an error field hands over the field", async () => {
+      const onError = vi.fn();
+      vi.stubGlobal("fetch", fetchStub(respond(409, { error: { message: "Taken" } })));
+
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, { onError } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+
+      expect(onError).toHaveBeenCalledWith({ message: "Taken" });
+      expect(result.current.error).toEqual({ message: "Taken" });
+    });
+
+    test("a 409 without an error field hands over the body", async () => {
+      const onError = vi.fn();
+      const body = { code: "slug_taken", message: "Taken" };
+      vi.stubGlobal("fetch", fetchStub(respond(409, body)));
+
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, { onError } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+
+      expect(onError).toHaveBeenCalledWith(body);
+      expect(result.current.error).toEqual(body);
+    });
+
+    test("a JSON null body is still an error", async () => {
+      const onError = vi.fn();
+      vi.stubGlobal("fetch", fetchStub(respond(422, null)));
+
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/agents" as never, {} as never, { onError } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+
+      expect(onError).toHaveBeenCalledWith({ message: "Request failed with status 422" });
+      expect(result.current.error).toEqual({ message: "Request failed with status 422" });
+    });
+  });
+
+  /**
    * The pending state keeps `data` on purpose. A rejected submit did not
    * replace the last result either, so blanking it made `<Form>`'s
    * `MutationContext.result` disappear on a validation failure.

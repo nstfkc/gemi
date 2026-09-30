@@ -1,5 +1,6 @@
 import { QueryError } from "../../client/QueryError";
 import { HttpRequest } from "../../http/HttpRequest";
+import { isHttpResponse } from "../../http/HttpResponse";
 import { RequestContext } from "../../http/requestContext";
 import { kernelContext } from "../../kernel/context";
 import { applyParams } from "../../utils/applyParams";
@@ -43,6 +44,20 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
           // The api of the page's own host group — on `admin.` that is the
           // admin api, which may not share a single route with the root's.
           const data = await app(DomainRouter).dispatchers(domain).api.getRouteData(patternPath);
+          // A handler's `HttpResponse`: its body is the data, and a status
+          // outside 2xx is the same `QueryError` the browser's fetch makes of
+          // it, body included.
+          if (isHttpResponse(data)) {
+            if (!data.ok) {
+              throw new QueryError(
+                applyParams(patternPath, params),
+                searchParams.toString(),
+                data.status,
+                data.body,
+              );
+            }
+            return data.body;
+          }
           // A handler that broke (`RequestBreakerError`) comes back as an
           // error `Response`, not a throw. Surface it as the same
           // `QueryError` the browser's fetch would produce — otherwise the
