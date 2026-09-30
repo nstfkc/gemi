@@ -346,8 +346,14 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     await queue.push(AlwaysThrows, "[]");
 
     await until(async () => Number((await rows())[0]?.attempts) === 1);
-    await until(async () => (await rows())[0]?.status === "pending");
-    const [retrying] = await rows();
+    // The row as the read that found it waiting saw it. A second read can
+    // land after the 50 ms backoff, on the next claim, whose `updated_at` is
+    // past the `available_at` it was claimed at.
+    let retrying: Record<string, unknown> | undefined;
+    await until(async () => {
+      [retrying] = await rows();
+      return retrying?.status === "pending";
+    });
     expect(String(retrying!.last_error)).toContain("smtp is down");
     expect(Number(retrying!.available_at)).toBeGreaterThan(Number(retrying!.updated_at));
 
