@@ -1,5 +1,6 @@
 import { Subject } from "../utils/Subject";
 import { QueryError } from "./QueryError";
+import { parseRetryAfter } from "./retryPolicy";
 
 type State = {
   loading: boolean;
@@ -47,6 +48,18 @@ export class QueryResource {
    * the wire at once.
    */
   private watchers = new Map<string, number>();
+  /**
+   * Consecutive failed fetches per variant. A background retry adds to the
+   * count; any other fetch that fails starts it again at 1, and a success
+   * clears it. `useQuery`'s retry policy reads it to decide whether to go
+   * again and how long to wait.
+   */
+  private failures = new Map<string, number>();
+  /**
+   * At most one scheduled retry per variant, however many mounted readers
+   * render it — each of them sees the same failure and asks for one.
+   */
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -89,6 +102,8 @@ export class QueryResource {
       });
       this.staleVariants.delete(variantKey);
       this.lastFetchRecord.set(variantKey, now);
+      this.failures.delete(variantKey);
+      this.cancelRetry(variantKey);
       // Wake a reader suspended on this variant — the payload the server just
       // shipped is the answer it was waiting on.
       this.settle(variantKey);
@@ -275,8 +290,59 @@ export class QueryResource {
         this.watchers.set(variantKey, count);
       } else {
         this.watchers.delete(variantKey);
+        // Nobody renders it any more: a retry would fetch for no one.
+        this.cancelRetry(variantKey);
       }
     };
+  }
+
+  /** How many fetches of this variant have failed in a row (0 after a success). */
+  failureCount(variantKey: string): number {
+    return this.failures.get(variantKey) ?? 0;
+  }
+
+  /**
+   * Retry a failed variant after `delay` ms. A no-op while a retry is already
+   * scheduled or a request is on the wire. When the timer fires, the retry
+   * only goes out if the variant still sits on an error and is still
+   * rendered by someone.
+   */
+  scheduleRetry(variantKey: string, delay: number) {
+    if (typeof window === "undefined") return;
+    if (this.retryTimers.has(variantKey) || this.inflight.has(variantKey)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(variantKey);
+      if (!this.watchers.has(variantKey)) return;
+      if (this.inflight.has(variantKey)) return;
+      const state = this.peek(variantKey);
+      if (!state?.error || state.loading) return;
+      // Loud (`loading: true`) only when there is no data to keep showing —
+      // the same choice `getVariant` makes.
+      this.resolveVariant(variantKey, state.hasData, true, true);
+    }, delay);
+    this.retryTimers.set(variantKey, timer);
+  }
+
+  cancelRetry(variantKey: string) {
+    const timer = this.retryTimers.get(variantKey);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.retryTimers.delete(variantKey);
+    }
+  }
+
+  /**
+   * Refetch a failed variant now, silently — the browser came back online.
+   * Starts a fresh run of failures, so the retry policy applies in full again.
+   */
+  retryNow(variantKey: string) {
+    if (typeof window === "undefined") return;
+    if (this.inflight.has(variantKey)) return;
+    const state = this.peek(variantKey);
+    if (!state?.error || state.loading) return;
+    this.resolveVariant(variantKey, true);
   }
 
   /** Every variant key this resource holds state for, in insertion order. */
@@ -357,13 +423,22 @@ export class QueryResource {
     variantKey: string,
     silent = false,
     cache = true,
+    isRetry = false,
   ) {
     if (typeof window === "undefined") {
       return;
     }
+    // Whatever triggered this fetch, a scheduled retry would only repeat it.
+    this.cancelRetry(variantKey);
     // Synchronous with the call, so every read in the same render pass sees
     // the request as already on the wire.
     this.inflight.add(variantKey);
+    const recordFailure = () => {
+      this.failures.set(
+        variantKey,
+        isRetry ? (this.failures.get(variantKey) ?? 0) + 1 : 1,
+      );
+    };
     try {
       const store = this.store.getValue();
       const previousState = store.get(variantKey);
@@ -388,9 +463,19 @@ export class QueryResource {
           cache:
             cache && !this.staleVariants.has(variantKey) ? "default" : "reload",
         });
-        data = await response.json();
+        try {
+          data = await response.json();
+        } catch (parseError) {
+          // A 2xx that isn't JSON is a broken response. An error status with
+          // a non-JSON body (a proxy's HTML 502, a CDN's 404) is still that
+          // status — the retry policy needs it — so it becomes a
+          // `QueryError` with a `null` body.
+          if (response.ok) throw parseError;
+          data = null;
+        }
       } catch (error) {
         console.error(`Error fetching url /api${fullUrl}`, error);
+        recordFailure();
         this.store.next(
           store.set(variantKey, {
             loading: false,
@@ -415,14 +500,21 @@ export class QueryResource {
         );
         this.staleVariants.delete(variantKey);
         this.lastFetchRecord.set(variantKey, Date.now());
+        this.failures.delete(variantKey);
       } else {
-        // this.lastFetchRecord.set(variantKey, 0);
+        recordFailure();
         this.store.next(
           store.set(variantKey, {
             loading: false,
             data: previousState?.data,
             hasData: previousState?.hasData ?? false,
-            error: new QueryError(this.key, variantKey, response!.status, data),
+            error: new QueryError(
+              this.key,
+              variantKey,
+              response!.status,
+              data,
+              parseRetryAfter(response!.headers?.get?.("retry-after")),
+            ),
             version: previousState?.version,
           }),
         );

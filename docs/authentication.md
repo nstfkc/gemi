@@ -837,7 +837,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Invalidates the cached user. |
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
-| `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
 | `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
@@ -851,6 +851,25 @@ function Profile() {
   if (!user) return <SignInPrompt />;
   return <span>Hello {user.name}</span>;
 }
+```
+
+`useUser()` never suspends: an anonymous visitor gets `user: null`. When the
+page carries no signed-in user it asks `/auth/me` once; the `401` it gets back
+is not retried (see [Failed queries and retries](./data-fetching.md#failed-queries-and-retries)).
+
+It doesn't read the app-wide `queryConfig`. Tune its `/auth/me` query with
+`queryConfig.user`, or per call with `useUser({ … })`, which wins. Accepted
+keys: `staleTime`, `retry`, `retryDelay`, `revalidateOnFocus`,
+`focusThrottleInterval`, `refreshInterval`.
+
+By default a cached user older than 5s is revalidated by the next `useUser()`
+that mounts, so a layout that calls it refetches `/auth/me` on most
+navigations. A session-length window stops that. `useSignIn` and `useSignOut`
+update the cached user themselves, so signing in or out still shows at once:
+
+```ts
+// both createRoot(RootLayout, { queryConfig }) and init(RootLayout, { queryConfig })
+const queryConfig = { user: { staleTime: 30 * 60_000 } };
 ```
 
 ### A sign-in form
