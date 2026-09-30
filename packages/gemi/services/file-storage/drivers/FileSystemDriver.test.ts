@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { FileSystemDriver } from "./FileSystemDriver";
@@ -61,5 +64,74 @@ describe("the default storage folder", () => {
   test("including when ROOT_DIR is set, so the override is not merely a fallback", () => {
     process.env.ROOT_DIR = "/real/project";
     expect(folderOf(new FileSystemDriver("/tmp/my-bucket"))).toBe("/tmp/my-bucket");
+  });
+});
+
+describe("FileSystemDriver.delete()", () => {
+  let folder: string;
+
+  beforeEach(async () => {
+    folder = await mkdtemp(join(tmpdir(), "gemi-fs-delete-"));
+  });
+
+  afterEach(async () => {
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  test("removes the file it names", async () => {
+    const driver = new FileSystemDriver(folder);
+    const name = await driver.put({ name: "avatars/a.txt", body: new Blob(["x"]) });
+
+    await driver.delete(name);
+
+    expect(await Bun.file(join(folder, "avatars/a.txt")).exists()).toBe(false);
+  });
+
+  test("accepts the object form, like put() and read()", async () => {
+    const driver = new FileSystemDriver(folder);
+    await driver.put({ name: "b.txt", body: new Blob(["x"]) });
+
+    await driver.delete({ name: "b.txt" });
+
+    expect(await Bun.file(join(folder, "b.txt")).exists()).toBe(false);
+  });
+
+  test("resolves for a file that is not there, so cleanup can retry", async () => {
+    const driver = new FileSystemDriver(folder);
+
+    await expect(driver.delete("never-written.txt")).resolves.toBeUndefined();
+    await expect(driver.delete("missing-dir/x.txt")).resolves.toBeUndefined();
+  });
+
+  test("refuses a name that climbs out of the storage folder", async () => {
+    const outside = join(folder, "..", `gemi-outside-${Bun.randomUUIDv7()}.txt`);
+    await writeFile(outside, "keep me");
+    const driver = new FileSystemDriver(folder);
+
+    try {
+      await expect(driver.delete(`../${outside.split("/").at(-1)}`)).rejects.toThrow(
+        /outside the storage folder/,
+      );
+      await expect(driver.delete(outside)).rejects.toThrow(/outside the storage folder/);
+      expect(await Bun.file(outside).exists()).toBe(true);
+    } finally {
+      await rm(outside, { force: true });
+    }
+  });
+});
+
+describe("FileSystemDriver.delete() containment", () => {
+  test("still deletes a file whose name merely starts with two dots", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "gemi-fs-delete-"));
+    try {
+      const driver = new FileSystemDriver(folder);
+      await driver.put({ name: "..notes.txt", body: new Blob(["x"]) });
+
+      await driver.delete("..notes.txt");
+
+      expect(await Bun.file(join(folder, "..notes.txt")).exists()).toBe(false);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 });

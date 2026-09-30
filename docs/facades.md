@@ -138,6 +138,7 @@ See [Internationalization](./i18n.md) for dictionaries, translation, and client 
 - `Storage.put(params | Blob, { signal }?)` — store a file; returns the driver's put result. Pass an `AbortSignal` to cancel the upload.
 - `Storage.fetch(params | string)` — read a stored file.
 - `Storage.list(folder)` — list files in a folder.
+- `Storage.delete(params | string)` — remove a stored file. A missing file is not an error.
 - `Storage.metadata(blobOrFile)` — extract image metadata (width, height, format, …) via `sharp`; returns `{}` for non-images. This one runs locally and does not touch the driver.
 
 ```typescript

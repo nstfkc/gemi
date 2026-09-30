@@ -301,3 +301,56 @@ describe("S3Driver.read()", () => {
     expect(commandName).toBe("HeadObjectCommand");
   });
 });
+
+describe("S3Driver.delete()", () => {
+  beforeEach(() => {
+    process.env.BUCKET_NAME = "test-bucket";
+  });
+
+  test("sends DeleteObject for the key, in the default bucket", async () => {
+    let command: any;
+    const driver = driverWith(async (c) => {
+      command = c;
+      return { $metadata: { httpStatusCode: 204 } };
+    });
+
+    await driver.delete("avatars/a.png");
+
+    expect(command.constructor.name).toBe("DeleteObjectCommand");
+    expect(command.input).toEqual({ Bucket: "test-bucket", Key: "avatars/a.png" });
+  });
+
+  test("honours an explicit bucket", async () => {
+    let input: any;
+    const driver = driverWith(async (c) => {
+      input = c.input;
+      return {};
+    });
+
+    await driver.delete({ name: "a.png", bucket: "other" });
+
+    expect(input).toEqual({ Bucket: "other", Key: "a.png" });
+  });
+
+  test("resolves when an S3-compatible service reports the key missing", async () => {
+    const driver = driverWith(async () => {
+      throw Object.assign(new Error("NoSuchKey"), {
+        name: "NoSuchKey",
+        $metadata: { httpStatusCode: 404 },
+      });
+    });
+
+    await expect(driver.delete("gone.png")).resolves.toBeUndefined();
+  });
+
+  test("still throws any other failure", async () => {
+    const driver = driverWith(async () => {
+      throw Object.assign(new Error("AccessDenied"), {
+        name: "AccessDenied",
+        $metadata: { httpStatusCode: 403 },
+      });
+    });
+
+    await expect(driver.delete("a.png")).rejects.toThrow(/AccessDenied/);
+  });
+});

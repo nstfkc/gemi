@@ -62,6 +62,11 @@ export interface ReadResult {
   name?: string;
 }
 
+export interface DeleteFileParams {
+  name: string;
+  bucket?: string;
+}
+
 export interface FileMetadata {
   width: number;
   height: number;
@@ -75,4 +80,9 @@ export interface IFileStorageDriver {
    * drivers written before this existed keep working.
    */
   read?(input: ReadFileParams | string): Promise<ReadResult>;
+  /**
+   * Removes an object. Deleting one that does not exist resolves without
+   * throwing, so a cleanup path can retry safely.
+   */
+  delete?(params: DeleteFileParams | string): Promise<void>;
 }

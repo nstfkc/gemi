@@ -9,6 +9,7 @@ export {
 } from "./file-storage/drivers/AzureBlobDriver";
 export type {
   ByteRange,
+  DeleteFileParams,
   FileMetadata,
   PutFileOptions,
   PutFileParams,

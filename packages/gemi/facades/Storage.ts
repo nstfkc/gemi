@@ -8,6 +8,7 @@ import type { Prettify } from "../utils/type";
 import { RequestContext } from "../http/requestContext";
 import type { ByteRange } from "../http/range";
 import type {
+  DeleteFileParams,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -79,5 +80,12 @@ export class Storage extends Facade {
   static list(folder: string) {
     return this.getFacadeRoot().driver.list(folder);
   }
-  static delete() {}
+
+  /**
+   * Removes a stored object. Deleting one that does not exist resolves without
+   * throwing, so a cleanup path can retry safely.
+   */
+  static async delete(params: DeleteFileParams | string): Promise<void> {
+    return this.getFacadeRoot().driver.delete(params);
+  }
 }

@@ -1,4 +1,5 @@
 import type {
+  DeleteFileParams,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -105,6 +106,31 @@ export class S3Driver extends FileStorageDriver {
     );
 
     return name;
+  }
+
+  async delete(params: DeleteFileParams | string) {
+    const name = typeof params === "string" ? params : params.name;
+    const bucket =
+      (typeof params === "string" ? undefined : params.bucket) ??
+      process.env.BUCKET_NAME;
+
+    if (!name) {
+      throw new Error("Object name has to be specified");
+    }
+
+    const { sdk, client } = await this.connect();
+    try {
+      await client.send(
+        new sdk.DeleteObjectCommand({ Bucket: bucket, Key: name }),
+      );
+    } catch (err: any) {
+      // S3 itself answers 204 for a missing key, but some S3-compatible
+      // services answer 404. Either way the object is gone.
+      if (err?.name === "NoSuchKey" || err?.$metadata?.httpStatusCode === 404) {
+        return;
+      }
+      throw err;
+    }
   }
 
   async list(folder: string) {

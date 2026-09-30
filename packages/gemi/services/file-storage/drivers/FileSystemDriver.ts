@@ -1,6 +1,7 @@
-import type { PutFileOptions, PutFileParams, ReadFileParams, ReadResult } from "./types";
+import type { DeleteFileParams, PutFileOptions, PutFileParams, ReadFileParams, ReadResult } from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
-import { readdir } from "fs/promises";
+import { readdir, unlink } from "fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
 import { projectRoot } from "../../../support/discover";
@@ -148,6 +149,33 @@ export class FileSystemDriver extends FileStorageDriver {
       throw new FileNotFoundError(name);
     }
     return file.size;
+  }
+
+  async delete(params: DeleteFileParams | string) {
+    const name = typeof params === "string" ? params : params.name;
+
+    if (!name) {
+      throw new Error("Object name has to be specified");
+    }
+
+    // A bucket key cannot climb out of its bucket, but a path can: refuse a
+    // name that resolves outside the storage folder rather than unlink it.
+    const root = resolve(this.folderPath);
+    const path = resolve(root, name);
+    const rel = relative(root, path);
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(`Refusing to delete "${name}": it is outside the storage folder`);
+    }
+
+    try {
+      await unlink(path);
+    } catch (err: any) {
+      // Already gone is the outcome the caller asked for.
+      if (err?.code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
   }
 
   async list() {
