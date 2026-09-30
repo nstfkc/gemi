@@ -3531,11 +3531,61 @@ export default function CreateUser() {
 | `search` | Query-string values appended to the request. |
 | `onSuccess(result, form)` | Called on success with the typed response and the `HTMLFormElement`. |
 | `onError(error, form)` | Called on failure with the error and the form element. |
+| `onSubmitStart(formData, form)` | Called just before the request is sent, with the `FormData` that will be sent. Return `false` to skip the request. |
+| `onSettled(form)` | Called after `onSuccess` or `onError`, whichever ran. |
 | `dynamicInputs(formData)` | Return extra key/value pairs to append at submit time (values not in the DOM). |
 
-All other native `<form>` props (`className`, `id`, …) pass straight through. The
-form element gets a `group` class and a `data-loading` attribute reflecting the
+All other native `<form>` props (`className`, `id`, `ref`, …) pass straight through.
+The form element gets a `group` class and a `data-loading` attribute reflecting the
 pending state, which you can style against.
+
+### The submit lifecycle
+
+On every submit event, in this order:
+
+1. `Form` prevents the browser's own submit. It always does, so the page never
+   reloads.
+2. Your `onSubmit`, if you passed one, is called with the event. It runs *alongside*
+   `Form`'s handler, not instead of it, and it cannot cancel the request — calling
+   `event.preventDefault()` in it changes nothing, because the default is already
+   prevented.
+3. If a submit is already in flight, this one stops here.
+4. The `FormData` is collected and `dynamicInputs` appended, then `onSubmitStart` is
+   called with it. Returning `false` skips the request.
+5. The request is sent; `onSuccess` or `onError` runs when it answers, then
+   `onSettled`.
+
+`onSubmitStart` and `onSettled` are the place for UI that brackets a request — clearing
+a stale message when a submit begins, closing a dialog once it ends — and
+`onSubmitStart` returning `false` is the place for a client-side check that should stop
+the request:
+
+```tsx
+import { useState } from "react";
+import { Form } from "gemi/client";
+
+export function Contact() {
+  const [notice, setNotice] = useState<string | null>(null);
+
+  return (
+    <Form
+      action="/contact"
+      onSubmitStart={(formData) => {
+        setNotice(null);
+        if (!String(formData.get("message") ?? "").trim()) {
+          setNotice("Write a message first.");
+          return false;
+        }
+      }}
+      onSuccess={() => setNotice("Sent.")}
+    >
+      <textarea name="message" />
+      {notice && <p>{notice}</p>}
+      <button type="submit">Send</button>
+    </Form>
+  );
+}
+```
 
 ### Submit and navigate on success
 

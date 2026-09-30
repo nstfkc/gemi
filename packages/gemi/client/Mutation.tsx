@@ -2,7 +2,7 @@ import {
   createContext,
   useContext,
   type ComponentProps,
-  type FormEvent,
+  type Ref,
   useRef,
   useEffect,
   useSyncExternalStore,
@@ -66,6 +66,13 @@ type Methods = {
   PATCH: PatchRequests;
 };
 
+// Whatever `<form onSubmit>` hands its handler under the installed
+// `@types/react` — `SubmitEvent` in current versions, `FormEvent` in older
+// ones — so the caller's handler can be called with it either way.
+type FormSubmitEvent = Parameters<
+  NonNullable<ComponentProps<"form">["onSubmit"]>
+>[0];
+
 interface FormProps<
   M extends keyof Methods,
   K extends keyof Methods[M],
@@ -74,6 +81,18 @@ interface FormProps<
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   onError?: (error: Any, form: HTMLFormElement) => void;
+  /**
+   * Called when a submit is about to send its request, with the exact
+   * `FormData` that will be sent (after `dynamicInputs`). Return `false` to
+   * skip the request. Not called for a submit swallowed because one is
+   * already in flight.
+   */
+  onSubmitStart?: (
+    formData: FormData,
+    form: HTMLFormElement,
+  ) => void | boolean;
+  /** Called after `onSuccess` or `onError`, whichever ran. */
+  onSettled?: (form: HTMLFormElement) => void;
   params?: Partial<UrlParser<`${K & string}`>>;
   search?: Record<string, string>;
   dynamicInputs?: (formData: FormData) => Record<string, any>;
@@ -89,6 +108,10 @@ export function Form<
     action,
     onSuccess = () => {},
     onError = () => {},
+    onSubmitStart,
+    onSettled,
+    onSubmit,
+    ref,
     params,
     search = {},
     className,
@@ -98,6 +121,27 @@ export function Form<
     ? { ...props, params: { ..._params, ...props.params } }
     : { ...props, params: _params };
   const formRef = useRef<HTMLFormElement>(null);
+  // Both refs, not one or the other. A `ref` from the caller used to land in
+  // the props spread over the `<form>`, which replaced `formRef` and left
+  // every submit returning early at `!formRef.current`.
+  const setFormRef = useCallback(
+    (node: HTMLFormElement | null) => {
+      formRef.current = node;
+      const cleanup = assignRef(ref, node);
+      // Returning a cleanup means React will not call this again with `null`,
+      // so the detach happens here — including the caller's own cleanup when
+      // their callback ref returned one.
+      return () => {
+        formRef.current = null;
+        if (typeof cleanup === "function") {
+          cleanup();
+        } else {
+          assignRef(ref, null);
+        }
+      };
+    },
+    [ref],
+  );
   const { __csrf } = useContext(ServerDataContext);
   const formDataSubject = useRef(new Subject(new FormData()));
 
@@ -152,17 +196,31 @@ export function Form<
       search,
     } as Any,
     {
-      onSuccess: (data) => onSuccess(data as Any, formRef.current),
-      onError: (error) => onError(error, formRef.current),
+      onSuccess: (data) => {
+        onSuccess(data as Any, formRef.current);
+        onSettled?.(formRef.current);
+      },
+      onError: (error) => {
+        onError(error, formRef.current);
+        onSettled?.(formRef.current);
+      },
     },
   );
 
-  const handleSubmit = async (e: FormEvent) => {
+  const handleSubmit = async (e: FormSubmitEvent) => {
     // Before the guards, not after: returning early without preventing the
     // default let the browser submit the form itself. A second click while a
     // slow submit was still in flight navigated the page away and took the
     // request with it.
     e.preventDefault();
+    // The caller's `onSubmit` runs alongside this handler rather than instead
+    // of it. It used to be spread over the `<form>` after `onSubmit=
+    // {handleSubmit}` and win: no `preventDefault`, so the browser submitted
+    // the form itself, and no request. It sees every submit event, like a
+    // native handler does, and it cannot cancel the request — the default is
+    // already prevented by now, so `defaultPrevented` carries no signal.
+    // `onSubmitStart` returning `false` is the way to skip one.
+    onSubmit?.(e);
     if (loading) {
       return;
     }
@@ -172,6 +230,9 @@ export function Form<
     const formData = new FormData(formRef.current);
     for (const [key, value] of Object.entries(dynamicInputs(formData))) {
       formData.append(key, value as any);
+    }
+    if (onSubmitStart?.(formData, formRef.current) === false) {
+      return;
     }
     trigger(formData as any);
   };
@@ -191,18 +252,29 @@ export function Form<
         formDataSubject,
       }}
     >
+      {/* The spread comes first so that nothing in it can replace what
+          `<Form>` needs to work; `ref` and `onSubmit` are composed above. */}
       <form
+        {...formProps}
         className={["group", className].filter(Boolean).join(" ")}
         data-loading={loading}
-        ref={formRef}
+        ref={setFormRef}
         onSubmit={handleSubmit}
-        {...formProps}
       >
         <input type="hidden" name="__csrf" value={__csrf} />
         {props.children}
       </form>
     </MutationContext.Provider>
   );
+}
+
+function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
+  if (typeof ref === "function") {
+    return ref(value);
+  }
+  if (ref) {
+    ref.current = value;
+  }
 }
 
 export function useMutationStatus() {

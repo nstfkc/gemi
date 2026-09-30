@@ -44,6 +44,10 @@ Inside a `Form`, three hooks read its context: `useFormStatus()`
 (`{ isPending }`), and `useFormData()` for live `FormData` as the user types. The
 form also carries a `data-loading` attribute for styling.
 
+For UI that brackets a submit, use `onSubmitStart(formData, form)` (return `false` to
+skip the request) and `onSettled(form)` rather than wiring it through `onSubmit`. An
+`onSubmit` of your own runs alongside `Form`'s handler but cannot cancel the request.
+
 **Use the mutation hooks (`usePost` / `usePut` / `usePatch` / `useDelete`) when the
 write is not a form submission** — a button that toggles a flag, an action in a menu,
 an optimistic list operation. Pair them with `useMutate` to update the reading
