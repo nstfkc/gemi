@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.78 to 0.79
 
 ## A tool input or agent output must be an object at the root (#478)
 
