@@ -36,7 +36,7 @@ function isEventLike(value: unknown): boolean {
   );
 }
 
-interface Config<T> {
+export interface Config<T> {
   fallbackData?: T;
   /**
    * When true (the default), a variant change keeps rendering the previous
@@ -96,11 +96,11 @@ const defaultConfig: Config<any> = {
   suspense: true,
 };
 
-type GetRPC = {
+export type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
 };
 
-type Data<T extends keyof GetRPC> =
+export type Data<T extends keyof GetRPC> =
   GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
     ? UnwrapPromise<Data>
     : never;
@@ -121,7 +121,7 @@ const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
 
 export type QueryResult<T extends keyof GetRPC> = NestedPrettify<Data<T> & {}>;
 
-type Options<T extends keyof GetRPC> = {
+export type Options<T extends keyof GetRPC> = {
   search?: Record<string, string | number | boolean | null>;
   params?: Partial<UrlParser<`${T & string}`>>;
 };
@@ -312,9 +312,18 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   const wasAwayRef = useRef(false);
   const lastFocusRevalidationRef = useRef(0);
 
+  // Subscribing also retains the variant, so an `invalidate` across search
+  // variants knows this one is on screen and refetches it now.
   const subscribe = useCallback(
-    (onStoreChange: () => void) => resource.store.subscribe(onStoreChange),
-    [resource],
+    (onStoreChange: () => void) => {
+      const release = resource.retain(variantKey);
+      const unsubscribe = resource.store.subscribe(onStoreChange);
+      return () => {
+        unsubscribe();
+        release();
+      };
+    },
+    [resource, variantKey],
   );
   // `peek` hands back the object stored in the map — its identity only
   // changes on a real write, so the snapshot is stable across render
