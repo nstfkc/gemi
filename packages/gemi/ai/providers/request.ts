@@ -527,6 +527,13 @@ export function toolResultOutput(part: ToolResultPart): string {
     if (part.cause === "stopped") {
       return `The run was stopped before this tool call could complete, so it did not run.${reason}`;
     }
+    if (part.cause === "interrupted") {
+      // Not "it did not run": the server went down while it was running, so it
+      // may have done some or all of its work (saved a page, sent an email)
+      // with nobody left to record the result. A model told it did not run
+      // does it again.
+      return `The run was interrupted (the server stopped) while this tool call was in progress, so its result was lost. It may have run in part or in full: check its effects before repeating it.${reason}`;
+    }
     return `The user declined this tool call, so it did not run.${reason}`;
   }
 

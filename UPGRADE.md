@@ -1,3 +1,56 @@
+# Upgrading from 0.75 to the next release
+
+## A threaded turn is stored as it runs, and a lost one reads as `interrupted` (#617)
+
+`AgentController` used to store a turn only when its run ended. A restart, crash
+or deploy mid-run left the thread with nothing from that turn, not even the
+user's message, while its tools might already have saved something.
+
+Now, on a thread:
+
+- **The store is written while the run goes.** The user's message is stored
+  when the run starts, then the assistant message in progress: when it opens,
+  when a tool call's arguments are complete, and when a tool result lands. A
+  message still being written has no `finishReason` and carries the run's id
+  in a new optional field, `AgentMessage.runId`. Each message is written again
+  once finished, and the end-of-run write stores the whole transcript as
+  before. Every write goes through `appendMessages`, which already upserts by
+  id, so a store needs no new method. It is called more often, and with the
+  same message several times; the last write wins.
+- **A message whose run is gone is closed as `interrupted`.** New
+  `FinishReason` `"interrupted"`. Any tool call the message left open gets a
+  `denied` result with a new `cause: "interrupted"`. The model is told the call
+  was cut off and may have run in part or in full, rather than that it did not
+  run. This happens when the next turn starts on the thread (and is written
+  back then), and when you read the thread with the new
+  `controller.readThread(threadId)`. That read does not write.
+- **Liveness is `isRunLive(runId, threadId)`**, a protected method that asks
+  this process's `liveRuns`. That's the whole answer on one instance. Behind
+  several instances, a message whose run lives on another instance reads as
+  interrupted here until that run's own writes replace it. #459 tracks a
+  lasting record of running runs; override `isRunLive` to consult one.
+
+**What to change:** the route that hands a thread to `useChat` (or a native
+session) should read it through the controller, so a lost turn shows as cut off
+rather than as an answer still streaming:
+
+```ts
+messages: await new ChatController().readThread(threadId),
+```
+
+**What to check:**
+
+- A `switch` over `FinishReason`, or over a denied result's `cause`, that is
+  exhaustive stops compiling until it handles `"interrupted"`.
+- A custom `AgentStore` must upsert by message id, as its contract already
+  says. One that inserts will now duplicate messages within a single turn.
+- `onMessage` is unchanged: it still fires after the run ends.
+- Stateless turns (no `threadId`) are unchanged.
+- The wire frames are unchanged. `"interrupted"` only appears on messages read
+  back from the store. The Swift and Kotlin clients read both values as open
+  strings, and both gain `FinishReason.interrupted` / `FinishReason.Interrupted`
+  constants.
+
 # Upgrading from 0.74 to 0.75
 
 ## `useQuery` stops retrying client errors — behaviour change (#421, #643)

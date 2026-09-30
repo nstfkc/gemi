@@ -2337,3 +2337,305 @@ describe("a user's upload, named to the model and handed to a tool", () => {
     });
   });
 });
+
+/**
+ * #617: a threaded turn is written while it runs, so a process that dies
+ * mid-run leaves the turn behind, marked interrupted, instead of nothing.
+ *
+ * A real `Agent` over a scripted provider throughout: what reaches the store
+ * mid-run is what the run reports and emits, and a stub run would only report
+ * what the test handed it. The tool is kyte's case: `buildPage` has saved
+ * something and is still going when the process dies.
+ */
+describe("a turn written as it runs", () => {
+  /** A `buildPage` that runs until `release` is called, which may be never. */
+  function builder() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const saved: string[] = [];
+    const buildPage = AgentTool.create({
+      name: "buildPage",
+      description: "Builds the page",
+      inputSchema: s.object({ title: s.string() }),
+      outputSchema: s.object({ ok: s.boolean() }),
+      execute: async ({ title }) => {
+        saved.push(title);
+        await gate;
+        return { ok: true };
+      },
+    });
+    const provider = fakeProvider(
+      [
+        { type: "tool-call", toolCallId: "c1", name: "buildPage", args: '{"title":"Home"}' },
+        finish(),
+      ],
+      [{ type: "text-delta", delta: "built" }, finish()],
+    );
+    const agent = Agent.create({ name: "builder", provider, tools: [buildPage] });
+    return { agent, provider, release, saved };
+  }
+
+  function controllerFor(agent: any, store: MemoryAgentStore, liveRuns = new MemoryLiveRuns()) {
+    return class extends AgentController {
+      agent = agent;
+      liveRuns = liveRuns;
+      store = store;
+    };
+  }
+
+  /** Waits until the store holds what `done` looks for, a tick at a time. */
+  async function until(done: () => Promise<boolean>) {
+    for (let tick = 0; tick < 50; tick++) {
+      if (await done()) return;
+      await settle();
+    }
+    throw new Error("the store never got there");
+  }
+
+  const toolCallStored = (store: MemoryAgentStore, threadId: string) => async () =>
+    ((await store.loadThread(threadId)) ?? []).some((m) =>
+      m.content.some((part) => part.type === "tool-call" && !part.partial),
+    );
+
+  test("stores the user's turn and the assistant message in progress while the run is going", async () => {
+    const { agent, release, saved } = builder();
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const Chat = controllerFor(agent, store);
+
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "build my page" }));
+    await until(toolCallStored(store, threadId));
+    expect(saved).toEqual(["Home"]);
+
+    const [user, assistant, ...rest] = (await store.loadThread(threadId))!;
+    expect(rest).toEqual([]);
+    expect(user!.role).toBe("user");
+    expect(user!.content).toEqual([{ type: "text", text: "build my page" }]);
+    expect(user!.finishReason).toBe("stop");
+    // In progress: no finish reason, and the run writing it named.
+    expect(assistant!.role).toBe("assistant");
+    expect(assistant!.finishReason).toBeUndefined();
+    expect(assistant!.runId).toMatch(/^run_/);
+    expect(assistant!.content).toEqual([
+      { type: "tool-call", toolCallId: "c1", name: "buildPage", input: { title: "Home" } },
+    ]);
+
+    // Its run is live here, so a reader sees it still being written.
+    const read = (await new Chat().readThread(threadId))!;
+    expect(read[1]!.finishReason).toBeUndefined();
+
+    release();
+    await eventsOf(response);
+    await settle();
+  });
+
+  test("a run that completes replaces its in-progress copies with the finished messages", async () => {
+    const { agent, release } = builder();
+    const writes: AgentMessage[][] = [];
+    class RecordingStore extends MemoryAgentStore {
+      async appendMessages(threadId: string, messages: AgentMessage[]) {
+        writes.push(structuredClone(messages));
+        return super.appendMessages(threadId, messages);
+      }
+    }
+    const store = new RecordingStore();
+    const { threadId } = await store.createThread({});
+    const Chat = controllerFor(agent, store);
+
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "build my page" }));
+    await until(toolCallStored(store, threadId));
+    release();
+    await eventsOf(response);
+    await settle();
+
+    const held = (await store.loadThread(threadId))!;
+    expect(held.map((m) => m.role)).toEqual(["user", "assistant", "assistant"]);
+    expect(new Set(held.map((m) => m.id)).size).toBe(held.length);
+    const [, call, answer] = held;
+    expect(call!.finishReason).toBe("stop");
+    expect(call!.runId).toBeUndefined();
+    expect(call!.content.map((part) => part.type)).toEqual(["tool-call", "tool-result"]);
+    expect(answer!.finishReason).toBe("stop");
+    expect(answer!.content).toEqual([{ type: "text", text: "built" }]);
+
+    // The last write of every message is its finished copy: an in-progress
+    // one never lands after it.
+    const last = new Map<string, AgentMessage>();
+    for (const batch of writes) for (const m of batch) last.set(m.id, m);
+    for (const m of last.values()) expect(m.finishReason).toBeDefined();
+    // And it was written before the run ended, not only at the end.
+    expect(writes.length).toBeGreaterThan(1);
+  });
+
+  test("after a restart mid-run, the turn reads as interrupted and the model is told", async () => {
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+
+    // The first process: the run gets as far as `buildPage` and never returns.
+    const first = builder();
+    await new (controllerFor(first.agent, store))().stream(
+      jsonRequest({ threadId, text: "build my page" }),
+    );
+    await until(toolCallStored(store, threadId));
+
+    // The second process: the same store, and none of the first one's runs.
+    const provider = fakeProvider([{ type: "text-delta", delta: "it did" }, finish()]);
+    const agent = Agent.create({ name: "builder", provider, tools: [] });
+    const Chat = controllerFor(agent, store, new MemoryLiveRuns());
+
+    const read = (await new Chat().readThread(threadId))!;
+    expect(read.map((m) => m.role)).toEqual(["user", "assistant"]);
+    const interrupted = read[1]!;
+    expect(interrupted.finishReason).toBe("interrupted");
+    expect(interrupted.runId).toMatch(/^run_/);
+    expect(interrupted.content).toEqual([
+      { type: "tool-call", toolCallId: "c1", name: "buildPage", input: { title: "Home" } },
+      {
+        type: "tool-result",
+        toolCallId: "c1",
+        name: "buildPage",
+        status: "denied",
+        cause: "interrupted",
+      },
+    ]);
+    // A read does not write: the next turn does, under the thread's lock.
+    expect((await store.loadThread(threadId))![1]!.finishReason).toBeUndefined();
+
+    await eventsOf(await new Chat().stream(jsonRequest({ threadId, text: "did it save?" })));
+    await settle();
+
+    // The model saw the interrupted call, worded so it does not assume the
+    // save never happened.
+    const input = toResponsesInput(provider.calls[0]!.messages, provider.capabilities);
+    const output = input.find((item) => item.type === "function_call_output") as any;
+    expect(output.call_id).toBe("c1");
+    expect(output.output).toMatch(/interrupted/);
+    expect(output.output).toMatch(/may have run/);
+
+    const held = (await store.loadThread(threadId))!;
+    expect(held.map((m) => `${m.role}:${m.finishReason}`)).toEqual([
+      "user:stop",
+      "assistant:interrupted",
+      "user:stop",
+      "assistant:stop",
+    ]);
+    expect(held[1]).toEqual(interrupted);
+  });
+
+  test("settling is idempotent: a second read or turn adds nothing to the interrupted message", async () => {
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    await new (controllerFor(builder().agent, store))().stream(
+      jsonRequest({ threadId, text: "build my page" }),
+    );
+    await until(toolCallStored(store, threadId));
+
+    const agent = Agent.create({ name: "builder", provider: fakeProvider(), tools: [] });
+    const Chat = controllerFor(agent, store, new MemoryLiveRuns());
+
+    const once = await new Chat().readThread(threadId);
+    expect(await new Chat().readThread(threadId)).toEqual(once);
+    await eventsOf(await new Chat().stream(jsonRequest({ threadId, text: "again" })));
+    await settle();
+    await eventsOf(await new Chat().stream(jsonRequest({ threadId, text: "and again" })));
+    await settle();
+
+    const held = (await store.loadThread(threadId))!;
+    expect(new Set(held.map((m) => m.id)).size).toBe(held.length);
+    const results = held.flatMap((m) => m.content).filter((part) => part.type === "tool-result");
+    expect(results).toHaveLength(1);
+  });
+
+  test("a start written twice leaves one copy of each message", async () => {
+    // What a retried start amounts to at the store: the same messages under
+    // the same ids again. A journal fed the run's report and frames twice is
+    // the whole of it, replayed.
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const { TurnJournal } = await import("./store/TurnJournal");
+    const user = message("u1", "user", "build my page");
+    const frames = [
+      { seq: 1, event: { type: "run-start", runId: "run_1", threadId } },
+      { seq: 2, event: { type: "message-start", messageId: "a1", role: "assistant" } },
+      {
+        seq: 3,
+        event: {
+          type: "tool-call",
+          messageId: "a1",
+          part: { type: "tool-call", toolCallId: "c1", name: "buildPage", input: {} },
+        },
+      },
+    ] as const;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const journal = new TurnJournal(store, threadId, [], (err) => {
+        throw err;
+      });
+      journal.finish(user);
+      for (const frame of frames) journal.frame(frame as any);
+      await journal.settled();
+    }
+
+    const held = (await store.loadThread(threadId))!;
+    expect(held.map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect(held[1]!.runId).toBe("run_1");
+    expect(held[1]!.content).toHaveLength(1);
+  });
+
+  test("isRunLive is the seam for runs this process cannot see", async () => {
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    await new (controllerFor(builder().agent, store))().stream(
+      jsonRequest({ threadId, text: "build my page" }),
+    );
+    await until(toolCallStored(store, threadId));
+
+    // Another instance, whose registry of running runs (#459) says it is live.
+    class Elsewhere extends controllerFor(builder().agent, store, new MemoryLiveRuns()) {
+      protected isRunLive() {
+        return true;
+      }
+    }
+    const read = (await new Elsewhere().readThread(threadId))!;
+    expect(read[1]!.finishReason).toBeUndefined();
+  });
+
+  test("the wire is unchanged: a threaded run sends the frames a stateless one does", async () => {
+    const script = (): ProviderEvent[][] => [
+      [{ type: "tool-call", toolCallId: "c1", name: "noop", args: "{}" }, finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    ];
+    const noop = AgentTool.create({
+      name: "noop",
+      description: "Does nothing",
+      inputSchema: s.object({}),
+      outputSchema: s.object({}),
+      execute: async () => ({}),
+    });
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const threaded = await eventsOf(
+      await new (controllerFor(
+        Agent.create({ name: "a", provider: fakeProvider(...script()), tools: [noop] }),
+        store,
+      ))().stream(jsonRequest({ threadId, text: "go" })),
+    );
+    const stateless = await eventsOf(
+      await new (controllerFor(
+        Agent.create({ name: "a", provider: fakeProvider(...script()), tools: [noop] }),
+        new MemoryAgentStore(),
+      ))().stream(jsonRequest({ text: "go" })),
+    );
+    await settle();
+
+    const shape = (events: AgentStreamEvent[]) =>
+      events.map((event) => ({
+        type: event.type,
+        finishReason: (event as any).finishReason,
+      }));
+    expect(shape(threaded)).toEqual(shape(stateless));
+    expect(JSON.stringify(threaded)).not.toMatch(/interrupted/);
+  });
+});
