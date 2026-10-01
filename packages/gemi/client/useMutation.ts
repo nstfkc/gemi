@@ -307,17 +307,28 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
 
+  // Clears the ref so a `cancel()` after the upload has settled does nothing:
+  // it used to abort a finished request and report `onCanceled` for it.
   const cancel = () => {
-    if (abortRef.current) {
-      abortRef.current();
-      options.onCanceled?.();
-      setState("idle");
-      setProgress(0);
-    }
+    const abort = abortRef.current;
+    if (!abort) return;
+    abortRef.current = null;
+    abort();
+    options.onCanceled?.();
+    setState("idle");
+    setProgress(0);
   };
 
-  // `undefined` for no file, a failed upload (reported through `onError`) or
-  // a network error, the same contract as `useMutation`'s `trigger`.
+  // `undefined` for no file, a failed upload (reported through `onError`), a
+  // network error or a `cancel()`, the same contract as `useMutation`'s
+  // `trigger`. A cancel is not an error: `onCanceled` reports it and `onError`
+  // does not run.
+  //
+  // It settles on the request's `load`/`error`/`timeout`/`abort` events. It
+  // used to settle on `readyState` 4 by wrapping the answer in a `Response`,
+  // which throws for the status 0 an abort or a dropped connection leaves —
+  // inside an async handler, so the throw was an unhandled rejection and a
+  // cancelled upload's `trigger` never settled (issue #671).
   const trigger = async (
     fileList: FileList | null | File,
   ): Promise<T | undefined> => {
@@ -339,66 +350,86 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
       data.append("file", fileList);
     }
     const xhr = new XMLHttpRequest();
-    abortRef.current = () => {
-      xhr.abort();
+    const abort = () => xhr.abort();
+    abortRef.current = abort;
+    // A newer `trigger` owns the ref once it has replaced it.
+    const release = () => {
+      if (abortRef.current === abort) abortRef.current = null;
     };
 
-    try {
-      const result = await new Promise<Response>((resolve, reject) => {
-        xhr.responseType = "blob";
-        xhr.onreadystatechange = async () => {
-          if (xhr.readyState !== 4) {
-            // done
-            return;
-          }
+    setState("uploading");
+    setProgress(0);
 
-          const response = new Response(xhr.response, {
+    try {
+      const outcome = await new Promise<
+        | { type: "load"; status: number; statusText: string; body: string }
+        | { type: "abort" }
+      >((resolve, reject) => {
+        xhr.addEventListener("load", () => {
+          resolve({
+            type: "load",
             status: xhr.status,
             statusText: xhr.statusText,
+            body: xhr.responseText,
           });
-
-          resolve(response);
-        };
-
+        });
+        xhr.addEventListener("abort", () => resolve({ type: "abort" }));
         xhr.addEventListener("error", () => {
+          reject(new TypeError("Failed to fetch"));
+        });
+        xhr.addEventListener("timeout", () => {
           reject(new TypeError("Failed to fetch"));
         });
 
         xhr.upload.addEventListener("loadstart", () => {
           setProgress(0);
         });
-        xhr.upload.addEventListener("loadend", () => {
+        // `load`, not `loadend`: `loadend` follows an abort too, and put the
+        // progress of a cancelled upload back to 1.
+        xhr.upload.addEventListener("load", () => {
           setProgress(1);
         });
-
         xhr.upload.addEventListener("progress", (event) => {
-          setProgress(event.loaded / event.total);
+          // A total the browser cannot tell is 0, and the ratio was `NaN`.
+          if (event.lengthComputable && event.total > 0) {
+            setProgress(event.loaded / event.total);
+          }
         });
 
         xhr.open(method, action, true);
         xhr.send(data);
       });
-      setState("uploading");
-      if (!result.ok) {
+      release();
+
+      // `cancel()` has already reported it and put the state back to idle.
+      if (outcome.type === "abort") {
+        return;
+      }
+
+      if (outcome.status < 200 || outcome.status > 299) {
         let error: MutationError = {
           kind: "server_error",
-          message: result.statusText,
+          message: outcome.statusText,
         };
         try {
-          const data = await result.json();
-          error = mutationErrorFromBody(data, result.status);
-        } catch (e) {
-          // do nothing
+          error = mutationErrorFromBody(
+            JSON.parse(outcome.body),
+            outcome.status,
+          );
+        } catch {
+          // Not JSON: a proxy's error page, say.
         }
         setState("error");
         options?.onError?.(error);
         return;
       }
-      const json = await result.json();
+      const json = JSON.parse(outcome.body);
       clearPrefetchCache?.();
       options?.onSuccess?.(json);
+      setState("done");
       return json;
     } catch (error) {
+      release();
       setState("error");
       options?.onError?.(error as MutationError);
       return;
