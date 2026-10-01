@@ -3826,8 +3826,14 @@ function Avatar() {
 }
 ```
 
-It returns `state` (`"idle" | "uploading" | "done" | "error"`), a `progress` number
-(0–1), `trigger(fileListOrFile)`, and `cancel()`. See [File Storage](./file-storage.md)
+It returns `state`, a `progress` number (0–1), `trigger(fileListOrFile)`, and
+`cancel()`. `state` is `"uploading"` from the moment `trigger` is called, `"done"`
+once the upload succeeds, `"error"` when it fails, and back to `"idle"` after a
+`cancel()`. `progress` stays put when the browser cannot tell the upload's size.
+
+`trigger` resolves with the response body, or `undefined` when there was no file, the
+upload failed (reported through `onError`) or it was cancelled. A cancel is not an
+error: `onCanceled` runs and `onError` does not. See [File Storage](./file-storage.md)
 for the server side.
 
 ## Updating queries from elsewhere: `useMutate`

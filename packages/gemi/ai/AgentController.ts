@@ -23,6 +23,7 @@ import {
   MemoryLiveRuns,
 } from "./store/LiveRuns";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
+import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import type {
@@ -1179,7 +1180,7 @@ export abstract class AgentController<
     if (destination === "provider" || !scope) {
       // Identical to the pre-attachment behaviour, down to the answer's
       // `fileId` — plus `downgraded` when this path was not the app's choice.
-      const fileId = await this.agent.provider.upload(file as File);
+      const fileId = await providerUpload(this.agent.provider, file as File);
       const answer: UploadResult = {
         fileId,
         name,
@@ -1201,7 +1202,7 @@ export abstract class AgentController<
     });
 
     const fileId =
-      destination === "both" ? await this.agent.provider.upload(file as File) : undefined;
+      destination === "both" ? await providerUpload(this.agent.provider, file as File) : undefined;
 
     const record: Attachment = {
       id: attachmentId,
@@ -1607,6 +1608,61 @@ class InvalidUploadError extends RequestBreakerError {
     this.name = "InvalidUploadError";
     this.payload = {
       api: { status: 400, data: { error: { code: "invalid_request", message } } },
+      view: {},
+    };
+  }
+}
+
+/**
+ * The provider's upload, with a refusal of THE FILE answered as the client's
+ * problem rather than the server's.
+ *
+ * A vendor that will not take a file answers 4xx, and before this that left
+ * `upload` as an unhandled `ProviderHttpError`: a 500 that tells the person
+ * attaching the file nothing about the file. MEASURED on Azure (#682,
+ * 2026-10-01): with `purpose: "user_data"` a `.docx` was refused with `400
+ * Unsupported extension: .docx. Supported extensions: .txt, .md, .pdf, …`; with
+ * `assistants` the `.docx` is accepted (and read in a turn), and an `.exe` is
+ * refused with `400 Invalid extension exe. Supported formats: "c", "cpp", …`.
+ * Either sentence is exactly what the person needs to read, so it is passed
+ * through as the message.
+ *
+ * Only the statuses that are about the request body: 400, 413, 415 and 422. A
+ * 401/403 is our key, a 429/5xx is the vendor's day, and both stay server
+ * errors — a person cannot fix either by picking another file.
+ */
+async function providerUpload(provider: { upload(file: File): Promise<string> }, file: File) {
+  try {
+    return await provider.upload(file);
+  } catch (error) {
+    if (error instanceof ProviderHttpError && REJECTED_FILE_STATUSES.has(error.status)) {
+      throw new RejectedUploadError(normalizeProviderError(error).message);
+    }
+    throw error;
+  }
+}
+
+const REJECTED_FILE_STATUSES = new Set([400, 413, 415, 422]);
+
+/**
+ * A 422 from `upload`: the provider would not take this file. `code` is
+ * `unsupported_file_type` when the vendor said the type was the problem (an
+ * extension or format allow-list) and `file_rejected` otherwise, so
+ * a composer can mark the one chip without parsing English. Same payload shape
+ * as `InvalidUploadError`.
+ */
+class RejectedUploadError extends RequestBreakerError {
+  constructor(message: string) {
+    super(message);
+    this.name = "RejectedUploadError";
+    const code =
+      /(unsupported|invalid) (extension|file type|format|mime)|supported (extensions|formats?)/i.test(
+        message,
+      )
+        ? "unsupported_file_type"
+        : "file_rejected";
+    this.payload = {
+      api: { status: 422, data: { error: { code, message } } },
       view: {},
     };
   }
