@@ -1,5 +1,6 @@
 import type { User } from "../auth/types";
 import { AuthManager } from "../auth/AuthManager";
+import { sessionUser } from "../auth/accessToken";
 import { signInLocation } from "../auth/signInRedirect";
 import { INTENDED_URL_PARAM, safeRedirectPath } from "../utils/intendedUrl";
 import {
@@ -15,32 +16,39 @@ export class Auth extends Facade {
     return AuthManager;
   }
 
+  /**
+   * The signed-in user, or an `AuthenticationError` — a 401, and a redirect to
+   * sign-in for a view.
+   *
+   * Agrees with the `auth` middleware on who that is, so a route with it and a
+   * route without it see the same user:
+   *
+   * - **A user on the request context** is returned as it is: one a global
+   *   middleware or a route middleware put there, or one an earlier lookup
+   *   found. See "Who counts as signed in" in docs/middleware.md.
+   * - **Otherwise the `access_token` cookie or header** is looked up, through
+   *   the same reader the middleware uses, and the user found is put on the
+   *   context for the rest of the request.
+   *
+   * On a broadcasting connection the token is read from the socket's upgrade
+   * request the same way, so a native client with no cookie jar authenticates
+   * with the header.
+   */
   static async user(): Promise<User> {
     const requestContextStore = RequestContext.getStore();
-    const broadcastingContextStore =
-      Broadcast.getFacadeRoot().context.getStore();
 
-    let accessToken = "";
-    let userAgent = "";
-
-    if (requestContextStore?.req) {
-      accessToken = requestContextStore.req.cookies.get("access_token");
-      userAgent = requestContextStore.req.headers.get("User-Agent");
-    }
-
-    if (broadcastingContextStore?.cookies) {
-      userAgent = broadcastingContextStore.headers.get("User-Agent");
-      accessToken = broadcastingContextStore.cookies.get("access_token");
-    }
-
-    let user = requestContextStore?.user;
+    let user: User | null = requestContextStore?.user;
 
     if (!user) {
-      const container = this.getFacadeRoot();
-      const session = await container.getSession(accessToken, userAgent);
-
-      user = session?.user;
-      requestContextStore?.setUser(user);
+      const broadcastingContextStore =
+        Broadcast.getFacadeRoot().context.getStore();
+      // A socket's upgrade request when there is one, as before; else the
+      // request's own.
+      const source = broadcastingContextStore ?? requestContextStore?.req;
+      user = await sessionUser(this.getFacadeRoot(), source);
+      if (user) {
+        requestContextStore?.setUser(user);
+      }
     }
 
     if (user) {

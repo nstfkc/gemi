@@ -5,11 +5,10 @@ import { RequestContext } from "../http/requestContext";
 /**
  * Signing out revokes the token the request carried, on either transport.
  *
- * `AuthenticationMiddleware` accepts an `access_token` cookie or an
- * `access_token` header; `Auth.user()` reads the cookie alone. `signOut` used
- * to read the cookie alone too, so a native client sending the header revoked
- * nothing — and answered `401` before it got that far, because resolving the
- * user went through `Auth.user()`.
+ * `signOut` used to read the `access_token` cookie alone, so a native client
+ * sending the header revoked nothing — and answered `401` before it got that
+ * far, because resolving the user went through `Auth.user()`, which then read
+ * the cookie alone too. All of them now share `readAccessToken`.
  */
 
 const UA = "MyApp iOS/1.0";
@@ -58,7 +57,7 @@ vi.mock("../facades", () => ({
   Auth: {
     user: async () => {
       throw new Error(
-        "signOut must not resolve the user through Auth.user(): it reads the cookie alone, so a header client's sign-out threw instead of revoking.",
+        "signOut must not resolve the user through Auth.user(): its getSession slides the session and writes the cookie this clears.",
       );
     },
   },
