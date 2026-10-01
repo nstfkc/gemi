@@ -8,6 +8,9 @@ const validationError = {
   messages: { prompt: ["Too long"] },
 };
 
+// What `error` holds for it: the body's field, with the status it came with.
+const reportedValidationError = { ...validationError, status: 422 };
+
 function respond(status: number, body: unknown) {
   return new Response(JSON.stringify(body), { status });
 }
@@ -51,7 +54,7 @@ describe("useMutation", () => {
     const { result } = renderHook(() => useMutation("POST" as never, "/agents" as never));
 
     await act(() => result.current.trigger({} as never));
-    expect(result.current.error).toEqual(validationError);
+    expect(result.current.error).toEqual(reportedValidationError);
 
     let pending!: Promise<unknown>;
     act(() => {
@@ -93,7 +96,7 @@ describe("useMutation", () => {
     );
 
     await act(() => result.current.trigger({} as never));
-    expect(result.current.error).toEqual(validationError);
+    expect(result.current.error).toEqual(reportedValidationError);
     onError.mockClear();
 
     await act(async () => {
@@ -120,7 +123,7 @@ describe("useMutation", () => {
     const { result } = renderHook(() => useMutation("POST" as never, "/agents" as never));
 
     await act(() => result.current.trigger({} as never));
-    expect(result.current.error).toEqual(validationError);
+    expect(result.current.error).toEqual(reportedValidationError);
     const staleCancel = result.current.cancel;
 
     await act(async () => {
@@ -228,8 +231,8 @@ describe("useMutation", () => {
 
     await act(() => result.current.trigger({} as never));
 
-    expect(onError).toHaveBeenCalledWith(validationError);
-    expect(result.current.error).toEqual(validationError);
+    expect(onError).toHaveBeenCalledWith(reportedValidationError);
+    expect(result.current.error).toEqual(reportedValidationError);
   });
 
   /**
@@ -269,8 +272,10 @@ describe("useMutation", () => {
 
       await act(() => result.current.trigger({} as never));
 
-      expect(onError).toHaveBeenCalledWith({ message: "Taken" });
-      expect(result.current.error).toEqual({ message: "Taken" });
+      // Given the kind its status stands for, so `<FormError>` shows it.
+      const reported = { kind: "form_error", message: "Taken", status: 409 };
+      expect(onError).toHaveBeenCalledWith(reported);
+      expect(result.current.error).toEqual(reported);
     });
 
     test("a 409 without an error field hands over the body", async () => {
@@ -284,8 +289,9 @@ describe("useMutation", () => {
 
       await act(() => result.current.trigger({} as never));
 
-      expect(onError).toHaveBeenCalledWith(body);
-      expect(result.current.error).toEqual(body);
+      const reported = { ...body, kind: "form_error", status: 409 };
+      expect(onError).toHaveBeenCalledWith(reported);
+      expect(result.current.error).toEqual(reported);
     });
 
     test("a JSON null body is still an error", async () => {
@@ -298,8 +304,13 @@ describe("useMutation", () => {
 
       await act(() => result.current.trigger({} as never));
 
-      expect(onError).toHaveBeenCalledWith({ message: "Request failed with status 422" });
-      expect(result.current.error).toEqual({ message: "Request failed with status 422" });
+      const reported = {
+        kind: "form_error",
+        message: "Request failed with status 422",
+        status: 422,
+      };
+      expect(onError).toHaveBeenCalledWith(reported);
+      expect(result.current.error).toEqual(reported);
     });
   });
 
@@ -320,7 +331,7 @@ describe("useMutation", () => {
     expect(result.current.data).toEqual({ id: 1 });
 
     await act(() => result.current.trigger({} as never));
-    expect(result.current.error).toEqual(validationError);
+    expect(result.current.error).toEqual(reportedValidationError);
     expect(result.current.data).toEqual({ id: 1 });
   });
 
@@ -393,7 +404,7 @@ describe("useMutation", () => {
         await settled.catch(() => {});
       });
       await expect(settled).resolves.toBeUndefined();
-      expect(onError).toHaveBeenCalledWith(validationError);
+      expect(onError).toHaveBeenCalledWith(reportedValidationError);
     });
 
     test("undefined, not a rejection, on a network failure", async () => {

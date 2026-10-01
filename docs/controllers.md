@@ -44,7 +44,7 @@ export class PostController extends Controller {
   async publish(req: HttpRequest<{}, { id: string }>) {
     const post = await Post.findUniqueOrThrow({ where: { id: req.params.id } });
     if (post.publishedAt) {
-      return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+      return HttpResponse.json({ error: { kind: "form_error", message: "Already published" } }, { status: 409 });
     }
     // ...
     return HttpResponse.json(post, { headers: { "X-Post-Version": String(post.version) } });
@@ -72,7 +72,7 @@ On top of those, `options.headers` apply as follows:
 **What the client sees.** Any 2xx is data: `useQuery` stores it, and a mutation calls `onSuccess` with it. A 4xx or 5xx is an error, handled as gemi's own errors are:
 
 - `useQuery` gets a `QueryError` whose `status` is the status and whose `body` is the JSON. The default retry policy applies, so a 4xx other than 408 and 429 is not retried.
-- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. A body with no `error` field is handed over whole.
+- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies, with the response's `status` added. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. An `error` that is a string, or an object with a `message` and no `kind`, is given the kind its status stands for (any 4xx without one of its own is a `form_error`). A body with no `error` field is handed over whole, given a kind and status the same way.
 - A loader's `Query.instant` or `Query.prefetch` on the server behaves the same as the browser. A 2xx resolves to the data, and an error status rejects with the same `QueryError`.
 
 `HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
@@ -172,12 +172,37 @@ See [Routing → Resource routes](./routing.md) for the exact method-to-path map
 
 gemi handles control flow through **thrown errors** that the framework catches and turns into the right response. All of them extend `RequestBreakerError` (exported from `gemi/http`), which carries separate `api` and `view` payloads.
 
+### RequestBreakerError
+
+Every other refusal answers `{ "error": { "kind", "message", "status" } }`: `authentication`, `authorization`, `permission`, `csrf`, `not_found`, `range_not_satisfiable`, `rate_limit`, `server_error` (an unhandled 500), and `form_error`. The client's guards (`isPermissionError`, `isNotFoundError`, …) read `kind`, so a refusal thrown with a message of its own is classified like the default one.
+
+Throw a `RequestBreakerError` with a status for a refusal of your own. Its `kind` follows from the status (401 `authentication`, 403 `permission`, 404 `not_found`, 429 `rate_limit`, 5xx `server_error`, any other status `form_error`), or name it:
+
+```typescript
+import { RequestBreakerError } from "gemi/http";
+
+throw new RequestBreakerError("This slug is taken", { status: 409 });
+// 409 { "error": { "kind": "form_error", "message": "This slug is taken", "status": 409 } }
+
+throw new RequestBreakerError("Staff only", { status: 403, kind: "permission" });
+```
+
+A subclass that sets `this.payload` itself answers that payload instead.
+
+**Native clients that read a string.** Before 0.85, `AuthenticationError`, `AuthorizationError`, `InsufficientPermissionsError`, `InvalidCSRFTokenError` and an unhandled 500 answered `error` as a bare string. A shipped client that reads `body.error` as a string cannot be updated in the same deploy as the server; set this once at boot until it reads `body.error.message`:
+
+```typescript
+RequestBreakerError.legacyStringPayload = true;
+```
+
+gemi's own web client reads both shapes, and the refusals that were already objects (404, 429, a policy 403) stay objects either way.
+
 ### ValidationError
 
 `throw new ValidationError(errors)` produces a **400** response shaped as:
 
 ```json
-{ "error": { "kind": "validation_error", "messages": { "name": ["Name is required"] } } }
+{ "error": { "kind": "validation_error", "messages": { "name": ["Name is required"] }, "status": 400 } }
 ```
 
 `errors` is a `Record<string, string[]>` (field → messages). Use it directly instead of inventing a per-endpoint error shape:

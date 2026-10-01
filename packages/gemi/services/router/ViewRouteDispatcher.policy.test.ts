@@ -153,7 +153,7 @@ describe("a policy denial in a view loader", () => {
 
     expect(res.status).toBe(403);
     expect(res.headers.get("Content-Type")).toBe("application/json");
-    expect(JSON.parse(text)).toEqual({ error: { message: "Forbidden" } });
+    expect(JSON.parse(text)).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
     expect(text).not.toMatch(/Order|policy/);
   });
 
@@ -197,7 +197,7 @@ describe("a policy denial behind a loader's Query.instant", () => {
   test("answers 403 for a view-data request and a page request alike", async () => {
     const data = await request("/orders-instant.json", alice);
     expect(data.status).toBe(403);
-    expect(await data.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await data.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
 
     const page = await request("/orders-instant", alice);
     expect(page.status).toBe(403);
@@ -216,7 +216,7 @@ describe("a policy denial in a view middleware", () => {
   test("answers 403 for a view-data request and a page request alike", async () => {
     const data = await request("/orders-by-middleware.json", bob);
     expect(data.status).toBe(403);
-    expect(await data.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await data.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
 
     const page = await request("/orders-by-middleware", bob);
     expect(page.status).toBe(403);

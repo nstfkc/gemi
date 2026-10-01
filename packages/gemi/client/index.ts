@@ -38,8 +38,11 @@ export type {
   MutationValidationError,
   MutationFormError,
   MutationServerError,
+  MutationRefusal,
+  MutationRefusalKind,
   MutationMessageError,
 } from "./MutationError";
+export type { RefusalKind } from "../http/refusal";
 export {
   Form,
   FormError,

@@ -1,7 +1,7 @@
 import { AuthApiRouter } from "../../auth/routes";
 import { ACCESS_TOKEN } from "../../auth/accessToken";
 import { ApiRouter, HttpRequest } from "../../http";
-import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
+import { GEMI_REQUEST_BREAKER_ERROR, refusal } from "../../http/Error";
 import { HttpResponse, isHttpResponse } from "../../http/HttpResponse";
 import { I18nRouter } from "../../i18n/I18nRouter";
 import { type CarriedContext, RequestContext } from "../../http/requestContext";
@@ -408,7 +408,7 @@ export class ApiRouteDispatcher {
     const routeHandler = this.flatRoutes[path];
 
     if (!routeHandler || !routeHandler[req.method]) {
-      return new Response(JSON.stringify({ error: { message: "Not found" } }), {
+      return new Response(JSON.stringify({ error: refusal("not_found", "Not found", 404) }), {
         status: 404,
       });
     }

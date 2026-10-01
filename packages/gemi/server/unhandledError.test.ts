@@ -58,7 +58,7 @@ describe("unhandledErrorResponse (production)", () => {
   test("/api answers with a generic JSON error", async () => {
     const res = unhandledErrorResponse(new Error("x"), "/api/orders");
     expect(res.headers.get("Content-Type")).toBe("application/json");
-    expect(await res.json()).toEqual({ error: "Internal Server Error" });
+    expect(await res.json()).toEqual({ error: { kind: "server_error", message: "Internal Server Error", status: 500 } });
   });
 
   test("a throwing onException still yields the generic 500", async () => {

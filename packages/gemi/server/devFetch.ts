@@ -1,3 +1,4 @@
+import { stringEraRefusal } from "../http/Error";
 import { join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
@@ -202,10 +203,15 @@ export function createDevFetch(
       sendErrorToClient(err);
 
       if (isApiPath(pathname)) {
-        return new Response(JSON.stringify({ error: err?.message ?? String(err) }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({
+            error: stringEraRefusal("server_error", err?.message ?? String(err), 500),
+          }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
 
       // This document has no live app (so no HttpReload listener to clear the

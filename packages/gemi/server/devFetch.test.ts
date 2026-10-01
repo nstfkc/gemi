@@ -174,6 +174,6 @@ describe("the dev server with a global middleware", () => {
 
     const api = await get("/api/ping", THROUGH_FRONT_DOOR);
     expect(api.status).toBe(500);
-    expect(await api.json()).toEqual({ error: "the gate fell over" });
+    expect(await api.json()).toEqual({ error: { kind: "server_error", message: "the gate fell over", status: 500 } });
   });
 });

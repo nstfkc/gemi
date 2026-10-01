@@ -1,4 +1,4 @@
-import { RequestBreakerError } from "./Error";
+import { refusal, RequestBreakerError, stringEraRefusal } from "./Error";
 import { formatUnsatisfiedContentRange } from "./range";
 
 export class AuthorizationError extends RequestBreakerError {
@@ -10,7 +10,7 @@ export class AuthorizationError extends RequestBreakerError {
     this.payload = {
       api: {
         status: 401,
-        data: { error: this.error },
+        data: { error: stringEraRefusal("authorization", this.error, 401) },
       },
       view: {},
     };
@@ -50,7 +50,9 @@ export class InsufficientPermissionsError extends RequestBreakerError {
     this.payload = {
       api: {
         status: InsufficientPermissionsError.apiStatus,
-        data: { error: this.error },
+        data: {
+          error: stringEraRefusal("permission", this.error, InsufficientPermissionsError.apiStatus),
+        },
       },
       // Without a status a view request would fall through to the
       // dispatcher's 400 default.
@@ -74,7 +76,7 @@ export class RangeNotSatisfiableError extends RequestBreakerError {
     this.payload = {
       api: {
         status: 416,
-        data: { error: { message: "Range not satisfiable" } },
+        data: { error: refusal("range_not_satisfiable", "Range not satisfiable", 416) },
         headers: {
           "Content-Range": formatUnsatisfiedContentRange(total),
           "Accept-Ranges": "bytes",
@@ -96,7 +98,7 @@ export class FileNotFoundError extends RequestBreakerError {
     this.payload = {
       api: {
         status: 404,
-        data: { error: { message: "Not found" } },
+        data: { error: refusal("not_found", "Not found", 404) },
         headers: { "Cache-Control": "no-store" },
       },
       view: {},
@@ -122,7 +124,7 @@ export class AuthenticationError extends RequestBreakerError {
     this.payload = {
       api: {
         status: 401,
-        data: { error: "Authentication error" },
+        data: { error: stringEraRefusal("authentication", "Authentication error", 401) },
       },
       viewData: {
         status: 200,

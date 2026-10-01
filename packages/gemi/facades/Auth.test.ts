@@ -51,7 +51,7 @@ describe("Auth.guard", () => {
     expect(error).toBeInstanceOf(InsufficientPermissionsError);
     expect(error.payload.api.status).toBe(403);
     expect(error.payload.api.data).toEqual({
-      error: "Insufficient permissions",
+      error: { kind: "permission", message: "Insufficient permissions", status: 403 },
     });
     expect(error.payload.view.status).toBe(403);
   });

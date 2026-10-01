@@ -19,6 +19,11 @@ and the failure disappears.
 | `AuthenticationError` | 401 — no identity (views redirect to sign-in) |
 | `AuthorizationError("msg")` | 401 — known identity, refused this action |
 | `InsufficientPermissionsError` | 403 — missing a role or permission |
+| `RequestBreakerError("msg", { status: 409 })` | any other refusal; `<FormError>` shows the message |
+
+Each answers `{ error: { kind, message, status } }`, so the guards classify a custom
+message (`isPermissionError` matches `AuthorizationError("You cannot edit this post")`)
+and the client shows `error.message`. Do not compare `error` with a string.
 
 **Incorrect (a 200 that the client cannot distinguish from success):**
 

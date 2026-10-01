@@ -558,7 +558,7 @@ describe("an agent calling the app's routes", () => {
 
     expect(result.status).toBe("error");
     expect(result.error.message).toBe(
-      '"rename-product" was refused with 400: {"error":{"kind":"validation_error","messages":{"name":["Name must be at least 3 characters"]}}}',
+      '"rename-product" was refused with 400: {"error":{"kind":"validation_error","messages":{"name":["Name must be at least 3 characters"]},"status":400}}',
     );
   });
 
@@ -607,7 +607,7 @@ describe("an agent calling the app's routes", () => {
 
     expect(result).toMatchObject({
       status: "error",
-      error: { message: '"refund-order" was refused with 403: {"error":{"message":"Forbidden"}}' },
+      error: { message: '"refund-order" was refused with 403: {"error":{"kind":"permission","message":"Forbidden","status":403}}' },
     });
     expect(JSON.stringify(result)).not.toContain("policy");
   });
