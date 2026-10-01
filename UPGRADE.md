@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.84.0 to 0.84.1
 
 ## Azure attachments upload with purpose `assistants` (#682)
 
