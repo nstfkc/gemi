@@ -166,8 +166,8 @@ export default defineAuthConfig({
   token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
   window), so every request converting it computes the same one, and nobody without `SECRET`
   can.
-- **Only inside a request.** Outside one — a broadcasting connection — there is no response
-  to carry the new cookie, so the token is refused until the client's next request converts it.
+- **Only inside a request.** Outside one there is no response to carry the new cookie, so
+  the token is refused until the client's next request converts it.
 - **A client that sends the `access_token` header** has to take the new token from the
   response's `Set-Cookie`, as it does on every sign-in; otherwise it is signed out when the
   grace window ends.

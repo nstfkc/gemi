@@ -88,12 +88,6 @@ export const PROVIDER_MIGRATIONS: ProviderMigration[] = [
     defineModule: "gemi/services",
   },
   {
-    provider: "BroadcastingServiceProvider",
-    configKey: "broadcast",
-    defineFn: "defineBroadcastConfig",
-    defineModule: "gemi/services",
-  },
-  {
     provider: "ImageOptimizationServiceProvider",
     configKey: "image",
     defineFn: "defineImageConfig",
@@ -159,7 +153,6 @@ export const SERVICE_RENAMES: Record<string, string> = {
   FileStorageServiceContainer: "FilesystemManager",
   QueueServiceContainer: "QueueManager",
   RedisServiceContainer: "RedisManager",
-  BroadcastingServiceContainer: "BroadcastManager",
   ImageOptimizationServiceContainer: "ImageManager",
   ApiRouterServiceContainer: "ApiRouteDispatcher",
   ViewRouterServiceContainer: "ViewRouteDispatcher",
@@ -221,7 +214,6 @@ export const EXTRACTION_TARGETS: Record<string, string> = {
   HttpRequest: "app/http/requests",
   CronJob: "app/cron",
   Job: "app/jobs",
-  BroadcastingChannel: "app/broadcasting",
   Middleware: "app/http/middleware",
   Email: "app/email",
   Policy: "app/policies",

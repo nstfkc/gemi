@@ -8,7 +8,7 @@ import { Auth, Redirect, Url, Log } from "gemi/facades";
 
 Each facade names one container binding and resolves it **per call**, so it always reads the instance registered for the current application — never one captured at module load. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. Most read from the current request through gemi's request context, so they only make sense while a request is being handled.
 
-> **Note:** Some facade names (`Redirect`, `Broadcast`) also exist as client-side React components/hooks with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
+> **Note:** One facade name (`Redirect`) also exists as a client-side React component with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
 
 All exports live in `gemi/facades`:
 
@@ -20,7 +20,6 @@ import {
   Lang,
   Storage,
   Query,
-  Broadcast,
   Url,
   Log,
   Meta,
@@ -175,20 +174,6 @@ const stats = await Query.instant("/dashboard/stats");
 ```
 
 > **Note:** `Query` cannot be called from an API request context (it throws) — it is meant for view rendering. See [Data Fetching](./data-fetching.md) for the client `useQuery` hook that consumes the same routes.
-
-## Broadcast
-
-`Broadcast` publishes real-time messages to a websocket channel from the server. It fronts `BroadcastManager` (token `broadcast`); channels are declared in `app/config/broadcast.ts`.
-
-- `Broadcast.channel(route, params)` — returns a handle with `publish(data, compress?)` that sends a message to the channel's topic (the route pattern with `params` applied).
-
-```typescript
-import { Broadcast } from "gemi/facades";
-
-Broadcast.channel("/chat/:roomId", { roomId }).publish({ text: "hello" });
-```
-
-See [Broadcasting](./broadcasting.md) for defining channels and the client `useSubscription`/`useBroadcast` hooks.
 
 ## Url
 
@@ -421,7 +406,6 @@ See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration
 - [Navigation](./navigation.md)
 - [File Storage](./file-storage.md)
 - [Data Fetching](./data-fetching.md)
-- [Broadcasting](./broadcasting.md)
 - [Internationalization](./i18n.md)
 - [Views & Layouts](./views-and-layouts.md)
 - [Configuration](./configuration.md)

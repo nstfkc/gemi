@@ -3,7 +3,7 @@
 
 ## gemi Documentation
 
-**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, a Prisma-typed ORM, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n — so you spend time on product code instead of wiring libraries together.
+**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, a Prisma-typed ORM, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, and i18n — so you spend time on product code instead of wiring libraries together.
 
 gemi is Laravel-inspired: an application is a **Kernel** owning a **container**, **service providers** register bindings into that container, runtime settings live in **`app/config/*.ts`**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router.
 
@@ -59,14 +59,13 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 ### Services & facades
 - **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
 - **[Features](./feature-flags.md)** — features declared in `app/features` and switched on from the database: `defineFeature`, `when` targeting, deterministic rollouts, `useFeature`, the `Features` facade, and route gating.
-- **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
+- **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
-- **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
 ## Core concepts at a glance
@@ -415,7 +414,7 @@ The container API is Laravel's:
 
 ### Framework services
 
-Fourteen framework providers bind fifteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
+Thirteen framework providers bind fourteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
 
 | Service | Token | Config slice | Facade |
 | --- | --- | --- | --- |
@@ -425,7 +424,6 @@ Fourteen framework providers bind fifteen services. You rarely resolve these dir
 | `FilesystemManager` | `filesystem` | `filesystem` | `Storage` |
 | `QueueManager` | `queue` | `queue` | — |
 | `RedisManager` | `redis` | `redis` | `Redis` |
-| `BroadcastManager` | `broadcast` | `broadcast` | `Broadcast` |
 | `ImageManager` | `image` | `image` | — |
 | `ApiRouteDispatcher` | `router.api` | `route.api` | `Query` |
 | `ViewRouteDispatcher` | `router.view` | `route.view` | — |
@@ -518,7 +516,6 @@ export default defineMiddlewareConfig({
 | `filesystem` | `defineFilesystemConfig` | `gemi/services` |
 | `queue` | `defineQueueConfig` | `gemi/services` |
 | `redis` | `defineRedisConfig` | `gemi/services` |
-| `broadcast` | `defineBroadcastConfig` | `gemi/services` |
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
@@ -761,7 +758,6 @@ The key members:
 
 - **`app.waitForBoot()`** — completes phase two of the boot. Await it before the first request.
 - **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API route dispatcher, everything else to the view route dispatcher.
-- **`app.websocket`** — a Bun `WebSocketHandler` for the broadcasting service.
 - **`app.dispatchJob(name, args)`** — enqueue a background job.
 - **`onException`** — an optional callback for unhandled errors thrown during a request; defaults to `console.error`.
 
@@ -8027,8 +8023,8 @@ export default defineAuthConfig({
   token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
   window), so every request converting it computes the same one, and nobody without `SECRET`
   can.
-- **Only inside a request.** Outside one — a broadcasting connection — there is no response
-  to carry the new cookie, so the token is refused until the client's next request converts it.
+- **Only inside a request.** Outside one there is no response to carry the new cookie, so
+  the token is refused until the client's next request converts it.
 - **A client that sends the `access_token` header** has to take the new token from the
   response's `Set-Cookie`, as it does on every sign-in; otherwise it is signed out when the
   grace window ends.
@@ -9767,7 +9763,7 @@ import { Auth, Redirect, Url, Log } from "gemi/facades";
 
 Each facade names one container binding and resolves it **per call**, so it always reads the instance registered for the current application — never one captured at module load. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. Most read from the current request through gemi's request context, so they only make sense while a request is being handled.
 
-> **Note:** Some facade names (`Redirect`, `Broadcast`) also exist as client-side React components/hooks with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
+> **Note:** One facade name (`Redirect`) also exists as a client-side React component with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
 
 All exports live in `gemi/facades`:
 
@@ -9779,7 +9775,6 @@ import {
   Lang,
   Storage,
   Query,
-  Broadcast,
   Url,
   Log,
   Meta,
@@ -9934,20 +9929,6 @@ const stats = await Query.instant("/dashboard/stats");
 ```
 
 > **Note:** `Query` cannot be called from an API request context (it throws) — it is meant for view rendering. See [Data Fetching](./data-fetching.md) for the client `useQuery` hook that consumes the same routes.
-
-## Broadcast
-
-`Broadcast` publishes real-time messages to a websocket channel from the server. It fronts `BroadcastManager` (token `broadcast`); channels are declared in `app/config/broadcast.ts`.
-
-- `Broadcast.channel(route, params)` — returns a handle with `publish(data, compress?)` that sends a message to the channel's topic (the route pattern with `params` applied).
-
-```typescript
-import { Broadcast } from "gemi/facades";
-
-Broadcast.channel("/chat/:roomId", { roomId }).publish({ text: "hello" });
-```
-
-See [Broadcasting](./broadcasting.md) for defining channels and the client `useSubscription`/`useBroadcast` hooks.
 
 ## Url
 
@@ -10180,7 +10161,6 @@ See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration
 - [Navigation](./navigation.md)
 - [File Storage](./file-storage.md)
 - [Data Fetching](./data-fetching.md)
-- [Broadcasting](./broadcasting.md)
 - [Internationalization](./i18n.md)
 - [Views & Layouts](./views-and-layouts.md)
 - [Configuration](./configuration.md)
@@ -12451,7 +12431,6 @@ Five mechanisms, one row each:
 | `Event.dispatch()`, sync listener | 1 → N | inline, and the caller names none of them |
 | `Event.dispatch()`, `queued = true` | 1 → N | the queue: retried, dead-lettered |
 | `Job.dispatch()` | 1 → 1 | the queue: retried, dead-lettered |
-| `Broadcast.publish()` | 1 → N | *clients*, over websockets |
 
 gemi has no ORM lifecycle events (`User.created` and friends) — a model write does not emit anything. Dispatch explicitly from the code that did the write.
 
@@ -12459,162 +12438,8 @@ gemi has no ORM lifecycle events (`User.created` and friends) — a model write 
 
 - [Jobs & Queues](./jobs-and-queues.md) — background work with retries, which a listener often dispatches.
 - [ORM](./orm.md) — `DB.transaction`, which `static afterCommit` hooks.
-- [Broadcasting](./broadcasting.md) — fan-out to browsers rather than to server-side handlers.
 - [Controllers](./controllers.md) — dispatching from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
-
----
-
-## Broadcasting
-
-gemi ships real-time messaging over websockets. You define **channels** on the server (route patterns with authorization logic), publish messages to them with the [`Broadcast`](./facades.md) facade, and subscribe to them from React components with `useSubscription`. A channel's topic is a route pattern — the same `:param` syntax used elsewhere in gemi — so a single channel definition can serve many concrete topics (one per room, per user, per order, …).
-
-## Defining a channel
-
-A channel is a class extending `BroadcastingChannel` from `gemi/broadcasting`:
-
-```typescript
-import { BroadcastingChannel } from "gemi/broadcasting";
-import { Auth } from "gemi/facades";
-
-export class ChatChannel extends BroadcastingChannel {
-  // Authorize a client's subscription. Receives the matched route params
-  // (from the topic pattern). Return true to allow, false to reject.
-  async subscribe(params: { roomId: string }) {
-    const user = await Auth.user();
-    return await isMemberOfRoom(user.id, params.roomId);
-  }
-
-  // Transform the payload before it is delivered to subscribers.
-  // Whatever you return is what clients receive as the message data.
-  publish(input: { text: string; userId: string }) {
-    return {
-      text: input.text,
-      userId: input.userId,
-      at: Date.now(),
-    };
-  }
-}
-```
-
-- **`subscribe(params)`** → `Promise<boolean> | boolean`. Called when a client tries to subscribe to a matching topic. It receives the route params parsed from the topic. Return `true` to authorize, `false` to reject. This is where you run auth/permission checks — the [`Auth`](./facades.md) facade works here because gemi runs it inside the request context of the socket. The base implementation returns `true` (public channel).
-- **`publish(input)`** → the message payload. Called on the server each time you publish; its return value is serialized and delivered to every subscriber. Use it to shape/enrich the outgoing message. The base implementation returns `{}`.
-
-> **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.
-
-## Registering channels
-
-A channel does nothing until it is registered under its topic route pattern in `app/config/broadcast.ts`:
-
-```typescript
-// app/config/broadcast.ts
-import { defineBroadcastConfig } from "gemi/services";
-import { ChatChannel } from "@/app/broadcasting/ChatChannel";
-
-export default defineBroadcastConfig({
-  channels: {
-    "/chat/:roomId": ChatChannel,
-  },
-});
-```
-
-Then import it into your Kernel's `config` under the `broadcast` key — see [Project Structure](./project-structure.md#configuration-appconfig):
-
-```typescript
-// app/kernel/Kernel.ts
-import broadcast from "../config/broadcast";
-
-export default class extends Kernel {
-  config = { broadcast /* , ... */ };
-}
-```
-
-An unregistered route is what makes `Broadcast.channel(...)` fall back to the no-op described below.
-
-## Topics and channels
-
-Each channel is associated with a **topic route pattern** (e.g. `/chat/:roomId`). When a client subscribes to a concrete topic like `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
-
-## Publishing from the server
-
-Use the [`Broadcast`](./facades.md) facade to publish to a channel from a controller, job, or any server code:
-
-```typescript
-import { Broadcast } from "gemi/facades";
-
-Broadcast.channel("/chat/:roomId", { roomId }).publish({
-  text: "hello",
-  userId: user.id,
-});
-```
-
-- `Broadcast.channel(route, params)` resolves the registered channel for `route`, applies `params` to build the concrete topic, and returns a handle.
-- `handle.publish(data, compress?)` runs the channel's `publish(data)` transform, then delivers `{ topic, data }` to every subscriber. Pass `compress: true` (default `false`) to enable per-message compression.
-
-If no channel is registered for `route`, `Broadcast.channel` logs an error and returns a no-op `publish`, so a missing registration fails quietly rather than throwing.
-
-## Subscribing from the client
-
-Use `useSubscription` from `gemi/client` to receive messages in a component:
-
-```tsx
-import { useState } from "react";
-import { useSubscription } from "gemi/client";
-
-function ChatRoom({ roomId }: { roomId: string }) {
-  const [messages, setMessages] = useState<any[]>([]);
-
-  useSubscription("/chat/:roomId", {
-    params: { roomId },
-    cb: (data) => setMessages((prev) => [...prev, data]),
-  });
-
-  return (
-    <ul>
-      {messages.map((m, i) => (
-        <li key={i}>{m.text}</li>
-      ))}
-    </ul>
-  );
-}
-```
-
-`useSubscription(route, { params, cb })`:
-
-- `route` — the channel's topic pattern (same string you registered).
-- `params` — values for the pattern's `:params`, used to build the concrete topic to subscribe to.
-- `cb(data)` — called for each message whose topic matches; `data` is the payload your channel's `publish` returned.
-
-The hook subscribes on mount and unsubscribes on unmount (and re-subscribes when the resolved topic changes).
-
-## Broadcasting from the client
-
-`useBroadcast` returns a function that sends a payload straight to a topic from the browser (client-to-client relay, without going through a server-side channel transform):
-
-```tsx
-import { useBroadcast } from "gemi/client";
-
-function Typing({ roomId }: { roomId: string }) {
-  const broadcast = useBroadcast("/chat/:roomId", { params: { roomId } });
-
-  return (
-    <input
-      onFocus={() => broadcast({ typing: true })}
-      onBlur={() => broadcast({ typing: false })}
-    />
-  );
-}
-```
-
-`useBroadcast(path, { params })` returns `(payload) => void`. It applies `params` to `path` to build the topic and relays `payload` to everyone subscribed to that topic. Subscribers receive it through their `useSubscription` `cb` just like a server-published message.
-
-> **Note:** Server publishing (`Broadcast` facade) runs your channel's `publish` transform and is the right tool for authoritative events. `useBroadcast` is a lightweight client relay for ephemeral signals like typing/presence — it does not pass through the channel's `publish` method.
-
-## Related
-
-- [Facades](./facades.md) — the `Broadcast` and `Auth` facades used above.
-- [Data Fetching](./data-fetching.md) — `useQuery` for request/response data.
-- [Project Structure](./project-structure.md#configuration-appconfig) — `app/config/*.ts` slices and how the Kernel assembles them.
 
 ---
 

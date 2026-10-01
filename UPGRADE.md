@@ -21,6 +21,44 @@ exits `1` where it exited `0`. If your platform alerts or restarts on a
 non-zero exit, make `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` long enough for your
 jobs, or expect the alert when they are cut off.
 
+## Broadcasting and websockets are removed (#31)
+
+**Breaking change.** The broadcasting subsystem is gone. Nothing in gemi used
+it, and apps that need real-time delivery are better served by a dedicated
+service than by a half-built one in the framework.
+
+Removed:
+
+- the `gemi/broadcasting` entry point and `BroadcastingChannel`
+- `Broadcast` from `gemi/facades`
+- `BroadcastManager`, `BroadcastServiceProvider`, `defineBroadcastConfig`,
+  `broadcastConfigDefaults` and the `BroadcastConfig` type from
+  `gemi/services`, and the `broadcast` config slice
+- `useSubscription` and `useBroadcast` from `gemi/client`, and the websocket
+  provider `ClientRouter` wrapped every page in
+- `App.websocket`, `App.onPublish()` and `Kernel.broadcast()`
+- the broadcasting entries in the `gemi migrate` codemod tables
+
+`Auth.user()` no longer reads a websocket connection's headers and cookies;
+it reads the current request only, as every non-websocket caller already did.
+Outside a request there is no token, so it throws `AuthenticationError` as
+before.
+
+What to delete in your app:
+
+- `app/config/broadcast.ts`, and its entry wherever you collect config
+- `app/broadcasting/` (your `BroadcastingChannel` subclasses)
+- any `Broadcast.channel(...).publish(...)` call, and any `useSubscription` /
+  `useBroadcast` in components
+- test stubs of `BroadcastManager`. folio's
+  `apps/web/app/auth/legacySessionMigration.postgres.bun-check.ts` imports
+  `BroadcastManager` from `gemi/services` only to stub the broadcasting branch
+  of `Auth.user()`; delete that import and the stub. `Auth.user()` no longer
+  resolves `BroadcastManager`, so nothing replaces it.
+
+The typechecker finds each of these: every removed name is now a missing
+export.
+
 # Upgrading from 0.82 to 0.83
 
 ## `reasoning` takes `"none"`, and any effort the model accepts (#658)

@@ -12,8 +12,7 @@ import {
  *
  * One store per scope with one owner, which is the pattern the framework
  * already follows — `kernel/context.ts` holds the Application,
- * `http/requestContext.ts` the request and its user,
- * `services/pubsub/BroadcastManager.ts` a socket's headers. The reasoning for
+ * `http/requestContext.ts` the request and its user. The reasoning for
  * not folding this into the kernel's is written up beside it, and the short
  * version is that a transaction scope has to *nest inside* an Application scope
  * without replacing it, and `foundation/app.ts` must keep reading exactly one

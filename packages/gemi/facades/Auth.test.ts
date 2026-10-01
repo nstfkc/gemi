@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   AuthenticationError,
   AuthorizationError,
@@ -6,7 +6,6 @@ import {
 } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import { Auth } from "./Auth";
-import { Broadcast } from "./Broadcast";
 
 /**
  * A fake standing in for `HttpRequest`, which needs a real `Request` and a route
@@ -29,13 +28,6 @@ function inRequest<T>(sessionUser: any, fn: () => Promise<T>): Promise<T> {
   } as any);
   return RequestContext.run(fakeRequest(), fn);
 }
-
-beforeEach(() => {
-  // No broadcasting context: this is an HTTP request.
-  vi.spyOn(Broadcast, "getFacadeRoot").mockReturnValue({
-    context: { getStore: () => undefined },
-  } as any);
-});
 
 afterEach(() => {
   vi.restoreAllMocks();

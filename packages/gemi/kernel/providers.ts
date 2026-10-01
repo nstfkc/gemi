@@ -11,7 +11,6 @@ import { ImageServiceProvider } from "../services/image-optimization/ImageServic
 import { KernelIdServiceProvider } from "../services/kernel-id/KernelIdServiceProvider";
 import { LogServiceProvider } from "../services/logging/LogServiceProvider";
 import { MiddlewareServiceProvider } from "../services/middleware/MiddlewareServiceProvider";
-import { BroadcastServiceProvider } from "../services/pubsub/BroadcastServiceProvider";
 import { QueueServiceProvider } from "../services/queue/QueueServiceProvider";
 import { RateLimiterServiceProvider } from "../services/rate-limiter/RateLimiterServiceProvider";
 import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
@@ -52,7 +51,6 @@ export const frameworkProviders: ServiceProviderConstructor[] = [
   QueueServiceProvider,
   EventServiceProvider,
   RedisServiceProvider,
-  BroadcastServiceProvider,
   ImageServiceProvider,
   TranslationServiceProvider,
   RateLimiterServiceProvider,

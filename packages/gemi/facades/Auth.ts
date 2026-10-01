@@ -7,7 +7,6 @@ import {
   InsufficientPermissionsError,
 } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
-import { Broadcast } from "./Broadcast";
 import { Facade } from "./Facade";
 
 export class Auth extends Facade {
@@ -17,8 +16,6 @@ export class Auth extends Facade {
 
   static async user(): Promise<User> {
     const requestContextStore = RequestContext.getStore();
-    const broadcastingContextStore =
-      Broadcast.getFacadeRoot().context.getStore();
 
     let accessToken = "";
     let userAgent = "";
@@ -26,11 +23,6 @@ export class Auth extends Facade {
     if (requestContextStore?.req) {
       accessToken = requestContextStore.req.cookies.get("access_token");
       userAgent = requestContextStore.req.headers.get("User-Agent");
-    }
-
-    if (broadcastingContextStore?.cookies) {
-      userAgent = broadcastingContextStore.headers.get("User-Agent");
-      accessToken = broadcastingContextStore.cookies.get("access_token");
     }
 
     let user = requestContextStore?.user;
