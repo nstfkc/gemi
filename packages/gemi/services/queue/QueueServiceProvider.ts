@@ -85,7 +85,11 @@ export class QueueServiceProvider extends ServiceProvider {
    * work: `drain()` then resolves only once every job has finished, by which
    * point nothing is unfinished and the list below is always empty — and the
    * operator who needed it got `Application`'s generic "did not finish within
-   * the provider shutdown deadline" instead, which names no job at all.
+   * the provider shutdown deadline" instead, which names no job at all.   *
+   * A drain that left jobs running resolves `{ abandoned: true }`, so
+   * `Application` reports this provider in `timedOut` and the process exits 1:
+   * the jobs are named in the log, and the exit code shows the stop was not
+   * clean (#580).
    */
   async shutdown(options?: { timeoutMs: number }) {
     // Resolving the manager now would build a driver only to stop it.
@@ -105,6 +109,7 @@ export class QueueServiceProvider extends ServiceProvider {
         `[gemi] Queued jobs still running at shutdown: ` +
           unfinished.map((job) => `${job.name} (${job.id})`).join(", "),
       );
+      return { abandoned: true };
     }
   }
 }
