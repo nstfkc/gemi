@@ -344,6 +344,26 @@ describe("AzureOpenAIProvider", () => {
     expect((calls[1]!.init.headers as Record<string, string>).authorization).toBe("Bearer token-2");
   });
 
+  /**
+   * #682. MEASURED on Azure: a `user_data` upload answers a `file-…` id that
+   * the Responses API then refuses ("Expected an ID that begins with
+   * 'assistant'") in every turn of the thread; `assistants` answers an
+   * `assistant-…` id that works as `input_file` and `input_image`.
+   */
+  test("upload posts with purpose assistants, not OpenAI's user_data", async () => {
+    const calls = stubFetch(new Response(JSON.stringify({ id: "assistant-abc" })));
+    const fileId = await azure().upload(
+      new File(["%PDF"], "brief.pdf", { type: "application/pdf" }),
+    );
+
+    expect(fileId).toBe("assistant-abc");
+    expect(calls[0]!.init.body).toBeInstanceOf(FormData);
+    expect((calls[0]!.init.body as FormData).get("purpose")).toBe("assistants");
+    expect((calls[0]!.init.headers as Record<string, string>)["api-key"]).toBe("azure-key");
+    // Setting content-type by hand would drop the multipart boundary.
+    expect((calls[0]!.init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+  });
+
   test("uploads follow the same fork, and are resource-scoped either way", async () => {
     const calls = stubFetch(new Response(JSON.stringify({ id: "assistant-file-1" })));
     await azure().upload(new File(["x"], "x.txt"));
