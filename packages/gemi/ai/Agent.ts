@@ -893,7 +893,39 @@ const EMPTY_PARAMETERS = {
 
 // --- agent ---------------------------------------------------------------
 
-export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
+/**
+ * How hard the model should think before it answers, sent as the provider's own
+ * effort setting (`reasoning.effort` on the Responses API).
+ *
+ * WHICH VALUES A MODEL TAKES IS THE MODEL'S BUSINESS, not gemi's. gpt-5 takes
+ * `"minimal"` and not `"none"`; gpt-5.1 and later take `"none"`; Azure's
+ * gpt-6-sol answers 400 to `"minimal"` and lists `none | low | medium | high |
+ * xhigh | max` (#658). A closed union meant an app could not say the one value
+ * its model wanted, and every new value waited on a gemi release. So the known
+ * values are listed for autocomplete and any other string is passed through
+ * unchanged — the same bet `capabilitiesForModel` makes on unknown model ids: a
+ * value the model rejects fails loudly, once, with the API naming the values it
+ * does accept (on `result().error`), and the fix is one line.
+ *
+ * `"none"` turns reasoning off on models that support it, which is what a short,
+ * latency-bound call wants: with any effort at all, `maxOutputTokens` caps the
+ * reasoning tokens too, and a small cap can be spent entirely on thinking. It is
+ * not the same as leaving `reasoning` unset, which gets the model's default
+ * (usually `"medium"`). On a model with no reasoning parameter at all
+ * (`capabilities.reasoning` is false) every value, `"none"` included, is
+ * dropped, since there is nothing to turn off.
+ */
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  // `string & {}` keeps the literals above in autocomplete; a bare `string`
+  // would swallow them.
+  | (string & {});
 
 export interface CreateAgentParams<
   T extends readonly ToolEntry[],
@@ -927,6 +959,9 @@ export interface CreateAgentParams<
    * recursive shape a name check cannot see, and for the merely runaway one.
    */
   maxDepth?: number;
+  /** The model's reasoning effort, e.g. `"none"` for a quick one-liner or
+   *  `"high"` for a hard problem. Unset gets the model's default. Any string
+   *  the model accepts works — see `ReasoningEffort`. */
   reasoning?: ReasoningEffort;
   /**
    * A ceiling on the tokens one model call may produce, passed to the provider
