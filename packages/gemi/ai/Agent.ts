@@ -1,3 +1,4 @@
+import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
@@ -21,6 +22,7 @@ import type {
   ToolAttachments,
 } from "./store/Attachments";
 import { ATTACHMENT_ID_PREFIX, InvalidAttachmentScopeError } from "./store/Attachments";
+import { httpErrorDetail } from "./providers/errors";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -413,6 +415,9 @@ export interface NestedRunResult<O = unknown> {
   usage: Usage;
   /** Set when the sub-agent declares an `output` schema and the run finished. */
   output?: O;
+  /** Why the sub-run failed: set exactly when `finishReason` is `"error"`. See
+   *  `AgentRunResult.error`. */
+  error?: AgentRunFailure;
   /** The record written to the parent's `ToolCallPart.nested`. */
   nested: NestedRun;
 }
@@ -877,6 +882,19 @@ export interface CreateAgentParams<
    * about its request that is not true.
    */
   temperature?: number;
+  /**
+   * Whether a run of this agent that ends with `finishReason: "error"` is
+   * written to the app's log (`Log.error`, so `storage/logs` and the log
+   * config's `onLogCreated`). Default `true`.
+   *
+   * On by default because the failure otherwise exists only as an `error` frame
+   * on a stream a server-side caller may never read, and `result()` resolves
+   * rather than rejects. A provider that cannot be reached, or a 400 for a
+   * parameter the model refuses, then looks like an agent that said nothing.
+   * Turn it off when the app already reports `result().error` (or the
+   * controller's `onError`) itself and a second line would be noise.
+   */
+  logErrors?: boolean;
 }
 
 /**
@@ -988,6 +1006,28 @@ export type NestedContext = {
   onPending: "escalate" | "deny";
 };
 
+/**
+ * Why a run ended with `finishReason: "error"`, as the server sees it.
+ *
+ * The same `code`, `message` and `retryable` as the `error` frame the run put
+ * on its stream, plus what only the server should have: the HTTP `status` and
+ * the provider's `requestId` when the failure was a response from the
+ * provider. Neither is ever written to a frame. A frame is built from this
+ * through one function (`toClientError`), which copies the `AgentError` fields
+ * by name, so a field added here stays server-side unless someone puts it there
+ * on purpose. That function is also where #446's `redactError` belongs.
+ *
+ * `message` is the provider's own sentence ("Unsupported parameter:
+ * 'temperature' ..."), which is what a log needs and why this is kept off the
+ * wire in any form richer than the frame already is.
+ */
+export type AgentRunFailure = AgentError & {
+  /** The provider's HTTP status, when the failure was a non-2xx response. */
+  status?: number;
+  /** The provider's request id (`x-request-id`), when it sent one. */
+  requestId?: string;
+};
+
 export type AgentRunResult<T extends ToolShapes, O> = {
   runId: string;
   /** Everything produced this run — the controller persists these. */
@@ -996,7 +1036,76 @@ export type AgentRunResult<T extends ToolShapes, O> = {
   usage: Usage;
   /** Set when the agent declares an `output` schema and the run finished. */
   output?: O;
+  /**
+   * Why the run failed. Set exactly when `finishReason` is `"error"`, and
+   * absent otherwise — an aborted run, `max-steps` and `length` are outcomes,
+   * not failures, and carry no error.
+   *
+   * Before this field a server-side caller that awaited `result()` saw only
+   * `finishReason: "error"` and no output: the cause was an `error` event on a
+   * stream it never read. Pass `result({ throwOnError: true })` to have the run
+   * reject with an `AgentRunError` instead.
+   */
+  error?: AgentRunFailure;
 };
+
+export type AgentResultOptions = {
+  /**
+   * Reject with an `AgentRunError` when the run ends with
+   * `finishReason: "error"`, instead of resolving with `result.error` set.
+   * Every other finish reason resolves as usual. Default `false`.
+   */
+  throwOnError?: boolean;
+};
+
+/**
+ * What `result({ throwOnError: true })` rejects with.
+ *
+ * It carries the whole `result` as well as the error's fields, because a run
+ * that failed on step three still produced steps one and two — their messages
+ * and their usage are billed and may need persisting — and a rejection that
+ * dropped them would make `throwOnError` the lossy way to call `result()`.
+ */
+export class AgentRunError extends Error {
+  readonly code: AgentRunFailure["code"];
+  readonly retryable: boolean;
+  readonly status?: number;
+  readonly requestId?: string;
+  readonly toolCallId?: string;
+  readonly runId: string;
+  readonly result: AgentRunResult<ToolShapes, unknown>;
+
+  constructor(result: AgentRunResult<ToolShapes, unknown> & { error: AgentRunFailure }) {
+    super(result.error.message);
+    this.name = "AgentRunError";
+    this.code = result.error.code;
+    this.retryable = result.error.retryable;
+    this.status = result.error.status;
+    this.requestId = result.error.requestId;
+    this.toolCallId = result.error.toolCallId;
+    this.runId = result.runId;
+    this.result = result;
+  }
+}
+
+/**
+ * The client's copy of a run's failure: the `AgentError` fields, named one by
+ * one, and nothing else.
+ *
+ * Named rather than spread so that a field added to `AgentRunFailure` cannot
+ * reach a browser by accident. This is the single place a run's own failure
+ * becomes a frame, which makes it where #446's `redactError` hook goes when it
+ * lands: it would map the value returned here, with the full `failure` still
+ * on `result().error` and in the log.
+ */
+function toClientError(failure: AgentRunFailure): AgentError {
+  return {
+    code: failure.code,
+    message: failure.message,
+    ...(failure.toolCallId !== undefined ? { toolCallId: failure.toolCallId } : {}),
+    retryable: failure.retryable,
+  };
+}
 
 /**
  * A run is an async iterable of events, and the SSE encoding is a method on it
@@ -1015,7 +1124,12 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
   /** Numbered events, replayable from a cursor. `toResponse` is this, encoded. */
   frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
   toResponse(params?: { from?: number }): Response;
-  result(): Promise<AgentRunResult<T, O>>;
+  /**
+   * Settles when the run is over. Resolves for every finish reason, `"error"`
+   * included, with the cause on `result.error`; pass `{ throwOnError: true }`
+   * to reject with an `AgentRunError` for that one instead.
+   */
+  result(options?: AgentResultOptions): Promise<AgentRunResult<T, O>>;
   /**
    * Cancels the run and closes the conversation behind it: every tool call
    * still in flight gets a `denied` result with `cause: "stopped"`, the
@@ -1050,6 +1164,7 @@ type RunConfig = {
   reasoning?: ReasoningEffort;
   maxOutputTokens?: number;
   temperature?: number;
+  logErrors: boolean;
 };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -1098,6 +1213,7 @@ export class Agent<
       reasoning: this.reasoning,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
+      logErrors: params.logErrors ?? true,
     };
   }
 
@@ -1360,6 +1476,8 @@ function bestEffortParse(text: string): any {
 type StepOutcome = {
   reason: FinishReason;
   error?: AgentError;
+  /** The HTTP response behind `error`, when the provider reported one. */
+  detail?: { status?: number; requestId?: string };
 };
 
 /**
@@ -1720,6 +1838,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private usage: Usage = emptyUsage();
   private finishReason: FinishReason = "stop";
+  /** Set by `fail`, and only there: the cause of a run that ends `"error"`. */
+  private failure: AgentRunFailure | undefined;
   private output: unknown;
   private stopReason: string | undefined;
 
@@ -1893,8 +2013,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     });
   }
 
-  result(): Promise<AgentRunResult<ToolShapes, unknown>> {
-    return this.settled;
+  result(options?: AgentResultOptions): Promise<AgentRunResult<ToolShapes, unknown>> {
+    if (!options?.throwOnError) return this.settled;
+    return this.settled.then((result) => {
+      if (result.error) throw new AgentRunError({ ...result, error: result.error });
+      return result;
+    });
   }
 
   stop(params?: { reason?: string }): void {
@@ -1925,8 +2049,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (error instanceof RunAborted || this.controller.signal.aborted) {
         await this.finalizeAborted();
       } else {
-        const normalized = this.config.provider.normalizeError(error);
-        this.emit({ type: "error", error: normalized });
+        this.fail(this.config.provider.normalizeError(error), httpErrorDetail(error));
         await this.finalizeMessage("error");
         this.finishReason = "error";
       }
@@ -1937,13 +2060,67 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.ended = true;
     this.wake();
 
+    const failure = this.finishReason === "error" ? this.failure : undefined;
+    if (failure && this.config.logErrors) this.logFailure(failure);
+
     return {
       runId: this.runId,
       messages: this.produced as AgentMessage<ToolShapes, unknown>[],
       finishReason: this.finishReason,
       usage: this.usage,
       output: this.output,
+      // Only when there is one, so a successful result has the same keys it
+      // always had.
+      ...(failure ? { error: failure } : {}),
     };
+  }
+
+  /**
+   * Records why the run is failing and puts the client's copy on the stream.
+   *
+   * The two are built apart on purpose. `failure` is the server's record —
+   * what `result().error` returns and what is logged — and carries the HTTP
+   * status and request id of the provider's response, when there was one.
+   * The frame gets `toClientError(failure)`: the `AgentError` fields only,
+   * exactly what it carried before `result().error` existed.
+   */
+  private fail(error: AgentError, detail: { status?: number; requestId?: string } = {}): void {
+    const failure: AgentRunFailure = { ...error, ...detail };
+    this.failure = failure;
+    this.emit({ type: "error", error: toClientError(failure) });
+  }
+
+  /**
+   * Through the app's logger, so it lands in `storage/logs` and `onLogCreated`.
+   *
+   * Outside an application — a script, a test, a run started before boot —
+   * there is no logger to resolve, and `Log.error` throws on the lookup. That
+   * case falls back to `console.error` rather than being dropped, since the
+   * point of this is that a failed run is never silent. In development it goes
+   * to the console as well, because `gemi dev` does not print the log file and
+   * the terminal is where a developer is looking.
+   */
+  private logFailure(failure: AgentRunFailure): void {
+    const message = `[gemi/ai] agent "${this.config.name}" run failed (${failure.code}${
+      failure.status !== undefined ? ` ${failure.status}` : ""
+    }): ${failure.message}`;
+    const metadata = {
+      agent: this.config.name,
+      runId: this.runId,
+      ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+      ...(this.depth > 0 ? { chain: this.chain } : {}),
+      error: failure,
+    };
+    let logged = false;
+    try {
+      Log.error(message, metadata);
+      logged = true;
+    } catch {
+      // No application to resolve a logger from. Reported below instead.
+    }
+    if (!logged || process.env.NODE_ENV === "development") {
+      console.error(message, metadata);
+    }
   }
 
   private async loop(): Promise<void> {
@@ -1954,7 +2131,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       const outcome = await this.runStep(message);
 
       if (outcome.error) {
-        this.emit({ type: "error", error: outcome.error });
+        this.fail(outcome.error, outcome.detail);
         await this.finalizeMessage("error");
         this.finishReason = "error";
         return;
@@ -2169,7 +2346,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "error": {
-          outcome = { reason: "error", error: event.error };
+          outcome = {
+            reason: "error",
+            error: event.error,
+            detail: httpErrorDetail(event),
+          };
           break;
         }
       }
@@ -2771,6 +2952,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       finishReason: result.finishReason,
       usage: record.usage ?? emptyUsage(),
       output: result.output ?? outputOf(record.messages),
+      ...(result.error ? { error: result.error } : {}),
       nested: record,
     };
   }

@@ -12,7 +12,15 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 
-import { Agent, AgentTool, Skill, ToolNamespace, type ToolShapesOf } from "./Agent";
+import {
+  Agent,
+  AgentRunError,
+  AgentTool,
+  Skill,
+  ToolNamespace,
+  type AgentRunFailure,
+  type ToolShapesOf,
+} from "./Agent";
 import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s, type Infer } from "./Schema";
@@ -338,5 +346,21 @@ describe("ctx.runAgent", () => {
       maxDepth: 1,
     });
     expectTypeOf(bounded.maxDepth).toEqualTypeOf<number>();
+  });
+});
+
+describe("a failed run on result() (#656)", () => {
+  const agent = Agent.create({ name: "plain", provider: OpenAIProvider.model("gpt-5.4") });
+
+  test("result().error is the server-side failure, optional", async () => {
+    const result = await agent.stream({ messages: [] }).result();
+    expectTypeOf(result.error).toEqualTypeOf<AgentRunFailure | undefined>();
+    expectTypeOf<AgentRunFailure["status"]>().toEqualTypeOf<number | undefined>();
+  });
+
+  test("throwOnError is an option of result(), and the result type is unchanged", () => {
+    const run = agent.stream({ messages: [] });
+    expectTypeOf(run.result({ throwOnError: true })).toEqualTypeOf(run.result());
+    expectTypeOf<AgentRunError["status"]>().toEqualTypeOf<number | undefined>();
   });
 });

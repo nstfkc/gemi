@@ -1,6 +1,6 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
-import { normalizeProviderError } from "./errors";
+import { httpErrorDetail, normalizeProviderError } from "./errors";
 import { requestWithRetry, type FetchLike } from "./http";
 import type { ResponsesRequest } from "./request";
 import { decodeChunks, emptyUsage, parseResponsesStream } from "./stream";
@@ -78,7 +78,9 @@ export async function* streamResponses(
     // An abort is not a failure to report: the run was stopped on purpose, and
     // `Agent` is already writing the ending. Saying so twice would put an error
     // in a transcript the user closed themselves.
-    if (normalized.code !== "aborted") yield { type: "error", error: normalized };
+    if (normalized.code !== "aborted") {
+      yield { type: "error", error: normalized, ...httpErrorDetail(error) };
+    }
     yield {
       type: "finish",
       reason: normalized.code === "aborted" ? "aborted" : "error",
