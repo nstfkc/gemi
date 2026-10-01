@@ -17,6 +17,7 @@ import {
   ScopedAttachments,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
+import { ProviderHttpError } from "./providers/errors";
 import { fakeProvider } from "./providers/fakeProvider";
 import { toResponsesInput } from "./providers/request";
 import { s } from "./Schema";
@@ -2885,4 +2886,78 @@ describe("the client's body reaches attachmentScope and authorizeRequest", () =>
     expect(calls[0]!.body).toEqual({ pageId: "pg_live" });
     expect(calls[0]!.attachments).not.toBeNull();
   });
+});
+
+/**
+ * #682: a provider that refuses the FILE is the person's problem to fix, not a
+ * 500. Both sentences below are verbatim Azure refusals (2026-10-01): the
+ * first for `.docx` under `purpose: "user_data"`, the second for `.exe` under
+ * `assistants`.
+ */
+describe("AgentController.upload when the provider refuses the file", () => {
+  function refusingChat(error: unknown) {
+    const run = new StubAgentRun("run_682");
+    const { agent } = stubAgent(run);
+    agent.provider.upload = async () => {
+      throw error;
+    };
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+    }
+    return new Chat();
+  }
+
+  test.each([
+    [
+      "brief.docx",
+      "Unsupported extension: .docx. Supported extensions: .txt, .md, .pdf, .csv, .json, .xml, .html, .png, .jpg, .jpeg, .gif, .tiff, .tif, .svg",
+    ],
+    [
+      "setup.exe",
+      'Invalid extension exe. Supported formats: "c", "cpp", "css", "csv", "doc", "docx"',
+    ],
+  ])(
+    "%s refused for its type is a 422 unsupported_file_type carrying the vendor's sentence",
+    async (name, message) => {
+      const controller = refusingChat(
+        new ProviderHttpError(400, { error: { message, code: "invalid_request" } }),
+      );
+      const error = await controller
+        .upload(uploadRequest(file(name, "application/octet-stream", "PK")))
+        .catch((err) => err);
+      expect(error.name).toBe("RejectedUploadError");
+      expect(error.payload.api).toEqual({
+        status: 422,
+        data: { error: { code: "unsupported_file_type", message } },
+      });
+    },
+  );
+
+  test("any other refusal of the body is a 422 file_rejected", async () => {
+    const controller = refusingChat(
+      new ProviderHttpError(413, { error: { message: "File too large." } }),
+    );
+    const error = await controller
+      .upload(uploadRequest(file("big.pdf", "application/pdf", "%PDF")))
+      .catch((err) => err);
+    expect(error.payload.api).toEqual({
+      status: 422,
+      data: { error: { code: "file_rejected", message: "File too large." } },
+    });
+  });
+
+  test.each([401, 429, 500])(
+    "a %i is not the file's fault and stays a server error",
+    async (status) => {
+      const original = new ProviderHttpError(status, { error: { message: "nope" } });
+      const controller = refusingChat(original);
+      const error = await controller
+        .upload(uploadRequest(file("a.pdf", "application/pdf", "%PDF")))
+        .catch((err) => err);
+      expect(error).toBe(original);
+    },
+  );
 });

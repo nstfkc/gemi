@@ -1,3 +1,32 @@
+# Unreleased
+
+## Azure attachments upload with purpose `assistants` (#682)
+
+`AzureOpenAIProvider.upload` sent `purpose: "user_data"`. Azure accepts that
+upload, but its Responses API refuses the `file-…` id it returns ("Expected
+an ID that begins with 'assistant'"), so every chat turn with an attachment
+failed on Azure. Every later turn of that thread failed too, because the file
+part is stored in it. Azure uploads now use `purpose: "assistants"` (ids start
+with `assistant-`). `OpenAIProvider` still uploads as `user_data`.
+
+- Nothing to change in your app. If you subclassed `AzureOpenAIProvider` to
+  override `upload` with `assistants`, delete the override.
+- Threads that already hold a `file-…` id from an Azure `user_data` upload
+  still fail. Start a new thread, or remove that file part from the stored
+  history.
+
+## A file the provider refuses is a 422, not a 500
+
+When the provider refuses an upload with 400, 413, 415 or 422 (for example,
+Azure answers an `.exe` with "Invalid extension exe. Supported formats: …"),
+`AgentController.upload` now answers **422** with
+`{ error: { code, message } }`. `message` is the provider's own sentence, and
+`code` is `unsupported_file_type` when the provider says the type is the
+problem and `file_rejected` otherwise. Before this the error went unhandled
+and became a 500. A 401, 403, 429 or 5xx from the provider is still a server
+error. With `assistants` Azure also accepts `.docx`, which it refused under
+`user_data`; a `.docx` attachment is read in a turn (measured 2026-10-01).
+
 # Upgrading from 0.83 to 0.84
 
 Breaking and behaviour changes first, in the order to check them:
