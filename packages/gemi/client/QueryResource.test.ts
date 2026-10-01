@@ -39,6 +39,16 @@ function createFetch() {
       settle({ ok, body });
       await vi.waitFor(() => {});
     },
+    /**
+     * Resolve the request at `index` among the ones still pending (0 is the
+     * oldest), so a test can make responses land out of order.
+     */
+    async resolveAt(index: number, body: any, ok = true) {
+      const [settle] = pending.splice(index, 1);
+      if (!settle) throw new Error(`No pending fetch at index ${index}`);
+      settle({ ok, body });
+      await vi.waitFor(() => {});
+    },
     pendingCount: () => pending.length,
   };
 }
@@ -566,5 +576,190 @@ describe("clearError", () => {
 
     resource.clearError();
     expect(subscriber).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("overlapping requests (#677)", () => {
+  test("an older refetch landing last does not overwrite the newer response", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+
+    resource.refetch(""); // request 1, sent after change A
+    resource.refetch(""); // request 2, sent after change B
+    expect(net.pendingCount()).toBe(2);
+
+    // Request 2 lands first, then the slow request 1.
+    await net.resolveAt(1, { images: ["a", "b"] });
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+    await net.resolveAt(0, { images: ["a"] });
+
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+    expect(resource.peek("")!.loading).toBe(false);
+  });
+
+  test("the same holds for overlapping mutate() calls", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+
+    resource.mutate("");
+    resource.mutate("");
+
+    await net.resolveAt(1, { images: ["a", "b"] });
+    await net.resolveAt(0, { images: ["a"] });
+
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+  });
+
+  test("in-order responses each land, so progress shows before the last one", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+
+    resource.refetch("");
+    resource.refetch("");
+
+    await net.resolveAt(0, { images: ["a"] });
+    expect(resource.peek("")!.data).toEqual({ images: ["a"] });
+    // A newer request is still on the wire, so the variant stays loading.
+    expect(resource.peek("")!.loading).toBe(true);
+
+    await net.resolveAt(0, { images: ["a", "b"] });
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+    expect(resource.peek("")!.loading).toBe(false);
+  });
+
+  test("a superseded request does not clear the in-flight flag of the newer one", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+
+    resource.refetch("");
+    resource.refetch("");
+    await net.resolveAt(0, { images: ["a"] });
+
+    // A render-time revalidation must join request 2, not start a third.
+    vi.setSystemTime(START + DEFAULT_STALE_TIME + 1);
+    resource.revalidate("");
+    expect(net.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a request sent before an optimistic mutate cannot overwrite it", async () => {
+    const resource = seeded("/todos", { "": [{ id: 1, done: false }] });
+
+    resource.refetch(""); // sent before the change
+    resource.mutate("", () => [{ id: 1, done: true }]); // optimistic + request 2
+
+    // The pre-change request lands after the optimistic write.
+    await net.resolveAt(0, [{ id: 1, done: false }]);
+    expect(resource.peek("")!.data).toEqual([{ id: 1, done: true }]);
+
+    // The mutate's own refetch is the source of truth once it lands.
+    await net.resolveAt(0, [{ id: 1, done: true, updatedAt: 1 }]);
+    expect(resource.peek("")!.data).toEqual([
+      { id: 1, done: true, updatedAt: 1 },
+    ]);
+  });
+
+  test("a request sent before an optimistic invalidate cannot overwrite it", async () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+    const release = resource.retain("");
+
+    resource.refetch("");
+    resource.invalidate("", () => [{ id: 1 }, { id: 2 }]);
+
+    await net.resolveAt(0, [{ id: 1 }]);
+    expect(resource.peek("")!.data).toEqual([{ id: 1 }, { id: 2 }]);
+
+    await net.resolveAt(0, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+    expect(resource.peek("")!.data).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    release();
+  });
+
+  test("a dropped response from the latest request still clears loading", async () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+
+    // Loud refetch, then an optimistic invalidate on an unwatched variant —
+    // it supersedes the request without sending a new one.
+    resource.refetch("");
+    expect(resource.peek("")!.loading).toBe(true);
+    resource.invalidate("", () => [{ id: 1 }, { id: 2 }]);
+
+    await net.resolveAt(0, [{ id: 1 }]);
+    expect(resource.peek("")!.data).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(resource.peek("")!.loading).toBe(false);
+    // Still stale, so the next read revalidates.
+    expect(resource.staleVariants.has("")).toBe(true);
+  });
+
+  test("an older request failing does not put an error over newer data", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    resource.refetch("");
+    resource.refetch("");
+
+    await net.resolveAt(1, { images: ["a", "b"] });
+    await net.resolveAt(0, { message: "boom" }, false);
+
+    const state = resource.peek("")!;
+    expect(state.error).toBeNull();
+    expect(state.data).toEqual({ images: ["a", "b"] });
+    expect(resource.failureCount("")).toBe(0);
+  });
+
+  test("an older request failing while the newer one is on the wire is ignored", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+
+    resource.refetch("");
+    resource.refetch("");
+
+    await net.resolveAt(0, { message: "boom" }, false);
+    expect(resource.peek("")!.error).toBeNull();
+    expect(resource.peek("")!.loading).toBe(true);
+
+    await net.resolveAt(0, { images: ["a"] });
+    expect(resource.peek("")!.data).toEqual({ images: ["a"] });
+    expect(resource.peek("")!.loading).toBe(false);
+  });
+
+  test("the latest request failing keeps the newest data, not the data at send time", async () => {
+    const resource = seeded("/pages/1", { "": { images: [] } });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    resource.refetch("");
+    resource.refetch("");
+
+    await net.resolveAt(0, { images: ["a"] });
+    await net.resolveAt(0, { message: "boom" }, false);
+
+    const state = resource.peek("")!;
+    expect(state.error).toBeInstanceOf(QueryError);
+    expect(state.data).toEqual({ images: ["a"] });
+    expect(resource.failureCount("")).toBe(1);
+  });
+
+  test("a suspended reader settles when the newer request lands, with its data", async () => {
+    const resource = seeded("/pages/1", {});
+
+    const { promise } = resource.read("");
+    resource.refetch(""); // a newer request for the same variant
+    let settled = false;
+    promise!.then(() => {
+      settled = true;
+    });
+
+    await net.resolveAt(1, { images: ["a", "b"] });
+    await vi.waitFor(() => expect(settled).toBe(true));
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+
+    await net.resolveAt(0, { images: [] });
+    expect(resource.peek("")!.data).toEqual({ images: ["a", "b"] });
+  });
+
+  test("variants are ordered independently", async () => {
+    const resource = seeded("/pages", { "page=1": [1], "page=2": [2] });
+
+    resource.refetch("page=1");
+    resource.refetch("page=2");
+
+    await net.resolveAt(1, [2, "new"]);
+    await net.resolveAt(0, [1, "new"]);
+
+    expect(resource.peek("page=1")!.data).toEqual([1, "new"]);
+    expect(resource.peek("page=2")!.data).toEqual([2, "new"]);
   });
 });
