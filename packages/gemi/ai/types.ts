@@ -94,6 +94,10 @@ export type AgentErrorCode =
   | "content_filtered"
   | "tool_error"
   | "invalid_tool_input"
+  /** The model's structured answer did not match the `output` schema, or never
+   *  finished — from `generate`, or from an agent's final turn. The message
+   *  says what was wrong, worded to be handed back to the model on a retry. */
+  | "invalid_output"
   /** A tool result came back for a call the server never made, or with a
    *  signature that does not verify. */
   | "invalid_tool_result"

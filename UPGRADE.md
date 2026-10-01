@@ -1,5 +1,97 @@
 # Unreleased
 
+Ships as 0.84. Two behaviour changes: an agent's schema mismatch reports
+`invalid_output`, and a shutdown that cuts off a job or cron tick exits `1`.
+
+## New: `generate()` and `ctx.generate()` — one model call with an output schema (#594)
+
+A typed answer without an agent: no tool loop, no nested transcript streamed to
+the browser, nothing written to the thread.
+
+```ts
+import { generate, s } from "gemi/ai";
+
+const result = await generate({
+  provider,
+  instructions,
+  prompt: `The business: ${description}`, // or `messages`, or both
+  output: s.object({ copies: s.array(s.object({ headline: s.string(), cta: s.string() })) }),
+  temperature: 0.9,
+  // maxOutputTokens, reasoning, signal, throwOnError, logErrors
+});
+
+if (result.ok) save(result.output); // typed from the schema
+```
+
+Inside an agent tool, call `ctx.generate({ ... })` instead. It is the same
+function with the turn bound in: it aborts when the user stops the turn, and its
+usage counts toward the turn's `usage`, the way a sub-agent's does. A `signal`
+you pass (say `AbortSignal.timeout(30_000)`) is combined with the tool call's
+`ctx.signal`, so a stop, the run's `maxRunDurationMs` and the tool's
+`timeoutMs` all cancel it. A stop or the run's deadline makes `ctx.generate`
+throw, so the tool body doesn't carry on; the tool's own `timeoutMs` comes back
+as `code: "timeout"`.
+
+**A bad answer is returned, not thrown.** The result is
+`{ ok: true, output, messages, usage, finishReason }` or
+`{ ok: false, error, messages, usage, finishReason }`:
+
+- `messages` is the whole transcript (what you passed, the prompt, the model's
+  reply) on both arms. On failure the reply holds the raw text the model wrote,
+  so a retry continues the conversation:
+
+  ```ts
+  let messages: AgentMessage[] = [];
+  let prompt = `The business: ${description}`;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = await generate({ provider, instructions, messages, prompt, output });
+    if (result.ok) return result.output;
+    messages = result.messages;
+    prompt = `Your output was rejected:\n${result.error.message}\nReturn it again, fixed.`;
+  }
+  ```
+
+- `usage` is on both arms, because a failed answer was still billed.
+- `error.code` is `invalid_output` (did not match the schema, cut off at
+  `maxOutputTokens` — then `finishReason` is `"length"` — or missing),
+  `timeout` (the signal aborted with a `TimeoutError`, such as
+  `AbortSignal.timeout`; retryable), `aborted` (any other abort, such as a
+  stop), or the provider's normalized code (`rate_limited`,
+  `content_filtered`, ...). `timeout` is the same code an agent run's deadline
+  and a tool's `timeoutMs` report.
+- `error` is an `AgentRunFailure`, like an agent run's `result().error`: when
+  the provider answered with an error it also has the HTTP `status` and the
+  provider's `requestId`. Neither ever reaches a client.
+
+It behaves like an agent run in two more ways:
+
+- **`throwOnError: true`** rejects with an `AgentRunError` instead of resolving
+  `ok: false`, and the result is then typed as the `ok: true` arm. The error
+  has the `code`, `retryable`, `status` and `requestId`, a `gen_` id in
+  `runId`, and the `messages`, `usage` and `finishReason` on `result`. Unlike a
+  run, a stop rejects too (`code: "aborted"`), because there is no output to
+  resolve with.
+- **A failure is logged** through `Log.error`, so it lands in `storage/logs`
+  and `onLogCreated`. In `gemi dev` it also goes to the console, and outside an
+  application it goes to `console.error`. A stop is not logged. Inside a tool
+  the line names the agent, run and tool call. Pass `logErrors: false` when you
+  handle `result.error` yourself, for example in a retry loop that expects an
+  occasional `invalid_output`.
+
+An `s.json()` schema works as it does for an agent: it is sent non-strict.
+
+`ctx.generate` is **not memoized**. `ctx.runAgent` and `ctx.generateImage` replay
+from what they recorded on the tool call when an escalating tool is re-entered;
+`ctx.generate` records nothing, so a re-entered tool calls the model again.
+
+## An agent's schema mismatch reports `invalid_output`, not `unknown` — behaviour change
+
+`AgentErrorCode` gained `invalid_output`. When an agent's final answer does not
+match its `output` schema, the `error` event it emits now has
+`code: "invalid_output"` instead of `"unknown"`; the message is unchanged. Only
+code that matched on `"unknown"` to detect this needs updating. An exhaustive
+`switch` over `AgentErrorCode` needs the new case.
+
 ## `auth` trusts a user middleware signed in, and `Auth.user()` reads the `access_token` header (#577, #587)
 
 What counts as signed in is now one rule, shared by the `auth` middleware and

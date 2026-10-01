@@ -2,6 +2,24 @@ import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
+import {
+  generateWithin,
+  type GenerateParams,
+  type GenerateResult,
+  type GenerateSuccess,
+} from "./generate";
+import {
+  addUsage,
+  appendReasoning,
+  appendText,
+  bestEffortParse,
+  emptyUsage,
+  outputFormat,
+  parseOutput,
+  raceAbort,
+  resolveRope,
+  RunAborted,
+} from "./runtime";
 import { supportsStrict } from "./Schema";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
@@ -242,6 +260,44 @@ export interface ToolContext {
    * checkpoint API, because that is a much larger feature than this one.
    */
   runAgent<A extends AnyAgent>(agent: A, params?: RunAgentParams): Promise<NestedRunResult>;
+
+  /**
+   * One model call with an output schema, from inside this tool: `generate`,
+   * bound to the turn. For a typed answer that needs no tools — where a
+   * sub-agent would bring a tool loop nobody wants and stream a transcript to
+   * the browser for a value it never renders.
+   *
+   *     const result = await ctx.generate({ provider, instructions, prompt, output });
+   *     if (!result.ok) return { error: result.error.message };
+   *
+   * WHAT THE BINDING ADDS, and why it is not left to the caller: the call
+   * aborts with the turn (`ctx.signal`), and its usage counts toward the turn,
+   * the way a nested run's does. Passing the signal by hand is easy to forget
+   * and the failure is invisible — a `stop()` that does not stop, and a bill
+   * the run under-reports. A `signal` of the tool's own (a timeout) is
+   * combined with the turn's, never swapped for it.
+   *
+   * SERVER ONLY. No frame reaches the client and nothing is written to the
+   * transcript; the tool returns whatever it makes of the answer.
+   *
+   * A BAD ANSWER IS A RESULT, NOT A THROW — `{ ok: false, error, messages,
+   * usage }`, so a retry continues `messages` — unless `throwOnError` is set.
+   * It is logged unless `logErrors: false`, with the agent, run and tool call
+   * it came from. See `generate`. A tool's own `timeoutMs` reaches it through
+   * `ctx.signal` and comes back as `code: "timeout"`. The exception is the
+   * turn itself being stopped, or reaching its deadline: then this throws, as
+   * `runAgent` does, so the body does not carry on with half an answer while
+   * the run around it is already closing — its result would be discarded
+   * anyway.
+   *
+   * NOT MEMOIZED. A tool re-entered after an escalation calls the model again,
+   * unlike `runAgent` and `generateImage`, which replay from what they recorded
+   * on the tool call. This records nothing, by design.
+   */
+  generate<O extends Schema<any>>(
+    params: GenerateParams<O> & { throwOnError: true },
+  ): Promise<GenerateSuccess<Infer<O>>>;
+  generate<O extends Schema<any>>(params: GenerateParams<O>): Promise<GenerateResult<Infer<O>>>;
 
   /**
    * Renders an image and parks it, in one step, wired into this tool call.
@@ -1548,50 +1604,6 @@ async function readSkillFile(file: string): Promise<string> {
 
 // --- the run -------------------------------------------------------------
 
-class RunAborted extends Error {
-  constructor() {
-    super("The run was stopped");
-    this.name = "RunAborted";
-  }
-}
-
-function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) {
-    return Promise.reject(new RunAborted());
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new RunAborted());
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-
-function emptyUsage(): Usage {
-  return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-}
-
-function addUsage(total: Usage, next: Usage | undefined): Usage {
-  if (!next) return total;
-  const merged: Usage = {
-    inputTokens: total.inputTokens + (next.inputTokens ?? 0),
-    outputTokens: total.outputTokens + (next.outputTokens ?? 0),
-    totalTokens: total.totalTokens + (next.totalTokens ?? 0),
-  };
-  if (next.reasoningTokens !== undefined || total.reasoningTokens !== undefined) {
-    merged.reasoningTokens = (total.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0);
-  }
-  if (next.cachedInputTokens !== undefined || total.cachedInputTokens !== undefined) {
-    merged.cachedInputTokens = (total.cachedInputTokens ?? 0) + (next.cachedInputTokens ?? 0);
-  }
-  if (next.imageInputTokens !== undefined || total.imageInputTokens !== undefined) {
-    merged.imageInputTokens = (total.imageInputTokens ?? 0) + (next.imageInputTokens ?? 0);
-  }
-  if (next.imageOutputTokens !== undefined || total.imageOutputTokens !== undefined) {
-    merged.imageOutputTokens = (total.imageOutputTokens ?? 0) + (next.imageOutputTokens ?? 0);
-  }
-  return merged;
-}
-
 function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown, unknown, void> {
   return (
     typeof value === "object" &&
@@ -1599,52 +1611,6 @@ function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown, unkn
     typeof (value as AsyncGenerator).next === "function" &&
     Symbol.asyncIterator in (value as object)
   );
-}
-
-/**
- * The best parse of a JSON document that is still arriving.
- *
- * Exists so a UI can bind fields before the object closes. It closes whatever
- * brackets are open and drops a trailing key with no value; when even that does
- * not parse it gives up and returns an empty object rather than throwing,
- * because a snapshot is a convenience and a run must not die for one.
- */
-function bestEffortParse(text: string): any {
-  if (!text.trim()) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    // fall through to repair
-  }
-  const closers: string[] = [];
-  let inString = false;
-  let escaped = false;
-  for (const char of text) {
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') inString = true;
-    else if (char === "{") closers.push("}");
-    else if (char === "[") closers.push("]");
-    else if (char === "}" || char === "]") closers.pop();
-  }
-  let repaired = text;
-  if (inString) repaired += '"';
-  repaired = repaired.replace(/[,:]\s*$/, "");
-  const suffix = closers.reverse().join("");
-  try {
-    return JSON.parse(repaired + suffix);
-  } catch {
-    // A trailing `"key":` leaves a property with no value; drop the key too.
-    try {
-      return JSON.parse(repaired.replace(/,?\s*"[^"]*"\s*$/, "") + suffix);
-    } catch {
-      return {};
-    }
-  }
 }
 
 type StepOutcome = {
@@ -2460,13 +2426,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       messages: this.historyForProvider(message),
       systemPrompt: await this.systemPrompt(),
       tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
-      output: this.config.output
-        ? {
-            name: "output",
-            schema: this.config.output.toJSONSchema(),
-            strict: supportsStrict(this.config.output),
-          }
-        : undefined,
+      output: this.config.output ? outputFormat(this.config.output) : undefined,
       reasoning: this.config.reasoning,
       maxOutputTokens: this.config.maxOutputTokens,
       temperature: this.config.temperature,
@@ -2608,19 +2568,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // itself, or it completes a partial output the server withheld.
     if (truncated) this.outputTruncated = true;
     if (this.config.output && outputText && !outcome.error && !truncated) {
-      const parsed = this.config.output.safeParse(bestEffortParse(outputText));
+      const parsed = parseOutput(this.config.output, outputText);
       if (parsed.ok === true) {
         this.output = parsed.value;
         message.content.push({ type: "output", value: parsed.value });
       } else {
-        this.emit({
-          type: "error",
-          error: {
-            code: "unknown",
-            message: `The model's structured answer did not match the output schema: ${parsed.errors.join(", ")}`,
-            retryable: true,
-          },
-        });
+        this.emit({ type: "error", error: parsed.error });
       }
     }
 
@@ -2907,6 +2860,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       editImage: files.editImage,
       turn: this.toolTurn(messageId),
       runAgent: this.nestedRunner(messageId, call, signal, resume),
+      generate: ((params: GenerateParams) =>
+        this.generateForTool(params, signal, call.toolCallId)) as ToolContext["generate"],
     };
 
     try {
@@ -2965,6 +2920,45 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         },
       };
     }
+  }
+
+  /**
+   * `ctx.generate`. See `ToolContext.generate` for why the binding matters.
+   *
+   * The usage is added before the abort check on purpose: a call cut short by
+   * `stop()` may still have been billed for what it produced, and the turn's
+   * total is the one place an app reads what the turn cost.
+   */
+  private async generateForTool(
+    params: GenerateParams,
+    callSignal: AbortSignal,
+    toolCallId: string,
+  ): Promise<GenerateResult<unknown>> {
+    // `callSignal` is the tool call's `ctx.signal`: it aborts on a stop, at the
+    // run's deadline, and at the tool's own `timeoutMs`. Only the first two
+    // abort the turn (`controller.signal`), and only those throw below.
+    const turn = this.controller.signal;
+    return generateWithin(
+      {
+        ...params,
+        signal: params.signal ? AbortSignal.any([callSignal, params.signal]) : callSignal,
+      },
+      {
+        origin: {
+          agent: this.config.name,
+          runId: this.runId,
+          ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+          toolCallId,
+        },
+        // Before the failure is logged or thrown: the usage was billed either
+        // way, and a stopped turn throws `RunAborted` rather than a
+        // `throwOnError` rejection the tool might catch and carry on from.
+        settled: (result) => {
+          this.usage = addUsage(this.usage, result.usage);
+          if (turn.aborted) throw new RunAborted();
+        },
+      },
+    );
   }
 
   // --- nested runs -------------------------------------------------------
@@ -4438,82 +4432,4 @@ function parseArgs(args: string): any {
   } catch {
     return args;
   }
-}
-
-/**
- * Resolves a string built by repeated concatenation, in place.
- *
- * `text = text + delta`, run once per streamed token, does not build a string —
- * it builds a rope: a tree of pointers to every fragment, which the engine
- * flattens only when something needs the characters contiguously. A message
- * that nothing reads before it is persisted therefore keeps all of its
- * fragments alive, and the tree costs several times the text.
- *
- * Measured on Bun 1.x, 600 deltas of six characters (a ~450-token answer, 3.5 KB
- * of ASCII): held as a rope, 18.7 KB. Resolved, 3.5 KB — half the UTF-16 size,
- * because a flat ASCII string is stored one byte per character and a rope
- * cannot be. That is 5.3x, and it is paid by every message a store keeps and
- * every run the live registry holds.
- *
- * Indexing is what forces the resolution: `text[0]` cannot be answered without
- * the characters, so the engine collapses the tree and drops the fragments.
- * Nothing is allocated and nothing is copied, which is why this is not
- * `split("").join("")` — that measures the same but allocates one string per
- * character to get there.
- *
- * DO NOT DELETE THIS AS A NO-OP. It reads like one and it is not; the value is
- * the side effect on the receiver. If a future engine does not resolve on
- * index, this silently becomes a real no-op and memory returns to what it is
- * today — a safe failure, which is why it is written as a hint rather than as a
- * round trip through an encoder that would also mangle a lone surrogate.
- */
-function resolveRope(text: string): string {
-  if (text.length > 0) void text[0];
-  return text;
-}
-
-function appendText(message: AgentMessage, type: "text" | "reasoning", delta: string) {
-  const last = message.content[message.content.length - 1];
-  if (last && last.type === type) {
-    (last as { text?: string }).text = ((last as { text?: string }).text ?? "") + delta;
-    return;
-  }
-  message.content.push(
-    type === "text" ? { type: "text", text: delta } : { type: "reasoning", text: delta },
-  );
-}
-
-/**
- * Reasoning is accumulated per ITEM, not per message, and the item's id is kept.
- *
- * This used to go through `appendText`, which merges on the part *type* alone
- * and has nowhere to put an id. Both halves of that were wrong and neither was
- * visible in the transcript:
- *
- *   - `request.ts` drops a reasoning item with no id, deliberately — the id is
- *     the API's handle on the stored reasoning and a fabricated one would look
- *     like continuity that is not there. So an id dropped here meant reasoning
- *     was never sent back at all: on a two-step run the model re-derived its
- *     own argument from nothing, and the prompt cache (which keys on the
- *     literal item) missed every time. Measured against the live Responses API
- *     in `live/live.test.ts`: the second call's input carried zero reasoning
- *     items.
- *   - a step that produces two reasoning items was flattening them into one
- *     part, so even with an id there would have been one id for two items'
- *     text.
- *
- * A part with no id is still appended rather than dropped: the text is what a
- * UI renders, and a provider that reports no item id (Azure does not always)
- * should still show its thinking. It just cannot be echoed back, which is the
- * bargain `reasoningItem` already documents.
- */
-function appendReasoning(message: AgentMessage, id: string | undefined, delta: string) {
-  const last = message.content[message.content.length - 1];
-  if (last && last.type === "reasoning" && last.id === id) {
-    last.text = (last.text ?? "") + delta;
-    return;
-  }
-  message.content.push(
-    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
-  );
 }
