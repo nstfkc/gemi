@@ -1,5 +1,7 @@
-import type { ReasoningEffort } from "./Agent";
+import { Log } from "../facades/Log";
+import { AgentRunError, type AgentRunFailure, type ReasoningEffort } from "./Agent";
 import type { AgentProvider } from "./AgentProvider";
+import { httpErrorDetail } from "./providers/errors";
 import {
   addUsage,
   appendReasoning,
@@ -47,13 +49,21 @@ import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
  * exception. Usage is on both because the tokens were billed either way, and
  * the failed attempt is the one an app repeats. It is also how the rest of the
  * module already reports: `Schema.safeParse` returns a result, and a failing
- * tool is a result the model reads.
+ * tool is a result the model reads. Pass `throwOnError: true` to have it
+ * reject with an `AgentRunError` instead, as `run.result()` can.
+ *
+ * A FAILURE IS LOGGED through `Log.error` by default, as a failed agent run is
+ * (`logErrors: false` turns it off); a stop is not a failure and is not. On
+ * `ok: false`, `error` also carries the provider's HTTP `status` and
+ * `requestId` when it answered with an error, as `result().error` does.
  *
  * `error.code` says which failure it was:
  *
  *   - `invalid_output` — the answer did not match the schema, was cut off at
  *     `maxOutputTokens` (then `finishReason` is `"length"`), or never came.
- *   - `aborted` — `signal` fired: a stop, or an `AbortSignal.timeout`.
+ *   - `timeout` — `signal` fired with a `TimeoutError`: an
+ *     `AbortSignal.timeout`, or the tool's `timeoutMs` under `ctx.generate`.
+ *   - `aborted` — `signal` fired for any other reason: a stop.
  *   - anything else — the provider failed, normalized by the provider's own
  *     `normalizeError` exactly as a failed agent step is (`rate_limited`,
  *     `content_filtered`, `provider_error`, …).
@@ -67,7 +77,83 @@ import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
  * again. `ctx.runAgent` and `ctx.generateImage` can replay because they record
  * on the tool call; this has nothing to record into by design.
  */
-export async function generate<O extends Schema<any>>(
+export function generate<O extends Schema<any>>(
+  params: GenerateParams<O> & { throwOnError: true },
+): Promise<GenerateSuccess<Infer<O>>>;
+export function generate<O extends Schema<any>>(
+  params: GenerateParams<O>,
+): Promise<GenerateResult<Infer<O>>>;
+export function generate(params: GenerateParams): Promise<GenerateResult<unknown>> {
+  return generateWithin(params);
+}
+
+/**
+ * Where a `generate` call was made from, for its log line: `ctx.generate`
+ * passes the agent, run and tool call it belongs to.
+ */
+export type GenerateOrigin = Record<string, unknown>;
+
+/**
+ * `generate`, plus what `ctx.generate` needs to bind it to a turn: the origin
+ * for the log line, and `settled`, which sees the result before it is logged
+ * or thrown. That is where the turn adds the usage (billed whether or not the
+ * answer parsed, and whether or not it is about to throw) and throws when the
+ * turn itself was stopped.
+ */
+export async function generateWithin(
+  params: GenerateParams,
+  hooks: { origin?: GenerateOrigin; settled?: (result: GenerateResult<unknown>) => void } = {},
+): Promise<GenerateResult<unknown>> {
+  // An id for the call, so the log line and an `AgentRunError` can be matched
+  // up. `gen_` rather than `run_`: there is no run, and nothing is stored.
+  const id = `gen_${crypto.randomUUID()}`;
+  const result = await callModel(params);
+  hooks.settled?.(result);
+  if (!result.ok) {
+    // A stop is an outcome the caller asked for, not a failure — the same rule
+    // an agent run follows (an aborted run carries no `error` and is not
+    // logged). A timeout is a failure: it reports `timeout`, as a run's
+    // deadline does, and is logged.
+    if (params.logErrors !== false && result.error.code !== "aborted") {
+      logFailure(id, result.error, hooks.origin);
+    }
+    if (params.throwOnError) {
+      throw new AgentRunError({
+        runId: id,
+        messages: result.messages,
+        finishReason: result.finishReason,
+        usage: result.usage,
+        error: result.error,
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * Through the app's logger, as a failed agent run is (`AgentRunImpl.logFailure`):
+ * `Log.error`, so it lands in `storage/logs` and `onLogCreated`; outside an
+ * application, where there is no logger to resolve, `console.error` instead;
+ * and in development the console as well.
+ */
+function logFailure(id: string, failure: AgentRunFailure, origin?: GenerateOrigin): void {
+  const message = `[gemi/ai] generate() failed (${failure.code}${
+    failure.status !== undefined ? ` ${failure.status}` : ""
+  }): ${failure.message}`;
+  const metadata = { ...origin, generateId: id, error: failure };
+  let logged = false;
+  try {
+    Log.error(message, metadata);
+    logged = true;
+  } catch {
+    // No application to resolve a logger from. Reported below instead.
+  }
+  if (!logged || process.env.NODE_ENV === "development") {
+    console.error(message, metadata);
+  }
+}
+
+async function callModel<O extends Schema<any>>(
   params: GenerateParams<O>,
 ): Promise<GenerateResult<Infer<O>>> {
   const prior = params.messages ?? [];
@@ -99,6 +185,9 @@ export async function generate<O extends Schema<any>>(
   let usage = emptyUsage();
   let reason: FinishReason = "stop";
   let error: AgentError | undefined;
+  // The HTTP status and request id of a failed provider response, as an agent
+  // run records them on `result().error` (#656). Server-side only.
+  let detail: { status?: number; requestId?: string } = {};
   let outputText = "";
 
   try {
@@ -146,6 +235,7 @@ export async function generate<O extends Schema<any>>(
           case "error":
             reason = "error";
             error = event.error;
+            detail = httpErrorDetail(event);
             break;
           // `tool-call-delta`, `tool-call` and `tool-search` cannot happen:
           // no tools were sent.
@@ -164,6 +254,7 @@ export async function generate<O extends Schema<any>>(
     } else {
       reason = "error";
       error = params.provider.normalizeError(thrown);
+      detail = httpErrorDetail(thrown);
     }
   }
 
@@ -220,15 +311,18 @@ export async function generate<O extends Schema<any>>(
   if (answered) {
     return { ok: true, output: output as Infer<O>, messages, usage, finishReason: reason };
   }
-  return { ok: false, error: error!, messages, usage, finishReason: reason };
+  return { ok: false, error: { ...error!, ...detail }, messages, usage, finishReason: reason };
 }
 
 function abortError(signal: AbortSignal): AgentError {
-  // `AbortSignal.timeout()` aborts with a `TimeoutError`, and saying so is the
-  // difference between "somebody pressed stop" and "try again with more time".
+  // `AbortSignal.timeout()` aborts with a `TimeoutError` (and so does a tool's
+  // `timeoutMs`, through `ctx.signal`), and saying so is the difference
+  // between "somebody pressed stop" and "try again with more time".
   const timedOut = (signal.reason as { name?: unknown } | undefined)?.name === "TimeoutError";
+  // The same code an agent run's deadline and a tool's `timeoutMs` report
+  // (#455), so one branch on `"timeout"` covers all three.
   return timedOut
-    ? { code: "aborted", message: "The generation timed out.", retryable: true }
+    ? { code: "timeout", message: "The generation timed out.", retryable: true }
     : { code: "aborted", message: "The generation was stopped.", retryable: false };
 }
 
@@ -263,13 +357,30 @@ export interface GenerateParams<O extends Schema<any> = Schema<any>> {
    *  `CreateAgentParams.temperature`. */
   temperature?: number;
   /**
-   * Stops the call; it then resolves `ok: false` with `code: "aborted"`.
+   * Stops the call; it then resolves `ok: false` with `code: "aborted"`, or
+   * `code: "timeout"` when it aborted with a `TimeoutError`.
    * `AbortSignal.timeout(ms)` is how to bound one.
    *
    * On `ctx.generate` this is combined with the turn's signal rather than
    * replacing it, so a timeout of the tool's own cannot unhook a `stop()`.
    */
   signal?: AbortSignal;
+  /**
+   * Reject with an `AgentRunError` instead of resolving `ok: false`, as
+   * `run.result({ throwOnError: true })` does for an agent. Its `result` holds
+   * the `messages`, `usage` and `error`, and its `runId` is the call's
+   * `gen_` id. Any `ok: false` rejects, a stop included, since there is no
+   * output to resolve with; the return type is then the `ok: true` arm.
+   * Default `false`.
+   */
+  throwOnError?: boolean;
+  /**
+   * Write a failed call to the app's log (`Log.error`), as a failed agent run
+   * is. Default `true`. A stop (`code: "aborted"`) is not a failure and is not
+   * logged. Turn it off when the caller reports `result.error` itself — a
+   * retry loop that expects `invalid_output` now and then, say.
+   */
+  logErrors?: boolean;
 }
 
 /** The parts of a `GenerateResult` both arms have. */
@@ -294,5 +405,15 @@ interface GenerateOutcome {
  * `{ ok, output, error }` compiles, and checking `ok` narrows both.
  */
 export type GenerateResult<O> =
-  | (GenerateOutcome & { ok: true; output: O; error?: undefined })
-  | (GenerateOutcome & { ok: false; error: AgentError; output?: undefined });
+  | GenerateSuccess<O>
+  | (GenerateOutcome & {
+      ok: false;
+      /** The `AgentError`, plus the provider's HTTP `status` and `requestId`
+       *  when the failure was a response from it — as on an agent run's
+       *  `result().error`. */
+      error: AgentRunFailure;
+      output?: undefined;
+    });
+
+/** The `ok: true` arm of `GenerateResult`, and what `throwOnError` resolves. */
+export type GenerateSuccess<O> = GenerateOutcome & { ok: true; output: O; error?: undefined };

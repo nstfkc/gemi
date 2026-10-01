@@ -110,7 +110,7 @@ export type {
 // A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same
 // function bound to the turn — see `ToolContext.generate`.
 export { generate } from "./generate";
-export type { GenerateParams, GenerateResult } from "./generate";
+export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate";
 
 // --- an app's API routes as tools ------------------------------------------
 //

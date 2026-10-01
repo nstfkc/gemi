@@ -1,8 +1,8 @@
 process.env.SECRET ??= "agent-test-secret";
 
 import path from "node:path";
-import { describe, expect, test } from "vitest";
-import { Agent, AgentTool } from "./Agent";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { Agent, AgentRunError, AgentTool } from "./Agent";
 import type { AgentProvider, ProviderEvent, ProviderStreamParams } from "./AgentProvider";
 import { generate } from "./generate";
 import { fakeProvider } from "./providers/fakeProvider";
@@ -27,6 +27,18 @@ const answer = (value: unknown, spent = usage(10, 5)): ProviderEvent[] => {
 };
 
 const COPY = s.object({ headline: s.string(), cta: s.string() });
+
+// A failed call is logged by default, and outside an application that is
+// `console.error`. Silenced here; the logging tests read it.
+let consoleError: ReturnType<typeof vi.spyOn>;
+beforeEach(() => {
+  consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+const generateLogs = () =>
+  consoleError.mock.calls.filter((call) => String(call[0]).includes("generate() failed"));
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -355,8 +367,9 @@ describe("generate", () => {
         signal: AbortSignal.timeout(20),
       });
 
+      // `timeout`, the code a run's deadline and a tool's `timeoutMs` report.
       expect(result.error).toEqual({
-        code: "aborted",
+        code: "timeout",
         message: "The generation timed out.",
         retryable: true,
       });
@@ -373,6 +386,195 @@ describe("generate", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe("aborted");
+    });
+  });
+
+  describe("a failure's status and request id", () => {
+    test("come from an error event, as on an agent run's result().error", async () => {
+      const result = await generate({
+        provider: fakeProvider([
+          {
+            type: "error",
+            error: { code: "rate_limited", message: "slow down", retryable: true },
+            status: 429,
+            requestId: "req_1",
+          },
+        ]),
+        prompt: "go",
+        output: COPY,
+      });
+
+      expect(result.error).toEqual({
+        code: "rate_limited",
+        message: "slow down",
+        retryable: true,
+        status: 429,
+        requestId: "req_1",
+      });
+    });
+
+    test("come from a thrown error", async () => {
+      const provider = hangingProvider();
+      provider.stream = () => {
+        throw Object.assign(new Error("bad request"), { status: 400, requestId: "req_2" });
+      };
+      const result = await generate({ provider, prompt: "go", output: COPY });
+
+      expect(result.error).toMatchObject({
+        code: "provider_error",
+        status: 400,
+        requestId: "req_2",
+      });
+    });
+
+    test("are absent when there was no response", async () => {
+      const result = await generate({
+        provider: fakeProvider(answer({ headline: 1 })),
+        prompt: "go",
+        output: COPY,
+      });
+
+      expect(result.error).not.toHaveProperty("status");
+      expect(result.error).not.toHaveProperty("requestId");
+    });
+  });
+
+  describe("throwOnError", () => {
+    test("rejects with an AgentRunError carrying the transcript and the usage", async () => {
+      const error = await generate({
+        provider: fakeProvider(answer({ headline: 1 }, usage(8, 4))),
+        prompt: "go",
+        output: COPY,
+        throwOnError: true,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+
+      expect(error).toBeInstanceOf(AgentRunError);
+      const run = error as AgentRunError;
+      expect(run.code).toBe("invalid_output");
+      expect(run.retryable).toBe(true);
+      expect(run.runId).toMatch(/^gen_/);
+      expect(run.result.usage).toEqual(usage(8, 4));
+      expect(run.result.finishReason).toBe("stop");
+      expect(run.result.messages.at(-1)).toMatchObject({ role: "assistant" });
+    });
+
+    test("carries the status and request id", async () => {
+      const failing = generate({
+        provider: fakeProvider([
+          {
+            type: "error",
+            error: { code: "rate_limited", message: "slow down", retryable: true },
+            status: 429,
+            requestId: "req_1",
+          },
+        ]),
+        prompt: "go",
+        output: COPY,
+        throwOnError: true,
+      });
+
+      await expect(failing).rejects.toMatchObject({
+        name: "AgentRunError",
+        code: "rate_limited",
+        status: 429,
+        requestId: "req_1",
+      });
+    });
+
+    test("resolves the ok: true result on success", async () => {
+      const result = await generate({
+        provider: fakeProvider(answer({ headline: "h", cta: "c" })),
+        prompt: "go",
+        output: COPY,
+        throwOnError: true,
+      });
+
+      expect(result).toMatchObject({ ok: true, output: { headline: "h", cta: "c" } });
+    });
+
+    test("rejects on a stop too, since there is no output to resolve with", async () => {
+      await expect(
+        generate({
+          provider: fakeProvider(answer({ headline: "h", cta: "c" })),
+          prompt: "go",
+          output: COPY,
+          signal: AbortSignal.abort(),
+          throwOnError: true,
+        }),
+      ).rejects.toMatchObject({ code: "aborted" });
+    });
+  });
+
+  describe("logging", () => {
+    test("a failure is logged by default, with its code and status", async () => {
+      await generate({
+        provider: fakeProvider([
+          {
+            type: "error",
+            error: { code: "rate_limited", message: "slow down", retryable: true },
+            status: 429,
+          },
+        ]),
+        prompt: "go",
+        output: COPY,
+      });
+
+      const logs = generateLogs();
+      expect(logs).toHaveLength(1);
+      expect(logs[0][0]).toBe("[gemi/ai] generate() failed (rate_limited 429): slow down");
+      expect(logs[0][1]).toMatchObject({
+        generateId: expect.stringMatching(/^gen_/),
+        error: { code: "rate_limited", status: 429 },
+      });
+    });
+
+    test("an invalid answer and a timeout are failures too", async () => {
+      await generate({
+        provider: fakeProvider(answer({ headline: 1 })),
+        prompt: "go",
+        output: COPY,
+      });
+      await generate({
+        provider: hangingProvider(),
+        prompt: "go",
+        output: COPY,
+        signal: AbortSignal.timeout(10),
+      });
+
+      expect(generateLogs().map((call) => call[0])).toEqual([
+        expect.stringContaining("(invalid_output)"),
+        expect.stringContaining("(timeout)"),
+      ]);
+    });
+
+    test("logErrors: false keeps it quiet", async () => {
+      await generate({
+        provider: fakeProvider(answer({ headline: 1 })),
+        prompt: "go",
+        output: COPY,
+        logErrors: false,
+      });
+
+      expect(generateLogs()).toEqual([]);
+    });
+
+    test("neither a stop nor a success is logged", async () => {
+      await generate({
+        provider: fakeProvider(answer({ headline: "h", cta: "c" })),
+        prompt: "go",
+        output: COPY,
+        signal: AbortSignal.abort(),
+      });
+      await generate({
+        provider: fakeProvider(answer({ headline: "h", cta: "c" })),
+        prompt: "go",
+        output: COPY,
+      });
+
+      expect(generateLogs()).toEqual([]);
     });
   });
 });
@@ -503,10 +705,82 @@ describe("ctx.generate", () => {
     const result = await agent.stream({ messages: [] }).result();
 
     // The tool's timeout fired and the turn carried on: a result, not a throw.
-    expect(seen).toMatchObject({ ok: false, error: { code: "aborted", retryable: true } });
+    expect(seen).toMatchObject({ ok: false, error: { code: "timeout", retryable: true } });
     expect(result.finishReason).toBe("stop");
     // It is not the turn's signal that was handed down, but one tied to it.
     expect(inner.calls[0].signal).toBeDefined();
+  });
+
+  test("a tool's own timeoutMs reaches it as a timeout", async () => {
+    const inner = hangingProvider();
+    const settled = deferred<unknown>();
+    const tool = AgentTool.create({
+      name: "write",
+      description: "x",
+      inputSchema: s.object({}),
+      timeoutMs: 20,
+      execute: async (_input: any, ctx: any) => {
+        settled.resolve(await ctx.generate({ provider: inner, prompt: "go", output: COPY }));
+        return "late";
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider(
+        [
+          { type: "tool-call", toolCallId: "c1", name: "write", args: "{}" },
+          { type: "finish", reason: "stop", usage: usage(100, 10) },
+        ],
+        [{ type: "finish", reason: "stop", usage: usage(200, 20) }],
+      ),
+      tools: [tool],
+    });
+
+    const result = await agent.stream({ messages: [] }).result();
+
+    expect(result.finishReason).toBe("stop");
+    expect(await settled.promise).toMatchObject({ ok: false, error: { code: "timeout" } });
+  });
+
+  test("logs a failure with the agent, run and tool call it came from", async () => {
+    const agent = parentWith(async (ctx) => {
+      await ctx.generate({
+        provider: fakeProvider(answer({ headline: 1 })),
+        prompt: "go",
+        output: COPY,
+      });
+      return "done";
+    });
+
+    const result = await agent.stream({ messages: [] }).result();
+
+    const logs = generateLogs();
+    expect(logs).toHaveLength(1);
+    expect(logs[0][1]).toMatchObject({
+      agent: "lead",
+      runId: result.runId,
+      toolCallId: "c1",
+      error: { code: "invalid_output" },
+    });
+  });
+
+  test("with throwOnError, rejects in the tool and still counts the usage", async () => {
+    const inner = fakeProvider(answer({ headline: 1 }, usage(7, 3)));
+    let caught: unknown;
+    const agent = parentWith(async (ctx) => {
+      try {
+        await ctx.generate({ provider: inner, prompt: "go", output: COPY, throwOnError: true });
+      } catch (error) {
+        caught = error;
+      }
+      return "done";
+    });
+
+    const result = await agent.stream({ messages: [] }).result();
+
+    expect(caught).toBeInstanceOf(AgentRunError);
+    expect((caught as AgentRunError).code).toBe("invalid_output");
+    expect(result.usage).toEqual(usage(307, 33));
   });
 });
 

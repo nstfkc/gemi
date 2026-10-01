@@ -1,6 +1,7 @@
 # Unreleased
 
-Additive, apart from one error code. Nothing to rewrite.
+Ships as 0.84. Two behaviour changes: an agent's schema mismatch reports
+`invalid_output`, and a shutdown that cuts off a job or cron tick exits `1`.
 
 ## New: `generate()` and `ctx.generate()` — one model call with an output schema (#594)
 
@@ -16,7 +17,7 @@ const result = await generate({
   prompt: `The business: ${description}`, // or `messages`, or both
   output: s.object({ copies: s.array(s.object({ headline: s.string(), cta: s.string() })) }),
   temperature: 0.9,
-  // maxOutputTokens, reasoning, signal
+  // maxOutputTokens, reasoning, signal, throwOnError, logErrors
 });
 
 if (result.ok) save(result.output); // typed from the schema
@@ -25,7 +26,11 @@ if (result.ok) save(result.output); // typed from the schema
 Inside an agent tool, call `ctx.generate({ ... })` instead. It is the same
 function with the turn bound in: it aborts when the user stops the turn, and its
 usage counts toward the turn's `usage`, the way a sub-agent's does. A `signal`
-you pass (say `AbortSignal.timeout(30_000)`) is combined with the turn's.
+you pass (say `AbortSignal.timeout(30_000)`) is combined with the tool call's
+`ctx.signal`, so a stop, the run's `maxRunDurationMs` and the tool's
+`timeoutMs` all cancel it. A stop or the run's deadline makes `ctx.generate`
+throw, so the tool body doesn't carry on; the tool's own `timeoutMs` comes back
+as `code: "timeout"`.
 
 **A bad answer is returned, not thrown.** The result is
 `{ ok: true, output, messages, usage, finishReason }` or
@@ -48,9 +53,30 @@ you pass (say `AbortSignal.timeout(30_000)`) is combined with the turn's.
 
 - `usage` is on both arms, because a failed answer was still billed.
 - `error.code` is `invalid_output` (did not match the schema, cut off at
-  `maxOutputTokens` — then `finishReason` is `"length"` — or missing), `aborted`
-  (the signal fired; `retryable` is true for a timeout), or the provider's
-  normalized code (`rate_limited`, `content_filtered`, ...).
+  `maxOutputTokens` — then `finishReason` is `"length"` — or missing),
+  `timeout` (the signal aborted with a `TimeoutError`, such as
+  `AbortSignal.timeout`; retryable), `aborted` (any other abort, such as a
+  stop), or the provider's normalized code (`rate_limited`,
+  `content_filtered`, ...). `timeout` is the same code an agent run's deadline
+  and a tool's `timeoutMs` report.
+- `error` is an `AgentRunFailure`, like an agent run's `result().error`: when
+  the provider answered with an error it also has the HTTP `status` and the
+  provider's `requestId`. Neither ever reaches a client.
+
+It behaves like an agent run in two more ways:
+
+- **`throwOnError: true`** rejects with an `AgentRunError` instead of resolving
+  `ok: false`, and the result is then typed as the `ok: true` arm. The error
+  has the `code`, `retryable`, `status` and `requestId`, a `gen_` id in
+  `runId`, and the `messages`, `usage` and `finishReason` on `result`. Unlike a
+  run, a stop rejects too (`code: "aborted"`), because there is no output to
+  resolve with.
+- **A failure is logged** through `Log.error`, so it lands in `storage/logs`
+  and `onLogCreated`. In `gemi dev` it also goes to the console, and outside an
+  application it goes to `console.error`. A stop is not logged. Inside a tool
+  the line names the agent, run and tool call. Pass `logErrors: false` when you
+  handle `result.error` yourself, for example in a retry loop that expects an
+  occasional `invalid_output`.
 
 An `s.json()` schema works as it does for an agent: it is sent non-strict.
 

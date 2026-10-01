@@ -2,7 +2,12 @@ import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
-import { generate, type GenerateParams, type GenerateResult } from "./generate";
+import {
+  generateWithin,
+  type GenerateParams,
+  type GenerateResult,
+  type GenerateSuccess,
+} from "./generate";
 import {
   addUsage,
   appendReasoning,
@@ -276,15 +281,22 @@ export interface ToolContext {
    * transcript; the tool returns whatever it makes of the answer.
    *
    * A BAD ANSWER IS A RESULT, NOT A THROW — `{ ok: false, error, messages,
-   * usage }`, so a retry continues `messages`. See `generate`. The exception
-   * is the turn itself being stopped: then this throws, as `runAgent` does, so
-   * the body does not carry on with half an answer while the run around it is
-   * already closing — its result would be discarded anyway.
+   * usage }`, so a retry continues `messages` — unless `throwOnError` is set.
+   * It is logged unless `logErrors: false`, with the agent, run and tool call
+   * it came from. See `generate`. A tool's own `timeoutMs` reaches it through
+   * `ctx.signal` and comes back as `code: "timeout"`. The exception is the
+   * turn itself being stopped, or reaching its deadline: then this throws, as
+   * `runAgent` does, so the body does not carry on with half an answer while
+   * the run around it is already closing — its result would be discarded
+   * anyway.
    *
    * NOT MEMOIZED. A tool re-entered after an escalation calls the model again,
    * unlike `runAgent` and `generateImage`, which replay from what they recorded
    * on the tool call. This records nothing, by design.
    */
+  generate<O extends Schema<any>>(
+    params: GenerateParams<O> & { throwOnError: true },
+  ): Promise<GenerateSuccess<Infer<O>>>;
   generate<O extends Schema<any>>(params: GenerateParams<O>): Promise<GenerateResult<Infer<O>>>;
 
   /**
@@ -2849,7 +2861,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       turn: this.toolTurn(messageId),
       runAgent: this.nestedRunner(messageId, call, signal, resume),
       generate: ((params: GenerateParams) =>
-        this.generateForTool(params, signal)) as ToolContext["generate"],
+        this.generateForTool(params, signal, call.toolCallId)) as ToolContext["generate"],
     };
 
     try {
@@ -2920,18 +2932,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private async generateForTool(
     params: GenerateParams,
     callSignal: AbortSignal,
+    toolCallId: string,
   ): Promise<GenerateResult<unknown>> {
     // `callSignal` is the tool call's `ctx.signal`: it aborts on a stop, at the
     // run's deadline, and at the tool's own `timeoutMs`. Only the first two
     // abort the turn (`controller.signal`), and only those throw below.
     const turn = this.controller.signal;
-    const result = await generate({
-      ...params,
-      signal: params.signal ? AbortSignal.any([callSignal, params.signal]) : callSignal,
-    });
-    this.usage = addUsage(this.usage, result.usage);
-    if (turn.aborted) throw new RunAborted();
-    return result;
+    return generateWithin(
+      {
+        ...params,
+        signal: params.signal ? AbortSignal.any([callSignal, params.signal]) : callSignal,
+      },
+      {
+        origin: {
+          agent: this.config.name,
+          runId: this.runId,
+          ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+          toolCallId,
+        },
+        // Before the failure is logged or thrown: the usage was billed either
+        // way, and a stopped turn throws `RunAborted` rather than a
+        // `throwOnError` rejection the tool might catch and carry on from.
+        settled: (result) => {
+          this.usage = addUsage(this.usage, result.usage);
+          if (turn.aborted) throw new RunAborted();
+        },
+      },
+    );
   }
 
   // --- nested runs -------------------------------------------------------
