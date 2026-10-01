@@ -8,7 +8,6 @@ import {
   InsufficientPermissionsError,
 } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
-import { Broadcast } from "./Broadcast";
 import { Facade } from "./Facade";
 
 export class Auth extends Facade {
@@ -29,10 +28,6 @@ export class Auth extends Facade {
    * - **Otherwise the `access_token` cookie or header** is looked up, through
    *   the same reader the middleware uses, and the user found is put on the
    *   context for the rest of the request.
-   *
-   * On a broadcasting connection the token is read from the socket's upgrade
-   * request the same way, so a native client with no cookie jar authenticates
-   * with the header.
    */
   static async user(): Promise<User> {
     const requestContextStore = RequestContext.getStore();
@@ -40,12 +35,7 @@ export class Auth extends Facade {
     let user: User | null = requestContextStore?.user;
 
     if (!user) {
-      const broadcastingContextStore =
-        Broadcast.getFacadeRoot().context.getStore();
-      // A socket's upgrade request when there is one, as before; else the
-      // request's own.
-      const source = broadcastingContextStore ?? requestContextStore?.req;
-      user = await sessionUser(this.getFacadeRoot(), source);
+      user = await sessionUser(this.getFacadeRoot(), requestContextStore?.req);
       if (user) {
         requestContextStore?.setUser(user);
       }

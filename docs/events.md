@@ -458,7 +458,6 @@ Five mechanisms, one row each:
 | `Event.dispatch()`, sync listener | 1 → N | inline, and the caller names none of them |
 | `Event.dispatch()`, `queued = true` | 1 → N | the queue: retried, dead-lettered |
 | `Job.dispatch()` | 1 → 1 | the queue: retried, dead-lettered |
-| `Broadcast.publish()` | 1 → N | *clients*, over websockets |
 
 gemi has no ORM lifecycle events (`User.created` and friends) — a model write does not emit anything. Dispatch explicitly from the code that did the write.
 
@@ -466,6 +465,5 @@ gemi has no ORM lifecycle events (`User.created` and friends) — a model write 
 
 - [Jobs & Queues](./jobs-and-queues.md) — background work with retries, which a listener often dispatches.
 - [ORM](./orm.md) — `DB.transaction`, which `static afterCommit` hooks.
-- [Broadcasting](./broadcasting.md) — fan-out to browsers rather than to server-side handlers.
 - [Controllers](./controllers.md) — dispatching from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.

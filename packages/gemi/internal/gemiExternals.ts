@@ -28,7 +28,6 @@ export const GEMI_EXTERNAL_SPECIFIERS = [
   "gemi/email",
   "gemi/kernel",
   "gemi/services",
-  "gemi/broadcasting",
   "gemi/i18n",
   // Not optional: `defineDictionary` handles register themselves in a
   // module-level registry that the view router preloads and snapshots through.

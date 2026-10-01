@@ -34,7 +34,7 @@ function samePath(a: string, b: string) {
  * request was for, so sign-in can return there.
  *
  * Only a view request carries one. An API request answers 401 and never
- * redirects, and a request outside any HTTP scope (a broadcast) has no page.
+ * redirects, and a call outside any HTTP scope has no page.
  */
 export function signInLocation(req: HttpRequest | undefined, signInPath?: string): string {
   const path = signInPath || app(AuthManager).config.signInPath;

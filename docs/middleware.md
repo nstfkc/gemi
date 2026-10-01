@@ -60,7 +60,7 @@ Requires a signed-in user. A user already on the request context passes as it is
 `auth` and `Auth.user()` agree on one rule, so a route with `auth` and a route without it see the same user:
 
 1. **A user on the request context is signed in.** Whatever a [global middleware](#global-middleware), or a route middleware listed *before* `auth`, put there with `this.req.ctx().setUser(user)` is trusted as it is, with or without an `access_token`. This is how an app signs users in by something other than gemi's own session: an SSO identity a proxy in front of the app passes on, an API key, a signed service token.
-2. **Otherwise, the access token.** The `access_token` cookie a browser sends, or else the `access_token` header a native client sends, read the same way by `auth`, `Auth.user()` (a broadcasting connection's included) and sign-out. It names a session, which must exist and not have expired. A token with no live session is no user.
+2. **Otherwise, the access token.** The `access_token` cookie a browser sends, or else the `access_token` header a native client sends, read the same way by `auth`, `Auth.user()` and sign-out. It names a session, which must exist and not have expired. A token with no live session is no user.
 
 ```typescript
 // app/http/middleware/SsoMiddleware.ts — listed in `global`
@@ -109,7 +109,7 @@ export class SsoMiddleware extends Middleware {
 >
 > gemi itself only ever puts on the context a user it resolved from a live session.
 
-A user signed in this way exists for the request it was set on, and only there. It has no gemi session, so sign-out has nothing to revoke (sign out at your identity provider). It is not on a [broadcasting](./broadcasting.md) connection, whose `Auth.user()` reads only the socket's `access_token`. And it is not carried into the in-process requests gemi makes on a request's behalf — a view's server-side `Query`, an MCP tool call's `dispatchAs` — which the global list does not run for, so an `auth` api route there refuses it. All of these fail closed.
+A user signed in this way exists for the request it was set on, and only there. It has no gemi session, so sign-out has nothing to revoke (sign out at your identity provider). It is not carried into the in-process requests gemi makes on a request's behalf — a view's server-side `Query`, an MCP tool call's `dispatchAs` — which the global list does not run for, so an `auth` api route there refuses it. All of these fail closed.
 
 ### `cache:...` → `CacheMiddleware`
 

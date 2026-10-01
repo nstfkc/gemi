@@ -4,8 +4,7 @@ import type { User } from "./types";
 export const ACCESS_TOKEN = "access_token";
 
 /**
- * Anything that carries a request's credentials: an `HttpRequest`, or the
- * headers and parsed cookies of a broadcasting connection.
+ * Anything that carries a request's credentials, such as an `HttpRequest`.
  */
 export interface AccessTokenSource {
   cookies: { get(name: string): string | null | undefined };
@@ -18,9 +17,8 @@ export interface AccessTokenSource {
  * it carries neither.
  *
  * The one place gemi reads the token. `AuthenticationMiddleware`,
- * `Auth.user()` (a request's and a broadcasting connection's) and sign-out used
- * to read it each in their own way, and disagreed on whether the header
- * counted — so a header client was signed in on a route carrying `auth` and
+ * `Auth.user()` and sign-out used to read it each in their own way, and
+ * disagreed on whether the header counted — so a header client was signed in on a route carrying `auth` and
  * refused on one without it (#587).
  *
  * An empty cookie — what a sign-out leaves a client that ignored the clearing

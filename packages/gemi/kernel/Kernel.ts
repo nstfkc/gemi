@@ -6,7 +6,6 @@ import type { Service, ServiceConstructor } from "../support/Service";
 import { registerModels } from "../orm/registration";
 import { registeredNames } from "../orm/registry";
 import { Scheduler } from "../services/cron/Scheduler";
-import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
 import { startClaimingIfServing } from "../services/queue/QueueServiceProvider";
 import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
@@ -225,10 +224,6 @@ export class Kernel {
 
   domains(): DomainRouter {
     return this.app.make(DomainRouter);
-  }
-
-  broadcast(): BroadcastManager {
-    return this.app.make(BroadcastManager);
   }
 
   queue(): QueueManager {

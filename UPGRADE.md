@@ -16,11 +16,9 @@ What counts as signed in is now one rule, shared by the `auth` middleware and
   check on that user, only a requirement to send one. An app that signs users in
   by SSO header, API key or a signed service token can now use `auth` instead
   of writing its own.
-- **`Auth.user()` reads the `access_token` header** (#587), on a request and on a
-  broadcasting connection, through the same reader as the middleware. A native
-  client was signed in on a route with `auth` and refused on one without it;
-  it is now signed in on both, and a native WebSocket can authenticate with the
-  header.
+- **`Auth.user()` reads the `access_token` header** (#587), through the same
+  reader as the middleware. A native client was signed in on a route with
+  `auth` and refused on one without it; it is now signed in on both.
 - **One token reader** (`readAccessToken`, internal) replaces the middleware's,
   `Auth.user()`'s two and sign-out's. An empty `access_token` cookie now counts
   as absent, so a header sent beside it is read. When both are sent the cookie
@@ -67,6 +65,44 @@ drain, so it never overran, and the abandoned job showed up only in the log.
 exits `1` where it exited `0`. If your platform alerts or restarts on a
 non-zero exit, make `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` long enough for your
 jobs, or expect the alert when they are cut off.
+
+## Broadcasting and websockets are removed (#31)
+
+**Breaking change.** The broadcasting subsystem is gone. Nothing in gemi used
+it, and apps that need real-time delivery are better served by a dedicated
+service than by a half-built one in the framework.
+
+Removed:
+
+- the `gemi/broadcasting` entry point and `BroadcastingChannel`
+- `Broadcast` from `gemi/facades`
+- `BroadcastManager`, `BroadcastServiceProvider`, `defineBroadcastConfig`,
+  `broadcastConfigDefaults` and the `BroadcastConfig` type from
+  `gemi/services`, and the `broadcast` config slice
+- `useSubscription` and `useBroadcast` from `gemi/client`, and the websocket
+  provider `ClientRouter` wrapped every page in
+- `App.websocket`, `App.onPublish()` and `Kernel.broadcast()`
+- the broadcasting entries in the `gemi migrate` codemod tables
+
+`Auth.user()` no longer reads a websocket connection's headers and cookies;
+it reads the current request only, as every non-websocket caller already did.
+Outside a request there is no token, so it throws `AuthenticationError` as
+before.
+
+What to delete in your app:
+
+- `app/config/broadcast.ts`, and its entry wherever you collect config
+- `app/broadcasting/` (your `BroadcastingChannel` subclasses)
+- any `Broadcast.channel(...).publish(...)` call, and any `useSubscription` /
+  `useBroadcast` in components
+- test stubs of `BroadcastManager`. folio's
+  `apps/web/app/auth/legacySessionMigration.postgres.bun-check.ts` imports
+  `BroadcastManager` from `gemi/services` only to stub the broadcasting branch
+  of `Auth.user()`; delete that import and the stub. `Auth.user()` no longer
+  resolves `BroadcastManager`, so nothing replaces it.
+
+The typechecker finds each of these: every removed name is now a missing
+export.
 
 # Upgrading from 0.82 to 0.83
 

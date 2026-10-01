@@ -33,7 +33,6 @@ import {
 import { ThemeProvider } from "../client/ThemeProvider";
 import type { ClientFeatureKey } from "../client/rpc";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
-import { WebSocketContext } from "../client/WebsocketContext";
 import { applyParams } from "../utils/applyParams";
 import { Subject } from "../utils/Subject";
 import { toVariantKey } from "../utils/variantKey";
@@ -608,37 +607,29 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     ],
   );
 
-  const [websocket] = useState(() => ({
-    subscribe: async () => {},
-    unsubscribe: async () => {},
-    broadcast: () => {},
-  }));
-
   return (
     <ThemeProvider theme={theme}>
       <ServerDataContext.Provider value={serverData}>
         <I18nProvider>
-          <WebSocketContext.Provider value={websocket}>
-            <QueryManagerProvider queryConfig={queryConfig}>
-              <ClientRouterContext.Provider value={routerContext}>
-                <RouteTransitionProvider
-                  isPending={false}
-                  isFetching={false}
-                  transitionPath={["", pathname]}
-                >
-                  <RouteStateProvider state={routeState}>
-                    <Boundary
-                      errorFallback={errorFallback}
-                      fallback={fallback}
-                      resetKey={pathname}
-                    >
-                      {children}
-                    </Boundary>
-                  </RouteStateProvider>
-                </RouteTransitionProvider>
-              </ClientRouterContext.Provider>
-            </QueryManagerProvider>
-          </WebSocketContext.Provider>
+          <QueryManagerProvider queryConfig={queryConfig}>
+            <ClientRouterContext.Provider value={routerContext}>
+              <RouteTransitionProvider
+                isPending={false}
+                isFetching={false}
+                transitionPath={["", pathname]}
+              >
+                <RouteStateProvider state={routeState}>
+                  <Boundary
+                    errorFallback={errorFallback}
+                    fallback={fallback}
+                    resetKey={pathname}
+                  >
+                    {children}
+                  </Boundary>
+                </RouteStateProvider>
+              </RouteTransitionProvider>
+            </ClientRouterContext.Provider>
+          </QueryManagerProvider>
         </I18nProvider>
       </ServerDataContext.Provider>
     </ThemeProvider>

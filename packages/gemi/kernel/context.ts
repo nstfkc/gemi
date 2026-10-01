@@ -2,18 +2,17 @@ import { AsyncLocalStorage } from "async_hooks";
 
 /**
  * The kernel's AsyncLocalStorage. It holds the Application, and nothing else —
- * `Kernel.run()` enters it once per request, websocket message or cron tick,
+ * `Kernel.run()` enters it once per request or cron tick,
  * and `foundation/app.ts` reads it to resolve services.
  *
  * "The framework's only AsyncLocalStorage" is a claim that used to sit here. It
- * was already not true — the *kernel's* is the only one, but `http/`, `pubsub/`
- * and now the ORM each keep their own. Four in the shipped framework (a fifth
+ * was already not true — the *kernel's* is the only one, but `http/` and now
+ * the ORM each keep their own. Three in the shipped framework (a fourth
  * sits in `rfc/workflow.ts`, an unreferenced design sketch that is outside
  * `package.json`'s exports and that nothing imports):
  *
  *   kernel     kernel/context.ts                     the Application
  *   request    http/requestContext.ts                req, user, cookies, locale
- *   broadcast  services/pubsub/BroadcastManager.ts   headers, cookies
  *   orm        orm/context.ts                        an open transaction
  *
  * The pattern is one store per scope with one owner, entered by that owner and

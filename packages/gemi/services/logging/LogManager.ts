@@ -156,8 +156,6 @@ export class LogManager {
     } catch (err) {
       console.log("Error parsing log object", err);
     }
-    // Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
-    //
     // Contained, because this is an app-supplied hook and every facade method
     // calls `log()` without awaiting it: a hook that throws would otherwise
     // leave a floating `Log.info()` as an unhandled rejection, which is the
