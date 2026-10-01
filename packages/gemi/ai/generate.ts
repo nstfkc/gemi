@@ -239,6 +239,9 @@ async function callModel<O extends Schema<any>>(
             break;
           // `tool-call-delta`, `tool-call` and `tool-search` cannot happen:
           // no tools were sent.
+          // `file-rejected` needs nothing here: the provider already sent the
+          // call again without that file, and `generate()` keeps no thread
+          // to mark the part in. The caller's `messages` are its own.
         }
       }
     } finally {

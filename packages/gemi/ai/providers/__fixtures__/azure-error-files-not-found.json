@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Files [assistant-AAAAAAAAAAAAAAAAAAAAAA, assistant-BBBBBBBBBBBBBBBBBBBBBB] were not found due to ownership verification failure. Ensure the same AOAI resource is used to create and access files.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}

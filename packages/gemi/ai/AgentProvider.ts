@@ -13,6 +13,7 @@ import {
   type ProviderConfig,
 } from "./providers/endpoints";
 import { normalizeProviderError } from "./providers/errors";
+import { sentFiles } from "./providers/fileRejection";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
@@ -147,6 +148,16 @@ export type ProviderEvent =
    * (`AgentRunResult.error`) and are never written to a client frame; leave
    * them out for an error that was not a response.
    */
+  /**
+   * The provider refused a stored file (`fileId` is the provider's id) and the
+   * call was sent again with a note in the file's place, so the turn goes on.
+   * `Agent` marks the stored `FilePart` `providerRejected`, which makes later
+   * requests send the note instead of the id — otherwise the same refusal
+   * costs a failed request on every turn of the thread (#684). `message` is
+   * the provider's, for the log. A provider that never retries need not send
+   * this; `Agent` treats its absence as nothing having been rejected.
+   */
+  | { type: "file-rejected"; fileId: string; message: string; status?: number; requestId?: string }
   | { type: "error"; error: AgentError; status?: number; requestId?: string };
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
@@ -263,6 +274,7 @@ export class OpenAIProvider extends AgentProvider {
       // parser has to read the answer as one too — a model that ignored the
       // parameter answers 400, not prose.
       structuredOutput: Boolean(params.output),
+      files: sentFiles(params.messages),
     });
   }
 
@@ -323,6 +335,7 @@ export class AzureOpenAIProvider extends AgentProvider {
       // parser has to read the answer as one too — a model that ignored the
       // parameter answers 400, not prose.
       structuredOutput: Boolean(params.output),
+      files: sentFiles(params.messages),
     });
   }
 

@@ -2521,6 +2521,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           };
           break;
         }
+        case "file-rejected": {
+          this.markFileRejected(event.fileId, event.message, httpErrorDetail(event));
+          break;
+        }
       }
     }
 
@@ -4300,6 +4304,65 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     message.content.push(result);
     this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
+  }
+
+  /**
+   * The provider refused a stored file and the call went ahead without it
+   * (#684). Every part holding that id is marked `providerRejected`, so the
+   * next request sends a note in its place rather than an id that fails the
+   * request again — the history is sent whole on every turn, and without the
+   * mark one dead file costs every later turn a refused request.
+   *
+   * Persisted the way a late tool result is: a message from an earlier run is
+   * amended (cloned, then reported and returned in `result()`), and one this
+   * run made is changed in place and reported again. Either way the store
+   * sees the same id with new content, which its contract says to upsert.
+   * The part is replaced rather than written to, because the original object
+   * may still be the caller's.
+   *
+   * Logged as a warning, not an error: the run goes on, and the model is told
+   * the file could not be read, so the user hears about it in the answer. The
+   * log is for whoever has to work out why a file stopped being readable.
+   */
+  private markFileRejected(
+    fileId: string,
+    reason: string,
+    detail: { status?: number; requestId?: string },
+  ): void {
+    for (const original of this.history) {
+      const hit = original.content.some(
+        (part) => part.type === "file" && part.fileId === fileId && !part.providerRejected,
+      );
+      if (!hit) continue;
+      const message = this.produced.includes(original) ? original : this.amend(original);
+      message.content = message.content.map((part) =>
+        part.type === "file" && part.fileId === fileId && !part.providerRejected
+          ? { ...part, providerRejected: true as const }
+          : part,
+      );
+      // The message being built by this step is reported when it is finalized;
+      // queueing it here as well would report it before it is finished.
+      if (message !== this.current) this.unreported.add(message);
+    }
+    if (!this.config.logErrors) return;
+    const message = `[gemi/ai] agent "${this.config.name}": the provider refused file ${fileId}${
+      detail.status !== undefined ? ` (${detail.status})` : ""
+    }; it was left out of the request and will not be sent again: ${reason}`;
+    const metadata = {
+      agent: this.config.name,
+      runId: this.runId,
+      ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+      fileId,
+      ...detail,
+    };
+    let logged = false;
+    try {
+      Log.warning(message, metadata);
+      logged = true;
+    } catch {
+      // No application to resolve a logger from.
+    }
+    if (!logged || process.env.NODE_ENV === "development") console.warn(message, metadata);
   }
 
   /** The clone of an earlier run's message that this run may write to. One per
