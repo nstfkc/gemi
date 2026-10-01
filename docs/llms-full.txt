@@ -2166,7 +2166,7 @@ export class PostController extends Controller {
   async publish(req: HttpRequest<{}, { id: string }>) {
     const post = await Post.findUniqueOrThrow({ where: { id: req.params.id } });
     if (post.publishedAt) {
-      return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+      return HttpResponse.json({ error: { kind: "form_error", message: "Already published" } }, { status: 409 });
     }
     // ...
     return HttpResponse.json(post, { headers: { "X-Post-Version": String(post.version) } });
@@ -2194,7 +2194,7 @@ On top of those, `options.headers` apply as follows:
 **What the client sees.** Any 2xx is data: `useQuery` stores it, and a mutation calls `onSuccess` with it. A 4xx or 5xx is an error, handled as gemi's own errors are:
 
 - `useQuery` gets a `QueryError` whose `status` is the status and whose `body` is the JSON. The default retry policy applies, so a 4xx other than 408 and 429 is not retried.
-- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. A body with no `error` field is handed over whole.
+- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies, with the response's `status` added. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. An `error` that is a string, or an object with a `message` and no `kind`, is given the kind its status stands for (any 4xx without one of its own is a `form_error`). A body with no `error` field is handed over whole, given a kind and status the same way.
 - A loader's `Query.instant` or `Query.prefetch` on the server behaves the same as the browser. A 2xx resolves to the data, and an error status rejects with the same `QueryError`.
 
 `HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
@@ -2294,12 +2294,37 @@ See [Routing → Resource routes](./routing.md) for the exact method-to-path map
 
 gemi handles control flow through **thrown errors** that the framework catches and turns into the right response. All of them extend `RequestBreakerError` (exported from `gemi/http`), which carries separate `api` and `view` payloads.
 
+### RequestBreakerError
+
+Every other refusal answers `{ "error": { "kind", "message", "status" } }`: `authentication`, `authorization`, `permission`, `csrf`, `not_found`, `range_not_satisfiable`, `rate_limit`, `server_error` (an unhandled 500), and `form_error`. The client's guards (`isPermissionError`, `isNotFoundError`, …) read `kind`, so a refusal thrown with a message of its own is classified like the default one.
+
+Throw a `RequestBreakerError` with a status for a refusal of your own. Its `kind` follows from the status (401 `authentication`, 403 `permission`, 404 `not_found`, 429 `rate_limit`, 5xx `server_error`, any other status `form_error`), or name it:
+
+```typescript
+import { RequestBreakerError } from "gemi/http";
+
+throw new RequestBreakerError("This slug is taken", { status: 409 });
+// 409 { "error": { "kind": "form_error", "message": "This slug is taken", "status": 409 } }
+
+throw new RequestBreakerError("Staff only", { status: 403, kind: "permission" });
+```
+
+A subclass that sets `this.payload` itself answers that payload instead.
+
+**Native clients that read a string.** Before 0.85, `AuthenticationError`, `AuthorizationError`, `InsufficientPermissionsError`, `InvalidCSRFTokenError` and an unhandled 500 answered `error` as a bare string. A shipped client that reads `body.error` as a string cannot be updated in the same deploy as the server; set this once at boot until it reads `body.error.message`:
+
+```typescript
+RequestBreakerError.legacyStringPayload = true;
+```
+
+gemi's own web client reads both shapes, and the refusals that were already objects (404, 429, a policy 403) stay objects either way.
+
 ### ValidationError
 
 `throw new ValidationError(errors)` produces a **400** response shaped as:
 
 ```json
-{ "error": { "kind": "validation_error", "messages": { "name": ["Name is required"] } } }
+{ "error": { "kind": "validation_error", "messages": { "name": ["Name is required"] }, "status": 400 } }
 ```
 
 `errors` is a `Record<string, string[]>` (field → messages). Use it directly instead of inventing a per-endpoint error shape:
@@ -2606,7 +2631,10 @@ class NotThroughFrontDoor extends RequestBreakerError {
   constructor() {
     super("Direct origin access");
     this.payload = {
-      api: { status: 403, data: { error: "Forbidden" } },
+      api: {
+        status: 403,
+        data: { error: { kind: "permission", message: "Forbidden", status: 403 } },
+      },
       view: { status: 403, error: { message: "Forbidden" } },
     };
   }
@@ -3734,22 +3762,22 @@ async function onClick() {
 ### Errors
 
 `onError` receives, and `error` holds, a `MutationError`: the `error` field of the
-response body exactly as the server sent it, or the `Error` the browser raised. It is
-one of these:
+response body with the response's `status`, or the `Error` the browser raised. Every
+refusal is an object with a `kind`, its `message` and its `status`:
 
 | what happened | value | guard |
 | --- | --- | --- |
-| A `ValidationError` (400) | `{ kind: "validation_error", messages }`, keyed by field | `isValidationError` |
-| A form-level error thrown by the app | `{ kind: "form_error", message }` | `isFormError` |
-| No signed-in user, `AuthenticationError` (401) | `"Authentication error"` | `isAuthenticationError` |
-| `InsufficientPermissionsError` (403), `AuthorizationError` (401) | `"Insufficient permissions"`, `"Not authorized"` | `isPermissionError` |
-| A policy refused the request (403) | `{ message: "Forbidden" }` | `isPermissionError` |
-| A missing or stale CSRF token (403) | `"Invalid CSRF token"` | `isCsrfError` |
-| A missing record, file or route (404) | `{ message: "Not found" }` | `isNotFoundError` |
-| `RateLimitMiddleware` refused it (429) | `{ message: "Rate limit exceeded" }` | `isRateLimitError` |
-| The server failed (500) | `"Internal Server Error"` | `isServerError` |
+| A `ValidationError` (400) | `{ kind: "validation_error", messages, status }`, keyed by field | `isValidationError` |
+| A form-level error: an app's own `RequestBreakerError`, or any 4xx with a message and no kind | `{ kind: "form_error", message, status }` | `isFormError` |
+| No signed-in user, `AuthenticationError` (401) | `{ kind: "authentication", message, status: 401 }` | `isAuthenticationError` |
+| `AuthorizationError` (401) | `{ kind: "authorization", message, status: 401 }` | `isPermissionError` |
+| `InsufficientPermissionsError` or a policy denial (403) | `{ kind: "permission", message, status: 403 }` | `isPermissionError` |
+| A missing or stale CSRF token (403) | `{ kind: "csrf", message, status: 403 }` | `isCsrfError` |
+| A missing record, file or route (404) | `{ kind: "not_found", message, status: 404 }` | `isNotFoundError` |
+| `RateLimitMiddleware` refused it (429) | `{ kind: "rate_limit", message, status: 429 }` | `isRateLimitError` |
+| The server failed (500; under `gemi dev` the message is the exception's) | `{ kind: "server_error", message, status: 500 }` | `isServerError` |
+| A failed `useUpload` whose body was not JSON | `{ kind: "server_error", message, status }` | `isServerError` |
 | The answer was not JSON (a proxy's error page) | a `SyntaxError` | `isServerError` |
-| A failed `useUpload` whose body was not JSON | `{ kind: "server_error", message }` | `isServerError` |
 | No answer at all: offline, DNS, CORS | a `TypeError` | `isNetworkError` |
 
 ```tsx
@@ -3757,7 +3785,8 @@ import { usePost, isPermissionError, isValidationError } from "gemi/client";
 
 const { trigger, error } = usePost("/todos", {}, {
   onError(error) {
-    if (isPermissionError(error)) toast("You can't add todos here");
+    // Matches `new AuthorizationError("You can't add todos here")` too.
+    if (isPermissionError(error)) toast(error.message);
   },
 });
 
@@ -3768,12 +3797,11 @@ const titleErrors = isValidationError(error) ? error.messages.title : [];
 `"authentication"`, `"permission"`, `"csrf"`, `"not_found"`, `"rate_limit"`,
 `"server"`, `"network"` or `"unknown"` — for a `switch` over all of them.
 
-Most refusals arrive as a bare string, and nothing on the client says which status
-it came with, so the guards recognise the framework's own messages. An
-`AuthorizationError` or `InsufficientPermissionsError` thrown with a message of its own
-arrives as that message and is `"unknown"`; compare it with the message you threw.
-So is a 500 under `gemi dev`, which carries the exception's message. A cancelled
-request is not an error: `onCanceled` runs and `error` stays `null`.
+The guards read `kind`, so a refusal thrown with a message of its own is classified
+like the default one. A server older than 0.85 sent most refusals as a bare string;
+the client wraps those into the same object, using the response's status, so a new
+client works against an old server during a rolling deploy. A cancelled request is
+not an error: `onCanceled` runs and `error` stays `null`.
 
 When you drive mutations from the `Form` component instead of calling `trigger`
 directly, validation and form errors are unpacked for you into `ValidationErrors` /
@@ -9114,7 +9142,8 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 throws — a failed query, say — propagates as itself rather than becoming a 403. That includes
 a `PolicyDeniedError` from a policied model the predicate reads: it is not a request-breaker
 error, so it reaches `onRequestFail`, and then answers what any policy denial does — `403`
-`{ error: { message: "Forbidden" } }`, not the guard's `"Insufficient permissions"`. If a
+`{ error: { kind: "permission", message: "Forbidden", status: 403 } }`, not the guard's
+`"Insufficient permissions"`. If a
 denial there is an expected refusal rather than something to report, catch it in the
 predicate and return `false`.
 
@@ -9171,11 +9200,16 @@ Three error types (all from `gemi/http`) drive authorization responses. They are
 controller, or facade — and the framework turns it into the response below. You generally
 don't construct them yourself; they are thrown for you by the middleware / facade helpers.
 
-| Error | API response | View response |
+| Error | API response `error` | View response |
 | --- | --- | --- |
-| `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
-| `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `403` `{ error }` (default `"Insufficient permissions"`) | `403` |
+| `AuthenticationError` | `401` `{ kind: "authentication", message: "Authentication error", status: 401 }` | `302` redirect to `/auth/sign-in` |
+| `AuthorizationError` | `401` `{ kind: "authorization", message, status: 401 }` (default message `"Not authorized"`) | (none) |
+| `InsufficientPermissionsError` | `403` `{ kind: "permission", message, status: 403 }` (default message `"Insufficient permissions"`) | `403` |
+
+The message is the one the error was thrown with, so `isPermissionError` on the client
+matches `new AuthorizationError("You cannot edit this post")` and `error.message` is that
+text. Before 0.85 these were bare strings; see `RequestBreakerError.legacyStringPayload` in
+[Controllers](./controllers.md#requestbreakererror) for native clients that still read one.
 
 - **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
   `Auth.user()` when there is no session. For view routes it redirects to the sign-in page

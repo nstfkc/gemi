@@ -1,4 +1,4 @@
-import { RequestBreakerError } from "./Error";
+import { RequestBreakerError, stringEraRefusal } from "./Error";
 import { Middleware } from "./Middleware";
 
 export class CSRFMiddleware extends Middleware {
@@ -29,7 +29,7 @@ export class InvalidCSRFTokenError extends RequestBreakerError {
   payload = {
     api: {
       status: 403,
-      data: { error: "Invalid CSRF token" },
+      data: { error: stringEraRefusal("csrf", "Invalid CSRF token", 403) },
     },
     view: {},
   };

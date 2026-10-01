@@ -74,7 +74,7 @@ describe("App.fetch routes by the /api segment", () => {
     expect(toView).not.toHaveBeenCalled();
     // The api dispatcher's own 404, not a view: `""` is not `/`.
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: { message: "Not found" } });
+    expect(await res.json()).toEqual({ error: { kind: "not_found", message: "Not found", status: 404 } });
   });
 
   test("/api/ reaches the api dispatcher, as /", async () => {

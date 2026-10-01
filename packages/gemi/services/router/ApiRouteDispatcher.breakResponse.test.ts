@@ -129,7 +129,7 @@ describe("a middleware's break response", () => {
     const res = await app.fetch(new Request("http://gemi.dev/api/unauthorized"));
 
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "Not authorized" });
+    expect(await res.json()).toEqual({ error: { kind: "authorization", message: "Not authorized", status: 401 } });
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example");
     expect(handled).toEqual([]);
   });
@@ -155,7 +155,7 @@ describe("a middleware's break response", () => {
     const res = await app.fetch(new Request("http://gemi.dev/api/denied"));
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await res.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example");
     expect(res.headers.get("Content-Type")).toBe("application/json");
     expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^session=refreshed/)]);

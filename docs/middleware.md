@@ -243,7 +243,10 @@ class NotThroughFrontDoor extends RequestBreakerError {
   constructor() {
     super("Direct origin access");
     this.payload = {
-      api: { status: 403, data: { error: "Forbidden" } },
+      api: {
+        status: 403,
+        data: { error: { kind: "permission", message: "Forbidden", status: 403 } },
+      },
       view: { status: 403, error: { message: "Forbidden" } },
     };
   }

@@ -1,3 +1,5 @@
+import { refusal } from "../../http/Error";
+
 /**
  * What a client gets when a request's ORM lookup matched nothing.
  *
@@ -16,7 +18,7 @@
  * error in the log.
  */
 export function notFoundResponse() {
-  const body = JSON.stringify({ error: { message: "Not found" } });
+  const body = JSON.stringify({ error: refusal("not_found", "Not found", 404) });
   // Sized, so `isOpenEndedBody` ends the request when it is returned. Without
   // the length it would wait for the body to be read, and an in-process caller
   // that only checks the status would never end it. (Same reason as

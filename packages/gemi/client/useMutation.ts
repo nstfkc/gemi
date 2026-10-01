@@ -383,6 +383,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
         let error: MutationError = {
           kind: "server_error",
           message: result.statusText,
+          status: result.status,
         };
         try {
           const data = await result.json();

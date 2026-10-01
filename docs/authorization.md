@@ -123,7 +123,8 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 throws — a failed query, say — propagates as itself rather than becoming a 403. That includes
 a `PolicyDeniedError` from a policied model the predicate reads: it is not a request-breaker
 error, so it reaches `onRequestFail`, and then answers what any policy denial does — `403`
-`{ error: { message: "Forbidden" } }`, not the guard's `"Insufficient permissions"`. If a
+`{ error: { kind: "permission", message: "Forbidden", status: 403 } }`, not the guard's
+`"Insufficient permissions"`. If a
 denial there is an expected refusal rather than something to report, catch it in the
 predicate and return `false`.
 
@@ -180,11 +181,16 @@ Three error types (all from `gemi/http`) drive authorization responses. They are
 controller, or facade — and the framework turns it into the response below. You generally
 don't construct them yourself; they are thrown for you by the middleware / facade helpers.
 
-| Error | API response | View response |
+| Error | API response `error` | View response |
 | --- | --- | --- |
-| `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
-| `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `403` `{ error }` (default `"Insufficient permissions"`) | `403` |
+| `AuthenticationError` | `401` `{ kind: "authentication", message: "Authentication error", status: 401 }` | `302` redirect to `/auth/sign-in` |
+| `AuthorizationError` | `401` `{ kind: "authorization", message, status: 401 }` (default message `"Not authorized"`) | (none) |
+| `InsufficientPermissionsError` | `403` `{ kind: "permission", message, status: 403 }` (default message `"Insufficient permissions"`) | `403` |
+
+The message is the one the error was thrown with, so `isPermissionError` on the client
+matches `new AuthorizationError("You cannot edit this post")` and `error.message` is that
+text. Before 0.85 these were bare strings; see `RequestBreakerError.legacyStringPayload` in
+[Controllers](./controllers.md#requestbreakererror) for native clients that still read one.
 
 - **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
   `Auth.user()` when there is no session. For view routes it redirects to the sign-in page

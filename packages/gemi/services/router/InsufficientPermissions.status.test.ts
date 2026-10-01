@@ -129,6 +129,6 @@ describe("a signed-in user Auth.guard refuses", () => {
     );
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await res.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
   });
 });

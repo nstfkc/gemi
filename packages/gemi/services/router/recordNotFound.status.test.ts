@@ -134,7 +134,7 @@ describe("a RecordNotFoundError from an api handler", () => {
   test("answers the same body as any other not-found", async () => {
     const res = await get("/api/pages/does-not-exist");
     // Byte for byte what `FileNotFoundError` and an unmatched api route answer.
-    expect(await res.json()).toEqual({ error: { message: "Not found" } });
+    expect(await res.json()).toEqual({ error: { kind: "not_found", message: "Not found", status: 404 } });
     expect(res.headers.get("Content-Type")).toBe("application/json");
   });
 
@@ -165,7 +165,7 @@ describe("a RecordNotFoundError from an api handler", () => {
     // send this back to a 500 — the reason `isPolicyDeniedError` matches names.
     const res = await get("/api/duplicated");
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: { message: "Not found" } });
+    expect(await res.json()).toEqual({ error: { kind: "not_found", message: "Not found", status: 404 } });
   });
 
   test("answers 404 for a write that matched no row", async () => {
@@ -218,7 +218,7 @@ describe("a RecordNotFoundError from a global middleware", () => {
     globalLooksUpRecord = true;
     const res = await get("/api/fine");
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: { message: "Not found" } });
+    expect(await res.json()).toEqual({ error: { kind: "not_found", message: "Not found", status: 404 } });
   });
 
   test("never reaches the route", async () => {

@@ -566,22 +566,22 @@ async function onClick() {
 ### Errors
 
 `onError` receives, and `error` holds, a `MutationError`: the `error` field of the
-response body exactly as the server sent it, or the `Error` the browser raised. It is
-one of these:
+response body with the response's `status`, or the `Error` the browser raised. Every
+refusal is an object with a `kind`, its `message` and its `status`:
 
 | what happened | value | guard |
 | --- | --- | --- |
-| A `ValidationError` (400) | `{ kind: "validation_error", messages }`, keyed by field | `isValidationError` |
-| A form-level error thrown by the app | `{ kind: "form_error", message }` | `isFormError` |
-| No signed-in user, `AuthenticationError` (401) | `"Authentication error"` | `isAuthenticationError` |
-| `InsufficientPermissionsError` (403), `AuthorizationError` (401) | `"Insufficient permissions"`, `"Not authorized"` | `isPermissionError` |
-| A policy refused the request (403) | `{ message: "Forbidden" }` | `isPermissionError` |
-| A missing or stale CSRF token (403) | `"Invalid CSRF token"` | `isCsrfError` |
-| A missing record, file or route (404) | `{ message: "Not found" }` | `isNotFoundError` |
-| `RateLimitMiddleware` refused it (429) | `{ message: "Rate limit exceeded" }` | `isRateLimitError` |
-| The server failed (500) | `"Internal Server Error"` | `isServerError` |
+| A `ValidationError` (400) | `{ kind: "validation_error", messages, status }`, keyed by field | `isValidationError` |
+| A form-level error: an app's own `RequestBreakerError`, or any 4xx with a message and no kind | `{ kind: "form_error", message, status }` | `isFormError` |
+| No signed-in user, `AuthenticationError` (401) | `{ kind: "authentication", message, status: 401 }` | `isAuthenticationError` |
+| `AuthorizationError` (401) | `{ kind: "authorization", message, status: 401 }` | `isPermissionError` |
+| `InsufficientPermissionsError` or a policy denial (403) | `{ kind: "permission", message, status: 403 }` | `isPermissionError` |
+| A missing or stale CSRF token (403) | `{ kind: "csrf", message, status: 403 }` | `isCsrfError` |
+| A missing record, file or route (404) | `{ kind: "not_found", message, status: 404 }` | `isNotFoundError` |
+| `RateLimitMiddleware` refused it (429) | `{ kind: "rate_limit", message, status: 429 }` | `isRateLimitError` |
+| The server failed (500; under `gemi dev` the message is the exception's) | `{ kind: "server_error", message, status: 500 }` | `isServerError` |
+| A failed `useUpload` whose body was not JSON | `{ kind: "server_error", message, status }` | `isServerError` |
 | The answer was not JSON (a proxy's error page) | a `SyntaxError` | `isServerError` |
-| A failed `useUpload` whose body was not JSON | `{ kind: "server_error", message }` | `isServerError` |
 | No answer at all: offline, DNS, CORS | a `TypeError` | `isNetworkError` |
 
 ```tsx
@@ -589,7 +589,8 @@ import { usePost, isPermissionError, isValidationError } from "gemi/client";
 
 const { trigger, error } = usePost("/todos", {}, {
   onError(error) {
-    if (isPermissionError(error)) toast("You can't add todos here");
+    // Matches `new AuthorizationError("You can't add todos here")` too.
+    if (isPermissionError(error)) toast(error.message);
   },
 });
 
@@ -600,12 +601,11 @@ const titleErrors = isValidationError(error) ? error.messages.title : [];
 `"authentication"`, `"permission"`, `"csrf"`, `"not_found"`, `"rate_limit"`,
 `"server"`, `"network"` or `"unknown"` — for a `switch` over all of them.
 
-Most refusals arrive as a bare string, and nothing on the client says which status
-it came with, so the guards recognise the framework's own messages. An
-`AuthorizationError` or `InsufficientPermissionsError` thrown with a message of its own
-arrives as that message and is `"unknown"`; compare it with the message you threw.
-So is a 500 under `gemi dev`, which carries the exception's message. A cancelled
-request is not an error: `onCanceled` runs and `error` stays `null`.
+The guards read `kind`, so a refusal thrown with a message of its own is classified
+like the default one. A server older than 0.85 sent most refusals as a bare string;
+the client wraps those into the same object, using the response's status, so a new
+client works against an old server during a rolling deploy. A cancelled request is
+not an error: `onCanceled` runs and `error` stays `null`.
 
 When you drive mutations from the `Form` component instead of calling `trigger`
 directly, validation and form errors are unpacked for you into `ValidationErrors` /

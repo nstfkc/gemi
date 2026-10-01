@@ -253,6 +253,7 @@ describe("App fetch()", () => {
           age: ["Age must be a number"],
           name: ["Name is required"],
         },
+        status: 400,
       },
     });
   });
@@ -274,6 +275,7 @@ describe("App fetch()", () => {
         messages: {
           payment_error: ["IBAN or Paypal is required"],
         },
+        status: 400,
       },
     });
   });
@@ -297,7 +299,7 @@ describe("App fetch()", () => {
     });
     const res = await app.fetch(request);
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: { message: "Not found" } });
+    expect(await res.json()).toEqual({ error: { kind: "not_found", message: "Not found", status: 404 } });
   });
 
   describe("a signed-out request for a guarded view", () => {

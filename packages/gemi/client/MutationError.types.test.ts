@@ -59,7 +59,6 @@ const snippets = {
     export function f(): string | null {
       const { error } = usePost(route);
       if (!error) return null;
-      if (typeof error === "string") return error;
       if (isValidationError(error)) return Object.keys(error.messages).join();
       return error.message;
     }`,
@@ -72,14 +71,22 @@ const snippets = {
         },
       });
     }`,
-  failedGuardKeepsStrings: `
+  guardsGiveMessageAndStatus: `
     export function f(error: MutationError): string {
-      if (isAuthenticationError(error) || isPermissionError(error)) return "refused";
+      if (isAuthenticationError(error)) return error.message + error.status;
+      if (isPermissionError(error)) {
+        const kind: "permission" | "authorization" = error.kind;
+        return kind + error.message + error.status;
+      }
       if (isNotFoundError(error)) return error.message;
-      // Other strings are still possible here: a failed guard must not narrow
-      // them away, which a guard typed \`error is string\` would.
-      const stillString: string extends typeof error ? true : false = true;
-      return String(stillString);
+      return "";
+    }`,
+  neverAString: `
+    export function f(error: MutationError) {
+      const notString: string extends MutationError ? false : true = true;
+      // @ts-expect-error a refusal is never a bare string since 0.85
+      const s: string = error;
+      return [notString, s];
     }`,
   exhaustiveKind: `
     export function f(error: MutationError): string {
@@ -170,8 +177,12 @@ describe("mutation errors under strict", () => {
     expect(diagnostics.hookOnError).toEqual([]);
   });
 
-  test("a guard that fails leaves the other strings in the union", () => {
-    expect(diagnostics.failedGuardKeepsStrings).toEqual([]);
+  test("a refusal's guard gives its message and status (#673)", () => {
+    expect(diagnostics.guardsGiveMessageAndStatus).toEqual([]);
+  });
+
+  test("a MutationError is never a string", () => {
+    expect(diagnostics.neverAString).toEqual([]);
   });
 
   test("mutationErrorKind's answers can be switched over exhaustively", () => {
