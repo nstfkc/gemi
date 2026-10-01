@@ -38,6 +38,12 @@ function createFetch() {
       if (!settle) throw new Error("No pending fetch to resolve");
       await act(async () => settle(body));
     },
+    /** Resolve the pending request at `index` (0 is the oldest). */
+    async resolveAt(index: number, body: unknown) {
+      const [settle] = pending.splice(index, 1);
+      if (!settle) throw new Error(`No pending fetch at index ${index}`);
+      await act(async () => settle(body));
+    },
   };
 }
 
@@ -124,5 +130,33 @@ describe("useQuery's mutate as an event handler", () => {
       mutateRef({ title: "optimistic", nativeEvent: null, preventDefault: null }),
     );
     expect(screen.getByText("optimistic")).toBeTruthy();
+  });
+});
+
+describe("useQuery's mutate with overlapping refetches (#677)", () => {
+  test("an older response landing last does not replace what is on screen", async () => {
+    const net = createFetch();
+    let mutateRef!: (value?: any) => void;
+    function View() {
+      const { data, mutate } = useQuery(
+        "/pages/1" as any,
+        {},
+        { suspense: false },
+      );
+      mutateRef = mutate;
+      return <p>{data ? data.images.join(",") || "empty" : "loading"}</p>;
+    }
+
+    render(<View />, { wrapper: Providers });
+    await net.resolve({ images: [] });
+    expect(screen.getByText("empty")).toBeTruthy();
+
+    act(() => mutateRef()); // after image A is saved
+    act(() => mutateRef()); // after image B is saved
+
+    await net.resolveAt(1, { images: ["a", "b"] });
+    expect(screen.getByText("a,b")).toBeTruthy();
+    await net.resolveAt(0, { images: ["a"] });
+    expect(screen.getByText("a,b")).toBeTruthy();
   });
 });

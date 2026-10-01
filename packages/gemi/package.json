@@ -31,7 +31,6 @@
     "./vite": "./dist/vite/index.mjs",
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
-    "./broadcasting": "./broadcasting/index.ts",
     "./i18n": "./i18n/index.ts",
     "./dictionary": "./i18n/dictionaryRuntime.ts",
     "./server": "./server/index.ts",

@@ -92,6 +92,51 @@ match its `output` schema, the `error` event it emits now has
 code that matched on `"unknown"` to detect this needs updating. An exhaustive
 `switch` over `AgentErrorCode` needs the new case.
 
+## `auth` trusts a user middleware signed in, and `Auth.user()` reads the `access_token` header (#577, #587)
+
+What counts as signed in is now one rule, shared by the `auth` middleware and
+`Auth.user()`:
+
+1. **A user on the request context.** One a global middleware, or a route
+   middleware listed before `auth`, put there with `ctx().setUser(user)`.
+2. **Otherwise the `access_token`**: the cookie, or else the `access_token`
+   header, naming a live session.
+
+- **`auth` passes a context user with no token** (#577). It used to require an
+  `access_token` cookie or header as well, and then trusted the context user
+  without checking that token against a session, so the token was never a
+  check on that user, only a requirement to send one. An app that signs users in
+  by SSO header, API key or a signed service token can now use `auth` instead
+  of writing its own.
+- **`Auth.user()` reads the `access_token` header** (#587), through the same
+  reader as the middleware. A native client was signed in on a route with
+  `auth` and refused on one without it; it is now signed in on both.
+- **One token reader** (`readAccessToken`, internal) replaces the middleware's,
+  `Auth.user()`'s two and sign-out's. An empty `access_token` cookie now counts
+  as absent, so a header sent beside it is read. When both are sent the cookie
+  still wins.
+
+Unknown, expired and pre-`v2.` tokens are refused exactly as before.
+
+**Behaviour change, and a security one: audit every `setUser` call.** Anything
+your middleware puts on `ctx().user` is now a signed-in user to every `auth`
+route, token or not. Before you upgrade, search your app for `setUser(` and
+check that each one runs only after the user is verified:
+
+- A global middleware that sets a placeholder, such as a guest or anonymous
+  user for logging, analytics or policies, now signs every visitor in. Move
+  that value off `ctx().user`.
+- A middleware that sets a user from an unverified header, query parameter or
+  token (for rate limiting or logs, say) now signs that request in as whoever
+  it names. Verify the credential first, or don't set a user.
+- A route middleware listed before `auth` that sets a user is trusted too. One
+  listed after `auth` still cannot sign anyone in.
+
+An app whose middleware never calls `setUser`, or calls it only with a user
+that `Auth.user()` returned, behaves as before, apart from header clients now
+being signed in on routes without `auth`. See
+[Who counts as signed in](docs/middleware.md#who-counts-as-signed-in).
+
 ## A job or cron tick cut off at the shutdown deadline now exits 1 (#580)
 
 The docs said a queued job still running at the provider shutdown deadline
@@ -112,6 +157,44 @@ drain, so it never overran, and the abandoned job showed up only in the log.
 exits `1` where it exited `0`. If your platform alerts or restarts on a
 non-zero exit, make `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` long enough for your
 jobs, or expect the alert when they are cut off.
+
+## Broadcasting and websockets are removed (#31)
+
+**Breaking change.** The broadcasting subsystem is gone. Nothing in gemi used
+it, and apps that need real-time delivery are better served by a dedicated
+service than by a half-built one in the framework.
+
+Removed:
+
+- the `gemi/broadcasting` entry point and `BroadcastingChannel`
+- `Broadcast` from `gemi/facades`
+- `BroadcastManager`, `BroadcastServiceProvider`, `defineBroadcastConfig`,
+  `broadcastConfigDefaults` and the `BroadcastConfig` type from
+  `gemi/services`, and the `broadcast` config slice
+- `useSubscription` and `useBroadcast` from `gemi/client`, and the websocket
+  provider `ClientRouter` wrapped every page in
+- `App.websocket`, `App.onPublish()` and `Kernel.broadcast()`
+- the broadcasting entries in the `gemi migrate` codemod tables
+
+`Auth.user()` no longer reads a websocket connection's headers and cookies;
+it reads the current request only, as every non-websocket caller already did.
+Outside a request there is no token, so it throws `AuthenticationError` as
+before.
+
+What to delete in your app:
+
+- `app/config/broadcast.ts`, and its entry wherever you collect config
+- `app/broadcasting/` (your `BroadcastingChannel` subclasses)
+- any `Broadcast.channel(...).publish(...)` call, and any `useSubscription` /
+  `useBroadcast` in components
+- test stubs of `BroadcastManager`. folio's
+  `apps/web/app/auth/legacySessionMigration.postgres.bun-check.ts` imports
+  `BroadcastManager` from `gemi/services` only to stub the broadcasting branch
+  of `Auth.user()`; delete that import and the stub. `Auth.user()` no longer
+  resolves `BroadcastManager`, so nothing replaces it.
+
+The typechecker finds each of these: every removed name is now a missing
+export.
 
 # Upgrading from 0.82 to 0.83
 

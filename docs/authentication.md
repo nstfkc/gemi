@@ -166,8 +166,8 @@ export default defineAuthConfig({
   token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
   window), so every request converting it computes the same one, and nobody without `SECRET`
   can.
-- **Only inside a request.** Outside one — a broadcasting connection — there is no response
-  to carry the new cookie, so the token is refused until the client's next request converts it.
+- **Only inside a request.** Outside one there is no response to carry the new cookie, so
+  the token is refused until the client's next request converts it.
 - **A client that sends the `access_token` header** has to take the new token from the
   response's `Set-Cookie`, as it does on every sign-in; otherwise it is signed out when the
   grace window ends.
@@ -969,16 +969,24 @@ export default class extends Kernel {
 this.get(DashboardController, "index").middleware(["auth"]);
 ```
 
-Requests without a valid `access_token` are rejected with an `AuthenticationError`:
-a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
-a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
-view's loader refuses the same way, with one difference worth knowing: the middleware takes
-the token from the `access_token` cookie **or** the `access_token` header, while `Auth.user()`
-reads the cookie alone. On a route carrying `auth` that gap is invisible, because the
-middleware has already put the user on the request context; on a route without it, a client
-that authenticates by header is refused. See [Middleware](./middleware.md) for the full DSL
-(`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
-role enforcement.
+Requests with no signed-in user are rejected with an `AuthenticationError`: a 401 for API
+routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) — a 302 on a page
+load, a client-side redirect on an in-app navigation. `Auth.user()` in a handler or a view's
+loader refuses the same way, and the two agree on who is signed in, so a route with `auth` and
+a route without it see the same user:
+
+- **A user already on the request context** — one a global middleware, or a route middleware
+  listed before `auth`, put there with `ctx().setUser(user)` — is signed in, with or without
+  an `access_token`. That is how an app signs users in by SSO, API key or anything else that
+  is not a gemi session. **Your middleware must verify the user before it sets one**; see
+  [Who counts as signed in](./middleware.md#who-counts-as-signed-in) for what that takes.
+- **Otherwise the `access_token`**, read from the cookie or else the `access_token` header —
+  one reader shared by `auth`, `Auth.user()` and sign-out — must
+  name a live session. An unknown, expired or pre-`v2.` token (without
+  `migrateLegacySession`) is no user.
+
+See [Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route,
+etc.) and [Authorization](./authorization.md) for role enforcement.
 
 The sign-in page is set once in the auth config:
 

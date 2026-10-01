@@ -3,7 +3,7 @@
 
 ## gemi Documentation
 
-**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, a Prisma-typed ORM, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n — so you spend time on product code instead of wiring libraries together.
+**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, a Prisma-typed ORM, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, and i18n — so you spend time on product code instead of wiring libraries together.
 
 gemi is Laravel-inspired: an application is a **Kernel** owning a **container**, **service providers** register bindings into that container, runtime settings live in **`app/config/*.ts`**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router.
 
@@ -59,14 +59,13 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 ### Services & facades
 - **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
 - **[Features](./feature-flags.md)** — features declared in `app/features` and switched on from the database: `defineFeature`, `when` targeting, deterministic rollouts, `useFeature`, the `Features` facade, and route gating.
-- **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
+- **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
-- **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
 ## Core concepts at a glance
@@ -415,7 +414,7 @@ The container API is Laravel's:
 
 ### Framework services
 
-Fourteen framework providers bind fifteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
+Thirteen framework providers bind fourteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
 
 | Service | Token | Config slice | Facade |
 | --- | --- | --- | --- |
@@ -425,7 +424,6 @@ Fourteen framework providers bind fifteen services. You rarely resolve these dir
 | `FilesystemManager` | `filesystem` | `filesystem` | `Storage` |
 | `QueueManager` | `queue` | `queue` | — |
 | `RedisManager` | `redis` | `redis` | `Redis` |
-| `BroadcastManager` | `broadcast` | `broadcast` | `Broadcast` |
 | `ImageManager` | `image` | `image` | — |
 | `ApiRouteDispatcher` | `router.api` | `route.api` | `Query` |
 | `ViewRouteDispatcher` | `router.view` | `route.view` | — |
@@ -518,7 +516,6 @@ export default defineMiddlewareConfig({
 | `filesystem` | `defineFilesystemConfig` | `gemi/services` |
 | `queue` | `defineQueueConfig` | `gemi/services` |
 | `redis` | `defineRedisConfig` | `gemi/services` |
-| `broadcast` | `defineBroadcastConfig` | `gemi/services` |
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
@@ -761,7 +758,6 @@ The key members:
 
 - **`app.waitForBoot()`** — completes phase two of the boot. Await it before the first request.
 - **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API route dispatcher, everything else to the view route dispatcher.
-- **`app.websocket`** — a Bun `WebSocketHandler` for the broadcasting service.
 - **`app.dispatchJob(name, args)`** — enqueue a background job.
 - **`onException`** — an optional callback for unhandled errors thrown during a request; defaults to `console.error`.
 
@@ -2420,7 +2416,63 @@ The following middleware classes ship with the framework and are exported from `
 
 ### `auth` → `AuthenticationMiddleware`
 
-Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
+Requires a signed-in user. A user already on the request context passes as it is (see [Who counts as signed in](#who-counts-as-signed-in)). Otherwise it reads the `access_token` cookie (or, failing that, the `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when there is neither — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
+
+### Who counts as signed in
+
+`auth` and `Auth.user()` agree on one rule, so a route with `auth` and a route without it see the same user:
+
+1. **A user on the request context is signed in.** Whatever a [global middleware](#global-middleware), or a route middleware listed *before* `auth`, put there with `this.req.ctx().setUser(user)` is trusted as it is, with or without an `access_token`. This is how an app signs users in by something other than gemi's own session: an SSO identity a proxy in front of the app passes on, an API key, a signed service token.
+2. **Otherwise, the access token.** The `access_token` cookie a browser sends, or else the `access_token` header a native client sends, read the same way by `auth`, `Auth.user()` and sign-out. It names a session, which must exist and not have expired. A token with no live session is no user.
+
+```typescript
+// app/http/middleware/SsoMiddleware.ts — listed in `global`
+import { timingSafeEqual } from "node:crypto";
+import { app } from "gemi/foundation";
+import { Middleware } from "gemi/http";
+import { AuthManager } from "gemi/services";
+
+const fromProxy = (secret: string | null) => {
+  const expected = Buffer.from(process.env.PROXY_SECRET!);
+  const given = Buffer.from(secret ?? "");
+  return given.length === expected.length && timingSafeEqual(given, expected);
+};
+
+export class SsoMiddleware extends Middleware {
+  async run() {
+    // Only the proxy knows the secret, so a client cannot write the header itself.
+    if (!fromProxy(this.req.headers.get("X-Proxy-Secret"))) return;
+    const email = this.req.headers.get("X-Forwarded-Email");
+    if (!email) return;
+    const auth = app(AuthManager);
+    const user = await auth.userProvider.findUserByEmailAddress(email, false);
+    if (!user) return;
+    // `extendSession` runs for session users only; give this one the same shape.
+    user["extension"] = await auth.config.extendSession(user);
+    this.req.ctx().setUser(user);
+  }
+}
+```
+
+> **Security: `setUser` is a sign-in.** A user your middleware sets passes `auth` on its own;
+> `auth` no longer also asks for an `access_token`. So a middleware must call `setUser` only
+> once it has **verified** who the request is from:
+>
+> - Check a credential the client cannot forge: an API key against its hash, a JWT's
+>   signature and expiry, a header only your proxy can set — and make sure it can only be set
+>   by the proxy: strip it at the edge, or check a secret the proxy adds, or keep the origin
+>   unreachable except through the proxy.
+> - Never set a user from request data you have not checked: an email or id in a header, a
+>   query parameter, an unverified token, an API key read for rate limiting or logs.
+> - Never set a placeholder — a guest or anonymous "user" object for logging, analytics or
+>   policies. It is now a signed-in user to every `auth` route. Keep such values somewhere
+>   other than `ctx().user`.
+> - Order matters for route middleware: one listed *after* `auth` runs too late to sign
+>   anyone in, and one listed before it is trusted.
+>
+> gemi itself only ever puts on the context a user it resolved from a live session.
+
+A user signed in this way exists for the request it was set on, and only there. It has no gemi session, so sign-out has nothing to revoke (sign out at your identity provider). It is not carried into the in-process requests gemi makes on a request's behalf — a view's server-side `Query`, an MCP tool call's `dispatchAs` — which the global list does not run for, so an `auth` api route there refuses it. All of these fail closed.
 
 ### `cache:...` → `CacheMiddleware`
 
@@ -2574,7 +2626,7 @@ class FrontDoorMiddleware extends Middleware {
 What a global middleware sees is not quite what a route middleware sees:
 
 - **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
-- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` then checks only that an `access_token` cookie or header is present, not that it belongs to a session, and `Auth.user()` returns the user without a token at all. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` passes it and `Auth.user()` returns it, with or without an `access_token`. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. See [Who counts as signed in](#who-counts-as-signed-in). Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
 - **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
 
 A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.
@@ -8027,8 +8079,8 @@ export default defineAuthConfig({
   token is not random like a sign-in's: it is HMAC-SHA256(`SECRET`, old token + a 10-minute
   window), so every request converting it computes the same one, and nobody without `SECRET`
   can.
-- **Only inside a request.** Outside one — a broadcasting connection — there is no response
-  to carry the new cookie, so the token is refused until the client's next request converts it.
+- **Only inside a request.** Outside one there is no response to carry the new cookie, so
+  the token is refused until the client's next request converts it.
 - **A client that sends the `access_token` header** has to take the new token from the
   response's `Set-Cookie`, as it does on every sign-in; otherwise it is signed out when the
   grace window ends.
@@ -8830,16 +8882,24 @@ export default class extends Kernel {
 this.get(DashboardController, "index").middleware(["auth"]);
 ```
 
-Requests without a valid `access_token` are rejected with an `AuthenticationError`:
-a 401 for API routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) —
-a 302 on a page load, a client-side redirect on an in-app navigation. `Auth.user()` in a
-view's loader refuses the same way, with one difference worth knowing: the middleware takes
-the token from the `access_token` cookie **or** the `access_token` header, while `Auth.user()`
-reads the cookie alone. On a route carrying `auth` that gap is invisible, because the
-middleware has already put the user on the request context; on a route without it, a client
-that authenticates by header is refused. See [Middleware](./middleware.md) for the full DSL
-(`-auth` to cancel, router vs per-route, etc.) and [Authorization](./authorization.md) for
-role enforcement.
+Requests with no signed-in user are rejected with an `AuthenticationError`: a 401 for API
+routes, and for views a redirect to `signInPath` (default `/auth/sign-in`) — a 302 on a page
+load, a client-side redirect on an in-app navigation. `Auth.user()` in a handler or a view's
+loader refuses the same way, and the two agree on who is signed in, so a route with `auth` and
+a route without it see the same user:
+
+- **A user already on the request context** — one a global middleware, or a route middleware
+  listed before `auth`, put there with `ctx().setUser(user)` — is signed in, with or without
+  an `access_token`. That is how an app signs users in by SSO, API key or anything else that
+  is not a gemi session. **Your middleware must verify the user before it sets one**; see
+  [Who counts as signed in](./middleware.md#who-counts-as-signed-in) for what that takes.
+- **Otherwise the `access_token`**, read from the cookie or else the `access_token` header —
+  one reader shared by `auth`, `Auth.user()` and sign-out — must
+  name a live session. An unknown, expired or pre-`v2.` token (without
+  `migrateLegacySession`) is no user.
+
+See [Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route,
+etc.) and [Authorization](./authorization.md) for role enforcement.
 
 The sign-in page is set once in the auth config:
 
@@ -9767,7 +9827,7 @@ import { Auth, Redirect, Url, Log } from "gemi/facades";
 
 Each facade names one container binding and resolves it **per call**, so it always reads the instance registered for the current application — never one captured at module load. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. Most read from the current request through gemi's request context, so they only make sense while a request is being handled.
 
-> **Note:** Some facade names (`Redirect`, `Broadcast`) also exist as client-side React components/hooks with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
+> **Note:** One facade name (`Redirect`) also exists as a client-side React component with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
 
 All exports live in `gemi/facades`:
 
@@ -9779,7 +9839,6 @@ import {
   Lang,
   Storage,
   Query,
-  Broadcast,
   Url,
   Log,
   Meta,
@@ -9832,9 +9891,9 @@ const mail = app(MailManager); // typed MailManager
 
 ## Auth
 
-`Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
+`Auth` reads and authorizes the current user. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
-- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
+- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none. The same rule as the `auth` middleware: a user middleware already put on the request context, else the session named by the `access_token` cookie or, failing that, the `access_token` header. See [Who counts as signed in](./middleware.md#who-counts-as-signed-in).
 - `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
 - `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`.
 - `Auth.authenticate(email)` — creates a session for the given email.
@@ -9934,20 +9993,6 @@ const stats = await Query.instant("/dashboard/stats");
 ```
 
 > **Note:** `Query` cannot be called from an API request context (it throws) — it is meant for view rendering. See [Data Fetching](./data-fetching.md) for the client `useQuery` hook that consumes the same routes.
-
-## Broadcast
-
-`Broadcast` publishes real-time messages to a websocket channel from the server. It fronts `BroadcastManager` (token `broadcast`); channels are declared in `app/config/broadcast.ts`.
-
-- `Broadcast.channel(route, params)` — returns a handle with `publish(data, compress?)` that sends a message to the channel's topic (the route pattern with `params` applied).
-
-```typescript
-import { Broadcast } from "gemi/facades";
-
-Broadcast.channel("/chat/:roomId", { roomId }).publish({ text: "hello" });
-```
-
-See [Broadcasting](./broadcasting.md) for defining channels and the client `useSubscription`/`useBroadcast` hooks.
 
 ## Url
 
@@ -10180,7 +10225,6 @@ See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration
 - [Navigation](./navigation.md)
 - [File Storage](./file-storage.md)
 - [Data Fetching](./data-fetching.md)
-- [Broadcasting](./broadcasting.md)
 - [Internationalization](./i18n.md)
 - [Views & Layouts](./views-and-layouts.md)
 - [Configuration](./configuration.md)
@@ -12451,7 +12495,6 @@ Five mechanisms, one row each:
 | `Event.dispatch()`, sync listener | 1 → N | inline, and the caller names none of them |
 | `Event.dispatch()`, `queued = true` | 1 → N | the queue: retried, dead-lettered |
 | `Job.dispatch()` | 1 → 1 | the queue: retried, dead-lettered |
-| `Broadcast.publish()` | 1 → N | *clients*, over websockets |
 
 gemi has no ORM lifecycle events (`User.created` and friends) — a model write does not emit anything. Dispatch explicitly from the code that did the write.
 
@@ -12459,162 +12502,8 @@ gemi has no ORM lifecycle events (`User.created` and friends) — a model write 
 
 - [Jobs & Queues](./jobs-and-queues.md) — background work with retries, which a listener often dispatches.
 - [ORM](./orm.md) — `DB.transaction`, which `static afterCommit` hooks.
-- [Broadcasting](./broadcasting.md) — fan-out to browsers rather than to server-side handlers.
 - [Controllers](./controllers.md) — dispatching from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
-
----
-
-## Broadcasting
-
-gemi ships real-time messaging over websockets. You define **channels** on the server (route patterns with authorization logic), publish messages to them with the [`Broadcast`](./facades.md) facade, and subscribe to them from React components with `useSubscription`. A channel's topic is a route pattern — the same `:param` syntax used elsewhere in gemi — so a single channel definition can serve many concrete topics (one per room, per user, per order, …).
-
-## Defining a channel
-
-A channel is a class extending `BroadcastingChannel` from `gemi/broadcasting`:
-
-```typescript
-import { BroadcastingChannel } from "gemi/broadcasting";
-import { Auth } from "gemi/facades";
-
-export class ChatChannel extends BroadcastingChannel {
-  // Authorize a client's subscription. Receives the matched route params
-  // (from the topic pattern). Return true to allow, false to reject.
-  async subscribe(params: { roomId: string }) {
-    const user = await Auth.user();
-    return await isMemberOfRoom(user.id, params.roomId);
-  }
-
-  // Transform the payload before it is delivered to subscribers.
-  // Whatever you return is what clients receive as the message data.
-  publish(input: { text: string; userId: string }) {
-    return {
-      text: input.text,
-      userId: input.userId,
-      at: Date.now(),
-    };
-  }
-}
-```
-
-- **`subscribe(params)`** → `Promise<boolean> | boolean`. Called when a client tries to subscribe to a matching topic. It receives the route params parsed from the topic. Return `true` to authorize, `false` to reject. This is where you run auth/permission checks — the [`Auth`](./facades.md) facade works here because gemi runs it inside the request context of the socket. The base implementation returns `true` (public channel).
-- **`publish(input)`** → the message payload. Called on the server each time you publish; its return value is serialized and delivered to every subscriber. Use it to shape/enrich the outgoing message. The base implementation returns `{}`.
-
-> **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.
-
-## Registering channels
-
-A channel does nothing until it is registered under its topic route pattern in `app/config/broadcast.ts`:
-
-```typescript
-// app/config/broadcast.ts
-import { defineBroadcastConfig } from "gemi/services";
-import { ChatChannel } from "@/app/broadcasting/ChatChannel";
-
-export default defineBroadcastConfig({
-  channels: {
-    "/chat/:roomId": ChatChannel,
-  },
-});
-```
-
-Then import it into your Kernel's `config` under the `broadcast` key — see [Project Structure](./project-structure.md#configuration-appconfig):
-
-```typescript
-// app/kernel/Kernel.ts
-import broadcast from "../config/broadcast";
-
-export default class extends Kernel {
-  config = { broadcast /* , ... */ };
-}
-```
-
-An unregistered route is what makes `Broadcast.channel(...)` fall back to the no-op described below.
-
-## Topics and channels
-
-Each channel is associated with a **topic route pattern** (e.g. `/chat/:roomId`). When a client subscribes to a concrete topic like `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
-
-## Publishing from the server
-
-Use the [`Broadcast`](./facades.md) facade to publish to a channel from a controller, job, or any server code:
-
-```typescript
-import { Broadcast } from "gemi/facades";
-
-Broadcast.channel("/chat/:roomId", { roomId }).publish({
-  text: "hello",
-  userId: user.id,
-});
-```
-
-- `Broadcast.channel(route, params)` resolves the registered channel for `route`, applies `params` to build the concrete topic, and returns a handle.
-- `handle.publish(data, compress?)` runs the channel's `publish(data)` transform, then delivers `{ topic, data }` to every subscriber. Pass `compress: true` (default `false`) to enable per-message compression.
-
-If no channel is registered for `route`, `Broadcast.channel` logs an error and returns a no-op `publish`, so a missing registration fails quietly rather than throwing.
-
-## Subscribing from the client
-
-Use `useSubscription` from `gemi/client` to receive messages in a component:
-
-```tsx
-import { useState } from "react";
-import { useSubscription } from "gemi/client";
-
-function ChatRoom({ roomId }: { roomId: string }) {
-  const [messages, setMessages] = useState<any[]>([]);
-
-  useSubscription("/chat/:roomId", {
-    params: { roomId },
-    cb: (data) => setMessages((prev) => [...prev, data]),
-  });
-
-  return (
-    <ul>
-      {messages.map((m, i) => (
-        <li key={i}>{m.text}</li>
-      ))}
-    </ul>
-  );
-}
-```
-
-`useSubscription(route, { params, cb })`:
-
-- `route` — the channel's topic pattern (same string you registered).
-- `params` — values for the pattern's `:params`, used to build the concrete topic to subscribe to.
-- `cb(data)` — called for each message whose topic matches; `data` is the payload your channel's `publish` returned.
-
-The hook subscribes on mount and unsubscribes on unmount (and re-subscribes when the resolved topic changes).
-
-## Broadcasting from the client
-
-`useBroadcast` returns a function that sends a payload straight to a topic from the browser (client-to-client relay, without going through a server-side channel transform):
-
-```tsx
-import { useBroadcast } from "gemi/client";
-
-function Typing({ roomId }: { roomId: string }) {
-  const broadcast = useBroadcast("/chat/:roomId", { params: { roomId } });
-
-  return (
-    <input
-      onFocus={() => broadcast({ typing: true })}
-      onBlur={() => broadcast({ typing: false })}
-    />
-  );
-}
-```
-
-`useBroadcast(path, { params })` returns `(payload) => void`. It applies `params` to `path` to build the topic and relays `payload` to everyone subscribed to that topic. Subscribers receive it through their `useSubscription` `cb` just like a server-published message.
-
-> **Note:** Server publishing (`Broadcast` facade) runs your channel's `publish` transform and is the right tool for authoritative events. `useBroadcast` is a lightweight client relay for ephemeral signals like typing/presence — it does not pass through the channel's `publish` method.
-
-## Related
-
-- [Facades](./facades.md) — the `Broadcast` and `Auth` facades used above.
-- [Data Fetching](./data-fetching.md) — `useQuery` for request/response data.
-- [Project Structure](./project-structure.md#configuration-appconfig) — `app/config/*.ts` slices and how the Kernel assembles them.
 
 ---
 

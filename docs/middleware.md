@@ -53,7 +53,63 @@ The following middleware classes ship with the framework and are exported from `
 
 ### `auth` → `AuthenticationMiddleware`
 
-Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
+Requires a signed-in user. A user already on the request context passes as it is (see [Who counts as signed in](#who-counts-as-signed-in)). Otherwise it reads the `access_token` cookie (or, failing that, the `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when there is neither — a **401** for API routes, a redirect to the auth config's `signInPath` (default `/auth/sign-in`) for view routes, carrying the requested page as `?redirect=`. One parameter overrides the sign-in page for a route: `"auth:/admin/sign-in"`. See [Authentication](./authentication.md#the-auth-middleware).
+
+### Who counts as signed in
+
+`auth` and `Auth.user()` agree on one rule, so a route with `auth` and a route without it see the same user:
+
+1. **A user on the request context is signed in.** Whatever a [global middleware](#global-middleware), or a route middleware listed *before* `auth`, put there with `this.req.ctx().setUser(user)` is trusted as it is, with or without an `access_token`. This is how an app signs users in by something other than gemi's own session: an SSO identity a proxy in front of the app passes on, an API key, a signed service token.
+2. **Otherwise, the access token.** The `access_token` cookie a browser sends, or else the `access_token` header a native client sends, read the same way by `auth`, `Auth.user()` and sign-out. It names a session, which must exist and not have expired. A token with no live session is no user.
+
+```typescript
+// app/http/middleware/SsoMiddleware.ts — listed in `global`
+import { timingSafeEqual } from "node:crypto";
+import { app } from "gemi/foundation";
+import { Middleware } from "gemi/http";
+import { AuthManager } from "gemi/services";
+
+const fromProxy = (secret: string | null) => {
+  const expected = Buffer.from(process.env.PROXY_SECRET!);
+  const given = Buffer.from(secret ?? "");
+  return given.length === expected.length && timingSafeEqual(given, expected);
+};
+
+export class SsoMiddleware extends Middleware {
+  async run() {
+    // Only the proxy knows the secret, so a client cannot write the header itself.
+    if (!fromProxy(this.req.headers.get("X-Proxy-Secret"))) return;
+    const email = this.req.headers.get("X-Forwarded-Email");
+    if (!email) return;
+    const auth = app(AuthManager);
+    const user = await auth.userProvider.findUserByEmailAddress(email, false);
+    if (!user) return;
+    // `extendSession` runs for session users only; give this one the same shape.
+    user["extension"] = await auth.config.extendSession(user);
+    this.req.ctx().setUser(user);
+  }
+}
+```
+
+> **Security: `setUser` is a sign-in.** A user your middleware sets passes `auth` on its own;
+> `auth` no longer also asks for an `access_token`. So a middleware must call `setUser` only
+> once it has **verified** who the request is from:
+>
+> - Check a credential the client cannot forge: an API key against its hash, a JWT's
+>   signature and expiry, a header only your proxy can set — and make sure it can only be set
+>   by the proxy: strip it at the edge, or check a secret the proxy adds, or keep the origin
+>   unreachable except through the proxy.
+> - Never set a user from request data you have not checked: an email or id in a header, a
+>   query parameter, an unverified token, an API key read for rate limiting or logs.
+> - Never set a placeholder — a guest or anonymous "user" object for logging, analytics or
+>   policies. It is now a signed-in user to every `auth` route. Keep such values somewhere
+>   other than `ctx().user`.
+> - Order matters for route middleware: one listed *after* `auth` runs too late to sign
+>   anyone in, and one listed before it is trusted.
+>
+> gemi itself only ever puts on the context a user it resolved from a live session.
+
+A user signed in this way exists for the request it was set on, and only there. It has no gemi session, so sign-out has nothing to revoke (sign out at your identity provider). It is not carried into the in-process requests gemi makes on a request's behalf — a view's server-side `Query`, an MCP tool call's `dispatchAs` — which the global list does not run for, so an `auth` api route there refuses it. All of these fail closed.
 
 ### `cache:...` → `CacheMiddleware`
 
@@ -207,7 +263,7 @@ class FrontDoorMiddleware extends Middleware {
 What a global middleware sees is not quite what a route middleware sees:
 
 - **No route yet.** `this.req` is an `HttpRequest` for the raw request with no `params` and an empty `routePath`. Its `kind` is `"api"` under `/api` and `"view"` otherwise, static files included.
-- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` then checks only that an `access_token` cookie or header is present, not that it belongs to a session, and `Auth.user()` returns the user without a token at all. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
+- **Its own request context.** Headers and cookies it sets with `this.req.ctx()` are put on the response the request ends with, a static file's included; a header the response sets itself wins. Its cookies are left off a response whose `Cache-Control` has `public` or `s-maxage`, as the built assets' does, because a shared cache that stored one would hand a single visitor's cookie to everyone. The route runs in a fresh context of its own, as it always has, but it starts with the user the global list left: a gate that looked the visitor up with `Auth.user()` or `ctx().setUser(...)` has done it for the route too. The route trusts that user as it would one it looked up itself: `auth` passes it and `Auth.user()` returns it, with or without an `access_token`. So a global middleware should set a user only once it has verified who they are — never from an unverified token or an API-key header read for rate limiting or logs. See [Who counts as signed in](#who-counts-as-signed-in). Nothing else crosses over. Not the locale, which the router decides for each route from its url and the request; not feature-flag evaluations, which the list would have made without a route and maybe before a user was known. That scope is closed as soon as the list is through, so `ctx().waitUntil(...)` has nothing to hold it open — background work belongs in a route middleware.
 - **No opting out.** A route's `-alias` cancels only what its routers added; it cannot remove a global entry. An exception, like the health probe above, belongs in the middleware.
 
 A `global` entry that names an alias not in `aliases`, or one written as `-alias`, stops the server at boot. A route's unknown alias is skipped; a global one is usually a gate for the whole origin, and a typo in it would leave every request ungated.

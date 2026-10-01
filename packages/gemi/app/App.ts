@@ -1,4 +1,3 @@
-import type { WebSocketHandler } from "bun";
 import type { Kernel } from "../kernel";
 import type { CarriedContext } from "../http/requestContext";
 import { isApiPath } from "../services/router/apiPath";
@@ -135,36 +134,6 @@ export class App {
         return (async (...args: any[]) => outcome.apply(await render(...args))) as any;
       }
       return outcome.apply(result);
-    });
-  }
-
-  public websocket: WebSocketHandler<{ headers: Headers }> = {
-    message: (ws, message) => {
-      const kernelRun = this.kernel.run.bind(this.kernel);
-      kernelRun(() => {
-        const broadcast = this.kernel.broadcast();
-        broadcast.run(ws.data.headers, () => {
-          broadcast.handleMessage(ws, message);
-        });
-      });
-    },
-    open: (_ws) => {},
-    close: (ws) => {
-      console.log("closed ws");
-      ws.terminate();
-    },
-  };
-
-  public onPublish(
-    fn: (
-      topic: string,
-      data: string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer,
-      compress?: boolean,
-    ) => void,
-  ) {
-    const kernelRun = this.kernel.run.bind(this.kernel);
-    kernelRun(() => {
-      this.kernel.broadcast().onPublish(fn);
     });
   }
 

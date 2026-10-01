@@ -61,9 +61,11 @@ const passThrough: GlobalMiddlewareOutcome = {
  * Headers and cookies reach the response through `apply`, and the user is
  * `carried` into the route's context, so a gate that looked the user up does
  * not make `auth` or `Auth.user()` look them up again. Both trust a user they
- * find on the context without checking it against a session (`auth` checks only
- * that a token is present), so whatever a global middleware sets is treated as
- * authenticated by the route. The rest stays behind:
+ * find on the context without checking it against a session or asking for a
+ * token, so whatever a global middleware sets is treated as authenticated by
+ * the route — which is what lets one sign a user in by SSO header or API key
+ * (#577), and why it must set only a user it has verified. The rest stays
+ * behind:
  * the locale, because the dispatchers decide it for the route, from its url,
  * and the feature evaluations, made against a request with no route and maybe
  * before a user was known.

@@ -72,9 +72,9 @@ export interface AuthConfig {
    * This is also where a sunset belongs — answer `false` after it — and once
    * it has passed, remove the option.
    *
-   * Only a request is converted: outside one, as on a broadcasting
-   * connection, there is no response to carry the new cookie, and the token is
-   * refused until the client's next request converts it.
+   * Only a request is converted: outside one there is no response to carry
+   * the new cookie, and the token is refused until the client's next request
+   * converts it.
    */
   migrateLegacySession?: LegacySessionMigrator | null;
 

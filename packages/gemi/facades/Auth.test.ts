@@ -6,15 +6,15 @@ import {
 } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import { Auth } from "./Auth";
-import { Broadcast } from "./Broadcast";
 
 /**
  * A fake standing in for `HttpRequest`, which needs a real `Request` and a route
- * match to construct. `Auth.user()` reads only a cookie and a header.
+ * match to construct. `Auth.user()` reads only a cookie and a header. It
+ * carries a token, since a request with none is never looked up.
  */
 function fakeRequest() {
   return {
-    cookies: { get: () => undefined },
+    cookies: { get: (name: string) => (name === "access_token" ? "v2.test" : undefined) },
     headers: { get: () => "test-agent" },
   } as any;
 }
@@ -29,13 +29,6 @@ function inRequest<T>(sessionUser: any, fn: () => Promise<T>): Promise<T> {
   } as any);
   return RequestContext.run(fakeRequest(), fn);
 }
-
-beforeEach(() => {
-  // No broadcasting context: this is an HTTP request.
-  vi.spyOn(Broadcast, "getFacadeRoot").mockReturnValue({
-    context: { getStore: () => undefined },
-  } as any);
-});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -172,5 +165,64 @@ describe("Auth.intendedUrl", () => {
     expect(
       withRedirect("//evil.example", () => Auth.intendedUrl("/home")),
     ).toBe("/home");
+  });
+});
+
+describe("Auth.user reads the access_token header (#587)", () => {
+  const getSession = vi.fn(async (token: string, _userAgent: string) =>
+    token === "v2.header" ? { user } : null,
+  );
+
+  /** Runs `fn` in a request that carried `headers` and `cookies`. */
+  function withCredentials<T>(
+    headers: Record<string, string>,
+    cookies: Record<string, string>,
+    fn: () => Promise<T>,
+  ) {
+    const req = {
+      cookies: { get: (name: string) => cookies[name] },
+      headers: new Headers(headers),
+    } as any;
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+      config: { signInPath: "/auth/sign-in" },
+      getSession,
+    } as any);
+    return RequestContext.run(req, fn);
+  }
+
+  beforeEach(() => {
+    getSession.mockClear();
+  });
+
+  test("a native client with no cookie jar signs in with the header", async () => {
+    const found = await withCredentials(
+      { access_token: "v2.header", "User-Agent": "ios" },
+      {},
+      () => Auth.user(),
+    );
+
+    expect(found).toBe(user);
+    expect(getSession).toHaveBeenCalledWith("v2.header", "ios");
+  });
+
+  test("an empty cookie does not hide the header", async () => {
+    await expect(
+      withCredentials({ access_token: "v2.header" }, { access_token: "" }, () => Auth.user()),
+    ).resolves.toBe(user);
+  });
+
+  test("a token with no session is refused", async () => {
+    const error = await withCredentials({ access_token: "v2.forged" }, {}, () =>
+      Auth.user(),
+    ).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+  });
+
+  test("no token is refused without a lookup", async () => {
+    const error = await withCredentials({}, {}, () => Auth.user()).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect(getSession).not.toHaveBeenCalled();
   });
 });

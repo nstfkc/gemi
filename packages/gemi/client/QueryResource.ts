@@ -61,6 +61,18 @@ export class QueryResource {
    * render it — each of them sees the same failure and asks for one.
    */
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Request ordering (#677). Every fetch takes the next number from `seq`
+   * when it is sent; `issued` holds the newest one per variant, and `applied`
+   * the number of the newest write that landed — a response, or an
+   * optimistic `mutate`/`invalidate` update, which takes the current `seq` and
+   * so supersedes every request already on the wire. A response whose number
+   * is not above `applied` is dropped, so overlapping refetches can no longer
+   * land an older body over a newer one just because it arrived last.
+   */
+  private seq = 0;
+  private issued = new Map<string, number>();
+  private applied = new Map<string, number>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -365,6 +377,7 @@ export class QueryResource {
     const store = this.store.getValue();
     const state = store.get(variantKey);
     if (fn && state?.hasData) {
+      this.markApplied(variantKey);
       this.store.next(
         store.set(variantKey, { ...state, data: fn(state.data), error: null }),
       );
@@ -406,6 +419,9 @@ export class QueryResource {
     }
     const data = fn(state.data);
 
+    // The optimistic value reflects the change being made; a request sent
+    // before it can only carry the old data, so it must not land over it.
+    this.markApplied(variantKey);
     this.staleVariants.add(variantKey);
     this.store.next(
       store.set(variantKey, {
@@ -423,6 +439,11 @@ export class QueryResource {
     this.resolveVariant(variantKey, false, false);
   }
 
+  /** Supersede every request for this variant that is already on the wire. */
+  private markApplied(variantKey: string) {
+    this.applied.set(variantKey, this.seq);
+  }
+
   private async resolveVariant(
     variantKey: string,
     silent = false,
@@ -437,14 +458,41 @@ export class QueryResource {
     // Synchronous with the call, so every read in the same render pass sees
     // the request as already on the wire.
     this.inflight.add(variantKey);
+    const seq = ++this.seq;
+    this.issued.set(variantKey, seq);
+    // No newer request for this variant has been sent since this one.
+    const isLatest = () => this.issued.get(variantKey) === seq;
+    // A newer response, or an optimistic update made after this request was
+    // sent, already landed.
+    const isSuperseded = () => (this.applied.get(variantKey) ?? 0) >= seq;
     const recordFailure = () => {
       this.failures.set(
         variantKey,
         isRetry ? (this.failures.get(variantKey) ?? 0) + 1 : 1,
       );
     };
+    const store = this.store.getValue();
+    /**
+     * Write a failure. Only the latest request reports one: an older request
+     * failing says nothing about the request that replaced it, which will
+     * answer for the variant itself. The current state is read at write time,
+     * not when the request was sent — a newer response may have landed since.
+     */
+    const writeError = (error: unknown) => {
+      if (!isLatest()) return;
+      recordFailure();
+      const current = store.get(variantKey);
+      this.store.next(
+        store.set(variantKey, {
+          loading: false,
+          data: current?.data,
+          hasData: current?.hasData ?? false,
+          error,
+          version: current?.version,
+        }),
+      );
+    };
     try {
-      const store = this.store.getValue();
       const previousState = store.get(variantKey);
 
       if (!silent) {
@@ -479,23 +527,28 @@ export class QueryResource {
         }
       } catch (error) {
         console.error(`Error fetching url /api${fullUrl}`, error);
-        recordFailure();
-        this.store.next(
-          store.set(variantKey, {
-            loading: false,
-            data: previousState?.data,
-            hasData: previousState?.hasData ?? false,
-            error,
-            version: previousState?.version,
-          }),
-        );
+        writeError(error);
         return;
       }
 
       if (response!.ok) {
+        if (isSuperseded()) {
+          // Older than what is on screen: drop it. If nothing newer is on the
+          // wire, this request still owns the `loading` flag it may have set.
+          const current = store.get(variantKey);
+          if (isLatest() && current?.loading) {
+            this.store.next(
+              store.set(variantKey, { ...current, loading: false }),
+            );
+          }
+          return;
+        }
+        this.applied.set(variantKey, seq);
+        const current = store.get(variantKey);
         this.store.next(
           store.set(variantKey, {
-            loading: false,
+            // A newer request still on the wire keeps a loud fetch loud.
+            loading: isLatest() ? false : (current?.loading ?? false),
             data,
             hasData: true,
             error: null,
@@ -506,26 +559,24 @@ export class QueryResource {
         this.lastFetchRecord.set(variantKey, Date.now());
         this.failures.delete(variantKey);
       } else {
-        recordFailure();
-        this.store.next(
-          store.set(variantKey, {
-            loading: false,
-            data: previousState?.data,
-            hasData: previousState?.hasData ?? false,
-            error: new QueryError(
-              this.key,
-              variantKey,
-              response!.status,
-              data,
-              parseRetryAfter(response!.headers?.get?.("retry-after")),
-            ),
-            version: previousState?.version,
-          }),
+        writeError(
+          new QueryError(
+            this.key,
+            variantKey,
+            response!.status,
+            data,
+            parseRetryAfter(response!.headers?.get?.("retry-after")),
+          ),
         );
       }
     } finally {
-      this.inflight.delete(variantKey);
-      // Settle on failure too — a suspended reader has to wake up to throw.
+      // An older request finishing must not clear the flag for the newer one
+      // still on the wire.
+      if (isLatest()) {
+        this.inflight.delete(variantKey);
+      }
+      // Settle on failure and on a dropped response too — a suspended reader
+      // has to wake up to throw, or to re-read and wait on the newer request.
       this.settle(variantKey);
     }
   }

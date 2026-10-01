@@ -25,7 +25,6 @@ import {
 } from "./ComponentContext";
 import { QueryManagerContext, QueryManagerProvider, type QueryConfig } from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
-import { WebSocketContextProvider } from "./WebsocketContext";
 import { useNavigate } from "./useNavigate";
 import { type PageData, type RouteState, RouteStateProvider } from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
@@ -432,33 +431,31 @@ export const ClientRouter = (props: {
   return (
     <ThemeProvider>
       <I18nProvider>
-        <WebSocketContextProvider>
-          <QueryManagerProvider queryConfig={props.queryConfig}>
-            <ComponentsProvider viewImportMap={props.viewImportMap} modules={props.viewModules}>
-              <ClientRouterProvider
-                cssManifest={cssManifest}
-                modulePreloadManifest={modulePreloadManifest}
-                assetBase={assetBase}
-                searchParams={router.searchParams}
-                params={router.params}
-                pageData={pageData}
-                is404={router.is404}
-                is500={false}
-                pathname={router.pathname}
-                currentPath={router.currentPath}
-                routeManifest={routeManifest}
-                breadcrumbs={breadcrumbs}
-                urlLocaleSegment={router.urlLocaleSegment}
-              >
-                <StrictMode>
-                  <RootLayout locale={i18n.currentLocale}>
-                    <Routes componentTree={componentTree} />
-                  </RootLayout>
-                </StrictMode>
-              </ClientRouterProvider>
-            </ComponentsProvider>
-          </QueryManagerProvider>
-        </WebSocketContextProvider>
+        <QueryManagerProvider queryConfig={props.queryConfig}>
+          <ComponentsProvider viewImportMap={props.viewImportMap} modules={props.viewModules}>
+            <ClientRouterProvider
+              cssManifest={cssManifest}
+              modulePreloadManifest={modulePreloadManifest}
+              assetBase={assetBase}
+              searchParams={router.searchParams}
+              params={router.params}
+              pageData={pageData}
+              is404={router.is404}
+              is500={false}
+              pathname={router.pathname}
+              currentPath={router.currentPath}
+              routeManifest={routeManifest}
+              breadcrumbs={breadcrumbs}
+              urlLocaleSegment={router.urlLocaleSegment}
+            >
+              <StrictMode>
+                <RootLayout locale={i18n.currentLocale}>
+                  <Routes componentTree={componentTree} />
+                </RootLayout>
+              </StrictMode>
+            </ClientRouterProvider>
+          </ComponentsProvider>
+        </QueryManagerProvider>
       </I18nProvider>
     </ThemeProvider>
   );

@@ -12,8 +12,8 @@ import { describe, expect, test } from "vitest";
  * > It ships **everything a typical web application needs** — class-based routing,
  * > a type-safe network layer, authentication and authorization, middleware, form
  * > validation, transactional email, background jobs, cron, object storage,
- * > real-time broadcasting, and i18n — so you spend time on product code instead
- * > of wiring libraries together.
+ * > and i18n — so you spend time on product code instead of wiring libraries
+ * > together.
  *
  * The sentence is a claim plus an enumeration, and the enumeration is what a
  * reader checks it against. A typical web application needs a database layer;

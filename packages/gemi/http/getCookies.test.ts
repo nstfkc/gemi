@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 
-import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { getCookies, parseCookieHeader } from "./getCookies";
 import { HttpRequest } from "./HttpRequest";
 
@@ -69,15 +68,5 @@ describe("every Cookie reader uses the same parser", () => {
     const cookies = getCookies(requestWithCookie(header));
     expect(cookies.get("token")).toBe("abc==");
     expect(cookies.get("session_id")).toBe("x");
-  });
-
-  test("BroadcastManager.run", () => {
-    const manager = new BroadcastManager({} as any);
-    let seen: Map<string, string> | undefined;
-    manager.run(new Headers({ Cookie: header }), () => {
-      seen = manager.context.getStore()?.cookies;
-    });
-    expect(seen?.get("token")).toBe("abc==");
-    expect(seen?.get("session_id")).toBe("x");
   });
 });

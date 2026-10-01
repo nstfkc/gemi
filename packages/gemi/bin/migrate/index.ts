@@ -49,7 +49,6 @@ const GEMI_MODULES = [
   "gemi/http",
   "gemi/i18n",
   "gemi/facades",
-  "gemi/broadcasting",
 ];
 
 export async function runMigrate(options: MigrateOptions) {

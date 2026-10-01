@@ -168,7 +168,7 @@ The container API is Laravel's:
 
 ### Framework services
 
-Fourteen framework providers bind fifteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
+Thirteen framework providers bind fourteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
 
 | Service | Token | Config slice | Facade |
 | --- | --- | --- | --- |
@@ -178,7 +178,6 @@ Fourteen framework providers bind fifteen services. You rarely resolve these dir
 | `FilesystemManager` | `filesystem` | `filesystem` | `Storage` |
 | `QueueManager` | `queue` | `queue` | — |
 | `RedisManager` | `redis` | `redis` | `Redis` |
-| `BroadcastManager` | `broadcast` | `broadcast` | `Broadcast` |
 | `ImageManager` | `image` | `image` | — |
 | `ApiRouteDispatcher` | `router.api` | `route.api` | `Query` |
 | `ViewRouteDispatcher` | `router.view` | `route.view` | — |
@@ -271,7 +270,6 @@ export default defineMiddlewareConfig({
 | `filesystem` | `defineFilesystemConfig` | `gemi/services` |
 | `queue` | `defineQueueConfig` | `gemi/services` |
 | `redis` | `defineRedisConfig` | `gemi/services` |
-| `broadcast` | `defineBroadcastConfig` | `gemi/services` |
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
@@ -514,7 +512,6 @@ The key members:
 
 - **`app.waitForBoot()`** — completes phase two of the boot. Await it before the first request.
 - **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API route dispatcher, everything else to the view route dispatcher.
-- **`app.websocket`** — a Bun `WebSocketHandler` for the broadcasting service.
 - **`app.dispatchJob(name, args)`** — enqueue a background job.
 - **`onException`** — an optional callback for unhandled errors thrown during a request; defaults to `console.error`.
 
