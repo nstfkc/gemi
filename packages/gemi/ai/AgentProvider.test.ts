@@ -132,6 +132,9 @@ describe("OpenAIProvider", () => {
       {
         type: "error",
         error: { code: "provider_error", message: "Incorrect API key", retryable: false },
+        // Beside the error, not in it: the run keeps it for `result().error`
+        // and never puts it on a client frame (#656).
+        status: 401,
       },
       {
         type: "finish",

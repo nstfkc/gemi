@@ -1,5 +1,44 @@
 # Unreleased
 
+## A failed agent run says why on `result()`, and is logged (#656)
+
+When a provider call failed, `run.result()` resolved with
+`finishReason: "error"`, no `output`, and nothing else. The cause was only an
+`error` event on the stream, so a server-side caller that just awaited
+`result()` never saw it, and nothing was logged.
+
+- **`AgentRunResult.error`** is set exactly when `finishReason` is `"error"`
+  (type `AgentRunFailure`). It has the same `code`, `message` and `retryable`
+  as the stream's `error` event. When the provider answered with an HTTP
+  error, it also has the `status` and the provider's `requestId`. A
+  successful, aborted, `max-steps` or `length` result has no `error` key, as
+  before. `NestedRunResult` (from `ctx.runAgent`) has the same field.
+- **`result({ throwOnError: true })`** rejects with an `AgentRunError`
+  (exported from `gemi/ai`) for a run that ends in `"error"`. It carries
+  `code`, `retryable`, `status`, `requestId`, `runId` and the whole `result`,
+  so the messages and usage of the steps before the failure are still there.
+  Every other finish reason resolves as usual. Without the option nothing
+  changes: `result()` still resolves.
+- **Failed runs are logged by default** through `Log.error`, so they land in
+  `storage/logs` and reach the log config's `onLogCreated`. In development
+  (`gemi dev`) the line also goes to the console. Outside an application (a
+  script, a test) it goes to `console.error` instead. Pass
+  `Agent.create({ logErrors: false })` if the app already reports the failure
+  itself and doesn't want a second line.
+
+Unchanged: the `error` frame a client receives. It carries only `code`,
+`message`, `retryable` (and `toolCallId` when set), exactly as before. The
+`status` and `requestId` stay on the server.
+
+For a custom `AgentProvider`: an `error` event may now carry optional
+`status` and `requestId` next to `error`, and a provider that throws an error
+with a numeric `status` (and optionally a string `requestId`) gets them
+recorded too. Neither is required.
+
+If you implement `AgentRun` yourself (a test stub, say), `result()` now takes
+an optional `{ throwOnError }`. A `result()` that ignores it still
+typechecks, but won't reject.
+
 ## `Storage.fetch` takes an abort signal (#654)
 
 `Storage.fetch(params, { signal })` now accepts an `AbortSignal`, as
