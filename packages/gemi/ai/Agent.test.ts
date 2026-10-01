@@ -998,7 +998,13 @@ describe("toResponse keepalive", () => {
       },
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
-    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    // No run deadline: the timer count below is the keepalive's alone.
+    const agent = Agent.create({
+      name: "patient",
+      provider,
+      tools: [slow],
+      maxRunDurationMs: null,
+    });
     const run = agent.stream({ messages: [] });
 
     const reader = run.toResponse().body!.getReader();
@@ -1032,7 +1038,13 @@ describe("toResponse keepalive", () => {
       execute: () => release.promise,
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
-    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    // No run deadline: the timer count below is the keepalive's alone.
+    const agent = Agent.create({
+      name: "patient",
+      provider,
+      tools: [slow],
+      maxRunDurationMs: null,
+    });
     const run = agent.stream({ messages: [] });
 
     const response = run.toResponse();

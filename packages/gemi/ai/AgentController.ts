@@ -629,6 +629,9 @@ export abstract class AgentController<
         clientRunId,
         onEvent: (event) => this.dispatchEvent(event, ctx),
         onInternalError: (err) => this.reportHookFailure(err),
+        // So the registry's age ceiling never cuts short a run its agent
+        // allowed to be longer. See `MemoryLiveRuns.maxAgeMs`.
+        maxRunDurationMs: this.agent.maxRunDurationMs,
       });
 
       if (journal) this.follow(run, journal);

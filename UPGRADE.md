@@ -1,3 +1,46 @@
+# Unreleased
+
+## Agent runs have a deadline, and tools can have a timeout (#455)
+
+A tool that never settled (a `fetch` with no timeout, say) kept its run open
+for the life of the process, and the live-run registry kept the run, its
+frames and everything it closed over with it.
+
+- **`Agent.create({ maxRunDurationMs })`**, default **10 minutes**
+  (`DEFAULT_MAX_RUN_DURATION_MS`, exported from `gemi/ai`). When a run reaches
+  it, the run is stopped the way `stop()` stops it: `ctx.signal` aborts (its
+  `reason` is a `TimeoutError`), the provider request is cancelled, and every
+  tool call still in flight gets a `denied` result with `cause: "stopped"`.
+  The run then ends with `finishReason: "error"` and
+  `result().error.code === "timeout"`, so it's logged (unless `logErrors:
+  false`) and `result({ throwOnError: true })` rejects. The client gets an
+  `error` frame with code `"timeout"`, then `run-end` with `"error"`, and the
+  finished transcript is stored like any other turn's.
+  `agent.stream({ maxRunDurationMs })` overrides it for one run. `null` (or
+  `Infinity`) turns it off. `0` or a negative number throws.
+- **`AgentTool.create({ timeoutMs })`**, no limit by default. When a call
+  reaches it, `ctx.signal` aborts with a `TimeoutError`, the model gets an
+  `error` result for that call with code `"timeout"`, and the run carries on.
+  The run stops waiting for the call at that point even if the tool ignores the
+  signal, and anything the tool yields or returns afterwards is dropped.
+- **`ctx.signal` is now per call** when the tool has a `timeoutMs`. It still
+  aborts on `stop()` and at the run's deadline. Image calls and sub-runs a
+  tool starts get the same signal, so a timeout cancels them too.
+- **`MemoryLiveRuns` has an age ceiling**, `maxAgeMs`, default 1 hour, `null`
+  to turn it off. An entry still there at that age, ended or not, gets its run
+  stopped and is evicted `ttlMs` later. `AgentController` passes the agent's
+  `maxRunDurationMs`, so a run allowed to be longer than an hour is never cut
+  off before its own limit plus `ttlMs`, and an agent with
+  `maxRunDurationMs: null` is exempt.
+- `AgentErrorCode` gains `"timeout"`. If you `switch` over it exhaustively, add
+  the case.
+
+**Behaviour change:** a run longer than 10 minutes used to be allowed and now
+ends as a `timeout` error. An agent whose runs are legitimately long (a batch
+job, a long research loop) should set `maxRunDurationMs` to its own bound, or
+`null`. A sub-run started with `ctx.runAgent` has no default limit of its own.
+It's bounded by its parent, unless its agent sets one explicitly.
+
 # Upgrading from 0.80 to 0.81
 
 ## A failed agent run says why on `result()`, and is logged (#656)
