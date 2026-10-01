@@ -175,7 +175,9 @@ export function mutationErrorFromBody(body: unknown, status: number): MutationEr
   if (typeof error.kind !== "string" && typeof error.message === "string") {
     return {
       ...withStatus,
-      kind: LEGACY_MESSAGES[error.message] ?? refusalKindForStatus(withStatus.status),
+      // The status alone places an older server's `{ message }` bodies (403
+      // "Forbidden", 404, 429), and it is what an app's own body means.
+      kind: refusalKindForStatus(withStatus.status),
     } as MutationError;
   }
   return withStatus as MutationError;
