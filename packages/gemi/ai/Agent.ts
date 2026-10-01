@@ -129,9 +129,17 @@ export interface ToolContext {
   threadId?: string;
   toolCallId: string;
   /**
-   * Aborted when the user calls `stop()`. Not when the connection drops — a run
-   * outlives the request that started it so a refresh can reattach, which means
-   * a disconnect is no longer a signal to stop working.
+   * Aborted when the user calls `stop()`, when the run reaches its
+   * `maxRunDurationMs`, and when this call reaches the tool's own `timeoutMs`
+   * (with a `TimeoutError` `DOMException` as its `reason`, the same as
+   * `AbortSignal.timeout`). Not when the connection drops — a run outlives the
+   * request that started it so a refresh can reattach, which means a
+   * disconnect is no longer a signal to stop working.
+   *
+   * Pass it to whatever the tool waits on (`fetch(url, { signal })`). A tool
+   * that ignores it does not hold the run open, since the run stops waiting
+   * for it either way, but whatever it started keeps running in the
+   * background.
    */
   signal: AbortSignal;
   /** Which step of the tool loop this is, starting at 1. */
@@ -494,6 +502,22 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
    * only for tools that are large, numerous, or rarely reached.
    */
   deferred?: boolean;
+  /**
+   * How long one call of this tool may take, in milliseconds. No limit by
+   * default; the run's own `maxRunDurationMs` still bounds it.
+   *
+   * When it is reached, `ctx.signal` is aborted with a `TimeoutError`, the
+   * model gets an `error` result for the call with code `"timeout"`, and the
+   * run carries on: the model can retry, try something else, or answer
+   * without it. The run stops waiting for the call at that moment, so a tool
+   * that ignores `ctx.signal` cannot hold the run open past it, and anything
+   * it yields or returns afterwards is dropped.
+   *
+   * Set it on any tool that waits on something it does not control (a third
+   * party API, a `fetch` with no timeout of its own). Not used by client tools,
+   * which the server never runs.
+   */
+  timeoutMs?: number;
 };
 
 /**
@@ -554,6 +578,8 @@ export class AgentTool<
   readonly requiresApproval: boolean;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
+  /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
+  readonly timeoutMs?: number;
   /**
    * There is deliberately no `namespace` here. A tool is a module-scope
    * singleton, so a field naming its group would hold whichever agent
@@ -573,6 +599,7 @@ export class AgentTool<
     this.deferred = params.deferred === true;
     this.answeredBy = params.answeredBy === "client" ? "client" : "server";
     this.execute = params.execute ?? undefined;
+    this.timeoutMs = params.timeoutMs;
   }
 
   /**
@@ -586,6 +613,9 @@ export class AgentTool<
     // `outputSchema` validates what `execute` or the browser hands back and is
     // never sent, so any shape is fine there.
     assertObjectRoot(params.inputSchema, `The tool "${params.name}"`, "inputSchema");
+    if (params.timeoutMs !== undefined) {
+      assertDuration(params.timeoutMs, `The tool "${params.name}"`, "timeoutMs");
+    }
     return new AgentTool(params);
   }
 
@@ -810,6 +840,50 @@ function assertObjectRoot(schema: Schema<any>, owner: string, field: string): vo
   );
 }
 
+/**
+ * A time limit has to be a positive number of milliseconds. `0` and a negative
+ * number are refused rather than read as "no limit" or "already expired": both
+ * readings are plausible, and a run that times out on its first tick, or a
+ * limit that silently does nothing, is the kind of surprise worth an error at
+ * startup instead.
+ */
+function assertDuration(value: unknown, owner: string, field: string): void {
+  if (typeof value === "number" && value > 0) return;
+  throw new Error(
+    `${owner} sets \`${field}\` to ${String(value)}, but it has to be a positive number of milliseconds. Use \`null\` for no limit.`,
+  );
+}
+
+/** `Infinity` and `null` both mean "no limit"; `undefined` means "not said". */
+function normalizeDuration(value: number | null | undefined): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || !Number.isFinite(value)) return null;
+  return value;
+}
+
+/**
+ * The longest delay `setTimeout` keeps: past it the runtime fires in about a
+ * millisecond, which for a deadline would mean "expire now". A limit longer
+ * than this (about 24.8 days) is no limit in practice and is treated as one.
+ */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Calls `onExpire` after `ms`, unless `ms` is no limit. Returns the cancel.
+ */
+function startTimer(ms: number | null, onExpire: () => void): () => void {
+  if (ms === null || ms > MAX_TIMER_MS) return () => {};
+  const timer = setTimeout(onExpire, ms);
+  return () => clearTimeout(timer);
+}
+
+/** `1500` as "1.5s", `600000` as "10m": for messages a model and a log read. */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${+(ms / 1000).toFixed(1)}s`;
+  return `${+(ms / 60_000).toFixed(1)}m`;
+}
+
 const EMPTY_PARAMETERS = {
   type: "object",
   properties: {},
@@ -895,7 +969,40 @@ export interface CreateAgentParams<
    * controller's `onError`) itself and a second line would be noise.
    */
   logErrors?: boolean;
+  /**
+   * The longest one run of this agent may take, in milliseconds. Default
+   * `DEFAULT_MAX_RUN_DURATION_MS`, ten minutes. `null` (or `Infinity`) turns
+   * the limit off.
+   *
+   * When it is reached the run is stopped the way `stop()` stops it (every
+   * tool call still in flight gets a `denied` result, `ctx.signal` aborts, the
+   * provider request is cancelled) and it ends with `finishReason: "error"`
+   * and `result().error.code` `"timeout"`, so it is logged and
+   * `result({ throwOnError: true })` rejects. The transcript is finalized and
+   * stored like any other.
+   *
+   * ON BY DEFAULT because the failure it bounds is silent and permanent. A tool
+   * that never settles (a `fetch` with no timeout) used to keep its run open
+   * for the life of the process, and the live-run registry with it: nobody is
+   * watching, nobody calls `/stop`, and nothing expires. Ten minutes is far
+   * past any interactive turn (a turn is `maxSteps` model calls plus their
+   * tools), and it is per run, not per thread. Time spent waiting for the user
+   * does not count, since a run waiting for input has already ended
+   * (`awaiting-input`). Raise it for an agent whose runs are legitimately
+   * long, such as a batch job or a long research loop.
+   *
+   * A sub-run started with `ctx.runAgent` is bounded by its parent's limit,
+   * since it shares the parent's signal, and has none of its own unless its
+   * agent sets one explicitly.
+   */
+  maxRunDurationMs?: number | null;
 }
+
+/**
+ * How long a run may take when its agent does not say. See
+ * `CreateAgentParams.maxRunDurationMs`.
+ */
+export const DEFAULT_MAX_RUN_DURATION_MS = 10 * 60 * 1000;
 
 /**
  * One call per client turn — a first message and an answer to a pending
@@ -934,6 +1041,9 @@ interface AgentStreamParamsBase {
    *  a fixed ceiling on the agent cannot serve. */
   maxOutputTokens?: number;
   temperature?: number;
+  /** Overrides the agent's `maxRunDurationMs` for this run. `null` turns the
+   *  limit off. */
+  maxRunDurationMs?: number | null;
   /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
@@ -1165,6 +1275,12 @@ type RunConfig = {
   maxOutputTokens?: number;
   temperature?: number;
   logErrors: boolean;
+  /**
+   * As the agent or the stream params gave it, with `Infinity` already folded
+   * into `null`. `undefined` is "not said", which a root run reads as
+   * `DEFAULT_MAX_RUN_DURATION_MS` and a sub-run as no limit of its own.
+   */
+  maxRunDurationMs: number | null | undefined;
 };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -1186,6 +1302,12 @@ export class Agent<
   readonly maxSteps: number;
   readonly maxDepth: number;
   readonly reasoning?: ReasoningEffort;
+  /**
+   * The time limit a run of this agent gets when it is started at the top (a
+   * sub-run is bounded by its parent): `DEFAULT_MAX_RUN_DURATION_MS` unless
+   * `Agent.create` said otherwise, and `null` for no limit.
+   */
+  readonly maxRunDurationMs: number | null;
 
   private readonly config: RunConfig;
 
@@ -1199,6 +1321,8 @@ export class Agent<
     this.maxSteps = params.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxDepth = params.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.reasoning = params.reasoning;
+    const limit = normalizeDuration(params.maxRunDurationMs);
+    this.maxRunDurationMs = limit === undefined ? DEFAULT_MAX_RUN_DURATION_MS : limit;
 
     const { registry, providerTools } = lowerTools(this.tools, this.skills);
     this.config = {
@@ -1214,6 +1338,7 @@ export class Agent<
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
       logErrors: params.logErrors ?? true,
+      maxRunDurationMs: limit,
     };
   }
 
@@ -1224,6 +1349,9 @@ export class Agent<
   >(params: CreateAgentParams<T, S, O>): Agent<T, S, O> {
     if (params.output) {
       assertObjectRoot(params.output as Schema<any>, `The agent "${params.name}"`, "output");
+    }
+    if (params.maxRunDurationMs != null) {
+      assertDuration(params.maxRunDurationMs, `The agent "${params.name}"`, "maxRunDurationMs");
     }
     return new Agent(params);
   }
@@ -1236,7 +1364,18 @@ export class Agent<
       reasoning: params.reasoning ?? this.config.reasoning,
       maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
       temperature: params.temperature ?? this.config.temperature,
+      maxRunDurationMs:
+        params.maxRunDurationMs !== undefined
+          ? normalizeDuration(params.maxRunDurationMs)
+          : this.config.maxRunDurationMs,
     };
+    if (params.maxRunDurationMs != null) {
+      assertDuration(
+        params.maxRunDurationMs,
+        `Agent.stream for "${this.name}"`,
+        "maxRunDurationMs",
+      );
+    }
     return new AgentRunImpl(config, params) as unknown as AgentRun<ToolShapesOf<T>, OutputOf<O>>;
   }
 }
@@ -1842,6 +1981,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private failure: AgentRunFailure | undefined;
   private output: unknown;
   private stopReason: string | undefined;
+  /**
+   * The limit that stopped this run, when it was `maxRunDurationMs` rather
+   * than `stop()` that did. Read by the abort path, which is shared: a run that
+   * ran out of time is closed exactly like a stopped one, and only its finish
+   * reason and its `error` differ.
+   */
+  private timedOutAfter: number | undefined;
+  /** Clears the `maxRunDurationMs` timer. A no-op for a run without one. */
+  private cancelDeadline: () => void = () => {};
 
   private readonly settled: Promise<AgentRunResult<ToolShapes, unknown>>;
 
@@ -1898,6 +2046,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (params.signal.aborted) this.controller.abort();
       else params.signal.addEventListener("abort", () => this.stop(), { once: true });
     }
+
+    // The root's default, not a sub-run's: a sub-run shares its parent's
+    // signal, so the parent's deadline already reaches it, and a default of its
+    // own would cut short a parent that was deliberately given longer.
+    const limit =
+      config.maxRunDurationMs !== undefined
+        ? config.maxRunDurationMs
+        : nesting
+          ? null
+          : DEFAULT_MAX_RUN_DURATION_MS;
+    this.cancelDeadline = startTimer(limit, () => this.expire(limit!));
 
     // Started here, not on first read. A run outlives the request that began
     // it, so nothing may depend on someone being attached — a client that
@@ -2027,6 +2186,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.controller.abort();
   }
 
+  /**
+   * `maxRunDurationMs` ran out. Stopped through the same controller as
+   * `stop()`, so everything that already honours a stop (the provider request,
+   * `raceAbort` around the tools, `ctx.signal`, sub-runs) honours this too.
+   * The difference is only in how the run ends: see `finalizeAborted`.
+   */
+  private expire(limit: number): void {
+    if (this.ended || this.controller.signal.aborted) return;
+    this.timedOutAfter = limit;
+    this.stopReason = `The run reached its time limit of ${formatDuration(limit)} and was stopped.`;
+    this.controller.abort(new DOMException(this.stopReason, "TimeoutError"));
+  }
+
   // --- the loop ----------------------------------------------------------
 
   private async execute(): Promise<AgentRunResult<ToolShapes, unknown>> {
@@ -2054,6 +2226,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.finishReason = "error";
       }
     }
+    this.cancelDeadline();
 
     this.emit({ type: "usage", usage: this.usage });
     this.emit({ type: "run-end", runId: this.runId, finishReason: this.finishReason });
@@ -2601,8 +2774,86 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     step: number,
     resume?: { answers: ClientToolResult[] },
   ): Promise<ToolResultPart> {
+    const timeoutMs = resolved.tool.timeoutMs;
+    if (timeoutMs === undefined) {
+      return this.runToolBody(
+        resolved,
+        messageId,
+        call,
+        input,
+        step,
+        resume,
+        this.controller.signal,
+        () => false,
+      );
+    }
+
+    // The call's own signal: the run's, plus this call's `timeoutMs`. Everything
+    // the call starts is handed this one rather than the run's, so a timeout
+    // cancels its image calls and sub-runs too, and the run's stop still
+    // reaches them through it. The forwarding is never removed, so a stop
+    // reaches whatever the call left running after it answered, exactly as it
+    // does with the run's own signal.
+    const callController = new AbortController();
+    const runSignal = this.controller.signal;
+    const forwardStop = () => callController.abort(runSignal.reason);
+    if (runSignal.aborted) forwardStop();
+    else runSignal.addEventListener("abort", forwardStop, { once: true });
+
+    // Set once the call has answered, by either route. Whatever the body yields
+    // after that belongs to a call the model has already been told about, and
+    // must not reach the stream.
+    let answered = false;
+    const body = this.runToolBody(
+      resolved,
+      messageId,
+      call,
+      input,
+      step,
+      resume,
+      callController.signal,
+      () => answered,
+    );
+
+    let cancelTimer = () => {};
+    const timedOut = new Promise<ToolResultPart>((resolve) => {
+      cancelTimer = startTimer(timeoutMs, () => {
+        const message = `"${String(call.name)}" did not finish within ${formatDuration(timeoutMs)} (timeoutMs: ${timeoutMs}) and was cancelled.`;
+        callController.abort(new DOMException(message, "TimeoutError"));
+        resolve({
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          name: call.name,
+          status: "error",
+          error: { code: "timeout", message, toolCallId: call.toolCallId, retryable: true },
+        });
+      });
+    });
+    // A body that settles after the timeout has nobody to tell. Its rejection
+    // (an `AbortError` from honouring the signal, usually) is swallowed here
+    // rather than surfacing as an unhandled one.
+    body.catch(() => {});
+    try {
+      return await Promise.race([body, timedOut]);
+    } finally {
+      answered = true;
+      cancelTimer();
+    }
+  }
+
+  /** One call of a server tool, from `execute` to the result the model sees. */
+  private async runToolBody(
+    resolved: ResolvedTool,
+    messageId: string,
+    call: ToolCallPart,
+    input: unknown,
+    step: number,
+    resume: { answers: ClientToolResult[] } | undefined,
+    signal: AbortSignal,
+    answered: () => boolean,
+  ): Promise<ToolResultPart> {
     // One object, because the three of them share a memo — see `toolFiles`.
-    const files = this.toolFiles(call);
+    const files = this.toolFiles(call, signal);
     const ctx: ToolContext = {
       context: this.context,
       // `{}` rather than undefined, so a tool can read a field without a guard
@@ -2612,7 +2863,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       runId: this.runId,
       threadId: this.params.threadId,
       toolCallId: call.toolCallId,
-      signal: this.controller.signal,
+      signal,
       step,
       depth: this.depth,
       resumed: resume !== undefined,
@@ -2620,7 +2871,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       generateImage: files.generateImage,
       editImage: files.editImage,
       turn: this.toolTurn(messageId),
-      runAgent: this.nestedRunner(messageId, call, resume),
+      runAgent: this.nestedRunner(messageId, call, signal, resume),
     };
 
     try {
@@ -2629,6 +2880,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (isAsyncGenerator(started)) {
         let next = await started.next();
         while (!next.done) {
+          if (answered()) {
+            // Timed out. Closed rather than drained: nothing it yields from
+            // here can be shown, and a generator that is still being pulled
+            // is one that keeps working.
+            void started.return(undefined as never).catch(() => {});
+            throw new RunAborted();
+          }
           this.emit({ type: "tool-progress", toolCallId: call.toolCallId, data: next.value });
           next = await started.next();
         }
@@ -2696,6 +2954,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private nestedRunner(
     messageId: string,
     call: ToolCallPart,
+    signal: AbortSignal,
     resume?: { answers: ClientToolResult[] },
   ): ToolContext["runAgent"] {
     // Snapshotted before the tool body runs, and lazily created on first use.
@@ -2735,7 +2994,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      return this.runNested(messageId, call, agent, params, write, recorded, resume?.answers ?? []);
+      return this.runNested(
+        messageId,
+        call,
+        signal,
+        agent,
+        params,
+        write,
+        recorded,
+        resume?.answers ?? [],
+      );
     };
   }
 
@@ -2751,6 +3019,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private async runNested(
     messageId: string,
     call: ToolCallPart,
+    signal: AbortSignal,
     agent: AnyAgent,
     params: RunAgentParams,
     write: (record: NestedRun) => void,
@@ -2818,7 +3087,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       body: this.params.body,
       // Inherited, not new: this is what makes the parent's `stop()` reach a
       // sub-run three levels down without anything in between forwarding it.
-      signal: this.controller.signal,
+      // The call's signal rather than the run's: it is the run's plus the
+      // tool's own `timeoutMs`, so a tool that times out takes its sub-runs
+      // with it instead of leaving them to finish for nobody.
+      signal,
       threadId: this.params.threadId,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
@@ -2984,7 +3256,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * and a tool that both stored a file and generated one would replay the wrong
    * record for each. One list, one cursor.
    */
-  private toolFiles(call: ToolCallPart): {
+  private toolFiles(
+    call: ToolCallPart,
+    signal: AbortSignal,
+  ): {
     attachments: ToolAttachments;
     generateImage: ToolContext["generateImage"];
     editImage: ToolContext["editImage"];
@@ -3171,9 +3446,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     return {
       generateImage: (model, params) =>
-        runImage(model, params, () =>
-          model.generate({ ...params, signal: this.controller.signal }),
-        ),
+        runImage(model, params, () => model.generate({ ...params, signal })),
 
       editImage: (model, params) =>
         runImage(model, params, async () => {
@@ -3186,7 +3459,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             ...rest,
             images: (await Promise.all(images.map(asInput))) as [ImageInput, ...ImageInput[]],
             ...(mask ? { mask: await asInput(mask) } : {}),
-            signal: this.controller.signal,
+            signal,
           });
         }),
 
@@ -4093,6 +4366,20 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           reason: this.stopReason,
         });
       }
+    }
+    if (this.timedOutAfter !== undefined) {
+      // An error, not an outcome: nobody asked for this run to end, and an app
+      // has to be able to see that it did — in the log, on `result().error`,
+      // and as a rejection under `throwOnError`. Recorded before the message
+      // closes, as every other failure is.
+      this.fail({
+        code: "timeout",
+        message: `The run did not finish within its time limit of ${formatDuration(this.timedOutAfter)} (maxRunDurationMs: ${this.timedOutAfter}) and was stopped.`,
+        retryable: true,
+      });
+      this.finishReason = "error";
+      await this.finalizeMessage("error");
+      return;
     }
     this.finishReason = "aborted";
     await this.finalizeMessage("aborted");

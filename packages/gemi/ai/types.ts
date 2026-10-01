@@ -101,6 +101,10 @@ export type AgentErrorCode =
    *  mistyped, or on an instance that is gone. Answered before anything runs;
    *  the app starts a new thread or continues stateless. */
   | "thread_not_found"
+  /** A time limit ran out: the run's `maxRunDurationMs` (on the run's
+   *  `error`), or a tool's `timeoutMs` (on that call's `tool-result`, with
+   *  `toolCallId` set, and the run carries on). */
+  | "timeout"
   | "aborted"
   | "unknown";
 

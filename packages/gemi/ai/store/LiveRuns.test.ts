@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { AgentStreamEvent, AgentStreamFrame } from "../types";
 import { FrameCursorEvictedError, LiveRunNotFoundError, MemoryLiveRuns } from "./LiveRuns";
@@ -410,5 +410,110 @@ describe("a cursor older than the buffer, and one only older than seq 1", () => 
 
     expect(() => runs.replay("run_rolled", 1)).toThrow(FrameCursorEvictedError);
     runs.clear();
+  });
+});
+
+/**
+ * #455: an entry used to be evicted only once its run ended, so a run that
+ * never ended stayed in the map for the life of the process. The age ceiling
+ * evicts it anyway.
+ */
+describe("MemoryLiveRuns age ceiling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets the pump catch up under fake timers. */
+  const tick = () => vi.advanceTimersByTimeAsync(0);
+
+  test("a run that never ends is stopped at maxAgeMs and evicted ttlMs later", async () => {
+    vi.useFakeTimers();
+    const runs = new MemoryLiveRuns({ ttlMs: 1000, maxAgeMs: 60_000 });
+    const run = new StubAgentRun("run_wedged");
+    runs.register(run, { threadId: "t1", clientRunId: "c1" });
+    run.emit(textDelta("a"));
+    await tick();
+
+    // A reader attached to it, parked waiting for more.
+    const read = collect(runs.replay("run_wedged"));
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(run.stopped).toBe(false);
+    expect(runs.size).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    // Stopped, with a reason, but still findable for the tail.
+    expect(run.stopped).toBe(true);
+    expect(run.stopReason).toMatch(/age limit/);
+    expect(runs.get("run_wedged")).toBe(run);
+
+    // The run ignores the stop. The entry goes anyway.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runs.size).toBe(0);
+    expect(runs.get("run_wedged")).toBeNull();
+    expect(await runs.find({ threadId: "t1" })).toBeNull();
+    expect(runs.findByClientRunId("c1")).toBeNull();
+    // And the parked reader finishes rather than hanging forever.
+    expect((await read).map((frame) => frame.seq)).toEqual([1]);
+
+    // Frames the wedged run emits now are not buffered anywhere.
+    run.emit(textDelta("b"));
+    await tick();
+    expect(runs.size).toBe(0);
+    run.finish();
+    await tick();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("a run that ends normally is evicted on the ttl clock and its ceiling is cleared", async () => {
+    vi.useFakeTimers();
+    const runs = new MemoryLiveRuns({ ttlMs: 1000, maxAgeMs: 60_000 });
+    const run = new StubAgentRun("run_fine");
+    runs.register(run);
+    run.emit(textDelta("a"));
+    run.finish();
+    await tick();
+    // Only the eviction timer is left; the ceiling went when the run ended.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runs.size).toBe(0);
+    expect(run.stopped).toBe(false);
+  });
+
+  test("the ceiling is never shorter than the run's own limit plus ttlMs", async () => {
+    vi.useFakeTimers();
+    const runs = new MemoryLiveRuns({ ttlMs: 1000, maxAgeMs: 60_000 });
+    const run = new StubAgentRun("run_long");
+    runs.register(run, { maxRunDurationMs: 120_000 });
+
+    await vi.advanceTimersByTimeAsync(120_999);
+    expect(run.stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run.stopped).toBe(true);
+    runs.clear();
+  });
+
+  test("a run with no limit of its own, or a registry with no ceiling, is never cut off", async () => {
+    vi.useFakeTimers();
+    const runs = new MemoryLiveRuns({ ttlMs: 1000, maxAgeMs: 60_000 });
+    const unlimited = new StubAgentRun("run_unlimited");
+    runs.register(unlimited, { maxRunDurationMs: null });
+
+    const off = new MemoryLiveRuns({ ttlMs: 1000, maxAgeMs: null });
+    const anything = new StubAgentRun("run_any");
+    off.register(anything);
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(unlimited.stopped).toBe(false);
+    expect(anything.stopped).toBe(false);
+    expect(runs.size).toBe(1);
+    expect(off.size).toBe(1);
+    runs.clear();
+    off.clear();
+  });
+
+  test("defaults to an hour, comfortably past the agent's default run limit", () => {
+    expect(new MemoryLiveRuns().maxAgeMs).toBe(60 * 60 * 1000);
   });
 });

@@ -8,6 +8,20 @@ import type { AgentStreamEvent, AgentStreamFrame } from "../types";
 const DEFAULT_TTL_MS = 60 * 1000;
 
 /**
+ * The oldest an entry may get, ended or not, unless its run's own time limit is
+ * longer. See `MemoryLiveRuns.maxAgeMs`.
+ *
+ * Six times the agent's default `maxRunDurationMs`, so it never races a
+ * deadline: a run that honours its limit has ended and been evicted on the
+ * `ttlMs` clock long before this. What reaches it is a run that could not be
+ * stopped by its deadline, e.g. one wedged in an `onMessage` that never settles.
+ */
+const DEFAULT_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** The longest delay `setTimeout` keeps; past it the runtime fires in ~1ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
  * How many frames are kept per run.
  *
  * The window has to be bounded or it is a memory leak with a long fuse: a
@@ -103,6 +117,14 @@ export type RegisterParams = {
   /** Reported failures: a hook that threw, or a run whose frame iterator did.
    *  Injectable so tests can assert on it instead of reading stderr. */
   onInternalError?: (error: unknown) => void;
+  /**
+   * The run's own time limit (`Agent.maxRunDurationMs`), when the caller knows
+   * it. The entry's age ceiling is never shorter than this plus `ttlMs`, so a
+   * run allowed two hours is not cut off at `maxAgeMs`; `null` is a run with no
+   * limit, and its entry has no ceiling either. Omitted, the ceiling is
+   * `maxAgeMs`.
+   */
+  maxRunDurationMs?: number | null;
 };
 
 type Entry = {
@@ -125,7 +147,15 @@ type Entry = {
    */
   lostBefore: number;
   ended: boolean;
+  /**
+   * Dropped from the map while its run was still going (the age ceiling).
+   * Readers finish on it as they would on `ended`, and the pump stops
+   * buffering frames nobody can read any more.
+   */
+  evicted: boolean;
   evictAt: ReturnType<typeof setTimeout> | null;
+  /** The age ceiling's timer. See `maxAgeMs`. */
+  expireAt: ReturnType<typeof setTimeout> | null;
   wake: Set<() => void>;
   /**
    * Bumped on every push and on the end.
@@ -159,6 +189,24 @@ type Entry = {
 export class MemoryLiveRuns implements LiveRuns {
   ttlMs: number;
   readonly maxFrames: number;
+  /**
+   * The oldest an entry may get, counted from `register`, whether or not its
+   * run has ended. Default one hour; `null` turns the ceiling off.
+   *
+   * Eviction normally runs on the `ttlMs` clock, which starts when the run
+   * ends — so a run that never ends was never evicted, and its entry, its
+   * frames and everything the run closes over stayed in the map for the life
+   * of the process (#455). The agent's `maxRunDurationMs` is what ends such a
+   * run now; this is the backstop for one that still does not end. When it
+   * fires the run is stopped (a no-op for one that has ended) and the entry is
+   * evicted `ttlMs` later, ended or not, so a reader attached to it gets the
+   * stopped run's last frames and then a closed stream rather than a hang.
+   *
+   * Per entry it is never shorter than the run's own limit plus `ttlMs`, when
+   * the registering caller passes one (`AgentController` does). Read at
+   * `register`, so changing it affects runs registered afterwards.
+   */
+  maxAgeMs: number | null;
 
   private runs = new Map<string, Entry>();
   /** Thread to the most recently registered run for it. */
@@ -166,9 +214,10 @@ export class MemoryLiveRuns implements LiveRuns {
   /** The client's pre-`run-start` name for a run, to the run. */
   private byClientRun = new Map<string, string>();
 
-  constructor(params: { ttlMs?: number; maxFrames?: number } = {}) {
+  constructor(params: { ttlMs?: number; maxFrames?: number; maxAgeMs?: number | null } = {}) {
     this.ttlMs = params.ttlMs ?? DEFAULT_TTL_MS;
     this.maxFrames = params.maxFrames ?? DEFAULT_MAX_FRAMES;
+    this.maxAgeMs = params.maxAgeMs === undefined ? DEFAULT_MAX_AGE_MS : params.maxAgeMs;
   }
 
   /**
@@ -191,7 +240,9 @@ export class MemoryLiveRuns implements LiveRuns {
       lastSeq: -1,
       lostBefore: 0,
       ended: false,
+      evicted: false,
       evictAt: null,
+      expireAt: null,
       wake: new Set(),
       version: 0,
     };
@@ -202,6 +253,7 @@ export class MemoryLiveRuns implements LiveRuns {
     if (params.clientRunId) {
       this.byClientRun.set(params.clientRunId, run.runId);
     }
+    this.scheduleExpiry(entry, params.maxRunDurationMs);
     return this.pump(entry, params);
   }
 
@@ -275,6 +327,9 @@ export class MemoryLiveRuns implements LiveRuns {
       if (entry.evictAt) {
         clearTimeout(entry.evictAt);
       }
+      if (entry.expireAt) {
+        clearTimeout(entry.expireAt);
+      }
       // Marked ended before waking: a reader parked on `wait` would otherwise
       // come back, find the entry unfinished, and park again forever.
       entry.ended = true;
@@ -295,6 +350,16 @@ export class MemoryLiveRuns implements LiveRuns {
     let hooks = Promise.resolve();
     try {
       for await (const frame of entry.run.frames()) {
+        // Evicted by the age ceiling with the run still going: nobody can
+        // reach this entry any more, so its frames are not kept. The hooks
+        // below still hear them — they are the app's, and the run is not over.
+        if (entry.evicted) {
+          const onEvent = params.onEvent;
+          if (onEvent) {
+            hooks = hooks.then(() => onEvent(frame.event)).catch((err) => report(params, err));
+          }
+          continue;
+        }
         entry.frames.push(frame);
         entry.lastSeq = frame.seq;
         if (entry.frames.length > this.maxFrames) {
@@ -313,6 +378,10 @@ export class MemoryLiveRuns implements LiveRuns {
       report(params, err);
     } finally {
       entry.ended = true;
+      if (entry.expireAt) {
+        clearTimeout(entry.expireAt);
+        entry.expireAt = null;
+      }
       this.notify(entry);
       // Eviction is scheduled off the ttl clock, BEFORE the hook chain is
       // awaited. `hooks` is app code — `onAwaitingInput` is documented as the
@@ -366,7 +435,7 @@ export class MemoryLiveRuns implements LiveRuns {
         yield frame;
         cursor = frame.seq + 1;
       }
-      if (entry.ended && cursor > entry.lastSeq) {
+      if ((entry.ended && cursor > entry.lastSeq) || entry.evicted) {
         return;
       }
       await this.wait(entry, seen);
@@ -395,7 +464,16 @@ export class MemoryLiveRuns implements LiveRuns {
     }
     const timer = setTimeout(() => {
       const runId = entry.run.runId;
-      this.runs.delete(runId);
+      if (!entry.ended) {
+        // The age ceiling, with the run still going. Its frames are released
+        // here because the pump of a run that has not ended still holds the
+        // entry, and readers are told to finish (see `drain`), since `ended`
+        // may never come. An ended entry keeps both: a reader still behind on
+        // it finishes the tail it was reading, as it always has.
+        entry.evicted = true;
+        entry.frames = [];
+      }
+      if (this.runs.get(runId) === entry) this.runs.delete(runId);
       if (entry.threadId && this.byThread.get(entry.threadId) === runId) {
         this.byThread.delete(entry.threadId);
       }
@@ -409,6 +487,33 @@ export class MemoryLiveRuns implements LiveRuns {
     // A finished run must not be the reason a process stays up.
     (timer as { unref?: () => void }).unref?.();
     entry.evictAt = timer;
+  }
+
+  /**
+   * The age ceiling: stops the run and starts the `ttlMs` eviction clock at
+   * `maxAgeMs` after `register`, whether or not the run has ended. See
+   * `maxAgeMs`.
+   */
+  private scheduleExpiry(entry: Entry, runLimit: number | null | undefined): void {
+    if (this.maxAgeMs === null || runLimit === null) return;
+    const ceiling =
+      runLimit === undefined ? this.maxAgeMs : Math.max(this.maxAgeMs, runLimit + this.ttlMs);
+    if (!Number.isFinite(ceiling) || ceiling > MAX_TIMER_MS) return;
+    const timer = setTimeout(() => {
+      entry.expireAt = null;
+      if (entry.ended) return;
+      try {
+        entry.run.stop({
+          reason: `The run was still going ${Math.round(ceiling / 1000)}s after it started, past the live-run registry's age limit.`,
+        });
+      } catch {
+        // A run whose `stop` throws is evicted all the same.
+      }
+      this.scheduleEviction(entry);
+    }, ceiling);
+    // Like the eviction timer: never the reason a process stays up.
+    (timer as { unref?: () => void }).unref?.();
+    entry.expireAt = timer;
   }
 }
 
