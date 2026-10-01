@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.81 to 0.82
 
 ## Agent runs have a deadline, and tools can have a timeout (#455)
 
