@@ -326,8 +326,10 @@ export class AzureOpenAIProvider extends AgentProvider {
     });
   }
 
+  /** `assistants`, not OpenAI's `user_data`: Azure's Responses API refuses a
+   *  `user_data` id outright (#682). See `UploadPurpose`. */
   upload(file: File): Promise<string> {
-    return uploadFile(this.endpoint(), file);
+    return uploadFile(this.endpoint(), file, "assistants");
   }
 
   protected deployment(): string {

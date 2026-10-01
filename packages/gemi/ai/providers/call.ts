@@ -105,15 +105,38 @@ export async function* streamResponses(
 }
 
 /**
+ * What a file is uploaded *for*, which decides where its id is accepted.
+ *
+ * The two providers disagree, and each refuses the other's answer.
+ *
+ * OpenAI: `user_data`. This is a file a person attached to a message, not a
+ * corpus for a retrieval store, and the purpose is what decides which of the
+ * two the file can be used for.
+ *
+ * Azure: `assistants`. MEASURED (gpt-6-sol deployment, `/openai/v1`,
+ * `api-version=preview`, 2026-10-01, #682): Azure accepts a `user_data` upload
+ * and answers a `file-…` id, and then its Responses API refuses that id in both
+ * `input_file` and `input_image` with `400 Invalid
+ * 'input[0].content[0].file_id': 'file-…'. Expected an ID that begins with
+ * 'assistant'.` The same files uploaded as `assistants` come back as
+ * `assistant-…` ids (`expires_at: null`) and work: pdf, txt, md and csv as
+ * `input_file`, png as `input_image` with real vision.
+ */
+export type UploadPurpose = "user_data" | "assistants";
+
+/**
  * Uploads an attachment and returns the id a `FilePart` carries.
  *
- * `user_data` rather than `assistants`: this is a file a person attached to a
- * message, not a corpus for a retrieval store, and the purpose is what decides
- * which of the two the file can be used for.
+ * The purpose is the caller's because it is a property of the provider, not of
+ * the file — see `UploadPurpose`.
  */
-export async function uploadFile(endpoint: ResponsesEndpoint, file: File): Promise<string> {
+export async function uploadFile(
+  endpoint: ResponsesEndpoint,
+  file: File,
+  purpose: UploadPurpose = "user_data",
+): Promise<string> {
   const form = new FormData();
-  form.set("purpose", "user_data");
+  form.set("purpose", purpose);
   form.set("file", file);
 
   const response = await requestWithRetry(

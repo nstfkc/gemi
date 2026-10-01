@@ -354,8 +354,8 @@ function attachmentLine(part: FilePart, shown: boolean): string {
  * above `IMAGE_EXTENSIONS`.
  *
  * `file_id` is the same field on both blocks, so nothing about the upload
- * changes: `uploadFile` posts once with `purpose: "user_data"` and the id it
- * returns is legal in either. `detail` is deliberately not sent on the image
+ * changes: `uploadFile` posts once (with the provider's purpose — see
+ * `UploadPurpose`) and the id it returns is legal in either. `detail` is deliberately not sent on the image
  * block — it is optional, the API defaults it, and a `FilePart` carries no
  * signal that would justify choosing anything but that default.
  *
