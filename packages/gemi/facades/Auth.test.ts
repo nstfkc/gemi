@@ -10,11 +10,12 @@ import { Broadcast } from "./Broadcast";
 
 /**
  * A fake standing in for `HttpRequest`, which needs a real `Request` and a route
- * match to construct. `Auth.user()` reads only a cookie and a header.
+ * match to construct. `Auth.user()` reads only a cookie and a header. It
+ * carries a token, since a request with none is never looked up.
  */
 function fakeRequest() {
   return {
-    cookies: { get: () => undefined },
+    cookies: { get: (name: string) => (name === "access_token" ? "v2.test" : undefined) },
     headers: { get: () => "test-agent" },
   } as any;
 }
@@ -172,5 +173,62 @@ describe("Auth.intendedUrl", () => {
     expect(
       withRedirect("//evil.example", () => Auth.intendedUrl("/home")),
     ).toBe("/home");
+  });
+});
+
+describe("Auth.user on a broadcasting connection (#587)", () => {
+  const getSession = vi.fn(async (token: string, _userAgent: string) =>
+    token === "v2.socket" ? { user } : null,
+  );
+
+  /** Runs `fn` as a socket whose upgrade request carried `headers`. */
+  function onSocket<T>(headers: Record<string, string>, fn: () => Promise<T>) {
+    const socketHeaders = new Headers(headers);
+    const cookies = new Map<string, string>();
+    for (const pair of (socketHeaders.get("Cookie") ?? "").split(";")) {
+      const [name, value] = pair.trim().split("=");
+      if (name) cookies.set(name, value ?? "");
+    }
+    vi.spyOn(Broadcast, "getFacadeRoot").mockReturnValue({
+      context: { getStore: () => ({ headers: socketHeaders, cookies }) },
+    } as any);
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+      config: { signInPath: "/auth/sign-in" },
+      getSession,
+    } as any);
+    // A channel's `subscribe` runs outside any HTTP request.
+    return RequestContext.exit(fn);
+  }
+
+  beforeEach(() => {
+    getSession.mockClear();
+  });
+
+  test("a native socket with no cookie jar signs in with the header", async () => {
+    const found = await onSocket({ access_token: "v2.socket", "User-Agent": "ios" }, () =>
+      Auth.user(),
+    );
+
+    expect(found).toBe(user);
+    expect(getSession).toHaveBeenCalledWith("v2.socket", "ios");
+  });
+
+  test("a browser socket still signs in with the cookie", async () => {
+    await expect(onSocket({ Cookie: "access_token=v2.socket" }, () => Auth.user())).resolves.toBe(
+      user,
+    );
+  });
+
+  test("a token with no session is refused", async () => {
+    const error = await onSocket({ access_token: "v2.forged" }, () => Auth.user()).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+  });
+
+  test("no token is refused without a lookup", async () => {
+    const error = await onSocket({}, () => Auth.user()).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect(getSession).not.toHaveBeenCalled();
   });
 });

@@ -30,7 +30,7 @@ export class ChatChannel extends BroadcastingChannel {
 }
 ```
 
-- **`subscribe(params)`** → `Promise<boolean> | boolean`. Called when a client tries to subscribe to a matching topic. It receives the route params parsed from the topic. Return `true` to authorize, `false` to reject. This is where you run auth/permission checks — the [`Auth`](./facades.md) facade works here because gemi runs it inside the request context of the socket. The base implementation returns `true` (public channel).
+- **`subscribe(params)`** → `Promise<boolean> | boolean`. Called when a client tries to subscribe to a matching topic. It receives the route params parsed from the topic. Return `true` to authorize, `false` to reject. This is where you run auth/permission checks — the [`Auth`](./facades.md) facade works here because gemi runs it inside the request context of the socket. `Auth.user()` reads the socket's upgrade request: its `access_token` cookie, or else an `access_token` header, which is how a native client with no cookie jar signs in. (A browser's `WebSocket` cannot set headers; it sends the cookie.) The base implementation returns `true` (public channel).
 - **`publish(input)`** → the message payload. Called on the server each time you publish; its return value is serialized and delivered to every subscriber. Use it to shape/enrich the outgoing message. The base implementation returns `{}`.
 
 > **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.

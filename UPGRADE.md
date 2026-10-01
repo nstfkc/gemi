@@ -1,5 +1,52 @@
 # Unreleased
 
+## `auth` trusts a user middleware signed in, and `Auth.user()` reads the `access_token` header (#577, #587)
+
+What counts as signed in is now one rule, shared by the `auth` middleware and
+`Auth.user()`:
+
+1. **A user on the request context.** One a global middleware, or a route
+   middleware listed before `auth`, put there with `ctx().setUser(user)`.
+2. **Otherwise the `access_token`**: the cookie, or else the `access_token`
+   header, naming a live session.
+
+- **`auth` passes a context user with no token** (#577). It used to require an
+  `access_token` cookie or header as well, and then trusted the context user
+  without checking that token against a session, so the token was never a
+  check on that user, only a requirement to send one. An app that signs users in
+  by SSO header, API key or a signed service token can now use `auth` instead
+  of writing its own.
+- **`Auth.user()` reads the `access_token` header** (#587), on a request and on a
+  broadcasting connection, through the same reader as the middleware. A native
+  client was signed in on a route with `auth` and refused on one without it;
+  it is now signed in on both, and a native WebSocket can authenticate with the
+  header.
+- **One token reader** (`readAccessToken`, internal) replaces the middleware's,
+  `Auth.user()`'s two and sign-out's. An empty `access_token` cookie now counts
+  as absent, so a header sent beside it is read. When both are sent the cookie
+  still wins.
+
+Unknown, expired and pre-`v2.` tokens are refused exactly as before.
+
+**Behaviour change, and a security one: audit every `setUser` call.** Anything
+your middleware puts on `ctx().user` is now a signed-in user to every `auth`
+route, token or not. Before you upgrade, search your app for `setUser(` and
+check that each one runs only after the user is verified:
+
+- A global middleware that sets a placeholder, such as a guest or anonymous
+  user for logging, analytics or policies, now signs every visitor in. Move
+  that value off `ctx().user`.
+- A middleware that sets a user from an unverified header, query parameter or
+  token (for rate limiting or logs, say) now signs that request in as whoever
+  it names. Verify the credential first, or don't set a user.
+- A route middleware listed before `auth` that sets a user is trusted too. One
+  listed after `auth` still cannot sign anyone in.
+
+An app whose middleware never calls `setUser`, or calls it only with a user
+that `Auth.user()` returned, behaves as before, apart from header clients now
+being signed in on routes without `auth`. See
+[Who counts as signed in](docs/middleware.md#who-counts-as-signed-in).
+
 ## A job or cron tick cut off at the shutdown deadline now exits 1 (#580)
 
 The docs said a queued job still running at the provider shutdown deadline

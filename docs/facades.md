@@ -73,9 +73,9 @@ const mail = app(MailManager); // typed MailManager
 
 ## Auth
 
-`Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
+`Auth` reads and authorizes the current user. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
-- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
+- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none. The same rule as the `auth` middleware: a user middleware already put on the request context, else the session named by the `access_token` cookie or, failing that, the `access_token` header — on a broadcasting connection, the socket's upgrade request's. See [Who counts as signed in](./middleware.md#who-counts-as-signed-in).
 - `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
 - `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`.
 - `Auth.authenticate(email)` — creates a session for the given email.

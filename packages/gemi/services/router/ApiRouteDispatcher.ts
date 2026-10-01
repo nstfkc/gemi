@@ -1,4 +1,5 @@
 import { AuthApiRouter } from "../../auth/routes";
+import { ACCESS_TOKEN } from "../../auth/accessToken";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { HttpResponse, isHttpResponse } from "../../http/HttpResponse";
@@ -47,12 +48,6 @@ class DebugRouter extends ApiRouter {
 }
 
 export type InProcessMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-
-/**
- * The only credential `AuthenticationMiddleware` reads, as the `access_token`
- * cookie or else an `access_token` header.
- */
-const ACCESS_TOKEN = "access_token";
 
 /**
  * The same response, with a body that calls `end` once when it is read to the
@@ -570,6 +565,11 @@ export class ApiRouteDispatcher {
       );
     }
 
+    // gemi's own token, on both transports, is the only identity carried. A
+    // user the initiator's global middleware signed in some other way — an
+    // SSO header, an API key — is not: no global middleware runs for this
+    // request and nothing from the initiator's context crosses over, so its
+    // `auth` routes refuse such a user, failing closed.
     const headers = new Headers();
     const cookieToken = initiator.cookies.get(ACCESS_TOKEN);
     if (cookieToken) {
