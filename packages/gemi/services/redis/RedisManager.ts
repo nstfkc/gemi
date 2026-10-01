@@ -53,6 +53,16 @@ export class RedisManager {
   set client(client: RedisClient) {
     this.instance = client;
   }
+
+  /**
+   * Closes the client, when one was built; a later `client` builds a new one.
+   * Does not build one to close it.
+   */
+  close(): void {
+    const client = this.instance;
+    this.instance = null;
+    client?.close();
+  }
 }
 
 function redisClientConstructor(): RedisClientConstructor {

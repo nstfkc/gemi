@@ -81,7 +81,7 @@ a binding into the container, and a facade resolves it.**
 | `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
-| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
+| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. `verifyPassword` is never handed a missing hash: for an account with no password (one created through OAuth) or an unknown address it runs against a throwaway hash from `hashPassword`, and the answer is `invalid_credentials`, as for a wrong password. The default also answers `false` for a stored value it cannot read as a hash. |
 | `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | 32 random bytes, hex | Token minting. Whatever you return must not be computable from the user's email or the time. |
 
 > **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
@@ -837,7 +837,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Invalidates the cached user. |
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
-| `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
 | `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
@@ -851,6 +851,25 @@ function Profile() {
   if (!user) return <SignInPrompt />;
   return <span>Hello {user.name}</span>;
 }
+```
+
+`useUser()` never suspends: an anonymous visitor gets `user: null`. When the
+page carries no signed-in user it asks `/auth/me` once; the `401` it gets back
+is not retried (see [Failed queries and retries](./data-fetching.md#failed-queries-and-retries)).
+
+It doesn't read the app-wide `queryConfig`. Tune its `/auth/me` query with
+`queryConfig.user`, or per call with `useUser({ … })`, which wins. Accepted
+keys: `staleTime`, `retry`, `retryDelay`, `revalidateOnFocus`,
+`focusThrottleInterval`, `refreshInterval`.
+
+By default a cached user older than 5s is revalidated by the next `useUser()`
+that mounts, so a layout that calls it refetches `/auth/me` on most
+navigations. A session-length window stops that. `useSignIn` and `useSignOut`
+update the cached user themselves, so signing in or out still shows at once:
+
+```ts
+// both createRoot(RootLayout, { queryConfig }) and init(RootLayout, { queryConfig })
+const queryConfig = { user: { staleTime: 30 * 60_000 } };
 ```
 
 ### A sign-in form

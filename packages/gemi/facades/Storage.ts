@@ -9,6 +9,7 @@ import { RequestContext } from "../http/requestContext";
 import type { ByteRange } from "../http/range";
 import type {
   DeleteFileParams,
+  FetchFileOptions,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -45,8 +46,20 @@ export class Storage extends Facade {
     }
   }
 
-  static async fetch(params: ReadFileParams | string) {
-    return this.getFacadeRoot().driver.fetch(params);
+  /**
+   * Reads an object as a streamed `Response`. Pass `{ signal }` to cancel the
+   * read, e.g. with the incoming request's signal or `AbortSignal.timeout()`:
+   * an abort rejects `fetch()` itself, or errors the body if it lands after
+   * `fetch()` resolved.
+   */
+  static async fetch(
+    params: ReadFileParams | string,
+    options: FetchFileOptions = {},
+  ) {
+    // Checked here too, so a custom driver that predates the option still
+    // refuses an already-aborted read.
+    options.signal?.throwIfAborted();
+    return this.getFacadeRoot().driver.fetch(params, options);
   }
 
   /**

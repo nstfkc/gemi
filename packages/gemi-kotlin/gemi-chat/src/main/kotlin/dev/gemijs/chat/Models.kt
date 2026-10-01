@@ -24,6 +24,13 @@ public value class FinishReason(public val value: String) {
     public val AwaitingInput: FinishReason = FinishReason("awaiting-input")
     public val Aborted: FinishReason = FinishReason("aborted")
     public val Error: FinishReason = FinishReason("error")
+    /**
+     * The run writing this message died before finishing it (a server restart,
+     * a crash). Only on a message read back from the server's store, never on
+     * a live frame; its open tool calls carry a `denied` result with cause
+     * `"interrupted"`.
+     */
+    public val Interrupted: FinishReason = FinishReason("interrupted")
   }
 }
 
@@ -143,8 +150,9 @@ public sealed interface ContentPart {
     public sealed interface Outcome {
       public data class Ok(val output: JsonElement) : Outcome
       public data class Error(val error: AgentError) : Outcome
-      /** The call did not run: `"refused"` by the client, or `"stopped"` by a
-       *  cancel that landed while it was in flight. */
+      /** The call did not complete: `"refused"` by the client, `"stopped"` by
+       *  a cancel that landed while it was in flight, or `"interrupted"` when
+       *  the server stopped mid-call (it may have run in part or in full). */
       public data class Denied(val cause: String, val reason: String?) : Outcome
     }
 

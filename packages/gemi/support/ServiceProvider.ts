@@ -14,6 +14,12 @@ import type { Application } from "../foundation/Application";
  * abandoned and the next begins, and one that throws is logged and does not
  * stop the rest. See `Application.shutdown`.
  *
+ * Under `gemi dev` it also runs on every `bun --hot` reload, for the
+ * application the reload replaced, once the new one is serving and the old
+ * one's requests have finished (see `server/devReload.ts`). A hook that closes
+ * something kept on `globalThis` across reloads would close it for the new
+ * application too.
+ *
  * `timeoutMs` is what is left of that shared deadline when this provider is
  * reached. A provider that waits for something — jobs finishing, a queue
  * draining — should bound its own wait by a little less than this, so that it

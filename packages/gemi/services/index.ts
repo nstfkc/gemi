@@ -10,6 +10,7 @@ export {
 export type {
   ByteRange,
   DeleteFileParams,
+  FetchFileOptions,
   FileMetadata,
   PutFileOptions,
   PutFileParams,

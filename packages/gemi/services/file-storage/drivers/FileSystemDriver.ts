@@ -1,5 +1,13 @@
-import type { DeleteFileParams, PutFileOptions, PutFileParams, ReadFileParams, ReadResult } from "./types";
+import type {
+  DeleteFileParams,
+  FetchFileOptions,
+  PutFileOptions,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
+import { abortableBody } from "./abortableBody";
 import { readdir, unlink } from "fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
@@ -70,7 +78,12 @@ export class FileSystemDriver extends FileStorageDriver {
     return name;
   }
 
-  async fetch(params: ReadFileParams | string) {
+  async fetch(
+    params: ReadFileParams | string,
+    { signal }: FetchFileOptions = {},
+  ) {
+    signal?.throwIfAborted();
+
     let bucket = process.env.BUCKET_NAME;
     let name: string | undefined;
 
@@ -87,7 +100,9 @@ export class FileSystemDriver extends FileStorageDriver {
 
     const path = `${this.folderPath}/${name}`;
     const file = Bun.file(path);
-    const result = Bun.file(path).stream();
+    // The disk read has no signal of its own. The body is wrapped instead, so
+    // an abort stops the stream and closes the file mid-read.
+    const result = abortableBody(Bun.file(path).stream(), signal);
     const date = new Date(file.lastModified).toUTCString();
 
     return new Response(result, {

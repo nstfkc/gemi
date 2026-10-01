@@ -427,8 +427,22 @@ public class ChatSession(
     // Escaped as a browser's `FormData` does: a quote or a line break in a
     // name would otherwise end the header, and could start another.
     val filename = name.replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
+    // `body`, as one JSON part beside the file, so the controller's
+    // `attachmentScope` and `authorizeRequest` see on an upload what they see
+    // on a turn (gemi #603). JSON rather than a part per key, so a number is
+    // still a number on arrival. Left out when empty, which the server reads
+    // the same way.
+    val bodyPart =
+      if (body.isEmpty()) {
+        ByteArray(0)
+      } else {
+        "--$boundary\r\nContent-Disposition: form-data; name=\"body\"\r\nContent-Type: application/json\r\n\r\n".toByteArray() +
+          GemiJson.encodeToString(JsonObject.serializer(), body).toByteArray() +
+          "\r\n".toByteArray()
+      }
     val form =
-      "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\nContent-Type: $mimeType\r\n\r\n".toByteArray() +
+      bodyPart +
+        "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\nContent-Type: $mimeType\r\n\r\n".toByteArray() +
         bytes +
         "\r\n--$boundary--\r\n".toByteArray()
     val response = transport.send(ChatRequest("$endpoint/files", headers(), form, "multipart/form-data; boundary=$boundary"))

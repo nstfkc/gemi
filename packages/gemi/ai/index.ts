@@ -72,13 +72,21 @@ export {
   // sub-agent's question through untouched needs `instanceof` to tell an
   // escalation from a failure, and rethrowing everything is not the same thing.
   PendingEscalation,
+  // A class for the same reason: `result({ throwOnError: true })` rejects with
+  // it, and a caller tells a failed run from its own bug with `instanceof`.
+  AgentRunError,
+  // What `maxRunDurationMs` is when an agent does not set it, so an app can
+  // derive its own limits from it rather than restate ten minutes.
+  DEFAULT_MAX_RUN_DURATION_MS,
   Skill,
   SKILLS_NAMESPACE,
   ToolNamespace,
 } from "./Agent";
 export type {
   AgentContext,
+  AgentResultOptions,
   AgentRun,
+  AgentRunFailure,
   AgentRunResult,
   AgentStreamParams,
   AnyAgent,
@@ -173,6 +181,7 @@ export type {
   AttachmentScope,
   AttachmentStorage,
   AttachmentStore,
+  AuthorizeRequestParams,
   LiveRuns,
   PutAttachmentParams,
   ToolAttachmentPut,

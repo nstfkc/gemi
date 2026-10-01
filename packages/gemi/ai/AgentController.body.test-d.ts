@@ -2,7 +2,11 @@ import { describe, expectTypeOf, test } from "vitest";
 
 import type { HttpRequest } from "../http/HttpRequest";
 import { Agent, AgentTool, type ToolContext } from "./Agent";
-import { AgentController, type AgentRouteRPC } from "./AgentController";
+import {
+  AgentController,
+  type AgentRouteRPC,
+  type AuthorizeRequestParams,
+} from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
 import { ApiRouter } from "../http/ApiRouter";
@@ -208,5 +212,76 @@ describe("a tool's ctx.body", () => {
     // view; a tool validates what it reads, as it would any other input it did
     // not define.
     expectTypeOf<ToolContext["body"]>().toEqualTypeOf<Record<string, unknown>>();
+  });
+});
+
+/**
+ * #603. `attachmentScope` and `authorizeRequest` get the body, typed as the
+ * controller's `Body`, and every override written before that keeps compiling.
+ */
+describe("the body in attachmentScope and authorizeRequest", () => {
+  test("attachmentScope's third argument is the controller's Body", () => {
+    class Scoped extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected async attachmentScope(
+        req: HttpRequest<any, any>,
+        threadId: string | undefined,
+        { body }: { body: PageBody },
+      ) {
+        expectTypeOf(body.pageId).toEqualTypeOf<string>();
+        const scope = await super.attachmentScope(req, threadId);
+        return scope ?? { key: `page:${body.pageId}` };
+      }
+    }
+    expectTypeOf<Scoped>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+  });
+
+  test("the pre-#603 attachmentScope overrides still compile", () => {
+    class TwoArgs extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected attachmentScope(_req: HttpRequest<any, any>, threadId?: string) {
+        return threadId ? { key: `thread:${threadId}` } : null;
+      }
+    }
+    class NoArgs extends AgentController<typeof pageAgent> {
+      agent = pageAgent;
+      protected attachmentScope() {
+        return { key: "org:acme" };
+      }
+    }
+    expectTypeOf<TwoArgs>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+    expectTypeOf<NoArgs>().toMatchTypeOf<AgentController<typeof pageAgent>>();
+  });
+
+  test("authorizeRequest has the body on stream and upload, and narrows on route", () => {
+    class Guarded extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected authorizeRequest(
+        _req: HttpRequest<any, any>,
+        params: AuthorizeRequestParams<PageBody>,
+      ) {
+        if (params.route === "stream" || params.route === "upload") {
+          expectTypeOf(params.body).toEqualTypeOf<PageBody>();
+        } else {
+          // `body?: undefined` here; this package compiles without
+          // `strictNullChecks`, so the narrowed route is what can be pinned.
+          expectTypeOf(params.route).toEqualTypeOf<"attach" | "stop">();
+        }
+      }
+    }
+    expectTypeOf<Guarded>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+  });
+
+  test("an authorizeRequest override written against the old params still compiles", () => {
+    class Old extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected authorizeRequest(
+        _req: HttpRequest<any, any>,
+        params: { route: "stream" | "attach" | "stop" | "upload"; threadId?: string },
+      ) {
+        void params;
+      }
+    }
+    expectTypeOf<Old>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
   });
 });

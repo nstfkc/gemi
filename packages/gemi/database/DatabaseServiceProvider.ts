@@ -21,6 +21,23 @@ export class DatabaseServiceProvider extends ServiceProvider {
       },
     );
   }
+
+  /**
+   * Closes every connection's pool. Registered early, so it runs late: after
+   * the queue and the scheduler have waited for their jobs, which still need
+   * it. Bun's `close()` lets a query already sent finish.
+   *
+   * On the way out of a production server this only tidies up before the
+   * exit. Under `gemi dev` it is the whole point: a `bun --hot` reload boots
+   * a new application with a new pool, and the replaced one's is closed here
+   * rather than left holding its connections for the life of the process
+   * (#652).
+   */
+  async shutdown() {
+    // Resolving the manager now would open a pool only to close it.
+    if (!this.app.resolved(DatabaseManager)) return;
+    await this.app.make(DatabaseManager).close();
+  }
 }
 
 /**

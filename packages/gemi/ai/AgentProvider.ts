@@ -141,7 +141,13 @@ export type ProviderEvent =
   | { type: "tool-search"; loaded: string[]; namespaces: string[] }
   | { type: "output-delta"; delta: string }
   | { type: "finish"; reason: FinishReason; usage: Usage }
-  | { type: "error"; error: AgentError };
+  /**
+   * `status` and `requestId` describe the HTTP response the error came from,
+   * when there was one. They are for the server's record of the run
+   * (`AgentRunResult.error`) and are never written to a client frame; leave
+   * them out for an error that was not a response.
+   */
+  | { type: "error"; error: AgentError; status?: number; requestId?: string };
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
 

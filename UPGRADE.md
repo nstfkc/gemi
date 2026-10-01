@@ -1,4 +1,4 @@
-# Upgrading from 0.74 to 0.75
+# Unreleased
 
 Additive, apart from one error code. Nothing to rewrite.
 
@@ -65,6 +65,376 @@ match its `output` schema, the `error` event it emits now has
 `code: "invalid_output"` instead of `"unknown"`; the message is unchanged. Only
 code that matched on `"unknown"` to detect this needs updating. An exhaustive
 `switch` over `AgentErrorCode` needs the new case.
+
+# Upgrading from 0.82 to 0.83
+
+## `reasoning` takes `"none"`, and any effort the model accepts (#658)
+
+`ReasoningEffort` was `"minimal" | "low" | "medium" | "high"`. Newer models
+take a different set: Azure's gpt-6-sol answers 400 to `"minimal"` and accepts
+`none | low | medium | high | xhigh | max`, so the lowest effort an app could ask
+for on it was `"low"`, and reasoning could not be turned off at all.
+
+- `ReasoningEffort` now lists `"none"`, `"xhigh"` and `"max"` as well, and
+  takes any other string. The value is sent to the model as is; gemi does not
+  check it against a list, because which values a model takes depends on the
+  model. A value the model rejects ends the run with `finishReason: "error"`
+  and the API's message (which names the values it does take) on
+  `result().error`.
+- `reasoning: "none"` is sent as `reasoning: { effort: "none" }`, without
+  `summary: "auto"`, since there is nothing to summarize. Every other value is
+  sent with the summary as before.
+- `"none"` is not the same as leaving `reasoning` unset: unset gets the model's
+  default effort (usually `"medium"`). Use `"none"` for short, latency-bound
+  calls; with any effort, `maxOutputTokens` caps reasoning tokens too, and a
+  small cap can be spent entirely on reasoning, leaving no text.
+- On a model gemi knows has no reasoning parameter (gpt-4o, gpt-4.1, gpt-3.5),
+  every value, `"none"` included, is still dropped from the request.
+- Older reasoning models do not take `"none"` (gpt-5 takes `"minimal"`
+  instead; o-series models take neither). Keep using `"minimal"` or `"low"`
+  there.
+
+If you worked around the old type with a cast (`"none" as ReasoningEffort`),
+the cast can go. Nothing else changes for existing values.
+
+# Upgrading from 0.81 to 0.82
+
+## Agent runs have a deadline, and tools can have a timeout (#455)
+
+A tool that never settled (a `fetch` with no timeout, say) kept its run open
+for the life of the process, and the live-run registry kept the run, its
+frames and everything it closed over with it.
+
+- **`Agent.create({ maxRunDurationMs })`**, default **10 minutes**
+  (`DEFAULT_MAX_RUN_DURATION_MS`, exported from `gemi/ai`). When a run reaches
+  it, the run is stopped the way `stop()` stops it: `ctx.signal` aborts (its
+  `reason` is a `TimeoutError`), the provider request is cancelled, and every
+  tool call still in flight gets a `denied` result with `cause: "stopped"`.
+  The run then ends with `finishReason: "error"` and
+  `result().error.code === "timeout"`, so it's logged (unless `logErrors:
+  false`) and `result({ throwOnError: true })` rejects. The client gets an
+  `error` frame with code `"timeout"`, then `run-end` with `"error"`, and the
+  finished transcript is stored like any other turn's.
+  `agent.stream({ maxRunDurationMs })` overrides it for one run. `null` (or
+  `Infinity`) turns it off. `0` or a negative number throws.
+- **`AgentTool.create({ timeoutMs })`**, no limit by default. When a call
+  reaches it, `ctx.signal` aborts with a `TimeoutError`, the model gets an
+  `error` result for that call with code `"timeout"`, and the run carries on.
+  The run stops waiting for the call at that point even if the tool ignores the
+  signal, and anything the tool yields or returns afterwards is dropped.
+- **`ctx.signal` is now per call** when the tool has a `timeoutMs`. It still
+  aborts on `stop()` and at the run's deadline. Image calls and sub-runs a
+  tool starts get the same signal, so a timeout cancels them too.
+- **`MemoryLiveRuns` has an age ceiling**, `maxAgeMs`, default 1 hour, `null`
+  to turn it off. An entry still there at that age, ended or not, gets its run
+  stopped and is evicted `ttlMs` later. `AgentController` passes the agent's
+  `maxRunDurationMs`, so a run allowed to be longer than an hour is never cut
+  off before its own limit plus `ttlMs`, and an agent with
+  `maxRunDurationMs: null` is exempt.
+- `AgentErrorCode` gains `"timeout"`. If you `switch` over it exhaustively, add
+  the case.
+
+**Behaviour change:** a run longer than 10 minutes used to be allowed and now
+ends as a `timeout` error. An agent whose runs are legitimately long (a batch
+job, a long research loop) should set `maxRunDurationMs` to its own bound, or
+`null`. A sub-run started with `ctx.runAgent` has no default limit of its own.
+It's bounded by its parent, unless its agent sets one explicitly.
+
+# Upgrading from 0.80 to 0.81
+
+## A failed agent run says why on `result()`, and is logged (#656)
+
+When a provider call failed, `run.result()` resolved with
+`finishReason: "error"`, no `output`, and nothing else. The cause was only an
+`error` event on the stream, so a server-side caller that just awaited
+`result()` never saw it, and nothing was logged.
+
+- **`AgentRunResult.error`** is set exactly when `finishReason` is `"error"`
+  (type `AgentRunFailure`). It has the same `code`, `message` and `retryable`
+  as the stream's `error` event. When the provider answered with an HTTP
+  error, it also has the `status` and the provider's `requestId`. A
+  successful, aborted, `max-steps` or `length` result has no `error` key, as
+  before. `NestedRunResult` (from `ctx.runAgent`) has the same field.
+- **`result({ throwOnError: true })`** rejects with an `AgentRunError`
+  (exported from `gemi/ai`) for a run that ends in `"error"`. It carries
+  `code`, `retryable`, `status`, `requestId`, `runId` and the whole `result`,
+  so the messages and usage of the steps before the failure are still there.
+  Every other finish reason resolves as usual. Without the option nothing
+  changes: `result()` still resolves.
+- **Failed runs are logged by default** through `Log.error`, so they land in
+  `storage/logs` and reach the log config's `onLogCreated`. In development
+  (`gemi dev`) the line also goes to the console. Outside an application (a
+  script, a test) it goes to `console.error` instead. Pass
+  `Agent.create({ logErrors: false })` if the app already reports the failure
+  itself and doesn't want a second line.
+
+Unchanged: the `error` frame a client receives. It carries only `code`,
+`message`, `retryable` (and `toolCallId` when set), exactly as before. The
+`status` and `requestId` stay on the server.
+
+For a custom `AgentProvider`: an `error` event may now carry optional
+`status` and `requestId` next to `error`, and a provider that throws an error
+with a numeric `status` (and optionally a string `requestId`) gets them
+recorded too. Neither is required.
+
+If you implement `AgentRun` yourself (a test stub, say), `result()` now takes
+an optional `{ throwOnError }`. A `result()` that ignores it still
+typechecks, but won't reject.
+
+## `Storage.fetch` takes an abort signal (#654)
+
+`Storage.fetch(params, { signal })` now accepts an `AbortSignal`, as
+`Storage.put` already did. An abort rejects `fetch()`, or errors the returned
+body if it lands later, so `await res.arrayBuffer()` rejects instead of
+hanging on a stalled read. Existing calls are unaffected.
+
+A custom driver's `fetch()` receives the options as its second argument
+(`FetchFileOptions`, exported from `gemi/services`). A driver that ignores it
+keeps working, and `Storage.fetch` still rejects a signal that is already
+aborted before calling it.
+
+# Upgrading from 0.79 to 0.80
+
+## `gemi dev` shuts the replaced application down on every reload (#652)
+
+Each `bun --hot` reload of server code boots a new application, and nothing
+stopped the one it replaced. Its database pool stayed open, so every save left
+10 idle Postgres connections behind (Bun's default pool size). After a few
+saves the dev server used up `max_connections`, and every process sharing that
+Postgres then failed with `too many clients already`.
+
+Now, once the new application is serving, the replaced one gets up to 10
+seconds to finish its requests and then runs its providers' `shutdown()`
+hooks. That closes its database pool and its Redis client, stops its cron
+schedule and drains its queue. The reload doesn't wait for any of this, and a
+failure in it is logged instead of shown in the error overlay.
+
+What changes for an app:
+
+- **Your providers' `shutdown()` runs in development too**, on each reload,
+  for the application being replaced. If a hook closes something you keep on
+  `globalThis` so that it survives reloads, it now closes it under the new
+  application as well. Leave shared state like that alone in `shutdown()`.
+- **The database pool and the Redis client are closed at shutdown** in every
+  mode: when `gemi start` or `gemi queue:work` is stopped, and on a dev reload.
+  Before, only the process exit closed them. The database closes last, after
+  the queue and the scheduler have waited for their jobs.
+- **A memory-queue job still waiting when you save is dropped** with the old
+  application, as it would be on a restart. Before, the old application's
+  queue kept running it on the old code. Jobs on the database driver are
+  unaffected: the new application already took over their loop.
+
+# Upgrading from 0.78 to 0.79
+
+## A tool input or agent output must be an object at the root (#478)
+
+`AgentTool.create` now throws when a tool's `inputSchema` does not emit
+`type: "object"` at its root, and `Agent.create` does the same for `output`.
+Before, a root `s.union(...)` (which lowers to `anyOf`), a primitive, an array,
+`s.json()` or a `.nullable()` object was accepted and then failed at request
+time: OpenAI's strict function parameters and structured output reject `anyOf`
+or a non-object at the root, so the first turn carrying the schema was a 400.
+The error now happens at startup and names the tool or agent.
+
+To upgrade, wrap the schema in an object and read the field off the result:
+
+```ts
+// before
+output: s.union([s.object({ kind: s.literal("a") }), s.object({ kind: s.literal("b") })]),
+// after
+output: s.object({
+  value: s.union([s.object({ kind: s.literal("a") }), s.object({ kind: s.literal("b") })]),
+}),
+// ...and read `result.output.value`
+```
+
+A tool's `outputSchema` is never sent to the provider and is not checked.
+
+# Upgrading from 0.77 to 0.78
+
+## `attachmentScope` and `authorizeRequest` get the request body (#603)
+
+A chat with no signed-in user and no thread (a stateless page builder that
+sends `useChat("/page-builder", { body: { pageId } })`) had no attachment scope,
+so `ctx.attachments` threw and `ctx.generateImage` could not run in it. The page
+was in the body, and neither method could see it: the route has already read
+the body by the time they run.
+
+- **`attachmentScope(req, threadId, { body })`.** A new third argument, the same
+  `body` `instructions()` gets, typed as the controller's `Body`. It is passed on
+  `stream` and on `upload`. The first two arguments are unchanged, so existing
+  overrides (`attachmentScope(req, threadId)`, `attachmentScope()`) and
+  `super.attachmentScope(req, threadId)` keep working.
+- **`authorizeRequest(req, { route, threadId, body })`.** `body` is set on
+  `stream` and `upload` and absent on `attach` and `stop`, which carry none.
+  The params type is exported as `AuthorizeRequestParams<Body>`; narrow on
+  `route` to read `body`. Overrides typed against the old `{ route, threadId }`
+  still compile.
+- **`useChat.uploadFile` sends the `body` option** as a `body` form part (one
+  JSON object) beside the file. The GemiChat (Swift) and `dev.gemijs.chat`
+  (Kotlin) `upload` do the same with the session's `body` when it is not empty.
+  So an upload resolves the same scope as the turn that uses it.
+- **A malformed `body` part is a 400** (`invalid_request`) from `/files`, before
+  `authorizeRequest` runs and before any bytes are stored or sent. A missing
+  part is `{}`, as before. The envelope's names (`turn`, `clientRunId`,
+  `threadId`, `messages`) are taken out of it, as they are on `stream`.
+
+Only key a scope on a body value the server looks up and that works as a
+capability, like a thread id: an unguessable page `publicId` that you find in
+the database, keyed on what the lookup returned.
+
+```ts
+protected async attachmentScope(req, threadId, { body }) {
+  const scope = await super.attachmentScope(req, threadId);
+  if (scope) return scope;
+  // Checked first: to an ORM, `{ publicId: undefined }` is no filter at all.
+  if (typeof body.pageId !== "string") return null;
+  const page = await Page.findFirst({ where: { publicId: body.pageId } });
+  return page ? { key: `page:${page.publicId}` } : null;
+}
+```
+
+Never ``{ key: `org:${body.orgId}` }``: an org id can be guessed, and the caller
+may not belong to that org. A tenant comes from `req.ctx().user`. Derive the
+key from a field that stays the same for the whole conversation (the page, not
+the selected element). A key that differs between the upload and the turn makes
+the upload's id an `AttachmentNotFoundError` in the turn.
+
+If you worked around this by overriding `stream` to read
+`req.rawRequest.clone().json()` into a field, that still works. You can delete
+it and read `body` in `attachmentScope` instead, which also covers `upload`.
+
+# Upgrading from 0.76 to 0.77
+
+## `HttpResponse.json(data, { status?, headers? })` (#646, #647)
+
+Return a JSON response with a custom status or headers from an API route
+without losing the route's type:
+
+```ts
+import { HttpResponse } from "gemi/http";
+return HttpResponse.json(post, { status: 201 });
+return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+```
+
+- The route's client type is `data`'s type, as if `data` had been returned
+  directly (a union with plain returns works too).
+- It goes through the same path as a plain return, so cookies, `ctx().setHeaders()`
+  headers and middleware headers (CORS, `cache`) are kept. `options.headers`
+  override by name, and `Set-Cookie` accumulates. `Content-Type` defaults to
+  `application/json`. A status of 400 or more gets `Cache-Control: no-store`
+  unless you set one.
+- `status` defaults to 200. 204, 205, 304 and anything outside 200–599 throw a
+  `RangeError`. API routes only: returning it from a view handler throws.
+
+**Behaviour change, client:** a non-2xx JSON body with no `error` field is now
+passed to `onError` / `error` whole. Before, it came through as `undefined`. A
+JSON `null` error body becomes `{ message: "Request failed with status N" }`
+instead of throwing a TypeError. Bodies shaped `{ error: … }` behave exactly as
+before.
+
+# Upgrading from 0.75 to 0.76
+
+## A threaded turn is stored as it runs, and a lost one reads as `interrupted` (#617)
+
+`AgentController` used to store a turn only when its run ended. A restart, crash
+or deploy mid-run left the thread with nothing from that turn, not even the
+user's message, while its tools might already have saved something.
+
+Now, on a thread:
+
+- **The store is written while the run goes.** The user's message is stored
+  when the run starts, then the assistant message in progress: when it opens,
+  when a tool call's arguments are complete, and when a tool result lands. A
+  message still being written has no `finishReason` and carries the run's id
+  in a new optional field, `AgentMessage.runId`. Each message is written again
+  once finished, and the end-of-run write stores the whole transcript as
+  before. Every write goes through `appendMessages`, which already upserts by
+  id, so a store needs no new method. It is called more often, and with the
+  same message several times; the last write wins.
+- **A message whose run is gone is closed as `interrupted`.** New
+  `FinishReason` `"interrupted"`. Any tool call the message left open gets a
+  `denied` result with a new `cause: "interrupted"`. The model is told the call
+  was cut off and may have run in part or in full, rather than that it did not
+  run. This happens when the next turn starts on the thread (and is written
+  back then), and when you read the thread with the new
+  `controller.readThread(threadId)`. That read does not write.
+- **Liveness is `isRunLive(runId, threadId)`**, a protected method that asks
+  this process's `liveRuns`. That's the whole answer on one instance. Behind
+  several instances, a message whose run lives on another instance reads as
+  interrupted here until that run's own writes replace it. #459 tracks a
+  lasting record of running runs; override `isRunLive` to consult one.
+
+**What to change:** the route that hands a thread to `useChat` (or a native
+session) should read it through the controller, so a lost turn shows as cut off
+rather than as an answer still streaming:
+
+```ts
+messages: await new ChatController().readThread(threadId),
+```
+
+**What to check:**
+
+- A `switch` over `FinishReason`, or over a denied result's `cause`, that is
+  exhaustive stops compiling until it handles `"interrupted"`.
+- A custom `AgentStore` must upsert by message id, as its contract already
+  says. One that inserts will now duplicate messages within a single turn.
+- `onMessage` is unchanged: it still fires after the run ends.
+- Stateless turns (no `threadId`) are unchanged.
+- The wire frames are unchanged. `"interrupted"` only appears on messages read
+  back from the store. The Swift and Kotlin clients read both values as open
+  strings, and both gain `FinishReason.interrupted` / `FinishReason.Interrupted`
+  constants.
+
+# Upgrading from 0.74 to 0.75
+
+## `useQuery` stops retrying client errors — behaviour change (#421, #643)
+
+A non-suspense `useQuery` used to retry a failed request forever, every 10s,
+whatever the status. So `useUser` on a public page polled `/auth/me` for as long
+as the page was open.
+
+- **Not retried:** 4xx except 408 and 429 (400, 401, 403, 404, 410, 422, …). The
+  error is returned once.
+- **Retried:** network failures, a 2xx body that isn't JSON, 408, 429 and 5xx.
+  At most 3 retries in a row, waiting 1s, 2s and 4s (capped at 30s). A
+  `Retry-After` header on 429/503 sets the wait (`QueryError.retryAfter`).
+- **Reconnect:** when the browser comes back online, a query whose last failure
+  is retryable is fetched again. `revalidateOnFocus` is unchanged.
+- **Non-JSON error bodies** (e.g. a proxy's HTML 502) are now a `QueryError`
+  with the status and `body: null`, instead of a `SyntaxError`.
+
+**Config:**
+- `retry` per call: a number, `false`/`0`, `true` (uncapped, still never 4xx),
+  or `(failureCount, error) => boolean`.
+- `retryDelay` per call: ms, or a function of the failure count.
+- Both are also accepted app-wide in `queryConfig`.
+- `retryIntervalOnError` is deprecated. It now only sets the backoff's base
+  delay.
+- `useUser(config?)` and `queryConfig.user` accept `staleTime`, `retry`,
+  `retryDelay`, `revalidateOnFocus`, `focusThrottleInterval` and
+  `refreshInterval`. Example: `queryConfig: { user: { staleTime: 30 * 60_000 } }`
+  stops refetching `/auth/me` on every navigation.
+
+**What to check:** code that relied on a query eventually recovering from a 4xx
+by retrying. Call `refetch()` (or `mutate()`) when the condition changes
+instead.
+
+# Upgrading from 0.74.0 to 0.74.1
+
+## Password sign-in never 500s on a missing or unreadable hash (#276, #642)
+
+Signing in with a password for a user who has none (e.g. OAuth-only), or whose
+stored hash is empty or unreadable, used to throw inside `Bun.password.verify`
+and answer 500. It now answers `invalid_credentials`, like a wrong password.
+`changePassword` answers its existing "Incorrect password" validation error
+instead of a 500.
+
+No password, unknown address and wrong password now take about the same time:
+gemi runs `verifyPassword` against a decoy hash in the first two cases. As a
+result, a sign-in for an unknown address costs one hash check, like a wrong
+password. A custom `verifyPassword` is never called with a null hash, and its
+type is unchanged. The default is exported as `verifyPasswordHash`.
 
 # Upgrading from 0.73 to 0.74
 

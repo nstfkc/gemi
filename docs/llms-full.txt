@@ -1044,7 +1044,7 @@ In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills t
 1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. A queue whose driver outlives the process (such as `database`) stops claiming new jobs and leaves them to other replicas; the memory queue keeps claiming until step 4, since no other process can run its jobs. Jobs already running carry on.
 2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
 3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
-4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule). The scheduler is registered after the queue, so it runs first, and whatever time its ticks take comes out of what the queue has left. Closing the listener does not close a kept-alive connection that was idle at the time, so a client that ignored `Connection: close` can still send a request down it; from this step on, such a request is answered `503` with `Connection: close` and reaches neither your routes nor your instrumentation.
+4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule). The scheduler is registered after the queue, so it runs first, and whatever time its ticks take comes out of what the queue has left. The database provider's closes every connection pool, and the Redis provider's closes its client if one was opened. The database is registered before both, so its pool closes after their jobs have finished with it. Closing the listener does not close a kept-alive connection that was idle at the time, so a client that ignored `Connection: close` can still send a request down it; from this step on, such a request is answered `503` with `Connection: close` and reaches neither your routes nor your instrumentation.
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short or a provider threw or overran. `gemi start` exits with the same code.
 
 A [`gemi queue:work`](./jobs-and-queues.md#worker-processes--gemi-queuework) worker drains the same way, with its running jobs in place of requests in step 3 and no delay in step 2.
@@ -1101,6 +1101,8 @@ export default class AppServiceProvider extends ServiceProvider {
 ```
 
 Providers shut down in reverse registration order, so yours — registered after the framework's — runs while the framework's services are still up. A hook that throws is logged and the next one still runs; one that is still running when `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` is up is abandoned, and any provider not reached by then is skipped.
+
+The hook also runs in development. Each `bun --hot` reload of `gemi dev` boots a new application, and once the new one is serving, the one it replaced is shut down: its requests get up to 10 seconds to finish, then its providers' `shutdown()` hooks run with 5 seconds between them. That closes the replaced application's database pool, Redis client, cron schedule and queue, so they don't pile up across saves. A reload whose boot throws shuts its own half-booted application down and leaves the old one serving. The shutdown runs in the background and doesn't delay the reload, and a failure in it is logged and doesn't reach the browser's error overlay. If a hook closes something you keep on `globalThis` so it survives reloads, it would close it for the new application too, so leave that to the new one.
 
 ### Handling the signals yourself
 
@@ -1569,6 +1571,18 @@ export default class extends ApiRouter {
 ```
 
 > **Note:** The generic parameters of `HttpRequest<Body, Params>` flow through the router types, so the client network layer (`useQuery`/`Form`) is typed end to end from the handler you write here. Type the request body and params on the handler and you get client-side type safety for free.
+
+To answer with a status or headers of your own, return `HttpResponse.json(data, { status, headers })` instead of `data`. The route stays typed as `data`, and the response keeps the cookies and headers the request set. See [Controllers → Status and headers](./controllers.md#status-and-headers-httpresponsejson).
+
+```typescript
+import { ApiRouter, HttpResponse } from "gemi/http";
+
+export default class extends ApiRouter {
+  routes = {
+    "/posts": this.post(async () => HttpResponse.json({ id: 1 }, { status: 201 })),
+  };
+}
+```
 
 ### Grouping methods at one path
 
@@ -2138,7 +2152,56 @@ export class HomeController extends Controller {
 }
 ```
 
-To change the response (redirect, status, headers), use the facades and errors rather than constructing a `Response` yourself — see [Errors](#errors-and-validation) below and the [`Redirect`](./authentication.md) facade.
+To change the response, use `HttpResponse`, the facades and errors rather than constructing a `Response` yourself. `HttpResponse` sets a status or headers (below). For errors see [Errors](#errors-and-validation), and for redirects see the [`Redirect`](./authentication.md) facade.
+
+### Status and headers: `HttpResponse.json`
+
+To answer with a status other than 200, or with extra headers, return `HttpResponse.json(data, options?)` from `gemi/http`:
+
+```typescript
+import { Controller, HttpRequest, HttpResponse } from "gemi/http";
+
+export class PostController extends Controller {
+  async store(req: HttpRequest<{ title: string }>) {
+    const post = await Post.create({ data: (await req.input()).toJSON() });
+    return HttpResponse.json(post, { status: 201 });
+  }
+
+  async publish(req: HttpRequest<{}, { id: string }>) {
+    const post = await Post.findUniqueOrThrow({ where: { id: req.params.id } });
+    if (post.publishedAt) {
+      return HttpResponse.json({ error: { message: "Already published" } }, { status: 409 });
+    }
+    // ...
+    return HttpResponse.json(post, { headers: { "X-Post-Version": String(post.version) } });
+  }
+}
+```
+
+`options` is `{ status?: number; headers?: HeadersInit }`, and `status` defaults to 200. A status the JSON body cannot go with is refused with a `RangeError`: one outside 200–599, or 204, 205 or 304.
+
+**It stays typed.** The route's client type is `data`'s type, as if the handler had returned `data`. A handler that returns `HttpResponse.json(post, { status: 201 })` gives `usePost`, `useQuery` and `Query.instant` the type `Post`. A handler that returns a plain object on one branch and `HttpResponse.json` on another is typed as the union of the two. A hand-built `Response` has no type, and returning one also loses the route's type.
+
+**It keeps what the request set.** It goes through the same path as a plain return, so the response also carries:
+
+- cookies set during the request, such as a refreshed session or `req.ctx().setCookie()`;
+- headers set with `req.ctx().setHeaders()`;
+- whatever middleware added, such as CORS headers or `cache`'s `Cache-Control`.
+
+On top of those, `options.headers` apply as follows:
+
+- A header named in `options.headers` replaces the one the request set.
+- A `Set-Cookie` in `options.headers` is added to the request's cookies. It does not replace them.
+- `Content-Type` is `application/json` unless `options.headers` names another one, such as `application/problem+json`.
+- A status of 400 or more is sent `Cache-Control: no-store` unless `options.headers` sets `Cache-Control`. gemi's own errors do the same, so a shared cache cannot replay one client's 404 to everyone from behind `cache`.
+
+**What the client sees.** Any 2xx is data: `useQuery` stores it, and a mutation calls `onSuccess` with it. A 4xx or 5xx is an error, handled as gemi's own errors are:
+
+- `useQuery` gets a `QueryError` whose `status` is the status and whose `body` is the JSON. The default retry policy applies, so a 4xx other than 408 and 429 is not retried.
+- `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. A body with no `error` field is handed over whole.
+- A loader's `Query.instant` or `Query.prefetch` on the server behaves the same as the browser. A 2xx resolves to the data, and an error status rejects with the same `QueryError`.
+
+`HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
 
 ## HttpRequest
 
@@ -3228,7 +3291,8 @@ const { data } = useQuery("/feed", {}, {
   fallbackData: [],        // initial data before the first fetch
   keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
-  retryIntervalOnError: 10000, // background retry — suspense: false only
+  retry: 3,                // background retries of a failed query — suspense: false only
+  retryDelay: (n) => 1000 * 2 ** (n - 1), // wait before retry n (default: 1s, 2s, 4s, capped at 30s)
   revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
   focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
@@ -3274,6 +3338,79 @@ Three things keep it from firing more than it should:
 A `lazy` query only becomes eligible once something has explicitly fetched it —
 `trigger()`, `refetch()` or `mutate()`. `prefetch()` deliberately does not
 count: it is "fetch once" for data the user may never look at.
+
+### Failed queries and retries
+
+With `suspense: false` a failed query returns its `error` and may retry in the
+background. Under suspense the error throws into the segment's error boundary
+instead, and resetting the boundary is the retry.
+
+Only failures another attempt might fix are retried: no answer at all (offline,
+a dropped connection), `408`, `429` and any `5xx`. Every other `4xx` — `400`,
+`401`, `403`, `404`, `410`, `422`, … — is returned once and never retried,
+because sending the same request again gets the same answer. That is what lets
+`useUser()` sit on a public page: the anonymous visitor's `401` from
+`/auth/me` is one request, not a poll.
+
+- **`retry`** (default `3`) — how many times in a row a retryable failure is
+  retried. `false` or `0` turns retries off, `true` removes the cap, and a
+  function `(failureCount, error) => boolean` decides alone, so it can also
+  retry a status the default never does. `failureCount` is 1 after the first
+  failure.
+- **`retryDelay`** — the wait before each retry, in ms, or
+  `(failureCount, error) => ms`. The default backs off exponentially: 1s, 2s,
+  4s, … capped at 30s.
+- **`Retry-After`** — when the failed response carries one (a `429` or `503`),
+  the retry waits exactly that long, whatever `retryDelay` says. It is also on
+  the error, in ms, as `error.retryAfter`. The retry still counts toward
+  `retry`.
+
+`error` is a `QueryError` (`status`, `body`, `retryAfter`) when the server
+answered, including with a non-JSON error page (`body` is then `null`), and the
+browser's `TypeError` when it did not. `isRetryableQueryError(error)` from
+`gemi/client` is the default's test, for building your own `retry`:
+
+```tsx
+import { isRetryableQueryError, QueryError } from "gemi/client";
+
+useQuery("/jobs/:id", { params: { id } }, {
+  suspense: false,
+  // A job that doesn't exist *yet* 404s: keep looking for a while.
+  retry: (n, error) =>
+    (error instanceof QueryError && error.status === 404 && n < 10) ||
+    (isRetryableQueryError(error) && n <= 3),
+  retryDelay: 2000,
+});
+```
+
+A run of retries ends at the first success. Unmounting every reader of the
+query cancels a pending retry. When the browser comes back `online`, a query
+whose last failure its policy would retry is fetched again, silently, with a
+fresh run of retries. `revalidateOnFocus` and `refetch()` fetch a failed query
+like any other.
+
+### App-wide defaults: `queryConfig`
+
+Set defaults for every `useQuery` once, where the roots are created. A call
+site's config still wins:
+
+```ts
+const queryConfig = { staleTime: 30_000, retry: 2, revalidateOnFocus: true };
+
+// app/config/route.ts — the server render
+view: { rootRouter: RootViewRouter, root: createRoot(RootLayout, { queryConfig }) },
+
+// app/client.tsx — the browser
+init(RootLayout, { queryConfig });
+```
+
+Pass the same value to both, so the server render and hydration agree.
+
+Accepted keys: `suspense`, `staleTime`, `keepPreviousData`, `retry`,
+`retryDelay`, `refreshInterval`, `revalidateOnFocus`, `focusThrottleInterval`
+(and the deprecated `retryIntervalOnError`). `lazy`, `fallbackData` and
+`refetchUntil` are call-site only. `useUser()` ignores these and reads
+`queryConfig.user` instead — see Authentication.
 
 ### Optimistic updates with `mutate`
 
@@ -4865,8 +5002,10 @@ These are the web hook's rules; the comments in `packages/gemi/ai/useChat.tsx` e
 - **Persist `messages` and `cursor` together.** Pass both back as `initialMessages` and `cursor` when the screen is rebuilt. A session on a thread then attaches to a run still going and asks only for the frames it hasn't seen. Restoring one without the other is how an answer ends up printed twice.
 - **Answers given together go out as one turn.** A turn that leaves a pending call unanswered refuses it. So `approve`/`answer` calls made in one go — a loop over `pending` — are coalesced into a single request.
 - **`stop()` ends the run. `close()` doesn't.** `stop()` marks the turn aborted at once and tells the server, which ends the generation and any tool in flight. `close()` only drops the connection, like a React unmount; the run finishes on the server, and a later session on the thread attaches to it. Call `close()` when the screen goes away.
+- **A turn cut off by a server restart reads as `interrupted`.** On a thread, the server stores a turn while it runs. If the server dies mid-run, the thread keeps the user's message and the assistant message up to that point, and it comes back with `finishReason` `interrupted` (`FinishReason.interrupted` / `FinishReason.Interrupted`), provided the app's route reads it with `readThread`. A tool call it left open has a `denied` result with cause `"interrupted"`: the tool may have run, so don't show it as refused. Show the message as cut off. The next turn goes on from there.
 - **`onAttachMiss`** fires when the attach probe finds no run. Behind a load balancer that's ambiguous, because the run may be alive on another instance. Re-reading the thread and calling `setMessages` shows the answer anyway.
 - **An upload has two ids, and either can be missing.** `upload` returns a `ChatUpload`. Its `fileId` is the provider's: put `upload.file` in a turn's `files` to show the model the file. Its `attachmentId` is gemi's: the handle a tool fetches the bytes by. A file the server kept but never sent to the provider has no `fileId`, so `file` is `nil`/`null`, not a turn carrying an empty id. An upload the server had no scope to keep has no `attachmentId`, and `downgraded` says so.
+- **An upload sends `body` too.** `upload` sends the session's `body`, when it is not empty, as a `body` form part (one JSON object) beside the file. The controller's `attachmentScope` and `authorizeRequest` then see the same fields on an upload as on a turn, so a chat whose subject is only in `body` (a page id, with no user and no thread) keeps its uploads under the same scope as its turns.
 - **Authentication** is whatever your routes' middleware checks. Mobile apps usually send a bearer token, so pass it in `headers`, which is asked for before every request.
 
 ## Related
@@ -7803,7 +7942,7 @@ a binding into the container, and a facade resolves it.**
 | `signInPath` | `string` | `"/auth/sign-in"` | The sign-in page the [`auth` middleware](#the-auth-middleware) sends signed-out view requests to. A path, or an `http(s)` URL for sign-in hosted elsewhere. Anything else fails the request — the value ends up in a `Location`. |
 | `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
 | `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
-| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
+| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. `verifyPassword` is never handed a missing hash: for an account with no password (one created through OAuth) or an unknown address it runs against a throwaway hash from `hashPassword`, and the answer is `invalid_credentials`, as for a wrong password. The default also answers `false` for a stored value it cannot read as a hash. |
 | `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | 32 random bytes, hex | Token minting. Whatever you return must not be computable from the user's email or the time. |
 
 > **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
@@ -8559,7 +8698,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Invalidates the cached user. |
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
-| `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
 | `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
@@ -8573,6 +8712,25 @@ function Profile() {
   if (!user) return <SignInPrompt />;
   return <span>Hello {user.name}</span>;
 }
+```
+
+`useUser()` never suspends: an anonymous visitor gets `user: null`. When the
+page carries no signed-in user it asks `/auth/me` once; the `401` it gets back
+is not retried (see [Failed queries and retries](./data-fetching.md#failed-queries-and-retries)).
+
+It doesn't read the app-wide `queryConfig`. Tune its `/auth/me` query with
+`queryConfig.user`, or per call with `useUser({ … })`, which wins. Accepted
+keys: `staleTime`, `retry`, `retryDelay`, `revalidateOnFocus`,
+`focusThrottleInterval`, `refreshInterval`.
+
+By default a cached user older than 5s is revalidated by the next `useUser()`
+that mounts, so a layout that calls it refetches `/auth/me` on most
+navigations. A session-length window stops that. `useSignIn` and `useSignOut`
+update the cached user themselves, so signing in or out still shows at once:
+
+```ts
+// both createRoot(RootLayout, { queryConfig }) and init(RootLayout, { queryConfig })
+const queryConfig = { user: { staleTime: 30 * 60_000 } };
 ```
 
 ### A sign-in form
@@ -10097,7 +10255,7 @@ await Storage.put(file, { signal: AbortSignal.timeout(30_000) });
 
 An aborted `put` rejects and the object should be treated as not written. The S3 and Azure drivers hand the signal to their SDK, which cancels the request in flight. The local disk driver checks the signal before it writes but does not interrupt a write already under way.
 
-### `fetch(params | string)`
+### `fetch(params | string, options?)`
 
 Reads a file back as a web `Response` (streamed body, with `Content-Type`, `Content-Length`, and caching headers already set). Pass the object name as a string, or a `ReadFileParams` object to target a specific bucket:
 
@@ -10118,6 +10276,21 @@ interface ReadFileParams {
 ```
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
+
+#### Cancelling a read
+
+Like `put`, `fetch` takes an optional second argument, `{ signal }`. Use it to give up on a slow backend, or to stop reading when the client disconnects:
+
+```typescript
+// Give up after 10 seconds, including while the body is being read
+const res = await Storage.fetch(name, { signal: AbortSignal.timeout(10_000) });
+const bytes = await res.arrayBuffer(); // rejects with a TimeoutError on timeout
+
+// Stop when the incoming request goes away
+return Storage.fetch(name, { signal: req.rawRequest.signal });
+```
+
+An abort before the object is found rejects `fetch` itself. An abort after `fetch` resolved errors the returned body instead, so a pending `arrayBuffer()`, `text()` or stream read rejects rather than hanging, and the driver cancels the underlying stream, which closes the file or releases the connection. The S3 and Azure drivers also hand the signal to their SDK, which cancels the request in flight.
 
 ### `read(params | string, options?)`
 
@@ -10316,6 +10489,7 @@ Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`
 import {
   FileStorageDriver,
   type DeleteFileParams,
+  type FetchFileOptions,
   type PutFileOptions,
   type PutFileParams,
   type ReadFileParams,
@@ -10328,8 +10502,11 @@ class MyDriver extends FileStorageDriver {
   ): Promise<string> {
     /* ...store and return the object name, honouring `signal`... */
   }
-  async fetch(params: ReadFileParams | string): Promise<Response> {
-    /* ...return a Response streaming the object... */
+  async fetch(
+    params: ReadFileParams | string,
+    { signal }: FetchFileOptions = {},
+  ): Promise<Response> {
+    /* ...return a Response streaming the object, honouring `signal`... */
   }
   async list(folder: string): Promise<any> {
     /* ... */

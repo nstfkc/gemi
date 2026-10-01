@@ -6,6 +6,7 @@ import {
   useRef,
 } from "react";
 import { QueryResource } from "./QueryResource";
+import type { RetryDelayOption, RetryOption } from "./retryPolicy";
 
 /** One streamed query payload: `[path, variantKey, data]`. */
 type StreamedQueryPayload = [string, string, any];
@@ -16,7 +17,7 @@ type StreamedQueryPayload = [string, string, any];
  * config → these defaults → framework defaults, so a call site always wins.
  * Only keys with app-wide meaning are accepted — `lazy`, `fallbackData` and
  * `refetchUntil` stay call-site-only. Framework-internal hooks (`useUser`,
- * `useSignIn`) never see these.
+ * `useSignIn`) never see these — `useUser` has its own `user` key.
  */
 export interface QueryConfig {
   /**
@@ -29,6 +30,15 @@ export interface QueryConfig {
   /** How long cached data stays fresh before a read revalidates it, in ms. */
   staleTime?: number;
   keepPreviousData?: boolean;
+  /**
+   * Background retries for failed `suspense: false` queries. Default `3`:
+   * network failures, 408, 429 and 5xx, with exponential backoff; other 4xx
+   * are never retried. See `useQuery`'s `retry`.
+   */
+  retry?: RetryOption;
+  /** The wait before each retry, in ms, or `(failureCount, error) => ms`. */
+  retryDelay?: RetryDelayOption;
+  /** @deprecated Use `retryDelay`. The base of the default backoff. */
   retryIntervalOnError?: number;
   refreshInterval?: number;
   /**
@@ -41,6 +51,25 @@ export interface QueryConfig {
    * (default 5000).
    */
   focusThrottleInterval?: number;
+  /**
+   * Defaults for `useUser()`'s `/auth/me` query, which ignores the keys above.
+   * E.g. `{ staleTime: 30 * 60_000 }` to revalidate the signed-in user at most
+   * every half hour — `useSignIn`/`useSignOut` still update it immediately.
+   */
+  user?: UserQueryConfig;
+}
+
+/**
+ * The `useUser()` settings an app may change — per call or app-wide through
+ * `queryConfig.user`. Its `suspense: false` and `fallbackData` stay pinned.
+ */
+export interface UserQueryConfig {
+  staleTime?: number;
+  retry?: RetryOption;
+  retryDelay?: RetryDelayOption;
+  revalidateOnFocus?: boolean;
+  focusThrottleInterval?: number;
+  refreshInterval?: number;
 }
 
 export const QueryConfigContext = createContext<QueryConfig | null>(null);
@@ -58,21 +87,46 @@ const APP_WIDE_QUERY_CONFIG_KEYS = [
   "suspense",
   "staleTime",
   "keepPreviousData",
+  "retry",
+  "retryDelay",
   "retryIntervalOnError",
   "refreshInterval",
   "revalidateOnFocus",
   "focusThrottleInterval",
 ] as const satisfies ReadonlyArray<keyof QueryConfig>;
 
+export const USER_QUERY_CONFIG_KEYS = [
+  "staleTime",
+  "retry",
+  "retryDelay",
+  "revalidateOnFocus",
+  "focusThrottleInterval",
+  "refreshInterval",
+] as const satisfies ReadonlyArray<keyof UserQueryConfig>;
+
+/** Copy the listed keys whose value is defined. */
+export function pickDefined<T extends object, K extends keyof T>(
+  source: T | null | undefined,
+  keys: ReadonlyArray<K>,
+): Pick<T, K> {
+  const picked = {} as Pick<T, K>;
+  if (!source) return picked;
+  for (const key of keys) {
+    if (source[key] !== undefined) picked[key] = source[key];
+  }
+  return picked;
+}
+
 export function pickAppWideQueryConfig(
   queryConfig: QueryConfig | null | undefined,
 ): QueryConfig | null {
   if (!queryConfig) return null;
-  const picked: QueryConfig = {};
-  for (const key of APP_WIDE_QUERY_CONFIG_KEYS) {
-    if (queryConfig[key] !== undefined) {
-      (picked as Record<string, unknown>)[key] = queryConfig[key];
-    }
+  const picked: QueryConfig = pickDefined(
+    queryConfig,
+    APP_WIDE_QUERY_CONFIG_KEYS,
+  );
+  if (queryConfig.user) {
+    picked.user = pickDefined(queryConfig.user, USER_QUERY_CONFIG_KEYS);
   }
   return picked;
 }

@@ -96,7 +96,10 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
   attach?: boolean;
   /**
    * Merged into the request body, and read back on the server in
-   * `instructions(req, { body })` and on every tool's `ctx.body`.
+   * `instructions(req, { body })` and on every tool's `ctx.body`. `uploadFile`
+   * sends it too, as a `body` form part, so the controller's
+   * `attachmentScope(req, threadId, { body })` and `authorizeRequest` see the
+   * same fields on an upload as on a turn.
    *
    * Typed by the controller: a controller written as `AgentController<typeof
    * agent, { pageId: string }>` has this checked against that shape, and one
@@ -1075,9 +1078,18 @@ export function useChat<P extends keyof AgentRoutes>(
 
   const uploadFile = useCallback(
     async (file: File) => {
-      const { base: url, headers: extraHeaders } = requestRef.current;
+      const { base: url, headers: extraHeaders, extraBody: body } = requestRef.current;
       const form = new FormData();
       form.append("file", file);
+      // The same `body` option every turn sends, as one JSON part, so the
+      // controller's `attachmentScope` and `authorizeRequest` see on this route
+      // what they see on `stream` (#603). A chat whose subject is only in the
+      // body — a page id, with no user and no thread — would otherwise file its
+      // uploads under no scope, or under a different one from its turns. JSON
+      // rather than a field per key, so a number is still a number on arrival.
+      if (body !== undefined) {
+        form.append("body", JSON.stringify(body));
+      }
       // No Content-Type: the boundary is the browser's to write.
       const response = await fetch(`${url}/files`, {
         method: "POST",

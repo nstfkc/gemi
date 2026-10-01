@@ -68,4 +68,28 @@ describe("RedisManager", () => {
 
     expect(() => new RedisManager().client).toThrow(/Bun's built-in Redis client/);
   });
+
+  // What the provider's `shutdown()` calls, so a `gemi dev` reload does not
+  // leave the replaced application's connection open (#652).
+  test("close() closes a client that was built, and builds none to close", () => {
+    const closed: number[] = [];
+    let n = 0;
+    bun.RedisClient = class {
+      id = ++n;
+      close() {
+        closed.push(this.id);
+      }
+    };
+
+    new RedisManager().close();
+    expect(n).toBe(0);
+
+    const manager = new RedisManager();
+    void manager.client;
+    manager.close();
+    expect(closed).toEqual([1]);
+
+    // A later access builds a fresh client rather than handing back the closed one.
+    expect((manager.client as any).id).toBe(2);
+  });
 });

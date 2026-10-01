@@ -30,7 +30,7 @@ export type ResponsesRequest = {
   tools?: ResponsesTool[];
   parallel_tool_calls?: boolean;
   text?: { format: Record<string, unknown> };
-  reasoning?: { effort: string; summary: "auto" };
+  reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
   max_output_tokens?: number;
 };
@@ -80,7 +80,13 @@ export function buildResponsesRequest(
   if (params.reasoning && capabilities.reasoning) {
     // `summary: "auto"` is not decoration — without it the stream carries no
     // reasoning text at all, and `ReasoningPart` would have nothing to hold.
-    body.reasoning = { effort: params.reasoning, summary: "auto" };
+    // Except at `"none"`, where there is no reasoning to summarize: the effort
+    // is sent on its own, so turning reasoning off is not also a request for a
+    // summary of it.
+    body.reasoning =
+      params.reasoning === "none"
+        ? { effort: "none" }
+        : { effort: params.reasoning, summary: "auto" };
   }
 
   if (typeof params.temperature === "number") body.temperature = params.temperature;
@@ -526,6 +532,13 @@ export function toolResultOutput(part: ToolResultPart): string {
     const reason = part.reason ? ` Reason given: ${part.reason}` : "";
     if (part.cause === "stopped") {
       return `The run was stopped before this tool call could complete, so it did not run.${reason}`;
+    }
+    if (part.cause === "interrupted") {
+      // Not "it did not run": the server went down while it was running, so it
+      // may have done some or all of its work (saved a page, sent an email)
+      // with nobody left to record the result. A model told it did not run
+      // does it again.
+      return `The run was interrupted (the server stopped) while this tool call was in progress, so its result was lost. It may have run in part or in full: check its effects before repeating it.${reason}`;
     }
     return `The user declined this tool call, so it did not run.${reason}`;
   }

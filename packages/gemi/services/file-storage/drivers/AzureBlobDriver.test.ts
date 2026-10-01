@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import { beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -15,7 +16,7 @@ type Downloaded = { offset?: number; count?: number };
  */
 function fakeAzure(
   options: {
-    download?: (offset?: number, count?: number) => any;
+    download?: (offset?: number, count?: number, opts?: any) => any;
     properties?: any;
     blobs?: string[];
     deleteError?: Error;
@@ -23,6 +24,7 @@ function fakeAzure(
 ) {
   const calls: {
     downloads: Downloaded[];
+    downloadOptions: any[];
     getProperties: number;
     uploads: any[];
     deletes: number;
@@ -30,6 +32,7 @@ function fakeAzure(
     blobs: string[];
   } = {
     downloads: [],
+    downloadOptions: [],
     getProperties: 0,
     uploads: [],
     deletes: 0,
@@ -38,9 +41,10 @@ function fakeAzure(
   };
 
   const blobClient = {
-    async download(offset?: number, count?: number) {
+    async download(offset?: number, count?: number, opts?: any) {
       calls.downloads.push({ offset, count });
-      const result = options.download?.(offset, count);
+      calls.downloadOptions.push(opts);
+      const result = options.download?.(offset, count, opts);
       if (result instanceof Error) throw result;
       return (
         result ?? {
@@ -472,6 +476,100 @@ describe("AzureBlobDriver.fetch()", () => {
     expect(res.headers.get("ETag")).toBe('"tag"');
     // No range travels through fetch().
     expect(calls.downloads).toEqual([{ offset: undefined, count: undefined }]);
+  });
+});
+
+describe("AzureBlobDriver.fetch() with a signal", () => {
+  /** A Node stream, as the SDK hands back under Bun, that stalls after one chunk. */
+  function stallingNodeStream() {
+    let sent = false;
+    return new Readable({
+      read() {
+        if (!sent) {
+          sent = true;
+          this.push(Buffer.from("abc"));
+        }
+        // Then nothing: a hung connection.
+      },
+    });
+  }
+
+  function streamed(readableStreamBody: Readable) {
+    return () => ({
+      readableStreamBody,
+      contentLength: 10,
+      contentType: "video/mp4",
+    });
+  }
+
+  test("passes the abort signal through to download()", async () => {
+    const { driver, calls } = driverWith();
+    const controller = new AbortController();
+
+    await driver.fetch("clip.mp4", { signal: controller.signal });
+
+    expect(calls.downloadOptions[0]?.abortSignal).toBe(controller.signal);
+  });
+
+  test("passes no options to download() without a signal", async () => {
+    const { driver, calls } = driverWith();
+
+    await driver.fetch("clip.mp4");
+
+    expect(calls.downloadOptions).toEqual([undefined]);
+  });
+
+  test("downloads nothing when the signal is already aborted", async () => {
+    const { driver, calls } = driverWith();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      driver.fetch("clip.mp4", { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls.downloads).toEqual([]);
+  });
+
+  test("an abort mid-transfer rejects the body read and destroys the download stream", async () => {
+    const nodeStream = stallingNodeStream();
+    const { driver } = driverWith({ download: streamed(nodeStream) });
+    const controller = new AbortController();
+
+    const res = await driver.fetch("clip.mp4", { signal: controller.signal });
+    const buffered = res.arrayBuffer();
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(buffered).rejects.toMatchObject({ name: "AbortError" });
+    // Cancelling the web stream destroys the Node stream beneath it, which is
+    // what releases the socket.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(nodeStream.destroyed).toBe(true);
+  });
+
+  test("rejects and destroys the stream if the abort lands as the response arrives", async () => {
+    const nodeStream = stallingNodeStream();
+    const controller = new AbortController();
+    const { driver } = driverWith({
+      download: () => {
+        // An SDK that answered despite the abort.
+        controller.abort();
+        return streamed(nodeStream)();
+      },
+    });
+
+    await expect(
+      driver.fetch("clip.mp4", { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(nodeStream.destroyed).toBe(true);
+  });
+
+  test("read() still downloads without options", async () => {
+    const { driver, calls } = driverWith();
+
+    await driver.read("clip.mp4");
+
+    expect(calls.downloadOptions).toEqual([undefined]);
   });
 });
 

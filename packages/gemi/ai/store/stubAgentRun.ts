@@ -1,4 +1,5 @@
-import type { AgentRun, AgentRunResult } from "../Agent";
+import { AgentRunError } from "../Agent";
+import type { AgentResultOptions, AgentRun, AgentRunResult } from "../Agent";
 import type { AgentStreamEvent, AgentStreamFrame, ToolShapes } from "../types";
 
 /**
@@ -91,8 +92,12 @@ export class StubAgentRun implements AgentRun<ToolShapes, unknown> {
     });
   }
 
-  result(): Promise<AgentRunResult<ToolShapes, unknown>> {
-    return this.settled;
+  result(options?: AgentResultOptions): Promise<AgentRunResult<ToolShapes, unknown>> {
+    if (!options?.throwOnError) return this.settled;
+    return this.settled.then((result) => {
+      if (result.error) throw new AgentRunError({ ...result, error: result.error });
+      return result;
+    });
   }
 
   stop(params: { reason?: string } = {}): void {

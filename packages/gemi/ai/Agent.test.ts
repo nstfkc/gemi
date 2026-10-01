@@ -998,7 +998,13 @@ describe("toResponse keepalive", () => {
       },
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
-    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    // No run deadline: the timer count below is the keepalive's alone.
+    const agent = Agent.create({
+      name: "patient",
+      provider,
+      tools: [slow],
+      maxRunDurationMs: null,
+    });
     const run = agent.stream({ messages: [] });
 
     const reader = run.toResponse().body!.getReader();
@@ -1032,7 +1038,13 @@ describe("toResponse keepalive", () => {
       execute: () => release.promise,
     });
     const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
-    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    // No run deadline: the timer count below is the keepalive's alone.
+    const agent = Agent.create({
+      name: "patient",
+      provider,
+      tools: [slow],
+      maxRunDurationMs: null,
+    });
     const run = agent.stream({ messages: [] });
 
     const response = run.toResponse();
@@ -1832,6 +1844,63 @@ function answeringAgent(name: string, text: string) {
   const provider = fakeProvider([{ type: "text-delta", delta: text }, finish()]);
   return { provider, agent: Agent.create({ name, provider }) };
 }
+
+describe("a schema the provider is shown must be an object at the root (#478)", () => {
+  const union = () => s.union([s.object({ a: s.string() }), s.object({ b: s.number() })]);
+  const tool = (inputSchema: Schema<any>) =>
+    AgentTool.create({ name: "pick", description: "x", inputSchema, execute: async () => ({}) });
+
+  test("a tool whose input is a root union is refused, naming the tool and the fix", () => {
+    expect(() => tool(union())).toThrow(
+      /The tool "pick" declares an `inputSchema` whose root is a union \(`anyOf`\)/,
+    );
+    expect(() => tool(union())).toThrow(/s\.object\(\{ value: s\.union\(\[\.\.\.\]\) \}\)/);
+  });
+
+  test("a tool whose input is not an object is refused", () => {
+    expect(() => tool(s.string())).toThrow(/root is a schema of type "string"/);
+    expect(() => tool(s.array(s.string()))).toThrow(/root is a schema of type "array"/);
+    expect(() => tool(s.json())).toThrow(/root is an unconstrained schema/);
+    expect(() => tool(s.object({ a: s.string() }).nullable())).toThrow(
+      /root is a schema of type \["object","null"\]/,
+    );
+  });
+
+  test("an agent whose output is a root union is refused, naming the agent", () => {
+    expect(() =>
+      Agent.create({ name: "router", provider: fakeProvider(), output: union() }),
+    ).toThrow(/The agent "router" declares an `output` whose root is a union/);
+    expect(() =>
+      Agent.create({ name: "router", provider: fakeProvider(), output: s.number() }),
+    ).toThrow(/root is a schema of type "number"/);
+  });
+
+  test("a hand-built schema is held to the same rule", () => {
+    expect(() => tool(schemaOf(() => [], { anyOf: [{ type: "string" }] }))).toThrow(
+      /root is a union/,
+    );
+  });
+
+  test("an object root, with a union under a property, is accepted", () => {
+    const wrapped = s.object({ value: union() });
+    expect(() => tool(wrapped)).not.toThrow();
+    expect(() =>
+      Agent.create({ name: "router", provider: fakeProvider(), output: wrapped }),
+    ).not.toThrow();
+  });
+
+  test("a tool's outputSchema is never sent, so any shape is fine there", () => {
+    expect(() =>
+      AgentTool.create({
+        name: "list",
+        description: "x",
+        inputSchema: s.object({}),
+        outputSchema: s.union([s.string(), s.number()]),
+        execute: async () => "a",
+      }),
+    ).not.toThrow();
+  });
+});
 
 /** A sub-agent whose first step asks the user something. */
 function askingAgent(name: string, question: string, ...rest: any[]) {

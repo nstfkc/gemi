@@ -66,7 +66,9 @@ export interface MutationMessageError {
  *
  * A cancelled request is not an error: `onCanceled` runs and `error` stays
  * `null`. A route that answers an error body of its own shape is outside this
- * type.
+ * type: a body with an `error` field (`HttpResponse.json({ error }, { status:
+ * 409 })`) hands over that field, as gemi's own errors do, and any other body
+ * is handed over whole.
  */
 export type MutationError =
   | MutationValidationError
@@ -118,6 +120,28 @@ function bodyMessage(error: unknown) {
   return isObject(error) && !(error instanceof Error) && !("kind" in error)
     ? error.message
     : undefined;
+}
+
+/**
+ * The `MutationError` a non-2xx response's parsed body stands for.
+ *
+ * gemi's own error bodies are `{ error }`, and the value under `error` is what
+ * the guards above read, so that is what is handed over. An app's body without
+ * one — `HttpResponse.json({ message: "Taken" }, { status: 409 })` — is handed
+ * over whole: read as `body.error` it was `undefined`, and a failed request
+ * left `error` looking like no error at all. A body with no content to hand
+ * over (`null`) becomes a `{ message }` naming the status.
+ *
+ * @internal
+ */
+export function mutationErrorFromBody(body: unknown, status: number): MutationError {
+  if (isObject(body) && "error" in body && body.error != null) {
+    return body.error as MutationError;
+  }
+  if (body == null) {
+    return { message: `Request failed with status ${status}` };
+  }
+  return body as MutationError;
 }
 
 /** Field messages, as `<ValidationErrors>` renders them. */

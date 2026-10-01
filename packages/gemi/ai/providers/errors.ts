@@ -62,6 +62,23 @@ function errorBody(body: unknown): OpenAIErrorBody | null {
 }
 
 /**
+ * The HTTP status and request id of a provider failure, read off what was
+ * thrown — server-side detail for `AgentRunResult.error`, never for a frame.
+ *
+ * By shape rather than by `instanceof ProviderHttpError`, so a custom provider
+ * whose SDK throws its own error class with a `status` gets the same detail.
+ * A `status` outside 100–599 is not an HTTP status and is ignored.
+ */
+export function httpErrorDetail(error: unknown): { status?: number; requestId?: string } {
+  if (!error || typeof error !== "object") return {};
+  const { status, requestId } = error as { status?: unknown; requestId?: unknown };
+  return {
+    ...(typeof status === "number" && status >= 100 && status <= 599 ? { status } : {}),
+    ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+  };
+}
+
+/**
  * Provider failures onto `AgentErrorCode`.
  *
  * The contract an app is buying here is that it can branch on `rate_limited`

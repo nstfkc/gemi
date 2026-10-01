@@ -12,6 +12,12 @@ export type {
   InfiniteQueryReturn,
 } from "./useInfiniteQuery";
 export { QueryError } from "./QueryError";
+export { isRetryableQueryError } from "./retryPolicy";
+export type {
+  QueryFailure,
+  RetryOption,
+  RetryDelayOption,
+} from "./retryPolicy";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export { useMutate } from "./useMutate";
 export {
@@ -44,7 +50,7 @@ export {
   ValidationErrors,
 } from "./Mutation";
 export { QueryManagerProvider } from "./QueryManagerContext";
-export type { QueryConfig } from "./QueryManagerContext";
+export type { QueryConfig, UserQueryConfig } from "./QueryManagerContext";
 export { useParams } from "./useParams";
 export { useDomain } from "./useDomain";
 export { useLocation } from "./useLocation";
