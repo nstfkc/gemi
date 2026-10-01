@@ -27,6 +27,20 @@ and became a 500. A 401, 403, 429 or 5xx from the provider is still a server
 error. With `assistants` Azure also accepts `.docx`, which it refused under
 `user_data`; a `.docx` attachment is read in a turn (measured 2026-10-01).
 
+## Fix: `useUpload`'s `cancel()` settles `trigger`, and `state` tracks the upload (#671)
+
+- `cancel()` mid-upload now resolves `trigger`'s promise with `undefined`. It
+  used to leave it pending forever (code after `await trigger(file)` never ran)
+  and log an unhandled `RangeError`. `onCanceled` runs; `onError` does not.
+- `state` reads `"uploading"` while the upload is in flight and `"done"` after
+  it succeeds. Before, it read `"idle"` during the upload and `"uploading"`
+  once it had finished. Code that waited for `state === "uploading"` as a
+  "finished" signal should wait for `"done"` (or use `onSuccess`).
+- `progress` no longer becomes `NaN` when the browser cannot compute the
+  upload's length, and a cancelled upload's `progress` stays at `0`.
+- `cancel()` after the upload has settled does nothing (it used to call
+  `onCanceled`).
+
 # Upgrading from 0.83 to 0.84
 
 Breaking and behaviour changes first, in the order to check them:
