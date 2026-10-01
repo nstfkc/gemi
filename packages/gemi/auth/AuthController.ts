@@ -10,6 +10,7 @@ import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
+import { readAccessToken } from "./accessToken";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
 
 /**
@@ -442,22 +443,19 @@ export class AuthController extends Controller {
   }
 
   async signOut(req = new HttpRequest()) {
-    // Both transports the `auth` middleware accepts, in its order: a browser's
-    // cookie, or the `access_token` header a native client sends. Reading the
-    // cookie alone revoked nothing for a header client — and, because
-    // `Auth.user()` reads the cookie too, that sign-out answered `401` before
-    // it ever reached the revocation below.
-    const token =
-      req.cookies.get("access_token") ?? req.headers.get("access_token");
+    // Both transports, through the reader `auth` and `Auth.user()` use: a
+    // browser's cookie, or the `access_token` header a native client sends.
+    // Reading the cookie alone revoked nothing for a header client (#586).
+    const token = readAccessToken(req);
 
     const auth = app(AuthManager);
     const { config } = auth;
 
-    // Looked up, rather than resolved through `Auth.user()`. Two reasons: it
-    // reads the cookie alone, and it goes through `getSession`, which slides a
-    // session past half its window and writes the cookie again — a second
-    // `Set-Cookie` for `access_token` racing the one below that clears it,
-    // since a request's cookies are a set of serialized strings, not a map.
+    // Looked up, rather than resolved through `Auth.user()`, which goes
+    // through `getSession`: that slides a session past half its window and
+    // writes the cookie again — a second `Set-Cookie` for `access_token`
+    // racing the one below that clears it, since a request's cookies are a
+    // set of serialized strings, not a map.
     // `revokeSession` also ends the session a pre-0.64 token was converted to.
     const session = await auth.revokeSession(token, req.headers.get("User-Agent"));
 

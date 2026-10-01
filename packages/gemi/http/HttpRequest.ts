@@ -237,7 +237,11 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
           break;
         }
 
-        messages.push(String(_message));
+        // Two rules can share a message (`string` and `email` both saying
+        // "Invalid email"); the field reports it once (#675).
+        if (!messages.includes(String(_message))) {
+          messages.push(String(_message));
+        }
       }
 
       if (messages.length > 0) {
@@ -246,10 +250,9 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     }
 
     for (const [key, value] of Object.entries(this.refine(input.toJSON()) ?? {})) {
-      if (!errors[key]) {
-        errors[key] = [];
-      }
-      errors[key] = [...(errors[key] ?? []), value as string];
+      const messages = errors[key] ?? [];
+      // A `refine` message the rules already reported is not repeated (#675).
+      errors[key] = messages.includes(value as string) ? messages : [...messages, value as string];
     }
 
     if (Object.keys(errors).length > 0) {

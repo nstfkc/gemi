@@ -153,7 +153,7 @@ export class AuthManager {
    * set `auth.migrateLegacySession`, which converts it instead.
    */
   async getSession(token: string, userAgent: string) {
-    // `Auth.user()` asks with no token at all when the request carried none.
+    // A caller may ask with no token at all; that is no session, not a lookup.
     if (!token) {
       return null;
     }
