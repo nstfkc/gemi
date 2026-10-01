@@ -616,7 +616,7 @@ describe("the provider's shutdown", () => {
     expect(calls).toEqual(["onTick", "callback", "onComplete"]);
   });
 
-  test("a tick outliving the deadline is named by the scheduler, not just timed out", async () => {
+  test("a tick outliving the deadline is named by the scheduler, and the provider counts as timed out", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { Held, release } = held();
@@ -631,7 +631,11 @@ describe("the provider's shutdown", () => {
     const logged = error.mock.calls.flat().join(" ");
     expect(logged).toContain("Cron jobs still running at shutdown");
     expect(logged).toContain("Held");
-    expect(report.timedOut).toEqual([]);
+    // Abandoned work is an unclean stop, so the exit code has to show it
+    // (#580): the provider is reported as timed out, which exits 1. It named
+    // the work itself, so `Application`'s generic overrun line is not logged.
+    expect(report.timedOut).toEqual(["ScheduleServiceProvider"]);
+    expect(logged).not.toContain("did not finish within the provider shutdown deadline");
     release();
   });
 

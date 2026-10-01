@@ -241,6 +241,37 @@ describe("Application.shutdown", () => {
     error.mockRestore();
   });
 
+  // #580: the queue and the scheduler bound their own drains, so they never
+  // overrun; what they abandon has to reach the report some other way.
+  it("reports a provider that resolves { abandoned: true } as timed out, and carries on", async () => {
+    const calls: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    class Abandons extends ServiceProvider {
+      async shutdown() {
+        calls.push("Abandons");
+        return { abandoned: true };
+      }
+    }
+    class Finishes extends ServiceProvider {
+      async shutdown() {
+        calls.push("Finishes");
+        return { abandoned: false };
+      }
+    }
+    const [One] = recorder(calls);
+    const application = new Application();
+    application.registerMany([One, Finishes, Abandons]);
+
+    expect(await application.shutdown({ timeoutMs: 1_000 })).toEqual({
+      failed: [],
+      timedOut: ["Abandons"],
+    });
+    expect(calls).toEqual(["Abandons", "Finishes", "One"]);
+    // The provider names what it abandoned; `Application` adds nothing.
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   // `GEMI_SHUTDOWN_PROVIDER_TIMEOUT=0`, from an operator with five seconds of
   // grace period to spend elsewhere. Every shutdown of that server is clean; it
   // simply has no provider phase.
