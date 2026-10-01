@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.82 to 0.83
 
 ## `reasoning` takes `"none"`, and any effort the model accepts (#658)
 
