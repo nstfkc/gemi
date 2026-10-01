@@ -19,6 +19,7 @@ import {
   Skill,
   ToolNamespace,
   type AgentRunFailure,
+  type ReasoningEffort,
   type ToolShapesOf,
 } from "./Agent";
 import { AgentController, type AgentRouteRPC } from "./AgentController";
@@ -362,5 +363,27 @@ describe("a failed run on result() (#656)", () => {
     const run = agent.stream({ messages: [] });
     expectTypeOf(run.result({ throwOnError: true })).toEqualTypeOf(run.result());
     expectTypeOf<AgentRunError["status"]>().toEqualTypeOf<number | undefined>();
+  });
+});
+
+describe("reasoning effort (#658)", () => {
+  test('takes "none" and the newer efforts, on the agent and per run', () => {
+    const quick = Agent.create({
+      name: "quick",
+      provider: OpenAIProvider.model("gpt-6-sol"),
+      reasoning: "none",
+    });
+    quick.stream({ messages: [], reasoning: "xhigh" });
+    quick.stream({ messages: [], reasoning: "max" });
+    expectTypeOf<"none">().toExtend<ReasoningEffort>();
+    expectTypeOf<"minimal">().toExtend<ReasoningEffort>();
+  });
+
+  test("takes an effort gemi has not heard of, since the model decides", () => {
+    expectTypeOf<"some-future-effort">().toExtend<ReasoningEffort>();
+  });
+
+  test("is still a string, not anything", () => {
+    expectTypeOf<number>().not.toExtend<ReasoningEffort>();
   });
 });

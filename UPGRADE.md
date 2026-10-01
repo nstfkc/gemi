@@ -21,6 +21,37 @@ exits `1` where it exited `0`. If your platform alerts or restarts on a
 non-zero exit, make `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` long enough for your
 jobs, or expect the alert when they are cut off.
 
+# Upgrading from 0.82 to 0.83
+
+## `reasoning` takes `"none"`, and any effort the model accepts (#658)
+
+`ReasoningEffort` was `"minimal" | "low" | "medium" | "high"`. Newer models
+take a different set: Azure's gpt-6-sol answers 400 to `"minimal"` and accepts
+`none | low | medium | high | xhigh | max`, so the lowest effort an app could ask
+for on it was `"low"`, and reasoning could not be turned off at all.
+
+- `ReasoningEffort` now lists `"none"`, `"xhigh"` and `"max"` as well, and
+  takes any other string. The value is sent to the model as is; gemi does not
+  check it against a list, because which values a model takes depends on the
+  model. A value the model rejects ends the run with `finishReason: "error"`
+  and the API's message (which names the values it does take) on
+  `result().error`.
+- `reasoning: "none"` is sent as `reasoning: { effort: "none" }`, without
+  `summary: "auto"`, since there is nothing to summarize. Every other value is
+  sent with the summary as before.
+- `"none"` is not the same as leaving `reasoning` unset: unset gets the model's
+  default effort (usually `"medium"`). Use `"none"` for short, latency-bound
+  calls; with any effort, `maxOutputTokens` caps reasoning tokens too, and a
+  small cap can be spent entirely on reasoning, leaving no text.
+- On a model gemi knows has no reasoning parameter (gpt-4o, gpt-4.1, gpt-3.5),
+  every value, `"none"` included, is still dropped from the request.
+- Older reasoning models do not take `"none"` (gpt-5 takes `"minimal"`
+  instead; o-series models take neither). Keep using `"minimal"` or `"low"`
+  there.
+
+If you worked around the old type with a cast (`"none" as ReasoningEffort`),
+the cast can go. Nothing else changes for existing values.
+
 # Upgrading from 0.81 to 0.82
 
 ## Agent runs have a deadline, and tools can have a timeout (#455)

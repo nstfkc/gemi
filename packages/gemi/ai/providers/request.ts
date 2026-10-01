@@ -30,7 +30,7 @@ export type ResponsesRequest = {
   tools?: ResponsesTool[];
   parallel_tool_calls?: boolean;
   text?: { format: Record<string, unknown> };
-  reasoning?: { effort: string; summary: "auto" };
+  reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
   max_output_tokens?: number;
 };
@@ -80,7 +80,13 @@ export function buildResponsesRequest(
   if (params.reasoning && capabilities.reasoning) {
     // `summary: "auto"` is not decoration — without it the stream carries no
     // reasoning text at all, and `ReasoningPart` would have nothing to hold.
-    body.reasoning = { effort: params.reasoning, summary: "auto" };
+    // Except at `"none"`, where there is no reasoning to summarize: the effort
+    // is sent on its own, so turning reasoning off is not also a request for a
+    // summary of it.
+    body.reasoning =
+      params.reasoning === "none"
+        ? { effort: "none" }
+        : { effort: params.reasoning, summary: "auto" };
   }
 
   if (typeof params.temperature === "number") body.temperature = params.temperature;
