@@ -135,3 +135,70 @@ describe("FileSystemDriver.delete() containment", () => {
     }
   });
 });
+
+describe("FileSystemDriver.fetch() with a signal", () => {
+  let folder: string;
+  // Large enough that Bun reads it in several chunks.
+  const SIZE = 8 * 1024 * 1024;
+
+  beforeEach(async () => {
+    folder = await mkdtemp(join(tmpdir(), "gemi-fs-fetch-"));
+    await writeFile(join(folder, "big.bin"), Buffer.alloc(SIZE, 7));
+  });
+
+  afterEach(async () => {
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  test("rejects at once for a signal that is already aborted", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(driver.fetch("big.bin", { signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+  });
+
+  test("an abort mid-read errors the body and stops reading the file", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    const received = first.value!.byteLength;
+    expect(received).toBeLessThan(SIZE);
+
+    controller.abort();
+
+    await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("an abort's reason, e.g. a timeout, is what the body read rejects with", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+    const reason = new DOMException("too slow", "TimeoutError");
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+    controller.abort(reason);
+
+    // Read from inside an async function, as callers do. On an already-errored
+    // body, Bun 1.3 throws from `arrayBuffer()` synchronously while newer Bun
+    // returns a rejected promise; both reach an `await` as the same rejection,
+    // but a bare `expect(res.arrayBuffer())` never gets a promise under 1.3.
+    const read = async () => res.arrayBuffer();
+
+    await expect(read()).rejects.toBe(reason);
+  });
+
+  test("reads the whole file when the signal never fires", async () => {
+    const driver = new FileSystemDriver(folder);
+    const controller = new AbortController();
+
+    const res = await driver.fetch("big.bin", { signal: controller.signal });
+
+    expect((await res.arrayBuffer()).byteLength).toBe(SIZE);
+  });
+});

@@ -10255,7 +10255,7 @@ await Storage.put(file, { signal: AbortSignal.timeout(30_000) });
 
 An aborted `put` rejects and the object should be treated as not written. The S3 and Azure drivers hand the signal to their SDK, which cancels the request in flight. The local disk driver checks the signal before it writes but does not interrupt a write already under way.
 
-### `fetch(params | string)`
+### `fetch(params | string, options?)`
 
 Reads a file back as a web `Response` (streamed body, with `Content-Type`, `Content-Length`, and caching headers already set). Pass the object name as a string, or a `ReadFileParams` object to target a specific bucket:
 
@@ -10276,6 +10276,21 @@ interface ReadFileParams {
 ```
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
+
+#### Cancelling a read
+
+Like `put`, `fetch` takes an optional second argument, `{ signal }`. Use it to give up on a slow backend, or to stop reading when the client disconnects:
+
+```typescript
+// Give up after 10 seconds, including while the body is being read
+const res = await Storage.fetch(name, { signal: AbortSignal.timeout(10_000) });
+const bytes = await res.arrayBuffer(); // rejects with a TimeoutError on timeout
+
+// Stop when the incoming request goes away
+return Storage.fetch(name, { signal: req.rawRequest.signal });
+```
+
+An abort before the object is found rejects `fetch` itself. An abort after `fetch` resolved errors the returned body instead, so a pending `arrayBuffer()`, `text()` or stream read rejects rather than hanging, and the driver cancels the underlying stream, which closes the file or releases the connection. The S3 and Azure drivers also hand the signal to their SDK, which cancels the request in flight.
 
 ### `read(params | string, options?)`
 
@@ -10474,6 +10489,7 @@ Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`
 import {
   FileStorageDriver,
   type DeleteFileParams,
+  type FetchFileOptions,
   type PutFileOptions,
   type PutFileParams,
   type ReadFileParams,
@@ -10486,8 +10502,11 @@ class MyDriver extends FileStorageDriver {
   ): Promise<string> {
     /* ...store and return the object name, honouring `signal`... */
   }
-  async fetch(params: ReadFileParams | string): Promise<Response> {
-    /* ...return a Response streaming the object... */
+  async fetch(
+    params: ReadFileParams | string,
+    { signal }: FetchFileOptions = {},
+  ): Promise<Response> {
+    /* ...return a Response streaming the object, honouring `signal`... */
   }
   async list(folder: string): Promise<any> {
     /* ... */

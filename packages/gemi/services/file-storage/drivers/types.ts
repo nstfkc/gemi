@@ -18,6 +18,16 @@ export interface PutFileOptions {
   signal?: AbortSignal;
 }
 
+export interface FetchFileOptions {
+  /**
+   * Cancels the read. An abort before the object is found rejects `fetch()`
+   * with the signal's reason (or the backend SDK's own abort error); an abort
+   * after it resolved errors the returned body, so a pending `arrayBuffer()`
+   * or stream read rejects instead of hanging.
+   */
+  signal?: AbortSignal;
+}
+
 export interface ReadFileParams {
   name: string;
   bucket?: string;
@@ -73,7 +83,7 @@ export interface FileMetadata {
 }
 
 export interface IFileStorageDriver {
-  fetch(input: ReadFileParams | string): Promise<Response>;
+  fetch(input: ReadFileParams | string, options?: FetchFileOptions): Promise<Response>;
   put(params: PutFileParams | Blob, options?: PutFileOptions): Promise<string>;
   /**
    * Optional: `FileStorageDriver` supplies a `fetch()`-backed default, so
