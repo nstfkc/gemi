@@ -62,6 +62,44 @@ now reports its message instead of the status text. Agent routes' own errors
 (`{ code, message }`) and run errors (`AgentRunFailure`) are unchanged. A route
 tool's refusal shown to the model includes the new fields.
 
+## Behaviour change: a failed `attach()` no longer fails the chat (#683)
+
+Before, when `useChat().attach(file)` failed, it set the chat's `error`,
+called `onError`, and then rejected. Now it only rejects, with an
+`AttachError` (`{ code, message, status }`). `code` is the server's own:
+`unsupported_file_type`, `file_too_large`, `file_rejected` or
+`invalid_request` from the agent route, or a refusal's `kind` such as
+`authentication`. Otherwise it is `upload_failed` (an answer that wasn't JSON)
+or `network_error` (no answer). The chat's `error`, `status` and `onError` are
+left alone, so a refused file no longer looks like a failed run.
+
+- **If your `onError` handled upload failures**, catch them where you call
+  `attach()` instead:
+  ```ts
+  try {
+    files.push(await attach(file));
+  } catch (error) {
+    if (error instanceof AttachError) markChip(file, error.message);
+  }
+  ```
+  `AttachError` is exported from `gemi/ai/client`.
+
+New, nothing to change:
+
+- `attach(file, { signal, onProgress })`. `signal` aborts the upload and
+  rejects with a `DOMException` named `AbortError`. `onProgress({ loaded,
+  total })` reports bytes sent; when it is given, the upload goes over
+  `XMLHttpRequest`. `total` is 0 when the browser can't tell.
+- `attach()` sends the hook's `threadId` (when it has one) in the upload form,
+  so an unauthenticated chat on a thread gets an `attachmentId` without
+  overriding `attachmentScope`. The server still uses only a thread its store
+  knows.
+- `AgentController.attachmentLimits(req)` returns `{ maxBytes?, accept? }`
+  (`accept` takes `<input accept>` entries such as `".pdf"`, `"image/*"` or
+  `"text/csv"`). A file outside it gets a **422** `{ error: { code, message }
+  }` (`file_too_large` or `unsupported_file_type`) before anything is stored
+  or sent to the provider. The default is no limits.
+
 # Upgrading from 0.84.0 to 0.84.1
 
 ## Azure attachments upload with purpose `assistants` (#682)

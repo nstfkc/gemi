@@ -2,7 +2,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentStreamFrame } from "./types";
-import { useChat, type UseChatResult } from "./useChat";
+import { AttachError, useChat, type UseChatResult } from "./useChat";
 
 /**
  * The hook is thin on purpose — the decoding and the message reducer are tested
@@ -104,7 +104,13 @@ const EDITS: AgentStreamFrame[] = [
     event: {
       type: "tool-result",
       messageId: "m3",
-      part: { type: "tool-result", toolCallId: "tc_a", name: "editComponent", status: "ok", output: { ok: true } },
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_a",
+        name: "editComponent",
+        status: "ok",
+        output: { ok: true },
+      },
     },
   },
   {
@@ -112,7 +118,13 @@ const EDITS: AgentStreamFrame[] = [
     event: {
       type: "tool-result",
       messageId: "m3",
-      part: { type: "tool-result", toolCallId: "tc_b", name: "createPage", status: "ok", output: { ok: true } },
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_b",
+        name: "createPage",
+        status: "ok",
+        output: { ok: true },
+      },
     },
   },
   { seq: 4, event: { type: "text-delta", messageId: "m3", delta: "Done." } },
@@ -444,9 +456,9 @@ describe("awaiting input", () => {
     });
 
     expect(box.api.pending).toHaveLength(2);
-    expect(box.api.error).toMatchObject({ retryable: true });
-    // With both set, awaiting-input wins: the question is still the thing the UI
-    // has to put in front of the user.
+    // And it is not the chat's error either (#683): the rejection is the
+    // caller's to show on the file.
+    expect(box.api.error).toBeNull();
     expect(box.api.status).toBe("awaiting-input");
   });
 });
@@ -1768,7 +1780,13 @@ const BUILD: AgentStreamFrame[] = [
     event: {
       type: "tool-result",
       messageId: "m6",
-      part: { type: "tool-result", toolCallId: "tc_p", name: "buildPage", status: "ok", output: { ok: true } },
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_p",
+        name: "buildPage",
+        status: "ok",
+        output: { ok: true },
+      },
     },
   },
   { seq: 6, event: { type: "message-end", messageId: "m6", finishReason: "stop" } },
@@ -1779,7 +1797,9 @@ describe("onToolProgress", () => {
   test("fires once per yielded value, in order, before the result", async () => {
     fetchMock.mockResolvedValueOnce(streamed(BUILD));
     const order: string[] = [];
-    const onToolProgress = vi.fn((progress: any) => order.push(`progress:${progress.data.section}`));
+    const onToolProgress = vi.fn((progress: any) =>
+      order.push(`progress:${progress.data.section}`),
+    );
     const onToolResult = vi.fn(() => order.push("result"));
     const { box } = mount({ attach: false, onToolProgress, onToolResult });
 
@@ -2131,5 +2151,323 @@ describe("uploadFile sends the body option", () => {
 
     const form = calls()[0]![1]!.body as FormData;
     expect([...form.keys()]).toEqual(["file"]);
+  });
+});
+
+/**
+ * An `XMLHttpRequest` the test drives by hand, firing events in a browser's
+ * order. `attach()` uses it only when `onProgress` is given.
+ */
+class FakeXHR extends EventTarget {
+  static last: FakeXHR | null = null;
+  upload = new EventTarget();
+  status = 0;
+  statusText = "";
+  responseText = "";
+  method = "";
+  url = "";
+  headers: Record<string, string> = {};
+  body: unknown = null;
+  aborted = false;
+
+  constructor() {
+    super();
+    FakeXHR.last = this;
+  }
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+
+  send(body: unknown) {
+    this.body = body;
+  }
+
+  progress(loaded: number, total: number, lengthComputable = true) {
+    this.upload.dispatchEvent(new ProgressEvent("progress", { loaded, total, lengthComputable }));
+  }
+
+  respond(status: number, body: string, statusText = "") {
+    this.status = status;
+    this.statusText = statusText;
+    this.responseText = body;
+    this.dispatchEvent(new ProgressEvent("load"));
+    this.dispatchEvent(new ProgressEvent("loadend"));
+  }
+
+  fail() {
+    this.dispatchEvent(new ProgressEvent("error"));
+    this.dispatchEvent(new ProgressEvent("loadend"));
+  }
+
+  abort() {
+    this.aborted = true;
+    this.status = 0;
+    this.upload.dispatchEvent(new ProgressEvent("abort"));
+    this.dispatchEvent(new ProgressEvent("abort"));
+    this.dispatchEvent(new ProgressEvent("loadend"));
+  }
+}
+
+const pdf = () => new File(["%PDF"], "q3.pdf", { type: "application/pdf" });
+
+/** #683: progress, abort, the thread, and a failure that stays with its file. */
+describe("attach()", () => {
+  afterEach(() => {
+    FakeXHR.last = null;
+  });
+
+  test("sends the hook's threadId with the upload", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(pdf());
+    });
+
+    const form = calls()[0]![1]!.body as FormData;
+    expect(form.get("threadId")).toBe("th_9");
+  });
+
+  test("and the one a stateless chat learned from its first run", async () => {
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(pdf());
+    });
+
+    const form = calls()[1]![1]!.body as FormData;
+    expect(form.get("threadId")).toBe("th_9");
+  });
+
+  test("a refused file rejects with the server's code and leaves the chat alone", async () => {
+    const onError = vi.fn();
+    const { box } = mount({ attach: false, onError });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: { code: "unsupported_file_type", message: "Invalid extension exe." },
+        }),
+        { status: 422 },
+      ),
+    );
+
+    let error: unknown;
+    await act(async () => {
+      error = await box.api.attach(pdf()).catch((err) => err);
+    });
+
+    expect(error).toBeInstanceOf(AttachError);
+    expect(error).toMatchObject({
+      code: "unsupported_file_type",
+      message: "Invalid extension exe.",
+      status: 422,
+    });
+    expect(box.api.error).toBeNull();
+    expect(box.api.status).toBe("idle");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  test("a framework refusal's kind stands in for a code", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: { kind: "authentication", message: "Sign in first.", status: 401 },
+        }),
+        { status: 401 },
+      ),
+    );
+    let error: any;
+    await act(async () => {
+      error = await box.api.attach(pdf()).catch((err) => err);
+    });
+    expect(error).toMatchObject({ code: "authentication", message: "Sign in first.", status: 401 });
+  });
+
+  test("an answer that is not JSON is upload_failed, with its status", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(
+      new Response("<html>bad gateway</html>", { status: 502, statusText: "Bad Gateway" }),
+    );
+    let error: any;
+    await act(async () => {
+      error = await box.api.attach(pdf()).catch((err) => err);
+    });
+    expect(error).toMatchObject({ code: "upload_failed", message: "Bad Gateway", status: 502 });
+  });
+
+  test("no answer at all is network_error", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    let error: any;
+    await act(async () => {
+      error = await box.api.attach(pdf()).catch((err) => err);
+    });
+    expect(error).toMatchObject({ code: "network_error", message: "Failed to fetch" });
+    expect(box.api.error).toBeNull();
+  });
+
+  test("the signal aborts a fetch upload with an AbortError", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockImplementationOnce(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal!.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    const controller = new AbortController();
+    let error: any;
+    await act(async () => {
+      const pending = box.api.attach(pdf(), { signal: controller.signal }).catch((err) => err);
+      controller.abort();
+      error = await pending;
+    });
+    expect(calls()[0]![1]!.signal).toBe(controller.signal);
+    expect(error).toBeInstanceOf(DOMException);
+    expect(error.name).toBe("AbortError");
+    expect(box.api.error).toBeNull();
+  });
+
+  test("a signal already aborted sends nothing", async () => {
+    const { box } = mount({ attach: false });
+    const controller = new AbortController();
+    controller.abort();
+    let error: any;
+    await act(async () => {
+      error = await box.api.attach(pdf(), { signal: controller.signal }).catch((err) => err);
+    });
+    expect(error.name).toBe("AbortError");
+    expect(calls()).toHaveLength(0);
+  });
+
+  describe("with onProgress, over XMLHttpRequest", () => {
+    test("reports bytes sent and answers like the fetch path", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const { box } = mount({
+        threadId: "th_9",
+        attach: false,
+        headers: { "x-tenant": "acme" },
+        body: { pageId: "pg_1" },
+      });
+      const progress: { loaded: number; total: number }[] = [];
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api.attach(pdf(), { onProgress: (p) => progress.push(p) });
+      });
+
+      const xhr = FakeXHR.last!;
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect([xhr.method, xhr.url]).toEqual(["POST", "/api/chat/files"]);
+      expect(xhr.headers).toEqual({ "x-tenant": "acme" });
+      const form = xhr.body as FormData;
+      expect(form.get("file")).toBeInstanceOf(File);
+      expect(form.get("threadId")).toBe("th_9");
+      expect(JSON.parse(form.get("body") as string)).toEqual({ pageId: "pg_1" });
+
+      await act(async () => {
+        xhr.progress(2, 4);
+        xhr.progress(3, 0, false);
+        xhr.respond(200, JSON.stringify({ fileId: "f_1", attachmentId: "gemi_att_1" }));
+        await pending;
+      });
+
+      expect(progress).toEqual([
+        { loaded: 2, total: 4 },
+        { loaded: 3, total: 0 },
+      ]);
+      await expect(pending).resolves.toEqual({
+        fileId: "f_1",
+        attachmentId: "gemi_att_1",
+        name: "q3.pdf",
+        mimeType: "application/pdf",
+        downgraded: undefined,
+      });
+    });
+
+    test("the signal aborts the request and rejects with an AbortError", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const { box } = mount({ attach: false });
+      const controller = new AbortController();
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api
+          .attach(pdf(), { signal: controller.signal, onProgress: () => {} })
+          .catch((err) => err);
+      });
+      await act(async () => {
+        controller.abort();
+      });
+
+      expect(FakeXHR.last!.aborted).toBe(true);
+      const error: any = await pending;
+      expect(error).toBeInstanceOf(DOMException);
+      expect(error.name).toBe("AbortError");
+      expect(box.api.error).toBeNull();
+    });
+
+    test("a refusal rejects with the server's code", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const onError = vi.fn();
+      const { box } = mount({ attach: false, onError });
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api.attach(pdf(), { onProgress: () => {} }).catch((err) => err);
+      });
+      await act(async () => {
+        FakeXHR.last!.respond(
+          422,
+          JSON.stringify({ error: { code: "file_too_large", message: "Too big." } }),
+        );
+      });
+
+      expect(await pending).toMatchObject({
+        code: "file_too_large",
+        message: "Too big.",
+        status: 422,
+      });
+      expect(onError).not.toHaveBeenCalled();
+      expect(box.api.error).toBeNull();
+    });
+
+    test("a dropped connection is network_error", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const { box } = mount({ attach: false });
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api.attach(pdf(), { onProgress: () => {} }).catch((err) => err);
+      });
+      await act(async () => {
+        FakeXHR.last!.fail();
+      });
+      expect(await pending).toMatchObject({ code: "network_error" });
+    });
+
+    test("a progress callback that throws does not fail the upload", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const { box } = mount({ attach: false });
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api.attach(pdf(), {
+          onProgress: () => {
+            throw new Error("render bug");
+          },
+        });
+      });
+      await act(async () => {
+        FakeXHR.last!.progress(1, 4);
+        FakeXHR.last!.respond(200, JSON.stringify({ fileId: "f_1" }));
+      });
+      await expect(pending).resolves.toMatchObject({ fileId: "f_1" });
+    });
   });
 });

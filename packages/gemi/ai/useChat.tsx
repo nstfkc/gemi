@@ -300,8 +300,22 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * one makes the request builder throw on every later turn of the thread.
    * What the optional type does catch, under `strictNullChecks`, is code that
    * reads `fileId` as a `string` — rendering it, or handing it to a vendor.
+   *
+   * A FAILED UPLOAD IS THAT FILE'S PROBLEM, NOT THE CONVERSATION'S (#683). The
+   * promise rejects with an `AttachError` (`{ code, message, status }`, the
+   * server's own code and sentence, e.g. `unsupported_file_type`), and nothing
+   * else changes: `error`, `status` and `onError` are the chat's, and a
+   * composer marks the one chip. `options.signal` aborts the upload and
+   * rejects with a `DOMException` named `AbortError`; nothing is stored.
+   * `options.onProgress` reports bytes sent, and is why the upload goes over
+   * `XMLHttpRequest` when it is given — `fetch` cannot report upload progress.
+   * The hook's `threadId`, once it has one, goes with the upload, so an
+   * unauthenticated chat on a thread has a scope to keep the file under.
    */
-  attach(file: File): Promise<{
+  attach(
+    file: File,
+    options?: AttachOptions,
+  ): Promise<{
     fileId?: string;
     attachmentId?: string;
     name: string;
@@ -313,6 +327,39 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
      */
     downgraded?: "no_scope";
   }>;
+}
+
+/** The second argument to `attach()`. */
+export type AttachOptions = {
+  /** Aborts the upload. The promise rejects with a `DOMException` named
+   *  `AbortError`, and the server keeps nothing. */
+  signal?: AbortSignal;
+  /** Bytes sent so far. `total` is 0 when the browser cannot tell. Giving this
+   *  sends the upload with `XMLHttpRequest`, which can report it. */
+  onProgress?: (progress: { loaded: number; total: number }) => void;
+};
+
+/**
+ * Why `attach()` rejected, for that file alone.
+ *
+ * `code` is the server's when it sent one — `unsupported_file_type`,
+ * `file_too_large`, `file_rejected` and `invalid_request` from
+ * `AgentController.upload`, or a framework refusal's `kind` such as
+ * `authentication` — and otherwise `upload_failed` (an answer that was
+ * not JSON, `status` says which) or `network_error` (no answer at all). A
+ * string rather than a union, because an app's own `attachmentDestination`
+ * can throw an error with a code of its own and that has to arrive intact.
+ */
+export class AttachError extends Error {
+  readonly code: string;
+  readonly status?: number;
+
+  constructor(code: string, message: string, status?: number) {
+    super(message);
+    this.name = "AttachError";
+    this.code = code;
+    if (status !== undefined) this.status = status;
+  }
 }
 
 /**
@@ -421,6 +468,114 @@ async function httpError(response: Response): Promise<AgentError> {
     message,
     retryable: response.status === 429 || response.status >= 500,
   };
+}
+
+type UploadAnswer = { status: number; statusText: string; body: string };
+
+function abortError(): DOMException {
+  return new DOMException("The upload was aborted.", "AbortError");
+}
+
+/** No progress wanted: `fetch`, which aborts on the signal by itself. */
+async function fetchUpload(
+  url: string,
+  form: FormData,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+): Promise<UploadAnswer> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: "POST", headers, body: form, signal });
+  } catch (error) {
+    if (isAbort(error) || signal?.aborted) throw abortError();
+    throw new AttachError(
+      "network_error",
+      error instanceof Error && error.message ? error.message : "The upload could not be sent.",
+    );
+  }
+  try {
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: await response.text(),
+    };
+  } catch (error) {
+    if (isAbort(error) || signal?.aborted) throw abortError();
+    throw new AttachError("network_error", "The upload's answer could not be read.");
+  }
+}
+
+/**
+ * Progress wanted: `XMLHttpRequest`, the one browser API that reports bytes
+ * sent. Settled on `load`/`error`/`timeout`/`abort`, never on `readyState` 4,
+ * which an abort reaches too with status 0 (#671 is that bug in `useUpload`).
+ */
+function xhrUpload(
+  url: string,
+  form: FormData,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+  onProgress: (progress: { loaded: number; total: number }) => void,
+): Promise<UploadAnswer> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const onAbort = () => xhr.abort();
+    const done = () => signal?.removeEventListener("abort", onAbort);
+    xhr.addEventListener("load", () => {
+      done();
+      resolve({ status: xhr.status, statusText: xhr.statusText, body: xhr.responseText });
+    });
+    xhr.addEventListener("abort", () => {
+      done();
+      reject(abortError());
+    });
+    const failed = () => {
+      done();
+      reject(new AttachError("network_error", "The upload could not be sent."));
+    };
+    xhr.addEventListener("error", failed);
+    xhr.addEventListener("timeout", failed);
+    xhr.upload.addEventListener("progress", (event) => {
+      // An app's callback throwing must not take the upload with it.
+      try {
+        onProgress({ loaded: event.loaded, total: event.lengthComputable ? event.total : 0 });
+      } catch {
+        // Ignored: progress is a report, not part of the upload.
+      }
+    });
+    xhr.open("POST", url, true);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    xhr.send(form);
+  });
+}
+
+/** A non-2xx answer as the file's error: the server's code and sentence when
+ *  it sent `{ error: { code, message } }`, the status line when it did not. */
+function attachErrorFrom(answer: UploadAnswer): AttachError {
+  let code = "upload_failed";
+  let message = answer.statusText || `The upload failed with status ${answer.status}.`;
+  try {
+    const data = JSON.parse(answer.body) as {
+      error?: string | { code?: unknown; kind?: unknown; message?: unknown };
+      message?: unknown;
+    };
+    const error = data?.error;
+    if (typeof error === "string") {
+      // An older server's bare refusal string.
+      if (error) message = error;
+    } else {
+      // `code` is the agent route's own (`unsupported_file_type`); `kind` is a
+      // framework refusal's (`authentication` from an `auth` middleware, #673).
+      const named = error?.code ?? error?.kind;
+      if (typeof named === "string" && named) code = named;
+      const text = error?.message ?? data?.message;
+      if (typeof text === "string" && text) message = text;
+    }
+  } catch {
+    // Not JSON: a proxy's error page, say. The status line is all there is.
+  }
+  return new AttachError(code, message, answer.status);
 }
 
 function turnFrom(message: AgentMessage): ClientTurn {
@@ -1076,67 +1231,84 @@ export function useChat<P extends keyof AgentRoutes>(
     [commit],
   );
 
-  const uploadFile = useCallback(
-    async (file: File) => {
-      const { base: url, headers: extraHeaders, extraBody: body } = requestRef.current;
-      const form = new FormData();
-      form.append("file", file);
-      // The same `body` option every turn sends, as one JSON part, so the
-      // controller's `attachmentScope` and `authorizeRequest` see on this route
-      // what they see on `stream` (#603). A chat whose subject is only in the
-      // body — a page id, with no user and no thread — would otherwise file its
-      // uploads under no scope, or under a different one from its turns. JSON
-      // rather than a field per key, so a number is still a number on arrival.
-      if (body !== undefined) {
-        form.append("body", JSON.stringify(body));
-      }
-      // No Content-Type: the boundary is the browser's to write.
-      const response = await fetch(`${url}/files`, {
-        method: "POST",
-        headers: { ...extraHeaders },
-        body: form,
-      });
-      if (!response.ok) {
-        const error = await httpError(response);
-        fail(error);
-        throw new Error(error.message);
-      }
-      const data = (await response.json()) as {
-        fileId?: string;
-        attachmentId?: string;
-        name?: string;
-        mimeType?: string;
-        downgraded?: "no_scope";
-      };
-      // The route only has to return the ids; the name and type are already
-      // here, so the caller gets something it can hand straight to
-      // `sendMessage`.
-      //
-      // TWO IDS, PASSED THROUGH SEPARATELY. `fileId` is the provider's and is
-      // what lets the model look at the file — unchanged, which is why it is
-      // still first and still spelled the same. `attachmentId` is gemi's, the
-      // handle a tool takes, and it goes in the same `turn.files` entry: the
-      // server tells the model the id beside the file, so the model can pass
-      // it to a tool rather than invent one. Either can be absent — a file the
-      // server kept but did not send to the provider has no `fileId`, and an
-      // upload with no attachment scope has no `attachmentId` (see
-      // `AgentController.attachmentScope`) — so both are optional here rather
-      // than asserted.
-      return {
-        fileId: data.fileId,
-        attachmentId: data.attachmentId,
-        name: data.name ?? file.name,
-        mimeType: data.mimeType ?? file.type,
-        // Passed through rather than dropped: without it a missing
-        // `attachmentId` looks the same to the client whether the server chose
-        // not to keep the file or could not tell who was uploading it, and only
-        // one of those is something to fix. The server says so once per process
-        // in its own log, which nobody debugging a browser is reading.
-        downgraded: data.downgraded,
-      };
-    },
-    [fail],
-  );
+  const uploadFile = useCallback(async (file: File, options: AttachOptions = {}) => {
+    const { base: url, headers: extraHeaders, extraBody: body } = requestRef.current;
+    const { signal, onProgress } = options;
+    if (signal?.aborted) throw abortError();
+    const form = new FormData();
+    form.append("file", file);
+    // The same `body` option every turn sends, as one JSON part, so the
+    // controller's `attachmentScope` and `authorizeRequest` see on this route
+    // what they see on `stream` (#603). A chat whose subject is only in the
+    // body — a page id, with no user and no thread — would otherwise file its
+    // uploads under no scope, or under a different one from its turns. JSON
+    // rather than a field per key, so a number is still a number on arrival.
+    if (body !== undefined) {
+      form.append("body", JSON.stringify(body));
+    }
+    // The thread, when the hook has one (#683). `AgentController.upload`
+    // reads it so an unauthenticated chat has something to scope the file
+    // to, and only takes it if its store knows the thread. Read at call time:
+    // a stateless chat gets its thread from the first `run-start`.
+    const threadId = stateRef.current!.threadId;
+    if (threadId) {
+      form.append("threadId", threadId);
+    }
+    // No Content-Type: the boundary is the browser's to write.
+    const answer = onProgress
+      ? await xhrUpload(`${url}/files`, form, { ...extraHeaders }, signal, onProgress)
+      : await fetchUpload(`${url}/files`, form, { ...extraHeaders }, signal);
+    // NOT `fail()`. An upload that did not work is the file's problem, and
+    // the chat's `error` and `onError` describe the conversation: setting
+    // them here made a composer's refused attachment look like a failed run
+    // (#683). The caller has the rejection, and that is enough.
+    if (answer.status < 200 || answer.status > 299) {
+      throw attachErrorFrom(answer);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(answer.body);
+    } catch {
+      throw new AttachError(
+        "upload_failed",
+        "The upload answered with something that is not JSON.",
+        answer.status,
+      );
+    }
+    const data = parsed as {
+      fileId?: string;
+      attachmentId?: string;
+      name?: string;
+      mimeType?: string;
+      downgraded?: "no_scope";
+    };
+    // The route only has to return the ids; the name and type are already
+    // here, so the caller gets something it can hand straight to
+    // `sendMessage`.
+    //
+    // TWO IDS, PASSED THROUGH SEPARATELY. `fileId` is the provider's and is
+    // what lets the model look at the file — unchanged, which is why it is
+    // still first and still spelled the same. `attachmentId` is gemi's, the
+    // handle a tool takes, and it goes in the same `turn.files` entry: the
+    // server tells the model the id beside the file, so the model can pass
+    // it to a tool rather than invent one. Either can be absent — a file the
+    // server kept but did not send to the provider has no `fileId`, and an
+    // upload with no attachment scope has no `attachmentId` (see
+    // `AgentController.attachmentScope`) — so both are optional here rather
+    // than asserted.
+    return {
+      fileId: data.fileId,
+      attachmentId: data.attachmentId,
+      name: data.name ?? file.name,
+      mimeType: data.mimeType ?? file.type,
+      // Passed through rather than dropped: without it a missing
+      // `attachmentId` looks the same to the client whether the server chose
+      // not to keep the file or could not tell who was uploading it, and only
+      // one of those is something to fix. The server says so once per process
+      // in its own log, which nobody debugging a browser is reading.
+      downgraded: data.downgraded,
+    };
+  }, []);
 
   useEffect(() => {
     // Mount only, deliberately: `threadId` is the handle that survives a
