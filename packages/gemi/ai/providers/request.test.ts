@@ -814,6 +814,33 @@ describe("buildResponsesRequest()", () => {
     expect(build({ reasoning: "high" }, OLD).reasoning).toBeUndefined();
   });
 
+  /**
+   * #658: Azure's gpt-6-sol rejects `"minimal"` and the lowest effort an app
+   * could ask for was `"low"`, which spent a small `max_output_tokens` cap
+   * entirely on reasoning. `"none"` has to reach the wire as itself — not be
+   * dropped, which would get the model's default effort instead of no effort.
+   * No summary is asked for, because there is no reasoning to summarize.
+   */
+  test('"none" is sent as itself, without a summary', () => {
+    expect(build({ reasoning: "none" }).reasoning).toEqual({ effort: "none" });
+  });
+
+  test('"none" is dropped like any other effort when the model cannot reason', () => {
+    expect(build({ reasoning: "none" }, OLD).reasoning).toBeUndefined();
+  });
+
+  /**
+   * Which efforts a model takes changes with the model, so the value is not
+   * checked against a list here — it is passed through, and a model that does
+   * not take it answers 400 naming the ones it does.
+   */
+  test.each(["minimal", "low", "xhigh", "max", "some-future-effort"])(
+    "%s is passed through unchanged, with a summary",
+    (effort) => {
+      expect(build({ reasoning: effort }).reasoning).toEqual({ effort, summary: "auto" });
+    },
+  );
+
   test("parallel_tool_calls is only sent when it has to be turned off", () => {
     const tools = [tool({ name: "bash" })];
     expect(build({ tools }).parallel_tool_calls).toBeUndefined();
