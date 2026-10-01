@@ -8,7 +8,9 @@ export type ServiceProviderConstructor = new (
 
 /**
  * What `Application.shutdown()` could not finish, by provider class name. Both
- * empty means every provider's `shutdown()` resolved in time.
+ * empty means every provider's `shutdown()` resolved in time and abandoned
+ * nothing. `timedOut` holds the providers that overran the deadline and the
+ * ones that resolved `{ abandoned: true }`.
  */
 export type ShutdownReport = { failed: string[]; timedOut: string[] };
 
@@ -118,8 +120,10 @@ export class Application extends Container {
    * a `SIGKILL`. A provider that overruns is abandoned (its promise keeps
    * running; the process is about to exit) and reported in `timedOut`; one
    * reached after the deadline has passed is not called at all and reported
-   * the same way. A `timeoutMs` of 0 is different in kind: nothing is called,
-   * nothing is reported, and the shutdown stays clean — the caller has said
+   * the same way. So is one that resolves `{ abandoned: true }`: it bounded
+   * its own wait and gave up on work (a queued job, a cron tick), which is the
+   * same unclean stop. A `timeoutMs` of 0 is different in kind: nothing is
+   * called, nothing is reported, and the shutdown stays clean — the caller has said
    * there is no time for this phase, which is a decision, not a fault.
    *
    * Idempotent: a second call returns the first call's result.
@@ -173,7 +177,10 @@ export class Application extends Container {
           // rather than being cut off mid-wait by the race below.
           .then(() => provider.shutdown({ timeoutMs: remaining }))
           .then(
-            () => "done" as const,
+            (result) =>
+              (result as { abandoned?: boolean } | undefined)?.abandoned
+                ? ("abandoned" as const)
+                : ("done" as const),
             (error: unknown) => {
               console.error(`[gemi] ${name}.shutdown() failed:`, error);
               return "failed" as const;
@@ -186,6 +193,9 @@ export class Application extends Container {
       clearTimeout(timer);
 
       if (outcome === "failed") report.failed.push(name);
+      // The provider gave up on work at the deadline and has already named it
+      // in its own log line; it counts as timed out so the exit code says so.
+      if (outcome === "abandoned") report.timedOut.push(name);
       if (outcome === "timeout") {
         console.error(
           `[gemi] ${name}.shutdown() did not finish within the provider shutdown deadline; moving on.`,

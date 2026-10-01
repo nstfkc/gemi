@@ -300,7 +300,7 @@ const jobs = await discoverCronJobs(); // every CronJob subclass under app/cron
 
 `app(Scheduler).stop()` stops every schedule, so no new tick starts; a tick already running is left to finish. `drain(timeoutMs)` stops the same way, then waits up to `timeoutMs` for the running ticks and resolves to `{ unfinished }` — each tick still running at the deadline, as `{ name, startedAt }`. Nothing is cancelled. `start()` schedules again. `running` is how many ticks are in progress.
 
-When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), the schedule keeps running while in-flight requests drain. The scheduler provider's `shutdown()` then stops it — so a tick that falls due from then on does not start — and waits for the running ticks within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). A tick still running at the deadline is abandoned when the process exits, and named in the log:
+When a production server is told to stop (see [Graceful shutdown](./configuration.md#graceful-shutdown)), the schedule keeps running while in-flight requests drain. The scheduler provider's `shutdown()` then stops it — so a tick that falls due from then on does not start — and waits for the running ticks within the shared provider deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`, 5 seconds by default). A tick still running at the deadline is abandoned when the process exits, named in the log, and the shutdown exits with code 1:
 
 ```
 [gemi] Cron jobs still running at shutdown: NightlyReport (started 2026-09-24T02:00:00.000Z)

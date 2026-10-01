@@ -1,6 +1,12 @@
 import type { Application } from "../foundation/Application";
 
 /**
+ * What a provider's `shutdown()` may resolve: nothing, or whether it
+ * abandoned work at the deadline. See `ServiceProvider` below.
+ */
+export type ProviderShutdownResult = void | { abandoned: boolean };
+
+/**
  * Every hook defaults to a no-op. `register()` binds services into the
  * container and must not resolve any of them; `boot()` runs after every
  * provider has registered, so it may resolve freely.
@@ -26,6 +32,12 @@ import type { Application } from "../foundation/Application";
  * is still the one to report what it gave up on. Ignoring it is fine; the
  * provider is then simply abandoned at the deadline, with only a generic line
  * from `Application` to say so.
+ *
+ * A provider that bounds its own wait and gives up on work it was waiting for
+ * resolves `{ abandoned: true }`. `Application` then reports it in `timedOut`
+ * as if it had overrun, and the process exits `1` — the work was cut off just
+ * the same, and an orchestrator or a log alert has to be able to see that from
+ * the exit code. The provider names what it abandoned in its own log line.
  */
 export abstract class ServiceProvider {
   constructor(protected app: Application) {}
@@ -34,5 +46,7 @@ export abstract class ServiceProvider {
 
   boot(): void | Promise<void> {}
 
-  shutdown(options?: { timeoutMs: number }): void | Promise<void> {}
+  shutdown(options?: {
+    timeoutMs: number;
+  }): ProviderShutdownResult | Promise<ProviderShutdownResult> {}
 }

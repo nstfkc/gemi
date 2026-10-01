@@ -1,4 +1,4 @@
-export { ServiceProvider } from "./ServiceProvider";
+export { ServiceProvider, type ProviderShutdownResult } from "./ServiceProvider";
 export { Service, type ServiceConstructor } from "./Service";
 export { Repository, type ConfigItems } from "./Repository";
 export { createConfigRepository, loadConfigFrom } from "./loadConfig";

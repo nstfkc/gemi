@@ -86,7 +86,7 @@ describe("the provider's shutdown", () => {
     expect((queue.driver as MemoryQueueDriver).waiting).toBe(1);
   });
 
-  test("a job outrunning the deadline is named by the queue, not just timed out", async () => {
+  test("a job outrunning the deadline is named by the queue, and the provider counts as timed out", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { Gated } = gated();
@@ -105,7 +105,11 @@ describe("the provider's shutdown", () => {
     const logged = error.mock.calls.flat().join(" ");
     expect(logged).toContain("Queued jobs still running at shutdown");
     expect(logged).toContain("Gated");
-    expect(report.timedOut).toEqual([]);
+    // Abandoned work is an unclean stop, so the exit code has to show it
+    // (#580): the provider is reported as timed out, which exits 1. It named
+    // the work itself, so `Application`'s generic overrun line is not logged.
+    expect(report.timedOut).toEqual(["QueueServiceProvider"]);
+    expect(logged).not.toContain("did not finish within the provider shutdown deadline");
   });
 
   test("does not build a queue nothing used", async () => {

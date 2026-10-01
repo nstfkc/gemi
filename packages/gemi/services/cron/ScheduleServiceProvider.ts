@@ -99,7 +99,10 @@ export class ScheduleServiceProvider extends ServiceProvider {
    * The wait is bounded a little inside what is left of the shared provider
    * deadline, like the queue's, so that this is what names the ticks it gave
    * up on rather than `Application`'s generic "did not finish within the
-   * provider shutdown deadline", which names no job at all.
+   * provider shutdown deadline", which names no job at all.   *
+   * Ticks left running resolve `{ abandoned: true }`, so `Application`
+   * reports this provider in `timedOut` and the process exits 1, as it does
+   * for a queued job cut off at the deadline (#580).
    */
   async shutdown(options?: { timeoutMs: number }) {
     // `boot()` always resolves it; this is for an application that shuts down
@@ -120,6 +123,7 @@ export class ScheduleServiceProvider extends ServiceProvider {
             .map((tick) => `${tick.name} (started ${tick.startedAt.toISOString()})`)
             .join(", "),
       );
+      return { abandoned: true };
     }
   }
 }
