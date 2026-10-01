@@ -3,6 +3,7 @@ import { act, cleanup, render, renderHook, waitFor } from "@testing-library/reac
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { InvalidCSRFTokenError } from "../http/CSRFMiddleware";
+import { RequestBreakerError } from "../http/Error";
 import {
   AuthenticationError,
   AuthorizationError,
@@ -68,10 +69,31 @@ const cases: Array<[name: string, response: () => Response, kind: MutationErrorK
     () => unhandledErrorResponse(new Error("boom"), "/api/posts", () => {}),
     "server",
   ],
+  // Issue #673: a refusal thrown with a message of its own was a bare string
+  // the guards could not place.
   [
-    "a refusal with a message of its own",
+    "an InsufficientPermissionsError with a message of its own",
     () => breaker(new InsufficientPermissionsError("Staff only")),
-    "unknown",
+    "permission",
+  ],
+  [
+    "an AuthorizationError with a message of its own",
+    () => breaker(new AuthorizationError("You cannot edit this post")),
+    "permission",
+  ],
+  [
+    "a 500 under gemi dev, which carries the exception's message",
+    () =>
+      new Response(
+        JSON.stringify({ error: { kind: "server_error", message: "boom", status: 500 } }),
+        { status: 500 },
+      ),
+    "server",
+  ],
+  [
+    "an app's own RequestBreakerError",
+    () => breaker(new RequestBreakerError("This slug is taken", { status: 409 })),
+    "form",
   ],
 ];
 
@@ -108,15 +130,70 @@ describe("the errors a mutation reports", () => {
     expect(mutationErrorKind(error)).toBe("server");
   });
 
-  /** The value is the response's `error` field as it was: typing it changed nothing at run time. */
-  test("the value is the body's error field, unchanged", async () => {
-    expect(await onErrorFor(() => breaker(new InsufficientPermissionsError()))).toBe(
-      "Insufficient permissions",
-    );
-    expect(await onErrorFor(() => notFoundResponse())).toEqual({ message: "Not found" });
+  test("the value is the body's error field: { kind, message, status }", async () => {
+    expect(
+      await onErrorFor(() => breaker(new AuthorizationError("You cannot edit this post"))),
+    ).toEqual({ kind: "authorization", message: "You cannot edit this post", status: 401 });
+    expect(await onErrorFor(() => notFoundResponse())).toEqual({
+      kind: "not_found",
+      message: "Not found",
+      status: 404,
+    });
     expect(
       await onErrorFor(() => breaker(new ValidationError({ email: ["Required"] }))),
-    ).toEqual({ kind: "validation_error", messages: { email: ["Required"] } });
+    ).toEqual({ kind: "validation_error", messages: { email: ["Required"] }, status: 400 });
+  });
+
+  test("a refusal the guards place has its message to show", async () => {
+    const error = await onErrorFor(() =>
+      breaker(new InsufficientPermissionsError("Staff only")),
+    );
+    if (!isPermissionError(error)) throw new Error("not a permission error");
+    expect(error.message).toBe("Staff only");
+    expect(error.status).toBe(403);
+  });
+});
+
+/**
+ * What a server before 0.85 sent, which a newer client still reads during a
+ * rolling deploy: bare strings, and `{ message }` with no kind.
+ */
+describe("a server before 0.85", () => {
+  const legacy = (status: number, error: unknown) =>
+    new Response(JSON.stringify({ error }), { status });
+
+  test.each([
+    [401, "Authentication error", "authentication", "authentication"],
+    [401, "Not authorized", "authorization", "permission"],
+    [401, "You cannot edit this post", "authorization", "permission"],
+    [403, "Insufficient permissions", "permission", "permission"],
+    [403, "Staff only", "permission", "permission"],
+    [403, "Invalid CSRF token", "csrf", "csrf"],
+    [500, "Internal Server Error", "server_error", "server"],
+    [500, "column \"x\" does not exist", "server_error", "server"],
+    [409, "This slug is taken", "form_error", "form"],
+  ] as const)("a %i %j is wrapped as %s", async (status, message, kind, guard) => {
+    const error = await onErrorFor(() => legacy(status, message));
+    expect(error).toEqual({ kind, message, status });
+    expect(mutationErrorKind(error)).toBe(guard);
+  });
+
+  test.each([
+    [404, "Not found", "not_found"],
+    [403, "Forbidden", "permission"],
+    [429, "Rate limit exceeded", "rate_limit"],
+  ] as const)("a %i { message: %j } gains its kind and status", async (status, message, kind) => {
+    expect(await onErrorFor(() => legacy(status, { message }))).toEqual({
+      kind,
+      message,
+      status,
+    });
+  });
+
+  test("a validation error gains its status", async () => {
+    expect(
+      await onErrorFor(() => legacy(400, { kind: "validation_error", messages: { a: ["x"] } })),
+    ).toEqual({ kind: "validation_error", messages: { a: ["x"] }, status: 400 });
   });
 
   test("a cancelled request is not one", async () => {
@@ -153,11 +230,11 @@ describe("the guards", () => {
     const samples = {
       validation: { kind: "validation_error", messages: {} },
       form: { kind: "form_error", message: "Try again" },
-      authentication: "Authentication error",
-      permission: "Insufficient permissions",
-      csrf: "Invalid CSRF token",
-      not_found: { message: "Not found" },
-      rate_limit: { message: "Rate limit exceeded" },
+      authentication: { kind: "authentication", message: "Sign in", status: 401 },
+      permission: { kind: "authorization", message: "Not yours", status: 401 },
+      csrf: { kind: "csrf", message: "Invalid CSRF token", status: 403 },
+      not_found: { kind: "not_found", message: "Gone", status: 404 },
+      rate_limit: { kind: "rate_limit", message: "Slow down", status: 429 },
       server: { kind: "server_error", message: "Bad Gateway" },
       network: new TypeError("Failed to fetch"),
     } as const;
@@ -180,6 +257,22 @@ describe("the guards", () => {
       }
       expect(mutationErrorKind(sample)).toBe(kind);
     }
+  });
+
+  test("a bare string or { message } off an older server is still placed", () => {
+    expect(isAuthenticationError("Authentication error")).toBe(true);
+    expect(isPermissionError("Insufficient permissions")).toBe(true);
+    expect(isPermissionError("Not authorized")).toBe(true);
+    expect(isCsrfError("Invalid CSRF token")).toBe(true);
+    expect(isServerError("Internal Server Error")).toBe(true);
+    expect(isPermissionError({ message: "Forbidden" })).toBe(true);
+    expect(isNotFoundError({ message: "Not found" })).toBe(true);
+    expect(isRateLimitError({ message: "Rate limit exceeded" })).toBe(true);
+  });
+
+  test("an object without a kind falls back to its status", () => {
+    expect(isPermissionError({ message: "Staff only", status: 403 })).toBe(true);
+    expect(isNotFoundError({ message: "Gone", status: 404 })).toBe(true);
   });
 
   test("an Error is never read as a { message } body", () => {

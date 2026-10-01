@@ -290,7 +290,7 @@ describe("dispatchAs", () => {
   test("a policy that denies the user denies the in-process call too", async () => {
     const bob = { Cookie: "access_token=v2.tok-bob" };
     const viaHttp = await snapshot(await direct("/orders", { headers: bob }));
-    expect(viaHttp).toEqual({ status: 403, body: { error: { message: "Forbidden" } } });
+    expect(viaHttp).toEqual({ status: 403, body: { error: { kind: "permission", message: "Forbidden", status: 403 } } });
 
     const { result } = await fromAgent(bob, async (req, dispatcher) =>
       snapshot(await dispatcher.dispatchAs(req, "GET", "/orders")),
@@ -556,7 +556,7 @@ describe("a policy denial", () => {
 
     expect(res.status).toBe(403);
     expect(res.headers.get("Content-Type")).toBe("application/json");
-    expect(JSON.parse(text)).toEqual({ error: { message: "Forbidden" } });
+    expect(JSON.parse(text)).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
     expect(text).not.toMatch(/Order|policy/);
   });
 
@@ -585,7 +585,7 @@ describe("a policy denial", () => {
     const res = await direct("/other-copy-orders");
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await res.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
     expect(failed[0]!.error).not.toBeInstanceOf(PolicyDeniedError);
   });
 
@@ -596,7 +596,7 @@ describe("a policy denial", () => {
     // the body's length is declared, so it is not waited on as a stream.
     expect(res.status).toBe(403);
     expect(res.headers.get("Content-Length")).toBe(
-      String(JSON.stringify({ error: { message: "Forbidden" } }).length),
+      String(JSON.stringify({ error: { kind: "permission", message: "Forbidden", status: 403 } }).length),
     );
     expect(ended).toEqual(["/api/orders"]);
 
@@ -608,7 +608,7 @@ describe("a policy denial", () => {
     const res = await direct("/orders-by-middleware", { headers: bob });
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(await res.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
     expect(failed[0]!.error).toMatchObject({ name: "PolicyDeniedError", reason: "denied" });
 
     const alice = await direct("/orders-by-middleware", {

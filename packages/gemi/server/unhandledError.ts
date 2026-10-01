@@ -1,3 +1,4 @@
+import { stringEraRefusal } from "../http/Error";
 import { isApiPath } from "../services/router/apiPath";
 
 // The production server's last resort: an error nothing on the way here turned
@@ -57,10 +58,13 @@ export function unhandledErrorResponse(
   }
 
   if (isApiPath(pathname)) {
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: stringEraRefusal("server_error", "Internal Server Error", 500) }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
 
   return new Response(GENERIC_500_HTML, {

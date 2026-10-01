@@ -410,6 +410,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
         let error: MutationError = {
           kind: "server_error",
           message: outcome.statusText,
+          status: outcome.status,
         };
         try {
           error = mutationErrorFromBody(

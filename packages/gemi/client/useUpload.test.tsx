@@ -139,6 +139,7 @@ describe("useUpload", () => {
     expect(onError).toHaveBeenCalledWith({
       kind: "validation_error",
       messages: { file: ["Too big"] },
+      status: 422,
     });
   });
 
@@ -156,6 +157,7 @@ describe("useUpload", () => {
     expect(onError).toHaveBeenCalledWith({
       kind: "server_error",
       message: "Bad Gateway",
+      status: 502,
     });
   });
 

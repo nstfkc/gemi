@@ -1,3 +1,67 @@
+# Unreleased
+
+## Breaking: refusals are objects `{ kind, message, status }` (#673)
+
+**Breaking change.** Every refusal's `error` is now an object. Before, most were
+bare strings with no status, so the client guards could only recognise the
+framework's default messages: `throw new AuthorizationError("You cannot edit
+this post")` was `"unknown"`, and apps compared strings.
+
+| refusal | `error` before | `error` now |
+| --- | --- | --- |
+| `AuthenticationError` (401) | `"Authentication error"` | `{ kind: "authentication", message, status: 401 }` |
+| `AuthorizationError` (401) | `"Not authorized"` or the custom message | `{ kind: "authorization", message, status: 401 }` |
+| `InsufficientPermissionsError` (403) | `"Insufficient permissions"` or the custom message | `{ kind: "permission", message, status: 403 }` |
+| `InvalidCSRFTokenError` (403) | `"Invalid CSRF token"` | `{ kind: "csrf", message, status: 403 }` |
+| unhandled 500 | `"Internal Server Error"` (the exception's message under `gemi dev`) | `{ kind: "server_error", message, status: 500 }` |
+| policy denial (403) | `{ message: "Forbidden" }` | `{ kind: "permission", message: "Forbidden", status: 403 }` |
+| not found (404) | `{ message: "Not found" }` | `{ kind: "not_found", message: "Not found", status: 404 }` |
+| range (416) | `{ message: "Range not satisfiable" }` | `{ kind: "range_not_satisfiable", message, status: 416 }` |
+| rate limit (429) | `{ message: "Rate limit exceeded" }` | `{ kind: "rate_limit", message, status: 429 }` |
+| `ValidationError` (400) | `{ kind: "validation_error", messages }` | the same, plus `status: 400` |
+
+**Web code.** `error` in `onError` and the mutation hooks is never a string now
+(`MutationError` lost `string`), and the guards match custom messages. Code that
+rendered it directly (`toast(error)`) or compared it (`error === "Not
+authorized"`) must read `error.message` or use the guards:
+
+```ts
+if (isPermissionError(error)) toast(error.message); // custom messages now match
+```
+
+The typechecker finds the string comparisons. The web client wraps a bare string
+from an older server into the same object (using the response's status), and the
+guards still accept the old strings and `{ message }` bodies, so a new client
+works against an old server during a rolling deploy. That fallback goes in 0.86.
+
+**Other bodies the hooks hand over** gain `status`, and a `kind` from the status
+when they have a `message` and no `kind`: an app's `HttpResponse.json({ error:
+"Slug taken" }, { status: 409 })` is now `{ kind: "form_error", message: "Slug
+taken", status: 409 }`, which `<FormError>` renders. `MutationMessageError` is
+deprecated and no longer part of `MutationError`.
+
+**`RequestBreakerError` takes a message and a status.** `throw new
+RequestBreakerError("Slug taken", { status: 409 })` answers the shape above,
+with `kind` following from the status (or `kind: "…"` to name it). A bare
+`new RequestBreakerError(message)` used to answer a 400 with an empty body; it
+now answers a 400 `form_error` with that message. A subclass that sets
+`this.payload` itself is unchanged.
+
+**Native and other non-gemi clients** that read `body.error` as a string must
+read `body.error.message`. Ship the client change first, or set this at boot for
+one release (it turns the five refusals that were strings back into strings; the
+ones that were already objects stay objects):
+
+```ts
+RequestBreakerError.legacyStringPayload = true;
+```
+
+**Agents.** `useChat` and the Swift/Kotlin chat clients already read
+`error.message`, so a refusal on an agent route (an `auth` middleware's 401, say)
+now reports its message instead of the status text. Agent routes' own errors
+(`{ code, message }`) and run errors (`AgentRunFailure`) are unchanged. A route
+tool's refusal shown to the model includes the new fields.
+
 # Upgrading from 0.84.0 to 0.84.1
 
 ## Azure attachments upload with purpose `assistants` (#682)

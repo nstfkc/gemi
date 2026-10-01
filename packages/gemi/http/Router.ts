@@ -29,6 +29,7 @@ export class ValidationError extends RequestBreakerError {
           error: {
             kind: "validation_error",
             messages: errors,
+            status: 400,
           },
         },
         headers: {

@@ -1,7 +1,7 @@
 import { app } from "../foundation/app";
 import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import type { RateLimitResult } from "../services/rate-limiter/types";
-import { RequestBreakerError } from "./Error";
+import { refusal, RequestBreakerError } from "./Error";
 import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { dispatchedClientAddress } from "./modelOriginated";
@@ -18,9 +18,7 @@ export class RateLimitExceededError extends RequestBreakerError {
       api: {
         status: 429,
         data: {
-          error: {
-            message: "Rate limit exceeded",
-          },
+          error: refusal("rate_limit", "Rate limit exceeded", 429),
         },
         headers,
       },

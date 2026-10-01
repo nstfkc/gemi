@@ -39,7 +39,8 @@ export { HttpRequest } from "./HttpRequest";
 export { InvalidValidationRuleError } from "./validate";
 export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
-export { RequestBreakerError } from "./Error";
+export { RequestBreakerError, type RequestBreakerOptions } from "./Error";
+export type { Refusal, RefusalKind } from "./refusal";
 export { HttpResponse, type HttpResponseOptions } from "./HttpResponse";
 export {
   defineMiddlewareConfig,
