@@ -47,6 +47,27 @@ that `Auth.user()` returned, behaves as before, apart from header clients now
 being signed in on routes without `auth`. See
 [Who counts as signed in](docs/middleware.md#who-counts-as-signed-in).
 
+## A job or cron tick cut off at the shutdown deadline now exits 1 (#580)
+
+The docs said a queued job still running at the provider shutdown deadline
+makes the shutdown exit with code 1. It exited 0: the queue bounds its own
+drain, so it never overran, and the abandoned job showed up only in the log.
+
+- `QueueServiceProvider` and `ScheduleServiceProvider` now report work they
+  abandoned at the deadline, and the provider is listed in
+  `ShutdownReport.timedOut`. `gemi start` and `gemi queue:work` then exit `1`
+  with "Shutdown finished with errors", so an orchestrator or a log alert sees
+  the unclean stop. The log line naming the jobs or ticks is unchanged.
+- `ServiceProvider.shutdown()` may now resolve `{ abandoned: true }` (type
+  `ProviderShutdownResult`). A custom provider that bounds its own wait can
+  use it to report work it gave up on in the same way. Returning nothing
+  works as before.
+
+**Behaviour change:** a shutdown that cuts off a queued job or a cron tick
+exits `1` where it exited `0`. If your platform alerts or restarts on a
+non-zero exit, make `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` long enough for your
+jobs, or expect the alert when they are cut off.
+
 # Upgrading from 0.82 to 0.83
 
 ## `reasoning` takes `"none"`, and any effort the model accepts (#658)

@@ -105,6 +105,46 @@ describe("a field that fails required", () => {
   });
 });
 
+describe("a field that fails several rules with the same message (#675)", () => {
+  class SignUp extends HttpRequest<{ email: string }> {
+    schema = {
+      email: { string: "Invalid email", required: "Email is required", email: "Invalid email" },
+    };
+  }
+
+  test("reports that message once", async () => {
+    // The issue's body: an array is neither a string nor an email.
+    expect(await errorsOf(new SignUp(jsonRequest({ email: ["a@b.co"] })))).toEqual({
+      email: ["Invalid email"],
+    });
+    expect(await errorsOf(new SignUp(jsonRequest({ email: "not-an-email" })))).toEqual({
+      email: ["Invalid email"],
+    });
+  });
+
+  test("different messages are all still reported, in rule order", async () => {
+    class Req extends HttpRequest<{ name: string }> {
+      schema = {
+        name: { string: "Not a string", "min:2": "Too short", "max:1": "Not a string" },
+      };
+    }
+    expect(await errorsOf(new Req(jsonRequest({ name: 7 })))).toEqual({
+      name: ["Not a string", "Too short"],
+    });
+  });
+
+  test("a refine message the rules already reported is not repeated", async () => {
+    class Req extends SignUp {
+      refine(_input: any) {
+        return { email: "Invalid email" };
+      }
+    }
+    expect(await errorsOf(new Req(jsonRequest({ email: 5 })))).toEqual({
+      email: ["Invalid email"],
+    });
+  });
+});
+
 describe("a schema naming a rule that does not exist", () => {
   class TypoRequest extends HttpRequest<{ name: string; age: number }> {
     schema = {
