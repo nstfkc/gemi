@@ -12,7 +12,7 @@
  *   socket's peer address, and `X-Real-IP` is dropped.
  * - `hops` (`GEMI_TRUST_PROXY=<n>`): the `n` proxies nearest the app are
  *   trusted. Each appends the address it was reached from, so the client is
- *   the `n`-th address from the right of `X-Forwarded-For` + peer. Anything
+ *   the `n`-th entry from the right of `X-Forwarded-For`. Anything
  *   further left was written by someone the app does not trust and is dropped.
  * - `all` (`GEMI_TRUST_PROXY=true`): the inbound header is passed through
  *   unchanged, as before 0.85. Only sound behind a proxy that overwrites
