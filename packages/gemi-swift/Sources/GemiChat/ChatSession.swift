@@ -69,6 +69,8 @@ public final class ChatSession<Agent: AgentSchema> {
   public var cursor: ChatCursor { ChatCursor(runId: state.cursorRunId, seq: state.seq) }
   /// The deferred tools the model has pulled in during the run in flight.
   public var loadedTools: [String] { state.loadedTools }
+  /// The run's total usage so far; each message's own is on `message.usage`.
+  public var usage: Usage? { state.usage }
 
   public var status: ChatStatus {
     // Ordered so `pending` non-empty exactly when awaiting input is true by

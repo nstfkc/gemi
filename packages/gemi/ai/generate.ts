@@ -306,6 +306,9 @@ async function callModel<O extends Schema<any>>(
     }
   }
   reply.finishReason = reason;
+  // One call, one message: the reply's usage is the call's, as an agent step's
+  // message carries its own (#467).
+  reply.usage = usage;
   messages.push(reply);
 
   if (answered) {

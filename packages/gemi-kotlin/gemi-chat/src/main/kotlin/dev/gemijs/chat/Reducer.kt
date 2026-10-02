@@ -37,7 +37,14 @@ public data class ChatState(
   /** The deferred tools the model has loaded this run, as a set. */
   val loadedTools: List<String> = emptyList(),
   val finishReason: FinishReason? = null,
+  /** The run's total usage so far, raw: every step plus what its tools spent.
+   *  Each assistant message carries its own share. Reset by `run-start`. */
+  internal val usageJson: JsonElement? = null,
 ) {
+  /** The run's total usage so far — every step plus what its tools spent.
+   *  Each assistant message's own share is on `AgentMessage.usage`. */
+  val usage: Usage? get() = Usage.from(usageJson)
+
   /**
    * Applies one frame. `null` when the frame was a replay and nothing
    * changed — the TypeScript reducer returning its input object — so a
@@ -94,6 +101,7 @@ public data class ChatState(
           runMessageIds = emptyList(),
           loadedTools = emptyList(),
           finishReason = null,
+          usageJson = null,
         )
 
       "message-start" -> withMessage(event.string("messageId") ?: "", now) { it.with("role", event["role"]) }
@@ -227,6 +235,9 @@ public data class ChatState(
             } else message
           flagged
             .with("finishReason", event["finishReason"])
+            // This message's own model call (#467); absent, the message keeps
+            // whatever it had.
+            .let { m -> event["usage"]?.let { m.with("usage", it) } ?: m }
             .with(
               "content",
               JsonArray(
@@ -249,12 +260,9 @@ public data class ChatState(
             )
         }
 
-      // On the last assistant message, never on the user's own turn.
-      "usage" -> {
-        val index = messages.indexOfLast { it.json.string("role") == "assistant" }
-        if (index == -1) this
-        else copy(messages = messages.toMutableList().also { it[index] = AgentMessage(it[index].json.with("usage", event["usage"])) })
-      }
+      // The run's total, not any message's (#467): each message gets its own
+      // from `message-end`.
+      "usage" -> copy(usageJson = event["usage"])
 
       "error" -> copy(error = event["error"].obj()?.let(::AgentError), pending = emptyList())
 
@@ -339,7 +347,7 @@ private fun applyNested(run: JsonObject, event: JsonObject, now: String): JsonOb
   event["label"]?.let { result = result.with("label", it) }
   result = result.with("messages", JsonArray(next.messages.map { it.json }))
   next.finishReason?.let { result = result.with("finishReason", JsonPrimitive(it.value)) }
-  if (inner.string("type") == "usage") result = result.with("usage", inner["usage"])
+  next.usageJson?.let { result = result.with("usage", it) }
   return result
 }
 
