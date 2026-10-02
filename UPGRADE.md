@@ -29,6 +29,33 @@ with a 400 refusal instead of a 500:
 error. Nothing to change unless you relied on a charset-carrying JSON body
 being ignored, or caught the 500.
 
+## `ai`: a live run answers only the user who started it (#442)
+
+**Behaviour change.** A run's handles — its `threadId`, its `runId` and the
+client-minted `clientRunId` — let whoever held one read the run's frames
+(`/attach`) or cancel it (`/stop`), and a turn on the same thread stopped it,
+unless the app's `authorizeRequest` checked thread ownership. Now
+`AgentController` records an owner on the run (`MemoryLiveRuns.register`'s new
+`owner`) from the new `protected runOwner(req)`, which defaults to
+`user:<id>` for an authenticated request and `null` otherwise. For an owned
+run, any other caller gets a 403
+`{ error: { kind: "permission", message: "This run belongs to someone else.", status: 403 } }` on:
+
+- `attach` to it (ended or not, while it is kept for the tail);
+- `stop` by `threadId`, `runId` or `clientRunId`, including a turn still waiting
+  for `authorizeRequest` or the thread's lock;
+- a `stream` turn on its thread that would supersede it while it is running.
+
+Anonymous turns and runs the server registers without an `owner` are unowned
+and behave as before. `MemoryLiveRuns` gains `ownerOf(runId)`,
+`mayAccess(runId, caller)` and `isRunning(runId)`.
+
+**Action:** none for an app whose threads belong to one user. An app where
+several users share a thread's live run (a team chat) overrides
+`runOwner(req)` to return the shared key, e.g. `team:<id>` taken from the
+user, or `null` to turn the check off. Guard `stream`, `attach` and `stop`
+with the same middleware so the owner can be read on all three.
+
 ## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
 
 **Behaviour change.** `AgentMessage.usage` was typed but the server never set

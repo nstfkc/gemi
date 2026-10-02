@@ -1,6 +1,6 @@
 import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
-import { RequestBreakerError } from "../http/Error";
+import { refusal, RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
 import { mediaType } from "../http/mediaType";
 import type { MiddlewareInput } from "../http/middlewareList";
@@ -249,7 +249,7 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
  * left on the client that had let go of it. The entry is marked rather than
  * removed, because the turn itself is what answers once its wait is over.
  */
-const pendingTurns = new Map<string, { cancelled: boolean }>();
+const pendingTurns = new Map<string, { cancelled: boolean; owner: string | null }>();
 
 /**
  * The key that carries `Body` on the instance type.
@@ -468,6 +468,48 @@ export abstract class AgentController<
   }
 
   /**
+   * WHO OWNS A RUN THIS REQUEST STARTS, and who a request to `attach` or `stop`
+   * one is (#442). An opaque key, compared with `===`; `null` is nobody.
+   *
+   * `stream` records it on the run, and from then on the run answers only that
+   * key: `attach` to it, `stop` of it (by `runId`, `threadId` or `clientRunId`,
+   * including a turn still waiting its place), and a turn on its thread that
+   * would supersede it while it is still going are each refused with a 403
+   * `{ error: { kind: "permission", message, status } }` for any other caller.
+   * That holds whatever `authorizeRequest` says, which is the point: every
+   * handle on a run is one a third party can come to hold (a shared link, a
+   * log line, a guessable `clientRunId`), and none of them says whose it is.
+   *
+   * THE DEFAULT IS THE AUTHENTICATED USER, `user:<id>`, and `null` without one.
+   * A `null` owner records an unowned run, which answers whoever holds a
+   * handle — exactly what every run did before this existed. So:
+   *
+   * - an anonymous turn starts an unowned run; its `threadId` stays the
+   *   capability. `sessionId()` is not used as a fallback: it is a cookie the
+   *   visitor writes, it can be minted between the turn and the reattach (a
+   *   view visited in between), and a mismatch would lock a visitor out of
+   *   their own run. An app with its own anonymous identity returns it here.
+   * - a run started by an authenticated user cannot be read or stopped by an
+   *   anonymous request, nor by another user.
+   * - a run the server starts itself (registered on `liveRuns` with no
+   *   `owner`) is unowned.
+   *
+   * Override it for anything wider than a user — a thread shared by a team
+   * returns `team:<id>` (from the user, never from the body) — or `null` to
+   * turn the check off. Whatever it reads must be present on all of `stream`,
+   * `attach` and `stop`, the same rule `attachmentScope` states: guard the three
+   * routes with the same middleware.
+   */
+  protected runOwner(req: HttpRequest<any, any>): string | null | Promise<string | null> {
+    const user = req.ctx?.()?.user;
+    const userId = user?.id ?? user?.publicId;
+    if (userId !== undefined && userId !== null && String(userId) !== "") {
+      return `user:${String(userId)}`;
+    }
+    return null;
+  }
+
+  /**
    * `POST /<path>` — one route for every client turn. A first message, an
    * approval, an answer to a question and a client tool's result are all just
    * the next turn, so none of them gets an endpoint of its own.
@@ -502,9 +544,13 @@ export abstract class AgentController<
       });
     }
 
+    // Who this run will belong to. Read before `pending` exists, so a stop that
+    // finds the pending turn can already be checked against it. See `runOwner`.
+    const owner = await this.runOwner(req);
+
     // From here until `register`, the only thing `/stop` can find this turn by.
     // See `pendingTurns`.
-    const pending = clientRunId ? { cancelled: false } : null;
+    const pending = clientRunId ? { cancelled: false, owner } : null;
     if (pending) {
       pendingTurns.set(clientRunId, pending);
     }
@@ -636,6 +682,8 @@ export abstract class AgentController<
       // anything.
       const eventHooks = this.liveRuns.register(run, {
         threadId,
+        // Who may attach to it and stop it from now on. See `runOwner`.
+        owner,
         // The client's handle on a run it started, which is the only one that
         // exists before `run-start` reaches it. See `RegisterParams`.
         clientRunId,
@@ -672,7 +720,7 @@ export abstract class AgentController<
       if (pending?.cancelled) {
         return stoppedBeforeStart();
       }
-      return threadId ? await this.withThread(threadId, start) : await start();
+      return threadId ? await this.withThread(threadId, owner, start) : await start();
     } finally {
       if (pending && pendingTurns.get(clientRunId) === pending) {
         pendingTurns.delete(clientRunId);
@@ -715,7 +763,11 @@ export abstract class AgentController<
    * registered and stops that instead. Per process, like `LiveRuns`, and for
    * the same reason: the run it guards lives here.
    */
-  private async withThread<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+  private async withThread(
+    threadId: string,
+    owner: string | null,
+    fn: () => Promise<Response>,
+  ): Promise<Response> {
     const previous = threadLocks.get(threadId) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -726,6 +778,17 @@ export abstract class AgentController<
     await previous;
     try {
       const live = await this.liveRuns.find({ threadId });
+      if (
+        live &&
+        this.liveRuns.isRunning(live.runId) &&
+        !this.liveRuns.mayAccess(live.runId, owner)
+      ) {
+        // Superseding is a stop, and someone else's run is not this caller's to
+        // stop (#442). Only while it is still going: an ended run is kept for
+        // `ttlMs` but a turn after it touches nothing of it. Whether this caller
+        // may post on the thread at all is `authorizeRequest`'s question.
+        return notYourRun();
+      }
       const run = live ? this.liveRuns.get(live.runId) : null;
       if (run) {
         // A run that already ended is still `find`-able for `ttlMs`; stopping
@@ -780,6 +843,10 @@ export abstract class AgentController<
     // `onAttachMiss`) and learns there. The thread's own 404 is `stream`'s,
     // where a turn would otherwise be persisted under it.
     const live = await this.liveRuns.find({ threadId });
+    if (live && !this.liveRuns.mayAccess(live.runId, await this.runOwner(req))) {
+      // Another caller's run (#442): none of its frames, ended or not.
+      return notYourRun();
+    }
     if (!live) {
       // An explicit miss, not a 200 with an empty stream. See `MemoryLiveRuns`:
       // behind a round-robin load balancer this is the common case, and it has
@@ -865,12 +932,18 @@ export abstract class AgentController<
     // thread, which is ended where it waits. `threadId` is the fallback for a
     // client that did not start this run at all — one that attached to it,
     // whose replayed tail carried no `run-start`.
+    const caller = await this.runOwner(req);
     let runId = typeof body.runId === "string" ? body.runId : undefined;
     if (!runId && typeof body.clientRunId === "string") {
       runId = this.liveRuns.findByClientRunId(body.clientRunId) ?? undefined;
       if (!runId) {
         const pending = pendingTurns.get(body.clientRunId);
         if (pending) {
+          // A `clientRunId` is the client's own choice and only as unguessable
+          // as it made it, so the turn it names is checked like a run (#442).
+          if (pending.owner !== null && pending.owner !== caller) {
+            return notYourRun();
+          }
           // Not on to `threadId`: that names the run this turn is queued
           // behind, which is already stopping, and answering for it would
           // leave this one to start.
@@ -888,6 +961,10 @@ export abstract class AgentController<
       // Already finished, already evicted, or never here. Not an error: the
       // caller wanted the run stopped and it is not running.
       return { stopped: false };
+    }
+    if (!this.liveRuns.mayAccess(run.runId, caller)) {
+      // Someone else's run, by whichever handle (#442). See `runOwner`.
+      return notYourRun();
     }
 
     run.stop({ reason: typeof body.reason === "string" ? body.reason : undefined });
@@ -1994,6 +2071,18 @@ function stoppedBeforeStart(): Response {
     code: "stopped",
     message: "The turn was stopped before it started.",
   });
+}
+
+/**
+ * The refusal for a run that belongs to another caller (#442), in the shape
+ * every other refusal has (`{ kind, message, status }`, #686), so `useChat` and
+ * the client guards classify it as `permission` without matching on text.
+ */
+function notYourRun(): Response {
+  return jsonResponse(
+    403,
+    refusal("permission", "This run belongs to someone else.", 403) as Record<string, unknown>,
+  );
 }
 
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
