@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { isBuildChunkPath, isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
+import { chunkReloadStubScript } from "../client/chunkLoadRecovery";
 
 /**
  * What `httpProd` answers when a static-looking request has no file behind it
@@ -13,7 +14,9 @@ describe("a missing build chunk", () => {
 
     expect(res?.status).toBe(200);
     expect(res?.headers.get("Content-Type")).toBe("application/javascript");
-    expect(await res?.text()).toContain("window.location.reload()");
+    const body = (await res?.text()) ?? "";
+    expect(body).toContain("window.location.reload()");
+    expect(body).toBe(chunkReloadStubScript("/assets/Dashboard-CRSTVHPB.js"));
   });
 
   test("is never cached", () => {
@@ -29,7 +32,7 @@ describe("a missing build chunk", () => {
     expect(isBuildChunkPath("/assets/client-abc.mjs")).toBe(true);
   });
 
-  test("is only the reload: it names no server path and never reads `caches`", async () => {
+  test("names no server path and never reads `caches`", async () => {
     // The body used to open with `if(caches){caches?.delete("<distPath>")}`.
     // `CacheStorage.delete` takes a cache name, so the path deleted nothing;
     // it published `dist/` absolute layout to anyone asking for a missing
@@ -39,7 +42,9 @@ describe("a missing build chunk", () => {
 
     expect(body).not.toContain("caches");
     expect(body).not.toContain("dist");
-    expect(body).toBe("window.location.reload();export {}");
+    // Guarded by the client router's marker (`chunkLoadRecovery.test.ts`
+    // runs it), so a chunk that stays missing cannot reload forever.
+    expect(body).toContain('"gemi:chunk-reload"');
   });
 });
 

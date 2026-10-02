@@ -281,8 +281,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       // Through `loadViewModule` so the module registry — and with it each
       // view's `Loading`/`Error` exports — is populated before the
       // transition commits the new surface.
+      //
+      // The rejection is handled by the route's `lazy()`, which reaches the
+      // same import, and by the chunk recovery inside `loadViewModule`; left
+      // unhandled here it was only noise in an error reporter (folio#2117).
       for (const component of views) {
-        loadViewModule(component);
+        loadViewModule(component).catch(() => {});
       }
 
       const payload = await loadRoutePayload({

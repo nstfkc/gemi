@@ -6,6 +6,7 @@ import {
 } from "../i18n/dictionaryRegistry";
 import { flattenComponentTree } from "./helpers/flattenComponentTree";
 import type { ServerDataContextValue } from "./ServerDataProvider";
+import { recoverFromChunkLoadError } from "./chunkLoadRecovery";
 
 declare const window: {
   __GEMI_DATA__: ServerDataContextValue;
@@ -28,7 +29,18 @@ declare const window: {
 const viewModules = new Map<string, Record<string, any>>();
 const viewModuleListeners = new Set<() => void>();
 
-export function loadViewModule(name: string): Promise<any> {
+/**
+ * Why a view chunk is being loaded. A `prefetch` that fails is left alone —
+ * nobody is waiting on it, and reloading the page under a hovered link would
+ * be the worst way to find out. The `navigation` or `hydration` that needs the
+ * same chunk fails the same way a moment later and recovers then.
+ */
+export type ViewModulePurpose = "navigation" | "hydration" | "prefetch";
+
+export function loadViewModule(
+  name: string,
+  purpose: ViewModulePurpose = "navigation",
+): Promise<any> {
   const loader =
     typeof window !== "undefined" ? window.loaders?.[name] : undefined;
   if (!loader) return Promise.resolve(null);
@@ -36,37 +48,49 @@ export function loadViewModule(name: string): Promise<any> {
   // its module evaluates, so everything past this mark once the chunk lands is
   // exactly what this view brought with it.
   const mark = dictionaryRegistrationMark();
-  return Promise.resolve(loader()).then(async (mod) => {
-    const isNew = !viewModules.has(name);
-    viewModules.set(name, mod);
+  return Promise.resolve(loader())
+    .catch((error) => {
+      // A chunk that will not load is usually a document from an earlier
+      // release (#548): one guarded full load of the page being navigated to
+      // gets the current one. Rethrown either way, so `lazy()` and the route's
+      // error boundary see the failure while the reload is under way — or for
+      // good, when the guard refuses it.
+      if (purpose !== "prefetch") {
+        recoverFromChunkLoadError(error, { source: purpose });
+      }
+      throw error;
+    })
+    .then(async (mod) => {
+      const isNew = !viewModules.has(name);
+      viewModules.set(name, mod);
 
-    // Notify on first registration so a `Route` that rendered before its
-    // module arrived re-reads it — otherwise a hard load could suspend into
-    // a `null` fallback while the view's `Loading` export sits in the module.
-    //
-    // Before the dictionary await, not after: this exists to surface the view's
-    // `Loading` export the moment it lands, and holding it behind a network
-    // fetch would put back the very `null` flash it removes.
-    //
-    // On a cold load this fires at the worst possible moment — the boundary it
-    // wakes is still suspended on the very `lazy()` this module is resolving,
-    // and an update there costs the boundary its server HTML. Wrapping it in a
-    // transition does not help (`hydrationBlank.test.tsx` pins that); what
-    // makes it harmless is `initialViewModulesReady`, which puts the initial
-    // route's modules in the registry before anything subscribes to it.
-    if (isNew) {
-      for (const listener of viewModuleListeners) listener();
-    }
+      // Notify on first registration so a `Route` that rendered before its
+      // module arrived re-reads it — otherwise a hard load could suspend into
+      // a `null` fallback while the view's `Loading` export sits in the module.
+      //
+      // Before the dictionary await, not after: this exists to surface the view's
+      // `Loading` export the moment it lands, and holding it behind a network
+      // fetch would put back the very `null` flash it removes.
+      //
+      // On a cold load this fires at the worst possible moment — the boundary it
+      // wakes is still suspended on the very `lazy()` this module is resolving,
+      // and an update there costs the boundary its server HTML. Wrapping it in a
+      // transition does not help (`hydrationBlank.test.tsx` pins that); what
+      // makes it harmless is `initialViewModulesReady`, which puts the initial
+      // route's modules in the registry before anything subscribes to it.
+      if (isNew) {
+        for (const listener of viewModuleListeners) listener();
+      }
 
-    // The single choke point every view chunk passes through — prefetch,
-    // navigation and hydration alike — so it is where a view's dictionaries get
-    // warmed. Awaited before the module is handed back, which folds the
-    // dictionary fetch into the loading state the route already shows instead
-    // of letting the view render and suspend a beat later.
-    await preloadDictionaries(currentLocale(), mark);
+      // The single choke point every view chunk passes through — prefetch,
+      // navigation and hydration alike — so it is where a view's dictionaries get
+      // warmed. Awaited before the module is handed back, which folds the
+      // dictionary fetch into the loading state the route already shows instead
+      // of letting the view render and suspend a beat later.
+      await preloadDictionaries(currentLocale(), mark);
 
-    return mod;
-  });
+      return mod;
+    });
 }
 
 function currentLocale(): string {
@@ -163,7 +187,7 @@ export const initialViewModulesReady: Promise<unknown> =
     ? Promise.race([
         Promise.all(
           initialViewNames(window.__GEMI_DATA__).map((name) =>
-            loadViewModule(name).catch(() => null),
+            loadViewModule(name, "hydration").catch(() => null),
           ),
         ),
         new Promise((resolve) =>

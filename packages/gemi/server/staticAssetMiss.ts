@@ -1,4 +1,5 @@
 import { isReservedAssetPath, RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
+import { chunkReloadStubScript } from "../client/chunkLoadRecovery";
 
 /**
  * A JavaScript module under `/assets/` — the only shape a client build chunk
@@ -47,10 +48,17 @@ export { isReservedAssetPath };
  * plain-http origin the bare identifier is not defined at all and reading it
  * threw a `ReferenceError` before the reload below could run — the recovery
  * failing exactly where it was needed.
+ *
+ * The reload is guarded by the same `sessionStorage` marker the client
+ * router's chunk recovery uses (`client/chunkLoadRecovery.ts`), so the stub
+ * and the router together reload once per cooldown. A chunk that is still
+ * missing after that reload makes the stub throw a chunk-load error instead —
+ * the importing `import()` rejects and the route's error boundary shows,
+ * where an unguarded reload used to loop.
  */
 export function staticAssetMiss(pathname: string): Response | undefined {
   if (isBuildChunkPath(pathname)) {
-    return new Response(`window.location.reload();export {}`, {
+    return new Response(chunkReloadStubScript(pathname), {
       headers: {
         "Content-Type": "application/javascript",
         "Cache-Control": "no-store",

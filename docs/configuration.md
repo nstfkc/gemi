@@ -43,6 +43,7 @@ interface GemiConfig {
 - **`vite.plugins`** are appended to gemi's own Vite plugins for both the client bundle and the SSR view bundle. Any other key under `vite` is treated as a standard Vite `UserConfig` field and merged on top of gemi's base config.
 - **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
 - **`assetBase`** serves the client build from somewhere other than the app's own `/assets/` — see [Asset base](#asset-base).
+- **`previousAssets`** keeps serving earlier releases' chunks after a deploy — see [Missing chunks after a deploy](#missing-chunks-after-a-deploy).
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
@@ -148,11 +149,60 @@ The base applies to `gemi build` only. `gemi dev` serves modules from Vite's dev
 
 ### Missing chunks after a deploy
 
-A request for a JavaScript chunk under `/assets/` that is not in `dist/client` is answered with a tiny module that reloads the page, rather than a 404: it is almost always a document from the previous release asking for its own chunk, and reloading gets it this release's document. The stub is sent with `Cache-Control: no-store` so no browser or edge keeps it once the real chunk is back. Any other miss under `/assets/` — a source map, a stylesheet, an image, a font — is a plain 404, and a `.js` path outside `/assets/` goes to your routes like any other request.
+A tab opened before a deploy keeps running the old release's JavaScript, and its next lazy `import()` — a client-side navigation to a view it has not loaded yet — asks for a chunk by the old release's hashed name. Three things keep that from breaking the page.
+
+**Keep the previous release's assets** (opt-in). With `previousAssets` set, `gemi build` copies the outgoing release's files from the previous `dist/client/assets` into the new build, so the server answers both releases' chunks:
+
+```typescript
+// gemi.config.ts
+export default defineConfig({
+  previousAssets: true, // or { releases: 2, maxAge: 7 * 24 * 60 * 60 }
+});
+```
+
+Hashed filenames never collide across releases, so the files sit side by side under `/assets/`. `gemi build` records in `dist/client/.vite/previous-assets.json` which files belong to which earlier release, and drops a release once it was replaced more than `maxAge` seconds ago (default 7 days) or is more than `releases` deploys back (default 2). The age is checked when the next build runs. Nothing changes at runtime.
+
+The previous build is read from `dist/client` by default, which only exists when you build where the last build ran. A container build starts from a clean tree, so point `GEMI_PREVIOUS_ASSETS` (or `previousAssets.from`) at the previous image's `dist/client`. Setting the variable turns the feature on by itself. A directory that does not exist is skipped with a notice, so the first deploy needs nothing special:
+
+```dockerfile
+# The image currently in production; any image works for the first deploy.
+ARG PREVIOUS_IMAGE=oven/bun:1-slim
+FROM ${PREVIOUS_IMAGE} AS previous
+
+FROM base AS build
+# ...
+RUN --mount=type=bind,from=previous,source=/,target=/previous \
+    GEMI_PREVIOUS_ASSETS=/previous/usr/src/app/dist/client bun run build
+```
+
+with `--build-arg PREVIOUS_IMAGE=<registry>/<app>:<previous tag>` on the deploy's `docker build`. Two things to check in the deploy: the path inside the previous image matches where your `dist/client` lands, and nothing purges or prunes `/assets/*` on deploy. A CDN purge of `/assets/*` is harmless once the origin keeps the old files, but it is also unnecessary, since every file there is immutable.
+
+**Reload once when a chunk will not load.** When a view chunk fails to load during a client-side navigation or hydration, the router does one full load of the URL it was going to, which gets that page from the current release. The same happens for a failed lazy `import()` in your own code that goes through Vite's preload helper (`vite:preloadError`). Only load failures count (`Failed to fetch dynamically imported module`, Safari's `Importing a module script failed`, and the like); a view that loads and throws goes to its error boundary as before. A failed prefetch does not reload anything.
+
+The reload is guarded so it cannot loop. A `sessionStorage` marker (`gemi:chunk-reload`) records when it happened, and a second failure within 30 seconds is left to the route's error boundary. Nothing reloads when the browser is offline or when `sessionStorage` cannot be used, since the guard could not survive the reload. To report the failure, veto the reload (for example when a form has unsaved input) or change the cooldown, pass `chunkLoadRecovery` to `init`:
+
+```typescript
+// app/client.tsx
+import { init } from "gemi/client";
+
+init(RootLayout, {
+  chunkLoadRecovery: {
+    cooldownMs: 60_000,
+    onChunkLoadError: ({ error, url, source, blocked }) => {
+      reportError(error, { url, source, blocked });
+      if (hasUnsavedChanges()) return false; // skip the reload
+    },
+  },
+});
+```
+
+`blocked` is `"cooldown"`, `"offline"`, `"storage"` or `null` (about to reload). `chunkLoadRecovery: false` turns the recovery off. An error boundary of your own can call `recoverFromChunkLoadError(error)` from `gemi/client`; it reloads under the same guard and returns `false` for anything that is not a chunk failure. `isChunkLoadError(error)` tests without reloading.
+
+**A stand-in for a missing chunk.** A request for a JavaScript chunk under `/assets/` that is not in `dist/client` is answered with a tiny module rather than a 404. It reloads the page under the same guard. Within the cooldown, it throws a chunk-load error instead, so the page's recovery and error boundary see the failure rather than a reload loop. The stub is sent with `Cache-Control: no-store`, so no browser or edge keeps it once the real chunk is back. Any other miss under `/assets/`, such as a source map, a stylesheet, an image or a font, is a plain 404, and a `.js` path outside `/assets/` goes to your routes like any other request.
 
 Every path under `/assets/` is answered from `dist/client`, whatever its extension, and never reaches your routes (global middleware still runs in front of it): the router refuses to mount a route there, so there is nothing of yours to answer it. Outside `/assets/`, a root-level public file (`/favicon.ico`, `/robots.txt`, `/fonts/brand.woff2`, …) is served when its extension is one of `png`, `jpg`, `jpeg`, `gif`, `svg`, `avif`, `webp`, `ico`, `css`, `js`, `mjs`, `map`, `txt`, `xml`, `webmanifest`, `woff`, `woff2`, `ttf`, `otf`, `webm`, `mp4`, `mp3` or `pdf`, and goes to your routes when no such file exists. `.json` is not on that list, because `/<path>.json` is how the client router fetches a view's data. The one exception is `/manifest.json`: it is served when your build has one (a PWA manifest in `public/`), and goes to your routes when it does not.
 
-**This recovery does not apply once you set an asset base.** With a base, every chunk URL in the document points at the CDN, so a missing chunk is a request the origin never sees and the CDN answers with its own 404 — the lazy `import()` rejects and the page stays broken where it stood. Keep the last few releases' `assets/` on the CDN rather than pruning on deploy, which is what the immutable, content-hashed filenames are for.
+**The stand-in and `previousAssets` do not apply once you set an asset base.** With a base, every chunk URL in the document points at the CDN, so a missing chunk is a request the origin never sees and the CDN answers with its own 404 — the lazy `import()` rejects and the page stays broken where it stood. Keep the last few releases' `assets/` on the CDN rather than pruning on deploy, which is what the immutable, content-hashed filenames are for. The router's reload still applies.
 
 ## Environment variables & `.env`
 
