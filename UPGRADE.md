@@ -1,5 +1,27 @@
 # Unreleased
 
+## `EMAIL_DEBUG` records the envelope; sends use the filtered recipients (#672)
+
+**`EMAIL_DEBUG=true` writes a JSON sidecar.** Next to each
+`.debug/emails/<iso><subject>.html`, `Email.send` now writes
+`<iso><subject>.json` with `to`, `cc`, `bcc`, `from`, `subject`, `headers`,
+`attachments` (`{ filename, bytes }`, no contents), `scheduledAt`, `locale` and
+`text`. The HTML path and contents are unchanged, so existing readers keep
+working; a test can now read the sidecar to check who a mail went to. Readers
+that list the directory and expect only `.html` files should filter by
+extension.
+
+**Subjects are sanitised in debug filenames.** `/`, `\` and control characters
+become `_`, so `"Invoice 2026/10"` writes `…Invoice 2026_10.html` instead of a
+subdirectory (or failing).
+
+**The driver receives the filtered `to`.** `filterRecipients` used to only
+decide whether to send: if it returned anything, the driver was handed the
+original `to`, so a filter that dropped or rewrote some addresses had no effect
+on the others. The driver now gets the list the filter returns, as the docs
+always said. Check your `filterRecipients` if it was written to return a
+placeholder (anything non-empty) rather than the real list.
+
 ## Breaking: refusals are objects `{ kind, message, status }` (#673)
 
 **Breaking change.** Every refusal's `error` is now an object. Before, most were
