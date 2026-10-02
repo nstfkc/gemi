@@ -68,6 +68,10 @@ const FONT = "wOF2-font-bytes";
 const GIF = "GIF89a-bytes";
 const JSON_ASSET = '{"answer":42}';
 const MANIFEST = '{"name":"app"}';
+// Public files whose extensions no allowlist ever named (#583).
+const VIDEO = "0123456789-mp4-bytes";
+const WASM = "\0asm-bytes";
+const CSV = "a,b\n1,2\n";
 
 let projectDir: string;
 let app: App;
@@ -89,6 +93,15 @@ beforeAll(async () => {
   await writeFile(join(dist, "client/fonts/brand.woff2"), FONT);
   await writeFile(join(dist, "client/assets/my font-abc123.woff2"), FONT);
   await writeFile(join(dist, "client/manifest.json"), MANIFEST);
+  await writeFile(join(dist, "client/loopVideo.mp4"), VIDEO);
+  await writeFile(join(dist, "client/module.wasm"), WASM);
+  await mkdir(join(dist, "client/v2/data"), { recursive: true });
+  await writeFile(join(dist, "client/v2/data/report.csv"), CSV);
+  await writeFile(join(dist, "client/notes.unknownext"), CSV);
+  // Dotfiles copied in from `public/` are never served.
+  await writeFile(join(dist, "client/.env"), "SECRET=1");
+  await mkdir(join(dist, "client/.hidden"), { recursive: true });
+  await writeFile(join(dist, "client/.hidden/file.txt"), "hidden");
   // Outside `dist/client`: what a traversal out of it would reach.
   await writeFile(join(dist, "secret.txt"), "secret");
   app = new App({ kernel: AppKernel });
@@ -212,9 +225,8 @@ describe("httpProd's static handler", () => {
     fetchSpy.mockRestore();
   });
 
-  // `woff2` and `gif` are on the root-level extension list as well, so the
-  // JSON here and the misses below are what hold `/assets` to being a file
-  // whatever its extension.
+  // The misses below are what hold `/assets` to being answered from
+  // `dist/client` whatever its extension.
   test.each([
     ["/assets/font-abc123.woff2", FONT],
     ["/assets/spinner-abc123.gif", GIF],
@@ -256,7 +268,7 @@ describe("httpProd's static handler", () => {
     expect(await res.text()).toContain("window.location.reload()");
   });
 
-  test("serves a font outside /assets by its extension", async () => {
+  test("serves a font outside /assets because the file exists", async () => {
     const res = await get("/fonts/brand.woff2", THROUGH_FRONT_DOOR);
 
     expect(res.status).toBe(200);
@@ -274,7 +286,11 @@ describe("httpProd's static handler", () => {
   test("never serves a file outside dist/client through an encoded separator", async () => {
     // `%2F` is not a separator to the URL parser, so its `..` normalization
     // leaves these alone; decoded, they climb out of `dist/client`.
-    for (const path of ["/assets/..%2F..%2Fsecret.txt", "/..%2Fsecret.txt", "/assets/%E0%A4%A.txt"]) {
+    for (const path of [
+      "/assets/..%2F..%2Fsecret.txt",
+      "/..%2Fsecret.txt",
+      "/assets/%E0%A4%A.txt",
+    ]) {
       const res = await get(path, THROUGH_FRONT_DOOR);
       expect(await res.text(), path).not.toBe("secret");
     }
@@ -303,5 +319,60 @@ describe("httpProd's static handler", () => {
     await get("/dashboard.json", THROUGH_FRONT_DOOR);
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["/loopVideo.mp4", VIDEO, "video/mp4"],
+    ["/module.wasm", WASM, "application/wasm"],
+    ["/v2/data/report.csv", CSV, "text/csv"],
+    ["/notes.unknownext", CSV, "application/octet-stream"],
+  ])("serves public file %s whatever its extension (#583)", async (path, body, type) => {
+    const res = await get(path, THROUGH_FRONT_DOOR);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(body);
+    expect(res.headers.get("Content-Type")?.startsWith(type), path).toBe(true);
+    expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("answers a byte range of a public video with a 206", async () => {
+    const res = await get("/loopVideo.mp4", { ...THROUGH_FRONT_DOOR, Range: "bytes=0-3" });
+
+    expect(res.status).toBe(206);
+    expect(await res.text()).toBe(VIDEO.slice(0, 4));
+    expect(res.headers.get("Content-Range")).toBe(`bytes 0-3/${VIDEO.length}`);
+    expect(res.headers.get("Content-Length")).toBe("4");
+
+    // A window that does not start at 0, so a second slice on top of this
+    // one (Bun's own range handling) would show.
+    const middle = await get("/loopVideo.mp4", { ...THROUGH_FRONT_DOOR, Range: "bytes=4-7" });
+    expect(middle.status).toBe(206);
+    expect(await middle.text()).toBe(VIDEO.slice(4, 8));
+
+    const suffix = await get("/loopVideo.mp4", { ...THROUGH_FRONT_DOOR, Range: "bytes=-5" });
+    expect(suffix.status).toBe(206);
+    expect(await suffix.text()).toBe(VIDEO.slice(-5));
+  });
+
+  test("answers an unsatisfiable range with a 416", async () => {
+    const res = await get("/loopVideo.mp4", { ...THROUGH_FRONT_DOOR, Range: "bytes=999-" });
+
+    expect(res.status).toBe(416);
+    expect(res.headers.get("Content-Range")).toBe(`bytes */${VIDEO.length}`);
+  });
+
+  test("never serves a dotfile, and hands a missing public path to the app", async () => {
+    for (const [path, content] of [
+      ["/.env", "SECRET=1"],
+      ["/.hidden/file.txt", "hidden"],
+      ["/.vite/manifest.json", "{}"],
+      ["/gone.mp4", null],
+    ]) {
+      fetchSpy.mockClear();
+      const res = await get(path!, THROUGH_FRONT_DOOR);
+      expect(await res.text(), path!).not.toBe(content);
+      expect(fetchSpy, path!).toHaveBeenCalledTimes(1);
+    }
   });
 });

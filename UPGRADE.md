@@ -62,6 +62,31 @@ now reports its message instead of the status text. Agent routes' own errors
 (`{ code, message }`) and run errors (`AgentRunFailure`) are unchanged. A route
 tool's refusal shown to the model includes the new fields.
 
+## Behaviour change: every file in `public/` is served, whatever its extension (#583)
+
+`gemi start` used to decide whether a root-level path was a static file from a
+fixed extension list. A `public/` file the list missed (`.wasm`, `.csv`,
+`.wav`, `.mov`, `.zip` …, and `.mp4`/`.webm` before 0.63) never reached the
+static handler: the router answered it, usually with a locale redirect and a
+rendered 404 page.
+
+The server now reads the files the build copied into `dist/client` once at
+boot, and serves a request whose path names one of them exactly — any
+extension, any depth. `/assets/*` and `/.well-known/*` are unchanged.
+
+- **A public file wins over a route with the same path.** A view's data URL
+  is `/<path>.json`, so a `public/pricing.json` now answers `/pricing.json`
+  instead of the `/pricing` view's data (this already held for
+  `public/manifest.json`). Rename the file if you ship one like that.
+- **Names starting with a dot are never served** (`.DS_Store`, `.env`, and
+  everything under a dot-directory), except `/.well-known/*` as before.
+- **Byte ranges.** Static files answer a single `Range` with a `206` (and an
+  unsatisfiable one with a `416`), so a `<video>` pointed at a public `.mp4`
+  can seek. A controller that streamed public videos only to get this can be
+  deleted.
+- **Files written into `dist/client` after the server started** are not served
+  outside `/assets` until the next restart.
+
 # Upgrading from 0.84.0 to 0.84.1
 
 ## Azure attachments upload with purpose `assistants` (#682)
