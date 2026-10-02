@@ -291,8 +291,9 @@ describe("a provider error", () => {
 
     expect(result.finishReason).toBe("error");
     expect(events.find((event) => event.type === "error")).toMatchObject({
-      error: { code: "content_filtered", message: "blocked" },
+      error: { code: "content_filtered" },
     });
+    expect(result.error).toMatchObject({ code: "content_filtered", message: "blocked" });
     // The tokens were still spent, so they are still counted.
     expect(result.usage).toEqual(usage(10, 5));
   });
@@ -352,9 +353,10 @@ describe("a tool call", () => {
     const agent = Agent.create({ name: "coder", provider, tools: [boom] });
     const result = await agent.stream({ messages: [] }).result();
 
+    // The exception's own text is logged, not shown (#446). See redact.test.ts.
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
       status: "error",
-      error: { code: "tool_error", message: "disk on fire" },
+      error: { code: "tool_error", message: 'The tool "boom" failed with an unexpected error.' },
     });
     expect(result.finishReason).toBe("stop");
   });
