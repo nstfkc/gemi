@@ -32,6 +32,9 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
       .join("?");
     const newReq = new Request(`${origin}/${pathnameWithSearch}`, {
       headers: req.headers,
+      // The page request's: a client that leaves mid-render aborts the
+      // queries the render started, as `req.signal` documents.
+      signal: req.signal,
     });
     const domain = requestDomain(req);
     if (domain) {

@@ -141,6 +141,24 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
   }
 
   /**
+   * Aborts when the client goes away before the response is sent: the
+   * browser closed the connection, or `useQuery` gave up on a request nobody
+   * renders any more (#659). Hand it to slow work — a model call, an upstream
+   * `fetch` — so it stops instead of running to completion for no one:
+   *
+   * ```ts
+   * const reply = await fetch(upstream, { signal: req.signal });
+   * if (req.signal.aborted) return null;
+   * ```
+   *
+   * During a server render, an in-process query shares the page request's
+   * signal.
+   */
+  get signal(): AbortSignal {
+    return this.rawRequest.signal;
+  }
+
+  /**
    * The parsed `Range` header, or `null` when absent or unusable. Pass it to
    * `FileStorage.read(name, { range })` to range explicitly; inside a
    * `this.stream()` route `read()` already picks it up on its own.

@@ -2239,6 +2239,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `req.headers` | read-only `Headers` | Request headers. `req.headers.get("User-Agent")`. |
 | `req.rawRequest` | `Request` | The underlying Fetch API `Request` (method, url, body, etc.). |
 | `req.routePath` | `string` | The matched route pattern. |
+| `req.signal` | `AbortSignal` | Aborts when the client goes away before the response is sent — a closed tab, or a `useQuery` request nobody renders any more. Pass it to slow work (`fetch(url, { signal: req.signal })`, a model call) so it stops early. |
 | `await req.input()` | `Promise<Input<Body>>` | Parses **and validates** the request body — see below. |
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
 | `req.locale()` | `string` | The resolved request locale. |
@@ -3487,6 +3488,26 @@ query cancels a pending retry. When the browser comes back `online`, a query
 whose last failure its policy would retry is fetched again, silently, with a
 fresh run of retries. `revalidateOnFocus` and `refetch()` fetch a failed query
 like any other.
+
+### Abandoned requests are aborted
+
+When the last mounted reader of a variant lets go of it — its `search` or
+`params` changed again before the answer landed, or the component unmounted —
+the request still on the wire is aborted. The abort is not a failure: no
+`error` is stored, the retry policy never sees it, whatever data was cached
+stays, and the variant simply fetches again the next time something reads it.
+A variant another component still renders is never aborted, and neither is a
+request nobody had mounted yet (a hover `prefetch()`).
+
+The server sees the disconnect on `req.signal`, so a slow handler can stop:
+
+```ts
+// app/http/controllers/SuggestionController.ts
+async next(req: HttpRequest) {
+  const res = await fetch(MODEL_URL, { method: "POST", body, signal: req.signal });
+  return await res.json();
+}
+```
 
 ### App-wide defaults: `queryConfig`
 

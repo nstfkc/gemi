@@ -444,6 +444,23 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     );
   }
 
+  // While a `keepPreviousData` variant change is pending, the variant loading
+  // in the background has no subscription yet — only the visible one does.
+  // Hold it too, so that when `search`/`params` change again before it lands,
+  // letting go of it aborts its request (#659) instead of leaving it to run
+  // to completion for nobody. Seeded like the render-path lookup, since this
+  // may be the first `getResource` for the new path.
+  useEffect(() => {
+    if (!isDeferred) return;
+    const targetSeed =
+      configRef.current.fallbackData != null
+        ? { [currentVariantKey]: configRef.current.fallbackData }
+        : prefetchedData?.[currentPath];
+    return getResource(currentPath, targetSeed ?? undefined).retain(
+      currentVariantKey,
+    );
+  }, [isDeferred, getResource, currentPath, currentVariantKey, prefetchedData]);
+
   // Mount / variant-change revalidation — unchanged semantics: `getVariant`
   // fetches when the variant is missing or stale, and now joins an in-flight
   // render-initiated read instead of racing it.
