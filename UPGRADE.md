@@ -1,5 +1,23 @@
 # Unreleased
 
+## `useQuery` aborts requests nobody renders; controllers get `req.signal` (#659)
+
+**Behaviour change.** When the last mounted reader of a query variant lets go
+of it (its `search`/`params` changed again before the answer landed, or it
+unmounted), the request still on the wire is now aborted instead of running to
+completion and landing in the cache. This covers the `keepPreviousData`
+pending variant under suspense too. The abort is silent: no `error`, no
+retry, cached data untouched. A variant another component still renders, and a
+request no reader had mounted (a hover `prefetch()`), are never aborted.
+
+What you may notice: going back to a variant whose request was aborted fetches
+it again rather than finding it cached.
+
+**New: `req.signal`** on `HttpRequest` is the incoming request's `AbortSignal`;
+it fires when the client disconnects (and, during a server render, when the
+page request does). Pass it to slow work such as model calls or upstream
+`fetch`es so they stop early. No action required.
+
 ## `this.proxy(...)` takes `.middleware()` (#7)
 
 A proxy route could not carry middleware of its own: `createFlatApiRoutes`

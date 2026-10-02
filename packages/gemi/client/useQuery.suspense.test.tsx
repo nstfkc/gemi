@@ -216,9 +216,12 @@ describe("useQuery with suspense (the default)", () => {
     // "" is cached but "page=2" is not — the query must not be fooled by the
     // sibling variant.
     expect(screen.queryByText("suspense-fallback")).not.toBeNull();
-    expect(net.fetchMock).toHaveBeenCalledWith("/api/todos?page=2", {
-      cache: "default",
-    });
+    expect(net.fetchMock).toHaveBeenCalledWith(
+      "/api/todos?page=2",
+      expect.objectContaining({
+        cache: "default",
+      }),
+    );
 
     await net.resolve([{ id: 2 }]);
     expect(screen.queryByText("items:1")).not.toBeNull();
@@ -321,9 +324,12 @@ describe("keepPreviousData under suspense", () => {
     expect(screen.queryByText("suspense-fallback")).toBeNull();
     expect(screen.queryByText("ids:1 loading:true")).not.toBeNull();
     // The new variant's request went on the wire immediately.
-    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/todos?page=2", {
-      cache: "default",
-    });
+    expect(net.fetchMock).toHaveBeenLastCalledWith(
+      "/api/todos?page=2",
+      expect.objectContaining({
+        cache: "default",
+      }),
+    );
 
     await net.resolve([{ id: 2 }]);
 
@@ -363,9 +369,12 @@ describe("keepPreviousData under suspense", () => {
 
     // First mount is unchanged: suspend into the fallback.
     expect(screen.queryByText("suspense-fallback")).not.toBeNull();
-    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/lists/1/todos", {
-      cache: "default",
-    });
+    expect(net.fetchMock).toHaveBeenLastCalledWith(
+      "/api/lists/1/todos",
+      expect.objectContaining({
+        cache: "default",
+      }),
+    );
     await net.resolve([{ id: 1 }]);
     expect(screen.queryByText("ids:1 loading:false")).not.toBeNull();
 
@@ -378,9 +387,12 @@ describe("keepPreviousData under suspense", () => {
     // the new resource's request went on the wire immediately.
     expect(screen.queryByText("suspense-fallback")).toBeNull();
     expect(screen.queryByText("ids:1 loading:true")).not.toBeNull();
-    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/lists/2/todos", {
-      cache: "default",
-    });
+    expect(net.fetchMock).toHaveBeenLastCalledWith(
+      "/api/lists/2/todos",
+      expect.objectContaining({
+        cache: "default",
+      }),
+    );
 
     await net.resolve([{ id: 2 }]);
 
