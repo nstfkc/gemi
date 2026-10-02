@@ -1,5 +1,34 @@
 # Unreleased
 
+## Request bodies: `Content-Type` is read by media type; bad JSON is a 400 (#699, #700)
+
+**Behaviour change (bug fix).** `req.input()` and `req.safeInput()` used to read
+a JSON body only when `Content-Type` was exactly `application/json`. It now
+compares the media type case-insensitively and ignores parameters, so
+`application/json; charset=utf-8` (the default of many HTTP clients) and
+`Application/JSON` are read, and so is any `+json` type such as
+`application/vnd.api+json` or `application/merge-patch+json`. Such a request
+used to reach your handler with an empty body.
+
+The same applies to forms: `application/x-www-form-urlencoded; charset=UTF-8`
+is read, and a urlencoded body is now turned into its fields (repeated keys as
+an array), as multipart already was. Before, `input.get(...)` on a urlencoded
+body always answered `undefined`.
+
+A JSON body that is empty (or only whitespace) is no body and reads as `{}`,
+like a request without one; a `required` rule then reports the missing field
+as a validation error. A body that is not valid JSON, or is JSON but not an
+object (`null`, `42`, `"text"`), or a form that cannot be parsed, is answered
+with a 400 refusal instead of a 500:
+
+```json
+{ "error": { "kind": "form_error", "message": "The request body is not valid JSON.", "status": 400 } }
+```
+
+`safeInput()` throws that refusal too, rather than reporting it as a field
+error. Nothing to change unless you relied on a charset-carrying JSON body
+being ignored, or caught the 500.
+
 ## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
 
 **Behaviour change.** `AgentMessage.usage` was typed but the server never set

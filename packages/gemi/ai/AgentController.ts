@@ -2,6 +2,7 @@ import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
 import { RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
+import { mediaType } from "../http/mediaType";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import {
@@ -1738,10 +1739,10 @@ type ParsedBody = {
 /**
  * The body, as JSON — or a reason it is not.
  *
- * Read off the raw request rather than through `req.input()`: that path matches
- * `Content-Type` exactly, so `application/json; charset=utf-8` — which several
- * HTTP clients send by default — parses as an empty body, and an agent turn
- * that silently loses its text is a bad way to find that out.
+ * Read off the raw request rather than through `req.input()`: that path also
+ * accepts `+json` types and answers its failures as a thrown refusal, while
+ * these routes are held to `application/json` alone (below) and answer with
+ * a `{ code, message }` body of their own.
  *
  * Matching the type by prefix is not the same as ignoring it. A body that
  * arrives as anything other than `application/json` is a 415, and the reason
@@ -1824,9 +1825,7 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
  * sending as `text/plain`.
  */
 function isJsonContentType(value: string | null): boolean {
-  if (typeof value !== "string") return false;
-  const [type] = value.split(";", 1);
-  return type.trim().toLowerCase() === "application/json";
+  return mediaType(value) === "application/json";
 }
 
 function invalidRequest(parsed: ParsedBody): Response {
