@@ -25,8 +25,8 @@ import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
-  consumeNestedRun,
-  consumePendingCall,
+  spendNestedRun,
+  spendPendingCall,
   readSignature,
   signNestedRun,
   signPendingCall,
@@ -43,6 +43,7 @@ import type {
 } from "./store/Attachments";
 import { ATTACHMENT_ID_PREFIX, InvalidAttachmentScopeError } from "./store/Attachments";
 import { httpErrorDetail } from "./providers/errors";
+import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -1166,6 +1167,16 @@ interface AgentStreamParamsBase {
    */
   redactError?: ErrorRedactor;
   /**
+   * Where the nonces of answered pending calls and re-entered sub-run records
+   * are spent, which is what makes a signed answer single-use (#445). Default
+   * the process-wide `MemoryNonceStore`: exact for one instance, but with
+   * several each would accept a replayed answer once. Give a shared store
+   * (`RedisNonceStore`, or your own `NonceStore`) when running more than one.
+   * `AgentController` sets this from its `nonces`. Handed down unchanged to a
+   * sub-run.
+   */
+  nonces?: NonceStore;
+  /**
    * The attachment handle every tool of this run is given as `ctx.attachments`.
    *
    * Resolved by the controller from the request — `attachmentsFor(req,
@@ -1718,7 +1729,7 @@ function seedOf(params: RunAgentParams): string | null {
  * carries an `attachmentId` too. `historyForProvider` keys its window on this
  * and `toolTurn` steps over these when it looks for the user's turn.
  */
-function injectedMessageIds(messages: AgentMessage[]): Set<string> {
+export function injectedMessageIds(messages: AgentMessage[]): Set<string> {
   const injected = new Set<string>();
   for (const message of messages) {
     for (const part of message.content) {
@@ -2564,6 +2575,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           };
           break;
         }
+        case "file-rejected": {
+          this.markFileRejected(event.fileId, event.message, httpErrorDetail(event));
+          break;
+        }
       }
     }
 
@@ -3173,6 +3188,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       threadId: this.params.threadId,
       // The same caller is reading, so the same rules for what it is told.
       redactError: this.params.redactError,
+      // The same store, so a sub-run's answers are single-use across every
+      // instance exactly as the parent's are.
+      nonces: this.params.nonces,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3900,7 +3918,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             // would run it once per replay. Once per record per turn — the
             // sub-run may have asked two things at once, and every answer to
             // it re-enters the same tool a single time.
-            if (!consumeNestedRun(parked.signature)) {
+            if (!(await this.spend(spendNestedRun, parked.signature))) {
               reject(
                 `The answer for "${answer.toolCallId}" is addressed under "${host}", which has already been re-entered on that record. Ask again.`,
               );
@@ -4183,6 +4201,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * opposite: the answer was good, the tool ran, and it is now waiting on a
    * question of its own, so the call must stay open *without* being denied.
    */
+  /**
+   * Spends a token's nonce in the run's `NonceStore`. A store that throws (its
+   * Redis is down, say) is logged and counted as spent: the answer is refused
+   * and the user asked again, rather than acted on unchecked.
+   */
+  private async spend(
+    spendIn: (signature: string, store: NonceStore) => Promise<boolean>,
+    signature: string,
+  ): Promise<boolean> {
+    try {
+      return await spendIn(signature, this.params.nonces ?? defaultNonceStore);
+    } catch (error) {
+      this.writeLog(`[gemi/ai] agent "${this.config.name}" could not spend a nonce`, { error });
+      return false;
+    }
+  }
+
   private async resolveAnswer(
     entry: { message: AgentMessage; call: ToolCallPart },
     answer: ClientToolResult,
@@ -4246,7 +4281,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // approves the same call every time it is presented — the client rewinds to
     // the history from before the result existed and replays, and the human who
     // approved once has approved forever.
-    if (!consumePendingCall(answer.signature)) {
+    if (!(await this.spend(spendPendingCall, answer.signature))) {
       return reject(`The answer for "${name}" has already been used. Ask again.`);
     }
 
@@ -4352,6 +4387,65 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     message.content.push(result);
     this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
+  }
+
+  /**
+   * The provider refused a stored file and the call went ahead without it
+   * (#684). Every part holding that id is marked `providerRejected`, so the
+   * next request sends a note in its place rather than an id that fails the
+   * request again — the history is sent whole on every turn, and without the
+   * mark one dead file costs every later turn a refused request.
+   *
+   * Persisted the way a late tool result is: a message from an earlier run is
+   * amended (cloned, then reported and returned in `result()`), and one this
+   * run made is changed in place and reported again. Either way the store
+   * sees the same id with new content, which its contract says to upsert.
+   * The part is replaced rather than written to, because the original object
+   * may still be the caller's.
+   *
+   * Logged as a warning, not an error: the run goes on, and the model is told
+   * the file could not be read, so the user hears about it in the answer. The
+   * log is for whoever has to work out why a file stopped being readable.
+   */
+  private markFileRejected(
+    fileId: string,
+    reason: string,
+    detail: { status?: number; requestId?: string },
+  ): void {
+    for (const original of this.history) {
+      const hit = original.content.some(
+        (part) => part.type === "file" && part.fileId === fileId && !part.providerRejected,
+      );
+      if (!hit) continue;
+      const message = this.produced.includes(original) ? original : this.amend(original);
+      message.content = message.content.map((part) =>
+        part.type === "file" && part.fileId === fileId && !part.providerRejected
+          ? { ...part, providerRejected: true as const }
+          : part,
+      );
+      // The message being built by this step is reported when it is finalized;
+      // queueing it here as well would report it before it is finished.
+      if (message !== this.current) this.unreported.add(message);
+    }
+    if (!this.config.logErrors) return;
+    const message = `[gemi/ai] agent "${this.config.name}": the provider refused file ${fileId}${
+      detail.status !== undefined ? ` (${detail.status})` : ""
+    }; it was left out of the request and will not be sent again: ${reason}`;
+    const metadata = {
+      agent: this.config.name,
+      runId: this.runId,
+      ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+      fileId,
+      ...detail,
+    };
+    let logged = false;
+    try {
+      Log.warning(message, metadata);
+      logged = true;
+    } catch {
+      // No application to resolve a logger from.
+    }
+    if (!logged || process.env.NODE_ENV === "development") console.warn(message, metadata);
   }
 
   /** The clone of an earlier run's message that this run may write to. One per

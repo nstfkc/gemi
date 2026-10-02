@@ -1,9 +1,12 @@
 import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
-import { RequestBreakerError } from "../http/Error";
+import { refusal, RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
+import { mediaType } from "../http/mediaType";
+import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
+import { injectedMessageIds } from "./Agent";
 import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
@@ -22,6 +25,20 @@ import {
   LiveRunNotFoundError,
   MemoryLiveRuns,
 } from "./store/LiveRuns";
+import {
+  defaultFileOwners,
+  type FileOwnerRecord,
+  type FileOwners,
+  MemoryFileOwners,
+} from "./store/FileOwners";
+import {
+  defaultNonceStore,
+  MemoryNonceStore,
+  type NonceRedisClient,
+  type NonceStore,
+  RedisNonceStore,
+  type RedisNonceStoreOptions,
+} from "./store/Nonces";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
@@ -92,6 +109,19 @@ export interface AgentStore {
    * keep. Calls for one run never overlap: each waits for the one before.
    */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
+  /**
+   * Delete these messages from the thread; ids it does not hold are ignored.
+   *
+   * What a threaded `regenerate` needs (#451): the server owns the history,
+   * so the answer being replaced has to leave the store, or the model reads
+   * `user: X, assistant: A, user: X` and writes a follow-up instead of a new
+   * answer. The controller calls it under the thread's lock with the last user
+   * turn and everything after it, then runs that turn again.
+   *
+   * Optional so a store written before it still compiles; without it a turn
+   * with `regenerate: true` on a thread is a 501 `regenerate_unsupported`.
+   */
+  removeMessages?(threadId: string, messageIds: string[]): Promise<void>;
 }
 
 /** The default: conversations last as long as the process. */
@@ -148,6 +178,18 @@ export {
   LiveRunNotFoundError,
   MemoryLiveRuns,
   defaultLiveRuns as liveRuns,
+};
+
+/** Who uploaded each provider file id (#443). See `store/FileOwners.ts`. */
+export { defaultFileOwners, type FileOwnerRecord, type FileOwners, MemoryFileOwners };
+/** Where answered calls' nonces are spent (#445). See `store/Nonces.ts`. */
+export {
+  defaultNonceStore,
+  MemoryNonceStore,
+  type NonceRedisClient,
+  type NonceStore,
+  RedisNonceStore,
+  type RedisNonceStoreOptions,
 };
 
 // --- controller ----------------------------------------------------------
@@ -256,7 +298,77 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
  * left on the client that had let go of it. The entry is marked rather than
  * removed, because the turn itself is what answers once its wait is over.
  */
-const pendingTurns = new Map<string, { cancelled: boolean }>();
+const pendingTurns = new Map<string, { cancelled: boolean; owner: string | null }>();
+
+// --- limits (#444) -------------------------------------------------------
+
+/** `AgentController.maxBodyBytes`'s default. */
+export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
+/** `AgentController.maxHistoryMessages`'s default. */
+export const DEFAULT_MAX_HISTORY_MESSAGES = 1000;
+/** `AgentController.maxConcurrentRuns`'s default. */
+export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+/** The cap on `attach` and `stop` bodies, which carry ids and nothing else. */
+const SMALL_BODY_BYTES = 64 * 1024;
+
+const noop = () => {};
+
+/**
+ * The runs each `runLimitKey` has going, by lane: a thread is one lane however
+ * many turns are queued or superseding on it, and a stateless turn is a lane
+ * of its own. A lane is held from the moment its turn is admitted until its
+ * last run ends.
+ */
+class RunSlots {
+  private byKey = new Map<string, Map<string, number>>();
+
+  /**
+   * Admits a turn in `lane` for `key`, or answers `null` when `key` already
+   * holds `limit` other lanes. Synchronous, so two turns arriving together
+   * cannot both see the last free slot. The function it returns frees the
+   * turn's hold; calling it twice is harmless.
+   */
+  take(key: string, lane: string, limit: number): (() => void) | null {
+    let lanes = this.byKey.get(key);
+    if (!lanes?.has(lane) && (lanes?.size ?? 0) >= limit) {
+      return null;
+    }
+    if (!lanes) {
+      lanes = new Map();
+      this.byKey.set(key, lanes);
+    }
+    lanes.set(lane, (lanes.get(lane) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.byKey.get(key);
+      const count = (current?.get(lane) ?? 1) - 1;
+      if (!current) return;
+      if (count > 0) {
+        current.set(lane, count);
+      } else {
+        current.delete(lane);
+        if (current.size === 0) this.byKey.delete(key);
+      }
+    };
+  }
+}
+
+/**
+ * Slots are counted per `liveRuns` registry rather than per process: the
+ * registry is what holds the runs being counted, and an app (or a test) with
+ * two registries has two sets of runs.
+ */
+const runSlots = new WeakMap<object, RunSlots>();
+function runSlotsFor(liveRuns: object): RunSlots {
+  let slots = runSlots.get(liveRuns);
+  if (!slots) {
+    slots = new RunSlots();
+    runSlots.set(liveRuns, slots);
+  }
+  return slots;
+}
 
 /**
  * The key that carries `Body` on the instance type.
@@ -365,6 +477,53 @@ export abstract class AgentController<
   attachmentStorage: AttachmentStorage = Storage;
 
   /**
+   * Who uploaded each provider file id (#443). `upload` records the id under
+   * `runOwner(req)`, and `stream` refuses a turn whose files name an id
+   * recorded for another owner with a 403 `{ error: { kind: "permission",
+   * message, status } }`. Defaults to the process-wide `MemoryFileOwners`; the
+   * same warning as `store` applies — assign something that outlives the
+   * request. An app with several processes, or that wants the binding to
+   * survive a restart, gives it a table (see `FileOwners`).
+   */
+  fileOwners: FileOwners = defaultFileOwners;
+
+  /**
+   * Where the nonce of each answered approval or question is spent, which is
+   * what makes a signed answer single-use (#445). On a stateless chat the
+   * client carries its history and can rewind it to before a result existed;
+   * the spent nonce is then the only thing that refuses the replayed answer.
+   *
+   * Defaults to the process-wide `MemoryNonceStore`, which is exact for one
+   * instance and forgets on restart. An app running several instances (or
+   * behind a load balancer whose affinity is best effort) assigns a shared
+   * store, built once at module scope like `store`:
+   *
+   *   const nonces = new RedisNonceStore();
+   *   class ChatController extends AgentController<typeof chat> {
+   *     nonces = nonces;
+   *   }
+   *
+   * or its own `NonceStore` over a table keyed by the nonce. In production a
+   * stateless turn served with the in-memory default logs a warning once.
+   */
+  nonces: NonceStore = defaultNonceStore;
+
+  /**
+   * Whether a turn may name a provider file id that `fileOwners` has no record
+   * of. `false` by default, which is what keeps the change additive: an id
+   * uploaded before the upgrade, before a restart (with the in-memory default),
+   * on another process, or by the app outside `upload` still works, as every id
+   * did before. An id that IS recorded for someone else is refused either way.
+   *
+   * Set it to `true` once `fileOwners` is durable and shared, to make the
+   * binding complete: then an id is usable only by the owner it was recorded
+   * for, or by anyone when it was recorded as anonymous. On a stateless chat
+   * the client carries its history, so this also refuses a file a tool attached
+   * earlier in the conversation; a strict app keeps its chats on a thread.
+   */
+  protected requireKnownFiles = false;
+
+  /**
    * How long the request that started a run is held open for its hooks, in
    * milliseconds, once the run has settled. The run itself is not bounded
    * here — the request is held for as long as it runs — only the app's code
@@ -442,6 +601,71 @@ export abstract class AgentController<
   protected requireThread = false;
 
   /**
+   * The largest JSON body `stream` reads, in bytes (#444). Default 4 MB.
+   *
+   * A turn is a few kilobytes; even a long stateless chat carrying its whole
+   * history is well under a megabyte, since files travel by id and not inline.
+   * Without a cap the route read whatever arrived (the production server
+   * accepts up to 10 GB), parsed it, and sent it to the provider at the app's
+   * expense. A body over it is refused with a 413 `{ error: { kind, message,
+   * status, code: "body_too_large" } }` before it is parsed, and before
+   * `authorizeRequest`. Checked against `Content-Length` when there is one and
+   * against the bytes read otherwise, so a chunked body cannot get past it.
+   * `attach` and `stop` carry only ids and are held to 64 KB. `Infinity` turns
+   * it off.
+   */
+  protected maxBodyBytes = DEFAULT_MAX_BODY_BYTES;
+
+  /**
+   * The most messages a stateless turn's client-carried history may hold
+   * (#444). Default 1000. A longer one is a 413 `history_too_long` before
+   * anything runs. Only `body.messages` counts: a threaded turn reads its
+   * history from the store, which the client does not write. Every message is
+   * sent to the model on every step, so this bounds what one turn can be billed
+   * for as much as `maxBodyBytes` does. `Infinity` turns it off.
+   */
+  protected maxHistoryMessages = DEFAULT_MAX_HISTORY_MESSAGES;
+
+  /**
+   * How many runs one caller may have going at once in this process (#444).
+   * Default 5. A run outlives the request that started it (so `attach` can
+   * find it), which means a client can post a turn and disconnect and the run
+   * still bills up to `maxSteps` model calls; without a cap, a thousand posts
+   * were a thousand runs.
+   *
+   * Counted per `runLimitKey` (by default `runOwner`, the authenticated user),
+   * and per conversation rather than per request: every turn on one thread is
+   * one slot, because a thread holds one run at a time and a new turn there
+   * supersedes the old one rather than adding to it. So a user resending
+   * mid-answer is never refused; a user with five chats answering at once and
+   * starting a sixth is, with a 429 `{ error: { kind: "rate_limit", message,
+   * status, code: "too_many_runs" } }`, after `authorizeRequest` and before the
+   * model is asked anything. A slot is freed when the run ends (stopped, timed
+   * out, or finished). `Infinity` turns it off.
+   */
+  protected maxConcurrentRuns = DEFAULT_MAX_CONCURRENT_RUNS;
+
+  /**
+   * Who `maxConcurrentRuns` counts a turn against (#444). The default is
+   * `runOwner`'s answer, the authenticated user; `null` is not counted.
+   *
+   * An anonymous turn is therefore not limited by default, because there is
+   * nothing sound to count it under: a client address is the proxy's unless
+   * `GEMI_TRUST_PROXY` is set, which would put every visitor in one bucket, and
+   * the session cookie is the visitor's to drop. An app that serves anonymous
+   * chats returns its own key here (`ip:${clientIp(req)}` behind a trusted
+   * proxy, say), sets `requireThread`, or puts `RateLimitMiddleware` on the
+   * route.
+   */
+  protected runLimitKey(
+    req: HttpRequest<any, any>,
+    params: { owner: string | null; threadId?: string },
+  ): string | null | Promise<string | null> {
+    void req;
+    return params.owner;
+  }
+
+  /**
    * Decides whether this caller may use this route, on every one of the four:
    * `stream`, `attach`, `stop` and `upload` (#542). Throw a request breaker
    * (`InsufficientPermissionsError`, say) to refuse; return to let it through.
@@ -475,12 +699,54 @@ export abstract class AgentController<
   }
 
   /**
+   * WHO OWNS A RUN THIS REQUEST STARTS, and who a request to `attach` or `stop`
+   * one is (#442). An opaque key, compared with `===`; `null` is nobody.
+   *
+   * `stream` records it on the run, and from then on the run answers only that
+   * key: `attach` to it, `stop` of it (by `runId`, `threadId` or `clientRunId`,
+   * including a turn still waiting its place), and a turn on its thread that
+   * would supersede it while it is still going are each refused with a 403
+   * `{ error: { kind: "permission", message, status } }` for any other caller.
+   * That holds whatever `authorizeRequest` says, which is the point: every
+   * handle on a run is one a third party can come to hold (a shared link, a
+   * log line, a guessable `clientRunId`), and none of them says whose it is.
+   *
+   * THE DEFAULT IS THE AUTHENTICATED USER, `user:<id>`, and `null` without one.
+   * A `null` owner records an unowned run, which answers whoever holds a
+   * handle — exactly what every run did before this existed. So:
+   *
+   * - an anonymous turn starts an unowned run; its `threadId` stays the
+   *   capability. `sessionId()` is not used as a fallback: it is a cookie the
+   *   visitor writes, it can be minted between the turn and the reattach (a
+   *   view visited in between), and a mismatch would lock a visitor out of
+   *   their own run. An app with its own anonymous identity returns it here.
+   * - a run started by an authenticated user cannot be read or stopped by an
+   *   anonymous request, nor by another user.
+   * - a run the server starts itself (registered on `liveRuns` with no
+   *   `owner`) is unowned.
+   *
+   * Override it for anything wider than a user — a thread shared by a team
+   * returns `team:<id>` (from the user, never from the body) — or `null` to
+   * turn the check off. Whatever it reads must be present on all of `stream`,
+   * `attach` and `stop`, the same rule `attachmentScope` states: guard the three
+   * routes with the same middleware.
+   */
+  protected runOwner(req: HttpRequest<any, any>): string | null | Promise<string | null> {
+    const user = req.ctx?.()?.user;
+    const userId = user?.id ?? user?.publicId;
+    if (userId !== undefined && userId !== null && String(userId) !== "") {
+      return `user:${String(userId)}`;
+    }
+    return null;
+  }
+
+  /**
    * `POST /<path>` — one route for every client turn. A first message, an
    * approval, an answer to a question and a client tool's result are all just
    * the next turn, so none of them gets an endpoint of its own.
    */
   async stream(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, this.maxBodyBytes);
     if (parsed.error) {
       // Before anything is registered or charged for. A run started off a body
       // we could not read would answer nothing, at the user's expense.
@@ -492,7 +758,11 @@ export abstract class AgentController<
     if (parsedTurn.error) {
       return invalidRequest({ body: {}, error: parsedTurn.error });
     }
-    const turn = parsedTurn.turn;
+    // Reassigned by a regenerate: the turn run again is the one the store holds.
+    let turn = parsedTurn.turn;
+    // Replace the thread's last answer rather than answer after it (#451). Only
+    // meaningful on a thread: a stateless client trims its own history.
+    const regenerate = threadId !== undefined && body.regenerate === true;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
     // The app's fields, separated once and handed to every method that reads
     // them — `authorizeRequest`, `instructions`, `context`, `attachmentScope` —
@@ -509,9 +779,36 @@ export abstract class AgentController<
       });
     }
 
+    if (regenerate && !this.store.removeMessages) {
+      return jsonResponse(501, {
+        code: "regenerate_unsupported",
+        message:
+          "This agent's store cannot remove messages, so a thread's answer cannot be regenerated. Implement `removeMessages` on the AgentStore.",
+      });
+    }
+
+    // The client's history is the only part of a stateless turn whose size the
+    // client chooses and the model is billed for on every step (#444). A
+    // threaded turn's `messages` are ignored, so they are not counted.
+    if (
+      !threadId &&
+      Array.isArray(body.messages) &&
+      body.messages.length > this.maxHistoryMessages
+    ) {
+      return limitResponse(
+        413,
+        "history_too_long",
+        `The conversation has ${body.messages.length} messages; this agent takes at most ${this.maxHistoryMessages}.`,
+      );
+    }
+
+    // Who this run will belong to. Read before `pending` exists, so a stop that
+    // finds the pending turn can already be checked against it. See `runOwner`.
+    const owner = await this.runOwner(req);
+
     // From here until `register`, the only thing `/stop` can find this turn by.
     // See `pendingTurns`.
-    const pending = clientRunId ? { cancelled: false } : null;
+    const pending = clientRunId ? { cancelled: false, owner } : null;
     if (pending) {
       pendingTurns.set(clientRunId, pending);
     }
@@ -536,7 +833,28 @@ export abstract class AgentController<
     // than running ahead of the lock, so that a dead thread is still a 404
     // before the app's own work is spent on it; the cost is that a turn queued
     // behind this one waits for `instructions()` as well.
+    // The run `start` registered, if it got that far: its end is what frees
+    // this turn's `maxConcurrentRuns` slot.
+    let started: AgentRun | null = null;
+    // What a regenerate took out of the thread, kept until the run replacing
+    // it has started.
+    let removed: AgentMessage[] = [];
     const start = async (): Promise<Response> => {
+      try {
+        return await startRun();
+      } finally {
+        // A regenerate that never started its run — stopped while it waited,
+        // or a throw from the app's hooks — puts back what it took out, since
+        // no new answer is coming to replace it. Still under the thread's lock,
+        // and appended at the end, which is where it was: it was the tail.
+        if (threadId && removed.length > 0 && (started as AgentRun | null) === null) {
+          await this.store
+            .appendMessages(threadId, removed)
+            .catch((err) => this.reportHookFailure(err));
+        }
+      }
+    };
+    const startRun = async (): Promise<Response> => {
       let messages: AgentMessage[];
       if (threadId) {
         const history = await this.store.loadThread(threadId);
@@ -565,8 +883,32 @@ export abstract class AgentController<
         // lock and after the previous run's transcript is stored, so the only
         // unfinished message left is one no run in this process owns.
         messages = await this.settleThread(threadId, history, { write: true });
+        if (regenerate) {
+          const cut = regenerationCut(messages);
+          if (!cut) {
+            return jsonResponse(409, {
+              code: "nothing_to_regenerate",
+              message: `Thread ${threadId} has no user turn to answer again.`,
+            });
+          }
+          // The last user turn and everything after it leave the store, and the
+          // turn is run again from what the store held — not from the client's
+          // copy, which may be stale or carry local ids. The user message comes
+          // back under a new id when the run reports it. Under the thread's
+          // lock and after the previous run's transcript is stored, so nothing
+          // writes the removed answer back. Each removed message takes its
+          // `usage` with it: the thread never holds both answers' costs.
+          removed = messages.slice(cut.index);
+          await this.store.removeMessages!(
+            threadId,
+            removed.map((message) => message.id),
+          );
+          messages = messages.slice(0, cut.index);
+          turn = cut.turn;
+        }
       } else {
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
+        warnInMemoryNonces(this.nonces);
       }
 
       const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
@@ -635,6 +977,8 @@ export abstract class AgentController<
         // What the client, and for a tool's exception the model, is told about
         // a failure. See `redactError`.
         redactError: (error, info) => this.redactError(error, info, ctx),
+        // Where answers' nonces are spent. See `nonces`.
+        nonces: this.nonces,
       }) as AgentRun;
 
       // Registered before the response is built: the run is now owned by the
@@ -643,6 +987,8 @@ export abstract class AgentController<
       // anything.
       const eventHooks = this.liveRuns.register(run, {
         threadId,
+        // Who may attach to it and stop it from now on. See `runOwner`.
+        owner,
         // The client's handle on a run it started, which is the only one that
         // exists before `run-start` reaches it. See `RegisterParams`.
         clientRunId,
@@ -653,6 +999,7 @@ export abstract class AgentController<
         maxRunDurationMs: this.agent.maxRunDurationMs,
       });
 
+      started = run;
       if (journal) this.follow(run, journal);
 
       // Kept, not just fired: the next turn on this thread has to know when
@@ -676,10 +1023,51 @@ export abstract class AgentController<
       // this turn. Before the thread's lock, which ends the thread's previous
       // run, so a refused or stopped turn does not end it either.
       await this.authorizeRequest(req, { route: "stream", threadId, body: extraBody });
+      // After the app's check, so a caller it refuses does not learn which ids
+      // are someone's; before the thread's lock, so a refused turn supersedes
+      // nothing. The client's history only counts without a thread: with one,
+      // `body.messages` is ignored and the history comes from the store.
+      const foreign = await this.foreignFile(
+        [...(turn?.files ?? []), ...(threadId ? [] : clientHistoryFiles(body.messages))],
+        owner,
+      );
+      if (foreign) {
+        return foreign;
+      }
       if (pending?.cancelled) {
         return stoppedBeforeStart();
       }
-      return threadId ? await this.withThread(threadId, start) : await start();
+      // After the app's check, so a refused caller spends no slot; before the
+      // thread's lock, so a turn over the limit waits behind nothing. No yield
+      // between the count and the take: see `RunSlots.take`.
+      const limitKey = await this.runLimitKey(req, { owner, threadId });
+      const release =
+        limitKey === null
+          ? noop
+          : runSlotsFor(this.liveRuns).take(
+              limitKey,
+              threadId ? `thread:${threadId}` : `run:${crypto.randomUUID()}`,
+              this.maxConcurrentRuns,
+            );
+      if (!release) {
+        return limitResponse(
+          429,
+          "too_many_runs",
+          `You already have ${this.maxConcurrentRuns} conversations answering. Wait for one to finish, or stop it, and send again.`,
+        );
+      }
+      try {
+        return threadId ? await this.withThread(threadId, owner, start) : await start();
+      } finally {
+        // A turn that never started a run (a dead thread, stopped while it
+        // waited, a throw) frees its slot now; one that did, when the run ends.
+        const run = started as AgentRun | null;
+        if (run) {
+          run.result().then(release, release);
+        } else {
+          release();
+        }
+      }
     } finally {
       if (pending && pendingTurns.get(clientRunId) === pending) {
         pendingTurns.delete(clientRunId);
@@ -722,7 +1110,11 @@ export abstract class AgentController<
    * registered and stops that instead. Per process, like `LiveRuns`, and for
    * the same reason: the run it guards lives here.
    */
-  private async withThread<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+  private async withThread(
+    threadId: string,
+    owner: string | null,
+    fn: () => Promise<Response>,
+  ): Promise<Response> {
     const previous = threadLocks.get(threadId) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -733,6 +1125,17 @@ export abstract class AgentController<
     await previous;
     try {
       const live = await this.liveRuns.find({ threadId });
+      if (
+        live &&
+        this.liveRuns.isRunning(live.runId) &&
+        !this.liveRuns.mayAccess(live.runId, owner)
+      ) {
+        // Superseding is a stop, and someone else's run is not this caller's to
+        // stop (#442). Only while it is still going: an ended run is kept for
+        // `ttlMs` but a turn after it touches nothing of it. Whether this caller
+        // may post on the thread at all is `authorizeRequest`'s question.
+        return notYourRun();
+      }
       const run = live ? this.liveRuns.get(live.runId) : null;
       if (run) {
         // A run that already ended is still `find`-able for `ttlMs`; stopping
@@ -761,7 +1164,7 @@ export abstract class AgentController<
    * has no transcript to leave a hole in. See `resolveCursor`.
    */
   async attach(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
     if (parsed.error) {
       return invalidRequest(parsed);
     }
@@ -787,6 +1190,10 @@ export abstract class AgentController<
     // `onAttachMiss`) and learns there. The thread's own 404 is `stream`'s,
     // where a turn would otherwise be persisted under it.
     const live = await this.liveRuns.find({ threadId });
+    if (live && !this.liveRuns.mayAccess(live.runId, await this.runOwner(req))) {
+      // Another caller's run (#442): none of its frames, ended or not.
+      return notYourRun();
+    }
     if (!live) {
       // An explicit miss, not a 200 with an empty stream. See `MemoryLiveRuns`:
       // behind a round-robin load balancer this is the common case, and it has
@@ -849,7 +1256,7 @@ export abstract class AgentController<
   async stop(
     req: HttpRequest<any, any> = new HttpRequest(),
   ): Promise<{ stopped: boolean } | Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
     if (parsed.error) {
       // `{ stopped: false }` would be the wrong answer as well as the wrong
       // status: it means "there was nothing to stop", and the truth is that we
@@ -872,12 +1279,18 @@ export abstract class AgentController<
     // thread, which is ended where it waits. `threadId` is the fallback for a
     // client that did not start this run at all — one that attached to it,
     // whose replayed tail carried no `run-start`.
+    const caller = await this.runOwner(req);
     let runId = typeof body.runId === "string" ? body.runId : undefined;
     if (!runId && typeof body.clientRunId === "string") {
       runId = this.liveRuns.findByClientRunId(body.clientRunId) ?? undefined;
       if (!runId) {
         const pending = pendingTurns.get(body.clientRunId);
         if (pending) {
+          // A `clientRunId` is the client's own choice and only as unguessable
+          // as it made it, so the turn it names is checked like a run (#442).
+          if (pending.owner !== null && pending.owner !== caller) {
+            return notYourRun();
+          }
           // Not on to `threadId`: that names the run this turn is queued
           // behind, which is already stopping, and answering for it would
           // leave this one to start.
@@ -895,6 +1308,10 @@ export abstract class AgentController<
       // Already finished, already evicted, or never here. Not an error: the
       // caller wanted the run stopped and it is not running.
       return { stopped: false };
+    }
+    if (!this.liveRuns.mayAccess(run.runId, caller)) {
+      // Someone else's run, by whichever handle (#442). See `runOwner`.
+      return notYourRun();
     }
 
     run.stop({ reason: typeof body.reason === "string" ? body.reason : undefined });
@@ -1200,6 +1617,18 @@ export abstract class AgentController<
         ? threadField
         : undefined;
 
+    // Who the provider's copy will belong to (#443): the same key that owns a
+    // run this caller starts, so the turn that names the file finds it its own.
+    const owner = await this.runOwner(req);
+    const recordOwner = (fileId: string) =>
+      this.fileOwners.record(fileId, {
+        owner,
+        name,
+        mimeType,
+        size: file.size,
+        createdAt: new Date().toISOString(),
+      });
+
     const policy = await this.attachmentDestination(file as File, req);
     const destination = narrowDestination(policy, form.get("destination"));
 
@@ -1235,6 +1664,7 @@ export abstract class AgentController<
       // Identical to the pre-attachment behaviour, down to the answer's
       // `fileId` — plus `downgraded` when this path was not the app's choice.
       const fileId = await providerUpload(this.agent.provider, file as File);
+      await recordOwner(fileId);
       const answer: UploadResult = {
         fileId,
         name,
@@ -1257,6 +1687,9 @@ export abstract class AgentController<
 
     const fileId =
       destination === "both" ? await providerUpload(this.agent.provider, file as File) : undefined;
+    if (fileId) {
+      await recordOwner(fileId);
+    }
 
     const record: Attachment = {
       id: attachmentId,
@@ -1272,6 +1705,34 @@ export abstract class AgentController<
     await this.attachments.put(scope, record);
 
     return { fileId, attachmentId, name, mimeType, size: file.size, destination };
+  }
+
+  /**
+   * The 403 for a turn naming a provider file id that is not this caller's, or
+   * `null` when every id may be used (#443). See `fileOwners`.
+   *
+   * Only `fileId` is checked: an `attachmentId` is resolved under the request's
+   * own scope, so another user's is already a not-found (`ScopedAttachments`).
+   * An entry carrying the caller's own `attachmentId` beside a foreign `fileId`
+   * is refused all the same — the `fileId` is what reaches the provider.
+   */
+  private async foreignFile(
+    files: { fileId?: string }[],
+    caller: string | null,
+  ): Promise<Response | null> {
+    const ids = new Set(
+      files.map((file) => file.fileId).filter((id): id is string => typeof id === "string"),
+    );
+    for (const fileId of ids) {
+      const record = await this.fileOwners.get(fileId);
+      if (record ? record.owner !== null && record.owner !== caller : this.requireKnownFiles) {
+        // The same sentence for a file that is someone else's and, in strict
+        // mode, one nobody recorded: which of the two it is would tell a caller
+        // probing ids that the id exists.
+        return notYourFile();
+      }
+    }
+    return null;
   }
 
   /**
@@ -1613,7 +2074,7 @@ export abstract class AgentController<
  * change; an app that depended on their shape would break on a release that
  * never mentioned them.
  */
-const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages"] as const;
+const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages", "regenerate"] as const;
 
 /**
  * The turn's own fields, which `toClientTurn` reads off the top level when the
@@ -1844,10 +2305,10 @@ type ParsedBody = {
 /**
  * The body, as JSON — or a reason it is not.
  *
- * Read off the raw request rather than through `req.input()`: that path matches
- * `Content-Type` exactly, so `application/json; charset=utf-8` — which several
- * HTTP clients send by default — parses as an empty body, and an agent turn
- * that silently loses its text is a bad way to find that out.
+ * Read off the raw request rather than through `req.input()`: that path also
+ * accepts `+json` types and answers its failures as a thrown refusal, while
+ * these routes are held to `application/json` alone (below) and answer with
+ * a `{ code, message }` body of their own.
  *
  * Matching the type by prefix is not the same as ignoring it. A body that
  * arrives as anything other than `application/json` is a 415, and the reason
@@ -1874,7 +2335,7 @@ type ParsedBody = {
  * downstream reads a positional body, so `[1,2,3]` could only ever have run as
  * an empty turn.
  */
-async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
+async function readJsonBody(req: HttpRequest<any, any>, maxBytes: number): Promise<ParsedBody> {
   const raw = req?.rawRequest;
   if (!raw || raw.method === "GET" || raw.method === "HEAD" || !raw.body) {
     return { body: {} };
@@ -1891,9 +2352,20 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
     };
   }
 
+  // Before a byte is read when the client declared its length, and while
+  // reading when it did not (#444).
+  const declared = Number(raw.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return bodyTooLarge(maxBytes);
+  }
+
   let text: string;
   try {
-    text = await raw.text();
+    const read = await readCapped(raw, maxBytes);
+    if (read === null) {
+      return bodyTooLarge(maxBytes);
+    }
+    text = read;
   } catch {
     // A body that stopped arriving mid-flight. Same class of failure as one
     // that arrived truncated, and the same answer.
@@ -1930,12 +2402,64 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
  * sending as `text/plain`.
  */
 function isJsonContentType(value: string | null): boolean {
-  if (typeof value !== "string") return false;
-  const [type] = value.split(";", 1);
-  return type.trim().toLowerCase() === "application/json";
+  return mediaType(value) === "application/json";
+}
+
+/**
+ * The body as text, or `null` once more than `maxBytes` of it has arrived, at
+ * which point the rest is not read. A limit that is not finite reads it all.
+ */
+async function readCapped(raw: Request, maxBytes: number): Promise<string | null> {
+  if (!Number.isFinite(maxBytes) || !raw.body) {
+    return await raw.text();
+  }
+  const reader = raw.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(noop);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function bodyTooLarge(maxBytes: number): ParsedBody {
+  return {
+    body: {},
+    status: 413,
+    code: "body_too_large",
+    error: `The request body is larger than this agent accepts (${maxBytes} bytes).`,
+  };
+}
+
+/**
+ * A refusal for one of #444's limits: the `{ kind, message, status }` every
+ * refusal has (#686), plus the `code` the agent routes' own errors carry, so a
+ * client can tell the limits apart without reading the message.
+ */
+function limitResponse(status: number, code: string, message: string): Response {
+  return jsonResponse(status, {
+    ...refusal(refusalKindForStatus(status), message, status),
+    code,
+  });
 }
 
 function invalidRequest(parsed: ParsedBody): Response {
+  if (parsed.status === 413) {
+    return limitResponse(413, parsed.code ?? "body_too_large", parsed.error ?? "");
+  }
   return jsonResponse(parsed.status ?? 400, {
     code: parsed.code ?? "invalid_request",
     message: parsed.error,
@@ -2095,12 +2619,93 @@ function searchParam(req: HttpRequest<any, any>, key: string): string | undefine
   return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * Where a threaded regenerate cuts the history: at the last message the user
+ * wrote, with the turn that wrote it. A file a tool showed is a user-role
+ * message too, but it is part of the answer being replaced, so it is stepped
+ * over (`injectedMessageIds`, the test `historyForProvider` uses).
+ */
+function regenerationCut(
+  messages: AgentMessage[],
+): { index: number; turn: ClientTurn } | null {
+  const injected = injectedMessageIds(messages);
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== "user" || injected.has(message.id)) continue;
+    let text = "";
+    const files: NonNullable<ClientTurn["files"]> = [];
+    for (const part of message.content) {
+      if (part.type === "text") text += part.text;
+      if (part.type === "file") {
+        files.push({
+          ...(part.fileId ? { fileId: part.fileId } : {}),
+          ...(part.attachmentId ? { attachmentId: part.attachmentId } : {}),
+          ...(part.name ? { name: part.name } : {}),
+          ...(part.mimeType ? { mimeType: part.mimeType } : {}),
+        });
+      }
+    }
+    if (!text && files.length === 0) continue;
+    return {
+      index,
+      turn: { ...(text ? { text } : {}), ...(files.length > 0 ? { files } : {}) },
+    };
+  }
+  return null;
+}
+
 /** A turn `/stop` ended while it waited, before anything ran or was charged. */
 function stoppedBeforeStart(): Response {
   return jsonResponse(409, {
     code: "stopped",
     message: "The turn was stopped before it started.",
   });
+}
+
+/**
+ * The refusal for a run that belongs to another caller (#442), in the shape
+ * every other refusal has (`{ kind, message, status }`, #686), so `useChat` and
+ * the client guards classify it as `permission` without matching on text.
+ */
+function notYourRun(): Response {
+  return jsonResponse(
+    403,
+    refusal("permission", "This run belongs to someone else.", 403) as Record<string, unknown>,
+  );
+}
+
+/** The refusal for a turn naming another owner's provider file (#443). Same
+ *  shape as `notYourRun`. */
+function notYourFile(): Response {
+  return jsonResponse(
+    403,
+    refusal(
+      "permission",
+      "A file in this turn was uploaded by someone else.",
+      403,
+    ) as Record<string, unknown>,
+  );
+}
+
+/**
+ * The file parts of a stateless chat's history, which the client carries and
+ * may have written anything into. Read defensively: the history is not
+ * validated anywhere else before the run, and a malformed one is the run's
+ * problem, not this check's.
+ */
+function clientHistoryFiles(messages: unknown): { fileId?: string }[] {
+  if (!Array.isArray(messages)) return [];
+  const files: { fileId?: string }[] = [];
+  for (const message of messages) {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part && typeof part === "object" && typeof part.fileId === "string") {
+        files.push({ fileId: part.fileId });
+      }
+    }
+  }
+  return files;
 }
 
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
@@ -2265,4 +2870,23 @@ function within(work: Promise<void>, ms: number): Promise<void> {
     timer = setTimeout(resolve, ms);
   });
   return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+}
+
+let warnedInMemoryNonces = false;
+
+/**
+ * Once per process, in production: a stateless chat whose answers are spent
+ * only in this process's memory. Correct for a single instance, which is why
+ * it is a warning; with several, a rewound history replays an approval once
+ * per instance (#445).
+ */
+function warnInMemoryNonces(nonces: NonceStore): void {
+  if (warnedInMemoryNonces || process.env.NODE_ENV !== "production") return;
+  if (!(nonces instanceof MemoryNonceStore)) return;
+  warnedInMemoryNonces = true;
+  console.warn(
+    "[gemi/ai] A stateless agent chat is spending approval nonces in process memory. " +
+      "With more than one instance a replayed approval is accepted once per instance. " +
+      "Set `nonces = new RedisNonceStore()` (or your own NonceStore) on the AgentController.",
+  );
 }

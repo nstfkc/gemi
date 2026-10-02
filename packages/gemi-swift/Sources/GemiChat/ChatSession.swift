@@ -193,7 +193,7 @@ public final class ChatSession<Agent: AgentSchema> {
   /// request going out happens before this returns, which is what lets
   /// `approve` coalesce and `stop` see the turn it is stopping.
   @discardableResult
-  private func start(_ turn: ClientTurn) -> Task<Void, Never> {
+  private func start(_ turn: ClientTurn, regenerate: Bool = false) -> Task<Void, Never> {
     // One run at a time. A second send while the first streams is a user who
     // changed their mind; the superseded turn is marked aborted as it is cut.
     let superseded = inFlight
@@ -249,6 +249,10 @@ public final class ChatSession<Agent: AgentSchema> {
       payload["messages"] = .array(forWire(history).map { .object($0.json) })
     }
     payload.merge(body) { _, extra in extra }
+    // On a thread the server holds the history, so trimming the local copy
+    // alone changes nothing: this asks it to drop its last answer and run the
+    // turn before it again (gemi #451). After `body`, so the app cannot unset it.
+    if regenerate, state.threadId != nil { payload["regenerate"] = .bool(true) }
 
     let id = UUID()
     let task = Task { [weak self] in
@@ -447,7 +451,9 @@ public final class ChatSession<Agent: AgentSchema> {
 
   // MARK: the rest
 
-  /// Drops the last assistant turn and re-runs from the user turn before it.
+  /// Drops the last assistant turn and re-runs from the user turn before it. On
+  /// a thread the server replaces its stored answer too, so the model sees the
+  /// question once rather than repeated.
   public func regenerate() async {
     guard
       let assistant = state.messages.lastIndex(where: { $0.role == .assistant }),
@@ -458,10 +464,11 @@ public final class ChatSession<Agent: AgentSchema> {
     state.messages = Array(state.messages[..<user])
     state.pending = []
     state.error = nil
-    await send(turn)
+    await start(turn, regenerate: true).value
   }
 
   /// Replaces the transcript, e.g. with a thread re-read after `onAttachMiss`.
+  /// Client-only: on a thread the server's history is what the next turn runs on.
   public func setMessages(_ messages: [AgentMessage]) {
     state.messages = messages
   }

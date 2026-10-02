@@ -803,6 +803,41 @@ describe("regenerate", () => {
     });
   });
 
+  /** #451. On a thread the server holds the history, so it has to be told to
+   *  replace its stored answer; stateless trims its own and says nothing. */
+  test("asks the server to replace its answer on a thread, and only there", async () => {
+    const initialMessages = [
+      { id: "u1", role: "user" as const, content: [{ type: "text" as const, text: "say hi" }], createdAt: "" },
+      {
+        id: "a1",
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "no" }],
+        createdAt: "",
+        finishReason: "stop" as const,
+      },
+    ];
+    const threaded = mount({ threadId: "th_9", attach: false, initialMessages });
+    await act(async () => {
+      await threaded.box.api.regenerate();
+    });
+    expect(bodyOf(0).regenerate).toBe(true);
+    expect(bodyOf(0).threadId).toBe("th_9");
+
+    const stateless = mount({ attach: false, initialMessages });
+    await act(async () => {
+      await stateless.box.api.regenerate();
+    });
+    expect(bodyOf(1).regenerate).toBeUndefined();
+  });
+
+  test("a plain send on a thread does not regenerate", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hello");
+    });
+    expect(bodyOf(0).regenerate).toBeUndefined();
+  });
+
   test("nothing to regenerate is a no-op", async () => {
     const { box } = mount({ attach: false });
 

@@ -243,8 +243,16 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * where it was cut rather than losing text the user already read.
    */
   stop(): Promise<void>;
-  /** Drops the last assistant turn and re-runs from the user turn before it. */
+  /**
+   * Drops the last assistant turn and re-runs from the user turn before it.
+   * On a thread the server replaces its stored answer too (`regenerate: true`
+   * on the request), so the model sees the question once, not a repeat.
+   */
   regenerate(): Promise<void>;
+  /**
+   * Replaces the local transcript. Client-only: on a thread the server keeps
+   * its own history, and this does not change what the next turn is run on.
+   */
   setMessages(messages: AgentMessage<ToolsOf<P>, OutputOf<P>>[]): void;
 
   /**
@@ -392,6 +400,12 @@ export type AgentRequestBody = {
    * server is expected to remember the mapping for as long as the run lives.
    */
   clientRunId: string;
+  /**
+   * Threaded only: replace the thread's last answer instead of answering after
+   * it. The server removes the last user turn and everything after it from the
+   * store and runs that turn again (#451). Sent by `regenerate()`.
+   */
+  regenerate?: boolean;
 } & Record<string, unknown>;
 
 /**
@@ -920,7 +934,7 @@ export function useChat<P extends keyof AgentRoutes>(
   );
 
   const send = useCallback(
-    async (turn: ClientTurn) => {
+    async (turn: ClientTurn, options: { regenerate?: boolean } = {}) => {
       const { base: url, extraBody: body } = requestRef.current;
       // One run at a time per hook. A second send while the first is streaming
       // is a user who changed their mind, not a request to interleave two
@@ -1030,6 +1044,10 @@ export function useChat<P extends keyof AgentRoutes>(
           // Stripped of the progress logs, which no part of the server reads and
           // which every later turn would otherwise re-upload.
           messages: stateRef.current!.threadId ? undefined : forWire(history),
+          // On a thread the server holds the history, so trimming the local
+          // copy alone changes nothing: this asks it to drop its last answer
+          // and run the turn before it again (#451). Stateless needs no flag.
+          ...(options.regenerate && stateRef.current!.threadId ? { regenerate: true } : {}),
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {
@@ -1228,7 +1246,7 @@ export function useChat<P extends keyof AgentRoutes>(
       pending: [],
       error: null,
     });
-    await send(turn);
+    await send(turn, { regenerate: true });
   }, [commit, send]);
 
   const setMessages = useCallback(

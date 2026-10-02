@@ -1,5 +1,189 @@
 # Unreleased
 
+## `ai`: `regenerate` replaces the answer on a thread (#451)
+
+**Behaviour change.** `regenerate()` in `useChat`, `ChatSession` (Swift) and
+`ChatSession` (Kotlin) only trimmed the client's copy of the transcript. On a
+thread the server reads the history from the store, so the model was sent
+`user: X, assistant: A, user: X` and wrote a follow-up instead of a new answer.
+On a thread the clients now send `regenerate: true` with the turn, and the
+controller, under the thread's lock, removes the last user turn and everything
+after it from the store and runs that turn again from the stored copy. The
+replaced messages (and their per-message `usage`) leave the thread; the
+regenerated turn counts as the same conversation for `maxConcurrentRuns`.
+Stateless chats are unchanged.
+
+`AgentStore` has a new optional method, `removeMessages(threadId, messageIds)`.
+`MemoryAgentStore` implements it. A custom store without it answers a
+threaded regenerate with 501 `regenerate_unsupported`; a thread with no user
+turn answers 409 `nothing_to_regenerate`. `regenerate` is now a reserved
+request-body key, so an app body field of that name no longer reaches
+`instructions()`/`ctx.body`. `setMessages` stays client-only on a thread.
+
+**Action:** if you have your own `AgentStore`, implement `removeMessages`
+(e.g. `DELETE FROM messages WHERE thread_id = ? AND id IN (...)`). Rename any
+app body field called `regenerate`.
+
+## `ai`: limits on body size, stateless history and concurrent runs (#444)
+
+**Behaviour change (security).** A run outlives the request that started it, so
+a client could post turns and disconnect and every one of them still billed up
+to `maxSteps` model calls; the agent route also read a body of any size and
+sent a stateless history of any length to the provider. `AgentController` now
+has three limits, each an overridable property:
+
+| Property | Default | Over it |
+|---|---|---|
+| `maxBodyBytes` | 4 MB | 413 `body_too_large`, before the body is parsed (`attach`/`stop`: fixed 64 KB) |
+| `maxHistoryMessages` | 1000 | 413 `history_too_long`, stateless turns only (a thread's history comes from the store) |
+| `maxConcurrentRuns` | 5 per caller | 429 `too_many_runs`, after `authorizeRequest`, before the model is called |
+
+Each refusal is `{ error: { kind, message, status, code } }` (`kind` is
+`form_error` for the 413s and `rate_limit` for the 429).
+
+`maxConcurrentRuns` counts per `runLimitKey(req, { owner, threadId })`, by
+default `runOwner` (the authenticated user), and per conversation: all turns on
+one thread share one slot, so resending mid-answer (which supersedes the
+running turn) is never refused. A slot is freed when the run ends. Anonymous
+turns (`null` key) are not counted by default; an app serving anonymous chats
+returns its own key, e.g. `ip:${clientIp(req)}` behind `GEMI_TRUST_PROXY`, or
+sets `requireThread`. `maxSteps` (default 8) still caps each run's model calls.
+
+```ts
+export class ChatController extends AgentController<typeof chat> {
+  agent = chat;
+  protected maxConcurrentRuns = 10;
+  protected maxBodyBytes = 8 * 1024 * 1024;
+}
+```
+
+**Action:** none for typical chats. Raise a limit (or set it to `Infinity`) if
+your app legitimately sends larger bodies, longer stateless histories, or runs
+more than five conversations per user at once.
+
+## `ai`: approval nonces can be spent in a shared store (#445)
+
+**Additive (security).** A signed answer to a pending call (an approval, a
+question, a client tool's result) is single-use because its nonce is spent when
+it is acted on. Spent nonces lived in one process's memory, so on a stateless
+chat with several instances (or after a restart) a client could rewind its
+history to before the result and replay the same approval once per instance.
+
+`AgentController` has a new `nonces` property taking a `NonceStore`
+(`consume(nonce, expiresAt): Promise<boolean>`, atomic insert-if-absent). The
+default is still the process-wide `MemoryNonceStore`, which is exact for a
+single instance. `RedisNonceStore` uses the app's Redis (`SET key 1 PX <ttl>
+NX`, so Redis expires each nonce with its token):
+
+```ts
+import { AgentController, RedisNonceStore } from "gemi/ai";
+
+const nonces = new RedisNonceStore(); // module scope, like `store`
+
+export class ChatController extends AgentController<typeof chat> {
+  agent = chat;
+  nonces = nonces;
+}
+```
+
+Or implement `NonceStore` over a table with the nonce as primary key
+(`INSERT ... ON CONFLICT (nonce) DO NOTHING`, accepted when one row was
+inserted) and delete rows past `expires_at` from a cron. `Agent.stream` takes
+the same store as `nonces` and passes it down to sub-runs. If the store throws,
+the answer is refused ("Ask again"), not run unchecked.
+
+In production, a stateless chat on the in-memory default logs a warning once
+per process.
+
+**Action:** none for a single instance or a threaded chat (there the stored
+result already refuses a second answer). An app serving stateless chats from
+several instances should set `nonces`. No migration is needed for
+`RedisNonceStore`; a table-backed store needs its own additive table.
+
+## Request bodies: `Content-Type` is read by media type; bad JSON is a 400 (#699, #700)
+
+**Behaviour change (bug fix).** `req.input()` and `req.safeInput()` used to read
+a JSON body only when `Content-Type` was exactly `application/json`. It now
+compares the media type case-insensitively and ignores parameters, so
+`application/json; charset=utf-8` (the default of many HTTP clients) and
+`Application/JSON` are read, and so is any `+json` type such as
+`application/vnd.api+json` or `application/merge-patch+json`. Such a request
+used to reach your handler with an empty body.
+
+The same applies to forms: `application/x-www-form-urlencoded; charset=UTF-8`
+is read, and a urlencoded body is now turned into its fields (repeated keys as
+an array), as multipart already was. Before, `input.get(...)` on a urlencoded
+body always answered `undefined`.
+
+A JSON body that is empty (or only whitespace) is no body and reads as `{}`,
+like a request without one; a `required` rule then reports the missing field
+as a validation error. A body that is not valid JSON, or is JSON but not an
+object (`null`, `42`, `"text"`), or a form that cannot be parsed, is answered
+with a 400 refusal instead of a 500:
+
+```json
+{ "error": { "kind": "form_error", "message": "The request body is not valid JSON.", "status": 400 } }
+```
+
+`safeInput()` throws that refusal too, rather than reporting it as a field
+error. Nothing to change unless you relied on a charset-carrying JSON body
+being ignored, or caught the 500.
+
+## `ai`: a live run answers only the user who started it (#442)
+
+**Behaviour change.** A run's handles — its `threadId`, its `runId` and the
+client-minted `clientRunId` — let whoever held one read the run's frames
+(`/attach`) or cancel it (`/stop`), and a turn on the same thread stopped it,
+unless the app's `authorizeRequest` checked thread ownership. Now
+`AgentController` records an owner on the run (`MemoryLiveRuns.register`'s new
+`owner`) from the new `protected runOwner(req)`, which defaults to
+`user:<id>` for an authenticated request and `null` otherwise. For an owned
+run, any other caller gets a 403
+`{ error: { kind: "permission", message: "This run belongs to someone else.", status: 403 } }` on:
+
+- `attach` to it (ended or not, while it is kept for the tail);
+- `stop` by `threadId`, `runId` or `clientRunId`, including a turn still waiting
+  for `authorizeRequest` or the thread's lock;
+- a `stream` turn on its thread that would supersede it while it is running.
+
+Anonymous turns and runs the server registers without an `owner` are unowned
+and behave as before. `MemoryLiveRuns` gains `ownerOf(runId)`,
+`mayAccess(runId, caller)` and `isRunning(runId)`.
+
+**Action:** none for an app whose threads belong to one user. An app where
+several users share a thread's live run (a team chat) overrides
+`runOwner(req)` to return the shared key, e.g. `team:<id>` taken from the
+user, or `null` to turn the check off. Guard `stream`, `attach` and `stop`
+with the same middleware so the owner can be read on all three.
+
+## `ai`: a provider file id answers only the user who uploaded it (#443)
+
+**Behaviour change (security).** A provider's file id (`file-…`) is scoped to
+the OpenAI/Azure org, not to a user, so anyone who learned another user's id (a
+shared transcript, a log line) could put it in their own `turn.files` and have
+the model read that user's document. `AgentController.upload` now records each
+provider id it gets under `runOwner(req)` (the same key that owns a run, #442:
+`user:<id>`, or `null` when anonymous) in the new `fileOwners` store
+(`MemoryFileOwners` by default). A `stream` turn naming an id recorded for a
+different owner, in `turn.files` or, on a stateless chat, in the client's
+`messages`, is refused before anything runs with a 403
+`{ error: { kind: "permission", message: "A file in this turn was uploaded by someone else.", status: 403 } }`.
+
+- An anonymous upload is recorded with owner `null` and is unowned: anyone
+  holding the id may use it, as before. An anonymous request has no identity
+  to bind to (`sessionId()` is a cookie the visitor writes), and the id stays
+  the capability.
+- An id with no record (uploaded before the upgrade, before a restart with the
+  in-memory default, on another process, or outside `upload`) is still let
+  through. Set `protected requireKnownFiles = true` to refuse those too, once
+  `fileOwners` is durable and shared (implement `FileOwners`: `record(fileId,
+  record)` and `get(fileId)`).
+
+**Action:** none for an app whose chats belong to one user. An app that
+overrides `runOwner(req)` gets the same key on files. An app with several
+server processes should give `fileOwners` a database-backed store, since the
+default only knows the uploads its own process saw.
+
 ## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
 
 **Behaviour change.** `AgentMessage.usage` was typed but the server never set
@@ -263,6 +447,28 @@ New, nothing to change:
   `"text/csv"`). A file outside it gets a **422** `{ error: { code, message }
   }` (`file_too_large` or `unsupported_file_type`) before anything is stored
   or sent to the provider. The default is no limits.
+
+## A stored file the provider refuses no longer breaks the thread (#684)
+
+A file part stays in the thread's history and is sent on every turn. When the
+provider refused its id (a deleted or expired file, an Azure `user_data` id
+from before 0.84.1, a file from another resource), that turn failed with a
+400, and so did every later turn of the thread.
+
+Now the built-in providers swap the refused file for a line of text telling
+the model the attachment could not be read, and send the request again. The
+turn goes on, and the model can tell the user. The run also marks the stored
+part `providerRejected: true` and persists it through the store and
+`onMessage`, like an amended tool result, so later turns send the note
+instead of the id.
+
+- Nothing to change in your app. Threads already broken by a refused file
+  work again on their next turn.
+- The refusal is logged as a warning (`Log.warning`, off with `logErrors:
+  false`).
+- New optional types: `FilePart.providerRejected` and the `file-rejected`
+  `ProviderEvent`. A custom `AgentProvider` doesn't need to send it.
+- A UI can read `providerRejected` to show the file as unreadable.
 
 ## Behaviour change: every file in `public/` is served, whatever its extension (#583)
 

@@ -1,6 +1,6 @@
 process.env.SECRET ??= "agent-controller-test-secret";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
 import { InsufficientPermissionsError } from "../http/errors";
@@ -14,7 +14,10 @@ import {
   limitRefusal,
   MemoryAgentStore,
   MemoryAttachmentStore,
+  MemoryFileOwners,
   MemoryLiveRuns,
+  MemoryNonceStore,
+  type NonceStore,
   ScopedAttachments,
   type AttachmentLimits,
 } from "./AgentController";
@@ -3051,5 +3054,527 @@ describe("AgentController.attachmentLimits", () => {
     expect(limitRefusal({ maxBytes: 10 * 1024 * 1024 }, big, "a.mov", "video/mp4")?.message).toBe(
       '"a.mov" is 15 MB; the limit is 10 MB.',
     );
+  });
+});
+
+/**
+ * #442: a thread id, a run id and a client-minted run id are all handles a
+ * third party can come to hold. The run records who started it, and only that
+ * caller may read it, stop it, or supersede it with a turn on its thread.
+ */
+describe("a live run belongs to whoever started it", () => {
+  function owned(runId = "run_owned") {
+    const run = new StubAgentRun(runId);
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+    }
+    return { run, controller: new Chat() };
+  }
+
+  /** Runs `fn` as the user `id`, or anonymously for `null`. */
+  function as<T>(id: number | null, req: HttpRequest<any, any>, fn: () => Promise<T>): Promise<T> {
+    return RequestContext.run(req as any, async () => {
+      if (id !== null) RequestContext.getStore().setUser({ id });
+      return await fn();
+    });
+  }
+
+  async function startAs(
+    controller: AgentController,
+    id: number | null,
+    body: Record<string, unknown>,
+  ) {
+    const req = jsonRequest({ text: "hi", ...body });
+    return await as(id, req, () => controller.stream(req));
+  }
+
+  async function expectRefused(response: unknown) {
+    expect(response).toBeInstanceOf(Response);
+    const res = response as Response;
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: { kind: "permission", message: "This run belongs to someone else.", status: 403 },
+    });
+  }
+
+  test("records the authenticated user as the owner", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    expect(controller.liveRuns.ownerOf("run_owned")).toBe("user:1");
+    run.finish();
+  });
+
+  test("another user cannot attach to it", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "secret" });
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(2, req, () => controller.attach(req)));
+    run.finish();
+  });
+
+  test("an anonymous caller cannot attach to it", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(null, req, () => controller.attach(req)));
+    run.finish();
+  });
+
+  test("not even once it has ended and is kept for the tail", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "secret" });
+    run.finish();
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(2, req, () => controller.attach(req)));
+  });
+
+  test("the owner still attaches", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "mine" });
+    run.finish();
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    const response = await as(1, req, () => controller.attach(req));
+    expect(response.status).toBe(200);
+    expect(await readSse(response)).toContain('"delta":"mine"');
+  });
+
+  test.each([
+    ["threadId", { threadId: "t1" }],
+    ["runId", { runId: "run_owned" }],
+    ["clientRunId", { clientRunId: "local_1" }],
+  ])("another user cannot stop it by %s", async (_name, handle) => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1", clientRunId: "local_1" });
+
+    const req = jsonRequest(handle);
+    await expectRefused(await as(2, req, () => controller.stop(req)));
+    expect(run.stopped).toBe(false);
+
+    const mine = jsonRequest(handle);
+    expect(await as(1, mine, () => controller.stop(mine))).toEqual({ stopped: true });
+    expect(run.stopped).toBe(true);
+    run.finish({ finishReason: "aborted" });
+  });
+
+  test("another user cannot stop a turn still waiting for authorizeRequest", async () => {
+    const run = new StubAgentRun("run_wait");
+    const { agent, calls } = stubAgent(run);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeRequest(_req: HttpRequest<any, any>, { route }: { route: string }) {
+        if (route === "stream") await gate;
+      }
+    }
+    const controller = new Chat();
+    const turn = startAs(controller, 1, { clientRunId: "local_wait" });
+    await settle();
+
+    const req = jsonRequest({ clientRunId: "local_wait" });
+    await expectRefused(await as(2, req, () => controller.stop(req)));
+
+    release();
+    await turn;
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("another user's turn on the thread does not supersede it while it runs", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+
+    await expectRefused(await startAs(controller, 2, { threadId: "t1" }));
+    expect(run.stopped).toBe(false);
+    run.finish();
+  });
+
+  test("an anonymous run is unowned, and answers whoever holds the handle", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, null, { threadId: "t1" });
+    expect(controller.liveRuns.ownerOf("run_owned")).toBeNull();
+
+    const attach = jsonRequest({ threadId: "t1" });
+    expect((await as(2, attach, () => controller.attach(attach))).status).toBe(200);
+    const stop = jsonRequest({ threadId: "t1" });
+    expect(await as(null, stop, () => controller.stop(stop))).toEqual({ stopped: true });
+    run.finish({ finishReason: "aborted" });
+  });
+
+  test("a run the server registered itself is unowned", async () => {
+    const run = new StubAgentRun("run_server");
+    const liveRuns = new MemoryLiveRuns();
+    void liveRuns.register(run as any, { threadId: "t9" });
+    expect(liveRuns.ownerOf("run_server")).toBeNull();
+    expect(liveRuns.mayAccess("run_server", "user:1")).toBe(true);
+    expect(liveRuns.mayAccess("run_server", null)).toBe(true);
+    run.finish();
+  });
+
+  test("runOwner can widen the owner, e.g. to a team", async () => {
+    const run = new StubAgentRun("run_team");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+      protected runOwner() {
+        return "team:acme";
+      }
+    }
+    const controller = new Chat();
+    await startAs(controller, 1, { threadId: "t1" });
+    const req = jsonRequest({ threadId: "t1" });
+    expect(await as(2, req, () => controller.stop(req))).toEqual({ stopped: true });
+    run.finish({ finishReason: "aborted" });
+  });
+});
+
+/**
+ * #443: a provider file id is the org's, not the user's — the vendor shows the
+ * file to whichever request names it. `upload` records who uploaded it, and a
+ * turn naming someone else's id is refused before anything runs.
+ */
+describe("a provider file id belongs to whoever uploaded it", () => {
+  function owning(extra: { requireKnownFiles?: boolean; runOwner?: string | null } = {}) {
+    const run = new StubAgentRun("run_files");
+    const calls: AgentStreamParams[] = [];
+    let n = 0;
+    const agent = {
+      name: "stub",
+      tools: [] as const,
+      skills: [] as const,
+      output: undefined,
+      provider: { upload: async () => `file-${++n}` },
+      stream: (params: AgentStreamParams) => {
+        calls.push(params);
+        return run;
+      },
+    } as any;
+    class Chat extends ScopedChat(agent) {
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+      fileOwners = new MemoryFileOwners();
+      requireKnownFiles = extra.requireKnownFiles ?? false;
+      runOwner(req: HttpRequest<any, any>) {
+        return "runOwner" in extra ? extra.runOwner! : super.runOwner(req);
+      }
+    }
+    return { run, calls, controller: new Chat() };
+  }
+
+  function as<T>(id: number | null, req: HttpRequest<any, any>, fn: () => Promise<T>): Promise<T> {
+    return RequestContext.run(req as any, async () => {
+      if (id !== null) RequestContext.getStore().setUser({ id });
+      return await fn();
+    });
+  }
+
+  async function uploadAs(controller: AgentController, id: number | null, form?: FormData) {
+    const req = uploadRequest(file("contract.pdf", "application/pdf", "%PDF"), form);
+    return await as(id, req, () => controller.upload(req));
+  }
+
+  async function turnAs(controller: AgentController, id: number | null, body: unknown) {
+    const req = jsonRequest(body);
+    return await as(id, req, () => controller.stream(req));
+  }
+
+  async function expectRefused(response: Response) {
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: {
+        kind: "permission",
+        message: "A file in this turn was uploaded by someone else.",
+        status: 403,
+      },
+    });
+  }
+
+  test("upload records the uploader against the provider's id", async () => {
+    const { controller } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    expect(await controller.fileOwners.get(fileId!)).toMatchObject({
+      owner: "user:1",
+      name: "contract.pdf",
+      mimeType: "application/pdf",
+      size: 4,
+    });
+  });
+
+  test("a provider-only upload is recorded too", async () => {
+    const { controller } = owning();
+    const form = new FormData();
+    form.set("destination", "storage");
+    // Storage-only: no provider id, nothing to record.
+    const kept = await uploadAs(controller, 1, form);
+    expect(kept.fileId).toBeUndefined();
+
+    class ProviderOnly extends (controller.constructor as any) {
+      attachmentDestination() {
+        return "provider" as const;
+      }
+    }
+    const providerOnly = new ProviderOnly() as AgentController;
+    const { fileId } = await uploadAs(providerOnly, 1);
+    expect((await providerOnly.fileOwners.get(fileId!))?.owner).toBe("user:1");
+  });
+
+  test("another user's turn naming it is refused before the agent runs", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    await expectRefused(
+      await turnAs(controller, 2, { text: "summarize", files: [{ fileId }] }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("so is an anonymous turn naming it", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    await expectRefused(await turnAs(controller, null, { text: "x", files: [{ fileId }] }));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("the uploader's own turn runs", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    const response = await turnAs(controller, 1, { text: "summarize", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.turn?.files).toEqual([{ fileId }]);
+    run.finish();
+  });
+
+  test("a foreign fileId beside the caller's own attachmentId is still refused", async () => {
+    const { controller, calls } = owning();
+    const theirs = await uploadAs(controller, 1);
+    const mine = await uploadAs(controller, 2);
+
+    await expectRefused(
+      await turnAs(controller, 2, {
+        text: "x",
+        files: [{ fileId: theirs.fileId, attachmentId: mine.attachmentId }],
+      }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a stateless history carrying someone else's file is refused", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    const forged: AgentMessage = {
+      ...message("m1", "user", "earlier"),
+      content: [{ type: "file", fileId: fileId!, name: "contract.pdf" }],
+    };
+
+    await expectRefused(await turnAs(controller, 2, { text: "again", messages: [forged] }));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("on a thread the client's `messages` are ignored, so they are not checked", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    const forged: AgentMessage = {
+      ...message("m1", "user", "earlier"),
+      content: [{ type: "file", fileId: fileId!, name: "contract.pdf" }],
+    };
+
+    const response = await turnAs(controller, 2, {
+      threadId: "t_mine",
+      text: "hi",
+      messages: [forged],
+    });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("an anonymous upload is unowned: anyone holding the id may use it", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, null);
+    expect((await controller.fileOwners.get(fileId!))?.owner).toBeNull();
+
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("an id nobody recorded is let through by default", async () => {
+    const { controller, calls, run } = owning();
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId: "file-old" }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("and refused with requireKnownFiles", async () => {
+    const { controller, calls } = owning({ requireKnownFiles: true });
+    await expectRefused(
+      await turnAs(controller, 2, { text: "x", files: [{ fileId: "file-old" }] }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("the owner is runOwner's: a shared key shares the file", async () => {
+    const { controller, calls, run } = owning({ runOwner: "team:7" });
+    const { fileId } = await uploadAs(controller, 1);
+    expect((await controller.fileOwners.get(fileId!))?.owner).toBe("team:7");
+
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+});
+
+describe("MemoryFileOwners", () => {
+  const record = (owner: string | null) => ({ owner, createdAt: new Date(0).toISOString() });
+
+  test("the first owner of an id keeps it", async () => {
+    const owners = new MemoryFileOwners();
+    await owners.record("file-1", record("user:1"));
+    await owners.record("file-1", record("user:2"));
+    expect((await owners.get("file-1"))?.owner).toBe("user:1");
+  });
+
+  test("is bounded, oldest first", async () => {
+    const owners = new MemoryFileOwners(2);
+    await owners.record("file-1", record("user:1"));
+    await owners.record("file-2", record("user:1"));
+    await owners.record("file-3", record("user:1"));
+    expect(await owners.get("file-1")).toBeNull();
+    expect((await owners.get("file-3"))?.owner).toBe("user:1");
+  });
+});
+
+describe("nonces (#445)", () => {
+  test("hands the controller's nonce store to the run", async () => {
+    const run = new StubAgentRun("run_nonce");
+    const { agent, calls } = stubAgent(run);
+    const nonces = new MemoryNonceStore();
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      nonces = nonces;
+    }
+
+    await new Chat().stream(jsonRequest({ messages: [], text: "hi" }));
+    run.finish({ messages: [] });
+    await settle();
+    expect(calls[0]!.nonces).toBe(nonces);
+  });
+
+  /**
+   * The issue itself: a stateless chat, two instances (two controllers, two
+   * agents, two live-run maps), one rewound history. With a store the two
+   * share, the second instance refuses the answer the first already acted on.
+   */
+  test("a stateless approval replayed on another instance is refused", async () => {
+    const refunded: string[] = [];
+    const refundOrder = AgentTool.create({
+      name: "refundOrder",
+      description: "Refund an order",
+      inputSchema: s.object({ orderId: s.string() }),
+      outputSchema: s.object({ refundId: s.string() }),
+      requiresApproval: true,
+      execute: async ({ orderId }) => {
+        refunded.push(orderId);
+        return { refundId: `rf_${orderId}` };
+      },
+    });
+    const tools = [refundOrder];
+    const instance = (nonces: NonceStore) => {
+      const agent = Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools,
+      });
+      const liveRuns = new MemoryLiveRuns();
+      return class extends AgentController {
+        agent = agent;
+        liveRuns = liveRuns;
+        nonces = nonces;
+      };
+    };
+    const shared = new MemoryNonceStore();
+    const A = instance(shared);
+    const B = instance(shared);
+
+    // The first turn ends awaiting the approval; its history is what a
+    // stateless client holds.
+    const asking = Agent.create({
+      name: "support",
+      provider: fakeProvider([
+        { type: "tool-call", toolCallId: "c1", name: "refundOrder", args: '{"orderId":"ord_1"}' },
+        finish(),
+      ]),
+      tools,
+    }).stream({ messages: [], turn: { text: "refund it" } });
+    const firstEvents: AgentStreamEvent[] = [];
+    const draining = (async () => {
+      for await (const event of asking as AsyncIterable<AgentStreamEvent>) firstEvents.push(event);
+    })();
+    const asked = await asking.result();
+    await draining;
+    const awaiting = firstEvents.find((event) => event.type === "awaiting-input") as any;
+    const answer = {
+      messages: asked.messages,
+      toolResults: [{ toolCallId: "c1", signature: awaiting.pending[0].signature, approve: true }],
+    };
+
+    await eventsOf(await new A().stream(jsonRequest(answer)));
+    await settle();
+    expect(refunded).toEqual(["ord_1"]);
+
+    // The same history, rewound to before the result, sent to B.
+    const replayed = await eventsOf(await new B().stream(jsonRequest(answer)));
+    await settle();
+    expect(refunded).toEqual(["ord_1"]);
+    expect(replayed.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+  });
+
+  test("warns once in production when a stateless chat spends nonces in memory", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      for (const id of ["run_w1", "run_w2"]) {
+        const run = new StubAgentRun(id);
+        const { agent } = stubAgent(run);
+        class Chat extends AgentController {
+          agent = agent;
+          liveRuns = new MemoryLiveRuns();
+        }
+        await new Chat().stream(jsonRequest({ messages: [], text: "hi" }));
+        run.finish({ messages: [] });
+        await settle();
+      }
+      const warned = warn.mock.calls.filter((call) => String(call[0]).includes("RedisNonceStore"));
+      expect(warned).toHaveLength(1);
+    } finally {
+      process.env.NODE_ENV = env;
+      warn.mockRestore();
+    }
   });
 });

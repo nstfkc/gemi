@@ -419,7 +419,28 @@ class ChatSessionTest {
 
     assertEquals(jsonOf("""{"text":"Q"}"""), transport.requests[0].body.body["turn"])
     assertEquals(JsonArray(emptyList()), transport.requests[0].body.body["messages"])
+    assertEquals(null, transport.requests[0].body.body["regenerate"])
     assertEquals(listOf("Q", "Try two."), chat.state.value.messages.map { it.text })
+  }
+
+  /** gemi #451: on a thread the server holds the history, so it is asked to
+   *  replace its stored answer rather than answer after it. */
+  @Test
+  fun regenerateOnAThreadAsksTheServerToReplaceItsAnswer() = runTest {
+    val transport = FakeTransport { sse(*answer("Try two.", "run_2", "m2")) }
+    val history =
+      listOf(
+        AgentMessage(jsonOf("""{"id":"u1","role":"user","createdAt":"t","content":[{"type":"text","text":"Q"}]}""").body),
+        AgentMessage(jsonOf("""{"id":"m1","role":"assistant","createdAt":"t","finishReason":"stop","content":[{"type":"text","text":"Try one."}]}""").body),
+      )
+    val chat = session(transport, threadId = "th_1", initialMessages = history)
+
+    chat.regenerate()
+    chat.send("next")
+
+    assertEquals(JsonPrimitive(true), transport.requests[0].body.body["regenerate"])
+    assertEquals(JsonPrimitive("th_1"), transport.requests[0].body.body["threadId"])
+    assertEquals(null, transport.requests[1].body.body["regenerate"])
   }
 
   @Test

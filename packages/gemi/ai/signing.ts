@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 
 /**
  * Signing for pending tool calls.
@@ -379,7 +380,7 @@ export function verifyNestedRun(
 // --- single use ----------------------------------------------------------
 
 /**
- * Nonces already spent, mapped to the moment they stop mattering.
+ * Spending a nonce.
  *
  * The MAC makes a token unforgeable; it does not make it single-use. Without
  * this a captured signature approves the same call again every time it is
@@ -388,68 +389,59 @@ export function verifyNestedRun(
  * server once asked this exact question; spending the nonce is what says nobody
  * has answered it yet.
  *
- * Deliberately in memory, and deliberately not a hard guarantee:
+ * Where spent nonces live is a `NonceStore` (`store/Nonces.ts`, #445). The
+ * default is the process-wide `MemoryNonceStore`, which is exact for one
+ * instance; an app with several instances gives the agent a shared store
+ * (`RedisNonceStore`, or a table) so a rewound history cannot be replayed once
+ * against each of them. The store's `consume` is insert-if-absent, so two
+ * instances answering at once cannot both win.
  *
- *   bounded — an entry lives at most as long as the token's TTL, and the sweep
- *             below is amortized O(1), so the map is bounded by the approvals
- *             actually issued in one TTL window rather than by uptime.
- *   local   — one process. A second replica has never seen the nonce and will
- *             accept it, so this closes the replay window rather than sealing
- *             it. That is still worth having and it fails open, which is the
- *             only direction a cache may fail: a lost registry costs a replay,
- *             never a legitimate approval that stops working.
- *
- * The stronger guard is the app's own message store: once a call has a result
+ * The other guard is the app's own message store: once a call has a result
  * next to it, the call is no longer open and the answer has nothing to attach
  * to. This is what stands in for that in stateless mode, where the history the
  * client returns can be rewound to before the result existed.
  */
-const spent = new Map<string, number>();
-
-/** Sweep when the map has grown past this, so sweeping costs O(1) per insert
- *  amortized instead of walking every entry on every approval. */
-let sweepAt = 1024;
-
-function sweep(now: number) {
-  for (const [nonce, expiresAt] of spent) {
-    if (expiresAt <= now) spent.delete(nonce);
-  }
-  sweepAt = Math.max(1024, spent.size * 2);
-}
 
 /**
- * Spends a signature's nonce. `false` means it was already spent — the answer
- * is a replay and must not be acted on.
+ * Spends a signature's nonce in `store`. `false` means it was already spent —
+ * the answer is a replay and must not be acted on — or the token is malformed.
+ * A store that throws rejects; the caller refuses the answer.
  *
  * Separate from `verifyPendingCall` rather than folded into it, because verify
  * is a pure question a caller may want to ask twice (logging a forgery, say)
  * and this one is a state change that must happen exactly once per answer.
  */
-export function consumePendingCall(signature: string, options: VerifyOptions = {}): boolean {
-  return spend(readSignature(signature), options);
+export function spendPendingCall(signature: string, store: NonceStore): Promise<boolean> {
+  return spendIn(store, readSignature(signature));
 }
 
 /**
- * Spends a parked-run record's nonce, on the same registry and the same terms.
+ * Spends a parked-run record's nonce, on the same store and the same terms.
  * `false` means the record has already re-entered its tool once — the turn is
  * a replay of a history from before the answer was delivered, and the body
  * must not run again on it.
  */
-export function consumeNestedRun(signature: string, options: VerifyOptions = {}): boolean {
-  return spend(readToken(signature, NESTED_VERSION), options);
+export function spendNestedRun(signature: string, store: NonceStore): Promise<boolean> {
+  return spendIn(store, readToken(signature, NESTED_VERSION));
 }
 
-function spend(
+async function spendIn(
+  store: NonceStore,
   parsed: { nonce: string; expiresAt: number } | null,
-  options: VerifyOptions,
-): boolean {
+): Promise<boolean> {
   if (!parsed) return false;
-  const now = options.now ?? Date.now();
-  if (spent.size >= sweepAt) sweep(now);
-  const spentUntil = spent.get(parsed.nonce);
-  // A record past its own expiry binds nothing: the token it refers to fails
-  // verification on its own, so holding the nonce would only grow the map.
-  if (spentUntil !== undefined && spentUntil > now) return false;
-  spent.set(parsed.nonce, parsed.expiresAt);
-  return true;
+  return store.consume(parsed.nonce, parsed.expiresAt);
+}
+
+/** `spendPendingCall` on the process-wide default store, synchronously.
+ *  `now` is injectable for tests. */
+export function consumePendingCall(signature: string, options: VerifyOptions = {}): boolean {
+  const parsed = readSignature(signature);
+  return parsed ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now) : false;
+}
+
+/** `spendNestedRun` on the process-wide default store, synchronously. */
+export function consumeNestedRun(signature: string, options: VerifyOptions = {}): boolean {
+  const parsed = readToken(signature, NESTED_VERSION);
+  return parsed ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now) : false;
 }
