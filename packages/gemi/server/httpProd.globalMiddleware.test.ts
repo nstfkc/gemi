@@ -73,6 +73,7 @@ const VIDEO = "0123456789-mp4-bytes";
 const WASM = "\0asm-bytes";
 const CSV = "a,b\n1,2\n";
 
+let seen: { forwardedFor: string | null; realIp: string | null } | null = null;
 let projectDir: string;
 let app: App;
 let server: { port: number; stop: (force?: boolean) => unknown };
@@ -129,7 +130,12 @@ beforeAll(async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 
   const { httpProd } = await import("./httpProd");
-  server = (await httpProd(app, (req, next) => next(req))) as any;
+  // No proxy is trusted, the default (#8).
+  delete process.env.GEMI_TRUST_PROXY;
+  server = (await httpProd(app, (req, next) => {
+    seen = { forwardedFor: req.headers.get("x-forwarded-for"), realIp: req.headers.get("x-real-ip") };
+    return next(req);
+  })) as any;
 });
 
 afterAll(async () => {
@@ -374,5 +380,21 @@ describe("httpProd's static handler", () => {
       expect(await res.text(), path!).not.toBe(content);
       expect(fetchSpy, path!).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("httpProd and X-Forwarded-For (#8)", () => {
+  test("replaces a client-sent x-forwarded-for with the socket's address", async () => {
+    await get("/api/ping", { ...THROUGH_FRONT_DOOR, "x-forwarded-for": "6.6.6.6", "x-real-ip": "7.7.7.7" });
+
+    expect(seen?.forwardedFor).not.toContain("6.6.6.6");
+    expect(seen?.forwardedFor).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
+    expect(seen?.realIp).toBeNull();
+  });
+
+  test("sets it from the socket when the client sent none", async () => {
+    await get("/api/ping", THROUGH_FRONT_DOOR);
+
+    expect(seen?.forwardedFor).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
   });
 });

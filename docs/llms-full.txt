@@ -1033,6 +1033,25 @@ GEMI_COMPRESSION=off
 
 Any other value (or none) leaves compression on.
 
+## Behind a proxy: `GEMI_TRUST_PROXY`
+
+`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, the default [rate-limit](./middleware.md#rate-limiting) key) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
+
+| `GEMI_TRUST_PROXY` | Client address |
+| --- | --- |
+| unset, `false`, `off`, `0` (default) | The socket's peer address. Whatever forwarding headers the client sent are discarded. |
+| `1`, `2`, … | The address the outermost of that many proxies was reached from, counted from the right of `X-Forwarded-For`. Entries further left were written by the client and are dropped. |
+| `true` | `X-Forwarded-For` and `X-Real-IP` as sent. Only for a proxy that overwrites them rather than appending. |
+
+Behind a proxy or load balancer, set it to the number of proxies in front of the app, or every client shares the proxy's address:
+
+```bash
+GEMI_TRUST_PROXY=1   # Railway, Fly, a single load balancer
+GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
+```
+
+Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
+
 ## Graceful shutdown
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
@@ -2520,7 +2539,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (left-most `x-forwarded-for` entry, then `x-real-ip`) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -2823,7 +2842,7 @@ export default defineRateLimiterConfig({
 
 ### Limiting by something other than an IP
 
-`x-forwarded-for` is trivially spoofed unless a proxy overwrites it, and it does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
+Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
 import { RateLimitMiddleware, clientIp } from "gemi/http";

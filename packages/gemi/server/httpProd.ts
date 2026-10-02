@@ -12,6 +12,7 @@ import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
+import { applyForwardedTrust, parseTrustProxy } from "./forwardedFor";
 
 // The rule this file used to spell out itself. It moved to `projectRoot`
 // because discovery needs the same answer during `waitForBoot()`, which is
@@ -238,15 +239,16 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // rather not spend origin CPU on it.
   const compressionEnabled = (process.env.GEMI_COMPRESSION ?? "auto").toLowerCase() !== "off";
 
+  // Which `X-Forwarded-For` entries to believe — see `forwardedFor.ts`. Parsed
+  // before `Bun.serve` so a bad value fails the boot, not every request.
+  const forwardedTrust = parseTrustProxy(process.env.GEMI_TRUST_PROXY);
+
   const server = Bun.serve({
     maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
     fetch: async (req, server) => {
-      if (!req.headers.get("x-forwarded-for")) {
-        // `requestIP` is null for closed/unix sockets — guard so it never
-        // throws before the request is handled.
-        const ip = server.requestIP(req);
-        if (ip) req.headers.set("x-forwarded-for", ip.address);
-      }
+      // `requestIP` is null for closed/unix sockets — guard so it never
+      // throws before the request is handled.
+      applyForwardedTrust(req.headers, server.requestIP(req)?.address ?? null, forwardedTrust);
       // The app's global middleware goes in front of the static handler as well
       // as the router, so it can refuse `/assets/*` too.
       const res = await instrumentation(req, (req) =>

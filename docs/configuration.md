@@ -240,6 +240,25 @@ GEMI_COMPRESSION=off
 
 Any other value (or none) leaves compression on.
 
+## Behind a proxy: `GEMI_TRUST_PROXY`
+
+`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, the default [rate-limit](./middleware.md#rate-limiting) key) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
+
+| `GEMI_TRUST_PROXY` | Client address |
+| --- | --- |
+| unset, `false`, `off`, `0` (default) | The socket's peer address. Whatever forwarding headers the client sent are discarded. |
+| `1`, `2`, … | The address the outermost of that many proxies was reached from, counted from the right of `X-Forwarded-For`. Entries further left were written by the client and are dropped. |
+| `true` | `X-Forwarded-For` and `X-Real-IP` as sent. Only for a proxy that overwrites them rather than appending. |
+
+Behind a proxy or load balancer, set it to the number of proxies in front of the app, or every client shares the proxy's address:
+
+```bash
+GEMI_TRUST_PROXY=1   # Railway, Fly, a single load balancer
+GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
+```
+
+Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
+
 ## Graceful shutdown
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:

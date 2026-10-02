@@ -146,9 +146,12 @@ function resolveLimiter(): RateLimiter | null {
  * through a different proxy chain got a fresh budget. Only the left-most entry
  * names the client.
  *
- * Both headers are trivially spoofed by anyone talking to the app directly, so
- * this is only sound behind a proxy that overwrites them. When you have
- * something better (a session, an API key), pass `key` in the config.
+ * Under `gemi start` the production server has already decided which entry to
+ * believe (`GEMI_TRUST_PROXY`, see `server/forwardedFor.ts`) and left exactly
+ * one address in `x-forwarded-for`, with `x-real-ip` dropped, so neither is
+ * client-written here. Elsewhere (`gemi dev`, a custom server) both headers are
+ * whatever the client sent. When you have something better (a session, an API
+ * key), pass `key` in the config.
  */
 export function clientIp(req: HttpRequest) {
   // A tool call's synthetic request has no forwarding headers; it spends the
