@@ -132,6 +132,12 @@ describe("foldEmail", () => {
     expect(foldEmail(`${"a".repeat(1_000_000)}@x.test`)).toBeNull();
     expect(normalizeEmail(`${"a".repeat(1_000_000)}@x.test`)).toBeNull();
   });
+
+  test("judges the length after trimming, so padding cannot dodge it", () => {
+    const pad = " ".repeat(5000);
+    expect(foldEmail(`${pad}Ada@Example.com${pad}`)).toBe("ada@example.com");
+    expect(normalizeEmail(`${pad}Ada@Example.com\t${pad}`)).toBe("ada@example.com");
+  });
 });
 
 describe("limiterKeyPart", () => {

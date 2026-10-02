@@ -728,6 +728,29 @@ function suite(label: string, url?: string) {
       },
     );
 
+    test.each([
+      ["signInWithPinV2", "verifyLimit", { pin: "000000" }],
+      ["verifyEmailCode", "verifyLimit", { code: "000000" }],
+      ["createMagicLinkToken", "requestLimit", {}],
+      ["requestEmailCode", "requestLimit", {}],
+    ] as const)(
+      "%s: a real address padded with whitespace spends that address's budget",
+      async (action, limit, body) => {
+        emailCode = { maxAttempts: 100, [limit]: { perEmail: [1, 900], perIp: false } };
+        bindAuth();
+        await seedUser("known@x.test");
+        const pad = " ".repeat(2000);
+
+        await attempt(action, { ...body, email: "known@x.test" }, { ip: "198.51.100.1" });
+        const padded = await attempt(
+          action,
+          { ...body, email: `${pad}Known@x.test${pad}` },
+          { ip: "198.51.100.2" },
+        );
+        expect((padded as any).error).toBeInstanceOf(RateLimitExceededError);
+      },
+    );
+
     test("generateCode supplies the PIN, and it is still stored hashed", async () => {
       application.instance(
         AuthManager,

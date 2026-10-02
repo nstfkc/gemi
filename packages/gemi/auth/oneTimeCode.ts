@@ -92,9 +92,13 @@ export const MAX_EMAIL_LENGTH = 320;
  * `MAX_EMAIL_LENGTH`.
  */
 export function foldEmail(value: unknown): string | null {
-  if (typeof value !== "string" || value.length > MAX_EMAIL_LENGTH * 4) return null;
-  const email = value.trim().toLowerCase();
-  return email === "" || email.length > MAX_EMAIL_LENGTH ? null : email;
+  if (typeof value !== "string") return null;
+  // Trimmed before the length is checked, so the cap judges the address the
+  // lookup will use: padding cannot push a real address past it (and onto the
+  // IP budget only) while the lookup still finds the account.
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.length > MAX_EMAIL_LENGTH) return null;
+  return trimmed.toLowerCase();
 }
 
 /**
@@ -102,8 +106,11 @@ export function foldEmail(value: unknown): string | null {
  * address, since it may create a user from it.
  */
 export function normalizeEmail(value: unknown): string | null {
-  if (typeof value !== "string" || value.length > MAX_EMAIL_LENGTH * 4) return null;
-  const email = value.trim().toLowerCase();
+  if (typeof value !== "string") return null;
+  // Trimmed before the length is checked, as in `foldEmail`.
+  const trimmed = value.trim();
+  if (trimmed.length > MAX_EMAIL_LENGTH) return null;
+  const email = trimmed.toLowerCase();
   // Not an RFC parser: enough to refuse what cannot be an address before a
   // row or a rate-limit key is made out of it.
   if (email.length < 3 || email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email)) {
