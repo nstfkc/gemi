@@ -478,9 +478,17 @@ function suite(label: string, url?: string) {
           ),
         ),
       );
+      // At most three were compared; the guess that went over burned the
+      // code, and any guess that arrived after that found no code at all (an
+      // `invalid_code` that compared nothing), so the counts depend on timing.
+      // What must hold: some guess went over, and the code is gone.
       const messages = outcomes.map((o) => errorsOf(o).code[0]);
-      expect(messages.filter((m) => m === "invalid_code").length).toBeLessThanOrEqual(3);
-      expect(messages.filter((m) => m === "too_many_attempts").length).toBeGreaterThanOrEqual(7);
+      expect(messages).toContain("too_many_attempts");
+      expect(messages.every((m) => m === "invalid_code" || m === "too_many_attempts")).toBe(true);
+      expect(await codeRows()).toEqual([]);
+      expect(
+        errorsOf(await attempt("verifyEmailCode", { email: "a@x.test", code })),
+      ).toEqual({ code: ["invalid_code"] });
     });
 
     test("a request for a new code starts a new attempt count", async () => {
