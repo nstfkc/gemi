@@ -18,7 +18,10 @@
  *   unchanged, as before 0.85. Only sound behind a proxy that overwrites
  *   `X-Forwarded-For` (and `X-Real-IP`) rather than appending to it.
  */
-export type ForwardedTrust = { kind: "none" } | { kind: "all" } | { kind: "hops"; hops: number };
+export type ForwardedTrust =
+  | { kind: "none" }
+  | { kind: "all" }
+  | { kind: "hops"; hops: number };
 
 const NONE: ForwardedTrust = { kind: "none" };
 
