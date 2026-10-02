@@ -410,6 +410,28 @@ now reports its message instead of the status text. Agent routes' own errors
 (`{ code, message }`) and run errors (`AgentRunFailure`) are unchanged. A route
 tool's refusal shown to the model includes the new fields.
 
+## A stored file the provider refuses no longer breaks the thread (#684)
+
+A file part stays in the thread's history and is sent on every turn. When the
+provider refused its id (a deleted or expired file, an Azure `user_data` id
+from before 0.84.1, a file from another resource), that turn failed with a
+400, and so did every later turn of the thread.
+
+Now the built-in providers swap the refused file for a line of text telling
+the model the attachment could not be read, and send the request again. The
+turn goes on, and the model can tell the user. The run also marks the stored
+part `providerRejected: true` and persists it through the store and
+`onMessage`, like an amended tool result, so later turns send the note
+instead of the id.
+
+- Nothing to change in your app. Threads already broken by a refused file
+  work again on their next turn.
+- The refusal is logged as a warning (`Log.warning`, off with `logErrors:
+  false`).
+- New optional types: `FilePart.providerRejected` and the `file-rejected`
+  `ProviderEvent`. A custom `AgentProvider` doesn't need to send it.
+- A UI can read `providerRejected` to show the file as unreadable.
+
 ## Behaviour change: every file in `public/` is served, whatever its extension (#583)
 
 `gemi start` used to decide whether a root-level path was a static file from a

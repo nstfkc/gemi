@@ -4800,3 +4800,104 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     expect(seen).toEqual([["gemi_att_parent"], []]);
   });
 });
+
+/**
+ * #684: a file the provider refused stays refused, so it must not go back up on
+ * every later turn. The provider drops it and retries; the run's job is to
+ * write that down on the stored part.
+ */
+describe("a file the provider refused", () => {
+  const rejected = (fileId: string): ProviderEvent => ({
+    type: "file-rejected",
+    fileId,
+    message: "Files [file-dead] were not found.",
+    status: 400,
+  });
+
+  test("is marked on an earlier turn's message, which is amended and persisted", async () => {
+    const earlier: AgentMessage = {
+      id: "u1",
+      role: "user",
+      content: [
+        { type: "text", text: "read this" },
+        { type: "file", fileId: "file-dead", name: "q3.pdf", mimeType: "application/pdf" },
+      ],
+      createdAt: "2026-10-01",
+    };
+    const provider = fakeProvider([
+      rejected("file-dead"),
+      { type: "text-delta", delta: "I could not open q3.pdf." },
+      finish(),
+    ]);
+    const reported: AgentMessage[] = [];
+    const agent = Agent.create({ name: "reader", provider, logErrors: false });
+    const result = await agent
+      .stream({
+        messages: [earlier],
+        turn: { text: "and now?" },
+        onMessage: (message) => void reported.push(structuredClone(message)),
+      })
+      .result();
+
+    expect(result.finishReason).toBe("stop");
+    const amended = result.messages.find((message) => message.id === "u1");
+    expect(amended?.content[1]).toMatchObject({ fileId: "file-dead", providerRejected: true });
+    expect(reported.filter((message) => message.id === "u1").at(-1)?.content[1]).toMatchObject({
+      providerRejected: true,
+    });
+    // The caller's message is an input, not scratch space.
+    expect(earlier.content[1]).not.toHaveProperty("providerRejected");
+
+    // And the next turn does not send the id at all.
+    const next = fakeProvider([finish()]);
+    await Agent.create({ name: "reader", provider: next })
+      .stream({
+        messages: [earlier, ...result.messages].filter(
+          (message, i, all) => all.findLastIndex((m) => m.id === message.id) === i,
+        ),
+        turn: { text: "again" },
+      })
+      .result();
+    const input = toResponsesInput(next.calls[0]!.messages, next.capabilities);
+    expect(JSON.stringify(input)).not.toContain('"file_id":"file-dead"');
+    expect(JSON.stringify(input)).toContain("could not be read by the provider");
+  });
+
+  test("is marked on this turn's own message, which is reported again", async () => {
+    const provider = fakeProvider([rejected("file-dead"), finish()]);
+    const reported: AgentMessage[] = [];
+    const agent = Agent.create({ name: "reader", provider, logErrors: false });
+    const result = await agent
+      .stream({
+        messages: [],
+        turn: { text: "read this", files: [{ fileId: "file-dead", name: "q3.pdf" }] },
+        onMessage: (message) => void reported.push(structuredClone(message)),
+      })
+      .result();
+
+    const users = result.messages.filter((message) => message.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]!.content[1]).toMatchObject({ fileId: "file-dead", providerRejected: true });
+    const copies = reported.filter((message) => message.id === users[0]!.id);
+    expect(copies.length).toBeGreaterThanOrEqual(2);
+    expect(copies.at(-1)!.content[1]).toMatchObject({ providerRejected: true });
+  });
+
+  test("is logged as a warning unless logErrors is off", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await Agent.create({
+        name: "reader",
+        provider: fakeProvider([rejected("file-dead"), finish()]),
+      })
+        .stream({ messages: [], turn: { text: "x", files: [{ fileId: "file-dead", name: "a" }] } })
+        .result();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("the provider refused file file-dead"),
+        expect.objectContaining({ fileId: "file-dead", status: 400 }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

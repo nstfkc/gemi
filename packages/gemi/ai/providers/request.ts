@@ -5,6 +5,7 @@ import type {
   ProviderToolSpec,
 } from "../AgentProvider";
 import { ATTACHMENT_ID_PREFIX } from "../store/Attachments";
+import { unreadableNote } from "./fileRejection";
 import type { AgentMessage, FilePart, ToolResultPart } from "../types";
 
 /**
@@ -182,6 +183,15 @@ export function toResponsesInput(
             throw new Error(
               "FilePart.fileId is empty and there is no `attachmentId` either. `fileId` is the *provider's* file id and `attachmentId` is gemi's (`gemi_att_…`), both from the upload response; an upload always answers at least one, so a part with neither was built from something other than that answer.",
             );
+          }
+          // Refused once already (#684): the id would be refused again, and the
+          // request with it. The model is told the file is there and was not
+          // read, and is given the attachment id when there is one, since the
+          // stored copy is still readable by a tool.
+          if (part.providerRejected) {
+            if (attachmentId) buffer.push(textContent(role, attachmentLine(part, false)));
+            buffer.push(textContent(role, unreadableNote(part.name)));
+            break;
           }
           if (attachmentId) buffer.push(textContent(role, attachmentLine(part, !!part.fileId)));
           if (part.fileId) buffer.push(fileContent(part));
