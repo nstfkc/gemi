@@ -56,6 +56,34 @@ several users share a thread's live run (a team chat) overrides
 user, or `null` to turn the check off. Guard `stream`, `attach` and `stop`
 with the same middleware so the owner can be read on all three.
 
+## `ai`: a provider file id answers only the user who uploaded it (#443)
+
+**Behaviour change (security).** A provider's file id (`file-…`) is scoped to
+the OpenAI/Azure org, not to a user, so anyone who learned another user's id (a
+shared transcript, a log line) could put it in their own `turn.files` and have
+the model read that user's document. `AgentController.upload` now records each
+provider id it gets under `runOwner(req)` (the same key that owns a run, #442:
+`user:<id>`, or `null` when anonymous) in the new `fileOwners` store
+(`MemoryFileOwners` by default). A `stream` turn naming an id recorded for a
+different owner, in `turn.files` or, on a stateless chat, in the client's
+`messages`, is refused before anything runs with a 403
+`{ error: { kind: "permission", message: "A file in this turn was uploaded by someone else.", status: 403 } }`.
+
+- An anonymous upload is recorded with owner `null` and is unowned: anyone
+  holding the id may use it, as before. An anonymous request has no identity
+  to bind to (`sessionId()` is a cookie the visitor writes), and the id stays
+  the capability.
+- An id with no record (uploaded before the upgrade, before a restart with the
+  in-memory default, on another process, or outside `upload`) is still let
+  through. Set `protected requireKnownFiles = true` to refuse those too, once
+  `fileOwners` is durable and shared (implement `FileOwners`: `record(fileId,
+  record)` and `get(fileId)`).
+
+**Action:** none for an app whose chats belong to one user. An app that
+overrides `runOwner(req)` gets the same key on files. An app with several
+server processes should give `fileOwners` a database-backed store, since the
+default only knows the uploads its own process saw.
+
 ## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
 
 **Behaviour change.** `AgentMessage.usage` was typed but the server never set

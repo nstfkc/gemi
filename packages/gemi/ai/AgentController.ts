@@ -23,6 +23,12 @@ import {
   LiveRunNotFoundError,
   MemoryLiveRuns,
 } from "./store/LiveRuns";
+import {
+  defaultFileOwners,
+  type FileOwnerRecord,
+  type FileOwners,
+  MemoryFileOwners,
+} from "./store/FileOwners";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
@@ -150,6 +156,9 @@ export {
   MemoryLiveRuns,
   defaultLiveRuns as liveRuns,
 };
+
+/** Who uploaded each provider file id (#443). See `store/FileOwners.ts`. */
+export { defaultFileOwners, type FileOwnerRecord, type FileOwners, MemoryFileOwners };
 
 // --- controller ----------------------------------------------------------
 
@@ -356,6 +365,32 @@ export abstract class AgentController<
    * different bucket from everything else.
    */
   attachmentStorage: AttachmentStorage = Storage;
+
+  /**
+   * Who uploaded each provider file id (#443). `upload` records the id under
+   * `runOwner(req)`, and `stream` refuses a turn whose files name an id
+   * recorded for another owner with a 403 `{ error: { kind: "permission",
+   * message, status } }`. Defaults to the process-wide `MemoryFileOwners`; the
+   * same warning as `store` applies — assign something that outlives the
+   * request. An app with several processes, or that wants the binding to
+   * survive a restart, gives it a table (see `FileOwners`).
+   */
+  fileOwners: FileOwners = defaultFileOwners;
+
+  /**
+   * Whether a turn may name a provider file id that `fileOwners` has no record
+   * of. `false` by default, which is what keeps the change additive: an id
+   * uploaded before the upgrade, before a restart (with the in-memory default),
+   * on another process, or by the app outside `upload` still works, as every id
+   * did before. An id that IS recorded for someone else is refused either way.
+   *
+   * Set it to `true` once `fileOwners` is durable and shared, to make the
+   * binding complete: then an id is usable only by the owner it was recorded
+   * for, or by anyone when it was recorded as anonymous. On a stateless chat
+   * the client carries its history, so this also refuses a file a tool attached
+   * earlier in the conversation; a strict app keeps its chats on a thread.
+   */
+  protected requireKnownFiles = false;
 
   /**
    * How long the request that started a run is held open for its hooks, in
@@ -717,6 +752,17 @@ export abstract class AgentController<
       // this turn. Before the thread's lock, which ends the thread's previous
       // run, so a refused or stopped turn does not end it either.
       await this.authorizeRequest(req, { route: "stream", threadId, body: extraBody });
+      // After the app's check, so a caller it refuses does not learn which ids
+      // are someone's; before the thread's lock, so a refused turn supersedes
+      // nothing. The client's history only counts without a thread: with one,
+      // `body.messages` is ignored and the history comes from the store.
+      const foreign = await this.foreignFile(
+        [...(turn?.files ?? []), ...(threadId ? [] : clientHistoryFiles(body.messages))],
+        owner,
+      );
+      if (foreign) {
+        return foreign;
+      }
       if (pending?.cancelled) {
         return stoppedBeforeStart();
       }
@@ -1234,6 +1280,18 @@ export abstract class AgentController<
         ? threadField
         : undefined;
 
+    // Who the provider's copy will belong to (#443): the same key that owns a
+    // run this caller starts, so the turn that names the file finds it its own.
+    const owner = await this.runOwner(req);
+    const recordOwner = (fileId: string) =>
+      this.fileOwners.record(fileId, {
+        owner,
+        name,
+        mimeType,
+        size: file.size,
+        createdAt: new Date().toISOString(),
+      });
+
     const policy = await this.attachmentDestination(file as File, req);
     const destination = narrowDestination(policy, form.get("destination"));
 
@@ -1269,6 +1327,7 @@ export abstract class AgentController<
       // Identical to the pre-attachment behaviour, down to the answer's
       // `fileId` — plus `downgraded` when this path was not the app's choice.
       const fileId = await providerUpload(this.agent.provider, file as File);
+      await recordOwner(fileId);
       const answer: UploadResult = {
         fileId,
         name,
@@ -1291,6 +1350,9 @@ export abstract class AgentController<
 
     const fileId =
       destination === "both" ? await providerUpload(this.agent.provider, file as File) : undefined;
+    if (fileId) {
+      await recordOwner(fileId);
+    }
 
     const record: Attachment = {
       id: attachmentId,
@@ -1306,6 +1368,34 @@ export abstract class AgentController<
     await this.attachments.put(scope, record);
 
     return { fileId, attachmentId, name, mimeType, size: file.size, destination };
+  }
+
+  /**
+   * The 403 for a turn naming a provider file id that is not this caller's, or
+   * `null` when every id may be used (#443). See `fileOwners`.
+   *
+   * Only `fileId` is checked: an `attachmentId` is resolved under the request's
+   * own scope, so another user's is already a not-found (`ScopedAttachments`).
+   * An entry carrying the caller's own `attachmentId` beside a foreign `fileId`
+   * is refused all the same — the `fileId` is what reaches the provider.
+   */
+  private async foreignFile(
+    files: { fileId?: string }[],
+    caller: string | null,
+  ): Promise<Response | null> {
+    const ids = new Set(
+      files.map((file) => file.fileId).filter((id): id is string => typeof id === "string"),
+    );
+    for (const fileId of ids) {
+      const record = await this.fileOwners.get(fileId);
+      if (record ? record.owner !== null && record.owner !== caller : this.requireKnownFiles) {
+        // The same sentence for a file that is someone else's and, in strict
+        // mode, one nobody recorded: which of the two it is would tell a caller
+        // probing ids that the id exists.
+        return notYourFile();
+      }
+    }
+    return null;
   }
 
   /**
@@ -2083,6 +2173,40 @@ function notYourRun(): Response {
     403,
     refusal("permission", "This run belongs to someone else.", 403) as Record<string, unknown>,
   );
+}
+
+/** The refusal for a turn naming another owner's provider file (#443). Same
+ *  shape as `notYourRun`. */
+function notYourFile(): Response {
+  return jsonResponse(
+    403,
+    refusal(
+      "permission",
+      "A file in this turn was uploaded by someone else.",
+      403,
+    ) as Record<string, unknown>,
+  );
+}
+
+/**
+ * The file parts of a stateless chat's history, which the client carries and
+ * may have written anything into. Read defensively: the history is not
+ * validated anywhere else before the run, and a malformed one is the run's
+ * problem, not this check's.
+ */
+function clientHistoryFiles(messages: unknown): { fileId?: string }[] {
+  if (!Array.isArray(messages)) return [];
+  const files: { fileId?: string }[] = [];
+  for (const message of messages) {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part && typeof part === "object" && typeof part.fileId === "string") {
+        files.push({ fileId: part.fileId });
+      }
+    }
+  }
+  return files;
 }
 
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
