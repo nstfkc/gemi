@@ -151,6 +151,7 @@ extension ChatState {
     runMessageIds = (json["runMessageIds"]?.arrayValue ?? []).compactMap(\.stringValue)
     loadedTools = (json["loadedTools"]?.arrayValue ?? []).compactMap(\.stringValue)
     finishReason = json["finishReason"]?.stringValue.map { FinishReason(rawValue: $0) }
+    usageJSON = json["usage"]
   }
 
   /// The state as `JSON.stringify` writes the TypeScript one: `undefined`
@@ -168,6 +169,7 @@ extension ChatState {
     json["threadId"] = threadId.map(JSONValue.string)
     json["cursorRunId"] = cursorRunId.map(JSONValue.string)
     json["finishReason"] = finishReason.map { .string($0.rawValue) }
+    json["usage"] = usageJSON
     return .object(json)
   }
 }

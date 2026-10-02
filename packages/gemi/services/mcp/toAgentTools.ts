@@ -1,4 +1,5 @@
 import { AgentTool, type AnyAgentTool } from "../../ai/Agent";
+import { ToolError } from "../../ai/redact";
 import { RequestContext } from "../../http/requestContext";
 import type { McpRegistry, McpToolFilter } from "./McpRegistry";
 
@@ -24,7 +25,7 @@ import type { McpRegistry, McpToolFilter } from "./McpRegistry";
  * it is never inferred from the verb.
  *
  * A failure the model should read — a 4xx, a missing file, a bad argument —
- * throws, and the agent loop turns a throw into a `tool_error` result the model
+ * throws a `ToolError` (`McpToolError` is one), whose message is shown, and the agent loop turns a throw into a `tool_error` result the model
  * sees and can correct on its next step.
  */
 export function toAgentTools(registry: McpRegistry, filter?: McpToolFilter): AnyAgentTool[] {
@@ -37,7 +38,7 @@ export function toAgentTools(registry: McpRegistry, filter?: McpToolFilter): Any
       execute: (input, ctx) => {
         const req = RequestContext.getStore()?.req;
         if (!req) {
-          throw new Error(
+          throw new ToolError(
             `"${descriptor.name}" calls an api route as the user who started this run, and this run was not started inside a request. Run it from an AgentController, or give this agent tools that do not go through the MCP registry.`,
           );
         }

@@ -291,10 +291,85 @@ describe("a provider error", () => {
 
     expect(result.finishReason).toBe("error");
     expect(events.find((event) => event.type === "error")).toMatchObject({
-      error: { code: "content_filtered", message: "blocked" },
+      error: { code: "content_filtered" },
     });
+    expect(result.error).toMatchObject({ code: "content_filtered", message: "blocked" });
     // The tokens were still spent, so they are still counted.
     expect(result.usage).toEqual(usage(10, 5));
+  });
+});
+
+describe("per-message usage (#467)", () => {
+  const spent = (inputTokens: number, outputTokens: number): ProviderEvent => ({
+    type: "finish",
+    reason: "stop",
+    usage: usage(inputTokens, outputTokens),
+  });
+
+  test("each step's message carries its own call's usage, and the run the total", async () => {
+    const provider = fakeProvider(
+      [toolCall("c1", "grep", { pattern: "a" }), spent(100, 10)],
+      [toolCall("c2", "grep", { pattern: "b" }), spent(200, 20)],
+      [{ type: "text-delta", delta: "done" }, spent(300, 30)],
+    );
+    const agent = Agent.create({ name: "coder", provider, tools: [grep] });
+    const persisted: AgentMessage[] = [];
+    const run = agent.stream({
+      messages: [],
+      turn: { text: "search" },
+      onMessage: (message) => {
+        if (message.role === "assistant") persisted.push(structuredClone(message));
+      },
+    });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    const assistant = result.messages.filter((message) => message.role === "assistant");
+    expect(assistant.map((message) => message.usage)).toEqual([
+      usage(100, 10),
+      usage(200, 20),
+      usage(300, 30),
+    ]);
+    // Not the run total on the last one, and nothing on the user's turn.
+    expect(result.messages[0]!.usage).toBeUndefined();
+    expect(result.usage).toEqual(usage(600, 60));
+
+    // `onMessage` persists the message with its usage already on it.
+    expect(persisted.map((message) => message.usage)).toEqual(assistant.map((m) => m.usage));
+
+    // On the wire: each `message-end` names its own; `usage` is the turn's.
+    const ends = events.filter((event) => event.type === "message-end");
+    expect(ends.map((event) => (event as any).usage)).toEqual([
+      usage(100, 10),
+      usage(200, 20),
+      usage(300, 30),
+    ]);
+    expect(events.filter((event) => event.type === "usage").at(-1)).toEqual({
+      type: "usage",
+      usage: usage(600, 60),
+    });
+  });
+
+  test("a call that reports usage alongside an error still bills its message", async () => {
+    const provider = fakeProvider([
+      { type: "error", error: { code: "content_filtered", message: "blocked", retryable: false } },
+      spent(7, 0),
+    ]);
+    const run = greetAgent(provider).stream({ messages: [], turn: { text: "hi" } });
+    const result = await run.result();
+    expect(result.messages.at(-1)!.usage).toEqual(usage(7, 0));
+  });
+
+  test("a call that never reported usage leaves the message without one", async () => {
+    // No finish frame: a provider stream cut off. Zero would read as "free".
+    const provider = fakeProvider([{ type: "text-delta", delta: "partial" }]);
+    const run = greetAgent(provider).stream({ messages: [], turn: { text: "hi" } });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+    expect(result.messages.at(-1)!).not.toHaveProperty("usage");
+    expect(events.find((event) => event.type === "message-end")).not.toHaveProperty("usage");
   });
 });
 
@@ -352,9 +427,10 @@ describe("a tool call", () => {
     const agent = Agent.create({ name: "coder", provider, tools: [boom] });
     const result = await agent.stream({ messages: [] }).result();
 
+    // The exception's own text is logged, not shown (#446). See redact.test.ts.
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
       status: "error",
-      error: { code: "tool_error", message: "disk on fire" },
+      error: { code: "tool_error", message: 'The tool "boom" failed with an unexpected error.' },
     });
     expect(result.finishReason).toBe("stop");
   });

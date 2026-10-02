@@ -146,12 +146,19 @@ export function sseResponse(frames: AsyncIterable<AgentStreamFrame>, status = 20
 }
 
 // `unknown` rather than a new code: `AgentErrorCode` is the wire contract and
-// belongs to the model's failures, not to the transport's. The message names
-// the cursor, which is what a client can actually act on.
+// belongs to the model's failures, not to the transport's.
+//
+// Only the two failures the live-run buffer raises keep their message: gemi
+// wrote them, and they name the cursor, which is what a client can act on.
+// Anything else is a store or a bug talking (a Redis error carries its host),
+// so the client gets a fixed sentence and the log gets the rest (#446).
+const TRANSPORT_CODES = new Set(["frame_cursor_evicted", "live_run_not_found"]);
+
 function toAgentError(err: unknown): AgentError {
-  return {
-    code: "unknown",
-    message: err instanceof Error ? err.message : String(err),
-    retryable: false,
-  };
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  if (err instanceof Error && typeof code === "string" && TRANSPORT_CODES.has(code)) {
+    return { code: "unknown", message: err.message, retryable: false };
+  }
+  console.error("[gemi/ai] agent stream failed", err);
+  return { code: "unknown", message: "The run's stream failed.", retryable: false };
 }

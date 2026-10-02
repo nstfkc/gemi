@@ -132,7 +132,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (left-most `x-forwarded-for` entry, then `x-real-ip`) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -435,7 +435,7 @@ export default defineRateLimiterConfig({
 
 ### Limiting by something other than an IP
 
-`x-forwarded-for` is trivially spoofed unless a proxy overwrites it, and it does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
+Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
 import { RateLimitMiddleware, clientIp } from "gemi/http";

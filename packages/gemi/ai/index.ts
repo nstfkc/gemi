@@ -105,6 +105,15 @@ export type {
   ToolTurn,
 } from "./Agent";
 
+// --- what a client is told about a failure (#446) --------------------------
+//
+// `ToolError` is a class, exported as a value: a tool throws it when its
+// message is written to be read, and every other exception reaches the model
+// and the client as a generic sentence. `redactError` is the default, for an
+// app's override of `AgentController.redactError` to fall back to.
+export { redactError, ToolError } from "./redact";
+export type { ErrorRedactionInfo, ErrorRedactor } from "./redact";
+
 // --- one model call --------------------------------------------------------
 //
 // A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same

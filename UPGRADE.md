@@ -1,5 +1,169 @@
 # Unreleased
 
+## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
+
+**Behaviour change.** `AgentMessage.usage` was typed but the server never set
+it; the browser put the whole run's total on the last assistant message, so a
+three-step run showed every token on step three and none on the first two.
+Now:
+
+- **Each assistant message carries its own model call's usage**, set by the
+  agent loop before `onMessage` and on `result().messages`, and sent on the
+  `message-end` frame as `usage`. A message whose call never reported usage
+  (aborted mid-stream) has none. `generate()`'s reply carries its call's usage
+  too.
+- **The `usage` frame is still the run's total** (all steps plus what tools
+  spent through sub-runs, `ctx.generate()` and images), and `result().usage`
+  is unchanged. Clients no longer copy it onto a message: it is
+  `useChat().usage` (web), `ChatSession.usage` (Swift) and
+  `ChatUiState.usage` (Kotlin), reset at each `run-start`. `NestedRun.usage`
+  is unchanged.
+
+No migration: gemi stores messages as JSON, and a stored message gains the
+field. Messages written before this keep whatever they had (the client-side
+run total on the last message, if the app persisted client state).
+
+**Action:** a UI that showed `message.usage` as "what this turn cost" should
+sum the turn's assistant messages, or read `useChat().usage` for the live run.
+Code that billed from the last message's `usage` should bill from
+`result().usage` on the server.
+
+## `ai`: failures reach clients and models redacted; `ToolError` for messages meant to be read (#446)
+
+**Behaviour change.** An agent's failures used to reach the browser verbatim: a
+provider's error body (Azure's names the resource and deployment), a `fetch`
+failure's hostname, and the text of any exception a tool threw, which the model
+was sent as well. A tool whose database driver threw put the connection string
+in the transcript. Now:
+
+- **The run's `error` frame** keeps `code`, `retryable` and `toolCallId`, and a
+  message gemi did not write is replaced with a fixed sentence for its code
+  (`provider_error`: "The model provider returned an error.", and likewise
+  `rate_limited`, `context_length_exceeded`, `content_filtered`,
+  `invalid_tool_input`, `tool_error`, `unknown`). Messages gemi wrote
+  (`timeout`, `invalid_output`, `aborted`, ...) are unchanged. `result().error`
+  and the log still carry the provider's own message, status and request id.
+- **A tool that throws** produces `The tool "<name>" failed with an unexpected
+  error.` for both the model and the client, and the exception is logged in
+  full (`Log.error`, unless the agent sets `logErrors: false`). To show a
+  message, throw a **`ToolError`** (from `gemi/ai`):
+  `throw new ToolError("There is no order 42.", { retryable: false })`. gemi's
+  own tool errors (attachments, `runAgent` replay, `toAgentTools` /
+  `McpToolError`) are `ToolError`s and read as before.
+- **`AgentController.onError`** now receives the unredacted error (with
+  `status` and `requestId` when the provider sent them).
+- A failure of the SSE transport itself (a store's exception) is sent as "The
+  run's stream failed." and logged; the cursor errors keep their message.
+
+**Action:** a tool that throws a plain `Error` to tell the model something ("No
+customer with that email") should throw `ToolError` instead, or return the
+message as its output. To change what clients see, override
+`AgentController.redactError(error, info, ctx)` (or pass `redactError` to
+`agent.stream()`), for example to show everything in development:
+
+```ts
+protected redactError(error, info, ctx) {
+  if (process.env.NODE_ENV === "development") return error;
+  return super.redactError(error, info, ctx);
+}
+```
+
+## `Link` leaves new-tab, modifier and download clicks to the browser (#694)
+
+**Behaviour change (bug fix).** A route `Link` used to cancel every click and
+navigate client-side, so `target="_blank"`, cmd/ctrl/shift/alt-click and
+`download` all stayed in the current tab. It now steps aside, and the browser
+handles the click as it would for a plain anchor, when:
+
+- `target` is set to anything other than `_self`;
+- a modifier key (meta, ctrl, shift, alt) is held;
+- the button is not the primary one;
+- `download` is set;
+- the click was already cancelled (`event.defaultPrevented`).
+
+Your own `onClick` now always runs first, including on a click to the page you
+are already on (it used to be skipped there). Calling `event.preventDefault()`
+in it now cancels the client-side navigation too; previously the router
+navigated regardless. If you relied on that, drop the `preventDefault()` call or
+navigate yourself with `useNavigate().push(...)`. Prefetch behaviour is
+unchanged.
+
+## `useQuery` aborts requests nobody renders; controllers get `req.signal` (#659)
+
+**Behaviour change.** When the last mounted reader of a query variant lets go
+of it (its `search`/`params` changed again before the answer landed, or it
+unmounted), the request still on the wire is now aborted instead of running to
+completion and landing in the cache. This covers the `keepPreviousData`
+pending variant under suspense too. The abort is silent: no `error`, no
+retry, cached data untouched. A variant another component still renders, and a
+request no reader had mounted (a hover `prefetch()`), are never aborted.
+
+What you may notice: going back to a variant whose request was aborted fetches
+it again rather than finding it cached.
+
+**New: `req.signal`** on `HttpRequest` is the incoming request's `AbortSignal`;
+it fires when the client disconnects (and, during a server render, when the
+page request does). Pass it to slow work such as model calls or upstream
+`fetch`es so they stop early. No action required.
+
+## `this.proxy(...)` takes `.middleware()` (#7)
+
+A proxy route could not carry middleware of its own: `createFlatApiRoutes`
+registered it with an empty list, so the only way to guard one was to move it
+into a nested router with `middlewares = [...]`. It now has `.middleware()`
+like every other route, run after the global list and the enclosing routers':
+
+```ts
+"/billing": this.proxy("http://billing.internal/api").middleware(["auth"]),
+```
+
+No existing route changes behaviour. **Check your `proxy()` routes:** one
+without middleware is public and forwards the client's headers, cookies and
+`Authorization` included, to its target.
+
+## Breaking: `X-Forwarded-For` is no longer trusted by default; set `GEMI_TRUST_PROXY` behind a proxy (#8)
+
+**Behaviour change.** `gemi start` used to pass a client-sent `X-Forwarded-For`
+through to the app unchanged, and `clientIp` (the default rate-limit key) read
+its left-most entry, which is the one the client writes. Any client could pick
+its own rate-limit bucket. The production server now decides which address to
+believe, leaves exactly one in `X-Forwarded-For`, and drops `X-Real-IP`:
+
+| `GEMI_TRUST_PROXY` | client address |
+| --- | --- |
+| unset, `false`, `off`, `0` (default) | the socket's peer address; forwarding headers are discarded |
+| `1`, `2`, … | the address the outermost of that many proxies was reached from (counted from the right of `X-Forwarded-For`) |
+| `true` | `X-Forwarded-For` and `X-Real-IP` passed through as sent (the old behaviour) |
+
+**Action required behind a proxy or load balancer** (Railway, Fly, a CDN): with
+the default, every request appears to come from the proxy, so all clients share
+one rate-limit budget. Set `GEMI_TRUST_PROXY` to the number of proxies in front
+of the app: `1` for Railway alone, `2` for Cloudflare in front of Railway. Use
+`true` only behind a proxy that overwrites `X-Forwarded-For` instead of
+appending to it. Any other value fails the boot. `gemi dev` is unchanged.
+
+## `EMAIL_DEBUG` records the envelope; sends use the filtered recipients (#672)
+
+**`EMAIL_DEBUG=true` writes a JSON sidecar.** Next to each
+`.debug/emails/<iso><subject>.html`, `Email.send` now writes
+`<iso><subject>.json` with `to`, `cc`, `bcc`, `from`, `subject`, `headers`,
+`attachments` (`{ filename, bytes }`, no contents), `scheduledAt`, `locale` and
+`text`. The HTML path and contents are unchanged, so existing readers keep
+working; a test can now read the sidecar to check who a mail went to. Readers
+that list the directory and expect only `.html` files should filter by
+extension.
+
+**Subjects are sanitised in debug filenames.** `/`, `\` and control characters
+become `_`, so `"Invoice 2026/10"` writes `…Invoice 2026_10.html` instead of a
+subdirectory (or failing).
+
+**The driver receives the filtered `to`.** `filterRecipients` used to only
+decide whether to send: if it returned anything, the driver was handed the
+original `to`, so a filter that dropped or rewrote some addresses had no effect
+on the others. The driver now gets the list the filter returns, as the docs
+always said. Check your `filterRecipients` if it was written to return a
+placeholder (anything non-empty) rather than the real list.
+
 ## Breaking: refusals are objects `{ kind, message, status }` (#673)
 
 **Breaking change.** Every refusal's `error` is now an object. Before, most were
@@ -99,6 +263,31 @@ New, nothing to change:
   `"text/csv"`). A file outside it gets a **422** `{ error: { code, message }
   }` (`file_too_large` or `unsupported_file_type`) before anything is stored
   or sent to the provider. The default is no limits.
+
+## Behaviour change: every file in `public/` is served, whatever its extension (#583)
+
+`gemi start` used to decide whether a root-level path was a static file from a
+fixed extension list. A `public/` file the list missed (`.wasm`, `.csv`,
+`.wav`, `.mov`, `.zip` …, and `.mp4`/`.webm` before 0.63) never reached the
+static handler: the router answered it, usually with a locale redirect and a
+rendered 404 page.
+
+The server now reads the files the build copied into `dist/client` once at
+boot, and serves a request whose path names one of them exactly — any
+extension, any depth. `/assets/*` and `/.well-known/*` are unchanged.
+
+- **A public file wins over a route with the same path.** A view's data URL
+  is `/<path>.json`, so a `public/pricing.json` now answers `/pricing.json`
+  instead of the `/pricing` view's data (this already held for
+  `public/manifest.json`). Rename the file if you ship one like that.
+- **Names starting with a dot are never served** (`.DS_Store`, `.env`, and
+  everything under a dot-directory), except `/.well-known/*` as before.
+- **Byte ranges.** Static files answer a single `Range` with a `206` (and an
+  unsatisfiable one with a `416`), so a `<video>` pointed at a public `.mp4`
+  can seek. A controller that streamed public videos only to get this can be
+  deleted.
+- **Files written into `dist/client` after the server started** are not served
+  outside `/assets` until the next restart.
 
 # Upgrading from 0.84.0 to 0.84.1
 

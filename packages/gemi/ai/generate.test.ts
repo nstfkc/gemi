@@ -112,7 +112,10 @@ describe("generate", () => {
     expect(result.messages[1]).toMatchObject({
       finishReason: "stop",
       content: [{ type: "output", value: { headline: "Bread, daily", cta: "Order now" } }],
+      // One call, one message: the reply carries the call's usage (#467).
+      usage: { inputTokens: 120, outputTokens: 30, totalTokens: 150 },
     });
+    expect(result.messages[0].usage).toBeUndefined();
   });
 
   test("makes one call, with the schema, the system prompt and no tools", async () => {

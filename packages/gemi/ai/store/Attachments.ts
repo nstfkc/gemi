@@ -1,3 +1,4 @@
+import { ToolError } from "../redact";
 import type {
   PutFileParams,
   ReadFileParams,
@@ -167,11 +168,12 @@ export interface AttachmentStorage {
  * is a tenant census delivered through the very tool the injection was aimed at.
  * One error, one wording, one code, for both.
  *
- * A plain `Error` rather than a `RequestBreakerError`: this is thrown inside a
+ * A `ToolError` rather than a `RequestBreakerError`: this is thrown inside a
  * tool, where the agent loop turns a throw into a tool result the model reads
  * and can recover from, not inside a route where it would decide a status code.
+ * A `ToolError` so the model and the client are shown its message (#446).
  */
-export class AttachmentNotFoundError extends Error {
+export class AttachmentNotFoundError extends ToolError {
   readonly code = "attachment_not_found";
   constructor(public readonly id: string) {
     super(`No attachment ${id}.`);
@@ -180,7 +182,7 @@ export class AttachmentNotFoundError extends Error {
 }
 
 /** Raised for a scope no caller could have meant. See `assertScope`. */
-export class InvalidAttachmentScopeError extends Error {
+export class InvalidAttachmentScopeError extends ToolError {
   readonly code = "invalid_attachment_scope";
   constructor(message: string) {
     super(message);

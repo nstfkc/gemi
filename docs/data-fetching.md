@@ -273,6 +273,26 @@ whose last failure its policy would retry is fetched again, silently, with a
 fresh run of retries. `revalidateOnFocus` and `refetch()` fetch a failed query
 like any other.
 
+### Abandoned requests are aborted
+
+When the last mounted reader of a variant lets go of it — its `search` or
+`params` changed again before the answer landed, or the component unmounted —
+the request still on the wire is aborted. The abort is not a failure: no
+`error` is stored, the retry policy never sees it, whatever data was cached
+stays, and the variant simply fetches again the next time something reads it.
+A variant another component still renders is never aborted, and neither is a
+request nobody had mounted yet (a hover `prefetch()`).
+
+The server sees the disconnect on `req.signal`, so a slow handler can stop:
+
+```ts
+// app/http/controllers/SuggestionController.ts
+async next(req: HttpRequest) {
+  const res = await fetch(MODEL_URL, { method: "POST", body, signal: req.signal });
+  return await res.json();
+}
+```
+
 ### App-wide defaults: `queryConfig`
 
 Set defaults for every `useQuery` once, where the roots are created. A call

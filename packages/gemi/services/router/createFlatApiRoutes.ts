@@ -108,7 +108,7 @@ export function createFlatApiRoutes(
     if (isProxyHandler(option)) {
       const proxyHandler = option;
       for (const method of ["GET", "POST", "PUT", "DELETE"]) {
-        addRoute(path, method, proxyHandler.run.bind(proxyHandler), []);
+        addRoute(path, method, proxyHandler.run.bind(proxyHandler), proxyHandler.middlewares);
       }
       continue;
     }
