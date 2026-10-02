@@ -126,6 +126,7 @@ private fun fixture(json: JsonObject): ChatState =
     runMessageIds = json["runMessageIds"].array().orEmpty().mapNotNull { it.string() },
     loadedTools = json["loadedTools"].array().orEmpty().mapNotNull { it.string() },
     finishReason = json.string("finishReason")?.let(::FinishReason),
+    usageJson = json["usage"],
   )
 
 /** The state as `JSON.stringify` writes the TypeScript one. */
@@ -141,4 +142,5 @@ private fun ChatState.fixtureJson(): JsonObject =
     "threadId" to threadId.json(),
     "cursorRunId" to cursorRunId.json(),
     "finishReason" to finishReason?.value.json(),
+    "usage" to usageJson,
   )

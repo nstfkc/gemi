@@ -2422,6 +2422,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       finishReason: reason,
       // Only when true, so the frame an ordinary message ends with is unchanged.
       ...(outputTruncated ? { outputTruncated: true as const } : {}),
+      // The model call's usage for this message alone (#467). Absent when the
+      // call never reported one — aborted mid-stream, or a provider that sent
+      // no terminal frame — rather than a zero that reads as "free".
+      ...(message.usage ? { usage: message.usage } : {}),
     });
     await this.report(message);
     // After it, never before: a file a tool showed during this message belongs
@@ -2536,6 +2540,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "finish": {
           this.usage = addUsage(this.usage, event.usage);
+          // This step's own cost, on the message the step wrote (#467). The run
+          // total above is the whole turn — every step plus tools' sub-runs,
+          // `generate()` calls and images — and putting it on the last message
+          // showed a three-step run's every token on step three. Added rather
+          // than assigned in case a provider ever closes a call with more than
+          // one finish frame.
+          message.usage = addUsage(message.usage ?? emptyUsage(), event.usage);
           // The usage is taken either way, the reason only if nothing has
           // already failed. A provider is allowed to report an error and then
           // close the call with a finish frame — a content filter does exactly

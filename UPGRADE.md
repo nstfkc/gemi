@@ -1,5 +1,33 @@
 # Unreleased
 
+## `ai`: `AgentMessage.usage` is each message's own; the run total moves to `useChat().usage` (#467)
+
+**Behaviour change.** `AgentMessage.usage` was typed but the server never set
+it; the browser put the whole run's total on the last assistant message, so a
+three-step run showed every token on step three and none on the first two.
+Now:
+
+- **Each assistant message carries its own model call's usage**, set by the
+  agent loop before `onMessage` and on `result().messages`, and sent on the
+  `message-end` frame as `usage`. A message whose call never reported usage
+  (aborted mid-stream) has none. `generate()`'s reply carries its call's usage
+  too.
+- **The `usage` frame is still the run's total** (all steps plus what tools
+  spent through sub-runs, `ctx.generate()` and images), and `result().usage`
+  is unchanged. Clients no longer copy it onto a message: it is
+  `useChat().usage` (web), `ChatSession.usage` (Swift) and
+  `ChatUiState.usage` (Kotlin), reset at each `run-start`. `NestedRun.usage`
+  is unchanged.
+
+No migration: gemi stores messages as JSON, and a stored message gains the
+field. Messages written before this keep whatever they had (the client-side
+run total on the last message, if the app persisted client state).
+
+**Action:** a UI that showed `message.usage` as "what this turn cost" should
+sum the turn's assistant messages, or read `useChat().usage` for the live run.
+Code that billed from the last message's `usage` should bill from
+`result().usage` on the server.
+
 ## `ai`: failures reach clients and models redacted; `ToolError` for messages meant to be read (#446)
 
 **Behaviour change.** An agent's failures used to reach the browser verbatim: a
