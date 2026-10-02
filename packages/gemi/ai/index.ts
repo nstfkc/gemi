@@ -170,6 +170,7 @@ export {
   defaultAgentStore,
   defaultAttachmentStore,
   defaultFileOwners,
+  defaultNonceStore,
   FrameCursorEvictedError,
   InvalidAttachmentScopeError,
   liveRuns,
@@ -178,6 +179,8 @@ export {
   MemoryAttachmentStore,
   MemoryFileOwners,
   MemoryLiveRuns,
+  MemoryNonceStore,
+  RedisNonceStore,
   ScopedAttachments,
 } from "./AgentController";
 export type {
@@ -196,7 +199,10 @@ export type {
   FileOwnerRecord,
   FileOwners,
   LiveRuns,
+  NonceRedisClient,
+  NonceStore,
   PutAttachmentParams,
+  RedisNonceStoreOptions,
   ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,

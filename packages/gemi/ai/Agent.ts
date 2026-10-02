@@ -25,8 +25,8 @@ import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
-  consumeNestedRun,
-  consumePendingCall,
+  spendNestedRun,
+  spendPendingCall,
   readSignature,
   signNestedRun,
   signPendingCall,
@@ -43,6 +43,7 @@ import type {
 } from "./store/Attachments";
 import { ATTACHMENT_ID_PREFIX, InvalidAttachmentScopeError } from "./store/Attachments";
 import { httpErrorDetail } from "./providers/errors";
+import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -1165,6 +1166,16 @@ interface AgentStreamParamsBase {
    * `redactError` method. Handed down unchanged to a sub-run.
    */
   redactError?: ErrorRedactor;
+  /**
+   * Where the nonces of answered pending calls and re-entered sub-run records
+   * are spent, which is what makes a signed answer single-use (#445). Default
+   * the process-wide `MemoryNonceStore`: exact for one instance, but with
+   * several each would accept a replayed answer once. Give a shared store
+   * (`RedisNonceStore`, or your own `NonceStore`) when running more than one.
+   * `AgentController` sets this from its `nonces`. Handed down unchanged to a
+   * sub-run.
+   */
+  nonces?: NonceStore;
   /**
    * The attachment handle every tool of this run is given as `ctx.attachments`.
    *
@@ -3173,6 +3184,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       threadId: this.params.threadId,
       // The same caller is reading, so the same rules for what it is told.
       redactError: this.params.redactError,
+      // The same store, so a sub-run's answers are single-use across every
+      // instance exactly as the parent's are.
+      nonces: this.params.nonces,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3900,7 +3914,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             // would run it once per replay. Once per record per turn — the
             // sub-run may have asked two things at once, and every answer to
             // it re-enters the same tool a single time.
-            if (!consumeNestedRun(parked.signature)) {
+            if (!(await this.spend(spendNestedRun, parked.signature))) {
               reject(
                 `The answer for "${answer.toolCallId}" is addressed under "${host}", which has already been re-entered on that record. Ask again.`,
               );
@@ -4183,6 +4197,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * opposite: the answer was good, the tool ran, and it is now waiting on a
    * question of its own, so the call must stay open *without* being denied.
    */
+  /**
+   * Spends a token's nonce in the run's `NonceStore`. A store that throws (its
+   * Redis is down, say) is logged and counted as spent: the answer is refused
+   * and the user asked again, rather than acted on unchecked.
+   */
+  private async spend(
+    spendIn: (signature: string, store: NonceStore) => Promise<boolean>,
+    signature: string,
+  ): Promise<boolean> {
+    try {
+      return await spendIn(signature, this.params.nonces ?? defaultNonceStore);
+    } catch (error) {
+      this.writeLog(`[gemi/ai] agent "${this.config.name}" could not spend a nonce`, { error });
+      return false;
+    }
+  }
+
   private async resolveAnswer(
     entry: { message: AgentMessage; call: ToolCallPart },
     answer: ClientToolResult,
@@ -4246,7 +4277,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // approves the same call every time it is presented — the client rewinds to
     // the history from before the result existed and replays, and the human who
     // approved once has approved forever.
-    if (!consumePendingCall(answer.signature)) {
+    if (!(await this.spend(spendPendingCall, answer.signature))) {
       return reject(`The answer for "${name}" has already been used. Ask again.`);
     }
 

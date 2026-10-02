@@ -1,5 +1,44 @@
 # Unreleased
 
+## `ai`: approval nonces can be spent in a shared store (#445)
+
+**Additive (security).** A signed answer to a pending call (an approval, a
+question, a client tool's result) is single-use because its nonce is spent when
+it is acted on. Spent nonces lived in one process's memory, so on a stateless
+chat with several instances (or after a restart) a client could rewind its
+history to before the result and replay the same approval once per instance.
+
+`AgentController` has a new `nonces` property taking a `NonceStore`
+(`consume(nonce, expiresAt): Promise<boolean>`, atomic insert-if-absent). The
+default is still the process-wide `MemoryNonceStore`, which is exact for a
+single instance. `RedisNonceStore` uses the app's Redis (`SET key 1 PX <ttl>
+NX`, so Redis expires each nonce with its token):
+
+```ts
+import { AgentController, RedisNonceStore } from "gemi/ai";
+
+const nonces = new RedisNonceStore(); // module scope, like `store`
+
+export class ChatController extends AgentController<typeof chat> {
+  agent = chat;
+  nonces = nonces;
+}
+```
+
+Or implement `NonceStore` over a table with the nonce as primary key
+(`INSERT ... ON CONFLICT (nonce) DO NOTHING`, accepted when one row was
+inserted) and delete rows past `expires_at` from a cron. `Agent.stream` takes
+the same store as `nonces` and passes it down to sub-runs. If the store throws,
+the answer is refused ("Ask again"), not run unchecked.
+
+In production, a stateless chat on the in-memory default logs a warning once
+per process.
+
+**Action:** none for a single instance or a threaded chat (there the stored
+result already refuses a second answer). An app serving stateless chats from
+several instances should set `nonces`. No migration is needed for
+`RedisNonceStore`; a table-backed store needs its own additive table.
+
 ## Request bodies: `Content-Type` is read by media type; bad JSON is a 400 (#699, #700)
 
 **Behaviour change (bug fix).** `req.input()` and `req.safeInput()` used to read
