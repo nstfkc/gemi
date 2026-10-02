@@ -5,6 +5,9 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { ValidationError } from "../http";
 import { AuthorizationError } from "../http/errors";
+import { RequestBreakerError } from "../http/Error";
+import { enforceCodeRateLimits, foldEmail, normalizeEmail } from "./oneTimeCode";
+import type { AuthConfig, AuthenticatedArgs } from "./config";
 import { Auth } from "../facades";
 import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
@@ -60,6 +63,23 @@ async function passwordMatches(
   } catch {}
   return false;
 }
+
+/**
+ * `onAuthenticated`, with `user` taken off the session when not given and its
+ * password hash left out.
+ */
+async function notifyAuthenticated(
+  config: { onAuthenticated?: AuthConfig["onAuthenticated"] },
+  args: Omit<AuthenticatedArgs, "user"> & { user?: User },
+) {
+  const user = args.user ?? args.session?.user;
+  if (!user || !config.onAuthenticated) return;
+  const { password: _, ...safe } = user as User;
+  await config.onAuthenticated({ ...args, user: safe as User });
+}
+
+/** Thrown inside the sign-up transaction to roll it back when the code was taken. */
+class CodeAlreadyClaimed extends Error {}
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
@@ -146,28 +166,19 @@ export class AuthController extends Controller {
     const auth = app(AuthManager);
     const { userProvider } = auth;
     const token = req.search.get("token");
-    const email = decodeURIComponent(req.search.get("email"))
-      .toLowerCase()
-      .trim();
-
-    let magicLink = null;
-
+    let email: string | null = null;
     try {
-      magicLink = await userProvider.findUserMagicLinkToken({
-        email,
-        token,
-      });
-    } catch (err) {
-      console.log(err);
-      return { error: JSON.stringify(err) };
-    }
+      email = foldEmail(decodeURIComponent(req.search.get("email") ?? ""));
+    } catch {}
 
-    if (!magicLink) {
+    // The row's hash is compared in constant time, its age checked against
+    // `emailCode.linkExpiresInMinutes`, and it is deleted by whichever request
+    // claims it first (#708).
+    if (!email || !token || !(await auth.verifyMagicLinkToken(email, token))) {
       return { error: "Invalid token" };
     }
 
     await userProvider.verifyUser(email);
-    await userProvider.deleteMagicLinkToken(email);
     const session = await auth.createOrUpdateSession({ email });
 
     req
@@ -179,32 +190,46 @@ export class AuthController extends Controller {
       );
 
     await auth.config.onSignIn(session, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return { session };
+  }
+
+  /**
+   * The checks both PIN routes share: the verify rate limits, then the code.
+   * Every refusal is the `ValidationError` on `pin` these routes have always
+   * answered a wrong PIN with, so a client built before #708 shows it where it
+   * showed "Invalid pin"; a rate limit is the middleware's 429.
+   */
+  private async verifyPinRequest(req: HttpRequest<{ email: string; pin: string }>) {
+    const auth = app(AuthManager);
+    const input = await req.input();
+    const { email: rawEmail, pin } = input.toJSON();
+    const email = foldEmail(rawEmail);
+
+    if (!email) {
+      throw new ValidationError({ pin: ["Invalid pin"] });
+    }
+
+    await enforceCodeRateLimits("verify", email, req, auth.config.emailCode.verifyLimit);
+
+    const result = await auth.verifyOneTimeCode(email, pin);
+    if (result.status === "too_many_attempts") {
+      throw new ValidationError({ pin: ["Too many attempts"] });
+    }
+    if (result.status !== "ok") {
+      throw new ValidationError({ pin: ["Invalid pin"] });
+    }
+
+    await auth.userProvider.verifyUser(email);
+    return email;
   }
 
   async signInWithPinV2(
     req = new HttpRequest<{ email: string; pin: string }>(),
   ) {
     const auth = app(AuthManager);
-    const { userProvider } = auth;
-    const input = await req.input();
-    const { email: _email, pin } = input.toJSON();
-    const email = _email.toLowerCase().trim();
-
-    const magicLinkToken = await userProvider.findUserMagicLinkToken({
-      email,
-      pin,
-    });
-
-    if (!magicLinkToken) {
-      throw new ValidationError({
-        pin: ["Invalid pin"],
-      });
-    }
-
-    await userProvider.deleteMagicLinkToken(email);
-    await userProvider.verifyUser(email);
+    const email = await this.verifyPinRequest(req);
 
     const session = await auth.createOrUpdateSessionV2({ email });
 
@@ -217,30 +242,14 @@ export class AuthController extends Controller {
       );
 
     await auth.config.onSignIn(session, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return session;
   }
 
   async signInWithPin(req = new HttpRequest<{ email: string; pin: string }>()) {
     const auth = app(AuthManager);
-    const { userProvider } = auth;
-    const input = await req.input();
-    const { email: _email, pin } = input.toJSON();
-    const email = _email.toLowerCase().trim();
-
-    const magicLinkToken = await userProvider.findUserMagicLinkToken({
-      email,
-      pin,
-    });
-
-    if (!magicLinkToken) {
-      throw new ValidationError({
-        pin: ["Invalid pin"],
-      });
-    }
-
-    await userProvider.deleteMagicLinkToken(email);
-    await userProvider.verifyUser(email);
+    const email = await this.verifyPinRequest(req);
 
     const session = await auth.createOrUpdateSession({ email });
 
@@ -253,6 +262,7 @@ export class AuthController extends Controller {
       );
 
     await auth.config.onSignIn(session, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return { session };
   }
@@ -297,6 +307,7 @@ export class AuthController extends Controller {
       );
 
     await auth.config.onSignIn(user, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, user, isNewUser: false, method: "password", req });
 
     const { password: _, ...rest } = user;
 
@@ -343,6 +354,7 @@ export class AuthController extends Controller {
       );
 
     await auth.config.onSignIn(user, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, user, isNewUser: false, method: "password", req });
 
     const { password: _, ...rest } = user;
 
@@ -748,6 +760,13 @@ export class AuthController extends Controller {
     } else {
       await config.onSignIn(user, req.search.toJSON());
     }
+    await notifyAuthenticated(auth.config, {
+      session,
+      user,
+      isNewUser: action === "signup",
+      method: "oauth",
+      req,
+    });
 
     // Where `oauthRedirect` was asked to return to, else `redirectPath`.
     // Checked again on the way out: a cookie is client-writable too.
@@ -866,8 +885,16 @@ export class AuthController extends Controller {
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
     const input = await req.input();
-    const email = input.get("email").toLowerCase().trim();
+    const email = foldEmail(input.get("email"));
     const auth = app(AuthManager);
+    const { uniformMagicLinkResponse, requestLimit } = auth.config.emailCode;
+
+    if (!email) {
+      return { email: null };
+    }
+
+    await enforceCodeRateLimits("request", email, req, requestLimit);
+
     const { user, pin, token } = await auth.createMagicLinkToken(email);
 
     if (user) {
@@ -877,6 +904,133 @@ export class AuthController extends Controller {
       };
     }
 
-    return { email: null };
+    // `{ email: null }` says the address has no account; clients built on
+    // that keep it unless the app opts into the uniform answer (#708).
+    return { email: uniformMagicLinkResponse ? email : null };
+  }
+
+  /**
+   * `POST /auth/email-code` `{ email }`: sends a one-time code (#708).
+   *
+   * Always `{ ok: true }`, whether or not the address has a user and whether
+   * or not one would be created, so the answer says nothing about accounts.
+   * An address that gets no code (unknown, with `createUser` off) is sent
+   * nothing and answered the same.
+   */
+  async requestEmailCode(req = new HttpRequest<{ email: string }>()) {
+    const auth = app(AuthManager);
+    const config = auth.config.emailCode;
+    if (!config.enabled) {
+      throw new RequestBreakerError("Not found", { status: 404 });
+    }
+
+    const input = await req.input();
+    const email = normalizeEmail(input.get("email"));
+    if (!email) {
+      throw new ValidationError({ email: ["Invalid email"] });
+    }
+
+    await enforceCodeRateLimits("request", email, req, config.requestLimit);
+
+    const user = await auth.userProvider.findUserByEmailAddress(email, false);
+    if (user || config.createUser) {
+      const { pin, token } = await auth.issueOneTimeCode(email, config.length);
+      await config.send({ email, code: pin, token, isNewUser: !user, req });
+    }
+
+    return { ok: true as const };
+  }
+
+  /**
+   * `POST /auth/email-code/verify` `{ email, code, name? }`: signs in with a
+   * code from `/auth/email-code`, creating the user first when there is none
+   * and `createUser` is on. Answers `{ session, isNewUser }` and sets the
+   * `access_token` cookie.
+   *
+   * A wrong, expired or missing code is a `ValidationError` on `code`
+   * (`invalid_code`); the guess past `maxAttempts` burns the code and is
+   * `too_many_attempts`.
+   */
+  async verifyEmailCode(
+    req = new HttpRequest<{ email: string; code: string; name?: string }>(),
+  ) {
+    const auth = app(AuthManager);
+    const { userProvider, config } = auth;
+    if (!config.emailCode.enabled) {
+      throw new RequestBreakerError("Not found", { status: 404 });
+    }
+
+    const input = await req.input();
+    const { email: rawEmail, code, name } = input.toJSON();
+    const email = normalizeEmail(rawEmail);
+    if (!email) {
+      throw new ValidationError({ code: ["invalid_code"] });
+    }
+
+    await enforceCodeRateLimits("verify", email, req, config.emailCode.verifyLimit);
+
+    const result = await auth.verifyOneTimeCode(email, code, { claim: false });
+    if (result.status === "too_many_attempts") {
+      throw new ValidationError({ code: ["too_many_attempts"] });
+    }
+    if (result.status !== "ok") {
+      throw new ValidationError({ code: ["invalid_code"] });
+    }
+    const row = result.row;
+
+    let user = await userProvider.findUserByEmailAddress(email, false);
+    let isNewUser = false;
+
+    if (user) {
+      if (!(await userProvider.claimMagicLinkToken(row.id))) {
+        throw new ValidationError({ code: ["invalid_code"] });
+      }
+      await userProvider.verifyUser(email);
+    } else if (config.emailCode.createUser) {
+      const locale = app(Translator).detectLocale(req);
+      try {
+        // Claimed inside the transaction: a rolled-back `onUserCreated` puts
+        // the code back, and of two requests with the same code only the one
+        // that deletes the row creates a user.
+        user = await userProvider.transaction(async () => {
+          if (!(await userProvider.claimMagicLinkToken(row.id))) {
+            throw new CodeAlreadyClaimed();
+          }
+          const created = await userProvider.createUser({
+            email,
+            name: typeof name === "string" ? name.trim() : "",
+            emailVerifiedAt: new Date(),
+            locale,
+          });
+          await config.onUserCreated(created);
+          return created;
+        });
+        isNewUser = true;
+      } catch (error) {
+        if (error instanceof CodeAlreadyClaimed) {
+          throw new ValidationError({ code: ["invalid_code"] });
+        }
+        throw error;
+      }
+    } else {
+      // A row for an address with no user, left from when `createUser` was on.
+      await userProvider.claimMagicLinkToken(row.id);
+      throw new ValidationError({ code: ["invalid_code"] });
+    }
+
+    const session = await auth.createOrUpdateSessionV2({ email, id: user.id });
+
+    req
+      .ctx()
+      .setCookie(
+        "access_token",
+        session.token,
+        app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
+      );
+
+    await config.onSignIn(session, req.search.toJSON());
+    await notifyAuthenticated(auth.config, { session, isNewUser, method: "email-code", req });
+
+    return { session, isNewUser };
   }
 }

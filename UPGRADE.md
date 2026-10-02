@@ -1,5 +1,73 @@
 # Unreleased
 
+## `auth`: email-code sign-in, and hardened magic-link PINs (#708)
+
+**Behaviour change (security).** The magic-link PIN had no expiry, no attempt
+limit and no rate limit, was stored in plain text, and was checked by a
+database lookup. Anyone who could trigger `/auth/magic-link` for an address
+could then guess its 6-digit PIN with no limit.
+
+What changes on the existing routes:
+
+| | Before | Now |
+|---|---|---|
+| `MagicLinkToken.pin` / `.token` | plain text | `h1.` + HMAC-SHA256 under `SECRET`, keyed to the email |
+| PIN check | `findUnique` on `(pin, email)` | row by email, `timingSafeEqual` on hashes |
+| PIN lifetime | until used or replaced | `emailCode.expiresInMinutes`, default 10 |
+| Link lifetime | until used or replaced | `emailCode.linkExpiresInMinutes`, default 7 days |
+| Wrong PINs | unlimited | `emailCode.maxAttempts`, default 5; the next guess burns the PIN |
+| `/auth/magic-link` | unlimited | `emailCode.requestLimit`, default 5/15 min per address, 20/15 min per IP |
+| `/auth/sign-in-with-pin(-v2)` | unlimited | `emailCode.verifyLimit`, default 10/15 min per address, 50/15 min per IP |
+
+Response shapes do not change. A wrong *or expired* PIN is still
+`ValidationError { pin: ["Invalid pin"] }`; a burned one is
+`ValidationError { pin: ["Too many attempts"] }` (same key); a rate limit is
+the middleware's 429 `{ error: { kind: "rate_limit" } }`. `/auth/magic-link`
+still answers `{ email: null }` for an unknown address (set
+`emailCode.uniformMagicLinkResponse: true` to stop revealing that). A missing
+`email` on these routes is now that same answer rather than a 500. Rows
+written before the upgrade (plain text) still verify until they expire, so
+codes in flight during the deploy keep working.
+
+The attempt count and the limits live in the rate limiter
+(`ratelimiter.driver`). With the default in-memory driver they are per
+instance; bind `RedisRateLimiter` when you run more than one. The per-IP limits
+use `clientIp(req)`, so check `GEMI_TRUST_PROXY` behind a proxy. No schema
+change or migration.
+
+New:
+
+- `POST /auth/email-code` and `POST /auth/email-code/verify`: sign-up-or-sign-in
+  with a one-time code, behind `auth.emailCode.enabled` (404 otherwise). The
+  request answer is `{ ok: true }` for every address. See "Email codes" in
+  `docs/authentication.md`.
+- `useEmailCode()` in `gemi/client`.
+- `onAuthenticated({ user, session, isNewUser, method, req })`, fired by every
+  sign-in that sets a session (password, PIN/link, email code, OAuth).
+- `generateCode(email)`: the code to issue, or nothing for random digits.
+
+**Action:**
+
+- **Stop writing or reading `MagicLinkToken.pin`/`token` yourself.** A hook
+  that rewrites the stored PIN for test accounts (e.g.
+  `MagicLinkToken.update({ where: { pin_email: { email, pin } }, data: { pin: "000000" } })`
+  in `onMagicLinkCreated`) now throws, because the stored value is a hash and
+  no row matches. Return the fixed code from `generateCode` instead, and gate
+  it to non-production:
+  ```ts
+  generateCode: (email) => (isTester(email) ? "000000" : undefined),
+  ```
+  Tests that read the PIN out of the table must take it from
+  `onMagicLinkCreated`/`Auth.createMagicLink` instead.
+- **Links in long-lived emails** (a welcome email carrying a sign-in link) stop
+  working after 7 days. Raise `emailCode.linkExpiresInMinutes` if they must
+  last longer.
+- **End-to-end suites** that request many PINs from one IP or for one address
+  need the limits raised (or set to `false`) in the test environment.
+- `UserProvider.findUserMagicLinkToken` is deprecated: it looks a row up by the
+  value as issued, which no longer matches. Use `findMagicLinkTokenByEmail` and
+  compare with `oneTimeSecretMatches` (both from `gemi/kernel`).
+
 ## `ai`: `regenerate` replaces the answer on a thread (#451)
 
 **Behaviour change.** `regenerate()` in `useChat`, `ChatSession` (Swift) and
