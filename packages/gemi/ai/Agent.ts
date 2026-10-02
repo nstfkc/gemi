@@ -1729,7 +1729,7 @@ function seedOf(params: RunAgentParams): string | null {
  * carries an `attachmentId` too. `historyForProvider` keys its window on this
  * and `toolTurn` steps over these when it looks for the user's turn.
  */
-function injectedMessageIds(messages: AgentMessage[]): Set<string> {
+export function injectedMessageIds(messages: AgentMessage[]): Set<string> {
   const injected = new Set<string>();
   for (const message of messages) {
     for (const part of message.content) {
