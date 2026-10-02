@@ -9,6 +9,7 @@ import type {
   PendingToolCall,
   ToolCallPart,
   ToolShapes,
+  Usage,
 } from "../types";
 
 /**
@@ -101,6 +102,12 @@ export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
    */
   loadedTools: string[];
   finishReason?: FinishReason;
+  /**
+   * The run's total usage so far, from its `usage` frames: every step plus what
+   * its tools spent. Run-scoped and reset by `run-start`, like `loadedTools`.
+   * Each assistant message's own share is on `AgentMessage.usage` (#467).
+   */
+  usage?: Usage;
 };
 
 export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>(
@@ -169,6 +176,7 @@ function reduce<T extends ToolShapes, O>(
         runMessageIds: [],
         loadedTools: [],
         finishReason: undefined,
+        usage: undefined,
       };
 
     case "message-start":
@@ -365,6 +373,9 @@ function reduce<T extends ToolShapes, O>(
         // unable to tell a cut-off answer from a message that never had one, and
         // the finish reason cannot say which — see `AgentMessage.outputTruncated`.
         ...(event.outputTruncated ? { outputTruncated: true as const } : {}),
+        // This message's own model call (#467). An assignment, so a replay is
+        // harmless; absent on the frame, the message keeps whatever it had.
+        ...(event.usage ? { usage: event.usage } : {}),
         content:
           // A run cut off by the output ceiling has no answer, and the partial
           // output part is dropped rather than completed.
@@ -386,27 +397,14 @@ function reduce<T extends ToolShapes, O>(
               ),
       }));
 
-    case "usage": {
-      // The only event with no id of its own, so it goes on the last assistant
-      // message — an assignment rather than an append, so a replay is harmless.
-      //
-      // The role test is the point. A run that counts its input tokens before
-      // opening a message — one that errors early, or whose only output is a
-      // tool call the client must resolve — emits `usage` while the last message
-      // in the list is still the user's own optimistic turn, and token counts
-      // rendered against what the user typed are simply false. With no assistant
-      // message to hang it on, dropping it is the honest answer.
-      //
-      // Deliberately *not* narrowed to the messages this run touched: a client
-      // resuming from a cursor mid-message has touched none of them yet, and
-      // narrowing would make `usage` the one event that fails to converge from
-      // an arbitrary cursor, which is the property the whole file is for.
-      const index = lastIndexWhere(state.messages, (message) => message.role === "assistant");
-      if (index === -1) return state;
-      const messages = state.messages.slice();
-      messages[index] = { ...messages[index]!, usage: event.usage };
-      return { ...state, messages };
-    }
+    case "usage":
+      // The run's total, not any message's (#467). It used to be put on the
+      // last assistant message, so a three-step run showed every token on step
+      // three and nothing on the first two — and a run whose tools spent
+      // through `generate()` or a sub-run billed that to a message that never
+      // made the call. Each message now gets its own from `message-end`; this
+      // is the turn's, on the state. An assignment, so a replay is harmless.
+      return { ...state, usage: event.usage };
 
     case "error":
       // Clearing `pending` here is what keeps "pending is non-empty exactly
@@ -662,10 +660,10 @@ function applyNested(run: NestedRun, event: NestedEvent, now: string): NestedRun
     messages: next.messages,
     ...(next.finishReason !== undefined ? { finishReason: next.finishReason } : {}),
     // The sub-run's own total, lifted so a UI can price the block it is
-    // rendering without walking its messages. An assignment, so redelivery is
-    // harmless — the inner `reduce` has already put the same number on the
-    // sub-run's last assistant message.
-    ...(event.event.type === "usage" ? { usage: event.event.usage } : {}),
+    // rendering without walking its messages — which carry only their own
+    // steps' usage, not what the sub-run's tools spent. An assignment, so
+    // redelivery is harmless.
+    ...(next.usage !== undefined ? { usage: next.usage } : {}),
   };
 }
 
@@ -696,13 +694,6 @@ function isReenterable<T extends ToolShapes, O>(
 function isFinished<T extends ToolShapes, O>(state: ChatState<T, O>, messageId: string) {
   const message = state.messages.find((candidate) => candidate.id === messageId);
   return message !== undefined && message.finishReason !== undefined;
-}
-
-function lastIndexWhere<M>(items: M[], match: (item: M) => boolean) {
-  for (let i = items.length - 1; i >= 0; i--) {
-    if (match(items[i]!)) return i;
-  }
-  return -1;
 }
 
 function withMessage<T extends ToolShapes, O>(

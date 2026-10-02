@@ -13,6 +13,7 @@ import type {
   ToolProgress,
   ToolResultPart,
   ToolShapes,
+  Usage,
 } from "./types";
 
 /**
@@ -264,6 +265,12 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * something to persist beside `messages`.
    */
   loadedTools: string[];
+  /**
+   * The run's total usage so far — every step plus what its tools spent — or
+   * `undefined` before the first `usage` frame. Run-scoped like `loadedTools`.
+   * Each assistant message carries its own share on `message.usage` (#467).
+   */
+  usage: Usage | undefined;
   /**
    * Sugar over `sendMessage`. The hook carries each pending call's signature —
    * and its `path`, if the question came from a sub-agent — and hands both back
@@ -1209,6 +1216,7 @@ export function useChat<P extends keyof AgentRoutes>(
     setMessages,
     pending: state.pending as PendingToolCall<ToolsOf<P>>[],
     loadedTools: state.loadedTools,
+    usage: state.usage,
     approve,
     answer,
     attach: uploadFile,

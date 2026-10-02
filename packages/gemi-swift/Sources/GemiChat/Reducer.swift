@@ -30,6 +30,12 @@ public struct ChatState: Hashable, Sendable {
   /// The deferred tools the model has loaded this run, as a set.
   public internal(set) var loadedTools: [String]
   public internal(set) var finishReason: FinishReason?
+  /// The run's total usage so far, raw: every step plus what its tools spent.
+  /// Each assistant message carries its own share (`AgentMessage.usage`).
+  /// Run-scoped, reset by `run-start`.
+  var usageJSON: JSONValue?
+  /// The run's total usage so far — every step plus what its tools spent.
+  public var usage: Usage? { usageJSON.flatMap { try? $0.decode(as: Usage.self) } }
 
   /// `initialChatState`. `seq: -1` means "I have seen nothing".
   public init(
@@ -98,6 +104,7 @@ extension ChatState {
       runMessageIds = []
       loadedTools = []
       finishReason = nil
+      usageJSON = nil
 
     case "message-start":
       withMessage(event.string("messageId") ?? "", now: now) { message in
@@ -237,6 +244,8 @@ extension ChatState {
         if event["outputTruncated"]?.boolValue == true {
           message["outputTruncated"] = .bool(true)
         }
+        // This message's own model call (#467).
+        if let usage = event["usage"] { message["usage"] = usage }
         if event["outputTruncated"]?.boolValue == true
           || event.string("finishReason") == "length"
         {
@@ -259,10 +268,9 @@ extension ChatState {
       }
 
     case "usage":
-      // On the last assistant message, never on the user's own turn.
-      guard let index = messages.lastIndex(where: { $0.json.string("role") == "assistant" })
-      else { return }
-      messages[index].json["usage"] = event["usage"]
+      // The run's total, not any message's (#467): each message gets its own
+      // from `message-end`.
+      usageJSON = event["usage"]
 
     case "error":
       error = AgentError(json: event["error"]?.objectValue ?? [:])
@@ -291,7 +299,7 @@ extension ChatState {
     if let label = event["label"] { next["label"] = label }
     next["messages"] = .array(sub.messages.map { .object($0.json) })
     if let reason = sub.finishReason { next["finishReason"] = .string(reason.rawValue) }
-    if inner.string("type") == "usage" { next["usage"] = inner["usage"] }
+    if let usage = sub.usageJSON { next["usage"] = usage }
     return next
   }
 

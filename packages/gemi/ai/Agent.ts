@@ -21,6 +21,8 @@ import {
   RunAborted,
 } from "./runtime";
 import { supportsStrict } from "./Schema";
+import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
+import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
   consumeNestedRun,
@@ -1058,6 +1060,10 @@ export interface CreateAgentParams<
    * parameter the model refuses, then looks like an agent that said nothing.
    * Turn it off when the app already reports `result().error` (or the
    * controller's `onError`) itself and a second line would be noise.
+   *
+   * Also covers a tool that throws anything but a `ToolError`: the model and
+   * the client only read that it failed (see `redactError`), so the log is
+   * where its message and stack are.
    */
   logErrors?: boolean;
   /**
@@ -1147,6 +1153,19 @@ interface AgentStreamParamsBase {
    */
   onMessage?: (message: AgentMessage) => void | Promise<void>;
   /**
+   * What a client is told about a failure: the run's `error` frame, and the
+   * result of a tool that threw (which the model reads too). Default
+   * `redactError`, which keeps the code and replaces any message gemi did not
+   * write (a provider's error body, an exception's text) with a fixed
+   * sentence, since those carry hostnames, resource names, request ids and
+   * connection strings. A tool that throws a `ToolError` keeps its message.
+   *
+   * Full detail stays server-side: on `result().error`, in the log, and in
+   * the controller's `onError`. `AgentController` sets this from its
+   * `redactError` method. Handed down unchanged to a sub-run.
+   */
+  redactError?: ErrorRedactor;
+  /**
    * The attachment handle every tool of this run is given as `ctx.attachments`.
    *
    * Resolved by the controller from the request — `attachmentsFor(req,
@@ -1214,9 +1233,9 @@ export type NestedContext = {
  * on its stream, plus what only the server should have: the HTTP `status` and
  * the provider's `requestId` when the failure was a response from the
  * provider. Neither is ever written to a frame. A frame is built from this
- * through one function (`toClientError`), which copies the `AgentError` fields
- * by name, so a field added here stays server-side unless someone puts it there
- * on purpose. That function is also where #446's `redactError` belongs.
+ * through one method (`redact`), which copies the `AgentError` fields by name,
+ * so a field added here stays server-side unless someone puts it there on
+ * purpose, and redacts the message (#446, see `redactError`).
  *
  * `message` is the provider's own sentence ("Unsupported parameter:
  * 'temperature' ..."), which is what a log needs and why this is kept off the
@@ -1287,25 +1306,6 @@ export class AgentRunError extends Error {
     this.runId = result.runId;
     this.result = result;
   }
-}
-
-/**
- * The client's copy of a run's failure: the `AgentError` fields, named one by
- * one, and nothing else.
- *
- * Named rather than spread so that a field added to `AgentRunFailure` cannot
- * reach a browser by accident. This is the single place a run's own failure
- * becomes a frame, which makes it where #446's `redactError` hook goes when it
- * lands: it would map the value returned here, with the full `failure` still
- * on `result().error` and in the log.
- */
-function toClientError(failure: AgentRunFailure): AgentError {
-  return {
-    code: failure.code,
-    message: failure.message,
-    ...(failure.toolCallId !== undefined ? { toolCallId: failure.toolCallId } : {}),
-    retryable: failure.retryable,
-  };
 }
 
 /**
@@ -2255,13 +2255,28 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * The two are built apart on purpose. `failure` is the server's record —
    * what `result().error` returns and what is logged — and carries the HTTP
    * status and request id of the provider's response, when there was one.
-   * The frame gets `toClientError(failure)`: the `AgentError` fields only,
-   * exactly what it carried before `result().error` existed.
+   * The frame gets the redacted copy (`redact`): the `AgentError` fields
+   * only, named one by one so a field added to `AgentRunFailure` cannot reach
+   * a browser by accident, and a message gemi did not write replaced (#446).
    */
   private fail(error: AgentError, detail: { status?: number; requestId?: string } = {}): void {
     const failure: AgentRunFailure = { ...error, ...detail };
     this.failure = failure;
-    this.emit({ type: "error", error: toClientError(failure) });
+    this.emit({ type: "error", error: this.redact(failure, { source: "run", failure }) });
+  }
+
+  /**
+   * The one place an error is redacted for the client, through the app's
+   * `redactError` or the default. The original is remembered against the
+   * copy so the controller's `onError`, which hears the frame in this
+   * process, still gets the full detail.
+   */
+  private redact(error: AgentError, info: Parameters<ErrorRedactor>[1]): AgentError {
+    const redacted = applyRedaction(this.params.redactError, error, info, (err) =>
+      this.writeLog(`[gemi/ai] agent "${this.config.name}" redactError threw`, { error: err }),
+    );
+    rememberUnredacted(redacted, error);
+    return redacted;
   }
 
   /**
@@ -2278,12 +2293,29 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const message = `[gemi/ai] agent "${this.config.name}" run failed (${failure.code}${
       failure.status !== undefined ? ` ${failure.status}` : ""
     }): ${failure.message}`;
+    this.writeLog(message, { error: failure });
+  }
+
+  /**
+   * A tool that threw something other than a `ToolError`. The model and the
+   * client are only told that it failed (see `redactError`), so this is the
+   * one place its message and stack survive.
+   */
+  private logToolFailure(call: ToolCallPart, error: unknown): void {
+    const text = error instanceof Error ? error.message : String(error);
+    this.writeLog(
+      `[gemi/ai] agent "${this.config.name}" tool "${String(call.name)}" threw: ${text}`,
+      { toolCallId: call.toolCallId, error },
+    );
+  }
+
+  private writeLog(message: string, extra: Record<string, unknown>): void {
     const metadata = {
       agent: this.config.name,
       runId: this.runId,
       ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
       ...(this.depth > 0 ? { chain: this.chain } : {}),
-      error: failure,
+      ...extra,
     };
     let logged = false;
     try {
@@ -2390,6 +2422,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       finishReason: reason,
       // Only when true, so the frame an ordinary message ends with is unchanged.
       ...(outputTruncated ? { outputTruncated: true as const } : {}),
+      // The model call's usage for this message alone (#467). Absent when the
+      // call never reported one — aborted mid-stream, or a provider that sent
+      // no terminal frame — rather than a zero that reads as "free".
+      ...(message.usage ? { usage: message.usage } : {}),
     });
     await this.report(message);
     // After it, never before: a file a tool showed during this message belongs
@@ -2504,6 +2540,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "finish": {
           this.usage = addUsage(this.usage, event.usage);
+          // This step's own cost, on the message the step wrote (#467). The run
+          // total above is the whole turn — every step plus tools' sub-runs,
+          // `generate()` calls and images — and putting it on the last message
+          // showed a three-step run's every token on step three. Added rather
+          // than assigned in case a provider ever closes a call with more than
+          // one finish frame.
+          message.usage = addUsage(message.usage ?? emptyUsage(), event.usage);
           // The usage is taken either way, the reason only if nothing has
           // already failed. A provider is allowed to report an error and then
           // close the call with a finish frame — a content filter does exactly
@@ -2910,18 +2953,25 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
       // A throwing tool is a result, not an exception out of the run: the model
       // is told the call failed and can try something else, which is what a
-      // person would do.
+      // person would do. What it is told is redacted (#446): the same part goes
+      // to the model, to the client and into the store, and an exception's
+      // message is whatever the code under the tool said, connection strings
+      // and internal hostnames included. A `ToolError` is the tool saying its
+      // message is meant to be read; anything else is logged in full here.
+      const deliberate = error instanceof ToolError;
+      if (!deliberate && this.config.logErrors) this.logToolFailure(call, error);
+      const raw: AgentError = {
+        code: "tool_error",
+        message: error instanceof Error ? error.message : String(error),
+        toolCallId: call.toolCallId,
+        retryable: deliberate ? error.retryable : true,
+      };
       return {
         type: "tool-result",
         toolCallId: call.toolCallId,
         name: call.name,
         status: "error",
-        error: {
-          code: "tool_error",
-          message: error instanceof Error ? error.message : String(error),
-          toolCallId: call.toolCallId,
-          retryable: true,
-        },
+        error: this.redact(raw, { source: "tool", toolName: String(call.name), cause: error }),
       };
     }
   }
@@ -3005,7 +3055,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (recorded) {
         const mismatch = replayMismatch(recorded, agent, params);
         if (mismatch) {
-          throw new Error(
+          throw new ToolError(
             `Nested run ${at} of "${String(call.name)}" ${mismatch}. ` +
               `runAgent is memoized by call index, so a body whose runAgent calls depend on a condition that changed between turns cannot be resumed — the answer would be paired with a different sub-run. ` +
               `Make the sequence of runAgent calls, and what each one is asked, the same every time this tool runs, or branch on ctx.resumed.`,
@@ -3065,13 +3115,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // the shapes a name cannot see, such as the same agent under two names.
     const chain = [...this.chain, agent.name];
     if (this.chain.includes(agent.name)) {
-      throw new Error(
+      throw new ToolError(
         `"${agent.name}" is already running further up this chain: ${chain.join(" -> ")}. An agent cannot run itself, directly or through another agent.`,
       );
     }
     const depth = this.depth + 1;
     if (depth > this.maxDepth) {
-      throw new Error(
+      throw new ToolError(
         `Nested agent runs are ${this.maxDepth} deep at most and this one would be ${depth}: ${chain.join(" -> ")}. Raise maxDepth on the agent at the root of the run if the tree is meant to be this deep.`,
       );
     }
@@ -3125,6 +3175,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // with it instead of leaving them to finish for nobody.
       signal,
       threadId: this.params.threadId,
+      // The same caller is reading, so the same rules for what it is told.
+      redactError: this.params.redactError,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3234,7 +3286,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // Nothing to ask means nothing the client could answer, and escalating
         // an empty list would end the parent awaiting-input with a tool call
         // that can never be resolved.
-        throw new Error(
+        throw new ToolError(
           `"${agent.name}" ended awaiting input but asked nothing, so there is no question to escalate.`,
         );
       }
@@ -3363,7 +3415,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           // the file, and the model answers about an image that never reached
           // the wire — with nothing in the transcript, the logs or the bill
           // saying which of those three things went wrong.
-          throw new Error(
+          throw new ToolError(
             `"${String(call.name)}" asked to show a file to ${provider.model}, which does not accept file input. Drop \`showModel\` for this provider, or run this agent on a model that takes files — \`capabilities.fileInput\` is what says which do.`,
           );
         }
@@ -3417,7 +3469,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const assertKind = (recorded: ToolAttachmentPut, wanted: "put" | "image", at: number) => {
       const was = recorded.generated ? "image" : "put";
       if (was === wanted) return;
-      throw new Error(
+      throw new ToolError(
         `Attachment ${at} of "${String(call.name)}" was ${was === "image" ? "a generated image" : "a stored file"} on the first attempt and is ${wanted === "image" ? "a generated image" : "a stored file"} now. ` +
           `ctx.attachments.put, ctx.generateImage and ctx.editImage share one memo indexed by call order within a tool call, so the sequence has to be the same every time this tool runs. Branch on ctx.resumed if it cannot be.`,
       );
@@ -3509,7 +3561,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             assertKind(recorded, "put", at);
             const mismatch = putMismatch(recorded, blob, params);
             if (mismatch) {
-              throw new Error(
+              throw new ToolError(
                 `Attachment ${at} of "${String(call.name)}" ${mismatch}. ` +
                   `ctx.attachments.put is memoized by call index within a tool call, so a body whose put calls depend on a condition that changed between turns cannot be replayed — the model would be shown a file under an id that names different bytes. ` +
                   `Make the sequence of put calls the same every time this tool runs, or branch on ctx.resumed.`,

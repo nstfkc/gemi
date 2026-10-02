@@ -98,6 +98,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `req.headers` | read-only `Headers` | Request headers. `req.headers.get("User-Agent")`. |
 | `req.rawRequest` | `Request` | The underlying Fetch API `Request` (method, url, body, etc.). |
 | `req.routePath` | `string` | The matched route pattern. |
+| `req.signal` | `AbortSignal` | Aborts when the client goes away before the response is sent — a closed tab, or a `useQuery` request nobody renders any more. Pass it to slow work (`fetch(url, { signal: req.signal })`, a model call) so it stops early. |
 | `await req.input()` | `Promise<Input<Body>>` | Parses **and validates** the request body — see below. |
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
 | `req.locale()` | `string` | The resolved request locale. |

@@ -87,9 +87,26 @@ Key points:
 - **`data` is type-checked against your `template` props.** The `locale` key is provided separately (see below) and is injected into the template props for you, so you omit it from `data`.
 - Any field you omit falls back to the value declared on the class (`to`, `from`, `subject`, `cc`, `bcc`, `attachments`, `headers`).
 - Sending renders **both** an HTML body and a plain-text body from the same template automatically.
-- Recipients pass through the `filterRecipients` callback from `app/config/mail.ts` before delivery; if it returns an empty list, the send is skipped.
+- `to` passes through the `filterRecipients` callback from `app/config/mail.ts` before delivery, and the driver receives the list it returns; if that list is empty, the send is skipped.
 
-> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/…html` and opens it locally — handy for previewing templates during development.
+> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/<iso-timestamp><subject>.html` and opens it locally (not under `CI=true`) — handy for previewing templates during development. Next to it, a `.json` file with the same name records the envelope the driver would have received, so a test can assert who a mail went to:
+>
+> ```json
+> {
+>   "to": ["ada@example.com"],
+>   "cc": [],
+>   "bcc": [],
+>   "from": "hello@example.com",
+>   "subject": "Welcome",
+>   "headers": {},
+>   "attachments": [{ "filename": "invoice.pdf", "bytes": 1234 }],
+>   "scheduledAt": null,
+>   "locale": "tr-TR",
+>   "text": "..."
+> }
+> ```
+>
+> `to` is the list after `filterRecipients`. `/`, `\` and control characters in the subject are replaced with `_` in the filename; the sidecar keeps the real subject. The `.json` is written before the `.html`.
 
 ### Previewing
 

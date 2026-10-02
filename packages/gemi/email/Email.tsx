@@ -5,6 +5,7 @@ import { app } from "../foundation/app";
 import { MailManager } from "../services/email/MailManager";
 import type { SendEmailParams } from "../services/email/drivers/types";
 import { Translator } from "../i18n/Translator";
+import { writeDebugEmail } from "./debugEmail";
 
 interface SendEmailArgs<T> extends Partial<Omit<SendEmailParams, "html">> {
   data: Omit<T, "locale">;
@@ -66,27 +67,33 @@ export class Email {
       }),
     ]);
 
+    const params: SendEmailParams = {
+      bcc,
+      cc,
+      from,
+      subject,
+      // What `filterRecipients` kept, not what was asked for.
+      to: recipients,
+      attachments,
+      html,
+      headers: _headers,
+      text,
+      scheduledAt: args.scheduledAt,
+    };
+
     if (process.env.EMAIL_DEBUG === "true") {
-      const fileName = `${process.env.ROOT_DIR}/.debug/emails/${new Date().toISOString()}${subject}.html`;
-      await Bun.write(fileName, html);
+      const fileName = await writeDebugEmail(
+        `${process.env.ROOT_DIR}/.debug/emails`,
+        params,
+        { locale: args.locale },
+      );
       if (process.env.CI !== "true") {
         await open(fileName);
       }
       return;
     }
 
-    await mail.send({
-      bcc,
-      cc,
-      from,
-      subject,
-      to,
-      attachments,
-      html,
-      headers: _headers,
-      text,
-      scheduledAt: args.scheduledAt,
-    });
+    await mail.send(params);
   }
 
   static async preview<T extends Email>(

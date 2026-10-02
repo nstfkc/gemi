@@ -1,4 +1,5 @@
 import type { ToolContext } from "../../ai/Agent";
+import { ToolError } from "../../ai/redact";
 import { s, type AnySchema, type JSONSchema, type Schema } from "../../ai/Schema";
 import type { RouteSource } from "../../http/ApiRouter";
 import type { HttpRequest } from "../../http/HttpRequest";
@@ -100,7 +101,7 @@ export type McpToolFilter = {
  * error. Anything else thrown from `execute` is the caller's mistake or the
  * server's, not the model's.
  */
-export class McpToolError extends Error {
+export class McpToolError extends ToolError {
   constructor(
     message: string,
     readonly status?: number,

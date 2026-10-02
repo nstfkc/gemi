@@ -82,11 +82,20 @@ const RUN: AgentStreamFrame[] = [
   {
     seq: 8,
     event: {
+      // The run's total: m1's model call plus what the grep tool spent.
       type: "usage",
+      usage: { inputTokens: 130, outputTokens: 25, totalTokens: 155 },
+    },
+  },
+  {
+    seq: 9,
+    event: {
+      type: "message-end",
+      messageId: "m1",
+      finishReason: "awaiting-input",
       usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
     },
   },
-  { seq: 9, event: { type: "message-end", messageId: "m1", finishReason: "awaiting-input" } },
   { seq: 10, event: { type: "run-end", runId: "run_1", finishReason: "awaiting-input" } },
 ];
 
@@ -161,12 +170,72 @@ describe("applyFrame over a run", () => {
     expect(state.runId).toBe("run_1");
   });
 
-  test("usage attaches to the message that just ended", () => {
-    expect(at(8).messages[0]!.usage).toEqual({
+  test("the run's usage is the run's, and is not put on any message (#467)", () => {
+    const state = at(8);
+    expect(state.usage).toEqual({ inputTokens: 130, outputTokens: 25, totalTokens: 155 });
+    expect(state.messages[0]!.usage).toBeUndefined();
+  });
+
+  test("a message's own usage arrives on its message-end (#467)", () => {
+    const state = at(9);
+    expect(state.messages[0]!.usage).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       totalTokens: 120,
     });
+    // The run total is untouched by it.
+    expect(state.usage).toEqual({ inputTokens: 130, outputTokens: 25, totalTokens: 155 });
+  });
+
+  test("each step's message keeps its own usage, not the last one's (#467)", () => {
+    const state = fold(initialChatState(), [
+      { seq: 0, event: { type: "run-start", runId: "run_1" } },
+      { seq: 1, event: { type: "message-start", messageId: "s1", role: "assistant" } },
+      {
+        seq: 2,
+        event: {
+          type: "message-end",
+          messageId: "s1",
+          finishReason: "stop",
+          usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        },
+      },
+      { seq: 3, event: { type: "message-start", messageId: "s2", role: "assistant" } },
+      {
+        seq: 4,
+        event: {
+          type: "message-end",
+          messageId: "s2",
+          finishReason: "stop",
+          usage: { inputTokens: 20, outputTokens: 5, totalTokens: 25 },
+        },
+      },
+      {
+        seq: 5,
+        event: { type: "usage", usage: { inputTokens: 30, outputTokens: 7, totalTokens: 37 } },
+      },
+      { seq: 6, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+    ]);
+    expect(state.messages.map((message) => message.usage?.totalTokens)).toEqual([12, 25]);
+    expect(state.usage?.totalTokens).toBe(37);
+  });
+
+  test("a message-end with no usage leaves the message's alone", () => {
+    // A server that predates per-message usage, or a call aborted before the
+    // provider reported any.
+    const state = fold(initialChatState(), [
+      { seq: 0, event: { type: "run-start", runId: "run_1" } },
+      { seq: 1, event: { type: "message-start", messageId: "s1", role: "assistant" } },
+      { seq: 2, event: { type: "message-end", messageId: "s1", finishReason: "aborted" } },
+    ]);
+    expect(state.messages[0]!).not.toHaveProperty("usage");
+  });
+
+  test("a new run starts with no usage of its own", () => {
+    const next = fold(at(10), [{ seq: 0, event: { type: "run-start", runId: "run_2" } }]);
+    expect(next.usage).toBeUndefined();
+    // The finished message keeps its own.
+    expect(next.messages[0]!.usage?.totalTokens).toBe(120);
   });
 
   test("message-end stamps the finish reason", () => {
@@ -573,6 +642,7 @@ describe("the rest of the event union", () => {
 
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0]!.usage).toBeUndefined();
+    expect(state.usage).toEqual({ inputTokens: 5, outputTokens: 0, totalTokens: 5 });
   });
 
   test("tool-search names the tools in play without touching the transcript", () => {
@@ -687,12 +757,22 @@ const NESTED: AgentStreamFrame[] = [
   { seq: 6, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
   { seq: 7, event: nested({ type: "text-delta", messageId: "n1", delta: "The list price is " }) },
   { seq: 8, event: nested({ type: "text-delta", messageId: "n1", delta: "$40." }) },
-  { seq: 9, event: nested({ type: "message-end", messageId: "n1", finishReason: "stop" }) },
+  {
+    seq: 9,
+    event: nested({
+      type: "message-end",
+      messageId: "n1",
+      finishReason: "stop",
+      usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+    }),
+  },
   {
     seq: 10,
     event: nested({
+      // The sub-run's total, which is more than its one message: its own
+      // tools spent too.
       type: "usage",
-      usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+      usage: { inputTokens: 45, outputTokens: 12, totalTokens: 57 },
     }),
   },
   { seq: 11, event: nested({ type: "run-end", runId: "nr_1", finishReason: "stop" }) },
@@ -829,7 +909,7 @@ describe("a tool that runs a sub-agent", () => {
       agent: "pricing",
       label: "researching pricing",
       finishReason: "stop",
-      usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+      usage: { inputTokens: 45, outputTokens: 12, totalTokens: 57 },
       messages: [
         {
           id: "n1",

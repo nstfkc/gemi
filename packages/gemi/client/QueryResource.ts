@@ -73,6 +73,13 @@ export class QueryResource {
   private seq = 0;
   private issued = new Map<string, number>();
   private applied = new Map<string, number>();
+  /**
+   * The abort controller of every request on the wire, per variant (#659).
+   * When the last mounted reader of a variant lets go of it, its requests are
+   * aborted: nobody is left to render the answer, and the server sees the
+   * disconnect through `req.signal`.
+   */
+  private controllers = new Map<string, Set<AbortController>>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -305,8 +312,37 @@ export class QueryResource {
         this.watchers.delete(variantKey);
         // Nobody renders it any more: a retry would fetch for no one.
         this.cancelRetry(variantKey);
+        this.scheduleAbort(variantKey);
       }
     };
+  }
+
+  /**
+   * Abort the variant's requests on the wire once nobody renders it (#659) —
+   * e.g. a `search` that changed again before its answer landed. Deferred a
+   * task so a reader that lets go and takes hold again in the same commit
+   * (StrictMode's double effects, a resubscribe) never cancels anything.
+   *
+   * A request with no mounted reader at all — a hover `prefetch`, a render
+   * that suspended for the first time — is never aborted here: only losing
+   * the *last* reader does that.
+   */
+  private scheduleAbort(variantKey: string) {
+    if (!this.controllers.has(variantKey)) return;
+    setTimeout(() => {
+      if (this.watchers.has(variantKey)) return;
+      this.abort(variantKey);
+    }, 0);
+  }
+
+  /** Abort every request on the wire for this variant. */
+  private abort(variantKey: string) {
+    const controllers = this.controllers.get(variantKey);
+    if (!controllers) return;
+    this.controllers.delete(variantKey);
+    for (const controller of controllers) {
+      controller.abort();
+    }
   }
 
   /** How many fetches of this variant have failed in a row (0 after a success). */
@@ -460,6 +496,16 @@ export class QueryResource {
     this.inflight.add(variantKey);
     const seq = ++this.seq;
     this.issued.set(variantKey, seq);
+    const controller =
+      typeof AbortController === "undefined" ? null : new AbortController();
+    if (controller) {
+      let set = this.controllers.get(variantKey);
+      if (!set) {
+        set = new Set();
+        this.controllers.set(variantKey, set);
+      }
+      set.add(controller);
+    }
     // No newer request for this variant has been sent since this one.
     const isLatest = () => this.issued.get(variantKey) === seq;
     // A newer response, or an optimistic update made after this request was
@@ -514,6 +560,7 @@ export class QueryResource {
           // of date, so the browser's HTTP cache must not answer for it.
           cache:
             cache && !this.staleVariants.has(variantKey) ? "default" : "reload",
+          signal: controller?.signal,
         });
         try {
           data = await response.json();
@@ -526,6 +573,20 @@ export class QueryResource {
           data = null;
         }
       } catch (error) {
+        if (controller?.signal.aborted) {
+          // Aborted because nobody renders the variant any more — not a
+          // failure: no error is stored, the retry policy never sees it, and
+          // whatever data was cached stays. If this request turned `loading`
+          // on and nothing newer is on the wire, turn it back off so the next
+          // reader starts from a clean slate.
+          const current = store.get(variantKey);
+          if (isLatest() && current?.loading) {
+            this.store.next(
+              store.set(variantKey, { ...current, loading: false }),
+            );
+          }
+          return;
+        }
         console.error(`Error fetching url /api${fullUrl}`, error);
         writeError(error);
         return;
@@ -570,6 +631,11 @@ export class QueryResource {
         );
       }
     } finally {
+      if (controller) {
+        const set = this.controllers.get(variantKey);
+        set?.delete(controller);
+        if (set?.size === 0) this.controllers.delete(variantKey);
+      }
       // An older request finishing must not clear the flag for the newer one
       // still on the wire.
       if (isLatest()) {

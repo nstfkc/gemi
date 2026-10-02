@@ -48,6 +48,8 @@ public data class ChatUiState(
   val cursor: ChatCursor,
   /** The deferred tools the model has pulled in during the run in flight. */
   val loadedTools: List<String>,
+  /** The run's total usage so far; each message's own is on `message.usage`. */
+  val usage: Usage? = null,
 )
 
 /**
@@ -134,6 +136,7 @@ public class ChatSession(
       runId = chat.runId,
       cursor = ChatCursor(chat.cursorRunId, chat.seq),
       loadedTools = chat.loadedTools,
+      usage = chat.usage,
     )
 
   private fun publish() {

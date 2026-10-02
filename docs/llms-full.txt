@@ -1033,6 +1033,25 @@ GEMI_COMPRESSION=off
 
 Any other value (or none) leaves compression on.
 
+## Behind a proxy: `GEMI_TRUST_PROXY`
+
+`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, the default [rate-limit](./middleware.md#rate-limiting) key) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
+
+| `GEMI_TRUST_PROXY` | Client address |
+| --- | --- |
+| unset, `false`, `off`, `0` (default) | The socket's peer address. Whatever forwarding headers the client sent are discarded. |
+| `1`, `2`, … | The address the outermost of that many proxies was reached from, counted from the right of `X-Forwarded-For`. Entries further left were written by the client and are dropped. |
+| `true` | `X-Forwarded-For` and `X-Real-IP` as sent. Only for a proxy that overwrites them rather than appending. |
+
+Behind a proxy or load balancer, set it to the number of proxies in front of the app, or every client shares the proxy's address:
+
+```bash
+GEMI_TRUST_PROXY=1   # Railway, Fly, a single load balancer
+GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
+```
+
+Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
+
 ## Graceful shutdown
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
@@ -1644,6 +1663,12 @@ routes = {
 };
 ```
 
+A proxy route runs behind the same middleware as any other route: the `global` list, the enclosing routers' `middlewares`, and its own `.middleware()`. Without any it is public, and it forwards the client's headers (cookies and `Authorization` included) to the target, plus the `headers` you pass. Guard it like any other route:
+
+```typescript
+"/billing": this.proxy("http://billing.internal/api", { "x-service-key": key }).middleware(["auth"]),
+```
+
 ### Streaming and range requests
 
 `this.stream(...)` registers a `GET` (and `HEAD`) handler that understands the `Range` header, so browsers can seek within audio and video. Return a `FileStorage.read()` result and the byte window is pushed down to the storage backend, so a seek transfers one window rather than the whole object:
@@ -2220,6 +2245,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `req.headers` | read-only `Headers` | Request headers. `req.headers.get("User-Agent")`. |
 | `req.rawRequest` | `Request` | The underlying Fetch API `Request` (method, url, body, etc.). |
 | `req.routePath` | `string` | The matched route pattern. |
+| `req.signal` | `AbortSignal` | Aborts when the client goes away before the response is sent — a closed tab, or a `useQuery` request nobody renders any more. Pass it to slow work (`fetch(url, { signal: req.signal })`, a model call) so it stops early. |
 | `await req.input()` | `Promise<Input<Body>>` | Parses **and validates** the request body — see below. |
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
 | `req.locale()` | `string` | The resolved request locale. |
@@ -2520,7 +2546,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (left-most `x-forwarded-for` entry, then `x-real-ip`) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -2823,7 +2849,7 @@ export default defineRateLimiterConfig({
 
 ### Limiting by something other than an IP
 
-`x-forwarded-for` is trivially spoofed unless a proxy overwrites it, and it does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
+Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
 import { RateLimitMiddleware, clientIp } from "gemi/http";
@@ -3468,6 +3494,26 @@ query cancels a pending retry. When the browser comes back `online`, a query
 whose last failure its policy would retry is fetched again, silently, with a
 fresh run of retries. `revalidateOnFocus` and `refetch()` fetch a failed query
 like any other.
+
+### Abandoned requests are aborted
+
+When the last mounted reader of a variant lets go of it — its `search` or
+`params` changed again before the answer landed, or the component unmounted —
+the request still on the wire is aborted. The abort is not a failure: no
+`error` is stored, the retry policy never sees it, whatever data was cached
+stays, and the variant simply fetches again the next time something reads it.
+A variant another component still renders is never aborted, and neither is a
+request nobody had mounted yet (a hover `prefetch()`).
+
+The server sees the disconnect on `req.signal`, so a slow handler can stop:
+
+```ts
+// app/http/controllers/SuggestionController.ts
+async next(req: HttpRequest) {
+  const res = await fetch(MODEL_URL, { method: "POST", body, signal: req.signal });
+  return await res.json();
+}
+```
 
 ### App-wide defaults: `queryConfig`
 
@@ -4251,6 +4297,11 @@ An absolute `http(s)://` `href`, such as a URL on another subdomain from
 `useDomain().url(...)`, renders a plain anchor that the browser loads in full.
 `useNavigate` treats an absolute URL the same way. See
 [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
+
+Clicks the browser should own are left to it, as with a plain anchor:
+`target="_blank"` (or any `target` other than `_self`), cmd/ctrl/shift/alt-click,
+a non-primary button, and `download`. Your own `onClick` runs first; calling
+`event.preventDefault()` in it cancels the client-side navigation.
 
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
@@ -10854,9 +10905,26 @@ Key points:
 - **`data` is type-checked against your `template` props.** The `locale` key is provided separately (see below) and is injected into the template props for you, so you omit it from `data`.
 - Any field you omit falls back to the value declared on the class (`to`, `from`, `subject`, `cc`, `bcc`, `attachments`, `headers`).
 - Sending renders **both** an HTML body and a plain-text body from the same template automatically.
-- Recipients pass through the `filterRecipients` callback from `app/config/mail.ts` before delivery; if it returns an empty list, the send is skipped.
+- `to` passes through the `filterRecipients` callback from `app/config/mail.ts` before delivery, and the driver receives the list it returns; if that list is empty, the send is skipped.
 
-> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/…html` and opens it locally — handy for previewing templates during development.
+> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/<iso-timestamp><subject>.html` and opens it locally (not under `CI=true`) — handy for previewing templates during development. Next to it, a `.json` file with the same name records the envelope the driver would have received, so a test can assert who a mail went to:
+>
+> ```json
+> {
+>   "to": ["ada@example.com"],
+>   "cc": [],
+>   "bcc": [],
+>   "from": "hello@example.com",
+>   "subject": "Welcome",
+>   "headers": {},
+>   "attachments": [{ "filename": "invoice.pdf", "bytes": 1234 }],
+>   "scheduledAt": null,
+>   "locale": "tr-TR",
+>   "text": "..."
+> }
+> ```
+>
+> `to` is the list after `filterRecipients`. `/`, `\` and control characters in the subject are replaced with `_` in the filename; the sidecar keeps the real subject. The `.json` is written before the `.html`.
 
 ### Previewing
 

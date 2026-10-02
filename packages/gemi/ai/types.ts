@@ -377,6 +377,14 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * calling a tool closes its message `awaiting-input` or `max-steps`.
    */
   outputTruncated?: true;
+  /**
+   * What the model call that wrote this assistant message cost — that step
+   * alone, not the turn (#467). A run of three steps has three messages, each
+   * with its own. Tools' spending (sub-runs, `generate()`, images) is in the
+   * run total — `result().usage` and the `usage` frame — and a sub-run's own
+   * total is on its `NestedRun`. Absent on user messages and on a message whose
+   * call never reported usage (aborted mid-stream).
+   */
   usage?: Usage;
   /**
    * The run writing this message, on a copy the controller stored while the
@@ -609,7 +617,18 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
       messageId: string;
       finishReason: FinishReason;
       outputTruncated?: true;
+      /**
+       * What the model call that wrote this message cost, and only it (#467).
+       * The same value as `AgentMessage.usage`. Absent when the provider never
+       * reported usage for the call (it was aborted mid-stream).
+       */
+      usage?: Usage;
     }
+  /**
+   * The whole turn's usage so far: every step's model call plus what tools
+   * spent through sub-runs, `generate()` and image calls. Not any one message's
+   * — that is on `message-end` and `AgentMessage.usage`.
+   */
   | { type: "usage"; usage: Usage }
   /**
    * An error after the headers are flushed cannot be an HTTP status, so it is an
