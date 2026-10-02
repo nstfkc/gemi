@@ -6,6 +6,7 @@ import { mediaType } from "../http/mediaType";
 import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
+import { injectedMessageIds } from "./Agent";
 import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
@@ -108,6 +109,19 @@ export interface AgentStore {
    * keep. Calls for one run never overlap: each waits for the one before.
    */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
+  /**
+   * Delete these messages from the thread; ids it does not hold are ignored.
+   *
+   * What a threaded `regenerate` needs (#451): the server owns the history,
+   * so the answer being replaced has to leave the store, or the model reads
+   * `user: X, assistant: A, user: X` and writes a follow-up instead of a new
+   * answer. The controller calls it under the thread's lock with the last user
+   * turn and everything after it, then runs that turn again.
+   *
+   * Optional so a store written before it still compiles; without it a turn
+   * with `regenerate: true` on a thread is a 501 `regenerate_unsupported`.
+   */
+  removeMessages?(threadId: string, messageIds: string[]): Promise<void>;
 }
 
 /** The default: conversations last as long as the process. */
@@ -736,7 +750,11 @@ export abstract class AgentController<
     if (parsedTurn.error) {
       return invalidRequest({ body: {}, error: parsedTurn.error });
     }
-    const turn = parsedTurn.turn;
+    // Reassigned by a regenerate: the turn run again is the one the store holds.
+    let turn = parsedTurn.turn;
+    // Replace the thread's last answer rather than answer after it (#451). Only
+    // meaningful on a thread: a stateless client trims its own history.
+    const regenerate = threadId !== undefined && body.regenerate === true;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
     // The app's fields, separated once and handed to every method that reads
     // them — `authorizeRequest`, `instructions`, `context`, `attachmentScope` —
@@ -750,6 +768,14 @@ export abstract class AgentController<
       return jsonResponse(400, {
         code: "thread_required",
         message: "This agent takes a turn only on a thread: send a threadId.",
+      });
+    }
+
+    if (regenerate && !this.store.removeMessages) {
+      return jsonResponse(501, {
+        code: "regenerate_unsupported",
+        message:
+          "This agent's store cannot remove messages, so a thread's answer cannot be regenerated. Implement `removeMessages` on the AgentStore.",
       });
     }
 
@@ -802,6 +828,9 @@ export abstract class AgentController<
     // The run `start` registered, if it got that far: its end is what frees
     // this turn's `maxConcurrentRuns` slot.
     let started: AgentRun | null = null;
+    // What a regenerate took out of the thread, kept until the run replacing
+    // it has started.
+    let removed: AgentMessage[] = [];
     const start = async (): Promise<Response> => {
       let messages: AgentMessage[];
       if (threadId) {
@@ -831,6 +860,29 @@ export abstract class AgentController<
         // lock and after the previous run's transcript is stored, so the only
         // unfinished message left is one no run in this process owns.
         messages = await this.settleThread(threadId, history, { write: true });
+        if (regenerate) {
+          const cut = regenerationCut(messages);
+          if (!cut) {
+            return jsonResponse(409, {
+              code: "nothing_to_regenerate",
+              message: `Thread ${threadId} has no user turn to answer again.`,
+            });
+          }
+          // The last user turn and everything after it leave the store, and the
+          // turn is run again from what the store held — not from the client's
+          // copy, which may be stale or carry local ids. The user message comes
+          // back under a new id when the run reports it. Under the thread's
+          // lock and after the previous run's transcript is stored, so nothing
+          // writes the removed answer back. Each removed message takes its
+          // `usage` with it: the thread never holds both answers' costs.
+          removed = messages.slice(cut.index);
+          await this.store.removeMessages!(
+            threadId,
+            removed.map((message) => message.id),
+          );
+          messages = messages.slice(0, cut.index);
+          turn = cut.turn;
+        }
       } else {
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
         warnInMemoryNonces(this.nonces);
@@ -847,6 +899,12 @@ export abstract class AgentController<
       const attachments = await this.attachmentsFor(req, threadId, { body: extraBody });
 
       if (pending?.cancelled) {
+        // A regenerate stopped here puts back what it took out, since no new
+        // answer is coming to replace it. Appended at the end, which is where
+        // it was: it was the tail.
+        if (threadId && removed.length > 0) {
+          await this.store.appendMessages(threadId, removed);
+        }
         // Stopped while it waited. Nothing has been asked of the model and
         // nothing registered, so there is no run to end and nothing charged
         // for. Checked after the last `await` above, so that a stop landing
@@ -1963,7 +2021,7 @@ export abstract class AgentController<
  * change; an app that depended on their shape would break on a release that
  * never mentioned them.
  */
-const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages"] as const;
+const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages", "regenerate"] as const;
 
 /**
  * The turn's own fields, which `toClientTurn` reads off the top level when the
@@ -2447,6 +2505,41 @@ function searchParam(req: HttpRequest<any, any>, key: string): string | undefine
 }
 
 /** A turn `/stop` ended while it waited, before anything ran or was charged. */
+/**
+ * Where a threaded regenerate cuts the history: at the last message the user
+ * wrote, with the turn that wrote it. A file a tool showed is a user-role
+ * message too, but it is part of the answer being replaced, so it is stepped
+ * over (`injectedMessageIds`, the test `historyForProvider` uses).
+ */
+function regenerationCut(
+  messages: AgentMessage[],
+): { index: number; turn: ClientTurn } | null {
+  const injected = injectedMessageIds(messages);
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== "user" || injected.has(message.id)) continue;
+    let text = "";
+    const files: NonNullable<ClientTurn["files"]> = [];
+    for (const part of message.content) {
+      if (part.type === "text") text += part.text;
+      if (part.type === "file") {
+        files.push({
+          ...(part.fileId ? { fileId: part.fileId } : {}),
+          ...(part.attachmentId ? { attachmentId: part.attachmentId } : {}),
+          ...(part.name ? { name: part.name } : {}),
+          ...(part.mimeType ? { mimeType: part.mimeType } : {}),
+        });
+      }
+    }
+    if (!text && files.length === 0) continue;
+    return {
+      index,
+      turn: { ...(text ? { text } : {}), ...(files.length > 0 ? { files } : {}) },
+    };
+  }
+  return null;
+}
+
 function stoppedBeforeStart(): Response {
   return jsonResponse(409, {
     code: "stopped",

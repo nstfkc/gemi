@@ -156,7 +156,7 @@ public class ChatSession(
    * request going out happens before this returns, which is what lets
    * `approve` coalesce and `stop` see the turn it is stopping.
    */
-  private fun start(turn: ClientTurn): Job {
+  private fun start(turn: ClientTurn, regenerate: Boolean = false): Job {
     // One run at a time. A second send while the first streams is a user who
     // changed their mind; the superseded turn is marked aborted as it is cut.
     val superseded = inFlight
@@ -205,6 +205,10 @@ public class ChatSession(
         .with("threadId", chat.threadId.json())
         .with("messages", if (chat.threadId == null) JsonArray(forWire(history).map { it.json }) else null)
     body.forEach { (key, value) -> payload = payload.with(key, value) }
+    // On a thread the server holds the history, so trimming the local copy
+    // alone changes nothing: this asks it to drop its last answer and run the
+    // turn before it again (gemi #451). After `body`, so the app cannot unset it.
+    if (regenerate && chat.threadId != null) payload = payload.with("regenerate", JsonPrimitive(true))
 
     val id = Any()
     // Lazy, so `inFlight` names the job before any of it runs: on an immediate
@@ -402,7 +406,11 @@ public class ChatSession(
 
   // --- the rest ------------------------------------------------------------
 
-  /** Drops the last assistant turn and re-runs from the user turn before it. */
+  /**
+   * Drops the last assistant turn and re-runs from the user turn before it. On
+   * a thread the server replaces its stored answer too, so the model sees the
+   * question once rather than repeated.
+   */
   public suspend fun regenerate() {
     val messages = chat.messages
     val assistant = messages.indexOfLast { it.role == AgentMessage.Role.Assistant }
@@ -413,10 +421,13 @@ public class ChatSession(
     // The user turn goes too, because `send` re-appends it.
     chat = chat.copy(messages = messages.subList(0, user), pending = emptyList(), error = null)
     publish()
-    send(turn)
+    start(turn, regenerate = true).join()
   }
 
-  /** Replaces the transcript, e.g. with a thread re-read after `onAttachMiss`. */
+  /**
+   * Replaces the transcript, e.g. with a thread re-read after `onAttachMiss`.
+   * Client-only: on a thread the server's history is what the next turn runs on.
+   */
   public fun setMessages(messages: List<AgentMessage>) {
     chat = chat.copy(messages = messages)
     publish()

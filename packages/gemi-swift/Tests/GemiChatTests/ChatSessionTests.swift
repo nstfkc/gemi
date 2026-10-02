@@ -502,7 +502,33 @@ func eventually(_ condition: () -> Bool) async {
 
     #expect(transport.requests[0].body["turn"] == ["text": "Q"])
     #expect(transport.requests[0].body["messages"] == [])
+    #expect(transport.requests[0].body["regenerate"] == nil)
     #expect(chat.messages.map(\.text) == ["Q", "Try two."])
+  }
+
+  /// gemi #451: on a thread the server holds the history, so it is asked to
+  /// replace its stored answer rather than answer after it.
+  @Test func regenerateOnAThreadAsksTheServerToReplaceItsAnswer() async {
+    let transport = FakeTransport { _ in sse(answer("Try two.", run: "run_2", message: "m2")) }
+    let history = [
+      AgentMessage(json: [
+        "id": "u1", "role": "user", "createdAt": "t", "content": [["type": "text", "text": "Q"]],
+      ]),
+      AgentMessage(json: [
+        "id": "m1", "role": "assistant", "createdAt": "t", "finishReason": "stop",
+        "content": [["type": "text", "text": "Try one."]],
+      ]),
+    ]
+    let chat = UntypedChatSession(
+      endpoint: endpoint, threadId: "th_1", initialMessages: history, attach: false,
+      transport: transport)
+
+    await chat.regenerate()
+    await chat.send("next")
+
+    #expect(transport.requests[0].body["regenerate"] == true)
+    #expect(transport.requests[0].body["threadId"] == "th_1")
+    #expect(transport.requests[1].body["regenerate"] == nil)
   }
 
   @Test func anUploadIsMultipartAndReturnsTheFileToSend() async throws {

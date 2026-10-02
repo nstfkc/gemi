@@ -113,6 +113,15 @@ export class MemoryAgentStore implements AgentStore {
     thread.touchedAt = Date.now();
   }
 
+  async removeMessages(threadId: string, messageIds: string[]): Promise<void> {
+    this.sweep();
+    const thread = this.threads.get(threadId);
+    if (!thread) return;
+    const drop = new Set(messageIds);
+    thread.messages = thread.messages.filter((message) => !drop.has(message.id));
+    thread.touchedAt = Date.now();
+  }
+
   /** Test seam, and a way for an app to drop a conversation on request. */
   delete(threadId: string): void {
     this.threads.delete(threadId);

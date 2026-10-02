@@ -1,5 +1,29 @@
 # Unreleased
 
+## `ai`: `regenerate` replaces the answer on a thread (#451)
+
+**Behaviour change.** `regenerate()` in `useChat`, `ChatSession` (Swift) and
+`ChatSession` (Kotlin) only trimmed the client's copy of the transcript. On a
+thread the server reads the history from the store, so the model was sent
+`user: X, assistant: A, user: X` and wrote a follow-up instead of a new answer.
+On a thread the clients now send `regenerate: true` with the turn, and the
+controller, under the thread's lock, removes the last user turn and everything
+after it from the store and runs that turn again from the stored copy. The
+replaced messages (and their per-message `usage`) leave the thread; the
+regenerated turn counts as the same conversation for `maxConcurrentRuns`.
+Stateless chats are unchanged.
+
+`AgentStore` has a new optional method, `removeMessages(threadId, messageIds)`.
+`MemoryAgentStore` implements it. A custom store without it answers a
+threaded regenerate with 501 `regenerate_unsupported`; a thread with no user
+turn answers 409 `nothing_to_regenerate`. `regenerate` is now a reserved
+request-body key, so an app body field of that name no longer reaches
+`instructions()`/`ctx.body`. `setMessages` stays client-only on a thread.
+
+**Action:** if you have your own `AgentStore`, implement `removeMessages`
+(e.g. `DELETE FROM messages WHERE thread_id = ? AND id IN (...)`). Rename any
+app body field called `regenerate`.
+
 ## `ai`: limits on body size, stateless history and concurrent runs (#444)
 
 **Behaviour change (security).** A run outlives the request that started it, so
