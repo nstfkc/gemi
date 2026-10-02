@@ -13,6 +13,7 @@ import {
   defaultAgentStore,
   MemoryAgentStore,
   MemoryAttachmentStore,
+  MemoryFileOwners,
   MemoryLiveRuns,
   ScopedAttachments,
 } from "./AgentController";
@@ -3146,5 +3147,226 @@ describe("a live run belongs to whoever started it", () => {
     const req = jsonRequest({ threadId: "t1" });
     expect(await as(2, req, () => controller.stop(req))).toEqual({ stopped: true });
     run.finish({ finishReason: "aborted" });
+  });
+});
+
+/**
+ * #443: a provider file id is the org's, not the user's — the vendor shows the
+ * file to whichever request names it. `upload` records who uploaded it, and a
+ * turn naming someone else's id is refused before anything runs.
+ */
+describe("a provider file id belongs to whoever uploaded it", () => {
+  function owning(extra: { requireKnownFiles?: boolean; runOwner?: string | null } = {}) {
+    const run = new StubAgentRun("run_files");
+    const calls: AgentStreamParams[] = [];
+    let n = 0;
+    const agent = {
+      name: "stub",
+      tools: [] as const,
+      skills: [] as const,
+      output: undefined,
+      provider: { upload: async () => `file-${++n}` },
+      stream: (params: AgentStreamParams) => {
+        calls.push(params);
+        return run;
+      },
+    } as any;
+    class Chat extends ScopedChat(agent) {
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+      fileOwners = new MemoryFileOwners();
+      requireKnownFiles = extra.requireKnownFiles ?? false;
+      runOwner(req: HttpRequest<any, any>) {
+        return "runOwner" in extra ? extra.runOwner! : super.runOwner(req);
+      }
+    }
+    return { run, calls, controller: new Chat() };
+  }
+
+  function as<T>(id: number | null, req: HttpRequest<any, any>, fn: () => Promise<T>): Promise<T> {
+    return RequestContext.run(req as any, async () => {
+      if (id !== null) RequestContext.getStore().setUser({ id });
+      return await fn();
+    });
+  }
+
+  async function uploadAs(controller: AgentController, id: number | null, form?: FormData) {
+    const req = uploadRequest(file("contract.pdf", "application/pdf", "%PDF"), form);
+    return await as(id, req, () => controller.upload(req));
+  }
+
+  async function turnAs(controller: AgentController, id: number | null, body: unknown) {
+    const req = jsonRequest(body);
+    return await as(id, req, () => controller.stream(req));
+  }
+
+  async function expectRefused(response: Response) {
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: {
+        kind: "permission",
+        message: "A file in this turn was uploaded by someone else.",
+        status: 403,
+      },
+    });
+  }
+
+  test("upload records the uploader against the provider's id", async () => {
+    const { controller } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    expect(await controller.fileOwners.get(fileId!)).toMatchObject({
+      owner: "user:1",
+      name: "contract.pdf",
+      mimeType: "application/pdf",
+      size: 4,
+    });
+  });
+
+  test("a provider-only upload is recorded too", async () => {
+    const { controller } = owning();
+    const form = new FormData();
+    form.set("destination", "storage");
+    // Storage-only: no provider id, nothing to record.
+    const kept = await uploadAs(controller, 1, form);
+    expect(kept.fileId).toBeUndefined();
+
+    class ProviderOnly extends (controller.constructor as any) {
+      attachmentDestination() {
+        return "provider" as const;
+      }
+    }
+    const providerOnly = new ProviderOnly() as AgentController;
+    const { fileId } = await uploadAs(providerOnly, 1);
+    expect((await providerOnly.fileOwners.get(fileId!))?.owner).toBe("user:1");
+  });
+
+  test("another user's turn naming it is refused before the agent runs", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    await expectRefused(
+      await turnAs(controller, 2, { text: "summarize", files: [{ fileId }] }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("so is an anonymous turn naming it", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    await expectRefused(await turnAs(controller, null, { text: "x", files: [{ fileId }] }));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("the uploader's own turn runs", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+
+    const response = await turnAs(controller, 1, { text: "summarize", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.turn?.files).toEqual([{ fileId }]);
+    run.finish();
+  });
+
+  test("a foreign fileId beside the caller's own attachmentId is still refused", async () => {
+    const { controller, calls } = owning();
+    const theirs = await uploadAs(controller, 1);
+    const mine = await uploadAs(controller, 2);
+
+    await expectRefused(
+      await turnAs(controller, 2, {
+        text: "x",
+        files: [{ fileId: theirs.fileId, attachmentId: mine.attachmentId }],
+      }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a stateless history carrying someone else's file is refused", async () => {
+    const { controller, calls } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    const forged: AgentMessage = {
+      ...message("m1", "user", "earlier"),
+      content: [{ type: "file", fileId: fileId!, name: "contract.pdf" }],
+    };
+
+    await expectRefused(await turnAs(controller, 2, { text: "again", messages: [forged] }));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("on a thread the client's `messages` are ignored, so they are not checked", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, 1);
+    const forged: AgentMessage = {
+      ...message("m1", "user", "earlier"),
+      content: [{ type: "file", fileId: fileId!, name: "contract.pdf" }],
+    };
+
+    const response = await turnAs(controller, 2, {
+      threadId: "t_mine",
+      text: "hi",
+      messages: [forged],
+    });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("an anonymous upload is unowned: anyone holding the id may use it", async () => {
+    const { controller, calls, run } = owning();
+    const { fileId } = await uploadAs(controller, null);
+    expect((await controller.fileOwners.get(fileId!))?.owner).toBeNull();
+
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("an id nobody recorded is let through by default", async () => {
+    const { controller, calls, run } = owning();
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId: "file-old" }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("and refused with requireKnownFiles", async () => {
+    const { controller, calls } = owning({ requireKnownFiles: true });
+    await expectRefused(
+      await turnAs(controller, 2, { text: "x", files: [{ fileId: "file-old" }] }),
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("the owner is runOwner's: a shared key shares the file", async () => {
+    const { controller, calls, run } = owning({ runOwner: "team:7" });
+    const { fileId } = await uploadAs(controller, 1);
+    expect((await controller.fileOwners.get(fileId!))?.owner).toBe("team:7");
+
+    const response = await turnAs(controller, 2, { text: "x", files: [{ fileId }] });
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+});
+
+describe("MemoryFileOwners", () => {
+  const record = (owner: string | null) => ({ owner, createdAt: new Date(0).toISOString() });
+
+  test("the first owner of an id keeps it", async () => {
+    const owners = new MemoryFileOwners();
+    await owners.record("file-1", record("user:1"));
+    await owners.record("file-1", record("user:2"));
+    expect((await owners.get("file-1"))?.owner).toBe("user:1");
+  });
+
+  test("is bounded, oldest first", async () => {
+    const owners = new MemoryFileOwners(2);
+    await owners.record("file-1", record("user:1"));
+    await owners.record("file-2", record("user:1"));
+    await owners.record("file-3", record("user:1"));
+    expect(await owners.get("file-1")).toBeNull();
+    expect((await owners.get("file-3"))?.owner).toBe("user:1");
   });
 });
