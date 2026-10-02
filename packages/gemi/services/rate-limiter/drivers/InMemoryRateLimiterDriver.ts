@@ -5,6 +5,8 @@ import { RateLimiterDriver } from "./RateLimiterDriver";
 interface Bucket {
   /** Window length this bucket was counted with, so config changes reset it. */
   window: number;
+  /** The limit of the last consume, so eviction can tell a full bucket from an idle one. */
+  limit: number;
   windowStart: number;
   current: number;
   previous: number;
@@ -14,7 +16,16 @@ export interface InMemoryRateLimiterOptions {
   /**
    * Hard cap on tracked keys. Reached only by traffic that never repeats a key
    * (spoofed `x-forwarded-for`, for instance); the map is swept of dead buckets
-   * first and only then evicts live ones, oldest touched first.
+   * first and only then evicts live ones down to 90% of the cap, the least
+   * spent (as a share of their limit) first and, among equals, the oldest
+   * touched first.
+   *
+   * Spending-first is what keeps key churn from buying a fresh budget: a
+   * bucket close to its limit (a code's guesses, an address under attack)
+   * outlives the one-hit keys an attacker makes to push it out, and is only
+   * reached once every less-spent key has gone. Eviction can still reset a
+   * bucket under enough churn, so a limit that guards a secret belongs on a
+   * shared store (`RedisRateLimiter`) in production.
    *
    * Defaults to 100k keys — a few MB, and far more than a single instance
    * legitimately sees inside one window.
@@ -47,6 +58,7 @@ export class InMemoryRateLimiter extends RateLimiterDriver {
     const elapsed = now - windowStart;
 
     const bucket = this.roll(key, window, windowStart);
+    bucket.limit = limit;
     const usage = estimateUsage(
       bucket.current,
       bucket.previous,
@@ -94,7 +106,7 @@ export class InMemoryRateLimiter extends RateLimiterDriver {
     const bucket = this.buckets.get(key);
 
     if (!bucket || bucket.window !== window) {
-      return { window, windowStart, current: 0, previous: 0 };
+      return { window, limit: 0, windowStart, current: 0, previous: 0 };
     }
 
     if (bucket.windowStart === windowStart) {
@@ -123,11 +135,24 @@ export class InMemoryRateLimiter extends RateLimiterDriver {
       }
     }
 
-    // Still over the cap, so the traffic is live rather than stale. Drop the
-    // least recently touched keys; the worst case is that a client whose bucket
-    // was dropped gets a fresh budget, which beats growing without bound.
-    for (const key of this.buckets.keys()) {
-      if (this.buckets.size <= this.maxKeys) break;
+    // Down to 90% of the cap rather than to the cap, so the scan below runs
+    // once per tenth of `maxKeys` new keys instead of on every one.
+    const target = this.maxKeys - Math.floor(this.maxKeys / 10);
+    if (this.buckets.size <= target) return;
+
+    // Still over, so the traffic is live rather than stale. Drop the least
+    // spent buckets first, the least recently touched among equals (the sort
+    // is stable over the map's LRU order). The one-hit keys of churn go before
+    // a bucket that has been counting something, so churning keys does not
+    // hand a fresh budget to whoever is being limited.
+    const ranked = [...this.buckets].map(([key, bucket], order) => ({
+      key,
+      order,
+      spent: bucket.limit > 0 ? (bucket.current + bucket.previous) / bucket.limit : 0,
+    }));
+    ranked.sort((a, b) => a.spent - b.spent || a.order - b.order);
+    for (const { key } of ranked) {
+      if (this.buckets.size <= target) break;
       this.buckets.delete(key);
     }
   }

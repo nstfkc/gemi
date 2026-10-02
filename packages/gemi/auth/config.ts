@@ -59,7 +59,9 @@ export interface EmailCodeConfig {
   requestLimit?: CodeRateLimits;
   /**
    * Guesses (`/auth/email-code/verify` and `/auth/sign-in-with-pin(-v2)`).
-   * Default `{ perEmail: [10, 900], perIp: [50, 900] }`.
+   * Default `{ perEmail: [10, 900], perIp: [50, 900] }`. Its `perIp` also
+   * limits `/auth/sign-in/magic-link`, on a counter of its own; the link spends
+   * no per-address budget, since a 256-bit token is not guessed.
    */
   verifyLimit?: CodeRateLimits;
   /**

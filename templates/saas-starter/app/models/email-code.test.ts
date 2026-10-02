@@ -58,6 +58,8 @@ function suite(label: string, url?: string) {
     const magicLinks: Array<{ email: string; pin: string; token: string }> = [];
     let emailCode: Record<string, unknown> = {};
     let failOnUserCreated = false;
+    /** Every key the limiter was asked to count, in order. */
+    let limiterKeys: string[] = [];
 
     const TABLES = [
       "SocialAccount",
@@ -162,9 +164,16 @@ function suite(label: string, url?: string) {
       emailCode = {};
       failOnUserCreated = false;
       // A fresh limiter per case, bound the way RateLimiterServiceProvider binds it.
+      const driver = new InMemoryRateLimiter();
+      limiterKeys = [];
+      const consume = driver.consume.bind(driver);
+      driver.consume = (params) => {
+        limiterKeys.push(params.key);
+        return consume(params);
+      };
       application.instance(
         RateLimiter,
-        new RateLimiter({ driver: new InMemoryRateLimiter(), limit: 1000, window: 60 }) as never,
+        new RateLimiter({ driver, limit: 1000, window: 60 }) as never,
       );
       bindAuth();
       if (url) {
@@ -689,6 +698,36 @@ function suite(label: string, url?: string) {
       });
     });
 
+    test.each([
+      ["signInWithPinV2", { pin: "123456" }],
+      ["createMagicLinkToken", {}],
+      ["requestEmailCode", {}],
+      ["verifyEmailCode", { code: "123456" }],
+    ] as const)(
+      "%s: an over-long email spends only the IP budget and makes no key from it",
+      async (action, body) => {
+        emailCode = {
+          requestLimit: { perEmail: [100, 900], perIp: [2, 900] },
+          verifyLimit: { perEmail: [100, 900], perIp: [2, 900] },
+        };
+        bindAuth();
+        const huge = `${"a".repeat(1_000_000)}@x.test`;
+        const ip = "a".repeat(10_000);
+
+        for (let i = 0; i < 2; i++) {
+          const outcome = await attempt(action, { ...body, email: huge }, { ip });
+          expect((outcome as any).error).not.toBeInstanceOf(RateLimitExceededError);
+        }
+        // The two refusals spent this IP's budget...
+        const third = await attempt(action, { ...body, email: "a@x.test" }, { ip });
+        expect((third as any).error).toBeInstanceOf(RateLimitExceededError);
+        // ...and no per-address key, nor any long one, was made.
+        expect(limiterKeys.some((key) => key.includes(":email:aaaa"))).toBe(false);
+        expect(Math.max(...limiterKeys.map((key) => key.length))).toBeLessThan(200);
+        expect(await codeRows()).toEqual([]);
+      },
+    );
+
     test("generateCode supplies the PIN, and it is still stored hashed", async () => {
       application.instance(
         AuthManager,
@@ -737,11 +776,11 @@ function suite(label: string, url?: string) {
 
     // --- /auth/sign-in/magic-link ---------------------------------------------
 
-    async function clickLink(email: string, token: string) {
+    async function clickLink(email: string, token: string, ip = "203.0.113.1") {
       const req = new HttpRequest(
         new Request(
           `http://localhost/auth/sign-in/magic-link?email=${encodeURIComponent(email)}&token=${token}`,
-          { headers: { "User-Agent": "test-agent" } },
+          { headers: { "User-Agent": "test-agent", "x-forwarded-for": ip } },
         ),
         {},
         "view",
@@ -764,6 +803,34 @@ function suite(label: string, url?: string) {
       await post("createMagicLinkToken", { email: "known@x.test" });
       await ageCodes(7 * 24 * 60 + 1);
       expect(await clickLink("known@x.test", magicLinks[1].token)).toEqual({
+        error: "Invalid token",
+      });
+    });
+
+    test("the link spends no per-address budget, so PIN guesses do not lock it out", async () => {
+      emailCode = { maxAttempts: 100, verifyLimit: { perEmail: [1, 900], perIp: [50, 900] } };
+      bindAuth();
+      await seedUser("known@x.test");
+      await post("createMagicLinkToken", { email: "known@x.test" });
+      const { pin, token } = magicLinks[0];
+
+      await attempt("signInWithPinV2", { email: "known@x.test", pin: wrong(pin) });
+      const locked = await attempt("signInWithPinV2", { email: "known@x.test", pin: wrong(pin) });
+      expect((locked as any).error).toBeInstanceOf(RateLimitExceededError);
+
+      const result: any = await clickLink("known@x.test", token, "198.51.100.5");
+      expect(result.session.user.email).toBe("known@x.test");
+    });
+
+    test("the link is limited per IP", async () => {
+      emailCode = { verifyLimit: { perEmail: [100, 900], perIp: [2, 900] } };
+      bindAuth();
+      await clickLink("known@x.test", "f".repeat(64));
+      await clickLink("other@x.test", "f".repeat(64));
+      await expect(clickLink("third@x.test", "f".repeat(64))).rejects.toBeInstanceOf(
+        RateLimitExceededError,
+      );
+      expect(await clickLink("third@x.test", "f".repeat(64), "198.51.100.6")).toEqual({
         error: "Invalid token",
       });
     });

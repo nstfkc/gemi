@@ -17,6 +17,7 @@ const {
   countCodeAttempt,
   foldEmail,
   hashOneTimeSecret,
+  limiterKeyPart,
   normalizeEmail,
   oneTimeSecretMatches,
   randomDigits,
@@ -121,6 +122,25 @@ describe("foldEmail", () => {
     for (const value of [undefined, null, 1, [], "", "   "]) {
       expect(foldEmail(value)).toBeNull();
     }
+  });
+
+  test("refuses anything longer than 320 characters", () => {
+    const local = "a".repeat(64);
+    const atLimit = `${local}@${"b".repeat(320 - 65)}`;
+    expect(foldEmail(atLimit)).toBe(atLimit);
+    expect(foldEmail(`${atLimit}c`)).toBeNull();
+    expect(foldEmail(`${"a".repeat(1_000_000)}@x.test`)).toBeNull();
+    expect(normalizeEmail(`${"a".repeat(1_000_000)}@x.test`)).toBeNull();
+  });
+});
+
+describe("limiterKeyPart", () => {
+  test("keeps short parts and hashes long ones to a fixed size", () => {
+    expect(limiterKeyPart("ada@example.com")).toBe("ada@example.com");
+    const long = limiterKeyPart("x".repeat(100_000));
+    expect(long).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(limiterKeyPart("x".repeat(100_000))).toBe(long);
+    expect(limiterKeyPart("y".repeat(100_000))).not.toBe(long);
   });
 });
 

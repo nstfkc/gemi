@@ -1,4 +1,4 @@
-import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { app } from "../foundation/app";
 import type { HttpRequest } from "../http/HttpRequest";
 import { RateLimitExceededError, clientIp } from "../http/RateLimitMiddleware";
@@ -77,15 +77,24 @@ export function randomDigits(length: number): string {
 }
 
 /**
+ * The longest address any of these routes accepts: 64 for the local part, 1
+ * for the `@`, 255 for the domain. Past it a value is refused before it becomes
+ * a rate-limit key or a database lookup; the request body can be megabytes, and
+ * a limiter keeps a key for every request it counted, refused or not.
+ */
+export const MAX_EMAIL_LENGTH = 320;
+
+/**
  * What the magic-link and PIN routes have always done to an address: trim and
  * lowercase, nothing more, so an account they could reach before (an address
  * without a TLD, a synthetic identifier) is still reachable. `null` for what is
- * not a non-empty string, which used to be a 500.
+ * not a non-empty string, which used to be a 500, and for anything longer than
+ * `MAX_EMAIL_LENGTH`.
  */
 export function foldEmail(value: unknown): string | null {
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string" || value.length > MAX_EMAIL_LENGTH * 4) return null;
   const email = value.trim().toLowerCase();
-  return email === "" ? null : email;
+  return email === "" || email.length > MAX_EMAIL_LENGTH ? null : email;
 }
 
 /**
@@ -93,7 +102,7 @@ export function foldEmail(value: unknown): string | null {
  * address, since it may create a user from it.
  */
 export function normalizeEmail(value: unknown): string | null {
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string" || value.length > MAX_EMAIL_LENGTH * 4) return null;
   const email = value.trim().toLowerCase();
   // Not an RFC parser: enough to refuse what cannot be an address before a
   // row or a rate-limit key is made out of it.
@@ -140,23 +149,38 @@ export function resetFallbackCodeLimiter() {
 }
 
 /**
+ * A limiter key part as it is when short, else its SHA-256. The parts come
+ * from the client (an address, an `x-forwarded-for`), and a key is held for
+ * the whole window, so none may cost more than a hash's worth of memory.
+ */
+export function limiterKeyPart(value: string): string {
+  return value.length <= 64 ? value : `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+/**
  * Spends one hit of each configured limit for `scope`, per IP first and then
  * per email, and throws the middleware's 429 (`{ error: { kind: "rate_limit" } }`)
  * on the first one that is spent. An IP over its limit does not also spend the
  * address's budget, so somebody hammering from one address cannot use up a
  * victim's.
+ *
+ * `email: null` spends the IP budget only: a request whose address was refused
+ * (missing, malformed, over `MAX_EMAIL_LENGTH`) still counts against its IP,
+ * but never makes a per-address key.
  */
 export async function enforceCodeRateLimits(
-  scope: "request" | "verify",
-  email: string,
+  scope: "request" | "verify" | "link",
+  email: string | null,
   req: HttpRequest<any, any>,
   limits: CodeRateLimits,
 ) {
   const limiter = codeLimiter();
   const checks: Array<[string, CodeRateLimit | undefined]> = [
-    [`auth:code-${scope}:ip:${clientIp(req as HttpRequest)}`, limits.perIp],
-    [`auth:code-${scope}:email:${email}`, limits.perEmail],
+    [`auth:code-${scope}:ip:${limiterKeyPart(clientIp(req as HttpRequest))}`, limits.perIp],
   ];
+  if (email !== null) {
+    checks.push([`auth:code-${scope}:email:${limiterKeyPart(email)}`, limits.perEmail]);
+  }
   for (const [key, limit] of checks) {
     if (!limit) continue;
     const [count, window] = limit;

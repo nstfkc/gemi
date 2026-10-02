@@ -631,7 +631,10 @@ There are two ways for the user to complete it:
 Both are single use, stored as keyed hashes (HMAC-SHA256 under `SECRET`), and compared in
 constant time. Requesting (`/auth/magic-link`) and guessing (`/auth/sign-in-with-pin*`) are
 rate limited per address and per IP, through the app's [rate limiter](./middleware.md); over
-a limit the answer is 429 `{ error: { kind: "rate_limit" } }`. The limits and lifetimes are
+a limit the answer is 429 `{ error: { kind: "rate_limit" } }`. The link
+(`/auth/sign-in/magic-link`) is limited per IP only: its 256-bit token is not guessed, so it
+spends no per-address budget, and a user whose PIN budget somebody else spent can still sign
+in from the same email (unless the guesses burned the code, which deletes its link too). The limits and lifetimes are
 the `emailCode` settings below, which govern these routes whether or not the email-code
 endpoints are enabled. With more than one instance, bind `RedisRateLimiter` so the attempt
 count and the limits are shared.
@@ -711,7 +714,7 @@ await verify(email, code); // refreshes useUser() on success
 | `linkExpiresInMinutes` | `10080` (7 days) | Magic-link lifetime. |
 | `maxAttempts` | `5` | Wrong guesses per code; the next guess burns it. |
 | `requestLimit` | `{ perEmail: [5, 900], perIp: [20, 900] }` | `[count, seconds]`, or `false` to turn one off. Also `/auth/magic-link`. |
-| `verifyLimit` | `{ perEmail: [10, 900], perIp: [50, 900] }` | Also `/auth/sign-in-with-pin*`. |
+| `verifyLimit` | `{ perEmail: [10, 900], perIp: [50, 900] }` | Also `/auth/sign-in-with-pin*`. Its `perIp` (on a counter of its own) also limits `/auth/sign-in/magic-link`. |
 | `uniformMagicLinkResponse` | `false` | See above. |
 | `send` | logs the code outside production | Awaited before the answer: enqueue the mail rather than sending it inline, so a known and an unknown address take the same time. |
 
@@ -721,6 +724,14 @@ proxy; the per-address limits and the attempt cap hold regardless. All of these 
 live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
 per process, so N instances allow N times the limits and a restart resets them. Bind
 `RedisRateLimiter` when you run more than one instance.
+
+An address longer than 320 characters is refused before it reaches a limiter key or the
+database, and spends only its IP's budget; key parts over 64 characters (a long
+`x-forwarded-for`, say) are stored as their SHA-256. The in-memory driver also caps the keys it
+holds (`maxKeys`, default 100k), and over the cap evicts the least spent buckets first, so
+churning one-hit keys (spoofed IPs, random addresses) does not push out a code's attempt count
+or an address's budget until every less-spent key has gone. Enough churn can still reset one,
+so **use `RedisRateLimiter` in production**: it has no such cap.
 
 Codes and links are stored as HMAC-SHA256 under `SECRET`, keyed to the address, so a code
 issued for one address never matches another's row, and rotating `SECRET` invalidates the

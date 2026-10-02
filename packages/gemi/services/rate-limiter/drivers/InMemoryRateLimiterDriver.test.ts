@@ -134,6 +134,25 @@ describe("bookkeeping", () => {
     expect(consume(limiter, "b").remaining).toBe(9);
   });
 
+  test("evicts the least spent buckets first, so key churn cannot reset a spent one", () => {
+    const limiter = new InMemoryRateLimiter({ maxKeys: 100 });
+
+    // A code's attempt counter: 4 of 5 guesses spent, then left untouched.
+    for (let i = 0; i < 4; i++) {
+      limiter.consume({ key: "attempts", limit: 5, window: WINDOW });
+    }
+    // Churn: thousands of one-hit keys, each touched after it.
+    for (let i = 0; i < 5000; i++) {
+      limiter.consume({ key: `ip-${i}`, limit: 20, window: WINDOW });
+    }
+
+    expect(limiter.size).toBeLessThanOrEqual(100);
+    const next = limiter.consume({ key: "attempts", limit: 5, window: WINDOW });
+    expect(next.allowed).toBe(true);
+    expect(next.remaining).toBe(0);
+    expect(limiter.consume({ key: "attempts", limit: 5, window: WINDOW }).allowed).toBe(false);
+  });
+
   test("clear() drops every counter", () => {
     const limiter = new InMemoryRateLimiter();
 

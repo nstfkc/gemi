@@ -171,6 +171,13 @@ export class AuthController extends Controller {
       email = foldEmail(decodeURIComponent(req.search.get("email") ?? ""));
     } catch {}
 
+    // Per IP only. A 256-bit token is not guessed, so the link spends no
+    // per-address budget: a user locked out of PINs by somebody else's
+    // guesses can still sign in with the link from the same email (#708).
+    await enforceCodeRateLimits("link", null, req, {
+      perIp: auth.config.emailCode.verifyLimit.perIp,
+    });
+
     // The row's hash is compared in constant time, its age checked against
     // `emailCode.linkExpiresInMinutes`, and it is deleted by whichever request
     // claims it first (#708).
@@ -207,11 +214,11 @@ export class AuthController extends Controller {
     const { email: rawEmail, pin } = input.toJSON();
     const email = foldEmail(rawEmail);
 
+    await enforceCodeRateLimits("verify", email, req, auth.config.emailCode.verifyLimit);
+
     if (!email) {
       throw new ValidationError({ pin: ["Invalid pin"] });
     }
-
-    await enforceCodeRateLimits("verify", email, req, auth.config.emailCode.verifyLimit);
 
     const result = await auth.verifyOneTimeCode(email, pin);
     if (result.status === "too_many_attempts") {
@@ -889,11 +896,11 @@ export class AuthController extends Controller {
     const auth = app(AuthManager);
     const { uniformMagicLinkResponse, requestLimit } = auth.config.emailCode;
 
+    await enforceCodeRateLimits("request", email, req, requestLimit);
+
     if (!email) {
       return { email: null };
     }
-
-    await enforceCodeRateLimits("request", email, req, requestLimit);
 
     const { user, pin, token } = await auth.createMagicLinkToken(email);
 
@@ -926,11 +933,10 @@ export class AuthController extends Controller {
 
     const input = await req.input();
     const email = normalizeEmail(input.get("email"));
+    await enforceCodeRateLimits("request", email, req, config.requestLimit);
     if (!email) {
       throw new ValidationError({ email: ["Invalid email"] });
     }
-
-    await enforceCodeRateLimits("request", email, req, config.requestLimit);
 
     const user = await auth.userProvider.findUserByEmailAddress(email, false);
     if (user || config.createUser) {
@@ -963,11 +969,10 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { email: rawEmail, code, name } = input.toJSON();
     const email = normalizeEmail(rawEmail);
+    await enforceCodeRateLimits("verify", email, req, config.emailCode.verifyLimit);
     if (!email) {
       throw new ValidationError({ code: ["invalid_code"] });
     }
-
-    await enforceCodeRateLimits("verify", email, req, config.emailCode.verifyLimit);
 
     const result = await auth.verifyOneTimeCode(email, code, { claim: false });
     if (result.status === "too_many_attempts") {

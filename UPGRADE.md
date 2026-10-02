@@ -18,6 +18,8 @@ What changes on the existing routes:
 | Wrong PINs | unlimited | `emailCode.maxAttempts`, default 5; the next guess burns the PIN |
 | `/auth/magic-link` | unlimited | `emailCode.requestLimit`, default 5/15 min per address, 20/15 min per IP |
 | `/auth/sign-in-with-pin(-v2)` | unlimited | `emailCode.verifyLimit`, default 10/15 min per address, 50/15 min per IP |
+| `/auth/sign-in/magic-link` | unlimited | `emailCode.verifyLimit.perIp` only (own counter); no per-address limit |
+| Addresses over 320 chars | accepted | refused before any limiter key or lookup; spend the IP budget only |
 
 Response shapes do not change. A wrong *or expired* PIN is still
 `ValidationError { pin: ["Invalid pin"] }`; a burned one is
@@ -87,7 +89,17 @@ New:
 - **Known limits.** The per-address limits and the attempt cap are keyed on
   the address, so a third party who knows an address can spend its budget
   and burn its current code (a temporary lock-out of up to 15 minutes, never a
-  sign-in). With `createUser: false`, an unknown address skips the row write
+  sign-in). The emailed link is not affected: it spends no per-address budget
+  (a 256-bit token is not guessed), so a user rate-limited by somebody else's
+  guesses can still click it. A burned code takes its link with it (one row).
+- **In-memory limiter eviction.** The default in-memory driver caps its keys
+  (`maxKeys`, 100k) and, over the cap, now evicts the least spent buckets
+  first (it evicted the least recently touched). One-hit churn (spoofed IPs,
+  random addresses) no longer pushes out a code's attempt count or a victim's
+  budget cheaply, but enough churn still can, since the attempt count lives in
+  the limiter rather than on the code's row. **Use `RedisRateLimiter` in
+  production.**
+- With `createUser: false`, an unknown address skips the row write
   and `send`, so its answer is slightly faster; enqueue mail in `send` to keep
   that difference small.
 - `UserProvider.findUserMagicLinkToken` is deprecated: it looks a row up by the
