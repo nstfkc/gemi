@@ -109,13 +109,29 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 }
 
+/**
+ * The runtime behind `this.proxy(url, headers)`: forwards the request, minus
+ * the headers withheld for this app alone, to `url`.
+ *
+ * It runs behind the same middleware chain as any other route — the global
+ * list, the enclosing routers' `middlewares`, then its own `.middleware()` —
+ * so `this.proxy(url).middleware(["auth"])` is refused before anything is
+ * forwarded (#7). Without any, a proxy route is as public as an unguarded
+ * `this.get(...)`, and the client's headers, cookies included, reach `url`.
+ */
 export class ProxyHandler {
   __internal_brand = "ProxyHandler";
+  middlewares: string[] = [];
 
   constructor(
     public url: string,
     public headers: Record<string, string>,
   ) {}
+
+  middleware(middlewareList: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewareList);
+    return this;
+  }
 
   run() {
     const req = new HttpRequest();

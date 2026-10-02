@@ -1663,6 +1663,12 @@ routes = {
 };
 ```
 
+A proxy route runs behind the same middleware as any other route: the `global` list, the enclosing routers' `middlewares`, and its own `.middleware()`. Without any it is public, and it forwards the client's headers (cookies and `Authorization` included) to the target, plus the `headers` you pass. Guard it like any other route:
+
+```typescript
+"/billing": this.proxy("http://billing.internal/api", { "x-service-key": key }).middleware(["auth"]),
+```
+
 ### Streaming and range requests
 
 `this.stream(...)` registers a `GET` (and `HEAD`) handler that understands the `Range` header, so browsers can seek within audio and video. Return a `FileStorage.read()` result and the byte window is pushed down to the storage backend, so a seek transfers one window rather than the whole object:

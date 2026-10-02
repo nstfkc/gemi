@@ -18,6 +18,21 @@ it fires when the client disconnects (and, during a server render, when the
 page request does). Pass it to slow work such as model calls or upstream
 `fetch`es so they stop early. No action required.
 
+## `this.proxy(...)` takes `.middleware()` (#7)
+
+A proxy route could not carry middleware of its own: `createFlatApiRoutes`
+registered it with an empty list, so the only way to guard one was to move it
+into a nested router with `middlewares = [...]`. It now has `.middleware()`
+like every other route, run after the global list and the enclosing routers':
+
+```ts
+"/billing": this.proxy("http://billing.internal/api").middleware(["auth"]),
+```
+
+No existing route changes behaviour. **Check your `proxy()` routes:** one
+without middleware is public and forwards the client's headers, cookies and
+`Authorization` included, to its target.
+
 ## Breaking: `X-Forwarded-For` is no longer trusted by default; set `GEMI_TRUST_PROXY` behind a proxy (#8)
 
 **Behaviour change.** `gemi start` used to pass a client-sent `X-Forwarded-For`
