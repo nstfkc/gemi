@@ -832,6 +832,21 @@ export abstract class AgentController<
     // it has started.
     let removed: AgentMessage[] = [];
     const start = async (): Promise<Response> => {
+      try {
+        return await startRun();
+      } finally {
+        // A regenerate that never started its run — stopped while it waited,
+        // or a throw from the app's hooks — puts back what it took out, since
+        // no new answer is coming to replace it. Still under the thread's lock,
+        // and appended at the end, which is where it was: it was the tail.
+        if (threadId && removed.length > 0 && (started as AgentRun | null) === null) {
+          await this.store
+            .appendMessages(threadId, removed)
+            .catch((err) => this.reportHookFailure(err));
+        }
+      }
+    };
+    const startRun = async (): Promise<Response> => {
       let messages: AgentMessage[];
       if (threadId) {
         const history = await this.store.loadThread(threadId);
@@ -899,12 +914,6 @@ export abstract class AgentController<
       const attachments = await this.attachmentsFor(req, threadId, { body: extraBody });
 
       if (pending?.cancelled) {
-        // A regenerate stopped here puts back what it took out, since no new
-        // answer is coming to replace it. Appended at the end, which is where
-        // it was: it was the tail.
-        if (threadId && removed.length > 0) {
-          await this.store.appendMessages(threadId, removed);
-        }
         // Stopped while it waited. Nothing has been asked of the model and
         // nothing registered, so there is no run to end and nothing charged
         // for. Checked after the last `await` above, so that a stop landing
@@ -2504,7 +2513,6 @@ function searchParam(req: HttpRequest<any, any>, key: string): string | undefine
   return typeof value === "string" ? value : undefined;
 }
 
-/** A turn `/stop` ended while it waited, before anything ran or was charged. */
 /**
  * Where a threaded regenerate cuts the history: at the last message the user
  * wrote, with the turn that wrote it. A file a tool showed is a user-role
@@ -2540,6 +2548,7 @@ function regenerationCut(
   return null;
 }
 
+/** A turn `/stop` ended while it waited, before anything ran or was charged. */
 function stoppedBeforeStart(): Response {
   return jsonResponse(409, {
     code: "stopped",

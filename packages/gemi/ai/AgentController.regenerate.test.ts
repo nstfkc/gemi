@@ -226,6 +226,23 @@ describe("regenerate on a thread (#451)", () => {
     expect(ids(await store.loadThread(threadId))).toEqual(["u0", "a0", "u1", "a1"]);
   });
 
+  test("a regenerate whose hooks throw before the run puts the answer back", async () => {
+    const { calls, store, threadId, agent } = await setup(history());
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = store;
+      protected async instructions(): Promise<string> {
+        throw new Error("db down");
+      }
+    }
+    await expect(
+      new Chat().stream(jsonRequest({ threadId, text: "x", regenerate: true })),
+    ).rejects.toThrow("db down");
+    expect(calls).toHaveLength(0);
+    expect(ids(await store.loadThread(threadId))).toEqual(["u0", "a0", "u1", "a1"]);
+  });
+
   test("counts as the same conversation for maxConcurrentRuns (#444)", async () => {
     const { calls, runs, threadId, Chat } = await setup(history());
     class Limited extends Chat {
