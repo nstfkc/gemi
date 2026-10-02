@@ -40,6 +40,26 @@ protected redactError(error, info, ctx) {
 }
 ```
 
+## `Link` leaves new-tab, modifier and download clicks to the browser (#694)
+
+**Behaviour change (bug fix).** A route `Link` used to cancel every click and
+navigate client-side, so `target="_blank"`, cmd/ctrl/shift/alt-click and
+`download` all stayed in the current tab. It now steps aside, and the browser
+handles the click as it would for a plain anchor, when:
+
+- `target` is set to anything other than `_self`;
+- a modifier key (meta, ctrl, shift, alt) is held;
+- the button is not the primary one;
+- `download` is set;
+- the click was already cancelled (`event.defaultPrevented`).
+
+Your own `onClick` now always runs first, including on a click to the page you
+are already on (it used to be skipped there). Calling `event.preventDefault()`
+in it now cancels the client-side navigation too; previously the router
+navigated regardless. If you relied on that, drop the `preventDefault()` call or
+navigate yourself with `useNavigate().push(...)`. Prefetch behaviour is
+unchanged.
+
 ## `useQuery` aborts requests nobody renders; controllers get `req.signal` (#659)
 
 **Behaviour change.** When the last mounted reader of a query variant lets go
