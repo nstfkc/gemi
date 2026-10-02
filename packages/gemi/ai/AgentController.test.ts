@@ -1,6 +1,6 @@
 process.env.SECRET ??= "agent-controller-test-secret";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
 import { InsufficientPermissionsError } from "../http/errors";
@@ -15,6 +15,8 @@ import {
   MemoryAttachmentStore,
   MemoryFileOwners,
   MemoryLiveRuns,
+  MemoryNonceStore,
+  type NonceStore,
   ScopedAttachments,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
@@ -3368,5 +3370,119 @@ describe("MemoryFileOwners", () => {
     await owners.record("file-3", record("user:1"));
     expect(await owners.get("file-1")).toBeNull();
     expect((await owners.get("file-3"))?.owner).toBe("user:1");
+  });
+});
+
+describe("nonces (#445)", () => {
+  test("hands the controller's nonce store to the run", async () => {
+    const run = new StubAgentRun("run_nonce");
+    const { agent, calls } = stubAgent(run);
+    const nonces = new MemoryNonceStore();
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      nonces = nonces;
+    }
+
+    await new Chat().stream(jsonRequest({ messages: [], text: "hi" }));
+    run.finish({ messages: [] });
+    await settle();
+    expect(calls[0]!.nonces).toBe(nonces);
+  });
+
+  /**
+   * The issue itself: a stateless chat, two instances (two controllers, two
+   * agents, two live-run maps), one rewound history. With a store the two
+   * share, the second instance refuses the answer the first already acted on.
+   */
+  test("a stateless approval replayed on another instance is refused", async () => {
+    const refunded: string[] = [];
+    const refundOrder = AgentTool.create({
+      name: "refundOrder",
+      description: "Refund an order",
+      inputSchema: s.object({ orderId: s.string() }),
+      outputSchema: s.object({ refundId: s.string() }),
+      requiresApproval: true,
+      execute: async ({ orderId }) => {
+        refunded.push(orderId);
+        return { refundId: `rf_${orderId}` };
+      },
+    });
+    const tools = [refundOrder];
+    const instance = (nonces: NonceStore) => {
+      const agent = Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools,
+      });
+      const liveRuns = new MemoryLiveRuns();
+      return class extends AgentController {
+        agent = agent;
+        liveRuns = liveRuns;
+        nonces = nonces;
+      };
+    };
+    const shared = new MemoryNonceStore();
+    const A = instance(shared);
+    const B = instance(shared);
+
+    // The first turn ends awaiting the approval; its history is what a
+    // stateless client holds.
+    const asking = Agent.create({
+      name: "support",
+      provider: fakeProvider([
+        { type: "tool-call", toolCallId: "c1", name: "refundOrder", args: '{"orderId":"ord_1"}' },
+        finish(),
+      ]),
+      tools,
+    }).stream({ messages: [], turn: { text: "refund it" } });
+    const firstEvents: AgentStreamEvent[] = [];
+    const draining = (async () => {
+      for await (const event of asking as AsyncIterable<AgentStreamEvent>) firstEvents.push(event);
+    })();
+    const asked = await asking.result();
+    await draining;
+    const awaiting = firstEvents.find((event) => event.type === "awaiting-input") as any;
+    const answer = {
+      messages: asked.messages,
+      toolResults: [{ toolCallId: "c1", signature: awaiting.pending[0].signature, approve: true }],
+    };
+
+    await eventsOf(await new A().stream(jsonRequest(answer)));
+    await settle();
+    expect(refunded).toEqual(["ord_1"]);
+
+    // The same history, rewound to before the result, sent to B.
+    const replayed = await eventsOf(await new B().stream(jsonRequest(answer)));
+    await settle();
+    expect(refunded).toEqual(["ord_1"]);
+    expect(replayed.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+  });
+
+  test("warns once in production when a stateless chat spends nonces in memory", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      for (const id of ["run_w1", "run_w2"]) {
+        const run = new StubAgentRun(id);
+        const { agent } = stubAgent(run);
+        class Chat extends AgentController {
+          agent = agent;
+          liveRuns = new MemoryLiveRuns();
+        }
+        await new Chat().stream(jsonRequest({ messages: [], text: "hi" }));
+        run.finish({ messages: [] });
+        await settle();
+      }
+      const warned = warn.mock.calls.filter((call) => String(call[0]).includes("RedisNonceStore"));
+      expect(warned).toHaveLength(1);
+    } finally {
+      process.env.NODE_ENV = env;
+      warn.mockRestore();
+    }
   });
 });

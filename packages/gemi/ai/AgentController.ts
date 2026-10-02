@@ -29,6 +29,14 @@ import {
   type FileOwners,
   MemoryFileOwners,
 } from "./store/FileOwners";
+import {
+  defaultNonceStore,
+  MemoryNonceStore,
+  type NonceRedisClient,
+  type NonceStore,
+  RedisNonceStore,
+  type RedisNonceStoreOptions,
+} from "./store/Nonces";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
@@ -159,6 +167,15 @@ export {
 
 /** Who uploaded each provider file id (#443). See `store/FileOwners.ts`. */
 export { defaultFileOwners, type FileOwnerRecord, type FileOwners, MemoryFileOwners };
+/** Where answered calls' nonces are spent (#445). See `store/Nonces.ts`. */
+export {
+  defaultNonceStore,
+  MemoryNonceStore,
+  type NonceRedisClient,
+  type NonceStore,
+  RedisNonceStore,
+  type RedisNonceStoreOptions,
+};
 
 // --- controller ----------------------------------------------------------
 
@@ -376,6 +393,27 @@ export abstract class AgentController<
    * survive a restart, gives it a table (see `FileOwners`).
    */
   fileOwners: FileOwners = defaultFileOwners;
+
+  /**
+   * Where the nonce of each answered approval or question is spent, which is
+   * what makes a signed answer single-use (#445). On a stateless chat the
+   * client carries its history and can rewind it to before a result existed;
+   * the spent nonce is then the only thing that refuses the replayed answer.
+   *
+   * Defaults to the process-wide `MemoryNonceStore`, which is exact for one
+   * instance and forgets on restart. An app running several instances (or
+   * behind a load balancer whose affinity is best effort) assigns a shared
+   * store, built once at module scope like `store`:
+   *
+   *   const nonces = new RedisNonceStore();
+   *   class ChatController extends AgentController<typeof chat> {
+   *     nonces = nonces;
+   *   }
+   *
+   * or its own `NonceStore` over a table keyed by the nonce. In production a
+   * stateless turn served with the in-memory default logs a warning once.
+   */
+  nonces: NonceStore = defaultNonceStore;
 
   /**
    * Whether a turn may name a provider file id that `fileOwners` has no record
@@ -641,6 +679,7 @@ export abstract class AgentController<
         messages = await this.settleThread(threadId, history, { write: true });
       } else {
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
+        warnInMemoryNonces(this.nonces);
       }
 
       const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
@@ -709,6 +748,8 @@ export abstract class AgentController<
         // What the client, and for a tool's exception the model, is told about
         // a failure. See `redactError`.
         redactError: (error, info) => this.redactError(error, info, ctx),
+        // Where answers' nonces are spent. See `nonces`.
+        nonces: this.nonces,
       }) as AgentRun;
 
       // Registered before the response is built: the run is now owned by the
@@ -2371,4 +2412,23 @@ function within(work: Promise<void>, ms: number): Promise<void> {
     timer = setTimeout(resolve, ms);
   });
   return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+}
+
+let warnedInMemoryNonces = false;
+
+/**
+ * Once per process, in production: a stateless chat whose answers are spent
+ * only in this process's memory. Correct for a single instance, which is why
+ * it is a warning; with several, a rewound history replays an approval once
+ * per instance (#445).
+ */
+function warnInMemoryNonces(nonces: NonceStore): void {
+  if (warnedInMemoryNonces || process.env.NODE_ENV !== "production") return;
+  if (!(nonces instanceof MemoryNonceStore)) return;
+  warnedInMemoryNonces = true;
+  console.warn(
+    "[gemi/ai] A stateless agent chat is spending approval nonces in process memory. " +
+      "With more than one instance a replayed approval is accepted once per instance. " +
+      "Set `nonces = new RedisNonceStore()` (or your own NonceStore) on the AgentController.",
+  );
 }

@@ -15,6 +15,7 @@ import { s } from "./Schema";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
 import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
+import { MemoryNonceStore, type NonceStore } from "./store/Nonces";
 import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS } from "./store/sse";
 import type {
   AgentMessage,
@@ -750,6 +751,100 @@ describe("an approval", () => {
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
       status: "denied",
       cause: "refused",
+    });
+  });
+
+  describe("spent on the run's nonce store (#445)", () => {
+    /** Two app instances: each its own agent, each given `nonces`. */
+    const approveOn = (nonces: NonceStore, messages: AgentMessage[], answer: ClientToolResult) =>
+      Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [refundOrder, askUser],
+      }).stream({ messages, turn: { toolResults: [answer] }, nonces });
+
+    test("a replay against a second instance sharing the store is refused", async () => {
+      const first = await askForApproval();
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      const shared = new MemoryNonceStore();
+
+      await approveOn(shared, first.result.messages, answer).result();
+      const again = approveOn(shared, first.result.messages, answer);
+      const { events, done } = collect(again);
+      await again.result();
+      await done;
+
+      expect(refundCalls).toEqual(["ord_1"]);
+      expect(events.find((event) => event.type === "error")).toMatchObject({
+        error: { code: "invalid_tool_result" },
+      });
+    });
+
+    test("instances with stores of their own each accept it: what #445 was", async () => {
+      const first = await askForApproval();
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      await approveOn(new MemoryNonceStore(), first.result.messages, answer).result();
+      await approveOn(new MemoryNonceStore(), first.result.messages, answer).result();
+      expect(refundCalls).toEqual(["ord_1", "ord_1"]);
+    });
+
+    test("the same answer raced at several instances runs the tool once", async () => {
+      const first = await askForApproval();
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      // Insert-if-absent behind an await, as a network store is.
+      const spent = new Set<string>();
+      const shared: NonceStore = {
+        async consume(nonce) {
+          await new Promise((resolve) => setTimeout(resolve, Math.random() * 5));
+          if (spent.has(nonce)) return false;
+          spent.add(nonce);
+          return true;
+        },
+      };
+      await Promise.all(
+        Array.from({ length: 5 }, () => approveOn(shared, first.result.messages, answer).result()),
+      );
+      expect(refundCalls).toEqual(["ord_1"]);
+    });
+
+    test("a store that throws refuses the answer instead of running it unchecked", async () => {
+      const first = await askForApproval();
+      const failing: NonceStore = {
+        async consume() {
+          throw new Error("redis down");
+        },
+      };
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const run = approveOn(failing, first.result.messages, {
+          toolCallId: "c1",
+          signature: first.pending[0].signature,
+          approve: true,
+        });
+        const { events, done } = collect(run);
+        const result = await run.result();
+        await done;
+
+        expect(refundCalls).toEqual([]);
+        expect(events.find((event) => event.type === "error")).toMatchObject({
+          error: { code: "invalid_tool_result" },
+        });
+        expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({ status: "denied" });
+      } finally {
+        errors.mockRestore();
+      }
     });
   });
 
