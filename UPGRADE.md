@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.84.1 to 0.85.0
 
 ## `ai`: `regenerate` replaces the answer on a thread (#451)
 
