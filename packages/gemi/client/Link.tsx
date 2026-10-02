@@ -5,6 +5,7 @@ import {
   useRef,
   memo,
   type ComponentProps,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type SyntheticEvent,
 } from "react";
@@ -113,6 +114,30 @@ export const Link = memo((props: any) => {
   const Route = RouteLink as unknown as (props: any) => ReactElement;
   return <Route {...props} />;
 }) as unknown as LinkComponent;
+
+/**
+ * Clicks the router must not take over, so the browser does what it would for a
+ * plain anchor: a new tab or window for `target="_blank"` and for cmd/ctrl/
+ * shift/alt-clicks, the context action for a middle click, a file for
+ * `download`, and nothing at all when a handler has already cancelled the click.
+ */
+function leaveClickToBrowser(event: ReactMouseEvent<HTMLAnchorElement>) {
+  if (event.defaultPrevented) {
+    return true;
+  }
+  if (event.button !== 0) {
+    return true;
+  }
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return true;
+  }
+  const anchor = event.currentTarget;
+  const target = anchor.getAttribute("target");
+  if (target && target !== "_self") {
+    return true;
+  }
+  return anchor.hasAttribute("download");
+}
 
 const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   const _params = useParams();
@@ -288,15 +313,18 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
       data-pending={isTransitioning && resolvedPath === targetPath}
       href={targetHref === '' ? '/' : targetHref}
       onClick={(e) => {
-        if (typeof window !== "undefined") {
-          if (currentHref === targetHref) {
-            e.preventDefault();
-            return;
-          }
+        // The caller's handler always runs, and runs first: it may want to
+        // log, close a menu, or cancel the navigation with `preventDefault()`.
+        onClick?.(e);
+        if (leaveClickToBrowser(e)) {
+          return;
+        }
+        if (currentHref === targetHref) {
+          e.preventDefault();
+          return;
         }
         let currentPath = window.location.pathname.replace(localeSegment, "");
         currentPath = currentPath === "" ? "/" : currentPath;
-        onClick?.(e);
 
         if (hash === "") {
           e.preventDefault();

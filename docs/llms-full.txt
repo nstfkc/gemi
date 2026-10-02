@@ -4298,6 +4298,11 @@ An absolute `http(s)://` `href`, such as a URL on another subdomain from
 `useNavigate` treats an absolute URL the same way. See
 [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
+Clicks the browser should own are left to it, as with a plain anchor:
+`target="_blank"` (or any `target` other than `_self`), cmd/ctrl/shift/alt-click,
+a non-primary button, and `download`. Your own `onClick` runs first; calling
+`event.preventDefault()` in it cancels the client-side navigation.
+
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
 
