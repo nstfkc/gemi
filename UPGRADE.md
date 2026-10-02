@@ -1,21 +1,18 @@
 # Unreleased
 
-## `auth`: request input is type-checked before it reaches a query (security)
+## `auth`: request input is type-checked before it reaches a query (security hardening)
 
-**Security fix — upgrade promptly.** Affects 0.85.0 and earlier. Several auth
-routes passed values from the request body or query string to the database
-without checking their runtime type. A JSON body can carry an object where a
-string is expected, and the ORM reads an object in a `where` as a filter, so a
-crafted request could match a row it should not have. The PIN sign-in routes
-were affected, as were the email verification, password reset and sign-up
-invitation lookups.
+Recommended for every app using gemi's auth routes. The auth routes now check
+the runtime type of the values they read from the request body or query string
+(`email`, `pin`, `token`, `password`, `invitationId`, …) before passing them to
+a database lookup. A JSON body can carry an object or an array where a string
+is expected, and the ORM reads an object in a `where` as a filter rather than a
+value, so only strings are passed on.
 
-Every auth route now checks what it reads (`email`, `pin`, `token`, `password`,
-`invitationId`, …) is a string before using it, and answers anything else
-exactly as it answers a wrong value: a wrong PIN is `Invalid pin`, a wrong reset
-token is `Invalid token`, and so on. A PIN must be six digits.
-`UserProvider`'s token lookups return `null` for a value that is not a
-non-empty string.
+A value of the wrong type is answered exactly like a wrong value: a PIN is
+`Invalid pin`, a reset or magic-link token is `Invalid token`, and so on. A PIN
+must be six digits, the format gemi issues. `UserProvider`'s token, PIN and
+invitation lookups return `null` for a value that is not a non-empty string.
 
 **ORM, behaviour change.** A unique key in `findUnique`, `findUniqueOrThrow`,
 `update`, `delete`, `upsert` and nested `connect`/`where`, and a compound key

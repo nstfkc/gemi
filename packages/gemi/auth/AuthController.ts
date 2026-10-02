@@ -210,8 +210,9 @@ export class AuthController extends Controller {
         token,
       });
     } catch (err) {
-      console.log(err);
-      return { error: JSON.stringify(err) };
+      // Logged, not returned: a failed lookup answers like a wrong token.
+      console.error(err);
+      return { error: "Invalid token" };
     }
 
     if (!magicLink) {

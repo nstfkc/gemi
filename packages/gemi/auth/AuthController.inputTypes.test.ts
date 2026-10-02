@@ -197,6 +197,22 @@ describe("signInWithMagicLink", () => {
     expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
   });
 
+  test("a repeated token is an invalid token, with no lookup", async () => {
+    expect(
+      await run("signInWithMagicLink", {}, link("email=victim%40example.com&token=a&token=b")),
+    ).toEqual({ ok: true, result: { error: "Invalid token" } });
+    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+  });
+
+  test("a failed lookup answers like a wrong token", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userProvider.findUserMagicLinkToken.mockRejectedValueOnce(new Error("lookup failed"));
+    expect(
+      await run("signInWithMagicLink", {}, link("email=victim%40example.com&token=abc")),
+    ).toEqual({ ok: true, result: { error: "Invalid token" } });
+    spy.mockRestore();
+  });
+
   test("a token and email are looked up as strings", async () => {
     await run("signInWithMagicLink", {}, link("email=Victim%40example.com&token=abc"));
     expect(userProvider.findUserMagicLinkToken).toHaveBeenCalledWith({
