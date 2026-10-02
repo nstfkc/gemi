@@ -174,6 +174,55 @@ function sourcesOf(routes: ReturnType<typeof createFlatApiRoutes>) {
   );
 }
 
+describe("createFlatApiRoutes - proxy routes (#7)", () => {
+  const METHODS = ["GET", "POST", "PUT", "DELETE"];
+
+  test("carry the route's own middleware on every method, after the router's", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/upstream": this.proxy("https://example.com").middleware(["auth", "rate-limit:10"]),
+      };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes(new Root().routes, "", ["csrf"]));
+
+    for (const method of METHODS) {
+      expect(middlewares[`${method} /upstream`]).toEqual(["csrf", "auth", "rate-limit:10"]);
+    }
+    expect(middlewares["OPTIONS /upstream"]).toEqual([]);
+  });
+
+  test("accept a bare string, as every other route's .middleware() does", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/upstream": this.proxy("https://example.com").middleware("auth"),
+      };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes(new Root().routes));
+
+    expect(middlewares["POST /upstream"]).toEqual(["auth"]);
+  });
+
+  test("inherit a nested router's middlewares", () => {
+    class Internal extends ApiRouter {
+      middlewares = ["auth"];
+      routes = {
+        "/upstream": this.proxy("https://example.com"),
+      };
+    }
+    class Root extends ApiRouter {
+      routes = { "/internal": Internal };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes(new Root().routes));
+
+    for (const method of METHODS) {
+      expect(middlewares[`${method} /internal/upstream`]).toEqual(["auth"]);
+    }
+  });
+});
+
 describe("createFlatApiRoutes - route source", () => {
   test("a resource and a route in a nested, prefixed router report their controller method", () => {
     class OrgRouter extends ApiRouter {
