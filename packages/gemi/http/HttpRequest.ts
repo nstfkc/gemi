@@ -1,4 +1,6 @@
+import { RequestBreakerError } from "./Error";
 import { parseCookieHeader } from "./getCookies";
+import { isJsonMediaType, mediaType } from "./mediaType";
 import { isModelOriginated } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
@@ -171,36 +173,74 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     return {};
   }
 
+  /**
+   * The body, by its media type: JSON (`application/json` or any `+json`
+   * type), a urlencoded form, or a multipart form. The type is read without
+   * its parameters and case-insensitively, so `application/json;
+   * charset=utf-8` is JSON (#699). Any other type, or none, reads as `{}`.
+   *
+   * An empty JSON body is no body, and reads as `{}` like a request without
+   * one. A body that is not JSON, or is JSON but not an object, is the
+   * client's mistake: a 400 refusal (`form_error`), never a 500 (#700).
+   */
   private async parseBody() {
-    let inputMap = new Input<T>({} as T);
-    if (this.rawRequest.headers.get("Content-Type") === "application/json") {
-      const body = await this.rawRequest.json();
-      inputMap = new Input<T>(body as T);
-    }
-    if (this.rawRequest.headers.get("Content-Type") === "application/x-www-form-urlencoded") {
-      const body = (await this.rawRequest.formData()) as any; // TODO: fix type
-      inputMap = new Input<T>(body as T);
+    const type = mediaType(this.rawRequest.headers.get("Content-Type"));
+
+    if (isJsonMediaType(type)) {
+      return new Input<T>((await this.parseJsonBody()) as T);
     }
 
-    if (this.rawRequest.headers.get("Content-Type")?.startsWith("multipart/form-data")) {
-      const body = (await this.rawRequest.formData()) as any; // TODO: fix type
+    if (type === "application/x-www-form-urlencoded" || type === "multipart/form-data") {
+      let body: FormData;
+      try {
+        body = await this.rawRequest.formData();
+      } catch {
+        throw new RequestBreakerError("The request body could not be read as a form.");
+      }
       const _inputMap = new Map<string, any>();
       for (const [key, value] of body.entries()) {
         if (_inputMap.has(key)) {
           const currentValue = _inputMap.get(key);
           if (Array.isArray(currentValue)) {
             currentValue.push(value);
-            _inputMap.set(key, currentValue);
           } else {
-            _inputMap.set(key, [currentValue, value] as any);
+            _inputMap.set(key, [currentValue, value]);
           }
         } else {
-          _inputMap.set(key, value as T[keyof T]);
+          _inputMap.set(key, value);
         }
       }
-      inputMap = new Input<T>(Object.fromEntries(_inputMap.entries()) as T);
+      return new Input<T>(Object.fromEntries(_inputMap.entries()) as T);
     }
-    return inputMap;
+
+    return new Input<T>({} as T);
+  }
+
+  private async parseJsonBody(): Promise<Body> {
+    if (!this.rawRequest.body) {
+      return {};
+    }
+    let text: string;
+    try {
+      text = await this.rawRequest.text();
+    } catch {
+      throw new RequestBreakerError("The request body could not be read.");
+    }
+    if (text.trim() === "") {
+      return {};
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new RequestBreakerError("The request body is not valid JSON.");
+    }
+    // `null`, a number, a string: nothing a field could be read from. An
+    // array is left alone, as it was before.
+    if (parsed === null || typeof parsed !== "object") {
+      throw new RequestBreakerError("The request body must be a JSON object.");
+    }
+    return parsed as Body;
   }
 
   private validateInput(input: Input<T>) {
