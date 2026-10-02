@@ -95,6 +95,18 @@ export class LiveRunNotFoundError extends Error {
 export type RegisterParams = {
   threadId?: string;
   /**
+   * Who started the run, as an opaque key (`AgentController.runOwner` makes it
+   * `user:<id>`), or `null`/absent for a run nobody in particular owns: an
+   * anonymous turn, or one the server started itself (#442).
+   *
+   * Recorded so `attach` and `stop` can tell the caller from the owner without a
+   * store round trip: a `threadId`, a `runId` and a client-minted `clientRunId`
+   * are all handles a third party can come to hold, and none of them says whose
+   * run it is. An owned run answers only the same key; an unowned one answers
+   * whoever holds a handle, which is what every run did before this existed.
+   */
+  owner?: string | null;
+  /**
    * The client's own name for this run, minted before the run had one.
    *
    * `runId` does not reach the client until `run-start`, and a stateless first
@@ -130,6 +142,8 @@ export type RegisterParams = {
 type Entry = {
   run: AgentRun;
   threadId?: string;
+  /** See `RegisterParams.owner`. `null` is unowned. */
+  owner: string | null;
   clientRunId?: string;
   /** A contiguous window of the run's frames, oldest first. */
   frames: AgentStreamFrame[];
@@ -235,6 +249,7 @@ export class MemoryLiveRuns implements LiveRuns {
     const entry: Entry = {
       run: run as AgentRun,
       threadId: params.threadId,
+      owner: params.owner ?? null,
       clientRunId: params.clientRunId,
       frames: [],
       lastSeq: -1,
@@ -288,6 +303,30 @@ export class MemoryLiveRuns implements LiveRuns {
 
   get(runId: string): AgentRun | null {
     return this.runs.get(runId)?.run ?? null;
+  }
+
+  /** Who started the run (see `RegisterParams.owner`); `null` for an unowned
+   *  run and for one this process does not hold. */
+  ownerOf(runId: string): string | null {
+    return this.runs.get(runId)?.owner ?? null;
+  }
+
+  /**
+   * Whether `caller` may read or stop the run: an unowned run (and one this
+   * process does not hold) answers anyone, an owned one only its owner. A
+   * caller with no key (`null`, an anonymous request) is not the owner of
+   * anything.
+   */
+  mayAccess(runId: string, caller: string | null): boolean {
+    const owner = this.ownerOf(runId);
+    return owner === null || owner === caller;
+  }
+
+  /** Whether the run is still going, as opposed to ended and kept for `ttlMs`,
+   *  or not here at all. */
+  isRunning(runId: string): boolean {
+    const entry = this.runs.get(runId);
+    return !!entry && !entry.ended && !entry.evicted;
   }
 
   /**
