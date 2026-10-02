@@ -2961,3 +2961,190 @@ describe("AgentController.upload when the provider refuses the file", () => {
     },
   );
 });
+
+/**
+ * #442: a thread id, a run id and a client-minted run id are all handles a
+ * third party can come to hold. The run records who started it, and only that
+ * caller may read it, stop it, or supersede it with a turn on its thread.
+ */
+describe("a live run belongs to whoever started it", () => {
+  function owned(runId = "run_owned") {
+    const run = new StubAgentRun(runId);
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+    }
+    return { run, controller: new Chat() };
+  }
+
+  /** Runs `fn` as the user `id`, or anonymously for `null`. */
+  function as<T>(id: number | null, req: HttpRequest<any, any>, fn: () => Promise<T>): Promise<T> {
+    return RequestContext.run(req as any, async () => {
+      if (id !== null) RequestContext.getStore().setUser({ id });
+      return await fn();
+    });
+  }
+
+  async function startAs(
+    controller: AgentController,
+    id: number | null,
+    body: Record<string, unknown>,
+  ) {
+    const req = jsonRequest({ text: "hi", ...body });
+    return await as(id, req, () => controller.stream(req));
+  }
+
+  async function expectRefused(response: unknown) {
+    expect(response).toBeInstanceOf(Response);
+    const res = response as Response;
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: { kind: "permission", message: "This run belongs to someone else.", status: 403 },
+    });
+  }
+
+  test("records the authenticated user as the owner", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    expect(controller.liveRuns.ownerOf("run_owned")).toBe("user:1");
+    run.finish();
+  });
+
+  test("another user cannot attach to it", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "secret" });
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(2, req, () => controller.attach(req)));
+    run.finish();
+  });
+
+  test("an anonymous caller cannot attach to it", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(null, req, () => controller.attach(req)));
+    run.finish();
+  });
+
+  test("not even once it has ended and is kept for the tail", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "secret" });
+    run.finish();
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    await expectRefused(await as(2, req, () => controller.attach(req)));
+  });
+
+  test("the owner still attaches", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+    run.emit({ type: "text-delta", messageId: "m1", delta: "mine" });
+    run.finish();
+    await settle();
+
+    const req = jsonRequest({ threadId: "t1" });
+    const response = await as(1, req, () => controller.attach(req));
+    expect(response.status).toBe(200);
+    expect(await readSse(response)).toContain('"delta":"mine"');
+  });
+
+  test.each([
+    ["threadId", { threadId: "t1" }],
+    ["runId", { runId: "run_owned" }],
+    ["clientRunId", { clientRunId: "local_1" }],
+  ])("another user cannot stop it by %s", async (_name, handle) => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1", clientRunId: "local_1" });
+
+    const req = jsonRequest(handle);
+    await expectRefused(await as(2, req, () => controller.stop(req)));
+    expect(run.stopped).toBe(false);
+
+    const mine = jsonRequest(handle);
+    expect(await as(1, mine, () => controller.stop(mine))).toEqual({ stopped: true });
+    expect(run.stopped).toBe(true);
+    run.finish({ finishReason: "aborted" });
+  });
+
+  test("another user cannot stop a turn still waiting for authorizeRequest", async () => {
+    const run = new StubAgentRun("run_wait");
+    const { agent, calls } = stubAgent(run);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected async authorizeRequest(_req: HttpRequest<any, any>, { route }: { route: string }) {
+        if (route === "stream") await gate;
+      }
+    }
+    const controller = new Chat();
+    const turn = startAs(controller, 1, { clientRunId: "local_wait" });
+    await settle();
+
+    const req = jsonRequest({ clientRunId: "local_wait" });
+    await expectRefused(await as(2, req, () => controller.stop(req)));
+
+    release();
+    await turn;
+    expect(calls).toHaveLength(1);
+    run.finish();
+  });
+
+  test("another user's turn on the thread does not supersede it while it runs", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, 1, { threadId: "t1" });
+
+    await expectRefused(await startAs(controller, 2, { threadId: "t1" }));
+    expect(run.stopped).toBe(false);
+    run.finish();
+  });
+
+  test("an anonymous run is unowned, and answers whoever holds the handle", async () => {
+    const { run, controller } = owned();
+    await startAs(controller, null, { threadId: "t1" });
+    expect(controller.liveRuns.ownerOf("run_owned")).toBeNull();
+
+    const attach = jsonRequest({ threadId: "t1" });
+    expect((await as(2, attach, () => controller.attach(attach))).status).toBe(200);
+    const stop = jsonRequest({ threadId: "t1" });
+    expect(await as(null, stop, () => controller.stop(stop))).toEqual({ stopped: true });
+    run.finish({ finishReason: "aborted" });
+  });
+
+  test("a run the server registered itself is unowned", async () => {
+    const run = new StubAgentRun("run_server");
+    const liveRuns = new MemoryLiveRuns();
+    void liveRuns.register(run as any, { threadId: "t9" });
+    expect(liveRuns.ownerOf("run_server")).toBeNull();
+    expect(liveRuns.mayAccess("run_server", "user:1")).toBe(true);
+    expect(liveRuns.mayAccess("run_server", null)).toBe(true);
+    run.finish();
+  });
+
+  test("runOwner can widen the owner, e.g. to a team", async () => {
+    const run = new StubAgentRun("run_team");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+      protected runOwner() {
+        return "team:acme";
+      }
+    }
+    const controller = new Chat();
+    await startAs(controller, 1, { threadId: "t1" });
+    const req = jsonRequest({ threadId: "t1" });
+    expect(await as(2, req, () => controller.stop(req))).toEqual({ stopped: true });
+    run.finish({ finishReason: "aborted" });
+  });
+});
