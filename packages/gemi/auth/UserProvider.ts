@@ -379,6 +379,9 @@ export class UserProvider<TSession = SessionWithUser> {
   }
 
   async findUserByVerificationToken(token: string): Promise<User | null> {
+    // A filter object here would match some other user's token. The
+    // controller checks too; this keeps an override's caller honest.
+    if (typeof token !== "string" || token === "") return null;
     return await this.run(() =>
       this.models.User.findFirst({ where: { verificationToken: token } }),
     );
@@ -513,6 +516,7 @@ export class UserProvider<TSession = SessionWithUser> {
   async findPasswordResetToken(
     args: FindPasswordResetTokenArgs,
   ): Promise<PasswordResetToken | null> {
+    if (typeof args.token !== "string" || args.token === "") return null;
     return await this.run(() =>
       this.models.PasswordResetToken.findUnique({
         where: { token: args.token },
@@ -533,6 +537,9 @@ export class UserProvider<TSession = SessionWithUser> {
     invitationId: string,
     email: string,
   ): Promise<Invitation> {
+    if (typeof invitationId !== "string" || typeof email !== "string") {
+      return null;
+    }
     return await this.run(() =>
       this.models.OrganizationInvitation.findFirst({
         where: { publicId: invitationId, email },
@@ -579,6 +586,14 @@ export class UserProvider<TSession = SessionWithUser> {
     // `_`. The schema declares `@@unique([token, email])` and
     // `@@unique([pin, email])`, so which one is used depends on what the caller
     // has — a link click carries the token, a typed code carries the pin.
+    //
+    // Strings only. The ORM refuses anything else in a compound key now, but
+    // "no match" is the answer a caller can act on, not an error.
+    const isString = (value: unknown): value is string =>
+      typeof value === "string" && value !== "";
+    if (!isString(args.email)) return null;
+    if (args.token !== undefined && !isString(args.token)) return null;
+    if (args.token === undefined && !isString(args.pin)) return null;
     return await this.run(() =>
       args.token
         ? this.models.MagicLinkToken.findUnique({

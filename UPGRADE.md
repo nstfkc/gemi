@@ -1,3 +1,37 @@
+# Unreleased
+
+## `auth`: request input is type-checked before it reaches a query (security)
+
+**Security fix — upgrade promptly.** Affects 0.85.0 and earlier. Several auth
+routes passed values from the request body or query string to the database
+without checking their runtime type. A JSON body can carry an object where a
+string is expected, and the ORM reads an object in a `where` as a filter, so a
+crafted request could match a row it should not have. The PIN sign-in routes
+were affected, as were the email verification, password reset and sign-up
+invitation lookups.
+
+Every auth route now checks what it reads (`email`, `pin`, `token`, `password`,
+`invitationId`, …) is a string before using it, and answers anything else
+exactly as it answers a wrong value: a wrong PIN is `Invalid pin`, a wrong reset
+token is `Invalid token`, and so on. A PIN must be six digits.
+`UserProvider`'s token lookups return `null` for a value that is not a
+non-empty string.
+
+**ORM, behaviour change.** A unique key in `findUnique`, `findUniqueOrThrow`,
+`update`, `delete`, `upsert` and nested `connect`/`where`, and a compound key
+(`a_b: { a, b }`) anywhere, now takes plain values only. A filter object, an
+array or `null` there throws `InvalidArgumentError`; before, it compiled as a
+filter. Prisma types these positions as plain values, so code that typechecks
+against the generated models is unaffected. Extra non-unique filters beside the
+key still work. `findFirst`/`findMany`/`updateMany`/`deleteMany` still take
+filters on any field, so request input passed into their `where` must be
+type-checked by the app (a `string` rule in the request schema does it).
+
+**Action:** upgrade. If you override `AuthController` routes or `UserProvider`
+lookups, or query auth tables from your own routes, make sure request values
+are checked to be strings before they reach a `where`. If you call
+`findUnique` with `null` or a filter in a key, switch to `findFirst`.
+
 # Upgrading from 0.84.1 to 0.85.0
 
 ## `ai`: `regenerate` replaces the answer on a thread (#451)

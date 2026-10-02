@@ -667,6 +667,83 @@ function suite(label: string, url?: string) {
       ).toBeNull();
     });
 
+    /**
+     * A request body can hand these lookups an object where a string belongs,
+     * and an object in a key position is a filter: `{ pin: {} }` once matched
+     * the address's row whatever its PIN. The provider answers "no match", and
+     * the model refuses the key outright.
+     */
+    describe("a lookup value that is not a string matches nothing", () => {
+      const BAD: unknown[] = [{}, { not: "000000" }, { in: ["1"] }, ["123456"], null, 123456];
+
+      beforeEach(async () => {
+        await auth.createMagicLinkToken({
+          email: "a@x.test",
+          token: "link-token",
+          pin: "123456",
+        });
+        const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+        await raw.unsafe(`UPDATE "User" SET "verificationToken" = 'vt' WHERE "id" = ${user.id}`);
+        await auth.createPasswordResetToken({ user, token: "reset-token" });
+      });
+
+      test.each(BAD)("findUserMagicLinkToken with pin %j", async (pin) => {
+        expect(
+          await auth.findUserMagicLinkToken({ email: "a@x.test", pin: pin as any }),
+        ).toBeNull();
+      });
+
+      test.each(BAD)("findUserMagicLinkToken with token %j", async (token) => {
+        expect(
+          await auth.findUserMagicLinkToken({ email: "a@x.test", token: token as any }),
+        ).toBeNull();
+      });
+
+      test.each(BAD)("findUserMagicLinkToken with email %j", async (email) => {
+        expect(
+          await auth.findUserMagicLinkToken({ email: email as any, pin: "123456" }),
+        ).toBeNull();
+      });
+
+      test.each(BAD)("findUserByVerificationToken with %j", async (token) => {
+        expect(await auth.findUserByVerificationToken(token as any)).toBeNull();
+      });
+
+      test.each(BAD)("findPasswordResetToken with %j", async (token) => {
+        expect(await auth.findPasswordResetToken({ token: token as any })).toBeNull();
+      });
+
+      // Not the number: that is a plain value, compared for equality like any
+      // other, so the model has nothing to refuse — it is the provider's
+      // string check above that turns it away.
+      test.each(BAD.filter((v) => typeof v !== "number"))(
+        "the model refuses pin %j in the compound key",
+        async (pin) => {
+        await expect(
+          MagicLinkTokenModel.findUnique({
+            where: { pin_email: { pin: pin as any, email: "a@x.test" } },
+          }),
+        ).rejects.toThrow(/Invalid/);
+        },
+      );
+
+      test("the model refuses a filter as a single-field key", async () => {
+        await expect(
+          PasswordResetTokenModel.findUnique({
+            where: { token: { not: "" } as any },
+          }),
+        ).rejects.toThrow(/Invalid/);
+      });
+
+      test("the real values still match", async () => {
+        expect(
+          await auth.findUserMagicLinkToken({ email: "a@x.test", pin: "123456" }),
+        ).not.toBeNull();
+        expect(await auth.findUserByVerificationToken("vt")).not.toBeNull();
+        expect(await auth.findPasswordResetToken({ token: "reset-token" })).not.toBeNull();
+      });
+    });
+
     test("deleteMagicLinkToken removes every token for the address", async () => {
       await auth.createMagicLinkToken({
         email: "a@x.test",
