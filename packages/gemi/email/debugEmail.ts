@@ -43,9 +43,9 @@ export function debugEmailFileSubject(subject: string) {
 export async function writeDebugEmail(
   dir: string,
   params: SendEmailParams,
-  options: { locale?: string; now?: Date } = {},
+  options: { locale?: string } = {},
 ) {
-  const base = `${dir}/${(options.now ?? new Date()).toISOString()}${debugEmailFileSubject(params.subject)}`;
+  const base = `${dir}/${new Date().toISOString()}${debugEmailFileSubject(params.subject)}`;
 
   const record: DebugEmailRecord = {
     to: params.to,
