@@ -1,5 +1,42 @@
 # Unreleased
 
+## `ai`: limits on body size, stateless history and concurrent runs (#444)
+
+**Behaviour change (security).** A run outlives the request that started it, so
+a client could post turns and disconnect and every one of them still billed up
+to `maxSteps` model calls; the agent route also read a body of any size and
+sent a stateless history of any length to the provider. `AgentController` now
+has three limits, each an overridable property:
+
+| Property | Default | Over it |
+|---|---|---|
+| `maxBodyBytes` | 4 MB | 413 `body_too_large`, before the body is parsed (`attach`/`stop`: fixed 64 KB) |
+| `maxHistoryMessages` | 1000 | 413 `history_too_long`, stateless turns only (a thread's history comes from the store) |
+| `maxConcurrentRuns` | 5 per caller | 429 `too_many_runs`, after `authorizeRequest`, before the model is called |
+
+Each refusal is `{ error: { kind, message, status, code } }` (`kind` is
+`form_error` for the 413s and `rate_limit` for the 429).
+
+`maxConcurrentRuns` counts per `runLimitKey(req, { owner, threadId })`, by
+default `runOwner` (the authenticated user), and per conversation: all turns on
+one thread share one slot, so resending mid-answer (which supersedes the
+running turn) is never refused. A slot is freed when the run ends. Anonymous
+turns (`null` key) are not counted by default; an app serving anonymous chats
+returns its own key, e.g. `ip:${clientIp(req)}` behind `GEMI_TRUST_PROXY`, or
+sets `requireThread`. `maxSteps` (default 8) still caps each run's model calls.
+
+```ts
+export class ChatController extends AgentController<typeof chat> {
+  agent = chat;
+  protected maxConcurrentRuns = 10;
+  protected maxBodyBytes = 8 * 1024 * 1024;
+}
+```
+
+**Action:** none for typical chats. Raise a limit (or set it to `Infinity`) if
+your app legitimately sends larger bodies, longer stateless histories, or runs
+more than five conversations per user at once.
+
 ## `ai`: approval nonces can be spent in a shared store (#445)
 
 **Additive (security).** A signed answer to a pending call (an approval, a

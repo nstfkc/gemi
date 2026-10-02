@@ -3,6 +3,7 @@ import { Controller } from "../http/Controller";
 import { refusal, RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
 import { mediaType } from "../http/mediaType";
+import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import {
@@ -277,6 +278,76 @@ const persisted = new WeakMap<AgentRun, Promise<void>>();
  */
 const pendingTurns = new Map<string, { cancelled: boolean; owner: string | null }>();
 
+// --- limits (#444) -------------------------------------------------------
+
+/** `AgentController.maxBodyBytes`'s default. */
+export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
+/** `AgentController.maxHistoryMessages`'s default. */
+export const DEFAULT_MAX_HISTORY_MESSAGES = 1000;
+/** `AgentController.maxConcurrentRuns`'s default. */
+export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+/** The cap on `attach` and `stop` bodies, which carry ids and nothing else. */
+const SMALL_BODY_BYTES = 64 * 1024;
+
+const noop = () => {};
+
+/**
+ * The runs each `runLimitKey` has going, by lane: a thread is one lane however
+ * many turns are queued or superseding on it, and a stateless turn is a lane
+ * of its own. A lane is held from the moment its turn is admitted until its
+ * last run ends.
+ */
+class RunSlots {
+  private byKey = new Map<string, Map<string, number>>();
+
+  /**
+   * Admits a turn in `lane` for `key`, or answers `null` when `key` already
+   * holds `limit` other lanes. Synchronous, so two turns arriving together
+   * cannot both see the last free slot. The function it returns frees the
+   * turn's hold; calling it twice is harmless.
+   */
+  take(key: string, lane: string, limit: number): (() => void) | null {
+    let lanes = this.byKey.get(key);
+    if (!lanes?.has(lane) && (lanes?.size ?? 0) >= limit) {
+      return null;
+    }
+    if (!lanes) {
+      lanes = new Map();
+      this.byKey.set(key, lanes);
+    }
+    lanes.set(lane, (lanes.get(lane) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.byKey.get(key);
+      const count = (current?.get(lane) ?? 1) - 1;
+      if (!current) return;
+      if (count > 0) {
+        current.set(lane, count);
+      } else {
+        current.delete(lane);
+        if (current.size === 0) this.byKey.delete(key);
+      }
+    };
+  }
+}
+
+/**
+ * Slots are counted per `liveRuns` registry rather than per process: the
+ * registry is what holds the runs being counted, and an app (or a test) with
+ * two registries has two sets of runs.
+ */
+const runSlots = new WeakMap<object, RunSlots>();
+function runSlotsFor(liveRuns: object): RunSlots {
+  let slots = runSlots.get(liveRuns);
+  if (!slots) {
+    slots = new RunSlots();
+    runSlots.set(liveRuns, slots);
+  }
+  return slots;
+}
+
 /**
  * The key that carries `Body` on the instance type.
  *
@@ -508,6 +579,71 @@ export abstract class AgentController<
   protected requireThread = false;
 
   /**
+   * The largest JSON body `stream` reads, in bytes (#444). Default 4 MB.
+   *
+   * A turn is a few kilobytes; even a long stateless chat carrying its whole
+   * history is well under a megabyte, since files travel by id and not inline.
+   * Without a cap the route read whatever arrived (the production server
+   * accepts up to 10 GB), parsed it, and sent it to the provider at the app's
+   * expense. A body over it is refused with a 413 `{ error: { kind, message,
+   * status, code: "body_too_large" } }` before it is parsed, and before
+   * `authorizeRequest`. Checked against `Content-Length` when there is one and
+   * against the bytes read otherwise, so a chunked body cannot get past it.
+   * `attach` and `stop` carry only ids and are held to 64 KB. `Infinity` turns
+   * it off.
+   */
+  protected maxBodyBytes = DEFAULT_MAX_BODY_BYTES;
+
+  /**
+   * The most messages a stateless turn's client-carried history may hold
+   * (#444). Default 1000. A longer one is a 413 `history_too_long` before
+   * anything runs. Only `body.messages` counts: a threaded turn reads its
+   * history from the store, which the client does not write. Every message is
+   * sent to the model on every step, so this bounds what one turn can be billed
+   * for as much as `maxBodyBytes` does. `Infinity` turns it off.
+   */
+  protected maxHistoryMessages = DEFAULT_MAX_HISTORY_MESSAGES;
+
+  /**
+   * How many runs one caller may have going at once in this process (#444).
+   * Default 5. A run outlives the request that started it (so `attach` can
+   * find it), which means a client can post a turn and disconnect and the run
+   * still bills up to `maxSteps` model calls; without a cap, a thousand posts
+   * were a thousand runs.
+   *
+   * Counted per `runLimitKey` (by default `runOwner`, the authenticated user),
+   * and per conversation rather than per request: every turn on one thread is
+   * one slot, because a thread holds one run at a time and a new turn there
+   * supersedes the old one rather than adding to it. So a user resending
+   * mid-answer is never refused; a user with five chats answering at once and
+   * starting a sixth is, with a 429 `{ error: { kind: "rate_limit", message,
+   * status, code: "too_many_runs" } }`, after `authorizeRequest` and before the
+   * model is asked anything. A slot is freed when the run ends (stopped, timed
+   * out, or finished). `Infinity` turns it off.
+   */
+  protected maxConcurrentRuns = DEFAULT_MAX_CONCURRENT_RUNS;
+
+  /**
+   * Who `maxConcurrentRuns` counts a turn against (#444). The default is
+   * `runOwner`'s answer, the authenticated user; `null` is not counted.
+   *
+   * An anonymous turn is therefore not limited by default, because there is
+   * nothing sound to count it under: a client address is the proxy's unless
+   * `GEMI_TRUST_PROXY` is set, which would put every visitor in one bucket, and
+   * the session cookie is the visitor's to drop. An app that serves anonymous
+   * chats returns its own key here (`ip:${clientIp(req)}` behind a trusted
+   * proxy, say), sets `requireThread`, or puts `RateLimitMiddleware` on the
+   * route.
+   */
+  protected runLimitKey(
+    req: HttpRequest<any, any>,
+    params: { owner: string | null; threadId?: string },
+  ): string | null | Promise<string | null> {
+    void req;
+    return params.owner;
+  }
+
+  /**
    * Decides whether this caller may use this route, on every one of the four:
    * `stream`, `attach`, `stop` and `upload` (#542). Throw a request breaker
    * (`InsufficientPermissionsError`, say) to refuse; return to let it through.
@@ -588,7 +724,7 @@ export abstract class AgentController<
    * the next turn, so none of them gets an endpoint of its own.
    */
   async stream(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, this.maxBodyBytes);
     if (parsed.error) {
       // Before anything is registered or charged for. A run started off a body
       // we could not read would answer nothing, at the user's expense.
@@ -615,6 +751,21 @@ export abstract class AgentController<
         code: "thread_required",
         message: "This agent takes a turn only on a thread: send a threadId.",
       });
+    }
+
+    // The client's history is the only part of a stateless turn whose size the
+    // client chooses and the model is billed for on every step (#444). A
+    // threaded turn's `messages` are ignored, so they are not counted.
+    if (
+      !threadId &&
+      Array.isArray(body.messages) &&
+      body.messages.length > this.maxHistoryMessages
+    ) {
+      return limitResponse(
+        413,
+        "history_too_long",
+        `The conversation has ${body.messages.length} messages; this agent takes at most ${this.maxHistoryMessages}.`,
+      );
     }
 
     // Who this run will belong to. Read before `pending` exists, so a stop that
@@ -648,6 +799,9 @@ export abstract class AgentController<
     // than running ahead of the lock, so that a dead thread is still a 404
     // before the app's own work is spent on it; the cost is that a turn queued
     // behind this one waits for `instructions()` as well.
+    // The run `start` registered, if it got that far: its end is what frees
+    // this turn's `maxConcurrentRuns` slot.
+    let started: AgentRun | null = null;
     const start = async (): Promise<Response> => {
       let messages: AgentMessage[];
       if (threadId) {
@@ -770,6 +924,7 @@ export abstract class AgentController<
         maxRunDurationMs: this.agent.maxRunDurationMs,
       });
 
+      started = run;
       if (journal) this.follow(run, journal);
 
       // Kept, not just fired: the next turn on this thread has to know when
@@ -807,7 +962,37 @@ export abstract class AgentController<
       if (pending?.cancelled) {
         return stoppedBeforeStart();
       }
-      return threadId ? await this.withThread(threadId, owner, start) : await start();
+      // After the app's check, so a refused caller spends no slot; before the
+      // thread's lock, so a turn over the limit waits behind nothing. No yield
+      // between the count and the take: see `RunSlots.take`.
+      const limitKey = await this.runLimitKey(req, { owner, threadId });
+      const release =
+        limitKey === null
+          ? noop
+          : runSlotsFor(this.liveRuns).take(
+              limitKey,
+              threadId ? `thread:${threadId}` : `run:${crypto.randomUUID()}`,
+              this.maxConcurrentRuns,
+            );
+      if (!release) {
+        return limitResponse(
+          429,
+          "too_many_runs",
+          `You already have ${this.maxConcurrentRuns} conversations answering. Wait for one to finish, or stop it, and send again.`,
+        );
+      }
+      try {
+        return threadId ? await this.withThread(threadId, owner, start) : await start();
+      } finally {
+        // A turn that never started a run (a dead thread, stopped while it
+        // waited, a throw) frees its slot now; one that did, when the run ends.
+        const run = started as AgentRun | null;
+        if (run) {
+          run.result().then(release, release);
+        } else {
+          release();
+        }
+      }
     } finally {
       if (pending && pendingTurns.get(clientRunId) === pending) {
         pendingTurns.delete(clientRunId);
@@ -904,7 +1089,7 @@ export abstract class AgentController<
    * has no transcript to leave a hole in. See `resolveCursor`.
    */
   async attach(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
     if (parsed.error) {
       return invalidRequest(parsed);
     }
@@ -996,7 +1181,7 @@ export abstract class AgentController<
   async stop(
     req: HttpRequest<any, any> = new HttpRequest(),
   ): Promise<{ stopped: boolean } | Response> {
-    const parsed = await readJsonBody(req);
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
     if (parsed.error) {
       // `{ stopped: false }` would be the wrong answer as well as the wrong
       // status: it means "there was nothing to stop", and the truth is that we
@@ -1977,7 +2162,7 @@ type ParsedBody = {
  * downstream reads a positional body, so `[1,2,3]` could only ever have run as
  * an empty turn.
  */
-async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
+async function readJsonBody(req: HttpRequest<any, any>, maxBytes: number): Promise<ParsedBody> {
   const raw = req?.rawRequest;
   if (!raw || raw.method === "GET" || raw.method === "HEAD" || !raw.body) {
     return { body: {} };
@@ -1994,9 +2179,20 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
     };
   }
 
+  // Before a byte is read when the client declared its length, and while
+  // reading when it did not (#444).
+  const declared = Number(raw.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return bodyTooLarge(maxBytes);
+  }
+
   let text: string;
   try {
-    text = await raw.text();
+    const read = await readCapped(raw, maxBytes);
+    if (read === null) {
+      return bodyTooLarge(maxBytes);
+    }
+    text = read;
   } catch {
     // A body that stopped arriving mid-flight. Same class of failure as one
     // that arrived truncated, and the same answer.
@@ -2036,7 +2232,61 @@ function isJsonContentType(value: string | null): boolean {
   return mediaType(value) === "application/json";
 }
 
+/**
+ * The body as text, or `null` once more than `maxBytes` of it has arrived, at
+ * which point the rest is not read. A limit that is not finite reads it all.
+ */
+async function readCapped(raw: Request, maxBytes: number): Promise<string | null> {
+  if (!Number.isFinite(maxBytes) || !raw.body) {
+    return await raw.text();
+  }
+  const reader = raw.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(noop);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function bodyTooLarge(maxBytes: number): ParsedBody {
+  return {
+    body: {},
+    status: 413,
+    code: "body_too_large",
+    error: `The request body is larger than this agent accepts (${maxBytes} bytes).`,
+  };
+}
+
+/**
+ * A refusal for one of #444's limits: the `{ kind, message, status }` every
+ * refusal has (#686), plus the `code` the agent routes' own errors carry, so a
+ * client can tell the limits apart without reading the message.
+ */
+function limitResponse(status: number, code: string, message: string): Response {
+  return jsonResponse(status, {
+    ...refusal(refusalKindForStatus(status), message, status),
+    code,
+  });
+}
+
 function invalidRequest(parsed: ParsedBody): Response {
+  if (parsed.status === 413) {
+    return limitResponse(413, parsed.code ?? "body_too_large", parsed.error ?? "");
+  }
   return jsonResponse(parsed.status ?? 400, {
     code: parsed.code ?? "invalid_request",
     message: parsed.error,
