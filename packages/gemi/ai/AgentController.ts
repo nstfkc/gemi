@@ -24,6 +24,8 @@ import {
 } from "./store/LiveRuns";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
+import { redactError, unredactedError } from "./redact";
+import type { ErrorRedactionInfo } from "./redact";
 import { sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import type {
@@ -583,7 +585,14 @@ export abstract class AgentController<
         ? new TurnJournal(this.store, threadId, messages, (err) => this.reportHookFailure(err))
         : null;
 
+      // Chosen here rather than by the run, so the hook context exists before
+      // the run does: `redactError` below is handed it, and the run may call
+      // it for its first frame.
+      const runId = `run_${crypto.randomUUID()}`;
+      const ctx: AgentHookContext = { req, runId, threadId };
+
       const run = this.agent.stream({
+        runId,
         messages,
         turn,
         threadId,
@@ -615,9 +624,10 @@ export abstract class AgentController<
         // way; the constraint is about what an app may declare, not about what
         // arrives.
         body: extraBody as Record<string, unknown>,
+        // What the client, and for a tool's exception the model, is told about
+        // a failure. See `redactError`.
+        redactError: (error, info) => this.redactError(error, info, ctx),
       }) as AgentRun;
-
-      const ctx: AgentHookContext = { req, runId: run.runId, threadId };
 
       // Registered before the response is built: the run is now owned by the
       // process rather than by this request, which is the property `/attach`
@@ -1253,6 +1263,44 @@ export abstract class AgentController<
     void ctx;
   }
 
+  /**
+   * What the client is told about a failure: the run's `error` frame, and the
+   * result of a tool that threw, which the model reads too and the store
+   * keeps. Return the error to send.
+   *
+   * The default (`redactError` from `gemi/ai`) keeps `code`, `retryable` and
+   * `toolCallId` and replaces every message gemi did not write with a fixed
+   * sentence for its code: a provider's error body names resources,
+   * deployments and request ids, and an exception's text can be a connection
+   * string. A tool that throws a `ToolError` keeps its message. The full
+   * detail is in `info` (`info.failure` for the run, `info.cause` for a
+   * tool), in the log, on `result().error`, and in `onError`, which is handed
+   * the unredacted error.
+   *
+   * Override it to show more, for instance everything in development:
+   *
+   *     protected redactError(error, info, ctx) {
+   *       if (process.env.NODE_ENV === "development") return error;
+   *       return super.redactError(error, info, ctx);
+   *     }
+   *
+   * Only the `AgentError` fields of what it returns are sent. One that throws
+   * is reported and the default is used instead.
+   */
+  protected redactError(
+    error: AgentError,
+    info: ErrorRedactionInfo,
+    ctx: AgentHookContext,
+  ): AgentError {
+    void ctx;
+    return redactError(error, info);
+  }
+
+  /**
+   * A failure on the run's stream, unredacted: the provider's own message,
+   * and the HTTP `status` and `requestId` when there were any. The client was
+   * sent `redactError`'s copy.
+   */
   protected onError(error: AgentError, ctx: AgentHookContext): void | Promise<void> {
     void error;
     void ctx;
@@ -1309,7 +1357,9 @@ export abstract class AgentController<
         await this.onAwaitingInput(event.pending as PendingToolCall[], ctx);
         return;
       case "error":
-        await this.onError(event.error, ctx);
+        // The frame carries the redacted copy; the hook is server-side and
+        // gets what it was made from.
+        await this.onError(unredactedError(event.error), ctx);
         return;
       default:
         return;

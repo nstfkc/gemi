@@ -218,10 +218,11 @@ describe("the client's copy of a failure", () => {
 
     const errors = seen.filter((event) => event.type === "error");
     expect(errors).toHaveLength(1);
-    // Exactly the frame it was before #656: no status, no request id.
+    // No status, no request id (#656), and not the provider's own sentence
+    // either (#446): that stays on `result().error` and in the log.
     expect((errors[0] as { error: unknown }).error).toStrictEqual({
       code: "provider_error",
-      message: "Unsupported parameter: 'temperature' is not supported with this model.",
+      message: "The model provider returned an error.",
       retryable: false,
     });
   });

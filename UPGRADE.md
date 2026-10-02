@@ -1,5 +1,45 @@
 # Unreleased
 
+## `ai`: failures reach clients and models redacted; `ToolError` for messages meant to be read (#446)
+
+**Behaviour change.** An agent's failures used to reach the browser verbatim: a
+provider's error body (Azure's names the resource and deployment), a `fetch`
+failure's hostname, and the text of any exception a tool threw, which the model
+was sent as well. A tool whose database driver threw put the connection string
+in the transcript. Now:
+
+- **The run's `error` frame** keeps `code`, `retryable` and `toolCallId`, and a
+  message gemi did not write is replaced with a fixed sentence for its code
+  (`provider_error`: "The model provider returned an error.", and likewise
+  `rate_limited`, `context_length_exceeded`, `content_filtered`,
+  `invalid_tool_input`, `tool_error`, `unknown`). Messages gemi wrote
+  (`timeout`, `invalid_output`, `aborted`, ...) are unchanged. `result().error`
+  and the log still carry the provider's own message, status and request id.
+- **A tool that throws** produces `The tool "<name>" failed with an unexpected
+  error.` for both the model and the client, and the exception is logged in
+  full (`Log.error`, unless the agent sets `logErrors: false`). To show a
+  message, throw a **`ToolError`** (from `gemi/ai`):
+  `throw new ToolError("There is no order 42.", { retryable: false })`. gemi's
+  own tool errors (attachments, `runAgent` replay, `toAgentTools` /
+  `McpToolError`) are `ToolError`s and read as before.
+- **`AgentController.onError`** now receives the unredacted error (with
+  `status` and `requestId` when the provider sent them).
+- A failure of the SSE transport itself (a store's exception) is sent as "The
+  run's stream failed." and logged; the cursor errors keep their message.
+
+**Action:** a tool that throws a plain `Error` to tell the model something ("No
+customer with that email") should throw `ToolError` instead, or return the
+message as its output. To change what clients see, override
+`AgentController.redactError(error, info, ctx)` (or pass `redactError` to
+`agent.stream()`), for example to show everything in development:
+
+```ts
+protected redactError(error, info, ctx) {
+  if (process.env.NODE_ENV === "development") return error;
+  return super.redactError(error, info, ctx);
+}
+```
+
 ## `useQuery` aborts requests nobody renders; controllers get `req.signal` (#659)
 
 **Behaviour change.** When the last mounted reader of a query variant lets go
