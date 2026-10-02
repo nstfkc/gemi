@@ -192,6 +192,7 @@ export type {
   AgentStore,
   Attachment,
   AttachmentDestination,
+  AttachmentLimits,
   AttachmentScope,
   AttachmentStorage,
   AttachmentStore,
