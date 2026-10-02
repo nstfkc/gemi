@@ -31,16 +31,20 @@ jobs:
       # short-lived publish credentials.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
+          # Nothing to cache (deps come from Bun), and a release job holding an
+          # OIDC token should never restore a cache. v6+ only auto-caches for
+          # npm `packageManager` values, so this is belt-and-braces.
+          package-manager-cache: false
 
       # Trusted publishing needs npm >= 11.5.1; node 22 ships npm 10, and the
       # latest npm requires node >= 22.
