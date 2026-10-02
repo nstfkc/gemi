@@ -1,5 +1,26 @@
 # Unreleased
 
+## Breaking: `X-Forwarded-For` is no longer trusted by default; set `GEMI_TRUST_PROXY` behind a proxy (#8)
+
+**Behaviour change.** `gemi start` used to pass a client-sent `X-Forwarded-For`
+through to the app unchanged, and `clientIp` (the default rate-limit key) read
+its left-most entry, which is the one the client writes. Any client could pick
+its own rate-limit bucket. The production server now decides which address to
+believe, leaves exactly one in `X-Forwarded-For`, and drops `X-Real-IP`:
+
+| `GEMI_TRUST_PROXY` | client address |
+| --- | --- |
+| unset, `false`, `off`, `0` (default) | the socket's peer address; forwarding headers are discarded |
+| `1`, `2`, … | the address the outermost of that many proxies was reached from (counted from the right of `X-Forwarded-For`) |
+| `true` | `X-Forwarded-For` and `X-Real-IP` passed through as sent (the old behaviour) |
+
+**Action required behind a proxy or load balancer** (Railway, Fly, a CDN): with
+the default, every request appears to come from the proxy, so all clients share
+one rate-limit budget. Set `GEMI_TRUST_PROXY` to the number of proxies in front
+of the app: `1` for Railway alone, `2` for Cloudflare in front of Railway. Use
+`true` only behind a proxy that overwrites `X-Forwarded-For` instead of
+appending to it. Any other value fails the boot. `gemi dev` is unchanged.
+
 ## Breaking: refusals are objects `{ kind, message, status }` (#673)
 
 **Breaking change.** Every refusal's `error` is now an object. Before, most were
