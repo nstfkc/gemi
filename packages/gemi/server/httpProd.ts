@@ -1,7 +1,6 @@
 import { join, resolve, sep } from "node:path";
 import { compressResponse } from "./compression";
-import { generateETag } from "./generateEtag";
-import { URLPattern } from "urlpattern-polyfill";
+import { listPublicFiles, staticFileResponse } from "./staticFile";
 import { stat } from "node:fs/promises";
 import { createStyles } from "./styles";
 import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./modulePreloads";
@@ -138,61 +137,45 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   //   at boot, so there is no app answer to lose, and `staticAssetMiss`
   //   turns a miss into the reload stub or a 404.
   // - `/.well-known/*`.
-  // - A root-level public file (`/favicon.ico`, `/robots.txt`, …), known only
-  //   by its extension, since any other path may be an app route. A miss
-  //   there goes to the app. `json` is left out on purpose: a client-side
-  //   navigation fetches a view's data as `/<path>.json`, so matching it would
-  //   put a filesystem lookup in front of every navigation and let a public
-  //   file shadow a view's data. `mjs` is here because a build configured to
-  //   emit `.mjs` chunks is served the same way as `.js`.
-  // - `/manifest.json`, the one root-level JSON file an app is expected to
-  //   ship (a PWA manifest in `public/`). Only when the file exists: a miss
-  //   goes to the app, so a view at `/manifest` keeps its data URL unless the
-  //   app also ships the file — and then the file wins.
-  const publicFilePattern = new URLPattern({
-    pathname:
-      "/*.:filetype(png|jpg|jpeg|gif|svg|avif|webp|ico|css|js|mjs|map|txt|xml|webmanifest|woff|woff2|ttf|otf|webm|mp4|mp3|pdf)",
-  });
+  // - Any other path that names a file the build copied out of `public/`,
+  //   whatever its extension (#583). Any other path may be an app route, so
+  //   it is static only when that exact file exists — read once here, since
+  //   the build output does not change under a running server. A view at
+  //   `/manifest` keeps its data URL (`/manifest.json`) unless the app also
+  //   ships `public/manifest.json`, and then the file wins. View data is
+  //   never a file in `dist/client`, so a client-side navigation pays for no
+  //   filesystem lookup.
+  const publicFiles = await listPublicFiles(clientDir);
 
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
+    if (isApiPath(pathname)) {
+      return await handleWithApp(req, pathname);
+    }
+
+    const distPath = clientFilePath(pathname);
     const isFileRequest =
       isReservedAssetPath(pathname) ||
       pathname.startsWith("/.well-known") ||
-      pathname === "/manifest.json" ||
-      publicFilePattern.test({ pathname });
+      (distPath !== null && publicFiles.has(distPath));
 
-    const isApi = isApiPath(pathname);
-
-    if (isFileRequest && !isApi) {
-      const distPath = clientFilePath(pathname);
+    if (isFileRequest) {
       // Served from here whatever the asset base is: a CDN in front of the
       // app uses this origin as the source it fills from. A file, not merely
       // a path that exists: `/assets` itself is `dist/client/assets`, a
       // directory, and streaming one would answer 200 and then fail mid-body.
+      //
+      // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
+      // once the body is streamed, which is *after* this handler has returned,
+      // with the response already committed as 200. So existence is checked
+      // here, per request, even for a path `publicFiles` lists.
       if (!distPath || !(await isFile(distPath))) {
         return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
       }
 
-      // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
-      // once the body is streamed, which is *after* this handler has returned,
-      // so the `try/catch` below can't catch it (it surfaces as an unhandled
-      // rejection with the response already committed as 200). Never build the
-      // streaming Response without checking existence first.
-
       try {
-        const file = Bun.file(distPath);
-
-        const etag = generateETag(file.lastModified);
-        return new Response(file.stream(), {
-          headers: {
-            "Content-Type": file.type,
-            "Cache-Control": "public, max-age=31536000, must-revalidate",
-            "Content-Length": String(file.size),
-            ETag: etag,
-          },
-        });
+        return staticFileResponse(req, distPath);
       } catch (error) {
         app.onException?.(error);
         return new Response("Not found", { status: 404 });
