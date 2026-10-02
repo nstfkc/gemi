@@ -8715,7 +8715,16 @@ await verify(email, code); // refreshes useUser() on success
 
 Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
 key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your
-proxy; the per-address limits and the attempt cap hold regardless.
+proxy; the per-address limits and the attempt cap hold regardless. All of these counters
+live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
+per process, so N instances allow N times the limits and a restart resets them. Bind
+`RedisRateLimiter` when you run more than one instance.
+
+Codes and links are stored as HMAC-SHA256 under `SECRET`, keyed to the address, so a code
+issued for one address never matches another's row, and rotating `SECRET` invalidates the
+ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
+perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
+with `generateCode` rather than writing `MagicLinkToken` yourself.
 
 ## OAuth
 

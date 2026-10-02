@@ -132,4 +132,30 @@ describe("countCodeAttempt", () => {
     expect(await countCodeAttempt(2, 1000, 3)).toBe(true);
     expect(await countCodeAttempt(1, 2000, 3)).toBe(true);
   });
+
+  test("the cap holds across a window boundary for a long-lived code", async () => {
+    // A code living a day, with every guess spent just before a limiter window
+    // ends: the count must not decay into a sixth guess before the code expires.
+    const sixDays = 6 * 86_400_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(sixDays * 3000 - 1000);
+      for (let i = 0; i < 5; i++) expect(await countCodeAttempt(7, 1, 5, 1440)).toBe(true);
+      vi.setSystemTime(sixDays * 3000 + 1439 * 60_000);
+      expect(await countCodeAttempt(7, 1, 5, 1440)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("emailCodeDefaults", () => {
+  test("refuses settings that would break or weaken the codes", async () => {
+    const { emailCodeDefaults } = await import("./config");
+    expect(emailCodeDefaults().maxAttempts).toBe(5);
+    expect(() => emailCodeDefaults({ maxAttempts: 0 })).toThrow(/maxAttempts/);
+    expect(() => emailCodeDefaults({ length: 3 })).toThrow(/length/);
+    expect(() => emailCodeDefaults({ expiresInMinutes: Number.NaN })).toThrow(/expiresInMinutes/);
+    expect(() => emailCodeDefaults({ linkExpiresInMinutes: -1 })).toThrow(/linkExpiresInMinutes/);
+  });
 });

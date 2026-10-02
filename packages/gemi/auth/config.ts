@@ -281,14 +281,34 @@ export interface AuthConfig {
   onAuthenticated?: (args: AuthenticatedArgs) => Promise<void> | void;
 }
 
+/**
+ * Throws at boot on a setting that would otherwise surface as a 500 on every
+ * sign-in (a `maxAttempts` of 0 reaches the rate limiter as a zero limit) or
+ * quietly weaken the codes (a 2-digit code).
+ */
+function checkEmailCodeNumber(name: string, value: number, min: number, max = Infinity) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    const range = max === Infinity ? `an integer of at least ${min}` : `an integer from ${min} to ${max}`;
+    throw new Error(`auth.emailCode.${name} must be ${range}, got ${value}`);
+  }
+}
+
 export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailCodeConfig> {
+  const length = config.length ?? 6;
+  const expiresInMinutes = config.expiresInMinutes ?? 10;
+  const linkExpiresInMinutes = config.linkExpiresInMinutes ?? 7 * 24 * 60;
+  const maxAttempts = config.maxAttempts ?? 5;
+  checkEmailCodeNumber("length", length, 4, 12);
+  checkEmailCodeNumber("expiresInMinutes", expiresInMinutes, 1);
+  checkEmailCodeNumber("linkExpiresInMinutes", linkExpiresInMinutes, 1);
+  checkEmailCodeNumber("maxAttempts", maxAttempts, 1);
   return {
     enabled: config.enabled ?? false,
     createUser: config.createUser ?? false,
-    length: config.length ?? 6,
-    expiresInMinutes: config.expiresInMinutes ?? 10,
-    linkExpiresInMinutes: config.linkExpiresInMinutes ?? 7 * 24 * 60,
-    maxAttempts: config.maxAttempts ?? 5,
+    length,
+    expiresInMinutes,
+    linkExpiresInMinutes,
+    maxAttempts,
     requestLimit: {
       perEmail: config.requestLimit?.perEmail ?? [5, 900],
       perIp: config.requestLimit?.perIp ?? [20, 900],

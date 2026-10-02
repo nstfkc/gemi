@@ -390,6 +390,29 @@ function suite(label: string, url?: string) {
       expect(await users()).toHaveLength(1);
     });
 
+    test("a code issued for one address does not sign in another", async () => {
+      await seedUser("a@x.test");
+      await seedUser("b@x.test");
+      await post("requestEmailCode", { email: "a@x.test" });
+      await post("requestEmailCode", { email: "b@x.test" });
+      const codeForA = sent[0].code;
+      const codeForB = sent[1].code;
+      // Only meaningful when the two codes differ.
+      if (codeForA !== codeForB) {
+        expect(
+          errorsOf(await attempt("verifyEmailCode", { email: "b@x.test", code: codeForA })),
+        ).toEqual({ code: ["invalid_code"] });
+      }
+      // And a stored hash moved onto another address's row matches nothing there.
+      await raw.unsafe(
+        `UPDATE "MagicLinkToken" SET "pin" = (SELECT "pin" FROM "MagicLinkToken" WHERE "email" = 'a@x.test') WHERE "email" = 'b@x.test'`,
+      );
+      expect(
+        errorsOf(await attempt("verifyEmailCode", { email: "b@x.test", code: codeForA })),
+      ).toEqual({ code: ["invalid_code"] });
+      expect(authenticated).toEqual([]);
+    });
+
     test("concurrent verifies of one code create the user exactly once", async () => {
       await post("requestEmailCode", { email: "race@x.test" });
       const { code } = sent[0];

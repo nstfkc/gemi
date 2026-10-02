@@ -171,17 +171,21 @@ export async function enforceCodeRateLimits(
  * Counts one guess at the code in row `rowId` and reports whether it is within
  * `maxAttempts`. The key names the row, so a newly issued code starts at zero.
  *
- * The window is a day, far longer than any code lives, so the sliding window
- * never decays a count while the code can still be used (#708).
+ * The limiter is a sliding window, which lets a count decay. The window is at
+ * least a day and at least `(maxAttempts + 1)` code lifetimes, so over the
+ * time a code can still be used the count decays by less than one guess and
+ * the cap holds for any `expiresInMinutes` (#708).
  */
 export async function countCodeAttempt(
   rowId: number | string,
   issuedAt: number,
   maxAttempts: number,
+  expiresInMinutes = 10,
 ): Promise<boolean> {
+  const window = Math.max(86_400, Math.ceil(expiresInMinutes * 60 * (maxAttempts + 1)));
   const result = await codeLimiter().consume(`auth:code-attempt:${rowId}:${issuedAt}`, {
     limit: maxAttempts,
-    window: 86_400,
+    window,
   });
   return result.allowed;
 }

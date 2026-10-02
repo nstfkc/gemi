@@ -64,6 +64,32 @@ New:
   last longer.
 - **End-to-end suites** that request many PINs from one IP or for one address
   need the limits raised (or set to `false`) in the test environment.
+- **Overriding the defaults:** every key is optional and replaces only its own
+  default; a limit is `[count, windowSeconds]` or `false`. Out-of-range
+  numbers (`maxAttempts < 1`, `length` outside 4–12, a non-integer lifetime)
+  fail the boot.
+  ```ts
+  // app/config/auth.ts
+  const testing = process.env.APP_ENV === "test";
+  export default defineAuthConfig({
+    emailCode: {
+      expiresInMinutes: 15,                 // default 10
+      linkExpiresInMinutes: 30 * 24 * 60,   // default 7 days
+      maxAttempts: 5,
+      requestLimit: testing ? { perEmail: false, perIp: false } : { perEmail: [5, 900] },
+      verifyLimit: testing ? { perEmail: false, perIp: false } : undefined,
+    },
+  });
+  ```
+- **`SECRET` keys the stored hashes.** Signing in already required it, so
+  nothing new must be set, but rotating `SECRET` invalidates every code and
+  link still outstanding (users request a new one).
+- **Known limits.** The per-address limits and the attempt cap are keyed on
+  the address, so a third party who knows an address can spend its budget
+  and burn its current code (a temporary lock-out of up to 15 minutes, never a
+  sign-in). With `createUser: false`, an unknown address skips the row write
+  and `send`, so its answer is slightly faster; enqueue mail in `send` to keep
+  that difference small.
 - `UserProvider.findUserMagicLinkToken` is deprecated: it looks a row up by the
   value as issued, which no longer matches. Use `findMagicLinkTokenByEmail` and
   compare with `oneTimeSecretMatches` (both from `gemi/kernel`).

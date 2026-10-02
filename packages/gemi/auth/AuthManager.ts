@@ -560,7 +560,7 @@ export class AuthManager {
       return { status: "expired" };
     }
 
-    if (!(await countCodeAttempt(row.id, issuedAt, maxAttempts))) {
+    if (!(await countCodeAttempt(row.id, issuedAt, maxAttempts, expiresInMinutes))) {
       await this.userProvider.claimMagicLinkToken(row.id);
       return { status: "too_many_attempts" };
     }
