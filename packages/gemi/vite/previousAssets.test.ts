@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -213,6 +213,60 @@ describe("carrying the previous release's assets", () => {
 
     expect(await listAssets(client)).toEqual(["a-v1.js", "a-v2.js"]);
     expect(existsSync(join(client, "index.html"))).toBe(false);
+  });
+});
+
+describe("what is not carried", () => {
+  test("source maps and dotfiles stay behind, even when a record names them", async () => {
+    const client = join(dir, "dist/client");
+    await write(client, {
+      "assets/a-v1.js": "1",
+      "assets/a-v1.js.map": "{}",
+      "assets/.DS_Store": "x",
+      [PREVIOUS_ASSETS_RECORD]: JSON.stringify({
+        releases: [{ retiredAt: new Date().toISOString(), files: ["assets/old-v0.js.map"] }],
+      }),
+      "assets/old-v0.js.map": "{}",
+    });
+
+    await deploy({ from: client }, client, { "assets/a-v2.js": "2" }, new Date());
+
+    expect(await listAssets(client)).toEqual(["a-v1.js", "a-v2.js"]);
+  });
+
+  test("a symlink, even one the record names, is not followed out of the previous assets", async () => {
+    const client = join(dir, "dist/client");
+    await write(dir, { secret: "s" });
+    await write(client, {
+      "assets/a-v1.js": "1",
+      [PREVIOUS_ASSETS_RECORD]: JSON.stringify({
+        releases: [{ retiredAt: new Date().toISOString(), files: ["assets/link.js"] }],
+      }),
+    });
+    await symlink(join(dir, "secret"), join(client, "assets/link.js"));
+
+    await deploy({ from: client }, client, { "assets/a-v2.js": "2" }, new Date());
+
+    expect(await listAssets(client)).toEqual(["a-v1.js", "a-v2.js"]);
+  });
+
+  test("the record stays bounded over many deploys", async () => {
+    const client = join(dir, "dist/client");
+    await write(client, { "assets/a-0.js": "0" });
+    for (let i = 1; i <= 10; i++) {
+      await deploy(
+        { from: client },
+        client,
+        { [`assets/a-${i}.js`]: String(i), "assets/vendor.js": "same" },
+        new Date(Date.UTC(2026, 9, 1, i)),
+      );
+    }
+    expect(await listAssets(client)).toEqual(["a-10.js", "a-8.js", "a-9.js", "vendor.js"]);
+    const record = JSON.parse(await readFile(join(client, PREVIOUS_ASSETS_RECORD), "utf8"));
+    expect(record.releases.map((r: { files: string[] }) => r.files)).toEqual([
+      ["assets/a-9.js"],
+      ["assets/a-8.js"],
+    ]);
   });
 });
 

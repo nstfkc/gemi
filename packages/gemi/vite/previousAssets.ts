@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
@@ -118,7 +118,9 @@ export async function stagePreviousAssets(
   const carriedFiles = new Set(carried.flatMap((release) => release.files));
   // The outgoing release's own files: everything it served that it was not
   // itself only carrying for an earlier one.
-  const own = (await listFiles(from, ASSETS_DIR)).filter((file) => !carriedFiles.has(file));
+  const own = (await listFiles(from, ASSETS_DIR)).filter(
+    (file) => isCarriable(file) && !carriedFiles.has(file),
+  );
 
   const releases = [
     { retiredAt: now.toISOString(), files: own },
@@ -133,7 +135,7 @@ export async function stagePreviousAssets(
   for (const release of releases) {
     const files: string[] = [];
     for (const file of release.files) {
-      const source = inside(from, file);
+      const source = isCarriable(file) ? inside(from, file) : null;
       if (!source || !(await isFile(source))) {
         continue;
       }
@@ -222,6 +224,17 @@ async function listFiles(root: string, dir: string): Promise<string[]> {
   return files;
 }
 
+/**
+ * Only what a page can ask for. A source map (`sourcemap: true` or `"hidden"`)
+ * is not something an old tab loads, and carrying it would keep serving the
+ * previous release's sources — `"hidden"` maps in particular are often meant
+ * for an error reporter only. Dotfiles (`.DS_Store`, an editor's swap file)
+ * are not build output.
+ */
+function isCarriable(file: string): boolean {
+  return !file.endsWith(".map") && !file.split("/").some((part) => part.startsWith("."));
+}
+
 // A recorded path is data from a previous build; one that climbs out of the
 // directory it names is refused rather than copied.
 function inside(root: string, file: string): string | null {
@@ -240,9 +253,11 @@ async function isDirectory(path: string) {
   }
 }
 
+// `lstat`, not `stat`: a symlink under the previous `assets/` (or one a
+// tampered record names) is not followed out of the directory and copied.
 async function isFile(path: string) {
   try {
-    return (await stat(path)).isFile();
+    return (await lstat(path)).isFile();
   } catch {
     return false;
   }

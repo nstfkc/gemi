@@ -94,6 +94,16 @@ describe("recoverFromChunkLoadError", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  test("a marker from the future (clock set back) does not block recovery for good", () => {
+    window.sessionStorage.setItem(
+      CHUNK_RELOAD_MARKER,
+      JSON.stringify({ url: "https://app.test/dashboard", at: Date.now() + 86_400_000 }),
+    );
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   test("a route failing once per view reloads once", () => {
     recoverFromChunkLoadError(chunkError());
     recoverFromChunkLoadError(chunkError());

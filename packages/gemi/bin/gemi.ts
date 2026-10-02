@@ -107,27 +107,34 @@ program.command("build").action(async () => {
   const stagingDir = previousAssets
     ? await mkdtemp(path.join(tmpdir(), "gemi-previous-assets-"))
     : undefined;
-  const retained =
-    previousAssets && stagingDir ? await stagePreviousAssets(previousAssets, stagingDir) : [];
 
-  console.log("Building client...");
+  try {
+    const retained =
+      previousAssets && stagingDir ? await stagePreviousAssets(previousAssets, stagingDir) : [];
 
-  await build({
-    configFile: false,
-    plugins: [gemiVite()],
-    build: { outDir: "dist/client" },
-  });
+    console.log("Building client...");
 
-  if (stagingDir) {
-    const carried = await restorePreviousAssets(
-      stagingDir,
-      path.join(rootDir, "dist", "client"),
-      retained,
-    );
-    await rm(stagingDir, { recursive: true, force: true });
-    console.log(
-      `Kept ${carried.files} asset file(s) from ${carried.releases} earlier release(s).`,
-    );
+    await build({
+      configFile: false,
+      plugins: [gemiVite()],
+      build: { outDir: "dist/client" },
+    });
+
+    if (stagingDir) {
+      const carried = await restorePreviousAssets(
+        stagingDir,
+        path.join(rootDir, "dist", "client"),
+        retained,
+      );
+      console.log(
+        `Kept ${carried.files} asset file(s) from ${carried.releases} earlier release(s).`,
+      );
+    }
+  } finally {
+    // A failed build must not leave a copy of the previous release in tmp.
+    if (stagingDir) {
+      await rm(stagingDir, { recursive: true, force: true });
+    }
   }
 
   console.log("Building server...");

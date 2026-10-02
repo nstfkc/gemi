@@ -165,7 +165,13 @@ function reloadBlock(cooldownMs: number): ChunkReloadBlock {
     return "storage";
   }
   const at = parseMarker(raw);
-  return at !== null && Date.now() - at < cooldownMs ? "cooldown" : null;
+  return at !== null && withinCooldown(Date.now() - at, cooldownMs) ? "cooldown" : null;
+}
+
+// A marker from the future (the clock was set back since it was written) is
+// stale rather than a cooldown that lasts until the clock catches up.
+function withinCooldown(elapsed: number, cooldownMs: number): boolean {
+  return elapsed >= 0 && elapsed < cooldownMs;
 }
 
 function parseMarker(raw: string | null): number | null {
@@ -204,7 +210,8 @@ export function chunkReloadStubScript(
   const error = JSON.stringify(`Failed to fetch dynamically imported module: ${pathname}`);
   return (
     `var r=!1;try{var s=window.sessionStorage,m=JSON.parse(s.getItem(${key})||"null");` +
-    `if(navigator.onLine!==!1&&!(m&&Date.now()-m.at<${cooldownMs})){` +
+    `var d=m?Date.now()-m.at:NaN;` +
+    `if(navigator.onLine!==!1&&!(d>=0&&d<${cooldownMs})){` +
     `s.setItem(${key},JSON.stringify({url:window.location.href,at:Date.now()}));r=!0}}catch(e){}` +
     `if(r)window.location.reload();else throw new Error(${error});export {}`
   );

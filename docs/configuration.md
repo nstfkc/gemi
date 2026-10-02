@@ -165,6 +165,9 @@ Hashed filenames never collide across releases, so the files sit side by side un
 The previous build is read from `dist/client` by default, which only exists when you build where the last build ran. A container build starts from a clean tree, so point `GEMI_PREVIOUS_ASSETS` (or `previousAssets.from`) at the previous image's `dist/client`. Setting the variable turns the feature on by itself. A directory that does not exist is skipped with a notice, so the first deploy needs nothing special:
 
 ```dockerfile
+# syntax=docker/dockerfile:1
+# (`RUN --mount` needs BuildKit; the syntax line must be the first line.)
+
 # The image currently in production; any image works for the first deploy.
 ARG PREVIOUS_IMAGE=oven/bun:1-slim
 FROM ${PREVIOUS_IMAGE} AS previous
@@ -175,7 +178,7 @@ RUN --mount=type=bind,from=previous,source=/,target=/previous \
     GEMI_PREVIOUS_ASSETS=/previous/usr/src/app/dist/client bun run build
 ```
 
-with `--build-arg PREVIOUS_IMAGE=<registry>/<app>:<previous tag>` on the deploy's `docker build`. Two things to check in the deploy: the path inside the previous image matches where your `dist/client` lands, and nothing purges or prunes `/assets/*` on deploy. A CDN purge of `/assets/*` is harmless once the origin keeps the old files, but it is also unnecessary, since every file there is immutable.
+with `--build-arg PREVIOUS_IMAGE=<registry>/<app>:<previous tag>` on the deploy's `docker build`. Things to check in the deploy: the path inside the previous image matches where your `dist/client` lands (the runtime image must include `dist/client/.vite/`, where the record of carried releases lives; without it, carried files look like the outgoing release's own and are never dropped), and nothing purges or prunes `/assets/*` on deploy. A CDN purge of `/assets/*` is harmless once the origin keeps the old files, but it is also unnecessary, since every file there is immutable.
 
 **Reload once when a chunk will not load.** When a view chunk fails to load during a client-side navigation or hydration, the router does one full load of the URL it was going to, which gets that page from the current release. The same happens for a failed lazy `import()` in your own code that goes through Vite's preload helper (`vite:preloadError`). Only load failures count (`Failed to fetch dynamically imported module`, Safari's `Importing a module script failed`, and the like); a view that loads and throws goes to its error boundary as before. A failed prefetch does not reload anything.
 
