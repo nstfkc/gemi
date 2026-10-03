@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.100.0 to 0.101.0
 
 ## `gemi/ai`: recursive schemas that stay strict, `s.recursive` (#745)
 
