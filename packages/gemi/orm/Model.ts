@@ -8,6 +8,9 @@ import {
   currentTransaction,
   isSystemScope,
   runAsSystem,
+  runWithTrashed,
+  trashedMode,
+  type TrashedMode,
   runAsUser,
   runOnConnection,
   withTransaction,
@@ -65,6 +68,11 @@ import {
   untracked,
 } from "./provenance";
 import * as registry from "./registry";
+import {
+  softDeleteField,
+  softDeletePolicies,
+  type SoftDeletesSetting,
+} from "./soft-deletes";
 import type { ModelSchema } from "./schema";
 
 /**
@@ -304,6 +312,103 @@ export abstract class Model {
    */
   static asUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
     return runAsUser(user, fn);
+  }
+
+  /**
+   * Soft deletes as a model setting (#663): every read, `count`, aggregate,
+   * update and delete on this model skips rows whose timestamp column is set —
+   * including the nested reads another model makes of it (`include`, `_count`,
+   * relation filters and orderings) under either relation strategy.
+   *
+   *     export class PriceOffer extends PriceOfferModel {
+   *       static $softDeletes = true;                 // `deletedAt`
+   *       // static $softDeletes = { field: "archivedAt" };
+   *     }
+   *
+   * **Unlike the `softDeletes()` policy it survives `Model.asSystem`.** That
+   * suspends authorization; it does not resurrect deleted rows. Opt out per
+   * call with {@link withTrashed} / {@link onlyTrashed}, which keep every other
+   * policy in force.
+   *
+   * `delete()` stays a hard delete — see `softDelete` in `soft-deletes.ts` for
+   * the recipe that turns one into an update, which this setting scopes like
+   * any other update. `upsert` is not scoped: its conflict target is a unique
+   * key, and a trashed row still holds it.
+   */
+  static $softDeletes?: SoftDeletesSetting;
+
+  /**
+   * Set on the subclass `withTrashed()` / `onlyTrashed()` return. Not for
+   * applications to write: the methods are the interface.
+   */
+  declare static $trashed?: TrashedMode;
+
+  /**
+   * Includes soft-deleted rows. Two spellings:
+   *
+   *     await PriceOffer.withTrashed().findMany({ where })   // this query
+   *     await PriceOffer.withTrashed(() =>                    // a block
+   *       Order.findMany({ include: { offer: true } }),
+   *     )
+   *
+   * The chain lifts the scope for the query it starts — the root model only.
+   * The block lifts it for every query on this model inside `fn`, which is the
+   * spelling that reaches a nested read *of* this model from another one.
+   *
+   * Only the soft-delete scope is lifted: tenant scopes and every other
+   * `$policies` entry still apply, which is what `asSystem` could not offer.
+   */
+  static withTrashed<T extends typeof Model>(this: T): T;
+  static withTrashed<R>(fn: () => Promise<R>): Promise<R>;
+  static withTrashed(fn?: () => Promise<unknown>): unknown {
+    return trashedView(this, "with", fn);
+  }
+
+  /** Reads soft-deleted rows only. Same two spellings as {@link withTrashed}. */
+  static onlyTrashed<T extends typeof Model>(this: T): T;
+  static onlyTrashed<R>(fn: () => Promise<R>): Promise<R>;
+  static onlyTrashed(fn?: () => Promise<unknown>): unknown {
+    return trashedView(this, "only", fn);
+  }
+
+  /**
+   * Clears the timestamp on one soft-deleted row and returns it.
+   *
+   * Scoped to trashed rows, so a `where` naming a row that is not deleted is a
+   * miss and raises `RecordNotFoundError` — the same answer `expire` gives for
+   * a row that already is. Takes `delete`'s arguments: a unique `where` and an
+   * optional projection.
+   */
+  static restore<C extends typeof Model & { delete(args: any): Promise<any> }>(
+    this: C,
+    args: Parameters<C["delete"]>[0],
+  ): ReturnType<C["delete"]> {
+    // Through a promise, so a model that does not soft-delete rejects like
+    // every other failed operation rather than throwing before one exists.
+    return Promise.resolve().then(() => {
+      const field = requireSoftDeletes(this, "restore");
+      return runWithTrashed(this.$modelSchema().name, "only", () =>
+        this.$exec("update", { ...(args as object), data: { [field]: null } }),
+      );
+    }) as ReturnType<C["delete"]>;
+  }
+
+  /** {@link restore} for every trashed row matching `where`; returns the count. */
+  static restoreMany<
+    C extends typeof Model & { deleteMany(args?: any): Promise<any> },
+  >(
+    this: C,
+    args?: Parameters<C["deleteMany"]>[0],
+  ): Promise<{ count: number }> {
+    return Promise.resolve().then(() => {
+      const field = requireSoftDeletes(this, "restoreMany");
+      return runWithTrashed(this.$modelSchema().name, "only", () =>
+        this.$exec("updateMany", {
+          ...(args as object | undefined),
+          data: { [field]: null },
+        }),
+      );
+    }) as Promise<{ count: number }>;
   }
 
   /**
@@ -682,7 +787,26 @@ export abstract class Model {
     // that has said it is a script should not then be scoped to a user that
     // happens to be in the request store.
     const system = isSystemScope();
-    const policies = system ? [] : policiesFor(this);
+
+    // The registered class, looked up once: the divergence guard below needs it,
+    // and so does the soft-delete setting when the caller queried the generated
+    // base rather than the class that declares it.
+    const registered = registry.has(schema.name)
+      ? registry.get<unknown>(schema.name)
+      : undefined;
+
+    // `$softDeletes` (#663) is applied **under `asSystem` too** — it is a fact
+    // about the data, not an authorization rule. Read off the queried class
+    // when it says anything, and off the registered one otherwise, so querying
+    // `PriceOfferModel` where `PriceOffer` owns the name still hides deleted
+    // rows: the safe direction for the same split the divergence guard covers.
+    const softField = softDeleteFieldOf(this, schema, registered);
+    const ownPolicies = system ? [] : policiesFor(this);
+    const policies = softDeletePolicies(
+      ownPolicies,
+      softField,
+      (this as { $trashed?: TrashedMode }).$trashed ?? trashedMode(schema.name),
+    );
     let policy: PolicyContext | undefined;
     let effective = args;
 
@@ -725,10 +849,6 @@ export abstract class Model {
     // that declares no policies of its own has, by construction, the chain its
     // parent has: there is nothing to compare.
     if (!system) {
-      const registered = registry.has(schema.name)
-        ? registry.get<unknown>(schema.name)
-        : undefined;
-
       if (
         registered !== undefined &&
         registered !== this &&
@@ -736,15 +856,15 @@ export abstract class Model {
       ) {
         const theirs = policiesFor(registered);
         const diverges =
-          policies.length !== theirs.length ||
-          policies.some((entry, index) => entry !== theirs[index]);
+          ownPolicies.length !== theirs.length ||
+          ownPolicies.some((entry, index) => entry !== theirs[index]);
 
         if (diverges) {
           throw new UnregisteredPolicyClassError(
             schema.name,
             (registered as { name?: string }).name ?? String(registered),
             this.name,
-            policies.length > 0 ? "queried" : "registered",
+            ownPolicies.length > 0 ? "queried" : "registered",
           );
         }
       }
@@ -765,18 +885,32 @@ export abstract class Model {
     // predicate twice — the same rows, but different SQL and a different plan key.
     const preScoped = isPreScoped(options);
 
-    if (!system && !preScoped) {
+    //
+    // **Under `asSystem` too, but carrying only the soft-delete scopes.** The
+    // walk is how a nested read gets its target's scope — and under the batched
+    // strategy the child's own `$exec` is marked pre-scoped and skips it — so
+    // skipping the walk would leave a deleted row reachable through any
+    // `include`. The walk is told `system: false` because it is handed only
+    // what should apply; `asSystem` has already removed the rest.
+    if (!preScoped) {
       effective = applyNestedPolicies(
         schema,
         effective,
         currentUser(),
-        system,
+        false,
         (model) => {
           if (!registry.has(model)) return undefined;
           const target = registry.get<typeof Model>(model);
           const targetSchema = target.$schema;
           if (!targetSchema) return undefined;
-          return { policies: policiesFor(target), schema: targetSchema };
+          return {
+            policies: softDeletePolicies(
+              system ? [] : policiesFor(target),
+              softDeleteField(target, targetSchema),
+              trashedMode(targetSchema.name),
+            ),
+            schema: targetSchema,
+          };
         },
       );
     }
@@ -1320,6 +1454,102 @@ function inheritsPoliciesFrom(queried: unknown, registered: unknown): boolean {
     Object.getPrototypeOf(queried) === registered &&
     !Object.hasOwn(queried as object, "$policies")
   );
+}
+
+/**
+ * The subclasses `withTrashed()` / `onlyTrashed()` return, per class and mode,
+ * so `User.withTrashed()` is the same class every time — like `Model.on`'s.
+ */
+const trashedViews = new WeakMap<object, Map<TrashedMode, unknown>>();
+
+/**
+ * `withTrashed` / `onlyTrashed`, both spellings.
+ *
+ * The chain is a bound subclass for the reasons `Model.on` gives for being
+ * one — the generated statics are inherited, `$exec`'s `this` stays the
+ * subclass, and a subclass that declares no `$policies` is recognised by the
+ * divergence guard as carrying its parent's. The block is an ambient scope
+ * keyed by model name, because it has to reach reads of this model that start
+ * from another one.
+ */
+function trashedView(
+  model: typeof Model,
+  mode: TrashedMode,
+  fn: (() => Promise<unknown>) | undefined,
+): unknown {
+  // Refused in both spellings: lifting a scope the model does not have is a
+  // misunderstanding, and silently doing nothing would let it stand. The block
+  // rejects rather than throws, like the operations it wraps; the chain has no
+  // promise to reject, so it throws where it is written.
+  const method = mode === "with" ? "withTrashed" : "onlyTrashed";
+
+  if (fn !== undefined) {
+    return Promise.resolve().then(() => {
+      requireSoftDeletes(model, method);
+      return runWithTrashed(model.$modelSchema().name, mode, fn);
+    });
+  }
+
+  requireSoftDeletes(model, method);
+
+  let byMode = trashedViews.get(model);
+  if (byMode === undefined) trashedViews.set(model, (byMode = new Map()));
+
+  const cached = byMode.get(mode);
+  if (cached !== undefined) return cached;
+
+  const bound = class extends model {
+    static $trashed = mode;
+  };
+  Object.defineProperty(bound, "name", {
+    value: (model as { name: string }).name,
+    configurable: true,
+  });
+
+  byMode.set(mode, bound);
+  return bound;
+}
+
+/**
+ * The column `$softDeletes` names for a query on `model`: read off the queried
+ * class when it says anything, and off the registered one otherwise — so a
+ * query through the generated base still hides deleted rows when the
+ * application's subclass owns the name.
+ */
+function softDeleteFieldOf(
+  model: unknown,
+  schema: ModelSchema,
+  registered: unknown,
+): string | undefined {
+  const own = (model as { $softDeletes?: SoftDeletesSetting }).$softDeletes;
+  return softDeleteField(
+    (own !== undefined || registered === undefined ? model : registered) as {
+      $softDeletes?: SoftDeletesSetting;
+    },
+    schema,
+  );
+}
+
+/** The model's soft-delete column, or a refusal naming the method that needed one. */
+function requireSoftDeletes(model: typeof Model, method: string): string {
+  const schema = model.$modelSchema();
+  const field = softDeleteFieldOf(
+    model,
+    schema,
+    registry.has(schema.name) ? registry.get<unknown>(schema.name) : undefined,
+  );
+
+  if (field === undefined) {
+    throw new UnsupportedQueryError(
+      method,
+      schema.name,
+      method,
+      `${schema.name} does not soft-delete. Set \`static $softDeletes = true\` ` +
+        `on the model class (or \`{ field: "<column>" }\`) to use ${method}.`,
+    );
+  }
+
+  return field;
 }
 
 async function runSteps(

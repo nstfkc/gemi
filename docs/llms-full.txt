@@ -7441,7 +7441,62 @@ knowing: the `where` **selects** and contributes nothing to the insert, so the c
 
 ### Soft deletes
 
-Ships as a policy, which is the proof the hook is expressive enough to be worth having:
+**`static $softDeletes`** marks a model as soft-deleting. Every read, `count`, aggregate, `groupBy`,
+`update` and `delete` on it skips rows whose `deletedAt` is set — including the reads other models
+make of it (`include`, `_count`, relation filters and relation orderings) under either relation
+strategy:
+
+```ts
+export class PriceOffer extends PriceOfferModel {
+  static $softDeletes = true                       // or { field: "archivedAt" }
+  static $policies = [new TenantPolicy()]
+}
+
+await PriceOffer.findUnique({ where: { publicId } })   // null for a deleted offer
+```
+
+**It is not a policy, so `Model.asSystem` keeps it.** `asSystem` suspends authorization; it does
+not bring deleted rows back. A row that is deleted is absent for every caller: `findUnique` answers
+`null`, the `OrThrow` variants raise `RecordNotFoundError`, and an `update` or `delete` naming it is
+a miss.
+
+To see deleted rows, say so. Both opt-outs lift **only** the soft-delete scope — a tenant scope and
+every other policy still apply:
+
+```ts
+await PriceOffer.withTrashed().findMany({ where })   // deleted and live rows
+await PriceOffer.onlyTrashed().findMany({ where })   // deleted rows only
+
+// A block: every query on PriceOffer inside it, including nested reads from another model
+await PriceOffer.withTrashed(() => Order.findMany({ include: { offer: true } }))
+
+await PriceOffer.restore({ where: { id } })          // clears deletedAt, returns the row
+await PriceOffer.restoreMany({ where: { orderId } }) // { count }
+```
+
+The chain form covers the query it starts, on the root model only; the block form is the one that
+reaches a nested read *of* the model. `restore` is scoped to deleted rows, so restoring a live row
+raises `RecordNotFoundError`.
+
+Three edges, each deliberate:
+
+- **`delete()` is still a hard delete**, for the reason the note below gives. Soft-delete with
+  `softDelete(PriceOffer)` (an `update` that sets the column, scoped like any other). Hard-deleting
+  a row that is already soft-deleted needs `withTrashed().delete(…)`.
+- **`upsert` is not scoped.** Its `where` compiles to an `on conflict` target, which cannot carry a
+  filter, and the deleted row really does still hold the unique key.
+- **A query through the generated base** (`PriceOfferModel`) reads the setting off the registered
+  class, so it hides deleted rows too.
+
+The column must be a nullable scalar (a misnamed one is refused on the first query). Declaring the
+`softDeletes()` policy below *as well* is harmless: the setting replaces it rather than applying
+the scope twice, and `withTrashed` lifts both.
+
+#### The `softDeletes()` policy
+
+The earlier form, still supported. It is a policy, so it is suspended by `Model.asSystem`, and it
+has no `withTrashed`:
+
 
 ```ts
 import { softDelete, softDeleteMany, softDeletes } from "gemi/orm"

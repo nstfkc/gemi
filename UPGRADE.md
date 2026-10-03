@@ -1,3 +1,16 @@
+# Unreleased
+
+## Soft deletes as a model setting: `static $softDeletes` (#663)
+
+A model can declare `static $softDeletes = true` (or `{ field: "archivedAt" }`). Reads, counts, aggregates, updates and deletes on it then skip rows whose timestamp is set, including nested reads from other models, and **this keeps applying under `Model.asSystem`**, unlike the `softDeletes()` policy. `Model.withTrashed()` / `Model.onlyTrashed()` (as a chain, or as a block `Model.withTrashed(() => …)`) lift only that scope and keep every other policy. `Model.restore({ where })` and `Model.restoreMany({ where })` clear the timestamp.
+
+Nothing changes for existing code: the setting is opt-in, `delete()` stays a hard delete, and the `softDeletes()` policy, `softDelete` and `softDeleteMany` work as before. To move a model over, add `static $softDeletes = true`; a `softDeletes()` entry on the same column can stay in `$policies` (the setting replaces it instead of applying the scope twice) or be removed. Hand-written `deletedAt: null` filters become redundant and can be dropped.
+
+Two things behave differently on a model with the setting, compared with filtering by hand under `asSystem`:
+
+- An `update`, `delete` or nested `connect` that names a soft-deleted row is a miss (`RecordNotFoundError`). Use `withTrashed()` to reach it.
+- Admin views or restore flows that read deleted rows through `asSystem` need `withTrashed()` / `onlyTrashed()`.
+
 # Upgrading from 0.91.1 to 0.92.0
 
 ## Typed error responses: `HttpResponse.error` / `httpError` (#665)

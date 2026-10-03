@@ -186,7 +186,9 @@ export {
   softDeleteMany,
   softDeletes,
   type SoftDeleteOptions,
+  type SoftDeletesSetting,
 } from "./soft-deletes";
+export type { TrashedMode } from "./context";
 
 // `take` / `skip` from a request's `page` / `perPage`. It lives in
 // `page-args.ts`, not `compile/paginate.ts` — the compiler's file of the same

@@ -104,7 +104,24 @@ export interface OrmScope {
    * when a savepoint rolls back.
    */
   commitDependsOn?: Promise<unknown>[];
+  /**
+   * Models whose soft-delete scope (`static $softDeletes`) is lifted or
+   * inverted for this async subtree, by name — set only by
+   * `Model.withTrashed(fn)` / `Model.onlyTrashed(fn)`.
+   *
+   * Keyed by model name rather than class because a nested relation read
+   * resolves its target through the registry by name, and the block has to
+   * reach those reads too. A fresh map per block, never mutated, so an inner
+   * block cannot leak its entry back into the enclosing one.
+   */
+  trashed?: ReadonlyMap<string, TrashedMode>;
 }
+
+/**
+ * How a soft-deleted model's trashed rows are treated: `"with"` includes them,
+ * `"only"` reads nothing else. Absent means the default — they are hidden.
+ */
+export type TrashedMode = "with" | "only";
 
 /**
  * Work deferred to a transaction's commit.
@@ -342,6 +359,33 @@ export function isSystemScope(): boolean {
 export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
   const current = ormContext.getStore();
   return ormContext.run({ ...current, depth: current?.depth ?? 0, system: true }, fn);
+}
+
+/**
+ * How `model`'s trashed rows are treated in this async scope, or `undefined`
+ * for the default (hidden). See `OrmScope.trashed`.
+ */
+export function trashedMode(model: string): TrashedMode | undefined {
+  return ormContext.getStore()?.trashed?.get(model);
+}
+
+/**
+ * Run `fn` with `model`'s soft-delete scope lifted (`"with"`) or inverted
+ * (`"only"`). Merged into the current scope like `runAsSystem`, so it keeps an
+ * open transaction, the system flag and the actor — and every other policy.
+ */
+export function runWithTrashed<T>(
+  model: string,
+  mode: TrashedMode,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = ormContext.getStore();
+  const trashed = new Map(current?.trashed);
+  trashed.set(model, mode);
+  return ormContext.run(
+    { ...current, depth: current?.depth ?? 0, trashed },
+    fn,
+  );
 }
 
 /** The explicitly-set actor, or `undefined` when none was. */
