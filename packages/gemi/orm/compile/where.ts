@@ -10,7 +10,7 @@ import {
 } from "../relation-filters";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import { type Correlated, correlate } from "./correlate";
-import { uniqueKeys } from "./unique";
+import { isUniqueKeyValue, uniqueKeys } from "./unique";
 import {
   type Binder,
   type Fragment,
@@ -409,6 +409,20 @@ function compileCompoundKey(
         schema.name,
         context.operation,
         `Missing '${member}'. A composite key needs all of ${members.join(", ")}.`,
+      );
+    }
+
+    // A compound key is equality on every member, in every operation that
+    // accepts it — never a filter. Left to `compileFieldFilter`, an object
+    // here (from an unchecked request body, say) compiled as a filter, and
+    // `{ pin_email: { pin: {}, email } }` matched on the email alone.
+    if (!isUniqueKeyValue(supplied[member])) {
+      throw new InvalidArgumentError(
+        `where.${key}.${member}`,
+        schema.name,
+        context.operation,
+        `A composite key takes a plain value for each of ` +
+          `${members.join(", ")}, not a filter, an array or null.`,
       );
     }
 
