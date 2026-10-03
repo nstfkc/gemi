@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { usePost } from "../useMutation";
 import { useFrameworkQuery } from "../useQuery";
 
@@ -16,9 +17,13 @@ interface UseEmailCodeArgs {
  * const r = await verify(email, code);  // { session, isNewUser } or undefined
  * ```
  *
- * `error` is the last refusal: a `validation_error` on `email` or `code`
- * (`invalid_code`, `too_many_attempts`), or a 429 `rate_limit`. A successful
- * `verify` refreshes `useUser()`.
+ * `error` is the outcome of the latest call, `request` or `verify`: a
+ * `validation_error` on `email` or `code` (`invalid_code`,
+ * `too_many_attempts`), a 429 `rate_limit`, or `null` once that call succeeds.
+ * A failed `verify` followed by "send a new code" therefore shows the
+ * request's error, or nothing, not the stale `invalid_code` (#724).
+ * `requestError` and `verifyError` hold each call's own last error. A
+ * successful `verify` refreshes `useUser()`.
  */
 export function useEmailCode(args: UseEmailCodeArgs = {}) {
   const { mutate } = useFrameworkQuery("/auth/me", {}, { lazy: true });
@@ -36,14 +41,29 @@ export function useEmailCode(args: UseEmailCodeArgs = {}) {
     },
   );
 
-  const error = verifyMutation.error ?? requestMutation.error;
+  // Each mutation keeps its error until it runs again, so either one alone
+  // can be stale. The latest call decides which one `error` reports.
+  const [latest, setLatest] = useState<"request" | "verify" | null>(null);
+  const error =
+    latest === "verify"
+      ? verifyMutation.error
+      : latest === "request"
+        ? requestMutation.error
+        : null;
   const isPending = requestMutation.loading || verifyMutation.loading;
 
   return {
-    request: (email: string) => requestMutation.trigger({ email } as any),
-    verify: (email: string, code: string, extra: { name?: string } = {}) =>
-      verifyMutation.trigger({ email, code, ...extra } as any),
+    request: (email: string) => {
+      setLatest("request");
+      return requestMutation.trigger({ email } as any);
+    },
+    verify: (email: string, code: string, extra: { name?: string } = {}) => {
+      setLatest("verify");
+      return verifyMutation.trigger({ email, code, ...extra } as any);
+    },
     isPending,
     error,
+    requestError: requestMutation.error,
+    verifyError: verifyMutation.error,
   };
 }

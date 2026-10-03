@@ -8844,6 +8844,10 @@ await request(email);
 await verify(email, code); // refreshes useUser() on success
 ```
 
+`error` is the outcome of the latest call: after a wrong code, "send a new code" shows the
+request's own error (a 429, say), or `null` once it succeeds, not the old `invalid_code`.
+`requestError` and `verifyError` keep each call's last error.
+
 | `emailCode` field | Default | |
 | --- | --- | --- |
 | `enabled` | `false` | Serves the two routes. |
@@ -9086,7 +9090,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
-| `useEmailCode({ onSuccess })` | `{ request(email), verify(email, code, { name? }), isPending, error }` | [Email codes](#email-codes-sign-up-or-sign-in). Refreshes `/auth/me` after `verify`. |
+| `useEmailCode({ onSuccess })` | `{ request(email), verify(email, code, { name? }), isPending, error, requestError, verifyError }` | [Email codes](#email-codes-sign-up-or-sign-in). Refreshes `/auth/me` after `verify`. |
 | `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user
