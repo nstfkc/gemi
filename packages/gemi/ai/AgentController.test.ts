@@ -11,6 +11,7 @@ import {
   AgentController,
   AttachmentNotFoundError,
   defaultAgentStore,
+  limitRefusal,
   MemoryAgentStore,
   MemoryAttachmentStore,
   MemoryFileOwners,
@@ -18,6 +19,7 @@ import {
   MemoryNonceStore,
   type NonceStore,
   ScopedAttachments,
+  type AttachmentLimits,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { ProviderHttpError } from "./providers/errors";
@@ -2966,6 +2968,96 @@ describe("AgentController.upload when the provider refuses the file", () => {
 });
 
 /**
+ * #683. A limit is a rule about the file, so it is answered before the thread
+ * is looked up, the policy asked, or a byte stored or sent anywhere.
+ */
+describe("AgentController.attachmentLimits", () => {
+  function limitedChat(limits: AttachmentLimits | null) {
+    const run = new StubAgentRun("run_683");
+    const { agent, uploads } = stubAgent(run);
+    const asked: string[] = [];
+    class Chat extends ScopedChat(agent) {
+      attachmentLimits() {
+        return limits;
+      }
+      attachmentDestination(f: File) {
+        asked.push(f.name);
+        return "both" as const;
+      }
+    }
+    const controller = new Chat();
+    return { controller, uploads, asked };
+  }
+
+  test("a file over maxBytes is a 422 file_too_large, and nothing is stored or uploaded", async () => {
+    const { controller, uploads, asked } = limitedChat({ maxBytes: 4 });
+    const error = await controller
+      .upload(uploadRequest(file("big.pdf", "application/pdf", "%PDF-1")))
+      .catch((err) => err);
+
+    expect(error.payload.api).toEqual({
+      status: 422,
+      data: {
+        error: { code: "file_too_large", message: '"big.pdf" is 6 B; the limit is 4 B.' },
+      },
+    });
+    expect(uploads).toHaveLength(0);
+    expect(asked).toEqual([]);
+    expect(controller.attachmentStorage.objects.size).toBe(0);
+  });
+
+  test("a type outside accept is a 422 unsupported_file_type", async () => {
+    const { controller, uploads } = limitedChat({ accept: [".pdf", "image/*"] });
+    const error = await controller
+      .upload(uploadRequest(file("setup.exe", "application/x-msdownload", "MZ")))
+      .catch((err) => err);
+
+    expect(error.payload.api).toEqual({
+      status: 422,
+      data: {
+        error: {
+          code: "unsupported_file_type",
+          message: '"setup.exe" is not a type this chat accepts. Accepted: .pdf, image/*.',
+        },
+      },
+    });
+    expect(uploads).toHaveLength(0);
+  });
+
+  test("a file inside the limits goes through as before", async () => {
+    const { controller, uploads } = limitedChat({ maxBytes: 1024, accept: ["image/*"] });
+    const result = await controller.upload(uploadRequest(file("p.png", "image/png", "PNG")));
+    expect(result.attachmentId).toMatch(/^gemi_att_/);
+    expect(uploads).toHaveLength(1);
+  });
+
+  test("no limits is the default, and changes nothing", async () => {
+    const { controller, uploads } = limitedChat(null);
+    await controller.upload(uploadRequest(file("setup.exe", "application/x-msdownload", "MZ")));
+    expect(uploads).toHaveLength(1);
+  });
+
+  test.each([
+    [".PDF", "Report.pdf", "application/octet-stream", true],
+    [".pdf", "report.pdf.exe", "application/octet-stream", false],
+    ["image/*", "x", "image/png", true],
+    ["image/*", "x", "imagery/png", false],
+    ["text/csv", "x", "text/csv; charset=utf-8", true],
+    ["text/csv", "x", "text/plain", false],
+  ])("accept %s against %s (%s) is %s", (rule, name, type, ok) => {
+    const refusal = limitRefusal({ accept: [rule] }, new Blob(["x"]), name, type);
+    expect(refusal === null).toBe(ok);
+  });
+
+  test("sizes are said in units a person reads", () => {
+    const big = { size: 15 * 1024 * 1024 + 1 } as Blob;
+    expect(limitRefusal({ maxBytes: 10 * 1024 * 1024 }, big, "a.mov", "video/mp4")?.message).toBe(
+      '"a.mov" is 15 MB; the limit is 10 MB.',
+    );
+  });
+});
+
+/**
  * #442: a thread id, a run id and a client-minted run id are all handles a
  * third party can come to hold. The run records who started it, and only that
  * caller may read it, stop it, or supersede it with a turn on its thread.
@@ -3350,6 +3442,18 @@ describe("a provider file id belongs to whoever uploaded it", () => {
     expect(response.status).toBe(200);
     expect(calls).toHaveLength(1);
     run.finish();
+  });
+
+  test("the run's owner is the subject its pending calls are bound to (#447)", async () => {
+    const signedIn = owning();
+    expect((await turnAs(signedIn.controller, 1, { text: "x" })).status).toBe(200);
+    expect(signedIn.calls[0].subject).toBe("user:1");
+    signedIn.run.finish();
+
+    const anonymous = owning();
+    await turnAs(anonymous.controller, null, { text: "x" });
+    expect(anonymous.calls[0].subject).toBeNull();
+    anonymous.run.finish();
   });
 });
 

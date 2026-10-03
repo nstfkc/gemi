@@ -661,6 +661,24 @@ Every member is required. A composite key is only unique as a whole, so a partia
 become a non-unique lookup — which is the failure `findUnique` exists to prevent, and it is refused
 by name.
 
+A unique key takes **plain values only**, in every one of these operations and in the compound form
+wherever it appears. A filter object, an array or `null` there is refused with an
+`InvalidArgumentError` rather than read as a filter: `{ email: { not: "" } }` in a `findUnique` would
+otherwise turn "the row with this email" into "any row the filter matches". Extra non-unique filters
+beside the key still narrow as before (`{ email, deletedAt: null }`).
+
+`findFirst`, `findMany`, `updateMany` and `deleteMany` take a filter on any field, unique or not. So
+a value read from a request — where JSON can carry an object in place of a string — has to be
+checked for its type before it goes into one of their `where`s:
+
+```ts
+const token = input.get("token")
+if (typeof token !== "string") throw new ValidationError({ token: ["Invalid token"] })
+await Invite.findFirst({ where: { token } })
+```
+
+A `string` rule in an `HttpRequest` schema does the same check.
+
 ### Returning everything except one column
 
 ```ts

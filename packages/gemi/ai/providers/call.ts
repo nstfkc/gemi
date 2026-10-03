@@ -1,6 +1,12 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
 import { httpErrorDetail, normalizeProviderError } from "./errors";
+import {
+  MAX_FILE_REJECTION_RETRIES,
+  rejectedFileIds,
+  withoutFiles,
+  type SentFile,
+} from "./fileRejection";
 import { requestWithRetry, type FetchLike } from "./http";
 import type { ResponsesRequest } from "./request";
 import { decodeChunks, emptyUsage, parseResponsesStream } from "./stream";
@@ -55,38 +61,64 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
 export async function* streamResponses(
   endpoint: ResponsesEndpoint,
   body: ResponsesRequest,
-  params: { signal?: AbortSignal; structuredOutput: boolean },
+  params: {
+    signal?: AbortSignal;
+    structuredOutput: boolean;
+    /** The file ids `body` sends, with their names — for the note that
+     *  replaces a file the provider refuses. See `providers/fileRejection.ts`. */
+    files?: Map<string, SentFile>;
+  },
 ): AsyncGenerator<ProviderEvent> {
-  let response: Response;
-  try {
-    response = await requestWithRetry(
-      endpoint.responsesUrl,
-      {
-        method: "POST",
-        headers: { ...(await endpoint.headers()), "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      {
-        maxRetries: endpoint.maxRetries,
-        timeoutMs: endpoint.timeoutMs,
-        signal: params.signal,
-        fetchImpl: endpoint.fetchImpl,
-      },
-    );
-  } catch (error) {
-    const normalized = normalizeProviderError(error);
-    // An abort is not a failure to report: the run was stopped on purpose, and
-    // `Agent` is already writing the ending. Saying so twice would put an error
-    // in a transcript the user closed themselves.
-    if (normalized.code !== "aborted") {
-      yield { type: "error", error: normalized, ...httpErrorDetail(error) };
+  let response: Response | undefined;
+  let request = body;
+  const rejected = new Set<string>();
+  for (let attempt = 0; response === undefined; attempt++) {
+    try {
+      response = await requestWithRetry(
+        endpoint.responsesUrl,
+        {
+          method: "POST",
+          headers: { ...(await endpoint.headers()), "content-type": "application/json" },
+          body: JSON.stringify(request),
+        },
+        {
+          maxRetries: endpoint.maxRetries,
+          timeoutMs: endpoint.timeoutMs,
+          signal: params.signal,
+          fetchImpl: endpoint.fetchImpl,
+        },
+      );
+    } catch (error) {
+      // A stored file the provider will not read fails this request and, left
+      // in, every later one in the thread (#684). Take it out and ask again,
+      // as long as the error blames a file this attempt still sent.
+      const blamed =
+        attempt < MAX_FILE_REJECTION_RETRIES
+          ? rejectedFileIds(request, error, params.files).filter((id) => !rejected.has(id))
+          : [];
+      if (blamed.length > 0) {
+        const reason = normalizeProviderError(error).message;
+        for (const fileId of blamed) {
+          rejected.add(fileId);
+          yield { type: "file-rejected", fileId, message: reason, ...httpErrorDetail(error) };
+        }
+        request = withoutFiles(request, new Set(blamed), params.files);
+        continue;
+      }
+      const normalized = normalizeProviderError(error);
+      // An abort is not a failure to report: the run was stopped on purpose, and
+      // `Agent` is already writing the ending. Saying so twice would put an error
+      // in a transcript the user closed themselves.
+      if (normalized.code !== "aborted") {
+        yield { type: "error", error: normalized, ...httpErrorDetail(error) };
+      }
+      yield {
+        type: "finish",
+        reason: normalized.code === "aborted" ? "aborted" : "error",
+        usage: emptyUsage(),
+      };
+      return;
     }
-    yield {
-      type: "finish",
-      reason: normalized.code === "aborted" ? "aborted" : "error",
-      usage: emptyUsage(),
-    };
-    return;
   }
 
   try {

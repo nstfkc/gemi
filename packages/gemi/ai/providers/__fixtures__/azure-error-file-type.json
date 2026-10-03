@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Invalid input: Expected context stuffing file type to be a supported format: .art, .bat, .brf, .c, .cls, .css, .csv, .diff, .doc, .docx, .dot, .eml, .epub, .es, .h, .hs, .htm, .html, .hwp, .hwpx, .ics, .ifb, .java, .js, .json, .keynote, .ksh, .ltx, .mail, .markdown, .md, .mht, .mhtml, .mjs, .msg, .nws, .odp, .ods, .odt, .otp, .ots, .pages, .patch, .pdf, .pl, .pm, .pot, .potm, .potx, .ppa, .pps, .ppsm, .ppsx, .ppt, .pptm, .pptx, .pwz, .py, .rst, .rtf, .scala, .sh, .shtml, .srt, .sty, .svg, .svgz, .tex, .text, .txt, .tsv, .vcf, .vtt, .wiz, .xla, .xlb, .xlc, .xlm, .xls, .xlsx, .xlt, .xlw, .xml, .yaml, .yml but got .png.",
+    "type": "invalid_request_error",
+    "param": "input",
+    "code": null
+  }
+}

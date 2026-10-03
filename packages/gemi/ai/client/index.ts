@@ -19,9 +19,10 @@
  * for `applyFrame` is reimplementing the hook.
  */
 
-export { useChat } from "../useChat";
+export { AttachError, useChat } from "../useChat";
 export type {
   AgentAttachBody,
+  AttachOptions,
   AgentRequestBody,
   AgentStopBody,
   ChatStatus,

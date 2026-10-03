@@ -174,6 +174,15 @@ export type FilePart = {
    * `Agent.ts`.
    */
   attachmentId?: string;
+  /**
+   * Set by the run when the provider refused `fileId` (a deleted or expired
+   * file, an id from the wrong upload purpose, #684). From then on the request
+   * carries a line saying the attachment could not be read instead of the id,
+   * so one bad file costs one turn a retry rather than failing every turn of
+   * the thread. `fileId` is kept, as the record of what was refused; a UI can
+   * use the flag to show the file as unreadable.
+   */
+  providerRejected?: true;
 };
 
 /**

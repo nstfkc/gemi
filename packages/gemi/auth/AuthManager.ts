@@ -489,7 +489,7 @@ export class AuthManager {
    * and `Auth.createMagicLink` always have, and returns them as issued for the
    * app to mail. An address with no user gets `{}` and nothing is written.
    *
-   * Since 0.85 the stored row holds hashes of both (#708); the plain values
+   * Since 0.88 the stored row holds hashes of both (#708); the plain values
    * exist only in what this returns.
    */
   async createMagicLinkToken(email: string) {

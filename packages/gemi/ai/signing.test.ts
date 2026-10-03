@@ -1,9 +1,10 @@
-import { createHmac } from "crypto";
+import { createHmac, hkdfSync, randomBytes } from "crypto";
 import { describe, expect, test } from "vitest";
 import {
   canonicalize,
   consumeNestedRun,
   consumePendingCall,
+  purposeKey,
   readSignature,
   signNestedRun,
   signPendingCall,
@@ -55,12 +56,8 @@ describe("a signed pending call", () => {
 
   test("survives an input that was parsed and re-serialized on the way back", () => {
     const signature = signPendingCall(claims(), { secret });
-    const roundTripped = JSON.parse(
-      JSON.stringify({ amountCents: 4200, orderId: "ord_1" }),
-    );
-    expect(verifyPendingCall(signature, claims({ input: roundTripped }), { secret }).ok).toBe(
-      true,
-    );
+    const roundTripped = JSON.parse(JSON.stringify({ amountCents: 4200, orderId: "ord_1" }));
+    expect(verifyPendingCall(signature, claims({ input: roundTripped }), { secret }).ok).toBe(true);
   });
 
   test("carries the issuing run in the clear, because the answer arrives in a later run", () => {
@@ -190,37 +187,12 @@ describe("spending a signature", () => {
 });
 
 describe("a path on a pending call", () => {
-  /** The MAC the flat form has always produced, recomputed from the outside. */
-  function flatMac(claim: PendingCallClaims, nonce: string, expiresAt: number) {
-    const fields = [
-      "agt1",
-      claim.runId,
-      claim.toolCallId,
-      claim.name,
-      claim.kind,
-      nonce,
-      String(expiresAt),
-      canonicalize(claim.input),
-    ];
-    const payload = fields.map((field) => `${field.length}:${field}`).join("");
-    return createHmac("sha256", secret).update(payload).digest("base64url");
-  }
-
-  test("changes nothing about a call that has none", () => {
-    // The one thing that must not move. Every approval already in flight was
-    // minted from exactly these eight fields, and a ninth carrying "[]" would
-    // make all of them come back looking forged the moment this deploys — the
-    // user who clicked Approve before the release would be told they refused.
-    const signature = signPendingCall(claims(), { secret });
-    const parsed = readSignature(signature)!;
-    expect(signature.split(".")[4]).toBe(flatMac(claims(), parsed.nonce, parsed.expiresAt));
-  });
-
   test("treats an empty path as no path, because it says the same thing", () => {
     const signature = signPendingCall(claims({ path: [] }), { secret });
-    const parsed = readSignature(signature)!;
-    expect(signature.split(".")[4]).toBe(flatMac(claims(), parsed.nonce, parsed.expiresAt));
     expect(verifyPendingCall(signature, claims(), { secret }).ok).toBe(true);
+    expect(
+      verifyPendingCall(signPendingCall(claims(), { secret }), claims({ path: [] }), { secret }).ok,
+    ).toBe(true);
   });
 
   test("verifies for the path it was minted under", () => {
@@ -361,5 +333,223 @@ describe("a signed parked-run record", () => {
       ok: false,
       reason: "expired",
     });
+  });
+});
+
+// --- #447: purpose-specific keys, bound principals --------------------------
+
+/** A token in the given format with a MAC computed from the outside. */
+function forge(
+  version: string,
+  runId: string,
+  key: string | Buffer,
+  fields: string[],
+  expiresAt = Date.now() + 60_000,
+) {
+  const nonce = randomBytes(12).toString("base64url");
+  const payload = fields
+    .map((field) => field.replace("{nonce}", nonce).replace("{exp}", String(expiresAt)))
+    .map((field) => `${field.length}:${field}`)
+    .join("");
+  const mac = createHmac("sha256", key).update(payload).digest("base64url");
+  return [
+    version,
+    Buffer.from(runId).toString("base64url"),
+    nonce,
+    expiresAt.toString(36),
+    mac,
+  ].join(".");
+}
+
+describe("the signing key (#447)", () => {
+  test("is derived per purpose with HKDF, not the raw app secret", () => {
+    const pending = purposeKey("gemi.ai.pending-call.v1", secret);
+    const nested = purposeKey("gemi.ai.nested-run.v1", secret);
+    expect(pending).toEqual(
+      Buffer.from(hkdfSync("sha256", secret, "gemi.ai.signing", "gemi.ai.pending-call.v1", 32)),
+    );
+    expect(pending.equals(nested)).toBe(false);
+    expect(pending.equals(Buffer.from(secret))).toBe(false);
+  });
+
+  test("a MAC made with the raw SECRET over the new claim set is a forgery", () => {
+    // What CSRF tokens and sessions are keyed with. Before #447 an HMAC under
+    // `SECRET` over the right bytes was a valid approval; now it is not.
+    const c = claims();
+    const fields = [
+      "agt2",
+      c.runId,
+      c.toolCallId,
+      c.name,
+      c.kind,
+      "{nonce}",
+      "{exp}",
+      canonicalize(c.input),
+      canonicalize([]),
+      canonicalize(null),
+    ];
+    const raw = forge("agt2", c.runId, secret, fields);
+    expect(verifyPendingCall(raw, c, { secret })).toEqual({ ok: false, reason: "forged" });
+    // The same bytes under the purpose key verify, which is what makes the
+    // line above a statement about the key and not about the field layout.
+    const keyed = forge("agt2", c.runId, purposeKey("gemi.ai.pending-call.v1", secret), fields);
+    expect(verifyPendingCall(keyed, c, { secret }).ok).toBe(true);
+  });
+
+  test("a parked-run record relabelled as a pending call is forged, and the other way round", () => {
+    // Cross-purpose replay with the tag rewritten so the version check passes:
+    // what refuses it is that each kind has its own key.
+    const record: NestedRunClaims = {
+      runId: "run_1",
+      path: ["call_outer"],
+      nestedRunId: "run_sub",
+      open: ["q1"],
+      input: {},
+    };
+    const asPending = signNestedRun(record, { secret }).replace(/^agn2\./, "agt2.");
+    expect(verifyPendingCall(asPending, claims(), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+
+    const asRecord = signPendingCall(claims(), { secret }).replace(/^agt2\./, "agn2.");
+    const { runId: _runId, ...presented } = record;
+    expect(verifyNestedRun(asRecord, presented, { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+
+    // And a token minted under one purpose's key with the other's field layout
+    // fails too: the key, not the layout, is the boundary.
+    const c = claims();
+    const fields = [
+      "agt2",
+      c.runId,
+      c.toolCallId,
+      c.name,
+      c.kind,
+      "{nonce}",
+      "{exp}",
+      canonicalize(c.input),
+      canonicalize([]),
+      canonicalize(null),
+    ];
+    const wrongKey = forge("agt2", c.runId, purposeKey("gemi.ai.nested-run.v1", secret), fields);
+    expect(verifyPendingCall(wrongKey, c, { secret })).toEqual({ ok: false, reason: "forged" });
+  });
+});
+
+describe("the principal in the claims (#447)", () => {
+  test("a pending call verifies for the subject it was minted for", () => {
+    const signature = signPendingCall(claims({ subject: "user:a" }), { secret });
+    expect(verifyPendingCall(signature, claims({ subject: "user:a" }), { secret }).ok).toBe(true);
+  });
+
+  test("a pending call minted for one user is forged for another, or for nobody", () => {
+    const signature = signPendingCall(claims({ subject: "user:a" }), { secret });
+    for (const subject of ["user:b", null, undefined, ""]) {
+      expect(verifyPendingCall(signature, claims({ subject }), { secret })).toEqual({
+        ok: false,
+        reason: "forged",
+      });
+    }
+  });
+
+  test("an anonymous pending call is not answerable by a signed-in user", () => {
+    const signature = signPendingCall(claims({ subject: null }), { secret });
+    expect(verifyPendingCall(signature, claims(), { secret }).ok).toBe(true);
+    expect(verifyPendingCall(signature, claims({ subject: "user:b" }), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+  });
+
+  test("a parked-run record minted for one user is forged for another", () => {
+    const record = {
+      path: ["call_outer"],
+      nestedRunId: "run_sub",
+      open: ["q1"],
+      input: { a: 1 },
+    };
+    const signature = signNestedRun({ ...record, runId: "run_1", subject: "user:a" }, { secret });
+    expect(verifyNestedRun(signature, { ...record, subject: "user:a" }, { secret }).ok).toBe(true);
+    expect(verifyNestedRun(signature, { ...record, subject: "user:b" }, { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+    expect(verifyNestedRun(signature, { ...record, subject: null }, { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+  });
+});
+
+describe("tokens minted before #447", () => {
+  /** A v1 pending-call token: raw secret, eight fields plus an optional path. */
+  function legacyPending(claim: PendingCallClaims, expiresAt?: number) {
+    const fields = [
+      "agt1",
+      claim.runId,
+      claim.toolCallId,
+      claim.name,
+      claim.kind,
+      "{nonce}",
+      "{exp}",
+      canonicalize(claim.input),
+    ];
+    if (claim.path && claim.path.length > 0) fields.push(canonicalize(claim.path));
+    return forge("agt1", claim.runId, secret, fields, expiresAt);
+  }
+
+  test("still verify, so a question asked before the upgrade can be answered after it", () => {
+    const signature = legacyPending(claims());
+    expect(verifyPendingCall(signature, claims(), { secret }).ok).toBe(true);
+    expect(readSignature(signature)?.runId).toBe("run_1");
+    expect(consumePendingCall(signature)).toBe(true);
+    expect(consumePendingCall(signature)).toBe(false);
+
+    const nested = legacyPending(claims({ path: ["call_outer"] }));
+    expect(verifyPendingCall(nested, claims({ path: ["call_outer"] }), { secret }).ok).toBe(true);
+    expect(verifyPendingCall(nested, claims(), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+  });
+
+  test("still verify as parked-run records", () => {
+    const fields = [
+      "agn1",
+      "run_1",
+      canonicalize(["call_outer"]),
+      "run_sub",
+      "{nonce}",
+      "{exp}",
+      canonicalize(["q1"]),
+      canonicalize({}),
+    ];
+    const signature = forge("agn1", "run_1", secret, fields);
+    const presented = { path: ["call_outer"], nestedRunId: "run_sub", open: ["q1"], input: {} };
+    expect(verifyNestedRun(signature, presented, { secret }).ok).toBe(true);
+    expect(consumeNestedRun(signature)).toBe(true);
+  });
+
+  test("are refused with an expiry no pre-upgrade token could have", () => {
+    // A v1 MAC is over the raw SECRET; bounding its expiry to one TTL past
+    // startup is what keeps that from being a standing forgery target.
+    const farFuture = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    expect(verifyPendingCall(legacyPending(claims(), farFuture), claims(), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+  });
+
+  test("are no longer minted", () => {
+    expect(signPendingCall(claims(), { secret }).startsWith("agt2.")).toBe(true);
+    expect(
+      signNestedRun(
+        { runId: "r", path: ["c"], nestedRunId: "s", open: [], input: null },
+        { secret },
+      ).startsWith("agn2."),
+    ).toBe(true);
   });
 });

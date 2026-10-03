@@ -81,6 +81,38 @@ async function notifyAuthenticated(
 /** Thrown inside the sign-up transaction to roll it back when the code was taken. */
 class CodeAlreadyClaimed extends Error {}
 
+/**
+ * Request input is checked for its runtime type before it reaches a query.
+ *
+ * A JSON body can carry an object or an array wherever a string was expected,
+ * and the type parameter on `HttpRequest` checks nothing at runtime. Handed to
+ * the ORM, such a value is not a value to match but a filter, so every auth
+ * route takes its identifiers through these and answers anything that is not a
+ * string exactly as it answers a wrong one.
+ */
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function emailInput(value: unknown): string | null {
+  return foldEmail(value);
+}
+
+/**
+ * The longest code the PIN routes accept. A code is six digits by default,
+ * `emailCode.length` digits on `/auth/email-code`, or whatever non-empty
+ * string `generateCode` returns, so the format is not checked here; the code
+ * is compared as a keyed hash, never handed to a query.
+ */
+export const MAX_PIN_LENGTH = 256;
+
+/** A typed PIN, or `null` for what is not a non-empty string within `MAX_PIN_LENGTH`. */
+export function pinValue(value: unknown): string | null {
+  return typeof value === "string" && value !== "" && value.length <= MAX_PIN_LENGTH
+    ? value
+    : null;
+}
+
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
 
@@ -147,9 +179,12 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { userProvider } = app(AuthManager);
 
-    const user = await userProvider.findUserByVerificationToken(
-      input.get("token"),
-    );
+    const token = nonEmptyString(input.get("token"));
+    if (!token) {
+      return { email: null };
+    }
+
+    const user = await userProvider.findUserByVerificationToken(token);
 
     if (!user) {
       return { email: null };
@@ -165,7 +200,7 @@ export class AuthController extends Controller {
   async signInWithMagicLink(req = new HttpRequest()) {
     const auth = app(AuthManager);
     const { userProvider } = auth;
-    const token = req.search.get("token");
+    const token = nonEmptyString(req.search.get("token"));
     let email: string | null = null;
     try {
       email = foldEmail(decodeURIComponent(req.search.get("email") ?? ""));
@@ -211,12 +246,14 @@ export class AuthController extends Controller {
   private async verifyPinRequest(req: HttpRequest<{ email: string; pin: string }>) {
     const auth = app(AuthManager);
     const input = await req.input();
-    const { email: rawEmail, pin } = input.toJSON();
+    const { email: rawEmail, pin: rawPin } = input.toJSON();
     const email = foldEmail(rawEmail);
+    const pin = pinValue(rawPin);
 
     await enforceCodeRateLimits("verify", email, req, auth.config.emailCode.verifyLimit);
 
-    if (!email) {
+    // A PIN that is not a string never reaches the lookup or spends an attempt.
+    if (!email || !pin) {
       throw new ValidationError({ pin: ["Invalid pin"] });
     }
 
@@ -288,11 +325,11 @@ export class AuthController extends Controller {
 
     // An unknown address is checked too, against a decoy, so it answers like a
     // wrong password in time as well as in body.
-    const isPasswordValid = await passwordMatches(
-      auth.config,
-      password,
-      user?.password,
-    );
+    // `SignInRequest` checks the email is a string; the password only that it
+    // is present. Anything else is a wrong password.
+    const isPasswordValid =
+      typeof password === "string" &&
+      (await passwordMatches(auth.config, password, user?.password));
 
     if (!user || !isPasswordValid) {
       throw new ValidationError({
@@ -335,11 +372,11 @@ export class AuthController extends Controller {
 
     // An unknown address is checked too, against a decoy, so it answers like a
     // wrong password in time as well as in body.
-    const isPasswordValid = await passwordMatches(
-      auth.config,
-      password,
-      user?.password,
-    );
+    // `SignInRequest` checks the email is a string; the password only that it
+    // is present. Anything else is a wrong password.
+    const isPasswordValid =
+      typeof password === "string" &&
+      (await passwordMatches(auth.config, password, user?.password));
 
     if (!user || !isPasswordValid) {
       throw new ValidationError({
@@ -378,8 +415,20 @@ export class AuthController extends Controller {
       password,
       name,
       invitationId,
-    } = input.toJSON();
-    const email = _email.toLowerCase().trim();
+    } = input.toJSON() as Record<string, any>;
+
+    // `signUpRequest` is the application's to replace, so the types the
+    // queries below depend on are checked here as well as by its schema.
+    const email = emailInput(_email);
+    if (!email) {
+      throw new ValidationError({ email: ["Invalid email"] });
+    }
+    if (password != null && typeof password !== "string") {
+      throw new ValidationError({ password: ["Invalid password"] });
+    }
+    if (invitationId != null && typeof invitationId !== "string") {
+      throw new ValidationError({ invitationId: ["Invalid invitation"] });
+    }
 
     const user = await userProvider.findUserByEmailAddress(email, false);
 
@@ -509,7 +558,11 @@ export class AuthController extends Controller {
 
   async forgotPassword(req = new ForgotPasswordRequest()) {
     const input = await req.input();
-    const email = input.get("email").toLowerCase().trim();
+    const email = emailInput(input.get("email"));
+
+    if (!email) {
+      return {};
+    }
 
     const { userProvider, config } = app(AuthManager);
 
@@ -539,11 +592,12 @@ export class AuthController extends Controller {
   async resetPassword(req = new ResetPasswordRequest()) {
     const { userProvider, config } = app(AuthManager);
     const input = await req.input();
-    const { password, token } = input.toJSON();
+    const { password, token: rawToken } = input.toJSON();
+    const token = nonEmptyString(rawToken);
 
-    const passwordResetToken = await userProvider.findPasswordResetToken({
-      token,
-    });
+    const passwordResetToken = token
+      ? await userProvider.findPasswordResetToken({ token })
+      : null;
 
     if (!passwordResetToken) {
       throw new ValidationError({
@@ -598,16 +652,20 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { oldPassword, newPassword } = input.toJSON();
 
+    if (typeof newPassword !== "string") {
+      throw new ValidationError({
+        newPassword: ["Invalid password"],
+      });
+    }
+
     const stored = await userProvider.findUserByEmailAddress(
       user.email,
       config.verifyEmail,
     );
 
-    const isPasswordValid = await passwordMatches(
-      config,
-      oldPassword,
-      stored?.password,
-    );
+    const isPasswordValid =
+      typeof oldPassword === "string" &&
+      (await passwordMatches(config, oldPassword, stored?.password));
 
     if (!isPasswordValid) {
       throw new ValidationError({
@@ -967,10 +1025,11 @@ export class AuthController extends Controller {
     }
 
     const input = await req.input();
-    const { email: rawEmail, code, name } = input.toJSON();
+    const { email: rawEmail, code: rawCode, name } = input.toJSON();
     const email = normalizeEmail(rawEmail);
+    const code = pinValue(rawCode);
     await enforceCodeRateLimits("verify", email, req, config.emailCode.verifyLimit);
-    if (!email) {
+    if (!email || !code) {
       throw new ValidationError({ code: ["invalid_code"] });
     }
 

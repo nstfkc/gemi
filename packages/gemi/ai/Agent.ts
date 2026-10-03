@@ -520,6 +520,39 @@ export class PendingEscalation extends Error {
 }
 
 /**
+ * What a per-run `inputSchema` is resolved from: the run's caller and the
+ * app's request body, the same `context` and `body` its tools are given.
+ */
+export interface ToolSchemaContext {
+  context: AgentContext;
+  /** CLIENT-CONTROLLED, exactly as `ToolContext.body` is. */
+  body: Record<string, unknown>;
+  runId: string;
+  threadId?: string;
+  /** Aborted with the run. */
+  signal: AbortSignal;
+}
+
+/**
+ * A tool's input schema: fixed, or resolved once per run.
+ *
+ * The function form is for a tool whose arguments depend on data — the fields
+ * of the collection a page edits, the options a tenant configured. It is
+ * called once when a run starts, before the model is shown the tools, and the
+ * schema it returns is both what the model sees and what the run validates
+ * the tool's arguments against, for every call in that run (a turn that
+ * answers a pending call is a new run and resolves it again). Build the
+ * schema with `s`, `s.fromJSONSchema` included; it has to be an object at the
+ * root, like any tool's.
+ *
+ * A resolver that throws, or returns a non-object schema, fails the run with
+ * `tool_error` before anything is sent to the provider.
+ */
+export type ToolInputSchema<Input> =
+  | Schema<Input>
+  | ((ctx: ToolSchemaContext) => Schema<Input> | Promise<Schema<Input>>);
+
+/**
  * A tool either resolves once, or yields progress and then returns.
  *
  * The generator form exists because a tool that takes twenty seconds is the
@@ -536,7 +569,8 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
   name: Name;
   /** The model's only description of when to reach for this. */
   description: string;
-  inputSchema: Schema<Input>;
+  /** A schema, or a function resolving one per run. See `ToolInputSchema`. */
+  inputSchema: ToolInputSchema<Input>;
   /**
    * Optional for a server tool, required for a client one — there it is what
    * the answer is validated against before the model sees it, and what types
@@ -632,7 +666,7 @@ export class AgentTool<
 > {
   readonly name: Name;
   readonly description: string;
-  readonly inputSchema: Schema<Input>;
+  readonly inputSchema: ToolInputSchema<Input>;
   readonly outputSchema?: Schema<Output>;
   readonly requiresApproval: boolean;
   readonly deferred: boolean;
@@ -671,7 +705,10 @@ export class AgentTool<
     // Only the input: it is the one schema the provider is shown. The
     // `outputSchema` validates what `execute` or the browser hands back and is
     // never sent, so any shape is fine there.
-    assertObjectRoot(params.inputSchema, `The tool "${params.name}"`, "inputSchema");
+    // A per-run schema is checked when a run resolves it.
+    if (typeof params.inputSchema !== "function") {
+      assertObjectRoot(params.inputSchema, `The tool "${params.name}"`, "inputSchema");
+    }
     if (params.timeoutMs !== undefined) {
       assertDuration(params.timeoutMs, `The tool "${params.name}"`, "timeoutMs");
     }
@@ -1177,6 +1214,18 @@ interface AgentStreamParamsBase {
    */
   nonces?: NonceStore;
   /**
+   * Who this run is answering: the principal every pending call and parked
+   * sub-run record it mints is bound to (#447). An answer, or a record, only
+   * verifies on a later run with the same `subject`, so a token lifted from
+   * one user's history cannot be spent in another user's turn. `null`, or
+   * omitted, is an anonymous run, and only verifies on another anonymous one.
+   *
+   * `AgentController` sets this from `runOwner` (`user:<id>` by default), so it
+   * must answer the same on the turn that asks and the turn that answers.
+   * Handed down unchanged to a sub-run.
+   */
+  subject?: string | null;
+  /**
    * The attachment handle every tool of this run is given as `ctx.attachments`.
    *
    * Resolved by the controller from the request — `attachmentsFor(req,
@@ -1356,11 +1405,17 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
   stop(params?: { reason?: string }): void;
 }
 
-/** A tool plus where it sits in the prompt. Fixed for the life of the agent. */
+/**
+ * A tool plus where it sits in the prompt. Fixed for the life of the agent,
+ * except `inputSchema`, which a run fills in for a tool whose schema is
+ * resolved per run (`ToolInputSchema`).
+ */
 type ResolvedTool = {
   tool: AnyAgentTool;
   namespace?: string;
   deferred: boolean;
+  /** `undefined` until the run resolves a per-run schema. */
+  inputSchema?: Schema<any>;
 };
 
 /** What a run needs from its agent, resolved once at `Agent.create`. */
@@ -1489,16 +1544,25 @@ export type AnyAgent = Agent<any, any, any>;
 // --- lowering ------------------------------------------------------------
 
 function toolSpec(resolved: ResolvedTool): ProviderToolSpec {
+  const schema = resolved.inputSchema;
   return {
     name: resolved.tool.name,
     description: resolved.tool.description,
-    parameters: resolved.tool.inputSchema.toJSONSchema(),
+    // A per-run schema is not known yet; the run swaps this spec for one built
+    // from the resolved schema (`AgentRunImpl.resolveToolSchemas`) before the
+    // provider ever sees it.
+    parameters: schema ? schema.toJSONSchema() : EMPTY_PARAMETERS,
     // Read off the schema, not asserted: an input containing an `s.json()`
     // field cannot be sent strict, and the tool that says so is the only place
     // that knows.
-    strict: supportsStrict(resolved.tool.inputSchema),
+    strict: schema ? supportsStrict(schema) : true,
     deferred: resolved.deferred,
   };
+}
+
+/** The tool's schema when it is fixed, `undefined` when it is resolved per run. */
+function staticInputSchema(tool: AnyAgentTool): Schema<any> | undefined {
+  return typeof tool.inputSchema === "function" ? undefined : tool.inputSchema;
 }
 
 /**
@@ -1539,14 +1603,23 @@ function lowerTools(
       }
       const members: ProviderToolSpec[] = [];
       for (const tool of entry.tools) {
-        const resolved = { tool, namespace: entry.name, deferred: entry.deferred || tool.deferred };
+        const resolved = {
+          tool,
+          namespace: entry.name,
+          deferred: entry.deferred || tool.deferred,
+          inputSchema: staticInputSchema(tool),
+        };
         register(resolved);
         members.push(toolSpec(resolved));
       }
       providerTools.push({ name: entry.name, description: entry.description, tools: members });
       continue;
     }
-    const resolved = { tool: entry, deferred: entry.deferred };
+    const resolved = {
+      tool: entry,
+      deferred: entry.deferred,
+      inputSchema: staticInputSchema(entry),
+    };
     register(resolved);
     providerTools.push(toolSpec(resolved));
   }
@@ -1555,7 +1628,12 @@ function lowerTools(
     const members: ProviderToolSpec[] = [];
     for (const skill of skills) {
       const tool = skillTool(skill);
-      register({ tool, namespace: SKILLS_NAMESPACE, deferred: false });
+      register({
+        tool,
+        namespace: SKILLS_NAMESPACE,
+        deferred: false,
+        inputSchema: staticInputSchema(tool),
+      });
       members.push({
         name: skill.name,
         description: skill.description,
@@ -1944,7 +2022,8 @@ class ReplayMemo<R> {
 class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
 
-  private readonly config: RunConfig;
+  /** Replaced once, by `resolveToolSchemas`, when the agent has per-run tool schemas. */
+  private config: RunConfig;
   private readonly params: AgentStreamParams;
   /** `params.context`, or `{}` for a run started without one. See `AgentContext`. */
   private readonly context: AgentContext;
@@ -2217,13 +2296,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.emit({ type: "run-start", runId: this.runId, threadId: this.params.threadId });
 
     try {
+      // First, because everything after it reads a tool's schema: re-entering
+      // a parked call below validates its input, and the model is shown them.
+      const unresolved = await this.resolveToolSchemas();
       // A turn that answers a sub-agent's question re-enters the tool that
       // asked it, and that tool may ask again — so the run can be finished
       // before it has taken a single model step. Going on to `loop()` here
       // would step the model with a tool call still open, which is exactly the
       // history the provider rejects.
-      const escalated = await this.ingestTurn();
-      if (escalated.length > 0) {
+      const escalated = unresolved ? [] : await this.ingestTurn();
+      if (unresolved) {
+        this.fail(unresolved);
+        this.finishReason = "error";
+      } else if (escalated.length > 0) {
         this.finishReason = "awaiting-input";
         this.emit({ type: "awaiting-input", runId: this.runId, pending: escalated });
       } else {
@@ -2258,6 +2343,66 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // always had.
       ...(failure ? { error: failure } : {}),
     };
+  }
+
+  /**
+   * Resolves the per-run input schemas (`ToolInputSchema`'s function form) and
+   * swaps them into this run's registry and provider tool list. A no-op for
+   * an agent whose tool schemas are all fixed, which is the common case.
+   *
+   * Returns the run's error when a resolver throws or returns a schema the
+   * provider cannot take; the caller fails the run with it. Its message names
+   * the tool and the cause — server-side only, since the client's copy is
+   * redacted like any `tool_error`. The run fails before the turn is ingested,
+   * so a client turn it carried is not reported to `onMessage`.
+   */
+  private async resolveToolSchemas(): Promise<AgentError | undefined> {
+    const pending = [...this.config.registry.values()].filter((entry) => !entry.inputSchema);
+    if (pending.length === 0) return undefined;
+    const ctx: ToolSchemaContext = {
+      context: this.context,
+      body: this.params.body ?? {},
+      runId: this.runId,
+      threadId: this.params.threadId,
+      signal: this.controller.signal,
+    };
+    const schemas = new Map<string, Schema<any>>();
+    const failures = await Promise.all(
+      pending.map(async (entry) => {
+        try {
+          const resolve = entry.tool.inputSchema as (
+            ctx: ToolSchemaContext,
+          ) => Schema<any> | Promise<Schema<any>>;
+          const schema = await resolve(ctx);
+          assertObjectRoot(schema, `The tool "${entry.tool.name}"`, "inputSchema");
+          schemas.set(entry.tool.name, schema);
+          return undefined;
+        } catch (error) {
+          return `"${entry.tool.name}": ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
+    );
+    if (this.controller.signal.aborted) throw new RunAborted();
+    const failed = failures.filter((failure) => failure !== undefined);
+    if (failed.length > 0) {
+      return {
+        code: "tool_error",
+        message: `Could not resolve the input schema of ${failed.join("; ")}`,
+        retryable: false,
+      };
+    }
+
+    const registry = new Map<string, ResolvedTool>();
+    for (const [name, entry] of this.config.registry) {
+      registry.set(name, schemas.has(name) ? { ...entry, inputSchema: schemas.get(name) } : entry);
+    }
+    const swap = (spec: ProviderToolSpec): ProviderToolSpec =>
+      schemas.has(spec.name) ? toolSpec(registry.get(spec.name)!) : spec;
+    const providerTools = this.config.providerTools.map((tool) =>
+      "tools" in tool ? { ...tool, tools: tool.tools.map(swap) } : swap(tool),
+    );
+    this.config = { ...this.config, registry, providerTools };
+    return undefined;
   }
 
   /**
@@ -2575,6 +2720,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           };
           break;
         }
+        case "file-rejected": {
+          this.markFileRejected(event.fileId, event.message, httpErrorDetail(event));
+          break;
+        }
       }
     }
 
@@ -2670,7 +2819,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         continue;
       }
 
-      const parsed = resolved.tool.inputSchema.safeParse(call.input);
+      const parsed = resolved.inputSchema!.safeParse(call.input);
       if (parsed.ok === false) {
         // Back to the model, not up the stack. A model that mis-typed one
         // argument can usually fix it on the next step, and throwing turns a
@@ -2787,6 +2936,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // Absent rather than empty at the top level, so the signature a root run
       // mints is byte-for-byte the one it minted before nesting existed.
       path: this.pathPrefix.length > 0 ? [...this.pathPrefix] : undefined,
+      // The principal the question is asked of (#447): an answer presented by
+      // anyone else fails the MAC.
+      subject: this.params.subject ?? null,
     };
   }
 
@@ -3187,6 +3339,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // The same store, so a sub-run's answers are single-use across every
       // instance exactly as the parent's are.
       nonces: this.params.nonces,
+      // The same principal, so a sub-agent's question is bound to the user the
+      // root run was started for.
+      subject: this.params.subject,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3256,6 +3411,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
                 nestedRunId: sub.runId,
                 open: [...openCallIds(messages)],
                 input: call.input,
+                subject: this.params.subject ?? null,
               }),
             }
           : {}),
@@ -4057,6 +4213,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       nestedRunId: parked.runId,
       open: [...openCallIds(parked.messages)],
       input: call.input,
+      subject: this.params.subject ?? null,
     });
     if (verified.ok === false) {
       return { ok: false, reason: verified.reason === "expired" ? "expired" : "unsigned" };
@@ -4103,7 +4260,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // input is a contract with the tool as it is now, and a value the schema
     // rejects must not reach it — the failure is a result the model can read,
     // exactly like a mis-typed argument on the way in.
-    const parsed = resolved.tool.inputSchema.safeParse(entry.call.input);
+    const parsed = resolved.inputSchema!.safeParse(entry.call.input);
     if (parsed.ok === false) {
       return {
         type: "tool-result",
@@ -4383,6 +4540,65 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     message.content.push(result);
     this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
+  }
+
+  /**
+   * The provider refused a stored file and the call went ahead without it
+   * (#684). Every part holding that id is marked `providerRejected`, so the
+   * next request sends a note in its place rather than an id that fails the
+   * request again — the history is sent whole on every turn, and without the
+   * mark one dead file costs every later turn a refused request.
+   *
+   * Persisted the way a late tool result is: a message from an earlier run is
+   * amended (cloned, then reported and returned in `result()`), and one this
+   * run made is changed in place and reported again. Either way the store
+   * sees the same id with new content, which its contract says to upsert.
+   * The part is replaced rather than written to, because the original object
+   * may still be the caller's.
+   *
+   * Logged as a warning, not an error: the run goes on, and the model is told
+   * the file could not be read, so the user hears about it in the answer. The
+   * log is for whoever has to work out why a file stopped being readable.
+   */
+  private markFileRejected(
+    fileId: string,
+    reason: string,
+    detail: { status?: number; requestId?: string },
+  ): void {
+    for (const original of this.history) {
+      const hit = original.content.some(
+        (part) => part.type === "file" && part.fileId === fileId && !part.providerRejected,
+      );
+      if (!hit) continue;
+      const message = this.produced.includes(original) ? original : this.amend(original);
+      message.content = message.content.map((part) =>
+        part.type === "file" && part.fileId === fileId && !part.providerRejected
+          ? { ...part, providerRejected: true as const }
+          : part,
+      );
+      // The message being built by this step is reported when it is finalized;
+      // queueing it here as well would report it before it is finished.
+      if (message !== this.current) this.unreported.add(message);
+    }
+    if (!this.config.logErrors) return;
+    const message = `[gemi/ai] agent "${this.config.name}": the provider refused file ${fileId}${
+      detail.status !== undefined ? ` (${detail.status})` : ""
+    }; it was left out of the request and will not be sent again: ${reason}`;
+    const metadata = {
+      agent: this.config.name,
+      runId: this.runId,
+      ...(this.params.threadId ? { threadId: this.params.threadId } : {}),
+      fileId,
+      ...detail,
+    };
+    let logged = false;
+    try {
+      Log.warning(message, metadata);
+      logged = true;
+    } catch {
+      // No application to resolve a logger from.
+    }
+    if (!logged || process.env.NODE_ENV === "development") console.warn(message, metadata);
   }
 
   /** The clone of an earlier run's message that this run may write to. One per

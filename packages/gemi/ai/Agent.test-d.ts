@@ -280,7 +280,9 @@ describe("AgentTool.ask", () => {
       description: "Ask the customer their name",
       outputSchema: s.object({ name: s.string() }),
     });
-    expectTypeOf(askName).toEqualTypeOf<AgentTool<"askName", { question: string }, { name: string }>>();
+    expectTypeOf(askName).toEqualTypeOf<
+      AgentTool<"askName", { question: string }, { name: string }>
+    >();
   });
 });
 
@@ -385,5 +387,22 @@ describe("reasoning effort (#658)", () => {
 
   test("is still a string, not anything", () => {
     expectTypeOf<number>().not.toExtend<ReasoningEffort>();
+  });
+});
+
+describe("per-run inputSchema (#710)", () => {
+  test("types execute's input from what the resolver returns", () => {
+    AgentTool.create({
+      name: "perRun",
+      description: "x",
+      inputSchema: async (ctx) => {
+        expectTypeOf(ctx.body).toEqualTypeOf<Record<string, unknown>>();
+        return s.object({ ids: s.array(s.string()) });
+      },
+      execute: async (input) => {
+        expectTypeOf(input).toEqualTypeOf<{ ids: string[] }>();
+        return input.ids.length;
+      },
+    });
   });
 });

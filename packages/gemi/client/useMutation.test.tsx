@@ -423,4 +423,277 @@ describe("useMutation", () => {
       expect(onError).toHaveBeenCalledTimes(1);
     });
   });
+
+  /**
+   * Issue #719. kyte draws pictures on two nodes at once through one `usePost`;
+   * latest-wins dropped the first job's saved page and, worse, its validation
+   * error. `concurrency: "parallel"` gives every call its own outcome.
+   */
+  describe("concurrency", () => {
+    /** A fetch whose answers the test releases one by one, in any order. */
+    function deferredFetch() {
+      const calls: Array<{
+        signal: AbortSignal;
+        release: (response: Response) => void;
+      }> = [];
+      const fetch = vi.fn((_url: string, init: { signal: AbortSignal }) => {
+        return new Promise<Response>((resolve, reject) => {
+          calls.push({ signal: init.signal, release: resolve });
+          init.signal.addEventListener("abort", () => reject(aborted()));
+        });
+      });
+      return { fetch, calls };
+    }
+
+    const parallel = { concurrency: "parallel" } as never;
+
+    test("two concurrent triggers each resolve and run their own callbacks", async () => {
+      const { fetch, calls } = deferredFetch();
+      vi.stubGlobal("fetch", fetch);
+      const onSuccess = vi.fn();
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, {
+          concurrency: "parallel",
+          onSuccess,
+        } as never),
+      );
+
+      const first = vi.fn();
+      const second = vi.fn();
+      let a!: Promise<unknown>;
+      let b!: Promise<unknown>;
+      act(() => {
+        a = result.current.trigger({ path: "a" } as never, { onSuccess: first });
+      });
+      act(() => {
+        b = result.current.trigger({ path: "b" } as never, { onSuccess: second });
+      });
+      expect(result.current.loading).toBe(true);
+      expect(result.current.pending).toBe(2);
+
+      // The second answers first; neither supersedes the other.
+      await act(async () => {
+        calls[1]!.release(respond(200, { id: "b" }));
+        await b;
+      });
+      expect(result.current.loading).toBe(true);
+      expect(result.current.pending).toBe(1);
+      expect(result.current.data).toEqual({ id: "b" });
+
+      await act(async () => {
+        calls[0]!.release(respond(200, { id: "a" }));
+        await a;
+      });
+      await expect(a).resolves.toEqual({ id: "a" });
+      await expect(b).resolves.toEqual({ id: "b" });
+      expect(first).toHaveBeenCalledWith({ id: "a" });
+      expect(second).toHaveBeenCalledWith({ id: "b" });
+      expect(onSuccess).toHaveBeenCalledTimes(2);
+      expect(result.current.loading).toBe(false);
+      expect(result.current.pending).toBe(0);
+      // The last call to settle.
+      expect(result.current.data).toEqual({ id: "a" });
+    });
+
+    test("one failing and one succeeding each report their own outcome", async () => {
+      const { fetch, calls } = deferredFetch();
+      vi.stubGlobal("fetch", fetch);
+      const onError = vi.fn();
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, {
+          concurrency: "parallel",
+          onError,
+        } as never),
+      );
+
+      const failed = { onSuccess: vi.fn(), onError: vi.fn() };
+      const succeeded = { onSuccess: vi.fn(), onError: vi.fn() };
+      let a!: Promise<unknown>;
+      let b!: Promise<unknown>;
+      act(() => {
+        a = result.current.trigger({ path: "a" } as never, failed);
+        b = result.current.trigger({ path: "b" } as never, succeeded);
+      });
+
+      // The failure lands first, then the success: the error is not lost to
+      // the newer request, and the success clears the hook-level `error`.
+      await act(async () => {
+        calls[0]!.release(respond(422, { error: validationError }));
+        await a;
+      });
+      expect(result.current.error).toEqual(reportedValidationError);
+      expect(result.current.loading).toBe(true);
+
+      await act(async () => {
+        calls[1]!.release(respond(200, { id: "b" }));
+        await b;
+      });
+
+      await expect(a).resolves.toBeUndefined();
+      await expect(b).resolves.toEqual({ id: "b" });
+      expect(failed.onError).toHaveBeenCalledWith(reportedValidationError);
+      expect(failed.onSuccess).not.toHaveBeenCalled();
+      expect(succeeded.onSuccess).toHaveBeenCalledWith({ id: "b" });
+      expect(succeeded.onError).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(result.current.error).toBeNull();
+      expect(result.current.data).toEqual({ id: "b" });
+      expect(result.current.loading).toBe(false);
+    });
+
+    test("a parallel failure keeps the last result, and a newer call does not clear it", async () => {
+      const { fetch, calls } = deferredFetch();
+      vi.stubGlobal("fetch", fetch);
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, parallel),
+      );
+
+      let a!: Promise<unknown>;
+      act(() => {
+        a = result.current.trigger({} as never);
+      });
+      await act(async () => {
+        calls[0]!.release(respond(200, { id: 1 }));
+        await a;
+      });
+      act(() => {
+        a = result.current.trigger({} as never);
+      });
+      await act(async () => {
+        calls[1]!.release(respond(422, { error: validationError }));
+        await a;
+      });
+      expect(result.current.data).toEqual({ id: 1 });
+      expect(result.current.error).toEqual(reportedValidationError);
+
+      // Another job starting is not news about the failed one.
+      act(() => {
+        result.current.trigger({} as never);
+      });
+      expect(result.current.error).toEqual(reportedValidationError);
+    });
+
+    /**
+     * #693 aborts a `useQuery` fetch nobody reads any more. A mutation is a
+     * write the user asked for: a newer one must never abort it.
+     */
+    test("a newer trigger does not abort the one in flight", async () => {
+      const { fetch, calls } = deferredFetch();
+      vi.stubGlobal("fetch", fetch);
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, parallel),
+      );
+
+      act(() => {
+        result.current.trigger({} as never);
+        result.current.trigger({} as never);
+        result.current.trigger({} as never);
+      });
+      expect(calls.map((c) => c.signal.aborted)).toEqual([false, false, false]);
+      expect(result.current.pending).toBe(3);
+    });
+
+    test("cancel() aborts every call in flight, without onError", async () => {
+      const { fetch, calls } = deferredFetch();
+      vi.stubGlobal("fetch", fetch);
+      const onError = vi.fn();
+      const onCanceled = vi.fn();
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, {
+          concurrency: "parallel",
+          onError,
+          onCanceled,
+        } as never),
+      );
+
+      let a!: Promise<unknown>;
+      let b!: Promise<unknown>;
+      act(() => {
+        a = result.current.trigger({} as never);
+        b = result.current.trigger({} as never);
+      });
+      await act(async () => {
+        result.current.cancel();
+        await Promise.all([a, b]);
+      });
+
+      expect(calls.every((c) => c.signal.aborted)).toBe(true);
+      await expect(a).resolves.toBeUndefined();
+      await expect(b).resolves.toBeUndefined();
+      expect(onCanceled).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
+      expect(result.current.error).toBeNull();
+      expect(result.current.loading).toBe(false);
+      expect(result.current.pending).toBe(0);
+    });
+
+    test("an onError that throws still leaves pending at zero", async () => {
+      vi.stubGlobal("fetch", fetchStub(respond(422, { error: validationError })));
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, {
+          concurrency: "parallel",
+          onError: (error: unknown) => {
+            if ((error as { kind?: string }).kind) throw new Error("boom");
+          },
+        } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+      expect(result.current.pending).toBe(0);
+      expect(result.current.loading).toBe(false);
+    });
+
+    describe("the default stays latest-wins", () => {
+      test("a superseded call resolves undefined and runs no callbacks, its own included", async () => {
+        const { fetch, calls } = deferredFetch();
+        vi.stubGlobal("fetch", fetch);
+        const onSuccess = vi.fn();
+        const onError = vi.fn();
+        const { result } = renderHook(() =>
+          useMutation("POST" as never, "/images" as never, {} as never, {
+            onSuccess,
+            onError,
+          } as never),
+        );
+
+        const older = { onSuccess: vi.fn(), onError: vi.fn() };
+        const newer = { onSuccess: vi.fn(), onError: vi.fn() };
+        let a!: Promise<unknown>;
+        let b!: Promise<unknown>;
+        act(() => {
+          a = result.current.trigger({} as never, older);
+          b = result.current.trigger({} as never, newer);
+        });
+        // Not aborted either: latest-wins drops the answer, not the request.
+        expect(calls[0]!.signal.aborted).toBe(false);
+        expect(result.current.pending).toBe(2);
+
+        await act(async () => {
+          calls[1]!.release(respond(200, { id: "b" }));
+          await b;
+        });
+        // The newest request has settled, so the hook is no longer loading
+        // even though the superseded one is still on the wire.
+        expect(result.current.loading).toBe(false);
+        expect(result.current.pending).toBe(1);
+
+        await act(async () => {
+          calls[0]!.release(respond(422, { error: validationError }));
+          await a;
+        });
+
+        await expect(a).resolves.toBeUndefined();
+        await expect(b).resolves.toEqual({ id: "b" });
+        expect(older.onSuccess).not.toHaveBeenCalled();
+        expect(older.onError).not.toHaveBeenCalled();
+        expect(newer.onSuccess).toHaveBeenCalledWith({ id: "b" });
+        expect(onSuccess).toHaveBeenCalledTimes(1);
+        expect(onError).not.toHaveBeenCalled();
+        expect(result.current.error).toBeNull();
+        expect(result.current.data).toEqual({ id: "b" });
+        expect(result.current.loading).toBe(false);
+        expect(result.current.pending).toBe(0);
+      });
+    });
+  });
 });

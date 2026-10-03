@@ -200,6 +200,14 @@ export type AgentHookContext = {
   threadId?: string;
 };
 
+/** What `AgentController.attachmentLimits` answers. Both optional. */
+export type AttachmentLimits = {
+  /** The largest file accepted, in bytes. */
+  maxBytes?: number;
+  /** `<input accept>` entries: `".pdf"`, `"image/*"`, `"text/csv"`. */
+  accept?: string[];
+};
+
 /**
  * What `POST /<path>/files` answers.
  *
@@ -722,6 +730,11 @@ export abstract class AgentController<
    * turn the check off. Whatever it reads must be present on all of `stream`,
    * `attach` and `stop`, the same rule `attachmentScope` states: guard the three
    * routes with the same middleware.
+   *
+   * It is also the `subject` every pending call of the run is signed for
+   * (#447): an approval or answer is accepted only on a turn whose `runOwner`
+   * is the one the question was asked of. So it must answer the same on the
+   * turn that asks and the turn that answers.
    */
   protected runOwner(req: HttpRequest<any, any>): string | null | Promise<string | null> {
     const user = req.ctx?.()?.user;
@@ -971,6 +984,9 @@ export abstract class AgentController<
         redactError: (error, info) => this.redactError(error, info, ctx),
         // Where answers' nonces are spent. See `nonces`.
         nonces: this.nonces,
+        // The principal its pending calls are bound to (#447): an answer is
+        // only accepted from the same `runOwner` the question was asked of.
+        subject: owner,
       }) as AgentRun;
 
       // Registered before the response is built: the run is now owned by the
@@ -1443,6 +1459,35 @@ export abstract class AgentController<
   }
 
   /**
+   * WHAT THIS ROUTE ACCEPTS AT ALL: a size ceiling and a list of types (#683).
+   * Checked once per upload, after `authorizeRequest` and before anything is
+   * stored or sent to the provider, and a file outside them is answered **422**
+   * with `{ error: { code, message } }` — `file_too_large` or
+   * `unsupported_file_type` — which `useChat().attach()` rejects with as an
+   * `AttachError`, so a composer can mark the one file.
+   *
+   * `accept` reads like an `<input accept>`: `".pdf"` matches the file name's
+   * extension, `"image/*"` a type family, `"text/csv"` one type. A file
+   * matching any entry is accepted. Left out (or `null` returned, the default)
+   * means no limit of that kind, which is how the route behaved before.
+   *
+   * Here rather than in `attachmentDestination`, which an app could throw from
+   * to the same end: a throw there is a 500 unless the app builds the response
+   * itself, and the provider's own refusal only arrives after the bytes were
+   * stored. A limit is a rule about the file, so it is answered before either.
+   *
+   *   protected attachmentLimits() {
+   *     return { maxBytes: 10 * 1024 * 1024, accept: [".pdf", "image/*"] };
+   *   }
+   */
+  protected attachmentLimits(
+    req: HttpRequest<any, any>,
+  ): AttachmentLimits | null | Promise<AttachmentLimits | null> {
+    void req;
+    return null;
+  }
+
+  /**
    * WHERE ONE FILE'S BYTES SHOULD GO. Called once per upload, with the file in
    * hand.
    *
@@ -1566,6 +1611,13 @@ export abstract class AgentController<
       threadId: typeof threadField === "string" && threadField.length > 0 ? threadField : undefined,
       body: extraBody,
     });
+    // Before the thread is looked up, the policy is asked, or a byte is kept:
+    // a file this route never takes costs nothing past this line.
+    const refusal = limitRefusal(await this.attachmentLimits(req), file, name, mimeType);
+    if (refusal) {
+      throw new LimitedUploadError(refusal.code, refusal.message);
+    }
+
     const threadId =
       typeof threadField === "string" &&
       threadField.length > 0 &&
@@ -2154,6 +2206,68 @@ async function providerUpload(provider: { upload(file: File): Promise<string> },
 }
 
 const REJECTED_FILE_STATUSES = new Set([400, 413, 415, 422]);
+
+/** A 422 from `upload` for a file outside `attachmentLimits`. */
+class LimitedUploadError extends RequestBreakerError {
+  constructor(code: "file_too_large" | "unsupported_file_type", message: string) {
+    super(message);
+    this.name = "LimitedUploadError";
+    this.payload = {
+      api: { status: 422, data: { error: { code, message } } },
+      view: {},
+    };
+  }
+}
+
+/** Why `file` is outside `limits`, or `null` when it is not. Exported for the
+ *  tests; the route is the only caller. */
+export function limitRefusal(
+  limits: AttachmentLimits | null | undefined,
+  file: Blob,
+  name: string,
+  mimeType: string,
+): { code: "file_too_large" | "unsupported_file_type"; message: string } | null {
+  if (!limits) return null;
+  const { maxBytes, accept } = limits;
+  if (typeof maxBytes === "number" && file.size > maxBytes) {
+    return {
+      code: "file_too_large",
+      message: `${JSON.stringify(name)} is ${formatBytes(file.size)}; the limit is ${formatBytes(maxBytes)}.`,
+    };
+  }
+  if (
+    accept &&
+    accept.length > 0 &&
+    !accept.some((entry) => acceptMatches(entry, name, mimeType))
+  ) {
+    return {
+      code: "unsupported_file_type",
+      message: `${JSON.stringify(name)} is not a type this chat accepts. Accepted: ${accept.join(", ")}.`,
+    };
+  }
+  return null;
+}
+
+function acceptMatches(entry: string, name: string, mimeType: string): boolean {
+  const rule = entry.trim().toLowerCase();
+  if (!rule) return false;
+  if (rule.startsWith(".")) return name.toLowerCase().endsWith(rule);
+  const type = mimeType.toLowerCase().split(";")[0]!.trim();
+  if (rule.endsWith("/*")) return type.startsWith(rule.slice(0, -1));
+  return type === rule;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${Math.round(value * 10) / 10} ${units[unit]}`;
+}
 
 /**
  * A 422 from `upload`: the provider would not take this file. `code` is

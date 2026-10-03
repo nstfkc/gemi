@@ -25,7 +25,7 @@ import { sessionTokenSecret } from "./sessionToken";
  * so no column is needed for it either.
  */
 
-/** The prefix a hashed column value carries. A value without it was written before 0.85. */
+/** The prefix a hashed column value carries. A value without it was written before 0.88. */
 export const ONE_TIME_HASH_PREFIX = "h1.";
 
 export type OneTimeSecretKind = "pin" | "link";

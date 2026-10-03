@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Invalid 'input[2].content[1].file_id': 'file-e63f5ebf1ae8433389d9180a889509c5'. Expected an ID that begins with 'assistant'.",
+    "type": "invalid_request_error",
+    "param": "input[2].content[1].file_id",
+    "code": "invalid_value"
+  }
+}
