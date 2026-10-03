@@ -201,7 +201,9 @@ export {
   MemoryFileOwners,
   MemoryLiveRuns,
   MemoryNonceStore,
+  MemoryReceiptStore,
   RedisNonceStore,
+  RedisReceiptStore,
   ScopedAttachments,
 } from "./AgentController";
 export type {
@@ -224,7 +226,11 @@ export type {
   NonceRedisClient,
   NonceStore,
   PutAttachmentParams,
+  ReceiptClaim,
+  ReceiptRedisClient,
+  ReceiptStore,
   RedisNonceStoreOptions,
+  RedisReceiptStoreOptions,
   ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,

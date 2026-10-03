@@ -25,6 +25,7 @@ import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import {
+  executionReceiptId,
   spendNestedRun,
   spendPendingCall,
   readSignature,
@@ -44,6 +45,7 @@ import type {
 import { ATTACHMENT_ID_PREFIX, InvalidAttachmentScopeError } from "./store/Attachments";
 import { httpErrorDetail } from "./providers/errors";
 import { defaultNonceStore, type NonceStore } from "./store/Nonces";
+import type { ReceiptClaim, ReceiptStore } from "./store/Receipts";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -1213,6 +1215,18 @@ interface AgentStreamParamsBase {
    * sub-run.
    */
   nonces?: NonceStore;
+  /**
+   * Where an approved tool's execution is claimed and its result recorded,
+   * which is what makes an approval run its tool at most once (#458). Before
+   * an approved tool runs, the run claims an id derived from the call the
+   * approval covers: a presentation of an approval that already ran gets the
+   * recorded result back instead of running the tool again, and one presented
+   * while another instance is still running it gets a `tool_error` result.
+   * Without a store an approved tool runs as before, guarded by the nonce
+   * alone. `AgentController` sets this from its `receipts`. Handed down
+   * unchanged to a sub-run.
+   */
+  receipts?: ReceiptStore;
   /**
    * Who this run is answering: the principal every pending call and parked
    * sub-run record it mints is bound to (#447). An answer, or a record, only
@@ -3339,6 +3353,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // The same store, so a sub-run's answers are single-use across every
       // instance exactly as the parent's are.
       nonces: this.params.nonces,
+      // And the same receipts, so a sub-agent's approved tool runs once too.
+      receipts: this.params.receipts,
       // The same principal, so a sub-agent's question is bound to the user the
       // root run was started for.
       subject: this.params.subject,
@@ -4405,6 +4421,31 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
   }
 
+  /**
+   * Records an approved tool's result on its receipt once it is known (#458),
+   * and only then hands it on, so a presentation that arrives after this run
+   * answered finds it. Chained to the execution rather than to the run's race,
+   * so a tool that finishes after a `stop()` still records what it did.
+   *
+   * A tool that never produces a result — it rejected, or escalated a question
+   * of its own — leaves the claim held: whether it acted is unknown, and a
+   * later presentation is `blocked` rather than run again.
+   */
+  private async recordReceipt(
+    receipt: { store: ReceiptStore; id: string; expiresAt: number },
+    execution: Promise<ToolResultPart>,
+  ): Promise<ToolResultPart> {
+    const result = await execution;
+    try {
+      await receipt.store.complete(receipt.id, result, receipt.expiresAt);
+    } catch (error) {
+      this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record a tool receipt`, {
+        error,
+      });
+    }
+    return result;
+  }
+
   private async resolveAnswer(
     entry: { message: AgentMessage; call: ToolCallPart },
     answer: ClientToolResult,
@@ -4463,12 +4504,68 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       );
     }
 
+    // An approval that already ran is answered with what it did, before the
+    // nonce is looked at (#458): its nonce was spent by the run that executed
+    // it, so the check below would refuse it, and a retried submit whose
+    // response was lost would tell the user the approval was not used when the
+    // tool has already acted on it. Claimed before spending, so that two
+    // instances whose nonce stores are not shared still run it once.
+    let receipt: { store: ReceiptStore; id: string; expiresAt: number } | undefined;
+    if (
+      this.params.receipts &&
+      kind === "approval" &&
+      "approve" in answer &&
+      answer.approve === true
+    ) {
+      const store = this.params.receipts;
+      const id = executionReceiptId(this.config.name, {
+        ...this.claimsFor(call.toolCallId, name, kind, call.input),
+        runId: issued.runId,
+      });
+      let claim: ReceiptClaim;
+      try {
+        claim = await store.claim(id, issued.expiresAt);
+      } catch (error) {
+        // As with a nonce store that throws: refused, not run unchecked.
+        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not claim a tool receipt`, {
+          error,
+        });
+        return reject(`The approval for "${name}" could not be checked. Ask again.`);
+      }
+      if (claim.status === "replay") {
+        return { ...claim.result, toolCallId: call.toolCallId, name: call.name } as ToolResultPart;
+      }
+      if (claim.status === "blocked") {
+        return {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          name: call.name,
+          status: "error",
+          error: {
+            code: "tool_error",
+            message: `"${name}" was already approved and started, and its result is not recorded yet: it is still running, or it stopped before finishing. It was not run again.`,
+            toolCallId: call.toolCallId,
+            retryable: false,
+          },
+        };
+      }
+      receipt = { store, id, expiresAt: issued.expiresAt };
+    }
+
     // Verifying says the server once asked this exact question; spending the
     // nonce says nobody has answered it yet. Without this step a captured token
     // approves the same call every time it is presented — the client rewinds to
     // the history from before the result existed and replays, and the human who
     // approved once has approved forever.
     if (!(await this.spend(spendPendingCall, answer.signature))) {
+      // Claimed for nothing: nothing ran, so a later presentation must not be
+      // told it is running. Answered by a run that predates the store, or
+      // denied before: either way there is no result to replay.
+      await receipt?.store.release(receipt.id).catch((error) => {
+        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not release a tool receipt`, {
+          error,
+        });
+      });
       return reject(`The answer for "${name}" has already been used. Ask again.`);
     }
 
@@ -4493,9 +4590,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // an input and not scratch space — and the clone is what makes the
         // sub-run transcript something `onMessage` can report.
         const executing = this.amendCall(entry);
+        const execution = this.executeTool(
+          resolved,
+          entry.message.id,
+          executing,
+          executing.input,
+          0,
+        );
         try {
           return await raceAbort(
-            this.executeTool(resolved, entry.message.id, executing, executing.input, 0),
+            receipt ? this.recordReceipt(receipt, execution) : execution,
             this.controller.signal,
           );
         } catch (error) {

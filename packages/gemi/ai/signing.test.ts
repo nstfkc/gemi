@@ -4,6 +4,7 @@ import {
   canonicalize,
   consumeNestedRun,
   consumePendingCall,
+  executionReceiptId,
   purposeKey,
   readSignature,
   signNestedRun,
@@ -551,5 +552,35 @@ describe("tokens minted before #447", () => {
         { secret },
       ).startsWith("agn2."),
     ).toBe(true);
+  });
+});
+
+describe("an execution receipt id (#458)", () => {
+  const id = (overrides: Partial<PendingCallClaims> = {}, agent = "support", key = secret) =>
+    executionReceiptId(agent, claims(overrides), { secret: key });
+
+  test("is the same for the same call, whatever order its input's keys arrive in", () => {
+    expect(id()).toBe(id({ input: { amountCents: 4200, orderId: "ord_1" } }));
+  });
+
+  test.each([
+    ["run", { runId: "run_2" }],
+    ["tool call", { toolCallId: "call_2" }],
+    ["tool", { name: "cancelOrder" }],
+    ["input", { input: { orderId: "ord_2", amountCents: 4200 } }],
+    ["path", { path: ["outer"] }],
+    ["subject", { subject: "user:2" }],
+  ] as const)("differs by %s", (_, overrides) => {
+    expect(id(overrides as Partial<PendingCallClaims>)).not.toBe(id());
+  });
+
+  test("differs by agent and by secret", () => {
+    expect(id({}, "billing")).not.toBe(id());
+    expect(id({}, "support", "another-secret")).not.toBe(id());
+  });
+
+  test("is not the pending call's MAC under the same claims", () => {
+    const signature = signPendingCall(claims(), { secret });
+    expect(signature).not.toContain(id());
   });
 });

@@ -17,6 +17,7 @@ import {
   MemoryFileOwners,
   MemoryLiveRuns,
   MemoryNonceStore,
+  MemoryReceiptStore,
   type NonceStore,
   ScopedAttachments,
   type AttachmentLimits,
@@ -3564,6 +3565,23 @@ describe("nonces (#445)", () => {
     expect(replayed.find((event) => event.type === "error")).toMatchObject({
       error: { code: "invalid_tool_result" },
     });
+  });
+
+  test("hands the controller's receipt store to the run (#458)", async () => {
+    const run = new StubAgentRun("run_receipts");
+    const { agent, calls } = stubAgent(run);
+    const receipts = new MemoryReceiptStore();
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      receipts = receipts;
+    }
+
+    await new Chat().stream(jsonRequest({ messages: [], text: "hi" }));
+    run.finish({ messages: [] });
+    await settle();
+    expect(calls[0]!.receipts).toBe(receipts);
   });
 
   test("warns once in production when a stateless chat spends nonces in memory", async () => {
