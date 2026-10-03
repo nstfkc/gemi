@@ -9,7 +9,7 @@ import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
-import type { ResponseData } from "./HttpResponse";
+import type { ResponseData, ResponseError } from "./HttpResponse";
 import { type MiddlewareInput, toMiddlewareList } from "./middlewareList";
 import type { MiddlewareReturnType } from "./Router";
 import {
@@ -24,7 +24,16 @@ import { withheldFromUpstream } from "./requestDomain";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
-export type ApiRouterHandler<Input, Output, Params> = (req: HttpRequest<Input, Params>) => Output;
+/**
+ * A route as the client's RPC map records it. `Error` is the route's typed
+ * error bodies (`ResponseError`), carried on a parameter no call passes so
+ * that the existing `ApiRouterHandler<I, infer O, P>` patterns still match:
+ * it defaults to `never`, which any route's `Error` accepts.
+ */
+export type ApiRouterHandler<Input, Output, Params, Error = never> = (
+  req: HttpRequest<Input, Params>,
+  __error?: [Error],
+) => Output;
 
 type CallbackHandler<Input, Output, Params> = (
   req: HttpRequest<Input, Params>,
@@ -545,7 +554,7 @@ type RouteHandlerParser<T, Prefix extends string = ""> =
   T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
     ? KeyAndValue<
         `${Method & string}:${Prefix & string}`,
-        ApiRouterHandler<Input, ResponseData<Output>, Params>
+        ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
       >
     : never;
 
@@ -559,7 +568,7 @@ type RouteHandlersParser<T, Prefix extends string = ""> = T extends RouteHandler
       >
         ? KeyAndValue<
             `${Method & string}:${Prefix & string}`,
-            ApiRouterHandler<Input, ResponseData<Output>, Params>
+            ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
           >
         : never;
     }[keyof T]

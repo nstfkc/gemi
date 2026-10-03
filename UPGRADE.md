@@ -1,3 +1,32 @@
+# Unreleased
+
+## Typed error responses: `HttpResponse.error` / `httpError` (#665)
+
+A handler can answer a typed error. `HttpResponse.error(status, body)`, or `httpError(status, body)` from `gemi/http`, answers `status` (400 to 599) with `{ "error": body }`, and the client adds `body` to the route's error type:
+
+```ts
+// server
+if (expired(link)) return httpError(410, { kind: "gone", message: "Shared list link has expired" });
+return { catalogId, newUser };
+
+// client
+usePost("/shared-lists/:id/import", {}, {
+  onSuccess: (result) => navigate(`/catalogs/${result.catalogId}`),
+  onError: (error) => { if (isHttpError(error, 410)) toast(error.message); },
+});
+```
+
+`onError` and `error` on `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form>` are `MutationError | E`, where `E` is each typed body with its `status`. A route without typed errors keeps `MutationError`. `isHttpError(error, status)` is a new guard in `gemi/client`. Nothing changes at run time for existing routes.
+
+These type changes may need small edits when you upgrade:
+
+- **An `HttpResponse.json` with a literal 4xx/5xx status is no longer in the success type.** `HttpResponse.json({ error: { message: "Taken" } }, { status: 409 })` used to be part of the route's data type. It is now one of the route's errors, typed the way `onError` receives it (`{ message, kind, status: 409 }`). A status known only at run time (`{ status: code }`) is still in the data type.
+- **A raw `Response` in a union with typed returns is no longer in the success type.** A handler returning `Data | Response` gives the client `Data`. The client never received a `Response` object, so a check like `if (result instanceof Response) return;` in `onSuccess` can be removed; under `strict` it may now fail to compile if `Data` is a primitive. A route that only returns a `Response` (a file, a stream) is still typed `Response`.
+- **`ApiRouterHandler` has a fourth type parameter**, the route's error type, defaulting to `never`. Existing `ApiRouterHandler<I, O, P>` references and `infer` patterns keep working.
+- `onError` is now declared with method syntax on the hook config and `<Form>`, so a handler annotated `(error: MutationError) => …` still compiles on a route with typed errors.
+
+`useQuery` is unchanged. Its `error` is still a `QueryError` whose `body` is the JSON.
+
 # Upgrading from 0.91.0 to 0.91.1
 
 ## Dev server works behind an HTTPS proxy or tunnel (#733)

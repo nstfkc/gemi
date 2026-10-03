@@ -44,7 +44,7 @@ export class PostController extends Controller {
   async publish(req: HttpRequest<{}, { id: string }>) {
     const post = await Post.findUniqueOrThrow({ where: { id: req.params.id } });
     if (post.publishedAt) {
-      return HttpResponse.json({ error: { kind: "form_error", message: "Already published" } }, { status: 409 });
+      return HttpResponse.error(409, { kind: "form_error", message: "Already published" });
     }
     // ...
     return HttpResponse.json(post, { headers: { "X-Post-Version": String(post.version) } });
@@ -54,7 +54,9 @@ export class PostController extends Controller {
 
 `options` is `{ status?: number; headers?: HeadersInit }`, and `status` defaults to 200. A status the JSON body cannot go with is refused with a `RangeError`: one outside 200–599, or 204, 205 or 304.
 
-**It stays typed.** The route's client type is `data`'s type, as if the handler had returned `data`. A handler that returns `HttpResponse.json(post, { status: 201 })` gives `usePost`, `useQuery` and `Query.instant` the type `Post`. A handler that returns a plain object on one branch and `HttpResponse.json` on another is typed as the union of the two. A hand-built `Response` has no type, and returning one also loses the route's type.
+**It stays typed.** The route's client type is `data`'s type, as if the handler had returned `data`. A handler that returns `HttpResponse.json(post, { status: 201 })` gives `usePost`, `useQuery` and `Query.instant` the type `Post`. A handler that returns a plain object on one branch and `HttpResponse.json` on another is typed as the union of the two.
+
+A response whose `status` is a literal 400 or more (`{ status: 409 }`) is not data: it is left out of that union and typed as one of the route's errors, as `HttpResponse.error` is (below). A status known only at run time (`{ status: code }`) stays in the data. A hand-built `Response` has no type. In a union with other returns it is left out of the data, because the client never receives a `Response` object; a route that only returns one (a file, a stream) is typed `Response`, as before.
 
 **It keeps what the request set.** It goes through the same path as a plain return, so the response also carries:
 
@@ -74,6 +76,29 @@ On top of those, `options.headers` apply as follows:
 - `useQuery` gets a `QueryError` whose `status` is the status and whose `body` is the JSON. The default retry policy applies, so a 4xx other than 408 and 429 is not retried.
 - `useMutation`, `usePost` and `<Form>` pass the body's `error` field to `onError` and `error`, as they do for gemi's own `{ "error": … }` bodies, with the response's `status` added. So `HttpResponse.json({ error: { kind: "form_error", message: "Taken" } }, { status: 409 })` renders in `<FormError>`. An `error` that is a string, or an object with a `message` and no `kind`, is given the kind its status stands for (any 4xx without one of its own is a `form_error`). A body with no `error` field is handed over whole, given a kind and status the same way.
 - A loader's `Query.instant` or `Query.prefetch` on the server behaves the same as the browser. A 2xx resolves to the data, and an error status rejects with the same `QueryError`.
+
+### Typed errors: `HttpResponse.error`
+
+To refuse a request with a body of your own and have the client know its type, return `HttpResponse.error(status, body, options?)`, or `httpError(status, body, options?)`, which is the same function:
+
+```typescript
+import { Controller, HttpRequest, httpError } from "gemi/http";
+
+export class SharedListController extends Controller {
+  async import(req: HttpRequest<{}, { id: string }>) {
+    const link = await SharedLink.findUniqueOrThrow({ where: { id: req.params.id } });
+    if (link.expiresAt < new Date()) {
+      return httpError(410, { kind: "gone", message: "Shared list link has expired" });
+    }
+    // ...
+    return { catalogId, newUser };
+  }
+}
+```
+
+It answers `status` with the JSON body `{ "error": body }`, the envelope gemi's own errors use, and is otherwise `HttpResponse.json`: the request's cookies and headers, `options.headers` and `Cache-Control: no-store` apply the same way. `status` must be an integer from 400 to 599, or it throws a `RangeError`.
+
+On the client the route's data type is `{ catalogId; newUser }` only, and `body` joins its error type. `onError` and `error` on `usePost`, `useMutation`, `useUpload` and `<Form>` are `MutationError | typeof body`, with `status: 410` added. `body` is typed with `const` inference, so `kind: "gone"` stays the literal `"gone"` and narrows. A body with a `message` and no `kind` is given the kind its status stands for (`form_error` for most 4xx), as gemi's own errors are. See [Data fetching → Errors](./data-fetching.md#errors) for narrowing it with `isHttpError`.
 
 `HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
 

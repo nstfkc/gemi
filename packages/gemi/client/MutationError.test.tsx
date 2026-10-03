@@ -11,6 +11,7 @@ import {
   InsufficientPermissionsError,
 } from "../http/errors";
 import { RateLimitExceededError } from "../http/RateLimitMiddleware";
+import { HttpResponse, httpError } from "../http/HttpResponse";
 import { ValidationError } from "../http/Router";
 import { notFoundResponse } from "../services/router/notFound";
 import { policyDeniedResponse } from "../services/router/policyDenied";
@@ -20,6 +21,7 @@ import {
   isAuthenticationError,
   isCsrfError,
   isFormError,
+  isHttpError,
   isNetworkError,
   isNotFoundError,
   isPermissionError,
@@ -151,6 +153,43 @@ describe("the errors a mutation reports", () => {
     if (!isPermissionError(error)) throw new Error("not a permission error");
     expect(error.message).toBe("Staff only");
     expect(error.status).toBe(403);
+  });
+});
+
+/**
+ * Issue #665: `HttpResponse.error` / `httpError` answer `{ error: body }`, and
+ * `onError` receives `body` with the status added. The responses are the ones
+ * the dispatcher sends, built by `toResponse`.
+ */
+describe("a route's typed errors", () => {
+  const sent = (res: HttpResponse<unknown, number>) => () => res.toResponse(new Headers(), []);
+
+  test("onError receives the body, with its status", async () => {
+    const error = await onErrorFor(
+      sent(httpError(410, { kind: "gone", message: "Link has expired" })),
+    );
+    expect(error).toEqual({ kind: "gone", message: "Link has expired", status: 410 });
+    expect(isHttpError(error, 410)).toBe(true);
+    expect(isHttpError(error, 409)).toBe(false);
+    expect(mutationErrorKind(error)).toBe("unknown");
+  });
+
+  test("a body with a message and no kind is given the status's kind", async () => {
+    const error = await onErrorFor(sent(HttpResponse.error(409, { message: "Taken" })));
+    expect(error).toEqual({ kind: "form_error", message: "Taken", status: 409 });
+    expect(isFormError(error)).toBe(true);
+  });
+
+  test("a body's own status is kept", async () => {
+    const error = await onErrorFor(sent(httpError(422, { kind: "x", status: 1 })));
+    expect(error).toEqual({ kind: "x", status: 1 });
+  });
+
+  test("isHttpError never matches an Error or a non-object", () => {
+    const network = Object.assign(new TypeError("Failed to fetch"), { status: 410 });
+    for (const value of [network, null, undefined, 410, "Gone"]) {
+      expect(isHttpError(value, 410)).toBe(false);
+    }
   });
 });
 

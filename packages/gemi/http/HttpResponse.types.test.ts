@@ -90,12 +90,8 @@ const snippets = {
       assert<
         Equal<Awaited<ReturnType<typeof Query.instant<"/union">>>, { a: number } | { b: string }>
       >();
-      assert<
-        Equal<
-          Awaited<ReturnType<typeof Query.instant<"/ctrl-find">>>,
-          { error: { message: string } } | { id: string }
-        >
-      >();
+      // A literal 404 is an error, not data, since #665: see HttpError.types.test.ts.
+      assert<Equal<Awaited<ReturnType<typeof Query.instant<"/ctrl-find">>>, { id: string }>>();
     }`,
   useQuery: `
     export function f() {

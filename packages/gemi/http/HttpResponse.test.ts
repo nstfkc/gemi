@@ -8,7 +8,7 @@ import { ApiRouter } from "./ApiRouter";
 import { CacheMiddleware } from "./CacheMiddleware";
 import { Controller } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
-import { HttpResponse, isHttpResponse } from "./HttpResponse";
+import { HttpResponse, httpError, isHttpResponse } from "./HttpResponse";
 import { Middleware } from "./Middleware";
 import { ViewRouter } from "./ViewRouter";
 import { Kernel } from "../kernel";
@@ -88,6 +88,12 @@ class RootApiRouter extends ApiRouter {
       "cache",
     ]),
     "/null": this.get(() => HttpResponse.json(null, { status: 422 })),
+    "/gone": this.post(() =>
+      httpError(410, { kind: "gone", message: "Link has expired" }),
+    ).middleware(["context"]),
+    "/gone/cached": this.get(() =>
+      HttpResponse.error(410, { kind: "gone" }, { headers: { "X-Reason": "expired" } }),
+    ).middleware(["cache"]),
   };
 }
 
@@ -289,6 +295,35 @@ describe("HttpResponse in a view handler", () => {
     expect(failed).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/HttpResponse is for api routes/) }),
     ]);
+  });
+});
+
+describe("HttpResponse.error / httpError (#665)", () => {
+  test("answers its status and { error: body }, with the request's headers and cookies", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/gone", { method: "POST" }));
+
+    expect(res.status).toBe(410);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(await res.json()).toEqual({ error: { kind: "gone", message: "Link has expired" } });
+    expect(res.headers.get("X-Context")).toBe("context");
+    expect(res.headers.getSetCookie().join()).toContain("session=refreshed");
+  });
+
+  test("is no-store behind cache, and keeps its own headers", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/gone/cached"));
+
+    expect(res.status).toBe(410);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Reason")).toBe("expired");
+  });
+
+  test("refuses a status below 400 or above 599", () => {
+    for (const status of [200, 201, 304, 399, 600, 410.5]) {
+      expect(() => httpError(status, {})).toThrow(RangeError);
+    }
+    expect(httpError(400, {}).status).toBe(400);
+    expect(HttpResponse.error(599, "x").body).toEqual({ error: "x" });
+    expect(isHttpResponse(httpError(410, {}))).toBe(true);
   });
 });
 

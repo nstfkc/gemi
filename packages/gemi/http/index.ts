@@ -42,7 +42,12 @@ export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
 export { RequestBreakerError, type RequestBreakerOptions } from "./Error";
 export type { Refusal, RefusalKind } from "./refusal";
-export { HttpResponse, type HttpResponseOptions } from "./HttpResponse";
+export {
+  HttpResponse,
+  httpError,
+  type HttpResponseOptions,
+  type ClientHttpError,
+} from "./HttpResponse";
 export {
   defineMiddlewareConfig,
   middlewareConfigDefaults,

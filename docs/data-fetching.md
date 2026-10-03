@@ -686,6 +686,34 @@ the client wraps those into the same object, using the response's status, so a n
 client works against an old server during a rolling deploy. A cancelled request is
 not an error: `onCanceled` runs and `error` stays `null`.
 
+#### A route's own typed errors
+
+A handler that answers `HttpResponse.error(status, body)` or `httpError(status, body)`
+(see [Controllers → Typed errors](./controllers.md#typed-errors-httpresponseerror))
+adds `body` to its route's error type: `onError` and `error` are `MutationError | E`,
+where `E` is each `body` with `status` added. `<Form onError>` and `useUpload` get the
+same type. Narrow it by its `kind`, or by status with `isHttpError`:
+
+```tsx
+import { usePost, isHttpError } from "gemi/client";
+
+const { trigger } = usePost("/shared-lists/:id/import", {}, {
+  onSuccess(result) {
+    navigate(`/catalogs/${result.catalogId}`); // no `Response` in the type
+  },
+  onError(error) {
+    if (isHttpError(error, 410)) toast(error.message); // error.kind is "gone"
+    // or: if (!(error instanceof Error) && error.kind === "gone") ...
+  },
+});
+```
+
+`isHttpError(error, status)` checks the status alone at run time, so a gemi refusal
+with the same status (a 404 `not_found`, a 429 `rate_limit`) passes it too. Pick a
+status gemi doesn't answer with, or check `kind` as well. A route with no typed
+errors keeps `MutationError` alone. `useQuery` is unchanged: its `error` is still a
+`QueryError` whose `body` is the JSON.
+
 When you drive mutations from the `Form` component instead of calling `trigger`
 directly, validation and form errors are unpacked for you into `ValidationErrors` /
 `FormError`. See [Forms](./forms.md).

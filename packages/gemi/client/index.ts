@@ -31,6 +31,7 @@ export {
   isRateLimitError,
   isServerError,
   isNetworkError,
+  isHttpError,
   mutationErrorKind,
 } from "./MutationError";
 export type {
@@ -42,6 +43,7 @@ export type {
   MutationRefusal,
   MutationRefusalKind,
   MutationMessageError,
+  HttpErrorWithStatus,
 } from "./MutationError";
 export type { RefusalKind } from "../http/refusal";
 export {
