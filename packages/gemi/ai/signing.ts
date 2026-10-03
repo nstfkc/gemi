@@ -133,6 +133,7 @@ function legacyExpiryOk(expiresAt: number): boolean {
  */
 const PENDING_CALL_PURPOSE = "gemi.ai.pending-call.v1";
 const NESTED_RUN_PURPOSE = "gemi.ai.nested-run.v1";
+const EXECUTION_RECEIPT_PURPOSE = "gemi.ai.execution-receipt.v1";
 const HKDF_SALT = "gemi.ai.signing";
 
 const derivedKeys = new Map<string, Buffer>();
@@ -538,6 +539,37 @@ export function verifyNestedRun(
  * to. This is what stands in for that in stateless mode, where the history the
  * client returns can be rewound to before the result existed.
  */
+
+/**
+ * The id an approved call's execution receipt is kept under (#458).
+ *
+ * Deterministic in the call the signature covers — the issuing run, the tool
+ * call id, the tool, its canonical input, the nesting path and the subject —
+ * and in nothing else, so every presentation of one approval, on any instance,
+ * names the same receipt. Not in the nonce or expiry: those identify one
+ * *token*, and a receipt identifies the *execution* it authorizes.
+ *
+ * An HMAC under its own HKDF-derived key rather than a plain hash, so an id in
+ * a shared store is neither a MAC for anything else nor something a client can
+ * compute to probe the store for another user's calls.
+ */
+export function executionReceiptId(
+  agent: string,
+  claims: PendingCallClaims,
+  options: { secret?: string } = {},
+): string {
+  const key = purposeKey(EXECUTION_RECEIPT_PURPOSE, options.secret);
+  return mac(key, [
+    agent,
+    claims.runId,
+    claims.toolCallId,
+    claims.name,
+    claims.kind,
+    canonicalize(claims.input),
+    canonicalize(claims.path ?? []),
+    subjectField(claims.subject),
+  ]).toString("base64url");
+}
 
 /**
  * Spends a signature's nonce in `store`. `false` means it was already spent —
