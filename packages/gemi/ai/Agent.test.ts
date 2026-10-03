@@ -4950,3 +4950,112 @@ describe("a file the provider refused", () => {
     }
   });
 });
+
+/**
+ * `inputSchema` as a function (#710): resolved once per run from the run's
+ * body and context, shown to the model and used to validate the calls.
+ */
+describe("per-run tool input schemas", () => {
+  const saveItems = (seen: unknown[]) =>
+    AgentTool.create({
+      name: "saveItems",
+      description: "Save items into the page's collection",
+      inputSchema: async (ctx) => {
+        seen.push(ctx.body);
+        const fields = (ctx.body.fields as string[]) ?? [];
+        return s.object({
+          items: s.array(
+            s.fromJSONSchema({
+              type: "object",
+              properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
+              required: fields,
+            }),
+          ),
+        });
+      },
+      outputSchema: anything(),
+      execute: async (input) => ({ saved: input.items.length }),
+    });
+
+  test("the resolved schema is what the model sees and what calls are checked against", async () => {
+    const seen: unknown[] = [];
+    const provider = fakeProvider(
+      [toolCall("c1", "saveItems", { items: [{ name: "a" }] }), finish()],
+      [toolCall("c2", "saveItems", { items: [{ name: "a", price: "1" }] }), finish()],
+      [finish()],
+    );
+    const agent = Agent.create({
+      name: "builder",
+      provider,
+      tools: [saveItems(seen), grep],
+    });
+    const result = await agent
+      .stream({ messages: [], body: { fields: ["name", "price"] } })
+      .result();
+
+    expect(seen).toEqual([{ fields: ["name", "price"] }]);
+    const spec = (provider.calls[0].tools as any[]).find((tool) => tool.name === "saveItems");
+    expect(spec.strict).toBe(true);
+    expect(spec.parameters.properties.items.items.properties).toEqual({
+      name: { type: "string" },
+      price: { type: "string" },
+    });
+    // A fixed sibling is untouched.
+    expect((provider.calls[0].tools as any[]).find((tool) => tool.name === "grep")).toBeDefined();
+
+    const results = partsOf(result.messages, "tool-result");
+    expect(results[0]).toMatchObject({ status: "error", error: { code: "invalid_tool_input" } });
+    expect(results[0].error.message).toContain("items[0].price: expected string, got undefined");
+    expect(results[1]).toMatchObject({ status: "ok", output: { saved: 1 } });
+  });
+
+  test("each run resolves its own schema", async () => {
+    const seen: unknown[] = [];
+    const tool = saveItems(seen);
+    const agent = Agent.create({
+      name: "builder",
+      provider: fakeProvider([finish()]),
+      tools: [tool],
+    });
+    const first = fakeProvider([finish()]);
+    const second = fakeProvider([finish()]);
+    await agent.stream({ messages: [], provider: first, body: { fields: ["a"] } }).result();
+    await agent.stream({ messages: [], provider: second, body: { fields: ["b"] } }).result();
+    const props = (provider: typeof first) =>
+      Object.keys(
+        (provider.calls[0].tools as any[])[0].parameters.properties.items.items.properties,
+      );
+    expect(props(first)).toEqual(["a"]);
+    expect(props(second)).toEqual(["b"]);
+  });
+
+  test("a resolver that throws, or returns a non-object, fails the run before the model is called", async () => {
+    for (const inputSchema of [
+      async () => {
+        throw new Error("collections table is down");
+      },
+      () => s.string() as any,
+    ]) {
+      const provider = fakeProvider([finish()]);
+      const agent = Agent.create({
+        name: "builder",
+        provider,
+        logErrors: false,
+        tools: [
+          AgentTool.create({
+            name: "broken",
+            description: "x",
+            inputSchema,
+            outputSchema: anything(),
+            execute: async () => ({}),
+          }),
+        ],
+      });
+      const result = await agent.stream({ messages: [] }).result();
+      expect(result.finishReason).toBe("error");
+      expect(result.error).toMatchObject({ code: "tool_error" });
+      expect(result.error!.message).toMatch(/Could not resolve the input schema of "broken"/);
+      expect(provider.calls).toHaveLength(0);
+    }
+  });
+});
