@@ -167,6 +167,30 @@ export abstract class GatedCronJob extends CronJob {
 
 That works, and it costs the app the framework's own vocabulary: a job under it reads `async run()` while every page of this documentation reads `async callback()`. The next person to follow the docs writes a `callback`, the base class overrides it, and the job silently does nothing — no error, no output, nothing to notice. It also never reached `onTick` and `onComplete`, which the scheduler calls outside `callback`.
 
+## Running on one instance — `withoutOverlapping` and `onOneServer`
+
+Every instance of the app runs the schedule. Two members keep a job's ticks apart across instances:
+
+```typescript
+import { CronJob, type HeldLock } from "gemi/services";
+
+export class RefreshUsage extends CronJob {
+  name = "refresh-usage";
+  cron = "0 * * * *";
+  onOneServer = true; // each tick runs on one instance only
+  withoutOverlapping = { expiresAfter: 15 * 60_000 }; // never two ticks at once
+
+  async callback(lock?: HeldLock) {
+    await lock?.fence(() => saveSnapshot()); // refused if the lock was lost meanwhile
+  }
+}
+```
+
+- **`onOneServer`**: the first instance to claim a tick's minute runs it, and the others skip it. This assumes the instances' clocks agree to well within a minute.
+- **`withoutOverlapping`**: a tick is skipped while an earlier tick of the same job still runs anywhere. `true` uses a five-minute lease; `expiresAfter` sets it. The lease is renewed while the tick runs, so it only bounds how long the lock outlives an instance that died. The lock is held across `onTick`, `callback` and `onComplete`, and passed to `callback`. If it is lost during the tick, `lock.lost` aborts and the scheduler logs it.
+
+Both use the queue's locks (see [Locks](./jobs-and-queues.md#locks--the-lock-facade)): the `gemi_locks` table with the database queue driver, so they hold across instances, and this process only with the memory driver. Both default to off. A tick that cannot reach the lock store is skipped and logged.
+
 ## Registering jobs — `app/cron/`
 
 Cron jobs are discovered. Every class under `app/cron` that extends `CronJob` is scheduled when the kernel boots, so writing the file is all it takes — there is no list to keep in step with it.

@@ -99,6 +99,20 @@ export type {
 } from "./queue/QueueDriver";
 export { Job } from "./queue/Job";
 
+// Locks: the primitive under unique jobs and cron `withoutOverlapping`.
+export {
+  LockManager,
+  HeldLock,
+  type AcquireOptions,
+  type LockRunResult,
+} from "./lock/LockManager";
+export { LockLostError, type LockStore } from "./lock/LockStore";
+export { MemoryLockStore } from "./lock/MemoryLockStore";
+export {
+  DatabaseLockStore,
+  type DatabaseLockStoreOptions,
+} from "./lock/DatabaseLockStore";
+
 // Events. `Event` shadows the DOM's global of the same name inside a module
 // that imports it, which is what you want in server code and worth knowing in a
 // file that also touches the browser one.

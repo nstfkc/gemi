@@ -6,6 +6,10 @@ import { DatabaseManager } from "../../database/DatabaseManager";
 import { kernelContext } from "../../kernel/context";
 import { deferUntilCommit } from "../../orm/context";
 import { isShuttingDown } from "../../server/shutdown";
+import { DatabaseLockStore } from "../lock/DatabaseLockStore";
+import { LockManager } from "../lock/LockManager";
+import type { LockStore } from "../lock/LockStore";
+import { MemoryLockStore } from "../lock/MemoryLockStore";
 import { DatabaseQueueDriver } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
@@ -170,6 +174,7 @@ export class QueueManager {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** Unknown names already reported as left for another replica; see `run`. */
   private readonly releasedNames = new Set<string>();
+  private lockManager: LockManager | undefined;
 
   /**
    * `application` is entered around every job, so `app()` inside one resolves
@@ -335,6 +340,11 @@ export class QueueManager {
       reportFailure?: boolean;
     } = {},
   ): Promise<string> {
+    // A unique job takes its key before it is recorded; see `pushUnique`.
+    // Computed here so a `uniqueId` that throws does so on the caller's stack.
+    const unique = this.uniqueKey(job, args);
+    if (unique) return this.pushUnique(job, args, unique, options);
+
     // Asked before anything is written, and in the caller's async context,
     // which is where the transaction is. The held branch is the fallback
     // rather than the rule because it loses the job to a crash between the
@@ -367,6 +377,159 @@ export class QueueManager {
       reportFailure: options.reportFailure,
       joins,
     });
+  }
+
+  /**
+   * The locks unique jobs, cron jobs' `withoutOverlapping` and `onOneServer`,
+   * and the `Lock` facade use, over the store the `locks` setting names. Built
+   * on first use, so an app that uses none of them never touches the store.
+   */
+  get locks(): LockManager {
+    this.lockManager ??= new LockManager(this.resolveLockStore());
+    return this.lockManager;
+  }
+
+  private resolveLockStore(): LockStore {
+    const locks = this.config.locks;
+    if (locks === "auto") {
+      const store = this.driver.lockStore?.();
+      if (store) return store;
+      if (this.durable) {
+        console.warn(
+          `[gemi] The queue driver keeps no locks, so unique jobs, ` +
+            `withoutOverlapping and onOneServer only hold within this process. ` +
+            `Set the queue slice's \`locks\` to "database" or a LockStore.`,
+        );
+      }
+      return new MemoryLockStore();
+    }
+    if (locks === "memory") return new MemoryLockStore();
+    if (locks === "database" || typeof locks === "function") {
+      if (!this.application && (locks === "database" || locks.length > 0)) {
+        throw new Error(
+          `The queue's locks need the application they belong to, and this ` +
+            `QueueManager was built without one. Pass { application }.`,
+        );
+      }
+      if (locks === "database") {
+        return new DatabaseLockStore(this.application!.make(DatabaseManager));
+      }
+      return locks(this.application!);
+    }
+    if (typeof locks === "string") {
+      throw new Error(
+        `Unknown queue locks "${locks}". The queue slice's locks is "auto", ` +
+          `"memory", "database", a LockStore, or a function returning one.`,
+      );
+    }
+    return locks;
+  }
+
+  /**
+   * The lock key a dispatch of a unique job takes, or `undefined` for a job
+   * that does not declare `uniqueId` or a dispatch it returned nothing for.
+   */
+  private uniqueKey(job: new () => Job, args: string) {
+    if (job.prototype.uniqueId === Job.prototype.uniqueId) return undefined;
+    const instance = new job();
+    const id = instance.uniqueId(...(JSON.parse(args) as unknown[]));
+    if (id === undefined || id === null || id === "") return undefined;
+    return { key: uniqueLockName(job.name, id), ttl: Math.max(1, instance.uniqueFor) };
+  }
+
+  /**
+   * Records a unique job if its key is free, and otherwise resolves to the id
+   * of the job holding it. The key's lock is owned by the job's id, which is
+   * how the job frees it when it ends and how a duplicate finds it.
+   *
+   * Inside a transaction the whole dispatch waits for the commit, even on a
+   * driver that could join the transaction. The key is taken outside it, so
+   * written on the transaction the job could roll back and leave its key held
+   * for `uniqueFor` with nothing queued under it. A held dispatch resolves to
+   * the id the job will have, and is dropped at the commit if a job with the
+   * same key is queued by then.
+   */
+  private pushUnique(
+    job: new () => Job,
+    args: string,
+    unique: { key: string; ttl: number },
+    options: { reportFailure?: boolean },
+  ): Promise<string> {
+    const id = Bun.randomUUIDv7();
+    const held = deferUntilCommit(() =>
+      this.recordUnique(job, args, unique, id, { report: true, committed: true }).then(
+        () => {},
+        () => {},
+      ),
+    );
+    if (held) return Promise.resolve(id);
+    return this.recordUnique(job, args, unique, id, {
+      report: options.reportFailure !== false,
+      committed: false,
+    });
+  }
+
+  private recordUnique(
+    job: new () => Job,
+    args: string,
+    unique: { key: string; ttl: number },
+    id: string,
+    options: { report: boolean; committed: boolean },
+  ): Promise<string> {
+    const store = this.locks.store;
+    const recorded = (async () => {
+      // A few rounds, for a key freed between a refused `acquire` and the
+      // `holder` read that follows it.
+      for (let round = 0; round < 5; round++) {
+        if ((await store.acquire(unique.key, id, unique.ttl)) !== null) {
+          try {
+            return await this.record(job, args, { id, reportFailure: false });
+          } catch (error) {
+            await store.release(unique.key, id).catch(() => {});
+            throw error;
+          }
+        }
+        const holder = await store.holder(unique.key);
+        if (holder) return holder.owner;
+      }
+      throw new Error(
+        `The unique key "${unique.key}" kept changing hands, so ${job.name} ` +
+          `was not queued.`,
+      );
+    })();
+    recorded.catch((error: unknown) => {
+      if (!options.report) return;
+      console.error(
+        `[gemi] The queue could not record the unique job ${job.name}` +
+          (options.committed
+            ? `, which was held until its transaction committed. The ` +
+              `transaction stays committed; the job did not run and will ` +
+              `not be retried.`
+            : `, so it did not run and will not be retried.`),
+        error,
+      );
+    });
+    return recorded;
+  }
+
+  /**
+   * Frees a unique job's key once the job has ended for good: completed or
+   * dead-lettered. Released by the job's id, so a key a newer dispatch holds
+   * after `uniqueFor` ran out is left alone.
+   */
+  private async releaseUnique(job: Job, args: unknown[], claimed: ClaimedJob) {
+    if (job.uniqueId === Job.prototype.uniqueId) return;
+    try {
+      const id = job.uniqueId(...args);
+      if (id === undefined || id === null || id === "") return;
+      await this.locks.store.release(uniqueLockName(claimed.name, id), claimed.id);
+    } catch (error) {
+      console.error(
+        `[gemi] Could not free the unique key of ${claimed.name} (${claimed.id}); ` +
+          `it frees itself after uniqueFor.`,
+        error,
+      );
+    }
   }
 
   /** `push`, once it is known that the job is recorded now. */
@@ -881,6 +1044,7 @@ export class QueueManager {
         error: error.message,
         retryInMs: null,
       });
+      await this.releaseUnique(job, args, claimed);
       return;
     }
 
@@ -900,6 +1064,7 @@ export class QueueManager {
           job.onDeadletter(error, ...args),
         );
         await this.driver.fail(claimed, { error: recorded, retryInMs: null });
+        await this.releaseUnique(job, args, claimed);
       } else {
         await this.driver.fail(claimed, {
           error: recorded,
@@ -910,7 +1075,13 @@ export class QueueManager {
     }
 
     await this.driver.complete(claimed);
+    await this.releaseUnique(job, args, claimed);
   }
+}
+
+/** The lock a unique job's key takes, namespaced by the job's name. */
+function uniqueLockName(job: string, id: string | number) {
+  return `gemi:job:${job}:${String(id)}`;
 }
 
 function hook(name: string, fn: () => void) {

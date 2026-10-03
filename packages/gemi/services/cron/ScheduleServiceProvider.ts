@@ -1,4 +1,5 @@
 import { kernelContext } from "../../kernel/context";
+import { LockManager } from "../lock/LockManager";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { withDefaults } from "../../support/withDefaults";
 import { discoverCronJobs } from "../discovery";
@@ -83,6 +84,9 @@ export class ScheduleServiceProvider extends ServiceProvider {
     if (process.env.GEMI_NO_SCHEDULE === "1") return;
 
     const app = this.app;
+    // The queue's locks, so `withoutOverlapping` and `onOneServer` hold across
+    // the instances sharing its storage. Resolved per tick that asks.
+    if (app.bound(LockManager)) scheduler.useLocks(() => app.make(LockManager));
     scheduler.start((cb) => kernelContext.run(app, cb));
   }
 

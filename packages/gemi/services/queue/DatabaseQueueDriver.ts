@@ -2,6 +2,7 @@ import type { SQL, TransactionSQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
+import { DatabaseLockStore } from "../lock/DatabaseLockStore";
 import { commitDependsOn, currentConnectionName, currentTransaction } from "../../orm/context";
 import type {
   ClaimOptions,
@@ -221,6 +222,18 @@ export class DatabaseQueueDriver implements QueueDriver {
         (${id}, ${name}, ${args}, 'pending', 0, ${now} + ${this.ms(q, delayMs)}, ${now}, ${now})
     `;
     return id;
+  }
+
+  /**
+   * Locks in the `gemi_locks` table of the same connection, so unique jobs,
+   * `withoutOverlapping` and `onOneServer` hold across every process sharing
+   * this database. The table is only touched when one of those is used.
+   */
+  lockStore(): DatabaseLockStore {
+    return new DatabaseLockStore(
+      { sql: this.sql, dialect: this.dialect, name: this.connection },
+      { busyTimeout: this.busyTimeout },
+    );
   }
 
   joinsTransaction(): boolean {

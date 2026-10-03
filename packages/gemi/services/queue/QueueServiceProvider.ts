@@ -5,6 +5,7 @@ import { ServiceProvider } from "../../support/ServiceProvider";
 import { discoverJobs } from "../discovery";
 import { withDefaults } from "../../support/withDefaults";
 import { queueConfigDefaults, type QueueConfig } from "./config";
+import { LockManager } from "../lock/LockManager";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import {
   claimingTurnedOff,
@@ -34,6 +35,8 @@ export class QueueServiceProvider extends ServiceProvider {
           application: this.app,
         }),
     );
+    // The `Lock` facade's binding: the queue's locks, over its storage.
+    this.app.singleton(LockManager, () => this.app.make(QueueManager).locks);
   }
 
   /**

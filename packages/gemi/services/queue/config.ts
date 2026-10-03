@@ -1,5 +1,6 @@
 import type { Application } from "../../foundation/Application";
 import type { Job } from "./Job";
+import type { LockStore } from "../lock/LockStore";
 import type { QueueDriver } from "./QueueDriver";
 
 // Config key: `queue`. Derived from `QueueServiceProvider`.
@@ -117,6 +118,24 @@ export interface QueueConfig {
    * unknown name there is dead-lettered at once.
    */
   unknownJobGrace?: number;
+
+  /**
+   * Where locks are kept: the ones unique jobs, a cron job's
+   * `withoutOverlapping` and `onOneServer`, and the `Lock` facade take.
+   *
+   * `"auto"`, the default, keeps them where the driver keeps jobs: with
+   * `"database"` that is the `gemi_locks` table of the same connection, so
+   * they hold across every process sharing it; with `"memory"` it is this
+   * process. `"memory"` and `"database"` (the default connection) choose
+   * explicitly, and a `LockStore`, or a function returning one, is used as
+   * given. Nothing is read or written until one of those features is used.
+   */
+  locks?:
+    | "auto"
+    | "memory"
+    | "database"
+    | LockStore
+    | ((application: Application) => LockStore);
 }
 
 export function defineQueueConfig(config: QueueConfig): QueueConfig {
@@ -132,5 +151,6 @@ export function queueConfigDefaults(): Required<QueueConfig> {
     visibilityTimeout: 5 * 60_000,
     pollInterval: 1000,
     unknownJobGrace: 60 * 60_000,
+    locks: "auto",
   };
 }

@@ -1,3 +1,6 @@
+import { type HeldLock, LockManager } from "../lock/LockManager";
+import { LockLostError } from "../lock/LockStore";
+import { MemoryLockStore } from "../lock/MemoryLockStore";
 import type { CronJob } from "./CronJob";
 import type { ScheduleConfig } from "./config";
 
@@ -33,7 +36,7 @@ declare global {
  * `onComplete` in particular runs whether `callback` returned or threw, closer
  * to a `finally` than to a success handler.
  */
-export async function runTick(job: CronJob): Promise<void> {
+export async function runTick(job: CronJob, options: TickOptions = {}): Promise<void> {
   try {
     // Plain truthiness, not `!== false`. The sloppy gate an app writes is
     // `if (!isProduction) return false;`, which returns `undefined` on the path
@@ -58,13 +61,79 @@ export async function runTick(job: CronJob): Promise<void> {
     return;
   }
 
+  const overlap = overlapLease(job.withoutOverlapping);
+  if (!job.onOneServer && overlap === undefined) {
+    await runHooks(job);
+    return;
+  }
+
+  // Fail closed, like the gate: a tick that cannot find out whether it may
+  // run is skipped, and the next one tries again.
+  let locks: LockManager;
+  try {
+    locks = options.locks?.() ?? processLocks();
+    if (job.onOneServer) {
+      const minute = Math.floor((options.now ?? Date.now()) / 60_000);
+      if (!(await locks.store.advance(`gemi:cron-tick:${job.name}`, minute))) return;
+    }
+  } catch (error) {
+    console.error(`Could not claim the tick of cron job ${job.name}; skipped it:`, error);
+    return;
+  }
+  if (overlap === undefined) {
+    await runHooks(job);
+    return;
+  }
+
+  try {
+    await locks.run(`gemi:cron:${job.name}`, { ttl: overlap }, (lock) => runHooks(job, lock));
+  } catch (error) {
+    if (error instanceof LockLostError) {
+      console.error(
+        `Cron job ${job.name} lost its withoutOverlapping lock while running: ` +
+          `another tick may have started alongside it.`,
+        error,
+      );
+    } else {
+      console.error(`Could not take the withoutOverlapping lock of cron job ${job.name}:`, error);
+    }
+  }
+}
+
+/** What `runTick` needs beyond the job. */
+export interface TickOptions {
+  /**
+   * The locks `withoutOverlapping` and `onOneServer` take. The scheduler
+   * passes the queue's, so they hold across instances sharing its storage;
+   * without one they hold within this process only.
+   */
+  locks?: () => LockManager;
+  /** The tick's time, for `onOneServer`. Default now. */
+  now?: number;
+}
+
+const DEFAULT_OVERLAP_LEASE = 5 * 60_000;
+
+function overlapLease(option: CronJob["withoutOverlapping"]): number | undefined {
+  if (!option) return undefined;
+  if (option === true) return DEFAULT_OVERLAP_LEASE;
+  return option.expiresAfter ?? DEFAULT_OVERLAP_LEASE;
+}
+
+let fallbackLocks: LockManager | undefined;
+function processLocks() {
+  fallbackLocks ??= new LockManager(new MemoryLockStore());
+  return fallbackLocks;
+}
+
+async function runHooks(job: CronJob, lock?: HeldLock) {
   try {
     await job.onTick.call(job);
   } catch (error) {
     console.error(`Error executing cron job ${job.name}:`, error);
   }
   try {
-    await job.callback.call(job);
+    await job.callback.call(job, lock);
   } catch (error) {
     console.error(`Error in cron job ${job.name}:`, error);
   }
@@ -119,6 +188,8 @@ export class Scheduler {
    */
   private stopped = false;
 
+  private locks: (() => LockManager) | undefined;
+
   constructor(config: Required<ScheduleConfig>) {
     this.resolved = config.jobs;
   }
@@ -158,6 +229,14 @@ export class Scheduler {
    */
   useJobs(jobs: Array<new () => CronJob>) {
     this.resolved = jobs;
+  }
+
+  /**
+   * Where `withoutOverlapping` and `onOneServer` take their locks. The
+   * provider hands over the queue's, resolved only when a tick needs them.
+   */
+  useLocks(locks: () => LockManager) {
+    this.locks = locks;
   }
 
   /**
@@ -229,7 +308,8 @@ export class Scheduler {
       // without the application context every other line of the tick has.
       const handle = Bun.cron(job.cron, () => {
         if (this.stopped) return;
-        return this.track(job.name, () => run(() => runTick(job)));
+        const locks = this.locks;
+        return this.track(job.name, () => run(() => runTick(job, { locks })));
       });
 
       registry.set(job.name, handle);
