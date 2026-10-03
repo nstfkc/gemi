@@ -1,5 +1,13 @@
 # Unreleased
 
+## `gemi/ai`: circuit breaking for `FallbackProvider` (#742)
+
+`FallbackProvider.chain(entries, { circuit: { failures, cooldownMs } })` skips a leg that has failed `failures` times in a row (default 3) for `cooldownMs` (default 30 000), and then lets one call probe it. It is off unless `circuit` is set, so nothing changes on upgrade. With it on:
+
+- A skipped leg isn't reported to `onUsage`, and `attempt` counts only the legs that were tried. The first leg actually tried is attempt 1 even when it is the chain's second.
+- State is per process by default (`MemoryCircuitStore`). Pass `circuit.store` to share it.
+- Two legs with the same `provider.model` need distinct `circuitKey`s, or the chain throws when it is built.
+
 ## `gemi/ai`: the model that answered is reported (#741)
 
 The `finish` provider event has a new optional field, `model`: the model the vendor says produced the response (`response.model` on the Responses API). It is often not the model you asked for: OpenAI answers `gpt-5.4` with a dated snapshot such as `gpt-5.4-2026-03-05`, and Azure answers a deployment name with the model behind it. `OpenAIProvider` and `AzureOpenAIProvider` now set it whenever the response named its model.

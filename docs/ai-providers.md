@@ -53,8 +53,21 @@ How a call moves through the chain:
 - **Usage per leg.** `onUsage` is called once for each leg that was tried. The report has its `index`, `model` (the leg's configured model), `responseModel` (the model the vendor says answered, such as the dated snapshot behind `gpt-5.4` or the model behind an Azure deployment name; absent when the leg never got a response), `attempt` (1 for the first leg tried in this call), `usage` (when the leg reported any), `outcome` (`ok`, `fallback`, `failed` or `aborted`) and `error`. Tokens billed by abandoned legs are added to the call's closing usage, so the run's usage is what the call actually cost. If `onUsage` throws, the error is ignored.
 - **Which model answered.** The call's closing `finish` event carries `model`, the answering leg's `responseModel`, so code reading the provider stream directly sees it without `onUsage`. The built-in OpenAI and Azure providers set `finish.model` on every call, chain or not.
 - **User aborts.** Stopping the run never tries the next leg.
+- **Circuit breaking** (opt-in). With `circuit` set, a leg that fails `failures` times in a row (default 3) is skipped for `cooldownMs` (default 30 000), so a dead primary stops costing its `timeoutMs` on every call. Only failures the chain falls back on count. A request any model would refuse doesn't count, and a leg that started answering counts as up even if it failed later. After the cool-down, one call tries the leg again: an answer closes the circuit and a failure reopens it. The last leg is never skipped. A skipped leg isn't reported to `onUsage`, and `attempt` counts only the legs that were tried. `onStateChange` is told when a circuit opens or closes.
 - **Capabilities** are the intersection of the legs' capabilities, so a feature one leg lacks is turned off for the whole chain. Without this, a chain could work only while the primary is up.
 - **Uploads** go to the first leg only. A provider's file id only works on that provider's account or resource. Legs on the same Azure resource share files. For a chain across accounts, keep provider file ids out of the fallback path or store attachments with gemi.
+
+```typescript
+const chat = FallbackProvider.chain(entries, {
+  circuit: {
+    failures: 3,
+    cooldownMs: 30_000,
+    onStateChange: ({ model, state }) => log.warn(`${model} circuit ${state}`),
+  },
+});
+```
+
+The circuit state is kept in memory in the process (a `MemoryCircuitStore`). It is shared with the chains that `from()` and `leg()` make from the chain, and not with any other chain. Each instance finds a dead leg on its own, which costs `failures` slow calls per instance per cool-down. To share the state between instances, pass `circuit.store`: any object with `allow(key, policy)` and `record(key, outcome, policy)` (the `CircuitStore` interface). A leg's circuit key is its provider's `model`. Give `circuitKey` to legs that share a model name, such as one model on two Azure resources. A chain whose legs share a key is refused when it is built.
 
 ### Comparing the legs: `evalChain`
 

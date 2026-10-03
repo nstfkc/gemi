@@ -6,6 +6,13 @@ import {
   type ProviderStream,
   type ProviderStreamParams,
 } from "./AgentProvider";
+import {
+  type CircuitOutcome,
+  type CircuitPolicy,
+  type CircuitState,
+  type CircuitStore,
+  MemoryCircuitStore,
+} from "./CircuitStore";
 import { httpErrorDetail } from "./providers/errors";
 import { addUsage, emptyUsage } from "./runtime";
 import type { AgentError, Usage } from "./types";
@@ -52,6 +59,12 @@ export type FallbackEntry = {
    * `capabilities.reasoning` is false.
    */
   reasoning?: ReasoningEffort;
+  /**
+   * The name this leg's circuit is kept under (#742). Default: the provider's
+   * `model`. Set it when two legs share a model name (one model on two Azure
+   * resources), or to share a leg's circuit between chains on purpose.
+   */
+  circuitKey?: string;
 };
 
 /** What `fallbackOn` is told besides the normalized error. */
@@ -78,7 +91,8 @@ export type FallbackUsage = {
    * never got that far or its provider does not report it (#741).
    */
   responseModel?: string;
-  /** 1 for the first leg tried in this call, 2 for the first fallback, and so on. */
+  /** 1 for the first leg tried in this call, 2 for the next one tried, and so
+   *  on. A leg skipped by an open circuit is not tried and not counted. */
   attempt: number;
   /**
    * What the leg reported, including a failed leg that billed tokens (a
@@ -105,6 +119,45 @@ export type FallbackOptions = {
   /** Per-leg usage. An exception thrown here is swallowed: accounting must not
    *  fail the call it is accounting for. */
   onUsage?: (report: FallbackUsage) => void;
+  /**
+   * Skip a leg that keeps failing (#742). Off when omitted; `{}` turns it on
+   * with the defaults. See `FallbackCircuit`.
+   */
+  circuit?: FallbackCircuit;
+};
+
+/**
+ * A circuit breaker per leg. A leg whose calls fail `failures` times in a row,
+ * in a way the chain falls back on (a timeout, a 5xx, a 429 — whatever
+ * `fallbackOn` says yes to), is skipped for `cooldownMs`, so a dead primary
+ * stops costing its `timeoutMs` on every call. After the cool-down one call
+ * tries it again: an answer closes the circuit, a failure opens it for another
+ * cool-down.
+ *
+ * The last leg is never skipped, so a chain always tries something, and its
+ * failures are not counted (it is never asked `fallbackOn`). A leg that started
+ * answering counts as a success even if it failed later: it is up.
+ */
+export type FallbackCircuit = {
+  /** Failures in a row that open a leg's circuit. Default 3. */
+  failures?: number;
+  /** How long an open circuit skips its leg, in milliseconds. Default 30 000. */
+  cooldownMs?: number;
+  /**
+   * Where the state lives. Default: a `MemoryCircuitStore` made for this chain,
+   * shared with the chains `from()` and `leg()` derive from it, and with no
+   * other — so a circuit is per process. See `CircuitStore` for why.
+   */
+  store?: CircuitStore;
+  /** Told when a leg's circuit opens or closes. Exceptions are swallowed. */
+  onStateChange?: (change: FallbackCircuitChange) => void;
+};
+
+export type FallbackCircuitChange = {
+  index: number;
+  model: string;
+  key: string;
+  state: CircuitState;
 };
 
 /** Every event that is content a consumer shows or stores. The first one commits its leg. */
@@ -136,6 +189,13 @@ export class FallbackProvider extends AgentProvider {
   readonly capabilities: ProviderCapabilities;
   readonly entries: readonly FallbackEntry[];
   private readonly options: FallbackOptions;
+  private readonly circuit:
+    | {
+        policy: CircuitPolicy;
+        store: CircuitStore;
+        onStateChange?: (change: FallbackCircuitChange) => void;
+      }
+    | undefined;
 
   constructor(entries: readonly FallbackEntry[], options: FallbackOptions = {}) {
     super();
@@ -150,7 +210,45 @@ export class FallbackProvider extends AgentProvider {
       }
     }
     this.entries = [...entries];
-    this.options = options;
+    const circuit = options.circuit;
+    if (circuit) {
+      const failures = circuit.failures ?? 3;
+      const cooldownMs = circuit.cooldownMs ?? 30_000;
+      if (!Number.isInteger(failures) || failures < 1) {
+        throw new Error(
+          `FallbackProvider: circuit.failures must be a positive integer, got ${failures}.`,
+        );
+      }
+      if (!(cooldownMs > 0)) {
+        throw new Error(
+          `FallbackProvider: circuit.cooldownMs must be a positive number, got ${cooldownMs}.`,
+        );
+      }
+      const keys = new Set<string>();
+      for (const entry of entries) {
+        const key = circuitKey(entry);
+        if (keys.has(key)) {
+          throw new Error(
+            `FallbackProvider: two legs share the circuit key "${key}". ` +
+              "Give one of them a `circuitKey`.",
+          );
+        }
+        keys.add(key);
+      }
+      // Made here, once, and written back into the options, so `from()` and
+      // `leg()` — which pass the options on — share it rather than each
+      // starting with every circuit closed.
+      const store = circuit.store ?? new MemoryCircuitStore();
+      this.options = { ...options, circuit: { ...circuit, store } };
+      this.circuit = {
+        policy: { failures, cooldownMs },
+        store,
+        ...(circuit.onStateChange ? { onStateChange: circuit.onStateChange } : {}),
+      };
+    } else {
+      this.options = options;
+      this.circuit = undefined;
+    }
     this.model = entries[0]!.provider.model;
     this.capabilities = intersect(entries.map((entry) => entry.provider.capabilities));
   }
@@ -205,11 +303,25 @@ export class FallbackProvider extends AgentProvider {
     let billed: Usage | undefined;
     const outer = params.signal;
 
+    let attempt = 0;
+
     for (let index = 0; index < this.entries.length; index++) {
       const entry = this.entries[index]!;
       const last = index === this.entries.length - 1;
-      const attempt = index + 1;
       const model = entry.provider.model;
+
+      // An open circuit skips the leg without a request. Never the last one.
+      if (this.circuit && !last && !(await this.allow(entry))) continue;
+      attempt += 1;
+      // What this leg's call says about its health, told to the breaker once.
+      // Before anything is yielded for it, so a consumer that stops reading
+      // does not leave a half-open probe hanging until it is given up on.
+      let told = false;
+      const tell = async (outcome: CircuitOutcome) => {
+        if (told) return;
+        told = true;
+        await this.record(index, entry, outcome);
+      };
 
       const leg = new AbortController();
       const onAbort = () => leg.abort(outer?.reason);
@@ -281,6 +393,7 @@ export class FallbackProvider extends AgentProvider {
 
           if (isContent(event)) {
             committed = true;
+            await tell("success");
             yield* held.splice(0);
             yield event;
             continue;
@@ -364,6 +477,7 @@ export class FallbackProvider extends AgentProvider {
       // The consumer stopped the run. Not a failure of this leg, and certainly
       // not one to answer by asking the next model.
       if (outer?.aborted) {
+        await tell("none");
         this.report({ index, model, responseModel, attempt, usage, outcome: "aborted" });
         yield closing({
           type: "finish",
@@ -376,6 +490,7 @@ export class FallbackProvider extends AgentProvider {
 
       if (!failure) {
         // Answered with nothing: a finish and no content. That is an answer.
+        await tell("success");
         this.report({ index, model, responseModel, attempt, usage, outcome: "ok" });
         for (const event of held) yield event.type === "finish" ? closing(event) : event;
         return;
@@ -392,6 +507,10 @@ export class FallbackProvider extends AgentProvider {
           ...(failure.requestId !== undefined ? { requestId: failure.requestId } : {}),
         });
 
+      // A leg's failure counts against it only when the chain moves on from
+      // it: a request any model would refuse says nothing about this one. The
+      // last leg is never asked, so its failures are not counted.
+      await tell(fallback ? "failure" : "none");
       this.report({
         index,
         model,
@@ -436,6 +555,33 @@ export class FallbackProvider extends AgentProvider {
     }
   }
 
+  private async allow(entry: FallbackEntry): Promise<boolean> {
+    if (!this.circuit) return true;
+    try {
+      return await this.circuit.store.allow(circuitKey(entry), this.circuit.policy);
+    } catch {
+      // A breaker that cannot be read must not stop the primary being tried.
+      return true;
+    }
+  }
+
+  private async record(index: number, entry: FallbackEntry, outcome: CircuitOutcome) {
+    if (!this.circuit) return;
+    const key = circuitKey(entry);
+    let state: CircuitState | undefined;
+    try {
+      state = await this.circuit.store.record(key, outcome, this.circuit.policy);
+    } catch {
+      return;
+    }
+    if (!state) return;
+    try {
+      this.circuit.onStateChange?.({ index, model: entry.provider.model, key, state });
+    } catch {
+      // Same rule as `onUsage`.
+    }
+  }
+
   private shouldFallBack(error: AgentError, failure: FallbackFailure): boolean {
     const decide = this.options.fallbackOn ?? ((e: AgentError) => e.retryable);
     try {
@@ -454,6 +600,10 @@ export class FallbackProvider extends AgentProvider {
       // See `FallbackOptions.onUsage`.
     }
   }
+}
+
+function circuitKey(entry: FallbackEntry): string {
+  return entry.circuitKey ?? entry.provider.model;
 }
 
 function outcomeOf(error: AgentError): FallbackUsage["outcome"] {
