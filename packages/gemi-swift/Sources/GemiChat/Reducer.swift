@@ -219,6 +219,23 @@ extension ChatState {
       let messageId = message.string("id") ?? ""
       if !runMessageIds.contains(messageId) { runMessageIds.append(messageId) }
 
+    case "message-id":
+      // The client's own copy of its turn, renamed to the id the server stored
+      // it under (gemi #466). A no-op when nothing is under `localId`; when the
+      // server's id is already there too, the local copy is the duplicate.
+      let localId = event["localId"]
+      let messageId = event["messageId"]
+      guard let localId, let messageId,
+        let index = messages.firstIndex(where: { $0.json["id"] == localId })
+      else { return }
+      if messages.contains(where: { $0.json["id"] == messageId }) {
+        messages.remove(at: index)
+      } else {
+        var json = messages[index].json
+        json["id"] = messageId
+        messages[index] = AgentMessage(json: json)
+      }
+
     case "awaiting-input":
       runId = event.string("runId")
       pending = (event["pending"]?.arrayValue ?? []).map {

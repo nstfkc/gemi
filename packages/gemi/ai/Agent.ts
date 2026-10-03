@@ -4211,9 +4211,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.produced.push(message);
       // A sub-run's turn was written by the tool that started it, not typed by
       // the client watching, so nothing on the stream would ever tell that
-      // client it exists (#470). A top-level turn needs no frame: the client
-      // sent it and already has it.
+      // client it exists (#470). A top-level turn is not echoed: the client
+      // sent it and already has it. What it does not have is this id, so it is
+      // told that alone, keyed by the id it gave its own copy (#466).
       if (this.depth > 0) this.emit({ type: "message", message });
+      else if (turn.localId) {
+        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id });
+      }
       await this.report(message);
     }
 

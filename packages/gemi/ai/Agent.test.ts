@@ -3904,6 +3904,47 @@ describe("a nested transcript, watched live and loaded later (#470)", () => {
     expect(events.some((event) => event.type === "message")).toBe(false);
   });
 
+  test("a top-level turn that names its copy is told the id it was stored under (#466)", async () => {
+    const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
+    const stream = greetAgent(provider).stream({
+      messages: [],
+      turn: { text: "hello", localId: "local_1" },
+    });
+    const { events, done } = collect(stream);
+    const result = await stream.result();
+    await done;
+    const user = result.messages.find((message) => message.role === "user")!;
+    expect(events.filter((event) => event.type === "message-id")).toEqual([
+      { type: "message-id", localId: "local_1", messageId: user.id },
+    ]);
+  });
+
+  test("a sub-run's turn comes whole, never as a message-id", async () => {
+    const sub = answeringAgent("researcher", "eleven");
+    const research = nestingTool("research", async (ctx) => {
+      await ctx.runAgent(sub.agent, { prompt: "how many?" });
+      return { ok: true };
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider(
+        [toolCall("c1", "research", {}), finish()],
+        [{ type: "text-delta", delta: "done" }, finish()],
+      ),
+      tools: [research],
+    });
+    const stream = agent.stream({ messages: [], turn: { text: "go", localId: "local_1" } });
+    const { frames, done } = collectWire(stream);
+    await stream.result();
+    await done;
+    const nested = frames
+      .filter((frame) => frame.event.type === "nested-event")
+      .map((frame) => frame.event.event.type);
+    expect(nested).toContain("message");
+    expect(nested).not.toContain("message-id");
+    expect(frames.filter((frame) => frame.event.type === "message-id")).toHaveLength(1);
+  });
+
   test("a resumed sub-run does not stream its seed a second time", async () => {
     const asking = askingAgent("reviewer", "ship it?", [
       { type: "text-delta", delta: "shipped" },

@@ -362,6 +362,26 @@ function reduce<T extends ToolShapes, O>(
       return { ...state, messages, runMessageIds };
     }
 
+    case "message-id": {
+      // The client's own copy of its turn, renamed to the id the server stored
+      // it under (#466). Only the id: the copy is what the user typed and is
+      // already on screen, and the server never sends the turn itself.
+      //
+      // A no-op when nothing is under `localId` — a replay after the rename,
+      // or a client attached from elsewhere that never held the copy. If the
+      // server's id is somehow already there too, the local copy is the
+      // duplicate and goes. Not added to `runMessageIds`: a user message is
+      // complete when it is sent, and `run-end` has nothing to close on it.
+      const index = state.messages.findIndex((message) => message.id === event.localId);
+      if (index === -1) return state;
+      const messages = state.messages.some((message) => message.id === event.messageId)
+        ? state.messages.filter((_, i) => i !== index)
+        : state.messages.map((message, i) =>
+            i === index ? { ...message, id: event.messageId } : message,
+          );
+      return { ...state, messages };
+    }
+
     case "awaiting-input":
       return { ...state, runId: event.runId, pending: [...event.pending] };
 

@@ -206,6 +206,20 @@ public data class ChatState(
         }
       }
 
+      // The client's own copy of its turn, renamed to the id the server stored
+      // it under (gemi #466). A no-op when nothing is under `localId`; when the
+      // server's id is already there too, the local copy is the duplicate.
+      "message-id" -> {
+        val localId = event["localId"]
+        val messageId = event["messageId"]
+        val index = if (localId == null || messageId == null) -1 else messages.indexOfFirst { it.json["id"] == localId }
+        when {
+          index == -1 -> this
+          messages.any { it.json["id"] == messageId } -> copy(messages = messages.filterIndexed { i, _ -> i != index })
+          else -> copy(messages = messages.toMutableList().also { it[index] = AgentMessage(it[index].json.with("id", messageId)) })
+        }
+      }
+
       "awaiting-input" ->
         copy(
           runId = event.string("runId"),
