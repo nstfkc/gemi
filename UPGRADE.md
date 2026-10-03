@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.95.0 to 0.96.0
 
 ## Locale- and time-zone-aware formatting (#670)
 
