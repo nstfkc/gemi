@@ -378,6 +378,42 @@ export interface SqlDialect {
   jsonValueAt(column: string, path: Binder): Fragment;
 
   /**
+   * Whether the JSON value at `path` — the column itself when `path` is
+   * `undefined` — is an **object** holding the key, any of the keys, or all of
+   * them: `has_key`, `has_some_keys`, `has_every_key` (#664).
+   *
+   * `keys` binds a string for `"one"` and a string array for the other two;
+   * `count` is that array's length, which SQLite needs because it tests one
+   * key per term. Postgres binds the array whole, so its text does not depend
+   * on `count` and the plan key collapses the list (`LIST_KEYS` in `plan.ts`).
+   *
+   * **Objects only, on both dialects.** Postgres's `?` also matches a string
+   * *element* of a top-level array; SQLite's path lookup does not. Both forms
+   * are guarded with "the value is an object" so the two answer the same rows:
+   * `has_every_key: []` is "is an object", and `has_some_keys: []` is false.
+   * A key holding the JSON value `null` exists.
+   */
+  jsonHasKeys(
+    column: string,
+    path: Binder | undefined,
+    keys: Binder,
+    mode: "one" | "some" | "every",
+    count: number,
+  ): Fragment;
+
+  /**
+   * `lhs` differs from `rhs`, treating NULL as equal to NULL — the guard
+   * `skipIfUnchanged` adds to an update's `where` (#664).
+   *
+   * `rhs` is the same parameter the `set` binds, so the comparison is against
+   * the stored encoding of the value. A `Json` column compares as JSON rather
+   * than as text: `jsonb` equality on Postgres (key order and whitespace do not
+   * matter), and `json()`-normalised text on SQLite (whitespace does not
+   * matter; key order does).
+   */
+  distinctFrom(lhs: string, rhs: Fragment, field: FieldSchema): Fragment;
+
+  /**
    * `limit`/`offset`. Both are values and therefore parameters — this is the
    * single most tempting place in the compiler to inline a number.
    */

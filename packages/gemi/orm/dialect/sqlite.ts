@@ -269,6 +269,68 @@ export class SqliteDialect implements SqlDialect {
     return concat(sql(`(${column} -> `), param(path), sql(")"));
   }
 
+  /**
+   * `json_type(col, '$."key"') is not null`, one term per key, behind
+   * `json_type(col, '$') = 'object'`.
+   *
+   * The key is appended to the path as a JSON string — `$."a.b"` — which SQLite
+   * reads as one label however many dots, brackets or quotes it holds. Both
+   * paths are bound. `json_each` would take the keys as one parameter, but it
+   * cannot be correlated safely: a column named `key`, `value` or `json`
+   * resolves to `json_each`'s own column inside the subquery, and the filter
+   * silently matches nothing. Measured on SQLite 3.51.
+   */
+  jsonHasKeys(
+    column: string,
+    path: Binder | undefined,
+    keys: Binder,
+    mode: "one" | "some" | "every",
+    count: number,
+  ): Fragment {
+    const base: Binder = (args, context) =>
+      path === undefined ? "$" : (path(args, context) as string);
+
+    const term = (index: number | undefined): Fragment =>
+      concat(
+        sql(`json_type(${column}, `),
+        param((args, context) => {
+          const value = keys(args, context);
+          const key = index === undefined ? value : (value as unknown[])[index];
+          return `${base(args, context)}.${JSON.stringify(String(key))}`;
+        }),
+        sql(") is not null"),
+      );
+
+    const terms =
+      mode === "one"
+        ? [term(undefined)]
+        : Array.from({ length: count }, (_, index) => term(index));
+
+    const body =
+      terms.length === 0
+        ? sql(mode === "some" ? "0" : "1")
+        : joinFragments(terms, mode === "every" ? " and " : " or ");
+
+    return concat(
+      sql(`(json_type(${column}, `),
+      param(base),
+      sql(") = 'object' and ("),
+      body,
+      sql("))"),
+    );
+  }
+
+  /**
+   * `is not`, SQLite's null-safe inequality. A `Json` column is stored as text,
+   * so both sides go through `json()` first and whitespace stops mattering.
+   */
+  distinctFrom(lhs: string, rhs: Fragment, field: FieldSchema): Fragment {
+    if (field.type === "Json" && !field.isList) {
+      return concat(sql(`json(${lhs}) is not json(`), rhs, sql(")"));
+    }
+    return concat(sql(`${lhs} is not `), rhs);
+  }
+
   jsonArrayContains(): Fragment {
     // Unreachable: `jsonFilters` does not list it, so `where.ts` refuses first
     // with a message naming the dialect. Throwing here rather than returning

@@ -307,6 +307,61 @@ export class PostgresDialect implements SqlDialect {
   }
 
   /**
+   * `jsonb_typeof(doc) = 'object' and doc ? $1` — and `?|` / `?&` with a
+   * `text[]` for the list forms, so every list length is one statement.
+   *
+   * The operators rather than `jsonb_exists()`: only the operator form can use
+   * a GIN index on the column. `?` is not a placeholder here — Postgres numbers
+   * its parameters `$n` — so nothing has to escape it. The `::jsonb` keeps a
+   * `@db.Json` column working, which has no `?` operator of its own.
+   */
+  jsonHasKeys(
+    column: string,
+    path: Binder | undefined,
+    keys: Binder,
+    mode: "one" | "some" | "every",
+  ): Fragment {
+    const doc = (): Fragment =>
+      path === undefined
+        ? sql(`(${column})::jsonb`)
+        : concat(sql("("), this.jsonExtract(column, path, false), sql(")::jsonb"));
+
+    const operand =
+      mode === "one"
+        ? concat(param(keys), sql("::text"))
+        : concat(
+            param((args, context) =>
+              arrayLiteral((keys(args, context) as unknown[]) ?? []),
+            ),
+            sql("::text[]"),
+          );
+
+    const operator = mode === "one" ? "?" : mode === "some" ? "?|" : "?&";
+
+    return concat(
+      sql("(jsonb_typeof("),
+      doc(),
+      sql(") = 'object' and "),
+      doc(),
+      sql(` ${operator} `),
+      operand,
+      sql(")"),
+    );
+  }
+
+  /**
+   * `is distinct from`, with the column cast to `jsonb` for a `Json` field so a
+   * `@db.Json` column compares too — `json` has no equality operator.
+   */
+  distinctFrom(lhs: string, rhs: Fragment, field: FieldSchema): Fragment {
+    const json = field.type === "Json" && !field.isList;
+    return concat(
+      sql(json ? `(${lhs})::jsonb is distinct from ` : `${lhs} is distinct from `),
+      rhs,
+    );
+  }
+
+  /**
    * `("col" #> $1) @> $2` — containment, which is what Prisma's
    * `array_contains` compiles to and why it accepts both a scalar and a list:
    * `@>` asks whether the left document contains the right one, and a bare

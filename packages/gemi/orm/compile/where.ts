@@ -972,6 +972,84 @@ export type JsonFilterName = (typeof JSON_FILTER_NAMES)[number];
 const JSON_FILTERS: ReadonlySet<string> = new Set(JSON_FILTER_NAMES);
 
 /**
+ * The key-exists filters on a `Json` column (#664). Not Prisma's — it has no
+ * way to ask whether a document holds a key — so they are kept apart from
+ * {@link JSON_FILTER_NAMES}, whose whole job is to track Prisma's set.
+ *
+ *     where: { payload: { has_key: "a" } }
+ *     where: { payload: { has_some_keys: ["a", "b"] } }
+ *     where: { payload: { has_every_key: ["a", "b"] } }
+ *     where: { payload: { path: ["meta"], has_key: "a" } }
+ *
+ * Named after Postgres's `?`, `?|` and `?&`, in the snake case the neighbouring
+ * JSON filters use. They work on the column and at a `path`, on both dialects;
+ * the value there has to be an object (see `SqlDialect.jsonHasKeys`).
+ */
+export const JSON_KEY_FILTER_NAMES = [
+  "has_key",
+  "has_some_keys",
+  "has_every_key",
+] as const;
+
+/** One of {@link JSON_KEY_FILTER_NAMES}. */
+export type JsonKeyFilterName = (typeof JSON_KEY_FILTER_NAMES)[number];
+
+const JSON_KEY_FILTERS: ReadonlySet<string> = new Set(JSON_KEY_FILTER_NAMES);
+
+/**
+ * `has_key` / `has_some_keys` / `has_every_key`, on the column (`path`
+ * undefined) or at a path.
+ *
+ * The operand is checked when it is bound, not when the plan is compiled: on
+ * Postgres the list collapses to one plan-key entry whatever it holds, so a
+ * check made only at compile time would be skipped by every warm call.
+ */
+function jsonKeyFilter(
+  schema: ModelSchema,
+  field: FieldSchema,
+  column: string,
+  key: string,
+  operand: unknown,
+  context: WhereContext,
+  path: Binder | undefined,
+  at: Binder,
+): Fragment {
+  const many = key !== "has_key";
+  const argument = `where.${field.name}.${key}`;
+
+  const check = (value: unknown): unknown => {
+    const valid = many
+      ? Array.isArray(value) && value.every((item) => typeof item === "string")
+      : typeof value === "string";
+    if (!valid) {
+      throw new InvalidArgumentError(
+        argument,
+        schema.name,
+        context.operation,
+        many
+          ? `Expected an array of key names, like ['a', 'b'].`
+          : `Expected a key name, like 'a'.`,
+      );
+    }
+    return value;
+  };
+
+  // Both: at compile time because SQLite compiles an empty list's terms from
+  // the operand and would never call the binder, and at bind time for the
+  // reason above.
+  check(operand);
+  const checked: Binder = (args, bind) => check(at(args, bind));
+
+  return context.dialect.jsonHasKeys(
+    column,
+    path,
+    checked,
+    key === "has_key" ? "one" : key === "has_some_keys" ? "some" : "every",
+    Array.isArray(operand) ? operand.length : 0,
+  );
+}
+
+/**
  * `where: { metadata: { path: …, equals: … } }`.
  *
  * **Two dialects, two path grammars, and that is Prisma's split rather than
@@ -1059,7 +1137,7 @@ function compileJsonFilter(
       `${field.name}.path`,
       schema.name,
       context.operation,
-      `A 'path' needs a filter beside it — ${[...JSON_FILTERS].sort().join(", ")}. ` +
+      `A 'path' needs a filter beside it — ${[...JSON_FILTERS, ...JSON_KEY_FILTERS].sort().join(", ")}. ` +
         `Prisma refuses a bare path too.`,
     );
   }
@@ -1067,12 +1145,21 @@ function compileJsonFilter(
   const parts: Fragment[] = [];
 
   for (const key of applied) {
+    if (JSON_KEY_FILTERS.has(key)) {
+      parts.push(
+        jsonKeyFilter(schema, field, column, key, filter[key], context, path, (args) =>
+          locate(args)?.[key],
+        ),
+      );
+      continue;
+    }
+
     if (!JSON_FILTERS.has(key)) {
       throw new UnsupportedQueryError(
         `${field.name}.${key}`,
         schema.name,
         context.operation,
-        `A JSON path filter takes ${[...JSON_FILTERS].sort().join(", ")}.`,
+        `A JSON path filter takes ${[...JSON_FILTERS, ...JSON_KEY_FILTERS].sort().join(", ")}.`,
       );
     }
 
@@ -1642,6 +1729,18 @@ function compileFieldFilter(
   for (const key of keys) {
     const operand = filter[key];
     if (operand === undefined || key === "mode") continue;
+
+    // The key-exists filters, on the column itself (#664). Before the operator
+    // check because they are not scalar operators, and only on a `Json` field —
+    // anywhere else the key falls through to that check and is refused.
+    if (field.type === "Json" && JSON_KEY_FILTERS.has(key)) {
+      parts.push(
+        jsonKeyFilter(schema, field, column, key, operand, context, undefined, (args) =>
+          locate(args)?.[key],
+        ),
+      );
+      continue;
+    }
 
     if (!OPERATORS.has(key)) {
       throw new InvalidArgumentError(

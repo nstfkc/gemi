@@ -723,6 +723,43 @@ On SQLite the error names the dialect and says so. If a batch is too large for o
 split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
 in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
 
+### Skipping updates that change nothing
+
+```ts
+await AsyncJob.update({ where: { id }, data, skipIfUnchanged: true })
+await AsyncJob.updateMany({ where, data, skipIfUnchanged: true })   // { count } of rows written
+```
+
+A row is written only when at least one assigned column would change. The check is part of the
+`UPDATE` itself — `where … and ("status" is distinct from $1 or …)` — so it costs no extra read and
+cannot race with a concurrent write. A row that would not change keeps its `@updatedAt`, which then
+means "last real change" rather than "last time something saved this row".
+
+- **`update` still returns the row.** When nothing changed it is read back with the same `where`,
+  `select` / `include` / `omit` and policies, so the caller cannot tell the two apart by shape;
+  compare `updatedAt` if it matters. A row that does not exist is still `RecordNotFoundError`.
+- **`updateMany` counts only the rows it wrote.**
+- **`increment`, `decrement`, `multiply`, `divide` and `push` always write**, so a `data` holding
+  one of them is a plain update. `{ set: value }` compares like a bare value.
+- **A nested relation write is refused** next to `skipIfUnchanged`: whether the parent "changed"
+  when only its children did has no single answer. Write the relation in its own call.
+- **`Json` compares as JSON.** On Postgres it is `jsonb` equality, so key order and whitespace do not
+  matter. On SQLite the stored text is compared after `json()`, which ignores whitespace but not key
+  order — the same document with its keys reordered counts as a change and is written.
+- Policies run as usual: `onUpdate` sees the `data`, and `redact` sees the returned row.
+
+To make it the default for a model, set `$skipNoopUpdates`. A call can still pass
+`skipIfUnchanged: false`:
+
+```ts
+export class AsyncJob extends AsyncJobModel {
+  static $skipNoopUpdates = true
+}
+```
+
+The default covers the `update` and `updateMany` calls your code makes. It does not reach the
+updates the ORM runs for a nested relation write, or the `update` half of an `upsert`.
+
 ### JSON path filters
 
 ```ts
@@ -852,6 +889,30 @@ await User.findMany({ where: { metadata: [1, 2] } })                        // a
 `not` is the exception, and it is a filter too: it takes a whole nested filter, so
 `{ metadata: { not: { path: ["a"], equals: 1 } } }` is a negated path filter, while
 `{ metadata: { equals: { … } } }` binds its operand as a value.
+
+### JSON key filters
+
+```ts
+await AsyncJob.findMany({ where: { payload: { has_key: "folioAiWorkspace" } } })
+await AsyncJob.findMany({
+  where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } },
+})
+await AsyncJob.findMany({ where: { payload: { has_every_key: ["a", "b"] } } })
+await AsyncJob.findMany({ where: { payload: { path: ["meta"], has_key: "b" } } })   // postgres path
+```
+
+Whether the document — or the value at `path` — is an **object** holding the key, any of the keys,
+or all of them. They work on both dialects, on the column and at a path, and combine with the other
+JSON filters. Prisma has no equivalent; the names follow Postgres's `?`, `?|` and `?&` in the snake
+case the other JSON filters use.
+
+- A key holding the JSON value `null` exists.
+- Only objects have keys. Postgres's `?` would also match a string *element* of an array; gemi
+  checks for an object first on both dialects, so `["a"]` does not have the key `"a"`.
+- `has_some_keys: []` matches nothing; `has_every_key: []` matches every object.
+- On Postgres they compile to the `?`, `?|` and `?&` operators, so a GIN index on the column is
+  used. The list forms bind one `text[]` whatever their length. On SQLite each key is a bound
+  `json_type(column, '$."key"')` lookup.
 
 ### Scalar lists (Postgres only)
 
