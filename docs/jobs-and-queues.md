@@ -358,6 +358,76 @@ See [Project Structure](./project-structure.md) for the full kernel layout.
 
 > **Note:** With the default memory driver the queue is **in-memory**: enqueued jobs do not survive a restart, and a job runs in the server process that dispatched it (or, for `worker` jobs, a Worker thread it spawns). Use it for best-effort background work (translations, image processing, notifications). For work that must survive restarts, or to run jobs in [worker processes](#worker-processes--gemi-queuework) of their own, use the [database driver](#the-database-driver), and make the jobs idempotent.
 
+## Unique jobs and locks
+
+### Unique jobs — `uniqueId`
+
+A job that returns a key from `uniqueId` is queued at most once per key. While a job with that key is waiting or running, another dispatch is not queued and resolves to the existing job's id:
+
+```typescript
+import { Job } from "gemi/services";
+
+export class RebuildReport extends Job {
+  static name = "RebuildReport";
+  uniqueFor = 10 * 60_000; // the key frees itself after this at the latest (default one hour)
+
+  uniqueId(reportId: string) {
+    return `report:${reportId}`; // return undefined to make one dispatch not unique
+  }
+
+  async run(reportId: string) {
+    // ...
+  }
+}
+
+const a = await RebuildReport.dispatch("42");
+const b = await RebuildReport.dispatch("42"); // b === a while that job waits or runs
+```
+
+The key is freed when the job completes or is dead-lettered, not between retries. With the database driver the key is a row in `gemi_locks`, so it holds across every process sharing the database. Inside a transaction, a unique dispatch waits for the commit (also on a driver that could write it on the transaction), and is dropped at the commit if a job with that key was queued by then.
+
+### Locks — the `Lock` facade
+
+Underneath is a lock with a lease and a fencing token. The queue keeps it where it keeps jobs: the `gemi_locks` table with the database driver, this process's memory with the memory driver. No Redis is needed.
+
+```typescript
+import { Lock } from "gemi/facades";
+
+const result = await Lock.run("usage-snapshot", { ttl: 60_000 }, async (lock) => {
+  const usage = await heavyQuery({ signal: lock.lost });
+  // Commits only if this process still holds the lock; refused with LockLostError otherwise.
+  await lock.fence(() => UsageSnapshot.upsert({ where: { id: 1 }, create: usage, update: usage }));
+  return usage;
+});
+if (!result.acquired) {
+  // another process is computing it
+}
+```
+
+- **`Lock.run(name, { ttl, wait }, fn)`** takes the lock, renews the lease every third of `ttl` while `fn` runs, and releases it after. It resolves `{ acquired: false }` if the lock is held (after waiting up to `wait` milliseconds, default no wait).
+- **`lock.token`** grows with each new holder of the name. Store it beside a write if another system must refuse older holders.
+- **`lock.lost`** is an `AbortSignal`. It aborts when a renewal finds another holder, or when the lease runs out by this process's clock without a successful renewal (for example while the database is unreachable). If the hold was lost, `Lock.run` rejects with `LockLostError` after `fn` settles instead of resolving.
+- **`lock.fence(fn)`** runs `fn` in a transaction that first locks the lock's row and checks the hold is current. ORM writes inside it commit only while this process holds the lock, and a new holder waits for the commit. A stale holder's fenced write is refused.
+- **`Lock.acquire(name, options)`** returns the `HeldLock` (or `null`) for manual use. Release it with `lock.release()`; it is not renewed unless you pass `renew: true`.
+
+With the database driver, add the table. With Prisma:
+
+```prisma
+model GemiLock {
+  name      String @id
+  owner     String
+  token     BigInt @default(0)
+  expiresAt BigInt @map("expires_at")
+  updatedAt BigInt @map("updated_at")
+
+  @@map("gemi_locks")
+}
+```
+
+Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, or the `Lock` facade is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
+
+The queue slice's `locks` picks another store: `"auto"` (the default: the driver's own), `"memory"`, `"database"` (the default connection), a `LockStore`, or `(app) => LockStore`.
+
 ## When to use a job
 
 Reach for a job when work is:

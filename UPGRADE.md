@@ -1,3 +1,13 @@
+# Unreleased
+
+## Cross-instance locks: unique jobs, `withoutOverlapping` and `onOneServer` (#662)
+
+A queued job can declare `uniqueId(...args)` (and `uniqueFor`, default one hour). While a job with that key is waiting or running, another dispatch is not queued and resolves to the existing job's id. Cron jobs take `withoutOverlapping = true | { expiresAfter }` (skip a tick while the last one still runs on any instance) and `onOneServer = true` (each tick runs on one instance). Underneath is a lock with a lease and a fencing token, also available as the `Lock` facade (`Lock.run`, `Lock.acquire`, `lock.fence`, `lock.lost`).
+
+The locks live where the queue keeps jobs. With `driver: "database"` that is a new `gemi_locks` table on the same connection, so add the `GemiLock` model from the docs to `schema.prisma` (or call `createTable()`) before using any of these. With the memory driver they only hold within one process. The queue slice's new `locks` setting chooses another store.
+
+No change is needed to upgrade: everything is opt-in, and nothing touches `gemi_locks` until a unique job, a locked cron job or `Lock` is used. A cron job's `callback` now receives the lock as an optional argument, which existing callbacks ignore.
+
 # Upgrading from 0.92.0 to 0.93.0
 
 ## ORM: skip no-op updates, and JSON key-exists filters (#664)

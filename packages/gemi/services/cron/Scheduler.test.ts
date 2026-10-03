@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Application } from "../../foundation/Application";
 import { Repository } from "../../support/Repository";
+import { LockManager } from "../lock/LockManager";
+import { MemoryLockStore } from "../lock/MemoryLockStore";
 import { CronJob } from "./CronJob";
 import { ScheduleServiceProvider } from "./ScheduleServiceProvider";
 import { Scheduler, runTick } from "./Scheduler";
@@ -651,5 +653,84 @@ describe("the provider's shutdown", () => {
     });
     expect(log).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
+  });
+});
+
+describe("withoutOverlapping and onOneServer (#662)", () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test("off by default: overlapping ticks both run", async () => {
+    let runs = 0;
+    class Plain extends CronJob {
+      name = "plain";
+      cron = "* * * * *";
+      async callback() {
+        runs++;
+        await sleep(50);
+      }
+    }
+    const job = new Plain();
+    await Promise.all([runTick(job), runTick(job)]);
+    expect(runs).toBe(2);
+  });
+
+  test("a tick that starts while the last one runs is skipped, hooks and all", async () => {
+    const calls: string[] = [];
+    class Slow extends CronJob {
+      name = "slow-662";
+      cron = "* * * * *";
+      withoutOverlapping = true;
+      onTick() {
+        calls.push("tick");
+      }
+      async callback(lock?: unknown) {
+        calls.push(lock ? "callback with lock" : "callback");
+        await sleep(50);
+      }
+      onComplete() {
+        calls.push("complete");
+      }
+    }
+    const job = new Slow();
+    await Promise.all([runTick(job), runTick(job)]);
+    expect(calls).toEqual(["tick", "callback with lock", "complete"]);
+    await runTick(job);
+    expect(calls).toHaveLength(6);
+  });
+
+  test("onOneServer runs a minute's tick once", async () => {
+    let runs = 0;
+    class Once extends CronJob {
+      name = "once-662";
+      cron = "* * * * *";
+      onOneServer = true;
+      callback() {
+        runs++;
+      }
+    }
+    const now = Date.UTC(2026, 0, 1, 12, 0, 5);
+    await runTick(new Once(), { now });
+    await runTick(new Once(), { now: now + 20_000 });
+    expect(runs).toBe(1);
+    await runTick(new Once(), { now: now + 60_000 });
+    expect(runs).toBe(2);
+  });
+
+  test("a lock store that fails skips the tick", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    let runs = 0;
+    class Locked extends CronJob {
+      name = "locked-662";
+      cron = "* * * * *";
+      withoutOverlapping = true;
+      callback() {
+        runs++;
+      }
+    }
+    const store = new MemoryLockStore();
+    store.acquire = () => Promise.reject(new Error("db down"));
+    await runTick(new Locked(), { locks: () => new LockManager(store) });
+    expect(runs).toBe(0);
+    expect(error).toHaveBeenCalled();
   });
 });

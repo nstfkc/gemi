@@ -40,6 +40,8 @@
  * computed on the dispatching machine would carry that machine's skew into
  * every other one.
  */
+import type { LockStore } from "../lock/LockStore";
+
 export interface QueueDriver {
   /**
    * Records a job and returns its id. The job is claimable once `delayMs` has
@@ -135,6 +137,15 @@ export interface QueueDriver {
    * that cannot guarantee it should leave this out and be polled.
    */
   subscribe?(wake: () => void): () => void;
+
+  /**
+   * A `LockStore` over the same storage, for the locks the queue and the
+   * scheduler take: unique jobs, `withoutOverlapping` and `onOneServer`, and
+   * the `Lock` facade. Optional: without it the locks are kept in this
+   * process's memory, which only serializes work within one process. Called
+   * once per manager.
+   */
+  lockStore?(): LockStore;
 }
 
 export type EnqueueJob = {

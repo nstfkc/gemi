@@ -12,9 +12,47 @@ export type CronExpression =
   | "@hourly"
   | (string & {});
 
+import type { HeldLock } from "../lock/LockManager";
+
+export type WithoutOverlapping =
+  | boolean
+  | {
+      /**
+       * The lock's lease, in milliseconds: how long it outlives an instance
+       * that died holding it. Renewed every third of this while the tick
+       * runs, so it does not limit how long a tick may take. Default five
+       * minutes.
+       */
+      expiresAfter?: number;
+    };
+
 export class CronJob {
   name: string;
   cron: CronExpression;
+
+  /**
+   * Skips a tick while an earlier tick of this job is still running, on this
+   * instance or any other sharing the queue's storage. With the database
+   * queue driver that is a lock row in `gemi_locks`; with the memory driver
+   * it only covers this process.
+   *
+   * The lock is held across `onTick`, `callback` and `onComplete`, and handed
+   * to `callback` as its argument. If its lease is lost while the tick runs
+   * (the instance stalled past `expiresAfter`), `lock.lost` aborts and the
+   * scheduler logs it. Writes that must not land after that go through
+   * `lock.fence(...)`.
+   *
+   * It does not stop a second instance from running the same tick after the
+   * first one finished; `onOneServer` does.
+   */
+  withoutOverlapping: WithoutOverlapping = false;
+
+  /**
+   * Runs each tick on one instance only, across every instance sharing the
+   * queue's storage: the first to claim the tick's minute runs it, the others
+   * skip it. Assumes the instances' clocks agree to well within a minute.
+   */
+  onOneServer = false;
 
   /**
    * Decides whether this tick happens at all. Evaluated once per tick, before
@@ -74,7 +112,11 @@ export class CronJob {
     return true;
   }
 
-  callback(): Promise<void> | void {}
+  /**
+   * The tick's work. `lock` is the `withoutOverlapping` lock when the job
+   * declares one.
+   */
+  callback(_lock?: HeldLock): Promise<void> | void {}
   onTick(): Promise<void> | void {}
   onComplete(): Promise<void> | void {}
 

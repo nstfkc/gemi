@@ -14,6 +14,26 @@ export class Job {
    */
   backoff: number | number[] = 0;
 
+  /**
+   * Makes the job unique per key, across every process sharing the queue's
+   * storage. Return a key from the dispatch arguments, or `undefined` for a
+   * dispatch that should not be unique. While a job with the same key is
+   * waiting or running, another dispatch is not queued: it resolves to the
+   * id of the job already there. The key is freed when that job completes or
+   * is dead-lettered, and at the latest after `uniqueFor`.
+   *
+   * The default returns `undefined`: a job is not unique unless it says so.
+   */
+  uniqueId(..._args: any[]): string | number | undefined | null {
+    return undefined;
+  }
+
+  /**
+   * How long a unique job's key is held at most, in milliseconds, so a job
+   * lost with its process does not block its key forever. Default one hour.
+   */
+  uniqueFor = 60 * 60_000;
+
   run(..._args: any[]): Promise<any> | any {}
 
   onFail(_error: Error, ..._args: any[]): void {}

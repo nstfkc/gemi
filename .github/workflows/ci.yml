@@ -514,6 +514,12 @@ jobs:
         run: bun --bun vitest run services/queue/DatabaseQueueDriver.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
 
+      # The lock store, unique jobs and cron withoutOverlapping/onOneServer
+      # across several clients on one database (#662).
+      - name: Locks on Postgres and MySQL
+        run: bun --bun vitest run services/lock/DatabaseLockStore.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+
       # `DB.schema()` reads a different catalog per dialect, and the servers
       # are already here. The filter selects nothing at all if the URLs go
       # missing, which would read as a pass, so the suite is told to fail
