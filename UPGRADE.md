@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.99.0 to 0.100.0
 
 ## `gemi/ai`: circuit breaking for `FallbackProvider` (#742)
 
