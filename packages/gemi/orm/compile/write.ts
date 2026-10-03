@@ -83,8 +83,8 @@ import { assertListDialect, compileWhere } from "./where";
 export const WRITE_ARGS: Record<string, Set<string>> = {
   create: new Set(["data", "select", "include", "omit"]),
   createMany: new Set(["data", "skipDuplicates"]),
-  update: new Set(["data", "where", "select", "include", "omit"]),
-  updateMany: new Set(["data", "where"]),
+  update: new Set(["data", "where", "select", "include", "omit", "skipIfUnchanged"]),
+  updateMany: new Set(["data", "where", "skipIfUnchanged"]),
   delete: new Set(["where", "select", "include", "omit"]),
   deleteMany: new Set(["where"]),
   upsert: new Set(["where", "create", "update", "select", "include", "omit"]),
@@ -523,12 +523,23 @@ function compileUpdate(
     dialect,
   );
 
-  const where = compileWhere(
+  const filter = compileWhere(
     schema,
     args?.where,
     { dialect, operation: op },
     (callArgs) => callArgs?.where,
   );
+
+  // `skipIfUnchanged` (#664): the write only happens to a row that some
+  // assigned column would actually change. `undefined` when not asked, or when
+  // the data cannot be a no-op.
+  const unchanged = noopGuard(schema, args, op, dialect, nested);
+  const where =
+    unchanged === undefined
+      ? filter
+      : filter
+        ? concat(sql("("), filter, sql(") and "), unchanged)
+        : unchanged;
 
   // MEASURED (Prisma 6.19.2, SQLite): `updateMany({ where, data: {} })` is
   // accepted and answers `{ count: 0 }` — with three rows in the table and two
@@ -591,7 +602,7 @@ function compileUpdate(
         sql(`select `),
         returning.selected,
         sql(` from ${dialect.quoteIdent(schema.table)}`),
-        where ? concat(sql(" where "), where) : sql(""),
+        filter ? concat(sql(" where "), filter) : sql(""),
       )
     : concat(
         sql(`update ${dialect.quoteIdent(schema.table)} set `),
@@ -601,6 +612,99 @@ function compileUpdate(
       );
 
   return plan(schema, statement, dialect, op, returning, nested);
+}
+
+/**
+ * The `where` an update gains under `skipIfUnchanged: true` (#664): at least one
+ * assigned column is distinct from the value being written.
+ *
+ *     update "Job" set "status" = $1, "updatedAt" = $2
+ *     where ("id" = $3) and ("status" is distinct from $4)
+ *
+ * Done in the statement rather than by reading the row first, so it costs no
+ * round trip and cannot race: the comparison and the write see the same row
+ * under the same lock. A row that would not change is not written at all, so
+ * its `@updatedAt` stays where it was — `@updatedAt` itself is never one of
+ * the compared columns, since it is the stamp rather than the change.
+ *
+ * Returns `undefined` — write as usual — when:
+ *
+ * - the option is not `true`;
+ * - `data` sets no column (the update already reads the row instead);
+ * - any assignment is an operator that changes the value by construction
+ *   (`increment`, `decrement`, `multiply`, `divide`, `push`). Comparing
+ *   `n + 1` with `n` is a write either way, and a `{ increment: 0 }` is not
+ *   worth a second code path.
+ *
+ * Nested relation writes are refused rather than guessed at: whether the parent
+ * "changed" when only its children did has no single right answer, and the
+ * nested steps assume the parent row was written.
+ */
+function noopGuard(
+  schema: ModelSchema,
+  args: any,
+  op: Operation,
+  dialect: SqlDialect,
+  nested: NestedWritePlanning | undefined,
+): Fragment | undefined {
+  const requested = args?.skipIfUnchanged;
+  if (requested === undefined || requested === false) return undefined;
+
+  if (requested !== true) {
+    throw new InvalidArgumentError(
+      "skipIfUnchanged",
+      schema.name,
+      op,
+      `Expected true or false, received ${describe(requested)}.`,
+    );
+  }
+
+  if (
+    nested !== undefined &&
+    (nested.contributions.length > 0 ||
+      nested.before.length > 0 ||
+      nested.after.length > 0)
+  ) {
+    throw new UnsupportedQueryError(
+      "skipIfUnchanged",
+      schema.name,
+      op,
+      "skipIfUnchanged compares the row's own columns, so it cannot be " +
+        "combined with a nested relation write. Write the relation in a " +
+        "separate call.",
+    );
+  }
+
+  const data = args.data as Record<string, unknown>;
+  const terms: Fragment[] = [];
+
+  for (const name of suppliedFields(schema, data)) {
+    const field = schema.fields[name];
+    const value = data[name];
+    let at: (callArgs: any) => any = (callArgs) => callArgs?.data?.[name];
+
+    if (isOperatorObject(value, field)) {
+      const operators = Object.keys(value as Record<string, unknown>).filter(
+        (key) => (value as Record<string, unknown>)[key] !== undefined,
+      );
+      // Anything but a lone `set` always changes the value — or is refused by
+      // `assignment`, which has already run and said so.
+      if (operators.length !== 1 || operators[0] !== "set") return undefined;
+      at = (callArgs) => callArgs?.data?.[name]?.set;
+    }
+
+    terms.push(
+      dialect.distinctFrom(
+        dialect.quoteIdent(field.column),
+        fieldParam(field, dialect, valueBinder(schema, op, field, dialect, at)),
+        field,
+      ),
+    );
+  }
+
+  if (terms.length === 0) return undefined;
+
+  return concat(sql("("), joinFragments(terms, " or "), sql(")"));
 }
 
 // --- delete / deleteMany ---------------------------------------------------

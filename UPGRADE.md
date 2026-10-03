@@ -1,3 +1,17 @@
+# Unreleased
+
+## ORM: skip no-op updates, and JSON key-exists filters (#664)
+
+`update` and `updateMany` take `skipIfUnchanged: true`. A row is written only when an assigned column would change, so a no-op update no longer bumps `@updatedAt`. The check is in the `UPDATE`'s `where`, so it costs no extra read. `update` still returns the row; `updateMany` counts only the rows it wrote. `static $skipNoopUpdates = true` on a model makes it the default for that model's `update` / `updateMany` calls, and a call can pass `skipIfUnchanged: false` to opt out.
+
+`Json` columns take `has_key`, `has_some_keys` and `has_every_key`, on the column and at a `path`, on Postgres and SQLite:
+
+```ts
+await AsyncJob.findMany({ where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } } });
+```
+
+No change is needed to upgrade: both are opt-in, and existing updates and filters behave as before.
+
 # Upgrading from 0.91.1 to 0.92.0
 
 ## Typed error responses: `HttpResponse.error` / `httpError` (#665)

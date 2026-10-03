@@ -90,7 +90,11 @@ import type {
   ExistingRowStatement,
   NestedWriteStatement,
 } from "./compile/nested-writes";
-import type { JsonFilterName, ListFilterName } from "./compile/where";
+import type {
+  JsonFilterName,
+  JsonKeyFilterName,
+  ListFilterName,
+} from "./compile/where";
 import type {
   ManyRelationOperator,
   OneRelationOperator,
@@ -471,7 +475,7 @@ type ListFilter<E> = {
  * filter, and `{ not: { a: 1 } }` raises on the key `a`. So `not` recurses here
  * and `equals` does not. Measured against `compileRead`, not inferred.
  */
-type JsonFilter = {
+type JsonFilter = JsonKeyFilter & {
   path?: never;
   equals?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
   not?:
@@ -618,8 +622,17 @@ type JsonPathNull =
  * `{ path: ["a"], equals: undefined }` raises the same refusal as
  * `{ path: ["a"] }`. That is Prisma's answer to both, measured.
  */
-type JsonPathFilter = { path: JsonPath } & {
+type JsonPathFilter = { path: JsonPath } & JsonKeyFilter & {
   [K in JsonFilterName]?: JsonPathOperand<K>;
+};
+
+/**
+ * Whether the document — or the value at `path` — is an object holding a key
+ * (#664). Not a Prisma filter; see `JSON_KEY_FILTER_NAMES` in
+ * `compile/where.ts`. A key holding the JSON value `null` exists.
+ */
+type JsonKeyFilter = {
+  [K in JsonKeyFilterName]?: K extends "has_key" ? string : readonly string[];
 };
 
 /**
@@ -1193,7 +1206,19 @@ export interface CreateArgs<M extends ModelTypeInfo> extends Selection<M> {
   data: CreateInput<M>;
 }
 
-export interface UpdateArgs<M extends ModelTypeInfo> extends Selection<M> {
+/**
+ * `skipIfUnchanged: true` writes the row only when some assigned column would
+ * change, so a no-op update leaves `@updatedAt` alone (#664). `update` still
+ * returns the row; `updateMany` counts only the rows it wrote. The model-level
+ * default is `static $skipNoopUpdates = true`.
+ */
+interface SkipIfUnchanged {
+  skipIfUnchanged?: boolean;
+}
+
+export interface UpdateArgs<M extends ModelTypeInfo>
+  extends Selection<M>,
+    SkipIfUnchanged {
   data: UpdateInput<M>;
   where: WhereUniqueInput<M>;
 }
@@ -1213,7 +1238,7 @@ export interface CreateManyArgs<M extends ModelTypeInfo> {
   skipDuplicates?: boolean;
 }
 
-export interface UpdateManyArgs<M extends ModelTypeInfo> {
+export interface UpdateManyArgs<M extends ModelTypeInfo> extends SkipIfUnchanged {
   data: UpdateInput<M>;
   where?: WhereInput<M>;
 }

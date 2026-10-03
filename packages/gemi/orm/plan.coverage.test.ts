@@ -79,6 +79,8 @@ const PROBES: Record<string, [unknown, unknown]> = {
   // compiles alike here; `compile/lock.test.ts` checks the key on Postgres,
   // where the two statements differ.
   lock: [{ lock: "update" }, { lock: "share" }],
+  // `true` adds an `is distinct from` term to the update's `where` (#664).
+  skipIfUnchanged: [{ skipIfUnchanged: true }, { skipIfUnchanged: false }],
 };
 
 /** What each operation needs beside the argument under test to compile at all. */

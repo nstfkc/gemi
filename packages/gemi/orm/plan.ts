@@ -411,6 +411,11 @@ const LIST_KEYS = new Set([
   "hasSome",
   "push",
   "path",
+  // The JSON key-exists lists (#664): one `text[]` parameter under `?|` / `?&`
+  // on Postgres. On SQLite they stay element-wise, one term per key, because
+  // `bindsListAsOneParameter` is false there and this set is never consulted.
+  "has_some_keys",
+  "has_every_key",
 ]);
 
 /**
@@ -671,7 +676,19 @@ export function planKey(
     args,
     false,
     dialect.bindsListAsOneParameter,
-  )}${lockKey(args)}`;
+  )}${lockKey(args)}${skipIfUnchangedKey(args)}`;
+}
+
+/**
+ * An update's `skipIfUnchanged`, verbatim, because `true` adds a `where` term
+ * and `false` does not — both shape to `boolean`, and a shared entry would hand
+ * one caller the other's statement (#664). Top level only, for the reason
+ * `lockKey` gives: a column of that name must stay a bound value.
+ */
+function skipIfUnchangedKey(args: unknown): string {
+  if (args === null || typeof args !== "object") return "";
+  const skip = (args as { skipIfUnchanged?: unknown }).skipIfUnchanged;
+  return skip === undefined ? "" : `:skipIfUnchanged=${String(skip)}`;
 }
 
 /**
