@@ -167,10 +167,6 @@ export function isCompressible(method: string, res: Response): boolean {
     return false;
   }
 
-  if (!res.body) {
-    return false;
-  }
-
   // 204/304 are bodyless; 206 is a byte range of an already-committed
   // representation and re-encoding it would invalidate its `Content-Range`.
   if (res.status < 200 || res.status === 204 || res.status === 206 || res.status === 304) {
@@ -183,6 +179,14 @@ export function isCompressible(method: string, res: Response): boolean {
 
   const contentType = res.headers.get("Content-Type");
   if (!contentType || !/^\s*text\/html\s*(;|$)/i.test(contentType)) {
+    return false;
+  }
+
+  // Only once the status and headers have ruled a range out: on Bun 1.3.14 on
+  // Linux, reading `.body` of a Response built on a sliced Blob makes it send
+  // past the slice's end (#725), so `.body` is never touched on a non-HTML
+  // response this function hands back untouched.
+  if (!res.body) {
     return false;
   }
 

@@ -395,10 +395,16 @@ export class ApiRouteDispatcher {
    * end, and the store would keep the user until it was collected. A stream
    * route answers HEAD, and its 404, a breaker's JSON or a handler's own
    * Response can all carry an unsized body there.
+   *
+   * `Content-Length` is checked before `response.body`, and the order matters:
+   * on Bun 1.3.14 on Linux, reading `.body` of a Response built on a sliced
+   * Blob — a `this.stream()` Range response — turns it into a stream that runs
+   * past the slice's end, and Bun.serve then sends the rest of the object
+   * under a 206 (#725).
    */
   private isOpenEndedBody(request: Request, response: Response) {
     return (
-      request.method !== "HEAD" && response.body !== null && !response.headers.has("Content-Length")
+      request.method !== "HEAD" && !response.headers.has("Content-Length") && response.body !== null
     );
   }
 
