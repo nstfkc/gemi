@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.89.0 to 0.90.0
 
 ## Email: idempotency keys and message ids (#715)
 
