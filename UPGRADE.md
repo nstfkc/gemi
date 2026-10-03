@@ -29,6 +29,30 @@ lookups, or query auth tables from your own routes, make sure request values
 are checked to be strings before they reach a `where`. If you call
 `findUnique` with `null` or a filter in a key, switch to `findFirst`.
 
+# Upgrading from 0.85.0 to 0.86.0
+
+## `client`: `concurrency: "parallel"` for mutation hooks (#719)
+
+**New, opt-in.** `useMutation`, `usePost`, `usePut`, `usePatch` and
+`useDelete` are latest-wins: a `trigger` that starts while another is in
+flight drops the older one's callbacks, state and result. A third-argument
+`concurrency: "parallel"` makes every call stand on its own: each `trigger`
+resolves to its own body (or `undefined`), and the hook's `onSuccess`/`onError`
+run for every call.
+
+- `trigger(input, { onSuccess, onError })` takes per-call callbacks in both
+  modes. They run after the hook's own, and only when the hook's would (in
+  latest mode, not for a superseded call).
+- The hooks return `pending`, the number of requests on the wire. In parallel
+  mode `loading` is `pending > 0`.
+- In parallel mode `data` is the last success's body, `error` is the last
+  settled call's outcome (a success clears it, starting a call does not), and
+  `cancel()` aborts every call in flight.
+- No mode aborts a request because a newer one started.
+- New exported types: `MutationConcurrency`, `MutationCallConfig`.
+
+**Action:** none. The default (`"latest"`) behaves as before.
+
 # Upgrading from 0.84.1 to 0.85.0
 
 ## `ai`: `regenerate` replaces the answer on a thread (#451)
