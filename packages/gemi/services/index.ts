@@ -97,7 +97,7 @@ export type {
   JobFailure,
   JobRelease,
 } from "./queue/QueueDriver";
-export { Job } from "./queue/Job";
+export { Job, type JobThrottle, type JobConcurrency } from "./queue/Job";
 
 // Locks: the primitive under unique jobs and cron `withoutOverlapping`.
 export {

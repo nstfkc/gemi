@@ -201,6 +201,41 @@ export class DatabaseLockStore implements LockStore {
   }
 
   /**
+   * A fixed window in the lock's row: `token` is the count and `expires_at`
+   * the window's end. One guarded `UPDATE` either starts a new window, counts
+   * a hit in the current one, or matches nothing because it is full.
+   */
+  async hit(name: string, limit: number, windowMs: number) {
+    await this.configure();
+    const q = this.sql;
+    const now = this.now(q);
+    await this.seed(q, name);
+    const window = this.ms(q, Math.max(1, windowMs));
+    const result = await q`
+      UPDATE ${this.name(q)}
+      SET token = CASE WHEN expires_at <= ${now} THEN 1 ELSE token + 1 END,
+          expires_at = CASE WHEN expires_at <= ${now} THEN ${now} + ${window} ELSE expires_at END,
+          updated_at = ${now}
+      WHERE name = ${name} AND (expires_at <= ${now} OR token < ${this.int(q, limit)})
+    `;
+    const allowed = affected(result) > 0;
+    const [row] = (await q`
+      SELECT expires_at - ${now} AS reset FROM ${this.name(q)} WHERE name = ${name}
+    `) as Array<{ reset: unknown }>;
+    return { allowed, resetInMs: Math.max(0, Number(row?.reset ?? 0)) };
+  }
+
+  async refund(name: string) {
+    await this.configure();
+    const q = this.sql;
+    const now = this.now(q);
+    await q`
+      UPDATE ${this.name(q)} SET token = token - 1, updated_at = ${now}
+      WHERE name = ${name} AND token > 0 AND expires_at > ${now}
+    `;
+  }
+
+  /**
    * Deletes locks that are free and were last touched more than `olderThanMs`
    * ago, and resolves to how many. Tokens start again from 1 for a pruned
    * name, so keep `olderThanMs` far above any lease.

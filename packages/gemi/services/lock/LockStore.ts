@@ -67,6 +67,22 @@ export interface LockStore {
    * `acquire` waits for that commit.
    */
   fence<T>(name: string, owner: string, token: number, fn: () => Promise<T>): Promise<T>;
+
+  /**
+   * Counts one hit against a fixed window kept under `name`: allowed when
+   * fewer than `limit` were counted in the current window, which starts at the
+   * first hit after the last one ended and lasts `windowMs`. A refused hit is
+   * not counted. `resetInMs` is how long until the window ends. A name used
+   * here must not also be used with `acquire` or `advance`.
+   */
+  hit(
+    name: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<{ allowed: boolean; resetInMs: number }>;
+
+  /** Takes back one counted hit from the current window, if it has one. */
+  refund(name: string): Promise<void>;
 }
 
 /** The hold on a lock ended before the work it guarded did. */
