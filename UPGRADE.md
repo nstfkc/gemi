@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.96.0 to 0.97.0
 
 ## `gemi/ai`: nested runs stream their seed and report their errors (#470, #468)
 
