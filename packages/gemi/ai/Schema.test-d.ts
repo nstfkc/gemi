@@ -236,3 +236,27 @@ describe("s.fromJSONSchema", () => {
     if (result.ok === false) expectTypeOf(result.issues).toEqualTypeOf<SchemaIssue[]>();
   });
 });
+
+describe("recursive() (#745)", () => {
+  type Node = { tag: string; text?: string; children: Node[] };
+
+  test("is the type it was given, usable as a field", () => {
+    const node = s.recursive<Node>("Node", (self) =>
+      s.object({ tag: s.string(), text: s.string().optional(), children: s.array(self) }),
+    );
+    expectTypeOf<Infer<typeof node>>().toEqualTypeOf<Node>();
+    const page = s.object({ root: node, aside: node.optional() });
+    expectTypeOf<Infer<typeof page>>().toEqualTypeOf<{ root: Node; aside?: Node }>();
+  });
+
+  test("a body that does not match the type is an error", () => {
+    s.recursive<Node>("Node", (_self) =>
+      // @ts-expect-error `children` is missing
+      s.object({ tag: s.string() }),
+    );
+    s.recursive<Node>("Node", (self) =>
+      // @ts-expect-error `tag` is a number here
+      s.object({ tag: s.number(), children: s.array(self) }),
+    );
+  });
+});

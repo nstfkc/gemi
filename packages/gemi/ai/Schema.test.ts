@@ -725,3 +725,276 @@ describe("foreign schemas", () => {
     expect(() => s.object({ fake } as never)).toThrow("foreign object");
   });
 });
+
+describe("recursive() (#745)", () => {
+  type Node = { tag: string; text?: string; children: Node[] };
+
+  const node = () =>
+    s.recursive<Node>("Node", (self) =>
+      s.object({
+        tag: s.enum(["section", "heading", "text"]),
+        text: s.string().optional(),
+        children: s.array(self),
+      }),
+    );
+
+  /**
+   * `assertStrict`, extended to what strict mode accepts for recursion: a
+   * `$ref` alone (no sibling keywords — OpenAI rejects `{ $ref, description }`)
+   * that resolves into the root's `$defs`, and every `$defs` entry strict in
+   * its own right.
+   */
+  function assertStrictRecursive(root: JSONSchema): void {
+    const defs = root.$defs ?? {};
+    const walk = (schema: JSONSchema, path: string): void => {
+      if (schema.$ref !== undefined) {
+        expect(Object.keys(schema), `${path}: $ref takes no siblings`).toEqual(["$ref"]);
+        const name = schema.$ref.replace(/^#\/\$defs\//, "");
+        expect(defs, `${path}: ${schema.$ref} must resolve`).toHaveProperty([name]);
+        return;
+      }
+      expect(schema, `${path}: $defs only at the root`).not.toHaveProperty("$defs");
+      const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+      if (types.includes("object")) {
+        expect(schema.additionalProperties, `${path} must be sealed`).toBe(false);
+        expect([...(schema.required ?? [])].sort()).toEqual(
+          Object.keys(schema.properties ?? {}).sort(),
+        );
+      }
+      for (const [key, child] of Object.entries(schema.properties ?? {})) {
+        walk(child, `${path}.${key}`);
+      }
+      if (schema.items) walk(schema.items, `${path}[]`);
+      for (const [index, member] of (schema.anyOf ?? []).entries()) {
+        walk(member, `${path}|${index}`);
+      }
+    };
+    const { $defs: _, ...rest } = root;
+    walk(rest, "$");
+    for (const [name, definition] of Object.entries(defs)) walk(definition, `$defs.${name}`);
+  }
+
+  test("emits $defs + $ref, and stays strict", () => {
+    const output = s.object({ title: s.string(), root: node() });
+    const json = output.toJSONSchema();
+
+    expect(json).toEqual({
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        root: { $ref: "#/$defs/Node" },
+      },
+      required: ["title", "root"],
+      additionalProperties: false,
+      $defs: {
+        Node: {
+          type: "object",
+          properties: {
+            tag: { type: "string", enum: ["section", "heading", "text"] },
+            text: { type: ["string", "null"] },
+            children: { type: "array", items: { $ref: "#/$defs/Node" } },
+          },
+          required: ["tag", "text", "children"],
+          additionalProperties: false,
+        },
+      },
+    });
+    assertStrictRecursive(json);
+    expect(supportsStrict(output)).toBe(true);
+  });
+
+  test("as the root, inlines the body there and keeps the $defs entry", () => {
+    const json = node().toJSONSchema();
+    expect(json.type).toBe("object");
+    expect(json.properties!.children).toEqual({
+      type: "array",
+      items: { $ref: "#/$defs/Node" },
+    });
+    expect(json.$defs!.Node!.properties!.tag).toEqual(json.properties!.tag);
+    assertStrictRecursive(json);
+    expect(supportsStrict(node())).toBe(true);
+  });
+
+  test("a described or nullable use wraps the $ref instead of adding siblings", () => {
+    const tree = node();
+    const json = s
+      .object({
+        main: tree.describe("The page"),
+        aside: tree.optional(),
+        footer: tree.nullable().describe("Optional footer"),
+      })
+      .toJSONSchema();
+
+    expect(json.properties!.main).toEqual({
+      description: "The page",
+      anyOf: [{ $ref: "#/$defs/Node" }],
+    });
+    expect(json.properties!.aside).toEqual({
+      anyOf: [{ $ref: "#/$defs/Node" }, { type: "null" }],
+    });
+    expect(json.properties!.footer).toEqual({
+      description: "Optional footer",
+      anyOf: [{ $ref: "#/$defs/Node" }, { type: "null" }],
+    });
+    assertStrictRecursive(json);
+  });
+
+  test("parses a nested tree to any depth and reports the path of a bad node", () => {
+    const tree = node();
+    const value = {
+      tag: "section",
+      text: null,
+      children: [
+        { tag: "heading", text: "Hi", children: [] },
+        { tag: "section", children: [{ tag: "text", text: "deep", children: [], extra: 1 }] },
+      ],
+    };
+    expect(tree.parse(value)).toEqual({
+      tag: "section",
+      children: [
+        { tag: "heading", text: "Hi", children: [] },
+        { tag: "section", children: [{ tag: "text", text: "deep", children: [] }] },
+      ],
+    });
+
+    const bad = tree.validate({
+      tag: "section",
+      children: [{ tag: "section", children: [{ tag: "image", children: "[]" }] }],
+    });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.issues.map((issue) => [issue.path, issue.code])).toEqual([
+      [["children", 0, "children", 0, "tag"], "enum"],
+      [["children", 0, "children", 0, "children"], "type"],
+    ]);
+  });
+
+  test("a value that contains itself is refused, not a stack overflow", () => {
+    const cyclic: Record<string, unknown> = { tag: "section", children: [] };
+    (cyclic.children as unknown[]).push(cyclic);
+    const result = node().safeParse(cyclic);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors).toEqual([
+      "children[0]: expected a finite tree, got a circular reference",
+    ]);
+
+    // The same object twice side by side is not a cycle.
+    const leafNode = { tag: "text", children: [] };
+    expect(node().safeParse({ tag: "section", children: [leafNode, leafNode] }).ok).toBe(true);
+  });
+
+  test("blames the closest union variant through a reference", () => {
+    const tree = node();
+    const block = s.union([
+      s.object({ kind: s.literal("tree"), root: tree }),
+      s.object({ kind: s.literal("text"), body: s.string() }),
+    ]);
+    const result = s.object({ block }).safeParse({
+      block: { kind: "tree", root: { tag: "nope", children: [] } },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toContain("block.root.tag");
+  });
+
+  test("mutual recursion through two named schemas", () => {
+    type Folder = { name: string; entries: Entry[] };
+    type Entry = { file: string | null; folder: Folder | null };
+    const folder: ReturnType<typeof s.recursive<Folder>> = s.recursive<Folder>("Folder", (self) =>
+      s.object({
+        name: s.string(),
+        entries: s.array(
+          s.recursive<Entry>("Entry", () =>
+            s.object({ file: s.string().nullable(), folder: self.nullable() }),
+          ),
+        ),
+      }),
+    );
+    const json = folder.toJSONSchema();
+    expect(Object.keys(json.$defs!).sort()).toEqual(["Entry", "Folder"]);
+    assertStrictRecursive(json);
+    expect(
+      folder.parse({
+        name: "/",
+        entries: [{ file: null, folder: { name: "a", entries: [{ file: "x", folder: null }] } }],
+      }),
+    ).toEqual({
+      name: "/",
+      entries: [{ file: null, folder: { name: "a", entries: [{ file: "x", folder: null }] } }],
+    });
+  });
+
+  test("a json node inside the body still turns strict off", () => {
+    const loose = s.recursive<{ props: unknown; children: unknown[] }>("Loose", (self) =>
+      s.object({ props: s.json(), children: s.array(self) }),
+    );
+    expect(supportsStrict(loose)).toBe(false);
+    expect(supportsStrict(s.object({ tree: loose }))).toBe(false);
+  });
+
+  test("a foreign schema carrying $defs and $ref is read as strict", () => {
+    // What MCP's `combineSchemas` produces from an input with a tree in it.
+    const json = s.object({ root: node() }).toJSONSchema();
+    const merged = {
+      toJSONSchema: () => ({
+        ...json,
+        properties: { ...json.properties, orgId: { type: "string" } },
+      }),
+      parse: (v: unknown) => v,
+      safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+    } as never;
+    expect(supportsStrict(merged)).toBe(true);
+
+    const loose = s
+      .object({
+        root: s.recursive<unknown>("L", (self) => s.object({ x: s.json(), c: s.array(self) })),
+      })
+      .toJSONSchema();
+    const mergedLoose = {
+      toJSONSchema: () => loose,
+      parse: (v: unknown) => v,
+      safeParse: (v: unknown) => ({ ok: true as const, value: v }),
+    } as never;
+    expect(supportsStrict(mergedLoose)).toBe(false);
+  });
+
+  describe("refuses what has no finite or strict form", () => {
+    test("self outside any object or array", () => {
+      expect(() =>
+        s.recursive<unknown>("Bad", (self) => s.union([s.object({ a: s.string() }), self])),
+      ).toThrow(/outside any object or array/);
+    });
+
+    test("an optional body", () => {
+      expect(() =>
+        s.recursive<unknown>("Bad", (self) => s.object({ c: s.array(self) }).optional()),
+      ).toThrow(/optional/);
+    });
+
+    test("a name that is not a plain $defs key", () => {
+      for (const name of ["", "a/b", "a~b", "1abc", "a b"]) {
+        expect(() => s.recursive<unknown>(name, (self) => s.object({ c: s.array(self) }))).toThrow(
+          /needs a name/,
+        );
+      }
+    });
+
+    test("two different schemas under one name", () => {
+      const a = s.recursive<unknown>("Same", (self) => s.object({ a: s.array(self) }));
+      const b = s.recursive<unknown>("Same", (self) => s.object({ b: s.array(self) }));
+      expect(() => s.object({ a, b }).toJSONSchema()).toThrow(/two different recursive schemas/);
+      // The same one twice is fine.
+      expect(s.object({ a, again: a }).toJSONSchema().$defs).toHaveProperty("Same");
+    });
+
+    test("using self before the definition returned", () => {
+      expect(() =>
+        s.recursive<unknown>("Early", (self) => {
+          self.toJSONSchema();
+          return s.object({ c: s.array(self) });
+        }),
+      ).toThrow(/before its definition returned/);
+    });
+  });
+});

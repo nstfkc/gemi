@@ -2184,6 +2184,32 @@ describe("strict mode follows the schema", () => {
   });
 
   /**
+   * #745: a tree that nests into itself used to need `s.json()`, which turned
+   * strict off for the whole answer. `s.recursive` keeps it, at the root too.
+   */
+  test("a recursive output is sent strict with its $defs, and its answer is parsed", async () => {
+    type Node = { tag: string; children: Node[] };
+    const node = s.recursive<Node>("Node", (self) =>
+      s.object({ tag: s.string(), children: s.array(self) }),
+    );
+    const tree = { tag: "div", children: [{ tag: "p", children: [] }] };
+    for (const output of [s.object({ previews: s.array(node) }), node]) {
+      const answer = output === node ? tree : { previews: [tree] };
+      const provider = fakeProvider([
+        { type: "output-delta", delta: JSON.stringify(answer) },
+        finish(),
+      ]);
+      const result = await Agent.create({ name: "a", provider, output })
+        .stream({ messages: [] })
+        .result();
+      expect(provider.calls[0].output).toMatchObject({ strict: true });
+      expect(provider.calls[0].output.schema.$defs).toHaveProperty("Node");
+      expect(provider.calls[0].output.schema.type).toBe("object");
+      expect(result.output).toEqual(answer);
+    }
+  });
+
+  /**
    * An agent whose whole answer is a free-form document — the shape a UI
    * generator returns. Worth an end-to-end test rather than trusting the two
    * halves above: the final answer goes through `safeParse`, and a node that
