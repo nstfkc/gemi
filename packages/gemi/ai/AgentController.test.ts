@@ -3443,6 +3443,18 @@ describe("a provider file id belongs to whoever uploaded it", () => {
     expect(calls).toHaveLength(1);
     run.finish();
   });
+
+  test("the run's owner is the subject its pending calls are bound to (#447)", async () => {
+    const signedIn = owning();
+    expect((await turnAs(signedIn.controller, 1, { text: "x" })).status).toBe(200);
+    expect(signedIn.calls[0].subject).toBe("user:1");
+    signedIn.run.finish();
+
+    const anonymous = owning();
+    await turnAs(anonymous.controller, null, { text: "x" });
+    expect(anonymous.calls[0].subject).toBeNull();
+    anonymous.run.finish();
+  });
 });
 
 describe("MemoryFileOwners", () => {

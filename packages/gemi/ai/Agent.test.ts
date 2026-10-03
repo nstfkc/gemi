@@ -486,13 +486,13 @@ function approvalAgent(...scripts: ProviderEvent[][]) {
 }
 
 /** Runs the first turn of the approval conversation. */
-async function askForApproval() {
+async function askForApproval(subject?: string | null) {
   refundCalls.length = 0;
   const { agent, provider } = approvalAgent([
     toolCall("c1", "refundOrder", { orderId: "ord_1" }),
     finish(),
   ]);
-  const run = agent.stream({ messages: [], turn: { text: "refund it" } });
+  const run = agent.stream({ messages: [], turn: { text: "refund it" }, subject });
   const { events, done } = collect(run);
   const result = await run.result();
   await done;
@@ -752,6 +752,55 @@ describe("an approval", () => {
       status: "denied",
       cause: "refused",
     });
+  });
+
+  describe("bound to the principal it was asked of (#447)", () => {
+    const approveAs = (
+      subject: string | null,
+      messages: AgentMessage[],
+      answer: ClientToolResult,
+    ) =>
+      Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [refundOrder, askUser],
+      }).stream({ messages, turn: { toolResults: [answer] }, subject });
+
+    test("is accepted from the subject it was minted for", async () => {
+      const first = await askForApproval("user:a");
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      await approveAs("user:a", first.result.messages, answer).result();
+      expect(refundCalls).toEqual(["ord_1"]);
+    });
+
+    test.each([
+      ["another user", "user:a", "user:b"],
+      ["an anonymous caller", "user:a", null],
+      ["a signed-in user, for an anonymous question", null, "user:b"],
+    ] as const)(
+      "is refused from %s, with the asker's whole history in hand",
+      async (_, asker, answerer) => {
+        const first = await askForApproval(asker);
+        const answer: ClientToolResult = {
+          toolCallId: "c1",
+          signature: first.pending[0].signature,
+          approve: true,
+        };
+        const run = approveAs(answerer, first.result.messages, answer);
+        const { events, done } = collect(run);
+        await run.result();
+        await done;
+
+        expect(refundCalls).toEqual([]);
+        expect(events.find((event) => event.type === "error")).toMatchObject({
+          error: { code: "invalid_tool_result" },
+        });
+      },
+    );
   });
 
   describe("spent on the run's nonce store (#445)", () => {
