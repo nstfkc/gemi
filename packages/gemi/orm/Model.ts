@@ -214,6 +214,22 @@ export abstract class Model {
   static $policies?: readonly PolicyEntry[];
 
   /**
+   * Make `skipIfUnchanged: true` the default for this model's `update` and
+   * `updateMany` (#664): a row whose assigned columns already hold the values
+   * being written is not written, so its `@updatedAt` keeps meaning "last real
+   * change".
+   *
+   *     export class AsyncJob extends AsyncJobModel {
+   *       static $skipNoopUpdates = true;
+   *     }
+   *
+   * A call can still opt out with `skipIfUnchanged: false`. Applies to the
+   * calls an application makes, not to the updates the ORM issues itself for a
+   * nested relation write — those keep their exact row counts.
+   */
+  static $skipNoopUpdates?: boolean;
+
+  /**
    * The connection this class's operations run on, set only by `on` below.
    *
    * `undefined` — which is what every model an application writes has — means
@@ -947,15 +963,20 @@ export abstract class Model {
     if (op === "upsert" && !preScoped && findThenWrite(schema, args, op)) {
       const { where, create, update, ...projection } = args;
 
+      // Marked ORM-issued so a `$skipNoopUpdates` model's default does not
+      // reach the `update` half: `upsert` takes no `skipIfUnchanged`, and its
+      // one-statement `on conflict` form could not honour one.
+      const inner = markOrmIssued({ ...options }) as ExecOptions;
+
       return transact(db, async () => {
-        const found = await this.$exec("findFirst", { where }, options);
+        const found = await this.$exec("findFirst", { where }, inner);
 
         return found === null
-          ? await this.$exec("create", { data: create, ...projection }, options)
+          ? await this.$exec("create", { data: create, ...projection }, inner)
           : await this.$exec(
               "update",
               { where, data: update, ...projection },
-              options,
+              inner,
             );
       });
     }
@@ -1059,6 +1080,19 @@ export abstract class Model {
       }
     }
 
+    // The model-level default for `skipIfUnchanged` (#664), resolved into the
+    // arguments so it reaches the plan key like the per-call spelling does.
+    // Not for the ORM's own nested-write updates: a `connect` that finds the
+    // foreign key already pointing at its target must still count that row.
+    if (
+      (op === "update" || op === "updateMany") &&
+      this.$skipNoopUpdates === true &&
+      effective?.skipIfUnchanged === undefined &&
+      !isOrmIssued(options)
+    ) {
+      effective = { ...effective, skipIfUnchanged: true };
+    }
+
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
     const executor: RelationExecutor = {
@@ -1074,9 +1108,11 @@ export abstract class Model {
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
       exec: (model, operation, relationArgs, preScoped, ormAuthored) => {
-        const base = preScoped
-          ? markPreScoped({ strategy: options?.strategy })
-          : { strategy: options?.strategy };
+        const base = markOrmIssued(
+          preScoped
+            ? markPreScoped({ strategy: options?.strategy })
+            : { strategy: options?.strategy },
+        );
         return registry
           .get<typeof Model>(model)
           .$exec(
@@ -1275,6 +1311,30 @@ export abstract class Model {
       );
 
       const result = this.$shape(plan, rows as unknown[]);
+
+      // `skipIfUnchanged` (#664): an `update` that matched its row but changed
+      // nothing wrote nothing, so `returning` came back empty. The caller still
+      // gets the row, read the way the `delete` pre-read reads one — the same
+      // scoped `where`, the same projection, redacted as the `update`. Only a
+      // row that does not exist at all is still `RecordNotFoundError`.
+      if (result === null && op === "update" && effective?.skipIfUnchanged === true) {
+        const {
+          data: _data,
+          skipIfUnchanged: _skip,
+          where,
+          ...projection
+        } = effective;
+        const current = await this.$exec(
+          "findFirst",
+          { where, ...projection },
+          markRedactedAs(
+            markPreScoped({ strategy: options?.strategy, track: options?.track }),
+            op,
+          ) as never,
+        );
+        if (current === null) throw new RecordNotFoundError(schema.name, op);
+        return current;
+      }
 
       // The plan shapes a single-row operation to `null` when nothing matched;
       // turning that into an error belongs here rather than in the plan, because
@@ -1850,4 +1910,24 @@ function redactFolded(
   }
 
   for (const child of nested) redactFolded(child, children, op, system);
+}
+
+/**
+ * Marks an `$exec` call as issued by the ORM itself — a nested write step or a
+ * relation read — rather than by the application. A module-private `Symbol`,
+ * like `PRE_SCOPED` in `policy.ts`, so it cannot be set from outside. Read only
+ * by the `$skipNoopUpdates` default (#664).
+ */
+const ORM_ISSUED = Symbol("gemi.orm.issuedByTheOrm");
+
+function markOrmIssued(options: object): object {
+  return { ...options, [ORM_ISSUED]: true };
+}
+
+function isOrmIssued(options: unknown): boolean {
+  return (
+    typeof options === "object" &&
+    options !== null &&
+    (options as Record<symbol, unknown>)[ORM_ISSUED] === true
+  );
 }

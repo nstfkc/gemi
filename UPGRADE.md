@@ -1,5 +1,17 @@
 # Unreleased
 
+## ORM: skip no-op updates, and JSON key-exists filters (#664)
+
+`update` and `updateMany` take `skipIfUnchanged: true`. A row is written only when an assigned column would change, so a no-op update no longer bumps `@updatedAt`. The check is in the `UPDATE`'s `where`, so it costs no extra read. `update` still returns the row; `updateMany` counts only the rows it wrote. `static $skipNoopUpdates = true` on a model makes it the default for that model's `update` / `updateMany` calls, and a call can pass `skipIfUnchanged: false` to opt out.
+
+`Json` columns take `has_key`, `has_some_keys` and `has_every_key`, on the column and at a `path`, on Postgres and SQLite:
+
+```ts
+await AsyncJob.findMany({ where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } } });
+```
+
+No change is needed to upgrade: both are opt-in, and existing updates and filters behave as before.
+
 ## Soft deletes as a model setting: `static $softDeletes` (#663)
 
 A model can declare `static $softDeletes = true` (or `{ field: "archivedAt" }`). Reads, counts, aggregates, updates and deletes on it then skip rows whose timestamp is set, including nested reads from other models, and **this keeps applying under `Model.asSystem`**, unlike the `softDeletes()` policy. `Model.withTrashed()` / `Model.onlyTrashed()` (as a chain, or as a block `Model.withTrashed(() => …)`) lift only that scope and keep every other policy. `Model.restore({ where })` and `Model.restoreMany({ where })` clear the timestamp.
