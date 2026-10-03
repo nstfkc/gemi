@@ -9,7 +9,12 @@ import { RequestBreakerError } from "../http/Error";
 import { Middleware } from "../http/Middleware";
 import { ViewRouter } from "../http/ViewRouter";
 import { Kernel } from "../kernel";
-import { createDevFetch } from "./devFetch";
+import {
+  createDevFetch,
+  DEV_ENTRY_PATH,
+  DEV_ENTRY_SOURCE,
+  REFRESH_PREAMBLE_SOURCE,
+} from "./devFetch";
 
 /**
  * The dev server's request handling, driven without `Bun.serve` or a real Vite.
@@ -130,7 +135,7 @@ describe("the dev server with a global middleware", () => {
     expect(ran).toBe(1);
   });
 
-  test.each(["/refresh.js", "/render-error.js"])("gates the dev script %s", async (path) => {
+  test.each(["/refresh.js", "/render-error.js", DEV_ENTRY_PATH])("gates the dev script %s", async (path) => {
     const refused = await get(path);
     expect(refused.status).toBe(403);
     expect(await refused.text()).toBe("direct origin access");
@@ -175,5 +180,77 @@ describe("the dev server with a global middleware", () => {
     const api = await get("/api/ping", THROUGH_FRONT_DOOR);
     expect(api.status).toBe(500);
     expect(await api.json()).toEqual({ error: { kind: "server_error", message: "the gate fell over", status: 500 } });
+  });
+});
+
+/**
+ * #733: the React Refresh preamble has to load from wherever the page did, and
+ * has to have run before any component module evaluates. Otherwise every
+ * component throws "@vitejs/plugin-react can't detect preamble" and the page
+ * never hydrates — which is what happened behind an https tunnel.
+ */
+describe("the React Refresh preamble", () => {
+  test("imports the runtime by an origin-relative URL, whatever the request's origin", async () => {
+    // What the server sees behind a TLS-terminating tunnel: plain http, and
+    // possibly its own localhost address rather than the tunnel's host.
+    const res = await devFetch(
+      new Request("http://localhost:5173/refresh.js", { headers: THROUGH_FRONT_DOOR }),
+    );
+    const source = await res.text();
+
+    expect(source).toBe(REFRESH_PREAMBLE_SOURCE);
+    expect(source).toContain('import RefreshRuntime from "/@react-refresh";');
+    expect(source).not.toMatch(/https?:\/\//);
+    expect(source).not.toContain("localhost");
+  });
+
+  test("installs everything plugin-react's transform checks for", () => {
+    expect(REFRESH_PREAMBLE_SOURCE).toContain("RefreshRuntime.injectIntoGlobalHook(window)");
+    expect(REFRESH_PREAMBLE_SOURCE).toContain("window.$RefreshReg$ =");
+    expect(REFRESH_PREAMBLE_SOURCE).toContain("window.$RefreshSig$ =");
+    expect(REFRESH_PREAMBLE_SOURCE).toContain("window.__vite_plugin_react_preamble_installed__ = true");
+  });
+
+  test("the dev entry runs the preamble, then the HMR client, then the app, each awaited", async () => {
+    const res = await get(DEV_ENTRY_PATH, THROUGH_FRONT_DOOR);
+    const source = await res.text();
+    expect(source).toBe(DEV_ENTRY_SOURCE);
+
+    const lines = source.split("\n").filter((line) => line.includes("import("));
+    expect(lines).toEqual([
+      'await import("/refresh.js").catch(report);',
+      'await import("/@vite/client").catch(report);',
+      'await import("/app/client.tsx");',
+    ]);
+  });
+
+  test("the dev entry really does finish the preamble before the app starts", async () => {
+    // Run the entry with a stand-in `import()` whose preamble resolves last:
+    // with async `<script type="module">` tags, that is the load order in
+    // which the app evaluated without a preamble.
+    const order: string[] = [];
+    const delays: Record<string, number> = { "/refresh.js": 30, "/@vite/client": 10, "/app/client.tsx": 0 };
+    const load = (path: string) =>
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          order.push(path);
+          resolve();
+        }, delays[path]),
+      );
+    const body = DEV_ENTRY_SOURCE.replaceAll("await import(", "await load(");
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+    await new AsyncFunction("load", "console", body)(load, console);
+
+    expect(order).toEqual(["/refresh.js", "/@vite/client", "/app/client.tsx"]);
+  });
+
+  test("a document boots through the one ordered entry, not separate async scripts", async () => {
+    const res = await get("/nowhere", THROUGH_FRONT_DOOR);
+    const html = await res.text();
+
+    expect(html).toContain(`src="${DEV_ENTRY_PATH}"`);
+    expect(html).not.toContain('src="/refresh.js"');
+    expect(html).not.toContain('src="/app/client.tsx"');
+    expect(html).not.toContain('src="/@vite/client"');
   });
 });

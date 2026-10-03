@@ -139,9 +139,54 @@ export function ssrRunner(vite: ViteDevServer) {
 }
 
 /**
- * The two scripts the dev document's bootstrap loads that nothing on disk
- * backs: `/refresh.js` installs the React Refresh preamble, and
- * `/render-error.js` is what the dev error page loads. `null` for any other
+ * The dev document's single bootstrap module. It loads, in this order:
+ *
+ *   1. `/refresh.js` — the React Refresh preamble;
+ *   2. `/@vite/client` — the HMR client;
+ *   3. `/app/client.tsx` — the app.
+ *
+ * One module, because React emits every `bootstrapModules` entry as
+ * `<script type="module" async>`, and async module scripts run in whatever
+ * order they finish loading. The preamble has to have installed
+ * `window.$RefreshReg$` before any component module evaluates, or
+ * `@vitejs/plugin-react`'s transform throws "can't detect preamble" and the
+ * app never hydrates. Awaiting each `import()` is what makes the order a
+ * guarantee rather than a race.
+ *
+ * The preamble and the HMR client are each caught: an app without
+ * `@vitejs/plugin-react` has no `/@react-refresh` and needs no preamble, and a
+ * broken HMR client must not stop the app from booting. The app's own import
+ * is not caught, so its errors surface as they would from a script tag.
+ */
+export const DEV_ENTRY_PATH = "/@gemi/dev-entry.js";
+
+export const DEV_ENTRY_SOURCE = `const report = (error) => console.error(error);
+await import("/refresh.js").catch(report);
+await import("/@vite/client").catch(report);
+await import("/app/client.tsx");
+`;
+
+/**
+ * Installs the React Refresh preamble, as `@vitejs/plugin-react`'s own
+ * `index.html` transform would.
+ *
+ * The runtime is imported by an origin-relative URL. An absolute one, built
+ * from the request URL the server sees, breaks behind a TLS-terminating proxy
+ * or tunnel: the browser is on `https://<tunnel>` while the server sees
+ * `http://localhost:5173`, so the import is blocked as mixed content or points
+ * at a host the browser cannot reach.
+ */
+export const REFRESH_PREAMBLE_SOURCE = `import RefreshRuntime from "/@react-refresh";
+RefreshRuntime.injectIntoGlobalHook(window);
+window.$RefreshReg$ = () => {};
+window.$RefreshSig$ = () => (type) => type;
+window.__vite_plugin_react_preamble_installed__ = true;
+`;
+
+/**
+ * The scripts the dev document loads that nothing on disk backs: the
+ * bootstrap entry above, `/refresh.js` with the React Refresh preamble, and
+ * `/render-error.js`, which the dev error page loads. `null` for any other
  * path.
  *
  * Answered inside the global middleware, not in front of it as they were. They
@@ -150,29 +195,21 @@ export function ssrRunner(vite: ViteDevServer) {
  * dev server answers goes around it.
  */
 function devScript(req: Request): Response | null {
-  const { pathname, host, protocol } = new URL(req.url);
-  if (pathname.startsWith("/render-error.js")) {
-    return new Response("window.render_error = true", {
+  const { pathname } = new URL(req.url);
+  const script = (source: string) =>
+    new Response(source, {
       headers: {
         "Content-Type": "application/javascript",
       },
     });
+  if (pathname === DEV_ENTRY_PATH) {
+    return script(DEV_ENTRY_SOURCE);
+  }
+  if (pathname.startsWith("/render-error.js")) {
+    return script("window.render_error = true");
   }
   if (pathname.startsWith("/refresh.js")) {
-    return new Response(
-      `
-      import RefreshRuntime from "${protocol}//${host}/@react-refresh";
-      RefreshRuntime.injectIntoGlobalHook(window);
-      window.$RefreshReg$ = () => {};
-      window.$RefreshSig$ = () => (type) => type;
-      window.__vite_plugin_react_preamble_installed__ = true;
-    `,
-      {
-        headers: {
-          "Content-Type": "application/javascript",
-        },
-      },
-    );
+    return script(REFRESH_PREAMBLE_SOURCE);
   }
   return null;
 }
@@ -267,7 +304,7 @@ export function createDevFetch(
         return await result({
           getStyles: async (currentViews: string[]) =>
             await createDevStyles(appDir, vite, currentViews),
-          bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
+          bootstrapModules: [DEV_ENTRY_PATH],
           viewImportMap,
           viewModules,
           ogMap,
@@ -283,8 +320,8 @@ export function createDevFetch(
     // `httpProd` puts the global middleware in front of its static files, so a
     // check that passes here passes there. A throw from it is answered like
     // one from a route. Vite's HMR websocket is the one thing it cannot cover:
-    // in middleware mode Vite serves it from a server of its own, on its own
-    // port, and those requests never reach this handler.
+    // its upgrade is relayed to Vite by `Bun.serve` (see `hmrRelay.ts`) before
+    // this handler runs, and Vite checks the token and host itself.
     return await instrumentation(req, (req) =>
       app.withGlobalMiddleware(req, requestHandler, errorResponse),
     );

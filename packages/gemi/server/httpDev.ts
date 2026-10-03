@@ -9,6 +9,14 @@ import { printStartupBanner } from "./banner";
 import { GEMI_EXTERNAL_SPECIFIERS } from "../internal/gemiExternals";
 import { createDevFetch, sendErrorToClient, ssrRunner } from "./devFetch";
 import { resolveHmrPort } from "./hmrPort";
+import {
+  type HmrRelayData,
+  hmrRelayHandler,
+  hmrRelayPort,
+  isHmrUpgrade,
+  listenHmrServer,
+  upgradeHmr,
+} from "./hmrRelay";
 
 export { viteErrorPayload } from "./devFetch";
 
@@ -52,16 +60,22 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     plugins: [gemiVite()],
     server: {
       middlewareMode: true,
-      // In middleware mode Vite stands up a second HTTP server for the HMR
-      // websocket, and defaults it to a fixed port — so two `gemi dev` processes
-      // fight over one socket and the loser silently hot-reloads on the winner's
-      // file changes. Name the port instead; see `hmrPort.ts` for how it is
-      // chosen. `ws` and not the older `hmr`: `server.hmr.{port,host,…}` is
+      // The page's own port, so the HMR client's fallback ("direct") socket
+      // also targets this server rather than Vite's default 5173.
+      port: httpPort,
+      // In middleware mode Vite would stand up a second HTTP server for the HMR
+      // websocket on a fixed port — so two `gemi dev` processes fought over one
+      // socket, and a proxy or tunnel, which carries only the page's port,
+      // could not reach it at all. Hand Vite a loopback server instead, on a
+      // port of this process's own (see `hmrPort.ts` for how it is chosen):
+      // given a server, Vite tells the browser to connect to the page's origin,
+      // and `Bun.serve` below relays that socket to it (see `hmrRelay.ts`).
+      // `ws` and not the older `hmr`: `server.hmr.{port,host,…}` is
       // deprecated in Vite 8 and warns. An app overriding either one in
       // `gemi.config.ts` still wins — plugin config (where `gemi.config.ts`'s
       // `vite` block is applied) is merged over this inline config, and Vite's
       // own `hmr`→`ws` compat shim forwards the deprecated spelling here.
-      ws: { port: resolveHmrPort(httpPort) },
+      ws: { server: await listenHmrServer(resolveHmrPort(httpPort)) },
       // Vite answers any host other than `localhost` and `*.localhost` with a
       // 403, which would block a `route.domains` root such as `lvh.me` and
       // every custom domain pointed here from `/etc/hosts`.
@@ -111,9 +125,19 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
 
-  const server = Bun.serve({
+  const devFetch = createDevFetch(app, instrumentation, vite);
+  // `null` when an app's own `server.ws` in `gemi.config.ts` sent Vite's
+  // websocket elsewhere; the browser then connects there directly.
+  const relayPort = hmrRelayPort(vite.config?.server?.ws);
+  const server = Bun.serve<HmrRelayData>({
     port: httpPort,
-    fetch: createDevFetch(app, instrumentation, vite),
+    fetch: (req, server) => {
+      if (relayPort !== null && isHmrUpgrade(req)) {
+        return upgradeHmr(req, server, relayPort);
+      }
+      return devFetch(req);
+    },
+    websocket: hmrRelayHandler,
   });
 
   // `bun --hot` re-evaluates its *whole* module graph on a server-code change —

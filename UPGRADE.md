@@ -1,3 +1,15 @@
+# Unreleased
+
+## Dev server works behind an HTTPS proxy or tunnel (#733)
+
+`gemi dev` can now be used through ngrok or another TLS-terminating proxy:
+
+- The React Refresh preamble (`/refresh.js`) imports `/@react-refresh` by an origin-relative URL. It used an absolute `http://<host>` URL built from the request, which an `https` page blocked as mixed content, so the app never hydrated.
+- The dev document boots through one module, `/@gemi/dev-entry.js`, which loads the preamble, then `/@vite/client`, then `/app/client.tsx`, in that order. The three used to be separate `async` module scripts that could run in any order.
+- Vite's HMR websocket is now served on the dev server's own port: the browser connects to the page's origin and the dev server relays the socket to Vite on loopback. Before, the browser connected to a second port (24678 and up), which a tunnel doesn't carry.
+
+No change is needed to upgrade. If you pinned the HMR socket in `gemi.config.ts` (`vite.server.ws.port` / `clientPort`, or `server.hmr.*`), it is still honoured: Vite listens there and the browser connects there directly, as before. Remove the override to get the single-port behaviour. If a firewall rule or container port mapping exposed port 24678 for HMR, it is no longer needed; the HMR port is now bound on 127.0.0.1 only.
+
 # Upgrading from 0.90.0 to 0.91.0
 
 ## Request validation: nested objects and arrays (#711)

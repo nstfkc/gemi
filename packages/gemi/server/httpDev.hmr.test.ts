@@ -26,10 +26,20 @@ const { createdConfigs, servedOptions, resolveHmrPort } = vi.hoisted(() => ({
 
 vi.mock("./hmrPort", () => ({ resolveHmrPort }));
 
+// The loopback server Vite's websocket is attached to. Stubbed so this file
+// binds nothing; `hmrRelay.test.ts` runs the real one against a real Vite.
+const { listenHmrServer } = vi.hoisted(() => ({
+  listenHmrServer: vi.fn(async (port: number) => ({ address: () => ({ port }) })),
+}));
+vi.mock("./hmrRelay", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./hmrRelay")>()),
+  listenHmrServer,
+}));
+
 vi.mock("vite", () => ({
   createServer: vi.fn(async (config: any) => {
     createdConfigs.push(config);
-    return { ws: { send: vi.fn() }, middlewares: () => {} };
+    return { ws: { send: vi.fn() }, middlewares: () => {}, config };
   }),
 }));
 
@@ -59,6 +69,7 @@ beforeEach(() => {
   createdConfigs.length = 0;
   servedOptions.length = 0;
   resolveHmrPort.mockClear();
+  listenHmrServer.mockClear();
   // `httpDev` caches its Vite server here across `bun --hot` reloads, so a test
   // that left one behind would stop the next one from creating a config at all.
   delete (globalThis as any).__gemiVite;
@@ -82,7 +93,8 @@ describe("httpDev's HMR websocket port", () => {
 
     // `server.ws`, not `server.hmr` — the latter is deprecated in Vite 8 and
     // warns on every boot.
-    expect(createdConfigs[0].server.ws.port).toBe(15_173);
+    expect(listenHmrServer).toHaveBeenCalledWith(15_173);
+    expect(createdConfigs[0].server.ws.server.address().port).toBe(15_173);
     expect(createdConfigs[0].server.hmr).toBeUndefined();
   });
 
@@ -94,7 +106,7 @@ describe("httpDev's HMR websocket port", () => {
     await startDev();
 
     expect(resolveHmrPort).toHaveBeenCalledWith(5174);
-    expect(createdConfigs[0].server.ws.port).toBe(15_174);
+    expect(listenHmrServer).toHaveBeenCalledWith(15_174);
     expect(servedOptions[0].port).toBe(5174);
   });
 
@@ -102,7 +114,7 @@ describe("httpDev's HMR websocket port", () => {
     process.env.PORT = "5174";
     await startDev();
 
-    expect(createdConfigs[0].server.ws.port).not.toBe(servedOptions[0].port);
+    expect(createdConfigs[0].server.ws.server.address().port).not.toBe(servedOptions[0].port);
   });
 
   test("a non-numeric PORT falls back to the default for both ports", async () => {
@@ -122,5 +134,94 @@ describe("httpDev's HMR websocket port", () => {
     expect(createdConfigs[0].server.middlewareMode).toBe(true);
     expect(createdConfigs[0].server.allowedHosts).toBe(true);
     expect(createdConfigs[0].appType).toBe("custom");
+  });
+});
+
+/**
+ * #733: a proxy or tunnel carries only the page's port, so the HMR socket has
+ * to be reachable there too. Vite is handed a server (so its client connects
+ * to the page's origin) and `Bun.serve` relays that socket to it.
+ */
+describe("httpDev's HMR websocket behind a proxy", () => {
+  test("tells Vite the page's port, and gives it no port of its own to advertise", async () => {
+    process.env.PORT = "5174";
+    await startDev();
+
+    // Given `ws.server` and no `ws.port`/`clientPort`, Vite's client connects
+    // to `location.host`; `server.port` is where its fallback socket goes.
+    expect(createdConfigs[0].server.port).toBe(5174);
+    expect(createdConfigs[0].server.ws.port).toBeUndefined();
+    expect(createdConfigs[0].server.ws.clientPort).toBeUndefined();
+  });
+
+  test("upgrades the Vite client's socket on the page's port and relays it", async () => {
+    delete process.env.PORT;
+    await startDev();
+    const { fetch, websocket } = servedOptions[0];
+    expect(websocket).toBeDefined();
+
+    const upgrade = vi.fn(() => true);
+    const req = new Request("http://tunnel.example/?token=t", {
+      headers: {
+        upgrade: "websocket",
+        "sec-websocket-protocol": "vite-hmr",
+        origin: "https://tunnel.example",
+      },
+    });
+    expect(await fetch(req, { upgrade })).toBeUndefined();
+
+    expect(upgrade).toHaveBeenCalledWith(req, {
+      headers: { "Sec-WebSocket-Protocol": "vite-hmr" },
+      data: expect.objectContaining({
+        target: "ws://127.0.0.1:15173/?token=t",
+        protocol: "vite-hmr",
+        headers: { host: "tunnel.example", origin: "https://tunnel.example" },
+      }),
+    });
+  });
+
+  test("hands every other request, other websockets included, to the app", async () => {
+    delete process.env.PORT;
+    await startDev();
+    const { fetch } = servedOptions[0];
+    const upgrade = vi.fn(() => true);
+
+    const page = await fetch(new Request("http://localhost:5173/"), { upgrade });
+    const otherSocket = await fetch(
+      new Request("http://localhost:5173/", {
+        headers: { upgrade: "websocket", "sec-websocket-protocol": "chat" },
+      }),
+      { upgrade },
+    );
+
+    expect(await page.text()).toBe("ok");
+    expect(await otherSocket.text()).toBe("ok");
+    expect(upgrade).not.toHaveBeenCalled();
+  });
+
+  test("relays nothing when the app pointed Vite's websocket elsewhere", async () => {
+    // An app's `vite.server.ws` in gemi.config.ts is merged over gemi's; with
+    // a port and no server, Vite listens there and the client goes direct.
+    vi.mocked((await import("vite")).createServer).mockImplementationOnce(async (config: any) => {
+      createdConfigs.push(config);
+      return {
+        ws: { send: vi.fn() },
+        middlewares: () => {},
+        config: { server: { ws: { port: 30_000 } } },
+      } as any;
+    });
+    delete process.env.PORT;
+    await startDev();
+    const upgrade = vi.fn(() => true);
+
+    const res = await servedOptions[0].fetch(
+      new Request("http://localhost:5173/", {
+        headers: { upgrade: "websocket", "sec-websocket-protocol": "vite-hmr" },
+      }),
+      { upgrade },
+    );
+
+    expect(await res.text()).toBe("ok");
+    expect(upgrade).not.toHaveBeenCalled();
   });
 });
