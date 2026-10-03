@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.86.1 to 0.87.0
 
 ## `ai`: purpose-specific signing keys, and approvals bound to the run owner (#447)
 
@@ -18,6 +18,13 @@ to who it was asked of, so it could be answered from another user's session.
   (`agt1` / `agn1`) still verify (raw key, no subject) until they expire, 24
   hours by default, so a question pending across the deploy can still be
   answered. Support for the old tags will be removed in a later release.
+
+This means a teammate can no longer approve or answer a question that was
+asked of a colleague: with the default `runOwner` (`user:<id>`) only the user
+whose turn asked can answer. If your app lets several people act on one run
+(a shared workspace or team inbox), override `runOwner` to return a key they
+share, such as `team:<id>`. Tokens issued before the upgrade stay valid for
+at most 24 hours.
 
 **Action:** none for most apps. If you override `runOwner`, it must return
 the same key on the turn that asks and the turn that answers (a value derived
