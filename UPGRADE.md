@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.98.0 to 0.99.0
 
 ## `gemi/ai`: the user's message keeps the server's id on the client (#466)
 
