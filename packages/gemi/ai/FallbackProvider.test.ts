@@ -3,6 +3,7 @@ process.env.SECRET ??= "fallback-test-secret";
 import { describe, expect, test } from "vitest";
 
 import { Agent } from "./Agent";
+import { MemoryCircuitStore } from "./CircuitStore";
 import type { AgentProvider, ProviderEvent, ProviderStreamParams } from "./AgentProvider";
 import { evalChain, FallbackProvider, type FallbackUsage } from "./FallbackProvider";
 import { fakeProvider } from "./providers/fakeProvider";
@@ -537,5 +538,204 @@ describe("evalChain", () => {
     // No fallback between legs: `a` failing never sent anything to `b`.
     expect(b.calls).toHaveLength(2);
     expect(a.calls[0]?.reasoning).toBe("low");
+  });
+});
+
+describe("circuit breaking (#742)", () => {
+  const failing = (): ProviderEvent[] => [
+    { type: "error", error: retryable, status: 503 },
+    { type: "finish", reason: "error", usage: usage(0, 0) },
+  ];
+  const answer = (said: string): ProviderEvent[] => [{ type: "text-delta", delta: said }, finish()];
+  const times = <T>(n: number, make: () => T) => Array.from({ length: n }, make);
+
+  /** A clock the test moves, for a store whose cool-down it can end. */
+  function clock() {
+    let now = 1_000;
+    return { now: () => now, advance: (ms: number) => (now += ms) };
+  }
+
+  test("a leg that keeps failing is skipped, and the next leg answers at once", async () => {
+    const primary = leg("a", ...times(5, failing));
+    const secondary = leg("b", ...times(5, () => answer("b")));
+    const changes: unknown[] = [];
+    const reports: FallbackUsage[] = [];
+    const chain = FallbackProvider.chain([{ provider: primary }, { provider: secondary }], {
+      circuit: { failures: 2, onStateChange: (change) => changes.push(change) },
+      onUsage: (r) => reports.push(r),
+    });
+
+    await collect(chain.stream({ messages: [] }));
+    await collect(chain.stream({ messages: [] }));
+    expect(changes).toEqual([{ index: 0, model: "a", key: "a", state: "open" }]);
+
+    reports.length = 0;
+    expect(text(await collect(chain.stream({ messages: [] })))).toBe("b");
+    expect(primary.calls).toHaveLength(2);
+    // The skipped leg is not tried, so not reported, and the leg that was is attempt 1.
+    expect(reports).toEqual([
+      { index: 1, model: "b", attempt: 1, usage: usage(1, 1), outcome: "ok" },
+    ]);
+  });
+
+  test("without `circuit` every call still tries the primary", async () => {
+    const primary = leg("a", ...times(4, failing));
+    const chain = FallbackProvider.chain([
+      { provider: primary },
+      { provider: leg("b", ...times(4, () => answer("b"))) },
+    ]);
+    for (let i = 0; i < 4; i++) await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(4);
+  });
+
+  test("failures must be in a row: a success in between starts the count again", async () => {
+    const primary = leg("a", failing(), answer("a"), failing(), failing());
+    const chain = FallbackProvider.chain(
+      [{ provider: primary }, { provider: leg("b", ...times(4, () => answer("b"))) }],
+      { circuit: { failures: 2 } },
+    );
+    for (let i = 0; i < 4; i++) await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(4);
+  });
+
+  test("after the cool-down one call probes; an answer closes the circuit", async () => {
+    const time = clock();
+    const primary = leg("a", failing(), answer("a again"), answer("a"));
+    const changes: string[] = [];
+    const chain = FallbackProvider.chain(
+      [{ provider: primary }, { provider: leg("b", ...times(3, () => answer("b"))) }],
+      {
+        circuit: {
+          failures: 1,
+          cooldownMs: 1_000,
+          store: new MemoryCircuitStore(time.now),
+          onStateChange: ({ state }) => changes.push(state),
+        },
+      },
+    );
+
+    await collect(chain.stream({ messages: [] }));
+    expect(text(await collect(chain.stream({ messages: [] })))).toBe("b");
+    time.advance(1_000);
+    expect(text(await collect(chain.stream({ messages: [] })))).toBe("a again");
+    expect(text(await collect(chain.stream({ messages: [] })))).toBe("a");
+    expect(changes).toEqual(["open", "closed"]);
+  });
+
+  test("a probe that fails opens the circuit again at once", async () => {
+    const time = clock();
+    const store = new MemoryCircuitStore(time.now);
+    const primary = leg("a", ...times(4, failing));
+    const chain = FallbackProvider.chain(
+      [{ provider: primary }, { provider: leg("b", ...times(4, () => answer("b"))) }],
+      { circuit: { failures: 3, cooldownMs: 1_000, store } },
+    );
+
+    for (let i = 0; i < 3; i++) await collect(chain.stream({ messages: [] }));
+    expect(store.state("a")).toBe("open");
+    time.advance(1_000);
+    expect(store.state("a")).toBe("half-open");
+    await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(4);
+    expect(store.state("a")).toBe("open");
+    await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(4);
+  });
+
+  test("a timeout counts as a failure", async () => {
+    const primary = hanging("a");
+    const chain = FallbackProvider.chain(
+      [
+        { provider: primary, timeoutMs: 10 },
+        { provider: leg("b", ...times(2, () => answer("b"))) },
+      ],
+      { circuit: { failures: 1 } },
+    );
+    await collect(chain.stream({ messages: [] }));
+    await collect(chain.stream({ messages: [] }));
+    expect(primary.seen).toHaveLength(1);
+  });
+
+  test("a failure the chain does not fall back on does not count", async () => {
+    const primary = leg("a", ...times(3, () => [
+      { type: "error", error: final, status: 400 } as ProviderEvent,
+      { type: "finish", reason: "error", usage: usage(0, 0) } as ProviderEvent,
+    ]));
+    const chain = FallbackProvider.chain(
+      [{ provider: primary }, { provider: leg("b") }],
+      { circuit: { failures: 1 } },
+    );
+    for (let i = 0; i < 3; i++) await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(3);
+  });
+
+  test("a leg that fails after it started answering is up, not down", async () => {
+    const primary = leg(
+      "a",
+      ...times(3, () => [
+        { type: "text-delta", delta: "half" } as ProviderEvent,
+        { type: "error", error: retryable } as ProviderEvent,
+        { type: "finish", reason: "error", usage: usage(0, 0) } as ProviderEvent,
+      ]),
+    );
+    const chain = FallbackProvider.chain([{ provider: primary }, { provider: leg("b") }], {
+      circuit: { failures: 1 },
+    });
+    for (let i = 0; i < 3; i++) await collect(chain.stream({ messages: [] }));
+    expect(primary.calls).toHaveLength(3);
+  });
+
+  test("the last leg is never skipped, and its failures are not counted", async () => {
+    const only = leg("a", ...times(3, failing));
+    const chain = FallbackProvider.chain([{ provider: only }], { circuit: { failures: 1 } });
+    for (let i = 0; i < 3; i++) await collect(chain.stream({ messages: [] }));
+    expect(only.calls).toHaveLength(3);
+  });
+
+  test("from() shares the chain's circuits", async () => {
+    const a = leg("a", ...times(2, failing));
+    const b = leg("b", ...times(3, failing));
+    const c = leg("c", ...times(3, () => answer("c")));
+    const chain = FallbackProvider.chain([{ provider: a }, { provider: b }, { provider: c }], {
+      circuit: { failures: 1 },
+    });
+
+    await collect(chain.from(1).stream({ messages: [] }));
+    expect(b.calls).toHaveLength(1);
+    await collect(chain.stream({ messages: [] }));
+    // `b` opened through `from(1)`, so the full chain skips it.
+    expect(a.calls).toHaveLength(1);
+    expect(b.calls).toHaveLength(1);
+    expect(c.calls).toHaveLength(2);
+  });
+
+  test("a store that throws does not stop the leg being tried", async () => {
+    const primary = leg("a", answer("a"));
+    const chain = FallbackProvider.chain([{ provider: primary }, { provider: leg("b") }], {
+      circuit: {
+        store: {
+          allow: () => Promise.reject(new Error("redis down")),
+          record: () => {
+            throw new Error("redis down");
+          },
+        },
+      },
+    });
+    expect(text(await collect(chain.stream({ messages: [] })))).toBe("a");
+  });
+
+  test("two legs on one circuit key are refused, and circuitKey separates them", () => {
+    const twins = () => [{ provider: leg("gpt-5.4") }, { provider: leg("gpt-5.4") }];
+    expect(() => FallbackProvider.chain(twins(), { circuit: {} })).toThrow(/circuitKey/);
+    expect(() => FallbackProvider.chain(twins())).not.toThrow();
+    const [one, two] = twins();
+    expect(() =>
+      FallbackProvider.chain([{ ...one!, circuitKey: "east" }, { ...two!, circuitKey: "west" }], {
+        circuit: {},
+      }),
+    ).not.toThrow();
+    const alone = [{ provider: leg("a") }];
+    expect(() => FallbackProvider.chain(alone, { circuit: { failures: 0 } })).toThrow();
+    expect(() => FallbackProvider.chain(alone, { circuit: { cooldownMs: 0 } })).toThrow();
   });
 });

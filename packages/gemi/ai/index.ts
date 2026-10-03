@@ -168,11 +168,15 @@ export { AgentProvider, AzureOpenAIProvider, OpenAIProvider } from "./AgentProvi
 export { evalChain, FallbackProvider } from "./FallbackProvider";
 export type {
   EvalChainResult,
+  FallbackCircuit,
+  FallbackCircuitChange,
   FallbackEntry,
   FallbackFailure,
   FallbackOptions,
   FallbackUsage,
 } from "./FallbackProvider";
+export { MemoryCircuitStore } from "./CircuitStore";
+export type { CircuitOutcome, CircuitPolicy, CircuitState, CircuitStore } from "./CircuitStore";
 export type {
   AzureConfig,
   ProviderCapabilities,
