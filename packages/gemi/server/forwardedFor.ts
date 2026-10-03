@@ -15,7 +15,7 @@
  *   the `n`-th entry from the right of `X-Forwarded-For`. Anything
  *   further left was written by someone the app does not trust and is dropped.
  * - `all` (`GEMI_TRUST_PROXY=true`): the inbound header is passed through
- *   unchanged, as before 0.85. Only sound behind a proxy that overwrites
+ *   unchanged, as before 0.88. Only sound behind a proxy that overwrites
  *   `X-Forwarded-For` (and `X-Real-IP`) rather than appending to it.
  */
 export type ForwardedTrust =

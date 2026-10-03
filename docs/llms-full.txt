@@ -8591,6 +8591,7 @@ may be sync or async.
 | `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
 | `onResetPassword` | `(session)` | A password reset completes (all the user's sessions are already invalidated). |
 | `onMagicLinkCreated` | `(session, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
+| `onAuthenticated` | `({ user, session, isNewUser, method, req })` | Any sign-in that sets a session: `method` is `"password"`, `"magic-link"` (PIN or link), `"email-code"` or `"oauth"`. Has the request, so it can read a cookie the app set before sign-in and claim anonymous work for `user`; `isNewUser` is true when this sign-in created the account. |
 | `extendSession` | `(user) => object` | Every session load and create/update; the returned object is merged onto `user.extension`. |
 
 `search` is the request's query string as a plain object (useful for attribution / redirect
@@ -8749,16 +8750,124 @@ There are two ways for the user to complete it:
 
 - **Link:** direct them to the view route
   `/auth/sign-in/magic-link?token=<token>&email=<email>` — it verifies the user, deletes the
-  token, creates the session cookie, and fires `onSignIn`.
+  token, creates the session cookie, and fires `onSignIn`. A link works for
+  `emailCode.linkExpiresInMinutes` (default 7 days).
 - **PIN:** `POST /auth/sign-in-with-pin` (or `/auth/sign-in-with-pin-v2`) with
-  `{ email, pin }`. An invalid PIN returns a [validation error](./forms.md) under the `pin`
-  key.
+  `{ email, pin }`. An invalid or expired PIN returns a [validation error](./forms.md) under
+  the `pin` key (`"Invalid pin"`); the guess past `emailCode.maxAttempts` burns the PIN and
+  answers `"Too many attempts"` under the same key. A PIN works for
+  `emailCode.expiresInMinutes` (default 10).
+
+Both are single use, stored as keyed hashes (HMAC-SHA256 under `SECRET`), and compared in
+constant time. Requesting (`/auth/magic-link`) and guessing (`/auth/sign-in-with-pin*`) are
+rate limited per address and per IP, through the app's [rate limiter](./middleware.md); over
+a limit the answer is 429 `{ error: { kind: "rate_limit" } }`. The link
+(`/auth/sign-in/magic-link`) is limited per IP only: its 256-bit token is not guessed, so it
+spends no per-address budget, and a user whose PIN budget somebody else spent can still sign
+in from the same email (unless the guesses burned the code, which deletes its link too). The limits and lifetimes are
+the `emailCode` settings below, which govern these routes whether or not the email-code
+endpoints are enabled. With more than one instance, bind `RedisRateLimiter` so the attempt
+count and the limits are shared.
+
+`/auth/magic-link` answers `{ email: null }` for an address with no user, which tells a
+caller whether an account exists; clients have been built on that answer, so it stays the
+default. `emailCode.uniformMagicLinkResponse: true` answers `{ email }` for every address.
+
+To give test accounts a fixed PIN, return it from `generateCode` instead of rewriting the
+stored row (which holds a hash):
+
+```typescript
+export default defineAuthConfig({
+  generateCode: (email) =>
+    process.env.APP_ENV !== "production" && email.endsWith("+e2e@example.com")
+      ? "000000"
+      : undefined, // the default: random digits
+});
+```
 
 > **Note:** `Auth.createMagicLink()` does **not** itself fire `onMagicLinkCreated` — it just
 > returns the token/PIN for you to use. The `onMagicLinkCreated` hook fires only when the
 > `POST /auth/magic-link` endpoint is called (e.g. a "email me a login code" form). Call
 > `Auth.createMagicLink` from your own callbacks (as in the `onSignUp` example above) when
 > you want to send the code yourself.
+
+## Email codes (sign-up-or-sign-in)
+
+One flow for both: the user types an email, gets a code, types it, and is signed in, with an
+account created when there was none. No password, no redirect, so it fits a dialog.
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  emailCode: {
+    enabled: true,
+    createUser: true, // false: only existing users get a code
+    async send({ email, code, isNewUser, req }) {
+      await LoginCodeEmail.send({ to: [email], data: { code, isNewUser } });
+    },
+  },
+  async onAuthenticated({ user, isNewUser, req }) {
+    const owner = req.cookies.get("anon_owner");
+    if (owner) await Website.claimAnonymous(owner, user.id);
+  },
+});
+```
+
+- `POST /auth/email-code` `{ email }` replaces any outstanding code for the address and
+  calls `send`. It answers `{ ok: true }` for every address, known or not, and whether or
+  not one gets a code, so it never says who has an account. Nothing is created yet.
+- `POST /auth/email-code/verify` `{ email, code, name? }` signs in. A missing user is
+  created when `createUser` is on, verified, in one transaction with `onUserCreated` (a
+  throw there rolls the user back and leaves the code usable). Answers
+  `{ session, isNewUser }`, sets the `access_token` cookie, and fires `onSignIn` and
+  `onAuthenticated`. A wrong, expired or missing code is a validation error on `code`
+  (`"invalid_code"`); the guess past `maxAttempts` burns the code (`"too_many_attempts"`).
+
+Both answer 404 unless `enabled`. On the client:
+
+```tsx
+import { useEmailCode } from "gemi/client";
+
+const { request, verify, isPending, error } = useEmailCode({
+  onSuccess: ({ isNewUser }) => close(),
+});
+await request(email);
+await verify(email, code); // refreshes useUser() on success
+```
+
+| `emailCode` field | Default | |
+| --- | --- | --- |
+| `enabled` | `false` | Serves the two routes. |
+| `createUser` | `false` | Sign-up-or-sign-in. |
+| `length` | `6` | Digits in a code from `/auth/email-code`. Magic-link PINs stay 6. |
+| `expiresInMinutes` | `10` | Code (and PIN) lifetime. |
+| `linkExpiresInMinutes` | `10080` (7 days) | Magic-link lifetime. |
+| `maxAttempts` | `5` | Wrong guesses per code; the next guess burns it. |
+| `requestLimit` | `{ perEmail: [5, 900], perIp: [20, 900] }` | `[count, seconds]`, or `false` to turn one off. Also `/auth/magic-link`. |
+| `verifyLimit` | `{ perEmail: [10, 900], perIp: [50, 900] }` | Also `/auth/sign-in-with-pin*`. Its `perIp` (on a counter of its own) also limits `/auth/sign-in/magic-link`. |
+| `uniformMagicLinkResponse` | `false` | See above. |
+| `send` | logs the code outside production | Awaited before the answer: enqueue the mail rather than sending it inline, so a known and an unknown address take the same time. |
+
+Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
+key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your
+proxy; the per-address limits and the attempt cap hold regardless. All of these counters
+live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
+per process, so N instances allow N times the limits and a restart resets them. Bind
+`RedisRateLimiter` when you run more than one instance.
+
+An address longer than 320 characters is refused before it reaches a limiter key or the
+database, and spends only its IP's budget; key parts over 64 characters (a long
+`x-forwarded-for`, say) are stored as their SHA-256. The in-memory driver also caps the keys it
+holds (`maxKeys`, default 100k), and over the cap evicts the least spent buckets first, so
+churning one-hit keys (spoofed IPs, random addresses) does not push out a code's attempt count
+or an address's budget until every less-spent key has gone. Enough churn can still reset one,
+so **use `RedisRateLimiter` in production**: it has no such cap.
+
+Codes and links are stored as HMAC-SHA256 under `SECRET`, keyed to the address, so a code
+issued for one address never matches another's row, and rotating `SECRET` invalidates the
+ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
+perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
+with `generateCode` rather than writing `MagicLinkToken` yourself.
 
 ## OAuth
 
@@ -8968,6 +9077,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+| `useEmailCode({ onSuccess })` | `{ request(email), verify(email, code, { name? }), isPending, error }` | [Email codes](#email-codes-sign-up-or-sign-in). Refreshes `/auth/me` after `verify`. |
 | `useIntendedUrl(fallback?)` | `string` | The page the sign-in URL's `?redirect=` names, or `fallback` (`"/"`). See [Returning to the intended page](#returning-to-the-intended-page). |
 
 ### Reading the current user

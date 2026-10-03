@@ -105,6 +105,7 @@ export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
 export { useIntendedUrl } from "./auth/useIntendedUrl";
+export { useEmailCode } from "./auth/useEmailCode";
 
 export { useFeature, useFeatures } from "./useFeature";
 export { useTranslator } from "./useTranslator";

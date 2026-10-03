@@ -17,7 +17,7 @@ export type RequestBreakerOptions = {
 
 export class RequestBreakerError extends Error {
   /**
-   * Answer the refusals that were bare strings before 0.85 — authentication,
+   * Answer the refusals that were bare strings before 0.88 — authentication,
    * authorization, permission, CSRF and a 500 — with that string again,
    * instead of `{ kind, message, status }`.
    *
@@ -82,7 +82,7 @@ export function refusal<K extends Exclude<RefusalKind, "validation_error">>(
 }
 
 /**
- * A refusal that was a bare string before 0.85: the object, or the string
+ * A refusal that was a bare string before 0.88: the object, or the string
  * under `RequestBreakerError.legacyStringPayload`.
  *
  * @internal

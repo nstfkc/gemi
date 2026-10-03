@@ -7,6 +7,8 @@ export { frameworkProviders } from "./providers";
 // about it.
 export { SESSION_SELECT, UserProvider } from "../auth/UserProvider";
 export type { SessionSelect } from "../auth/UserProvider";
+export { hashOneTimeSecret, oneTimeSecretMatches } from "../auth/oneTimeCode";
+export type { MagicLinkTokenRow } from "../auth/types";
 export type {
   Account,
   AuthModels,

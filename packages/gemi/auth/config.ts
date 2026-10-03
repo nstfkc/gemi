@@ -3,6 +3,93 @@ import type { HttpRequest } from "../http/HttpRequest";
 import type { SessionWithUser, User } from "./types";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
 import { SignUpRequest } from "./requests";
+import type { CodeRateLimits } from "./oneTimeCode";
+
+/** What `emailCode.send` is handed. */
+export interface EmailCodeSendArgs {
+  /** Normalized: trimmed and lowercased. */
+  email: string;
+  /** The one-time code, as typed. Never stored like this. */
+  code: string;
+  /**
+   * A one-time link token for the same row, for an email that offers a link
+   * as well as a code (`/auth/sign-in/magic-link?email=&token=`).
+   */
+  token: string;
+  /** No user has this address yet; verifying the code will create one. */
+  isNewUser: boolean;
+  req: HttpRequest<any, any>;
+}
+
+/**
+ * One-time email codes (#708). The security settings here (`expiresInMinutes`,
+ * `maxAttempts`, `requestLimit`, `verifyLimit`, `linkExpiresInMinutes`) apply
+ * to the older `/auth/magic-link` + `/auth/sign-in-with-pin(-v2)` pair too,
+ * whether or not `enabled` is on. `enabled`, `createUser`, `length` and `send`
+ * are for `POST /auth/email-code` and `/auth/email-code/verify` only.
+ */
+export interface EmailCodeConfig {
+  /** Serves `/auth/email-code` and `/auth/email-code/verify`. Default `false`: both answer 404. */
+  enabled?: boolean;
+  /**
+   * Sign-up-or-sign-in: an address with no user gets a code too, and verifying
+   * it creates the user (verified, inside the same transaction as
+   * `onUserCreated`). Default `false`: an unknown address is sent nothing, and
+   * the request answers exactly as it would for a known one.
+   */
+  createUser?: boolean;
+  /** Digits in a code from `/auth/email-code`. Default 6. `/auth/magic-link` PINs stay 6. */
+  length?: number;
+  /** How long a code (PIN) can be used. Default 10. */
+  expiresInMinutes?: number;
+  /**
+   * How long the link token issued with the code can be used, on
+   * `/auth/sign-in/magic-link`. Default 7 days. A link carries 256 random
+   * bits, so it is not guessable the way a code is; this bounds how long an
+   * old email stays a key.
+   */
+  linkExpiresInMinutes?: number;
+  /** Wrong guesses one code survives; the next one burns it. Default 5. */
+  maxAttempts?: number;
+  /**
+   * Requests for a code (`/auth/email-code` and `/auth/magic-link`).
+   * Default `{ perEmail: [5, 900], perIp: [20, 900] }`. Over it: 429
+   * `{ error: { kind: "rate_limit" } }`.
+   */
+  requestLimit?: CodeRateLimits;
+  /**
+   * Guesses (`/auth/email-code/verify` and `/auth/sign-in-with-pin(-v2)`).
+   * Default `{ perEmail: [10, 900], perIp: [50, 900] }`. Its `perIp` also
+   * limits `/auth/sign-in/magic-link`, on a counter of its own; the link spends
+   * no per-address budget, since a 256-bit token is not guessed.
+   */
+  verifyLimit?: CodeRateLimits;
+  /**
+   * `/auth/magic-link` answers `{ email: null }` for an address with no user,
+   * which tells anyone asking whether it has an account. Clients built against
+   * that (they treat `null` as "no account") keep working while this is
+   * `false`, the default. `true` answers `{ email }` for every address.
+   * `/auth/email-code` never reveals it.
+   */
+  uniformMagicLinkResponse?: boolean;
+  /**
+   * Delivers a code from `/auth/email-code`. Awaited before the request
+   * answers, so for an answer that takes the same time whether or not an
+   * address gets a code, enqueue the mail here rather than sending it inline.
+   * Unset, the code is logged outside production and dropped in it.
+   */
+  send?: (args: EmailCodeSendArgs) => Promise<void> | void;
+}
+
+/** What `onAuthenticated` is handed. */
+export interface AuthenticatedArgs {
+  user: User;
+  session: any;
+  /** The user was created by this sign-in (email code, or a first OAuth sign-in). */
+  isNewUser: boolean;
+  method: "password" | "email-code" | "magic-link" | "oauth";
+  req: HttpRequest<any, any>;
+}
 
 /**
  * Decides whether a pre-0.64 session is converted to a `v2.` one. See
@@ -165,6 +252,82 @@ export interface AuthConfig {
     session: any,
     args: { email: string; token: string; pin: string },
   ) => Promise<void> | void;
+
+  /** One-time email codes, and the limits on the magic-link PIN routes. See `EmailCodeConfig`. */
+  emailCode?: EmailCodeConfig;
+
+  /**
+   * The code to issue for `email`, on `/auth/magic-link`, `Auth.createMagicLink`
+   * and `/auth/email-code`. Return nothing for the default, random digits.
+   *
+   * For fixed test accounts, instead of rewriting the stored `pin` after the
+   * fact (the column holds a hash now, so such a rewrite no longer matches):
+   *
+   *     generateCode: (email) =>
+   *       process.env.APP_ENV !== "production" && email.endsWith("+e2e@example.com")
+   *         ? "000000"
+   *         : undefined,
+   */
+  generateCode?: (
+    email: string,
+  ) => string | null | undefined | Promise<string | null | undefined>;
+
+  /**
+   * Fires after every sign-in that sets a session: password, PIN or link,
+   * email code, OAuth. Unlike `onSignIn` it has the request, so it can read a
+   * cookie or header the app set before sign-in (an anonymous owner id, say)
+   * and claim that work for `user`, and it says whether the user is new.
+   * Fires after the session is committed; a throw fails the response but not
+   * the sign-in.
+   */
+  onAuthenticated?: (args: AuthenticatedArgs) => Promise<void> | void;
+}
+
+/**
+ * Throws at boot on a setting that would otherwise surface as a 500 on every
+ * sign-in (a `maxAttempts` of 0 reaches the rate limiter as a zero limit) or
+ * quietly weaken the codes (a 2-digit code).
+ */
+function checkEmailCodeNumber(name: string, value: number, min: number, max = Infinity) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    const range = max === Infinity ? `an integer of at least ${min}` : `an integer from ${min} to ${max}`;
+    throw new Error(`auth.emailCode.${name} must be ${range}, got ${value}`);
+  }
+}
+
+export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailCodeConfig> {
+  const length = config.length ?? 6;
+  const expiresInMinutes = config.expiresInMinutes ?? 10;
+  const linkExpiresInMinutes = config.linkExpiresInMinutes ?? 7 * 24 * 60;
+  const maxAttempts = config.maxAttempts ?? 5;
+  checkEmailCodeNumber("length", length, 4, 12);
+  checkEmailCodeNumber("expiresInMinutes", expiresInMinutes, 1);
+  checkEmailCodeNumber("linkExpiresInMinutes", linkExpiresInMinutes, 1);
+  checkEmailCodeNumber("maxAttempts", maxAttempts, 1);
+  return {
+    enabled: config.enabled ?? false,
+    createUser: config.createUser ?? false,
+    length,
+    expiresInMinutes,
+    linkExpiresInMinutes,
+    maxAttempts,
+    requestLimit: {
+      perEmail: config.requestLimit?.perEmail ?? [5, 900],
+      perIp: config.requestLimit?.perIp ?? [20, 900],
+    },
+    verifyLimit: {
+      perEmail: config.verifyLimit?.perEmail ?? [10, 900],
+      perIp: config.verifyLimit?.perIp ?? [50, 900],
+    },
+    uniformMagicLinkResponse: config.uniformMagicLinkResponse ?? false,
+    send:
+      config.send ??
+      (({ email, code }) => {
+        if (process.env.NODE_ENV !== "production") {
+          console.info(`[gemi] email code for ${email}: ${code} (set auth.emailCode.send to deliver it)`);
+        }
+      }),
+  };
 }
 
 /**
@@ -241,5 +404,8 @@ export function authConfigDefaults(
     onForgotPassword: () => {},
     onResetPassword: () => {},
     onMagicLinkCreated: () => {},
+    emailCode: emailCodeDefaults(config.emailCode),
+    generateCode: () => undefined,
+    onAuthenticated: () => {},
   };
 }

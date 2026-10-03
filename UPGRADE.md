@@ -1,5 +1,115 @@
 # Unreleased
 
+## `auth`: email-code sign-in, and hardened magic-link PINs (#708)
+
+**Behaviour change (security).** The magic-link PIN had no expiry, no attempt
+limit and no rate limit, was stored in plain text, and was checked by a
+database lookup. Anyone who could trigger `/auth/magic-link` for an address
+could then guess its 6-digit PIN with no limit.
+
+What changes on the existing routes:
+
+| | Before | Now |
+|---|---|---|
+| `MagicLinkToken.pin` / `.token` | plain text | `h1.` + HMAC-SHA256 under `SECRET`, keyed to the email |
+| PIN check | `findUnique` on `(pin, email)` | row by email, `timingSafeEqual` on hashes |
+| PIN lifetime | until used or replaced | `emailCode.expiresInMinutes`, default 10 |
+| Link lifetime | until used or replaced | `emailCode.linkExpiresInMinutes`, default 7 days |
+| Wrong PINs | unlimited | `emailCode.maxAttempts`, default 5; the next guess burns the PIN |
+| `/auth/magic-link` | unlimited | `emailCode.requestLimit`, default 5/15 min per address, 20/15 min per IP |
+| `/auth/sign-in-with-pin(-v2)` | unlimited | `emailCode.verifyLimit`, default 10/15 min per address, 50/15 min per IP |
+| `/auth/sign-in/magic-link` | unlimited | `emailCode.verifyLimit.perIp` only (own counter); no per-address limit |
+| Addresses over 320 chars | accepted | refused before any limiter key or lookup; spend the IP budget only |
+
+Response shapes do not change. A wrong *or expired* PIN is still
+`ValidationError { pin: ["Invalid pin"] }`; a burned one is
+`ValidationError { pin: ["Too many attempts"] }` (same key); a rate limit is
+the middleware's 429 `{ error: { kind: "rate_limit" } }`. `/auth/magic-link`
+still answers `{ email: null }` for an unknown address (set
+`emailCode.uniformMagicLinkResponse: true` to stop revealing that). A missing
+`email` on these routes is now that same answer rather than a 500. Rows
+written before the upgrade (plain text) still verify until they expire, so
+codes in flight during the deploy keep working.
+
+The attempt count and the limits live in the rate limiter
+(`ratelimiter.driver`). With the default in-memory driver they are per
+instance; bind `RedisRateLimiter` when you run more than one. The per-IP limits
+use `clientIp(req)`, so check `GEMI_TRUST_PROXY` behind a proxy. No schema
+change or migration.
+
+New:
+
+- `POST /auth/email-code` and `POST /auth/email-code/verify`: sign-up-or-sign-in
+  with a one-time code, behind `auth.emailCode.enabled` (404 otherwise). The
+  request answer is `{ ok: true }` for every address. See "Email codes" in
+  `docs/authentication.md`.
+- `useEmailCode()` in `gemi/client`.
+- `onAuthenticated({ user, session, isNewUser, method, req })`, fired by every
+  sign-in that sets a session (password, PIN/link, email code, OAuth).
+- `generateCode(email)`: the code to issue, or nothing for random digits.
+
+**Action:**
+
+- **Stop writing or reading `MagicLinkToken.pin`/`token` yourself.** A hook
+  that rewrites the stored PIN for test accounts (e.g.
+  `MagicLinkToken.update({ where: { pin_email: { email, pin } }, data: { pin: "000000" } })`
+  in `onMagicLinkCreated`) now throws, because the stored value is a hash and
+  no row matches. Return the fixed code from `generateCode` instead, and gate
+  it to non-production:
+  ```ts
+  generateCode: (email) => (isTester(email) ? "000000" : undefined),
+  ```
+  Tests that read the PIN out of the table must take it from
+  `onMagicLinkCreated`/`Auth.createMagicLink` instead.
+- **Links in long-lived emails** (a welcome email carrying a sign-in link) stop
+  working after 7 days. Raise `emailCode.linkExpiresInMinutes` if they must
+  last longer.
+- **End-to-end suites** that request many PINs from one IP or for one address
+  need the limits raised (or set to `false`) in the test environment.
+- **Overriding the defaults:** every key is optional and replaces only its own
+  default; a limit is `[count, windowSeconds]` or `false`. Out-of-range
+  numbers (`maxAttempts < 1`, `length` outside 4–12, a non-integer lifetime)
+  fail the boot.
+  ```ts
+  // app/config/auth.ts
+  const testing = process.env.APP_ENV === "test";
+  export default defineAuthConfig({
+    emailCode: {
+      expiresInMinutes: 15,                 // default 10
+      linkExpiresInMinutes: 30 * 24 * 60,   // default 7 days
+      maxAttempts: 5,
+      requestLimit: testing ? { perEmail: false, perIp: false } : { perEmail: [5, 900] },
+      verifyLimit: testing ? { perEmail: false, perIp: false } : undefined,
+    },
+  });
+  ```
+- **`SECRET` keys the stored hashes.** Signing in already required it, so
+  nothing new must be set, but rotating `SECRET` invalidates every code and
+  link still outstanding (users request a new one).
+- **Known limits.** The per-address limits and the attempt cap are keyed on
+  the address, so a third party who knows an address can spend its budget
+  and burn its current code (a temporary lock-out of up to 15 minutes, never a
+  sign-in). The emailed link is not affected: it spends no per-address budget
+  (a 256-bit token is not guessed), so a user rate-limited by somebody else's
+  guesses can still click it. A burned code takes its link with it (one row).
+- **In-memory limiter eviction.** The default in-memory driver caps its keys
+  (`maxKeys`, 100k) and, over the cap, now evicts the least spent buckets
+  first (it evicted the least recently touched). One-hit churn (spoofed IPs,
+  random addresses) no longer pushes out a code's attempt count or a victim's
+  budget cheaply, but enough churn still can, since the attempt count lives in
+  the limiter rather than on the code's row. **Use `RedisRateLimiter` in
+  production.**
+- With `createUser: false`, an unknown address skips the row write
+  and `send`, so its answer is slightly faster; enqueue mail in `send` to keep
+  that difference small.
+- `UserProvider.findUserMagicLinkToken` is deprecated: it looks a row up by the
+  value as issued, which no longer matches. Use `findMagicLinkTokenByEmail` and
+  compare with `oneTimeSecretMatches` (both from `gemi/kernel`).
+- The PIN routes and `/auth/email-code/verify` still refuse a code that is not
+  a string (0.86.1), but no longer require six digits: any non-empty string up
+  to 256 characters is compared, so codes of `emailCode.length` digits or from
+  `generateCode` are accepted.
+
 ## Chunks from the previous release after a deploy (#548)
 
 **Behaviour change (client).** When a view chunk fails to load during a

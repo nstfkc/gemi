@@ -51,6 +51,8 @@ const auth = {
   },
   userProvider,
   createMagicLinkToken: vi.fn(async () => ({})),
+  verifyOneTimeCode: vi.fn(async (..._args: unknown[]) => ({ status: "invalid" as const })),
+  verifyMagicLinkToken: vi.fn(async (..._args: unknown[]) => false),
   createOrUpdateSession: async () => ({ token: "t", expiresAt: new Date() }),
   createOrUpdateSessionV2: async () => ({ token: "t", expiresAt: new Date() }),
   accessTokenCookieOptions: (_req: unknown, expires: Date) => ({
@@ -62,6 +64,12 @@ const auth = {
 };
 
 vi.mock("../foundation/app", () => ({ app: () => auth }));
+// The verify limits are covered in oneTimeCode.test.ts; here every request
+// reaches the input checks.
+vi.mock("./oneTimeCode", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./oneTimeCode")>()),
+  enforceCodeRateLimits: async () => {},
+}));
 vi.mock("../facades", () => ({
   Auth: { user: async () => ({ id: 1, email: "victim@example.com" }) },
 }));
@@ -79,7 +87,8 @@ type Action =
   | "resetPassword"
   | "changePassword"
   | "createMagicLinkToken"
-  | "signInWithMagicLink";
+  | "signInWithMagicLink"
+  | "verifyEmailCode";
 
 /** Runs an action on a JSON body; resolves to its result or its validation errors. */
 async function run(
@@ -149,34 +158,61 @@ beforeEach(() => {
 describe.each(["signInWithPin", "signInWithPinV2"] as const)("%s", (action) => {
   test.each(PAYLOADS)("a pin that is %s is a wrong pin", async (_, pin) => {
     expect(await run(action, { email: "victim@example.com", pin })).toEqual(INVALID_PIN);
-    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+    expect(auth.verifyOneTimeCode).not.toHaveBeenCalled();
   });
 
   test.each(PAYLOADS)("an email that is %s is a wrong pin", async (_, email) => {
     expect(await run(action, { email, pin: "123456" })).toEqual(INVALID_PIN);
-    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+    expect(auth.verifyOneTimeCode).not.toHaveBeenCalled();
   });
 
-  test.each(["", "12345", "1234567", "abcdef", " 123456", "12345\n"])(
-    "a pin of %j is a wrong pin",
-    async (pin) => {
-      expect(await run(action, { email: "victim@example.com", pin })).toEqual(INVALID_PIN);
-      expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
-    },
-  );
+  test.each(["", "1".repeat(257)])("a pin of %j is a wrong pin, with no lookup", async (pin) => {
+    expect(await run(action, { email: "victim@example.com", pin })).toEqual(INVALID_PIN);
+    expect(auth.verifyOneTimeCode).not.toHaveBeenCalled();
+  });
 
   test("a missing pin is a wrong pin", async () => {
     expect(await run(action, { email: "victim@example.com" })).toEqual(INVALID_PIN);
-    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+    expect(auth.verifyOneTimeCode).not.toHaveBeenCalled();
   });
 
-  test("a well-formed pin is looked up as strings", async () => {
-    expect(await run(action, { email: " Victim@Example.com ", pin: "012345" })).toEqual(
-      INVALID_PIN,
+  // The code's format is not checked: `emailCode.length` and `generateCode`
+  // decide it, and the comparison is of keyed hashes (#708).
+  test.each(["012345", "1234", "12345678", "AB12-cd34", "1".repeat(256)])(
+    "a string pin of %j is checked as a string",
+    async (pin) => {
+      expect(await run(action, { email: " Victim@Example.com ", pin })).toEqual(INVALID_PIN);
+      expect(auth.verifyOneTimeCode).toHaveBeenCalledWith("victim@example.com", pin);
+    },
+  );
+
+  test("a matching code of another length signs in", async () => {
+    auth.verifyOneTimeCode.mockResolvedValueOnce({ status: "ok", row: { id: 1 } } as any);
+    const result = await run(action, { email: "victim@example.com", pin: "12345678" });
+    expect(result.ok).toBe(true);
+    expect(userProvider.verifyUser).toHaveBeenCalledWith("victim@example.com");
+  });
+});
+
+describe("verifyEmailCode", () => {
+  const INVALID_CODE = { ok: false, errors: { code: ["invalid_code"] } };
+  beforeEach(() => {
+    auth.config.emailCode = { ...defaults.emailCode, enabled: true };
+  });
+
+  test.each(PAYLOADS)("a code that is %s is an invalid code", async (_, code) => {
+    expect(await run("verifyEmailCode", { email: "victim@example.com", code })).toEqual(
+      INVALID_CODE,
     );
-    expect(userProvider.findUserMagicLinkToken).toHaveBeenCalledWith({
-      email: "victim@example.com",
-      pin: "012345",
+    expect(auth.verifyOneTimeCode).not.toHaveBeenCalled();
+  });
+
+  test.each(["12345678", "AB12-cd34"])("a string code of %j is checked", async (code) => {
+    expect(await run("verifyEmailCode", { email: "victim@example.com", code })).toEqual(
+      INVALID_CODE,
+    );
+    expect(auth.verifyOneTimeCode).toHaveBeenCalledWith("victim@example.com", code, {
+      claim: false,
     });
   });
 });
@@ -194,31 +230,21 @@ describe("signInWithMagicLink", () => {
       ok: true,
       result: { error: "Invalid token" },
     });
-    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+    expect(auth.verifyMagicLinkToken).not.toHaveBeenCalled();
   });
 
   test("a repeated token is an invalid token, with no lookup", async () => {
     expect(
       await run("signInWithMagicLink", {}, link("email=victim%40example.com&token=a&token=b")),
     ).toEqual({ ok: true, result: { error: "Invalid token" } });
-    expect(userProvider.findUserMagicLinkToken).not.toHaveBeenCalled();
+    expect(auth.verifyMagicLinkToken).not.toHaveBeenCalled();
   });
 
-  test("a failed lookup answers like a wrong token", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    userProvider.findUserMagicLinkToken.mockRejectedValueOnce(new Error("lookup failed"));
+  test("a token and email are checked as strings", async () => {
     expect(
-      await run("signInWithMagicLink", {}, link("email=victim%40example.com&token=abc")),
+      await run("signInWithMagicLink", {}, link("email=Victim%40example.com&token=abc")),
     ).toEqual({ ok: true, result: { error: "Invalid token" } });
-    spy.mockRestore();
-  });
-
-  test("a token and email are looked up as strings", async () => {
-    await run("signInWithMagicLink", {}, link("email=Victim%40example.com&token=abc"));
-    expect(userProvider.findUserMagicLinkToken).toHaveBeenCalledWith({
-      email: "victim@example.com",
-      token: "abc",
-    });
+    expect(auth.verifyMagicLinkToken).toHaveBeenCalledWith("victim@example.com", "abc");
   });
 });
 
