@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.91.1 to 0.92.0
 
 ## Typed error responses: `HttpResponse.error` / `httpError` (#665)
 
