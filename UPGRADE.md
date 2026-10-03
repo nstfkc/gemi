@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.88.0 to 0.88.1
 
 ## `ApiRouter`: a stream or file `get` can share a path with other verbs (#707)
 
