@@ -33,8 +33,21 @@ export type StreamDescriptor = {
   headers?: Record<string, string>;
 };
 
+/**
+ * A `FileStorage.read()` result with response options layered on top, so a
+ * handler can name, re-type or force-download a stored file without unpacking
+ * the read (and risking dropping `partial`, which breaks `Range`):
+ *
+ * ```ts
+ * const read = await FileStorage.read(key);
+ * return { ...read, name: original, download: true, headers: { "Cache-Control": "private" } };
+ * ```
+ */
+export type StreamReadResult = ReadResult &
+  Pick<StreamDescriptor, "download" | "status" | "headers">;
+
 export type StreamOutput =
-  | ReadResult
+  | StreamReadResult
   | Blob
   | Response
   | StreamDescriptor
@@ -56,8 +69,15 @@ type Normalized = {
   extraHeaders: Record<string, string>;
 };
 
-function isReadResult(output: object): output is ReadResult {
+function isReadResult(output: object): output is StreamReadResult {
   return "total" in output && "partial" in output && "body" in output;
+}
+
+function notFound() {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "X-Content-Type-Options": "nosniff" },
+  });
 }
 
 /** A 416, whose `Content-Range` reports the current size and no offsets. */
@@ -72,6 +92,7 @@ export function createUnsatisfiableResponse(total: number): Response {
       // current length. A cache that replayed it to a request which asked for
       // no range, or a different one, would be serving a wrong answer.
       "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
@@ -101,11 +122,11 @@ async function normalize(output: Exclude<StreamOutput, Response | null | undefin
       partial: output.partial,
       type: output.type,
       name: output.name,
-      download: false,
+      download: output.download ?? false,
       etag: output.etag,
       lastModified: output.lastModified,
-      status: 200,
-      extraHeaders: {},
+      status: output.status ?? 200,
+      extraHeaders: output.headers ?? {},
     } satisfies Normalized;
   }
 
@@ -147,7 +168,7 @@ export async function createStreamResponse(
   }
 
   if (!output) {
-    return new Response("Not found", { status: 404 });
+    return notFound();
   }
 
   const normalized = await normalize(output);
@@ -161,7 +182,7 @@ export async function createStreamResponse(
     typeof (body as any).exists === "function"
   ) {
     if (!(await (body as any).exists())) {
-      return new Response("Not found", { status: 404 });
+      return notFound();
     }
   }
 
@@ -199,6 +220,9 @@ export async function createStreamResponse(
   const headers = new Headers();
   headers.set("Accept-Ranges", "bytes");
   headers.set("Content-Type", normalized.type || "application/octet-stream");
+  // Stream routes mostly serve stored uploads from the app's own origin. A
+  // browser that sniffed one as HTML or script would run it there.
+  headers.set("X-Content-Type-Options", "nosniff");
 
   if (isPartial) {
     headers.set("Content-Range", formatContentRange(start, end, total));

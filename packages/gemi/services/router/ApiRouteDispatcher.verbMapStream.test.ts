@@ -40,6 +40,24 @@ class RootApiRouter extends ApiRouter {
       patch: this.patch(async () => ({ patched: true })),
     },
     "/solo": this.stream(async () => new Blob(["0123456789"])),
+    "/download": this.stream(async () => {
+      // What `FileStorage.read()` hands back, decorated in place (#727).
+      const read = {
+        body: new Blob(["0123456789"], { type: "application/pdf" }),
+        start: 0,
+        end: 9,
+        total: 10,
+        partial: false,
+        type: "application/pdf",
+        name: "k3y",
+      };
+      return {
+        ...read,
+        name: "report.pdf",
+        download: true,
+        headers: { "Cache-Control": "private" },
+      };
+    }),
   };
 }
 
@@ -112,5 +130,36 @@ describe("a verb map with a stream get", () => {
     const res = await app.fetch(new Request(url("/files/abc"), { method: "OPTIONS" }));
 
     expect(res.status).toBe(204);
+  });
+});
+
+describe("a stream route's headers (#727)", () => {
+  test("a decorated read keeps its headers on a 200", async () => {
+    const res = await app.fetch(new Request(url("/download")));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Content-Disposition")).toContain("attachment");
+    expect(res.headers.get("Cache-Control")).toBe("private");
+    expect(await res.text()).toBe("0123456789");
+  });
+
+  test("a decorated read keeps its headers on a 206", async () => {
+    const res = await app.fetch(
+      new Request(url("/download"), { headers: { Range: "bytes=2-4" } }),
+    );
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 2-4/10");
+    expect(res.headers.get("Content-Length")).toBe("3");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Content-Disposition")).toContain("attachment");
+    expect(res.headers.get("Cache-Control")).toBe("private");
+    expect(await res.text()).toBe("234");
+  });
+
+  test("a plain stream route sends nosniff", async () => {
+    const res = await app.fetch(new Request(url("/solo")));
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
   });
 });

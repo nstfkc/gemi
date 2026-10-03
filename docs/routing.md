@@ -184,6 +184,25 @@ A handler can also return a `Blob` or a `Bun.file()` directly, and the framework
 "/clip": this.stream(() => Bun.file("/videos/clip.mp4")),
 ```
 
+Every response from a stream route (200, 206, 416, 404 and `HEAD`) carries `X-Content-Type-Options: nosniff`, so a browser never sniffs a stored upload into HTML or script on your origin.
+
+To name the file, force a download, or add headers, spread the read and set what you need. Don't unpack it field by field: `partial` and the offsets must survive, or `Range` requests break.
+
+```typescript
+"/documents/:id": this.stream(async (req) => {
+  const doc = await Document.find(req.params.id);
+  const read = await FileStorage.read(doc.storageKey);
+  return {
+    ...read,
+    name: doc.originalName, // Content-Disposition file name (defaults to the storage key)
+    download: true, // `attachment` rather than `inline`
+    headers: { "Cache-Control": "private, max-age=300" },
+  };
+}),
+```
+
+`type` and `status` can be overridden the same way. Headers in `headers` win over the computed ones, `X-Content-Type-Options` included.
+
 Returning a `Response` yourself opts out of all of the above and is passed through untouched.
 
 Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
