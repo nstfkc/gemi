@@ -16,10 +16,13 @@
  * better than one that lets you write a schema the API refuses at runtime.
  *
  * `json()` is the one deliberate hole in that, for the formats strict mode
- * cannot describe at all: a record with arbitrary keys, a mixed-type tuple, a
- * recursive document. It does not widen the subset — it turns strict mode off
- * for the schema containing it, which `supportsStrict` reads back off the tree
- * so that no caller has to remember to.
+ * cannot describe at all: a record with arbitrary keys, a mixed-type tuple. It
+ * does not widen the subset — it turns strict mode off for the schema containing
+ * it, which `supportsStrict` reads back off the tree so that no caller has to
+ * remember to.
+ *
+ * A document that nests into itself is NOT one of those: strict mode accepts
+ * `$defs` + `$ref`, and `recursive()` emits exactly that (#745).
  */
 
 export type JSONSchema = {
@@ -32,6 +35,15 @@ export type JSONSchema = {
   additionalProperties?: false;
   items?: JSONSchema;
   anyOf?: readonly JSONSchema[];
+  /**
+   * `#/$defs/<name>`, pointing at an entry of the root's `$defs`. Emitted by
+   * `s.recursive` and never with a sibling keyword: OpenAI's strict mode
+   * refuses `{ $ref, description }`, so a described or nullable reference is
+   * wrapped in an `anyOf` instead.
+   */
+  $ref?: string;
+  /** Only ever on the root: every `s.recursive` the schema reaches, by name. */
+  $defs?: Record<string, JSONSchema>;
 };
 
 /**
@@ -227,7 +239,37 @@ type SchemaNode =
   | { kind: "array"; item: Definition; checks?: ArrayChecks }
   | { kind: "union"; members: readonly Definition[] }
   /** Constrains nothing. The node strict mode has no spelling for. */
-  | { kind: "json" };
+  | { kind: "json" }
+  /**
+   * A use of an `s.recursive` schema — its `self`, or the builder it returned.
+   * Emitted as a `$ref` into the root's `$defs`, read by following the cell.
+   */
+  | { kind: "ref"; cell: RecursiveCell };
+
+/**
+ * One `s.recursive` declaration. `definition` is filled in once the callback
+ * returns; until then `self` is a reference to something that does not exist
+ * yet, which is the whole trick.
+ *
+ * `active` is the set of values being read through this cell right now, the
+ * cycle guard for a JavaScript value that contains itself (a tool output an app
+ * built). Per cell rather than global, so that one value read through two
+ * different recursive schemas in a row is not mistaken for a cycle.
+ */
+type RecursiveCell = {
+  name: string;
+  definition?: Definition;
+  active: Set<object>;
+};
+
+function bodyOf(cell: RecursiveCell): Definition {
+  if (!cell.definition) {
+    throw new Error(
+      `gemi/ai: the recursive schema "${cell.name}" was used before its definition returned; \`self\` can be nested into the schema, but not parsed or emitted inside the callback`,
+    );
+  }
+  return cell.definition;
+}
 
 type ParseResult = { ok: true; value: unknown } | { ok: false; errors: string[] };
 
@@ -270,13 +312,52 @@ function definitionOf(schema: AnySchema): Definition {
 
 // --- emitting ------------------------------------------------------------
 
-function emit(definition: Definition): JSONSchema {
+/**
+ * What one `toJSONSchema()` call collects on its way down: the `$defs` the
+ * root will carry, and which cell owns each name in them.
+ */
+type EmitContext = {
+  defs: Record<string, JSONSchema>;
+  cells: Map<string, RecursiveCell>;
+};
+
+/**
+ * The schema as the provider sees it: the tree, plus `$defs` at the root when
+ * an `s.recursive` is anywhere in it.
+ *
+ * A recursive schema used AS the root is inlined there, and its `$defs` entry
+ * is a second copy of the same body. Pointing the root at itself with
+ * `"$ref": "#"` would be shorter, and OpenAI accepts it, but `#` means "the
+ * whole document" — and a document that gets merged into (MCP's
+ * `combineSchemas` adds properties to an input's root) would then demand the
+ * merged-in fields at every level of the tree.
+ */
+function emitRoot(definition: Definition): JSONSchema {
+  const context: EmitContext = { defs: {}, cells: new Map() };
+  let root = definition;
+  if (definition.node.kind === "ref") {
+    const body = bodyOf(definition.node.cell);
+    root = {
+      ...body,
+      ...(definition.description ? { description: definition.description } : {}),
+      optional: definition.optional,
+      nullable: definition.nullable || body.nullable,
+    };
+  }
+  const schema = emit(root, context);
+  return Object.keys(context.defs).length > 0 ? { ...schema, $defs: context.defs } : schema;
+}
+
+function emit(definition: Definition, context: EmitContext): JSONSchema {
   // A `json` node already admits every value there is, null included, so
   // widening it would only add an `anyOf` for the model to read past — and one
   // whose second branch is a strictly narrower repeat of its first.
   const widen = (definition.optional || definition.nullable) && definition.node.kind !== "json";
-  const body = allowNull(emitNode(definition.node), widen);
+  let body = allowNull(emitNode(definition.node, context), widen);
   const description = [definition.description, hint(definition.node)].filter(Boolean).join(" ");
+  // `$ref` takes no siblings under strict mode, so a described reference
+  // becomes a one-member `anyOf` that can carry the description beside it.
+  if (description && body.$ref !== undefined) body = { anyOf: [body] };
   return description ? { description, ...body } : body;
 }
 
@@ -304,10 +385,11 @@ function hint(node: SchemaNode): string {
     if (checks?.minItems !== undefined) said.push(`At least ${checks.minItems} items.`);
     if (checks?.maxItems !== undefined) said.push(`At most ${checks.maxItems} items.`);
   }
+  // A `ref` says nothing of its own: its body's hints are in its `$defs` entry.
   return said.join(" ");
 }
 
-function emitNode(node: SchemaNode): JSONSchema {
+function emitNode(node: SchemaNode, context: EmitContext): JSONSchema {
   switch (node.kind) {
     case "string":
       return { type: "string" };
@@ -324,12 +406,12 @@ function emitNode(node: SchemaNode): JSONSchema {
     case "enum":
       return { type: "string", enum: node.values };
     case "array":
-      return { type: "array", items: emit(node.item) };
+      return { type: "array", items: emit(node.item, context) };
     case "object":
       return {
         type: "object",
         properties: Object.fromEntries(
-          Object.entries(node.shape).map(([key, child]) => [key, emit(child)]),
+          Object.entries(node.shape).map(([key, child]) => [key, emit(child, context)]),
         ),
         // Every declared property, optional ones included. This is the whole of
         // strict mode's bargain: the model is never allowed to omit a key, so
@@ -338,13 +420,30 @@ function emitNode(node: SchemaNode): JSONSchema {
         additionalProperties: false,
       };
     case "union":
-      return { anyOf: node.members.map(emit) };
+      return { anyOf: node.members.map((member) => emit(member, context)) };
     // The empty schema, which is JSON Schema's own way of saying "any value" —
     // no `type` listing all seven, which reads as a constraint the model then
     // has to check itself. What the field actually is gets said in
     // `description`, the one channel a model reads either way.
     case "json":
       return {};
+    case "ref": {
+      const { cell } = node;
+      const owner = context.cells.get(cell.name);
+      if (owner && owner !== cell) {
+        throw new Error(
+          `gemi/ai: two different recursive schemas are named "${cell.name}" in one schema; give each s.recursive(...) its own name`,
+        );
+      }
+      if (!owner) {
+        // Claimed BEFORE the body is emitted: the body refers to itself, and
+        // that inner reference has to find the name taken and stop here.
+        context.cells.set(cell.name, cell);
+        context.defs[cell.name] = {};
+        context.defs[cell.name] = emit(bodyOf(cell), context);
+      }
+      return { $ref: `#/$defs/${cell.name}` };
+    }
   }
 }
 
@@ -409,6 +508,8 @@ function wanted(definition: Definition): string {
         return "one of the variants";
       case "json":
         return "a JSON value";
+      case "ref":
+        return wanted({ ...bodyOf(node.cell), optional: false, nullable: false });
     }
   })();
   return definition.optional || definition.nullable ? `${base} or null` : base;
@@ -479,6 +580,31 @@ function score(definition: Definition, value: unknown): number {
     // the discriminant of a variant the model was never aiming at.
     case "json":
       return 1;
+    case "ref":
+      return through(
+        node.cell,
+        value,
+        () => 1,
+        () => score(bodyOf(node.cell), value),
+      );
+  }
+}
+
+/**
+ * Runs `walk` with `value` marked as being read through `cell`, or `cycle` when
+ * it already is. A value can only meet the same cell again further down by
+ * containing itself — `s.recursive` refuses a body that reaches `self` without
+ * an object or array in between — so this is exactly the cycle guard, and a
+ * value that merely appears twice side by side is read twice.
+ */
+function through<R>(cell: RecursiveCell, value: unknown, cycle: () => R, walk: () => R): R {
+  if (typeof value !== "object" || value === null) return walk();
+  if (cell.active.has(value)) return cycle();
+  cell.active.add(value);
+  try {
+    return walk();
+  } finally {
+    cell.active.delete(value);
   }
 }
 
@@ -619,6 +745,23 @@ function readNode(
       if (value === undefined) return fail();
       checkJson(value, path, issues, new Set());
       return value;
+    // The reference's own `optional`/`nullable` were settled by `read` above;
+    // the body's are its own business, settled by the `read` below.
+    case "ref":
+      return through(
+        node.cell,
+        value,
+        () => {
+          issues.push({
+            path,
+            code: "type",
+            message: "expected a finite tree, got a circular reference",
+            params: {},
+          });
+          return undefined;
+        },
+        () => read(bodyOf(node.cell), value, path, issues).value,
+      );
   }
 }
 
@@ -823,7 +966,7 @@ function make<T>(definition: Definition): SchemaBuilder<T> {
  */
 function build(definition: Definition): RuntimeSchema {
   const runtime: RuntimeSchema = {
-    toJSONSchema: () => emit(definition),
+    toJSONSchema: () => emitRoot(definition),
     parse(value) {
       const issues: SchemaIssue[] = [];
       const result = read(definition, value, [], issues);
@@ -1239,7 +1382,8 @@ export const s: {
   /**
    * Any JSON value, constrained by nothing — for a format the rest of this
    * builder cannot describe: a record with arbitrary keys, a mixed-type tuple,
-   * a document that nests into itself.
+   * a document whose shape is not known in advance. (A document that nests
+   * into itself has a strict spelling: `s.recursive`.)
    *
    * A schema containing one cannot be sent under strict mode, so a tool whose
    * input uses it is sent with `strict: false` automatically. That is not an
@@ -1272,6 +1416,47 @@ export const s: {
    */
   json(): SchemaBuilder<JsonValue>;
   json<T>(): SchemaBuilder<T>;
+  /**
+   * A schema that contains itself — a tree of UI nodes, a comment thread, a
+   * folder listing — and stays strict-mode safe, unlike `s.json()`.
+   *
+   * ```ts
+   * type Node = { tag: string; text?: string; children: Node[] };
+   *
+   * const node = s.recursive<Node>("Node", (self) =>
+   *   s.object({
+   *     tag: s.enum(["section", "heading", "text"]),
+   *     text: s.string().optional(),
+   *     children: s.array(self),
+   *   }),
+   * );
+   * const output = s.object({ title: s.string(), root: node });
+   * ```
+   *
+   * Emitted the way OpenAI's strict structured output spells recursion: the
+   * body once under the root's `$defs[name]`, and `{ "$ref": "#/$defs/<name>" }`
+   * wherever it is used. Used as the root itself, the body is also inlined at
+   * the root, since a tool's parameters and an agent's output must be an
+   * object there. `parse`, `safeParse` and `validate` follow the reference to
+   * any depth.
+   *
+   * `T` has to be written out: TypeScript cannot infer a type from a value
+   * that mentions itself. The callback's schema is checked against it, so a
+   * field the type has and the schema lacks (or the reverse) is a type error.
+   *
+   * Rules, each an error when the schema is built:
+   *
+   * - `name` is the `$defs` key: letters, digits, `_` and `-`. Two different
+   *   recursive schemas in one tool or output need different names.
+   * - `self` must be nested inside an `s.object` field or an `s.array` — a
+   *   body that is `self` again through a union describes no finite value.
+   * - The body cannot be `optional()`; make the uses optional instead
+   *   (`children: s.array(self).optional()`, `next: self.optional()`).
+   *
+   * Strict mode limits the rest as usual: every node of the body is in the
+   * strict subset or the whole schema is sent non-strict (`supportsStrict`).
+   */
+  recursive<T>(name: string, define: (self: SchemaBuilder<T>) => Schema<T>): SchemaBuilder<T>;
   /**
    * A schema read from a JSON Schema at runtime — for a shape that comes from
    * data rather than code, like a collection whose items a user defined.
@@ -1331,6 +1516,7 @@ export const s: {
       leaf({ kind: "union", members: members.map(definitionOf) }),
     ),
   json: <T>() => make<T>(leaf({ kind: "json" })),
+  recursive,
   fromJSONSchema: <T>(schema: unknown, options: FromJSONSchemaOptions = {}) => {
     const problems: string[] = [];
     const definition = fromJSON(schema, options, "", problems);
@@ -1385,6 +1571,7 @@ function strictJSONSchema(schema: JSONSchema): boolean {
   // `description` is prose, not a constraint. A node carrying only that — which
   // is what `s.json().describe(...)` emits — says nothing about its value.
   const constrained =
+    schema.$ref !== undefined ||
     schema.type !== undefined ||
     schema.enum !== undefined ||
     schema.const !== undefined ||
@@ -1400,6 +1587,11 @@ function strictJSONSchema(schema: JSONSchema): boolean {
   for (const member of schema.anyOf ?? []) {
     if (!strictJSONSchema(member)) return false;
   }
+  // A `$ref` is answered for by the `$defs` entry it points at, which is
+  // checked here once rather than followed — following it is a cycle.
+  for (const definition of Object.values(schema.$defs ?? {})) {
+    if (!strictJSONSchema(definition)) return false;
+  }
   return true;
 }
 
@@ -1408,10 +1600,11 @@ function strictJSONSchema(schema: JSONSchema): boolean {
  * inherit "strict" by omission — which is the failure that shows up as a 400
  * from the provider rather than as a type error here.
  *
- * Needs no cycle guard: a definition tree is built bottom-up out of finished
- * builders, so nothing in it can refer to something still being constructed.
+ * The one cycle in a definition tree is an `s.recursive` reaching itself, so
+ * `seen` holds the cells already being answered for: a body that is strict
+ * apart from its references to itself is strict.
  */
-function strictNode(node: SchemaNode): boolean {
+function strictNode(node: SchemaNode, seen = new Set<RecursiveCell>()): boolean {
   switch (node.kind) {
     case "string":
     case "number":
@@ -1420,12 +1613,67 @@ function strictNode(node: SchemaNode): boolean {
     case "enum":
       return true;
     case "object":
-      return Object.values(node.shape).every((child) => strictNode(child.node));
+      return Object.values(node.shape).every((child) => strictNode(child.node, seen));
     case "array":
-      return strictNode(node.item.node);
+      return strictNode(node.item.node, seen);
     case "union":
-      return node.members.every((member) => strictNode(member.node));
+      return node.members.every((member) => strictNode(member.node, seen));
     case "json":
       return false;
+    case "ref":
+      if (seen.has(node.cell)) return true;
+      seen.add(node.cell);
+      return strictNode(bodyOf(node.cell).node, seen);
   }
+}
+
+/**
+ * Whether `definition` can reach `cell` without an object property or an
+ * array item in between — through a union member, or another recursive
+ * schema's body. Such a schema describes no finite value (`Self = Self |
+ * string` is just `string`), and reading one would recurse forever on a
+ * primitive, where no object is there to catch the cycle with.
+ */
+function reachesUnguarded(
+  definition: Definition,
+  cell: RecursiveCell,
+  seen = new Set<RecursiveCell>(),
+): boolean {
+  const node = definition.node;
+  if (node.kind === "union") {
+    return node.members.some((member) => reachesUnguarded(member, cell, seen));
+  }
+  if (node.kind !== "ref") return false;
+  if (node.cell === cell) return true;
+  if (seen.has(node.cell) || !node.cell.definition) return false;
+  seen.add(node.cell);
+  return reachesUnguarded(node.cell.definition, cell, seen);
+}
+
+const RECURSIVE_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+
+function recursive<T>(
+  name: string,
+  define: (self: SchemaBuilder<T>) => Schema<T>,
+): SchemaBuilder<T> {
+  if (typeof name !== "string" || !RECURSIVE_NAME.test(name)) {
+    throw new Error(
+      `gemi/ai: s.recursive needs a name of letters, digits, "_" and "-" (starting with a letter or "_", at most 64), got ${JSON.stringify(name)}`,
+    );
+  }
+  const cell: RecursiveCell = { name, active: new Set() };
+  const reference = (): Definition => leaf({ kind: "ref", cell });
+  const body = definitionOf(define(make<T>(reference())));
+  if (body.optional) {
+    throw new Error(
+      `gemi/ai: the recursive schema "${name}" is optional() as a whole; mark the places that use it optional instead`,
+    );
+  }
+  if (reachesUnguarded(body, cell)) {
+    throw new Error(
+      `gemi/ai: the recursive schema "${name}" refers to itself outside any object or array, so it describes no finite value; nest \`self\` in an s.object(...) field or an s.array(...)`,
+    );
+  }
+  cell.definition = body;
+  return make<T>(reference());
 }

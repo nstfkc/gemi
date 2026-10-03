@@ -1,3 +1,30 @@
+# Unreleased
+
+## `gemi/ai`: recursive schemas that stay strict, `s.recursive` (#745)
+
+A tree that nests into itself (UI nodes, a comment thread, a folder listing) used to need `s.json()`, and that sent the whole tool or output with `strict: false`. `s.recursive` describes it in the strict subset instead:
+
+```ts
+type Node = { tag: string; text?: string; children: Node[] };
+
+const node = s.recursive<Node>("Node", (self) =>
+  s.object({ tag: s.string(), text: s.string().optional(), children: s.array(self) }),
+);
+const output = s.object({ title: s.string(), root: node });
+```
+
+It is emitted the way OpenAI and Azure OpenAI strict structured output spell recursion: the body once in the root's `$defs.Node`, and `{ "$ref": "#/$defs/Node" }` wherever it is used. `parse`, `safeParse` and `validate` follow it to any depth and report the full path of a bad node. Used as the root itself, the body is also inlined at the root, because tools and outputs need an object there.
+
+No change is needed to upgrade. Things to know:
+
+- `T` has to be written out (`s.recursive<Node>(...)`); the body is checked against it.
+- `self` has to sit inside an `s.object` field or an `s.array`, the body can't be `optional()` (make the uses optional), and the name is a plain `$defs` key. Each is an error when the schema is built. Two different recursive schemas with the same name in one schema throw from `toJSONSchema()`.
+- A described or nullable use is emitted as an `anyOf` around the `$ref`, because strict mode refuses keywords next to a `$ref`.
+- `JSONSchema` has two new optional fields, `$ref` and `$defs`. Code that walks an emitted schema should handle them.
+- `supportsStrict` on a hand-built schema (one not made with `s`, such as MCP's merged input) now counts a `$ref` as a constraint and checks the `$defs` entries. Before, a `$ref` node made it answer `false`.
+- An `s.json()` inside the body still sends the whole schema non-strict, as before. A record with arbitrary keys (like `props`) has no strict form; use a list of `{ name, value }` pairs, or a string the app parses.
+- `s.fromJSONSchema` still refuses `$ref` and `$defs`.
+
 # Upgrading from 0.99.0 to 0.100.0
 
 ## `gemi/ai`: circuit breaking for `FallbackProvider` (#742)
