@@ -1,3 +1,11 @@
+# Unreleased
+
+## `FallbackProvider`: an ordered provider chain for `gemi/ai` (#666)
+
+`FallbackProvider.chain([{ provider, timeoutMs?, reasoning? }, ...], { fallbackOn?, onUsage? })` is a provider that tries its legs in order, so `Agent.create({ provider: chain })` needs no other change. A leg that fails before any output falls back to the next one (by default when `error.retryable` is true). Once a leg has streamed text, reasoning, a tool call or structured output, a later error is final. `timeoutMs` is the time to the leg's first event. An entry's `reasoning` overrides the agent's for that leg. `onUsage` reports each leg tried, including the failed legs that billed tokens, and those tokens are added to the call's closing usage. `capabilities` is the intersection of the legs' capabilities. `upload()` goes to the first leg. `chain.from(i)` enters the chain at `i`, and `evalChain(chain, fixture, { samples })` runs a fixture against each leg on its own. See `docs/ai-providers.md`.
+
+No change is needed to upgrade: it is a new export, and `OpenAIProvider` and `AzureOpenAIProvider` are unchanged.
+
 # Upgrading from 0.93.0 to 0.94.0
 
 ## Per-key throttles and concurrency for jobs (#661)

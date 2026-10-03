@@ -165,6 +165,14 @@ export { ImageRequestError } from "./providers/images";
 
 // --- providers ------------------------------------------------------------
 export { AgentProvider, AzureOpenAIProvider, OpenAIProvider } from "./AgentProvider";
+export { evalChain, FallbackProvider } from "./FallbackProvider";
+export type {
+  EvalChainResult,
+  FallbackEntry,
+  FallbackFailure,
+  FallbackOptions,
+  FallbackUsage,
+} from "./FallbackProvider";
 export type {
   AzureConfig,
   ProviderCapabilities,
