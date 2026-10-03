@@ -1,3 +1,7 @@
+# Unreleased
+
+- `useEmailCode()`: `error` is now the outcome of the latest call (`request` or `verify`). A stale `invalid_code` no longer hides a newer request error (a 429, say) or lingers after a successful `request`. New `requestError` and `verifyError` hold each call's own last error. Code that relied on `error` keeping a verify error across a `request` should read `verifyError` (#724).
+
 # Upgrading from 0.88.0 to 0.88.1
 
 ## `ApiRouter`: a stream or file `get` can share a path with other verbs (#707)
