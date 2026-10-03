@@ -181,13 +181,19 @@ export function useMutation<
     // is `pending > 0` in parallel mode, while in latest mode it follows the
     // newest request alone, as it always has, so a superseded one settling
     // leaves it as it is.
+    //
+    // A call leaves `pending` once: an `onError` that throws lands in the
+    // `catch` and settles the call a second time.
+    let left = false;
     const settle = (
       update: (prev: State<T>) => Pick<State<T>, "data" | "error">,
       superseded = false,
     ) => {
       inFlight.current.delete(controller);
+      const leaving = !left;
+      left = true;
       setState((prev) => {
-        const pending = prev.pending - 1;
+        const pending = leaving ? prev.pending - 1 : prev.pending;
         return {
           ...update(prev),
           pending,

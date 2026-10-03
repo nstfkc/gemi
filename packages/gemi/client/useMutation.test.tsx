@@ -627,6 +627,22 @@ describe("useMutation", () => {
       expect(result.current.pending).toBe(0);
     });
 
+    test("an onError that throws still leaves pending at zero", async () => {
+      vi.stubGlobal("fetch", fetchStub(respond(422, { error: validationError })));
+      const { result } = renderHook(() =>
+        useMutation("POST" as never, "/images" as never, {} as never, {
+          concurrency: "parallel",
+          onError: (error: unknown) => {
+            if ((error as { kind?: string }).kind) throw new Error("boom");
+          },
+        } as never),
+      );
+
+      await act(() => result.current.trigger({} as never));
+      expect(result.current.pending).toBe(0);
+      expect(result.current.loading).toBe(false);
+    });
+
     describe("the default stays latest-wins", () => {
       test("a superseded call resolves undefined and runs no callbacks, its own included", async () => {
         const { fetch, calls } = deferredFetch();
