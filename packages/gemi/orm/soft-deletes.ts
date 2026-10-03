@@ -1,5 +1,7 @@
 import { UnsupportedQueryError } from "./errors";
+import type { TrashedMode } from "./context";
 import type { ModelPolicy } from "./policy";
+import type { ModelSchema } from "./schema";
 
 /**
  * Soft deletes, as a policy.
@@ -125,7 +127,7 @@ export function softDeletes<M = any>(
 ): ModelPolicy<any, any, RowOf<M>> {
   const field = options.field ?? "deletedAt";
 
-  return {
+  const policy: ModelPolicy<any, any, RowOf<M>> = {
     scope: () => ({ [field]: null }),
 
     // A soft-deleted model still creates ordinary rows; the column is left to
@@ -148,6 +150,12 @@ export function softDeletes<M = any>(
     // for its own column. That separation is the point of the per-policy check.
     onUpdate: (_context, data) => data,
   };
+
+  // Tagged with its column, so a model that also sets `$softDeletes` on the
+  // same column does not apply the scope twice — and so `withTrashed` lifts
+  // this one too. See `softDeletePolicies`. A symbol, so the policy-shape
+  // check (which reads string keys) never sees it.
+  return Object.assign(policy, { [POLICY_FIELD]: field });
 }
 
 /**
@@ -270,4 +278,143 @@ function assertNoData(
       `Call update directly if you meant to change other fields at the same ` +
       `time.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// `static $softDeletes` — soft deletes as a model setting rather than a policy
+// ---------------------------------------------------------------------------
+
+/**
+ * The value of `static $softDeletes`: `true` for a `deletedAt` column, or the
+ * column named.
+ *
+ * **Not a policy, and that is the point (#663).** `Model.asSystem` suspends
+ * every `$policies` entry, which is right for authorization and wrong for soft
+ * deletes: a soft-deleted row is gone as far as the application is concerned,
+ * whoever is asking. An application that runs its data access under `asSystem`
+ * therefore never got `softDeletes()`'s scope and hand-wrote `deletedAt: null`
+ * on every query — one missed filter was a public data leak. The setting is
+ * applied by `$exec` whether or not policies are suspended.
+ *
+ * It still *rides* the policy machinery — the scope is a `ModelPolicy` built
+ * here and appended to the model's chain — because that machinery is what
+ * reaches every place a read of the model can hide: nested `include`s under
+ * both strategies, `_count`, relation filters and relation orderings. A second
+ * mechanism would have to rediscover each of them.
+ */
+export type SoftDeletesSetting<M = any> =
+  | boolean
+  | {
+      /** The timestamp column. Defaults to `deletedAt`. */
+      field?: SchemaFields<M>;
+    };
+
+/** Marks a `softDeletes()` policy with the column it scopes on. */
+const POLICY_FIELD = Symbol("gemi.orm.softDeletesField");
+
+/** The column a `softDeletes()` policy scopes on, or `undefined` for any other policy. */
+function policyField(policy: ModelPolicy): string | undefined {
+  return (policy as { [POLICY_FIELD]?: string })[POLICY_FIELD];
+}
+
+/**
+ * The column a model soft-deletes on, or `undefined` when it does not.
+ *
+ * Validated against the schema on every call — one property read and one
+ * lookup — because the failure it prevents is a model that *believes* it hides
+ * deleted rows and hides nothing: a misspelt column would otherwise surface as
+ * an `UnknownFieldError` naming a field the caller never wrote in a `where`.
+ */
+export function softDeleteField(
+  model: { $softDeletes?: SoftDeletesSetting },
+  schema: ModelSchema,
+): string | undefined {
+  const setting = model.$softDeletes;
+  if (setting === undefined || setting === false || setting === null) {
+    return undefined;
+  }
+
+  const field =
+    setting === true ? "deletedAt" : (setting.field ?? "deletedAt");
+  const column = schema.fields[field];
+
+  if (column === undefined || !column.nullable || column.isList) {
+    throw new UnsupportedQueryError(
+      "$softDeletes",
+      schema.name,
+      "softDeletes",
+      column === undefined
+        ? `${schema.name} has no '${field}' field to soft-delete on. ` +
+            `Set \`static $softDeletes = { field: "<column>" }\` to name a ` +
+            `nullable DateTime column, or add \`${field} DateTime?\` to the model.`
+        : `'${field}' must be a nullable scalar column to mark a row deleted, ` +
+            `and on ${schema.name} it is not.`,
+    );
+  }
+
+  return field;
+}
+
+/**
+ * The scope policies for each (column, mode), made once so identity is stable
+ * and the per-query cost is a `Map.get`.
+ */
+const scopes = new Map<string, ModelPolicy>();
+
+function scopePolicy(field: string, mode: "hidden" | "only"): ModelPolicy {
+  const key = `${mode}:${field}`;
+  let policy = scopes.get(key);
+  if (policy !== undefined) return policy;
+
+  const where =
+    mode === "hidden" ? { [field]: null } : { [field]: { not: null } };
+
+  policy = Object.freeze({
+    // **Not on `upsert`.** An upsert's `where` compiles to an `on conflict`
+    // target, which cannot carry a predicate — the policy machinery refuses a
+    // scope there rather than drop it. For a tenant scope that refusal is right;
+    // for soft deletes it would take `upsert` away from every flagged model, and
+    // the trashed row really does still hold the unique key the conflict is on.
+    // So an upsert sees trashed rows, which is what the database's own unique
+    // constraint says too.
+    scope: (context: { operation: string }) =>
+      context.operation === "upsert" ? undefined : where,
+    // Pass-throughs, for the reasons `softDeletes()` gives: creating rows is
+    // unaffected, and writing the column is what soft deleting and restoring
+    // *are* — this scope is the one that gets to say the write is intended.
+    onCreate: (_context: unknown, data: any) => data,
+    onUpdate: (_context: unknown, data: any) => data,
+  }) as ModelPolicy;
+
+  scopes.set(key, policy);
+  return policy;
+}
+
+/**
+ * The policy chain `$exec` applies for a model: its own `$policies` (or none,
+ * under `asSystem`) with the soft-delete scope added when the model sets
+ * `$softDeletes`.
+ *
+ * - `mode` undefined hides trashed rows, `"with"` adds no scope, `"only"`
+ *   inverts it.
+ * - A `softDeletes()` policy on the **same column** is dropped from the chain
+ *   when the setting is present, so declaring both — the likely shape of a
+ *   migration from one to the other — neither applies the scope twice nor
+ *   keeps hiding rows inside a `withTrashed`.
+ * - The scope goes **first**: it decides which rows exist at all, so a policy
+ *   after it only ever sees rows that do.
+ */
+export function softDeletePolicies(
+  policies: readonly ModelPolicy[],
+  field: string | undefined,
+  mode: TrashedMode | undefined,
+): readonly ModelPolicy[] {
+  if (field === undefined) return policies;
+
+  const rest = policies.some((policy) => policyField(policy) === field)
+    ? policies.filter((policy) => policyField(policy) !== field)
+    : policies;
+
+  if (mode === "with") return rest;
+  return [scopePolicy(field, mode === "only" ? "only" : "hidden"), ...rest];
 }

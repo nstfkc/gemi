@@ -2,7 +2,14 @@ import { describe, expect, test } from "vitest";
 
 import { UnsupportedQueryError } from "./errors";
 import { user } from "./fixtures";
-import { softDelete, softDeleteMany } from "./soft-deletes";
+import type { ModelPolicy } from "./policy";
+import {
+  softDelete,
+  softDeleteField,
+  softDeleteMany,
+  softDeletePolicies,
+  softDeletes,
+} from "./soft-deletes";
 
 /**
  * The refusal `softDelete` raises when the caller passes a `data`.
@@ -82,5 +89,83 @@ describe("softDelete refuses a data argument", () => {
       softDelete(model, { field: "archivedAt" })({ data: {} }),
     );
     expect(error!.model).toBe("User");
+  });
+});
+
+/**
+ * `static $softDeletes` (#663) — the pieces `$exec` composes, without a
+ * database. The behaviour against one is `templates/saas-starter/app/models/
+ * soft-deletes-setting.test.ts`.
+ */
+describe("$softDeletes resolution", () => {
+  test("true means deletedAt; an object names the column; absent or false means none", () => {
+    expect(softDeleteField({ $softDeletes: true }, user)).toBe("deletedAt");
+    expect(
+      softDeleteField({ $softDeletes: { field: "emailVerifiedAt" } }, user),
+    ).toBe("emailVerifiedAt");
+    expect(softDeleteField({}, user)).toBeUndefined();
+    expect(softDeleteField({ $softDeletes: false }, user)).toBeUndefined();
+  });
+
+  test("a column the model does not have is refused, naming it", () => {
+    expect(() =>
+      softDeleteField({ $softDeletes: { field: "archivedAt" } }, user),
+    ).toThrow(/no 'archivedAt' field/);
+  });
+
+  test("a non-nullable column is refused", () => {
+    expect(() =>
+      softDeleteField({ $softDeletes: { field: "createdAt" } }, user),
+    ).toThrow(/nullable/);
+  });
+});
+
+describe("softDeletePolicies", () => {
+  const tenant: ModelPolicy = { scope: () => ({ organizationId: 7 }) };
+  const context = { operation: "findMany" } as never;
+
+  test("no setting leaves the chain as it is, by identity", () => {
+    const chain = [tenant];
+    expect(softDeletePolicies(chain, undefined, undefined)).toBe(chain);
+    expect(softDeletePolicies(chain, undefined, "with")).toBe(chain);
+  });
+
+  test("hidden by default, first in the chain", () => {
+    const [first, second] = softDeletePolicies([tenant], "deletedAt", undefined);
+    expect(first.scope!(context)).toEqual({ deletedAt: null });
+    expect(second).toBe(tenant);
+  });
+
+  test("'only' inverts the scope and 'with' removes it, keeping the rest", () => {
+    const [only] = softDeletePolicies([tenant], "deletedAt", "only");
+    expect(only.scope!(context)).toEqual({ deletedAt: { not: null } });
+    expect(softDeletePolicies([tenant], "deletedAt", "with")).toEqual([tenant]);
+  });
+
+  test("the scope objects are stable, so they do not churn anything keyed on identity", () => {
+    expect(softDeletePolicies([], "deletedAt", undefined)[0]).toBe(
+      softDeletePolicies([], "deletedAt", undefined)[0],
+    );
+  });
+
+  test("an upsert is not scoped — its where is a conflict target", () => {
+    const [scope] = softDeletePolicies([], "deletedAt", undefined);
+    expect(scope.scope!({ operation: "upsert" } as never)).toBeUndefined();
+  });
+
+  test("a softDeletes() policy on the same column is replaced, not doubled", () => {
+    const legacy = softDeletes();
+    const chain = softDeletePolicies([legacy, tenant], "deletedAt", undefined);
+    expect(chain).toHaveLength(2);
+    expect(chain).not.toContain(legacy);
+    expect(softDeletePolicies([legacy, tenant], "deletedAt", "with")).toEqual([
+      tenant,
+    ]);
+  });
+
+  test("a softDeletes() policy on another column is kept", () => {
+    const other = softDeletes({ field: "archivedAt" });
+    const chain = softDeletePolicies([other], "deletedAt", "with");
+    expect(chain).toEqual([other]);
   });
 });
