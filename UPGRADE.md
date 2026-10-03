@@ -1,3 +1,16 @@
+# Unreleased
+
+## `gemi/ai`: the model that answered is reported (#741)
+
+The `finish` provider event has a new optional field, `model`: the model the vendor says produced the response (`response.model` on the Responses API). It is often not the model you asked for: OpenAI answers `gpt-5.4` with a dated snapshot such as `gpt-5.4-2026-03-05`, and Azure answers a deployment name with the model behind it. `OpenAIProvider` and `AzureOpenAIProvider` now set it whenever the response named its model.
+
+`FallbackProvider` uses it. Each `onUsage` report has a new `responseModel` field next to the configured `model`, and the chain's closing `finish` carries the answering leg's `model`.
+
+No change is needed to upgrade. Things to know:
+
+- A test that compares a built-in provider's `finish` event with `toEqual` now sees a `model` key. Use `toMatchObject` or add the key.
+- A custom provider does not have to set `model`. When it doesn't, `responseModel` is absent from its reports.
+
 # Upgrading from 0.98.0 to 0.99.0
 
 ## `gemi/ai`: the user's message keeps the server's id on the client (#466)

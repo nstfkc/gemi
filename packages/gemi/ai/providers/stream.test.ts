@@ -320,6 +320,27 @@ describe("parseResponsesStream()", () => {
     ]);
   });
 
+  test("a stream that stops after response.created still says which model it was (#741)", async () => {
+    const events = await collect([
+      frame("response.created", {
+        type: "response.created",
+        response: { id: "resp_1", model: "gpt-5.4-2026-03-05" },
+      }),
+      TEXT_STREAM[2]!,
+    ]);
+    expect(events.at(-1)).toEqual({
+      type: "finish",
+      reason: "error",
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      model: "gpt-5.4-2026-03-05",
+    });
+  });
+
+  test("a response that never names its model leaves no model key on the finish", async () => {
+    const events = await collect(TEXT_STREAM);
+    expect(Object.keys(events.at(-1)!)).not.toContain("model");
+  });
+
   test("unparseable frames are skipped without abandoning the stream", async () => {
     const events = await collect([
       "event: response.output_text.delta\ndata: {not json\n\n",

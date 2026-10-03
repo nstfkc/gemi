@@ -72,6 +72,12 @@ export type FallbackUsage = {
   index: number;
   /** The leg's configured model. */
   model: string;
+  /**
+   * The model the vendor says answered (`finish.model`): the snapshot behind an
+   * alias, or the model behind an Azure deployment name. Absent when the leg
+   * never got that far or its provider does not report it (#741).
+   */
+  responseModel?: string;
   /** 1 for the first leg tried in this call, 2 for the first fallback, and so on. */
   attempt: number;
   /**
@@ -214,6 +220,7 @@ export class FallbackProvider extends AgentProvider {
       let committed = false;
       let finished = false;
       let usage: Usage | undefined;
+      let responseModel: string | undefined;
       let failure: { error: AgentError; status?: number; requestId?: string } | undefined;
       let timedOut = false;
       let iterator: AsyncIterator<ProviderEvent> | undefined;
@@ -257,6 +264,8 @@ export class FallbackProvider extends AgentProvider {
             break;
           }
           const event = next.value;
+
+          if (event.type === "finish" && event.model) responseModel = event.model;
 
           if (committed) {
             if (event.type === "finish") {
@@ -305,11 +314,20 @@ export class FallbackProvider extends AgentProvider {
           if (error.code !== "aborted") {
             yield { type: "error", error, ...httpErrorDetail(thrown) };
           }
-          this.report({ index, model, attempt, usage, outcome: outcomeOf(error), error });
+          this.report({
+            index,
+            model,
+            responseModel,
+            attempt,
+            usage,
+            outcome: outcomeOf(error),
+            error,
+          });
           yield closing({
             type: "finish",
             reason: error.code === "aborted" ? "aborted" : "error",
             usage: emptyUsage(),
+            ...(responseModel ? { model: responseModel } : {}),
           });
           return;
         }
@@ -334,6 +352,7 @@ export class FallbackProvider extends AgentProvider {
         this.report({
           index,
           model,
+          responseModel,
           attempt,
           usage,
           outcome: failure ? outcomeOf(failure.error) : "ok",
@@ -345,14 +364,19 @@ export class FallbackProvider extends AgentProvider {
       // The consumer stopped the run. Not a failure of this leg, and certainly
       // not one to answer by asking the next model.
       if (outer?.aborted) {
-        this.report({ index, model, attempt, usage, outcome: "aborted" });
-        yield closing({ type: "finish", reason: "aborted", usage: usage ?? emptyUsage() });
+        this.report({ index, model, responseModel, attempt, usage, outcome: "aborted" });
+        yield closing({
+          type: "finish",
+          reason: "aborted",
+          usage: usage ?? emptyUsage(),
+          ...(responseModel ? { model: responseModel } : {}),
+        });
         return;
       }
 
       if (!failure) {
         // Answered with nothing: a finish and no content. That is an answer.
-        this.report({ index, model, attempt, usage, outcome: "ok" });
+        this.report({ index, model, responseModel, attempt, usage, outcome: "ok" });
         for (const event of held) yield event.type === "finish" ? closing(event) : event;
         return;
       }
@@ -371,6 +395,7 @@ export class FallbackProvider extends AgentProvider {
       this.report({
         index,
         model,
+        responseModel,
         attempt,
         usage,
         outcome: fallback ? "fallback" : outcomeOf(failure.error),
@@ -405,6 +430,7 @@ export class FallbackProvider extends AgentProvider {
         type: "finish",
         reason: failure.error.code === "aborted" ? "aborted" : (closingFinish?.reason ?? "error"),
         usage: usage ?? emptyUsage(),
+        ...(responseModel ? { model: responseModel } : {}),
       });
       return;
     }
@@ -421,6 +447,7 @@ export class FallbackProvider extends AgentProvider {
 
   private report(report: FallbackUsage): void {
     if (report.usage === undefined) delete report.usage;
+    if (report.responseModel === undefined) delete report.responseModel;
     try {
       this.options.onUsage?.(report);
     } catch {

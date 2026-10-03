@@ -247,8 +247,25 @@ describe("the ordinary streams", () => {
         reasoningTokens: 0,
         cachedInputTokens: 0,
       },
+      model: "gpt-5.4-2026-03-05",
     });
     expect(events.some((e) => e.type === "error")).toBe(false);
+  });
+
+  /**
+   * The model the vendor says answered (#741), which is not the one asked
+   * for: OpenAI resolves the `gpt-5.4` alias to a dated snapshot, and Azure
+   * answers a deployment name with the model behind it. Recorded, not
+   * assumed — both fixtures carry `response.model` on their terminal frame.
+   */
+  test("the finish says which model answered", async () => {
+    const answered = async (name: string) => {
+      const last = (await parse(name)).at(-1);
+      return last?.type === "finish" ? last.model : undefined;
+    };
+    expect(await answered("openai-text.sse")).toBe("gpt-5.4-2026-03-05");
+    expect(await answered("azure-text.sse")).toBe("gpt-5.4");
+    expect(await answered("azure-content-filtered.sse")).toBe("gpt-4o");
   });
 
   /**
@@ -408,7 +425,12 @@ describe("the recorded failures", () => {
             retryable: false,
           },
         },
-        { type: "finish", reason: "error", usage: expect.anything() },
+        {
+          type: "finish",
+          reason: "error",
+          usage: expect.anything(),
+          model: expect.stringMatching(/^gpt-4o/),
+        },
       ]);
     }
   });
