@@ -161,6 +161,22 @@ describe("the regex rules", () => {
   });
 });
 
+describe("array, object and in (#711)", () => {
+  test("object is a plain object: not an array, null or an upload", () => {
+    expect(validate("object")({})).toBe(true);
+    expect(validate("object")([])).toBe(false);
+    expect(validate("object")(null)).toBe(false);
+    expect(validate("object")(new Blob(["x"]))).toBe(false);
+  });
+
+  test("in compares strings exactly, and a parameter may hold a colon", () => {
+    expect(validate("in:question,choice")("choice")).toBe(true);
+    expect(validate("in:question,choice")("Choice")).toBe(false);
+    expect(validate("in:1,2")(1)).toBe(false);
+    expect(validate("in:a:b,c")("a:b")).toBe(true);
+  });
+});
+
 describe("the file rules", () => {
   const png = new Blob(["x".repeat(2048)], { type: "image/png" });
 
@@ -221,6 +237,9 @@ const everyRule: Record<(typeof RULES)[number], { rule: string; accepts: string[
   file: { rule: "file", accepts: [] },
   fileType: { rule: "fileType:png", accepts: [] },
   fileSize: { rule: "fileSize:1MB", accepts: [] },
+  array: { rule: "array", accepts: ["array ['x']", "array []"] },
+  object: { rule: "object", accepts: ["object {a:1}", "object {}"] },
+  in: { rule: "in:hi,x", accepts: ["string 'hi'"] },
 };
 
 describe("every rule is implemented", () => {
@@ -258,6 +277,9 @@ describe("a rule the table does not have", () => {
       "fileSize:5mb",
       "fileSize:1.5MB",
       "fileSize",
+      "in",
+      "in:",
+      "in:,",
     ]) {
       expect(() => validate(rule), rule).toThrow(InvalidValidationRuleError);
     }

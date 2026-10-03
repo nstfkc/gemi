@@ -101,6 +101,9 @@ export const RULES = [
   "file",
   "fileType",
   "fileSize",
+  "array",
+  "object",
+  "in",
 ] as const;
 
 /**
@@ -125,7 +128,10 @@ function numericParam(rule: string, param: string | undefined): number {
 }
 
 export function validate(ruleName: string) {
-  const [rule, param] = ruleName.split(":");
+  // Split at the first colon only, so a parameter may hold one.
+  const colon = ruleName.indexOf(":");
+  const rule = colon === -1 ? ruleName : ruleName.slice(0, colon);
+  const param = colon === -1 ? undefined : ruleName.slice(colon + 1);
   switch (rule) {
     /**
      * Present. Not "non-empty for the two types that happen to have `.length`".
@@ -251,6 +257,32 @@ export function validate(ruleName: string) {
         );
       }
       return (value: any) => value instanceof Blob && value.size <= absoluteSize;
+    }
+    /**
+     * The JSON container types, for the parent of a nested rule
+     * (`rounds: { array: … }` next to `"rounds.*.prompt": { … }`, #711). An
+     * object is a plain one: not an array, not `null`, not an upload.
+     */
+    case "array":
+      return (value: any) => Array.isArray(value);
+    case "object":
+      return (value: any) =>
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        !(value instanceof Blob);
+    /**
+     * One of a fixed list: `in:question,choice`. Compared as strings and
+     * exactly, so it is a rule for string fields; a number is not "in" `1,2`.
+     */
+    case "in": {
+      const allowed = (param ?? "").split(",").filter((item) => item !== "");
+      if (allowed.length === 0) {
+        throw new InvalidValidationRuleError(
+          `Validation rule "in" needs a comma-separated list, e.g. "in:draft,published"`,
+        );
+      }
+      return (value: any) => typeof value === "string" && allowed.includes(value);
     }
     /**
      * Not `() => true`. That default is how `string` and `boolean` shipped in

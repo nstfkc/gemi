@@ -1,3 +1,21 @@
+# Unreleased
+
+## Request validation: nested objects and arrays (#711)
+
+An `HttpRequest` schema can validate nested fields and arrays of objects. Keys can be dotted paths, with `*` for every array item, and failures are reported under the concrete path (`rounds.2.prompt`):
+
+```ts
+schema = {
+  rounds: { required: "Add a round", array: "Must be a list", "max:10": "At most 10 rounds" },
+  "rounds.*.prompt": { required: "Prompt is required", "max:2000": "Too long" },
+  "rounds.*.kind": { "in:question,choice": "Unknown kind" },
+};
+```
+
+`schema` can also be an `s` schema from `gemi/ai` (`schema = s.object({ ... })`). Its `validate()` issues become the usual `validation_error` response, keyed by `issue.path.join(".")`, and `input()` returns the parsed value. There are three new rules: `array`, `object` and `in:a,b`.
+
+No change is needed to upgrade. Flat schemas behave as before, including a key with a dot that the body has as a field of its own (a form field named `user.name`). One edge case: a rule parameter is now split at the first colon only, so `in:a:b` lists `a:b`. A malformed numeric parameter such as `min:3:4` now throws `InvalidValidationRuleError` instead of being read as `min:3`.
+
 # Upgrading from 0.89.0 to 0.90.0
 
 ## Email: idempotency keys and message ids (#715)

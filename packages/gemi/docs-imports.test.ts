@@ -149,6 +149,7 @@ describe("documented gemi imports resolve", () => {
 
     const modules = [...new Set(imports.map((entry) => entry.module))].sort();
     expect(modules).toEqual([
+      "gemi/ai",
       "gemi/app",
       "gemi/client",
       "gemi/config",

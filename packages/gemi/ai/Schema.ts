@@ -252,6 +252,14 @@ interface RuntimeSchema {
  */
 const definitions = new WeakMap<object, Definition>();
 
+/**
+ * Whether `value` is a schema built with `s`. How `HttpRequest` tells an `s`
+ * body schema from a map of rules (#711), without a property on the builder.
+ */
+export function isSchema(value: unknown): value is SchemaBuilder<unknown> {
+  return typeof value === "object" && value !== null && definitions.has(value);
+}
+
 function definitionOf(schema: AnySchema): Definition {
   const definition = definitions.get(schema);
   if (!definition) {
