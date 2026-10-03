@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.97.0 to 0.98.0
 
 ## `gemi/ai`: execution receipts, so an approved tool runs at most once (#458)
 
