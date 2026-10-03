@@ -1,3 +1,15 @@
+# Unreleased
+
+## Email: idempotency keys and message ids (#715)
+
+`Email.send` takes an `idempotencyKey` and resolves to `{ id, provider, status, error? }` with the provider's message id, so a queued send can be retried without double-sending and tracked afterwards:
+
+```ts
+const { id } = await ReportEmail.send({ to, data, idempotencyKey: `report:${reportId}:${recipientId}` });
+```
+
+`ResendDriver` forwards the key as Resend's `Idempotency-Key` header (kept for 24 hours). No change is needed to upgrade: code that ignored `send`'s result keeps working, and it still doesn't throw when the driver rejects a message (that is now `status: "failed"`). `ResendDriver.send` still returns a boolean. Custom drivers, and `MailManager` or `ResendDriver` subclasses that override `send`, keep being called through `send`; they report `id: null` until they override the new `deliver`, and ignore the key unless they forward `params.idempotencyKey`. The `EMAIL_DEBUG` sidecar gains an `idempotencyKey` field.
+
 # Upgrading from 0.88.2 to 0.89.0
 
 ## Stream routes: `nosniff` by default, and decorated reads (#727)

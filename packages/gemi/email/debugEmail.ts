@@ -18,6 +18,7 @@ export interface DebugEmailRecord {
   // Attachment bodies are left out: name and size are enough to assert on.
   attachments: Array<{ filename: string; bytes: number }>;
   scheduledAt: string | null;
+  idempotencyKey: string | null;
   locale: string | null;
   text: string | null;
 }
@@ -59,6 +60,7 @@ export async function writeDebugEmail(
       bytes: Buffer.byteLength(attachment.content),
     })),
     scheduledAt: params.scheduledAt ?? null,
+    idempotencyKey: params.idempotencyKey ?? null,
     locale: options.locale ?? null,
     text: params.text ?? null,
   };

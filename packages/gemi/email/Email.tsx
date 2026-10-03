@@ -3,7 +3,11 @@ import { render } from "jsx-email";
 import open from "open";
 import { app } from "../foundation/app";
 import { MailManager } from "../services/email/MailManager";
-import type { SendEmailParams } from "../services/email/drivers/types";
+import { deliverThrough } from "../services/email/deliver";
+import type {
+  EmailSendResult,
+  SendEmailParams,
+} from "../services/email/drivers/types";
 import { Translator } from "../i18n/Translator";
 import { writeDebugEmail } from "./debugEmail";
 
@@ -25,7 +29,7 @@ export class Email {
   static async send<T extends Email>(
     this: new () => T,
     args: SendEmailArgs<T["template"] extends (p: infer P) => any ? P : never>,
-  ) {
+  ): Promise<EmailSendResult> {
     const instance = new this();
 
     const defaultLocale = app(Translator).defaultLocale;
@@ -50,10 +54,13 @@ export class Email {
       ...(headers ?? {}),
     };
 
+    const debug = process.env.EMAIL_DEBUG === "true";
+    const provider = debug ? "debug" : (mail.driver?.provider ?? "custom");
+
     const recipients = await mail.filterRecipients(to);
 
     if (!recipients.length) {
-      return;
+      return { id: null, provider, status: "skipped" };
     }
 
     const [html, text] = await Promise.all([
@@ -79,9 +86,10 @@ export class Email {
       headers: _headers,
       text,
       scheduledAt: args.scheduledAt,
+      idempotencyKey: args.idempotencyKey,
     };
 
-    if (process.env.EMAIL_DEBUG === "true") {
+    if (debug) {
       const fileName = await writeDebugEmail(
         `${process.env.ROOT_DIR}/.debug/emails`,
         params,
@@ -90,10 +98,17 @@ export class Email {
       if (process.env.CI !== "true") {
         await open(fileName);
       }
-      return;
+      return { id: `debug_${crypto.randomUUID()}`, provider, status: "debug" };
     }
 
-    await mail.send(params);
+    // A manager replaced by the app (see "Replacing the manager entirely")
+    // that predates `deliver`, or only overrides `send`, is called through
+    // `send`.
+    const result = await deliverThrough(mail, params);
+
+    return result.ok
+      ? { id: result.id, provider, status: "sent" }
+      : { id: result.id, provider, status: "failed", error: result.error };
   }
 
   static async preview<T extends Email>(

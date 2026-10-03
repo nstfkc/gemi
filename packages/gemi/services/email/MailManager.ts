@@ -1,6 +1,7 @@
 import { mailConfigDefaults, type MailConfig } from "./config";
+import { deliverThrough } from "./deliver";
 import type { EmailDriver } from "./drivers/EmailDriver";
-import type { SendEmailParams } from "./drivers/types";
+import type { EmailDeliveryResult, SendEmailParams } from "./drivers/types";
 
 export class MailManager {
   static token = "mail";
@@ -24,5 +25,12 @@ export class MailManager {
 
   send(params: SendEmailParams) {
     return this.driver.send(params);
+  }
+
+  /** Like `send`, but reports the outcome and the provider's message id. */
+  async deliver(params: SendEmailParams): Promise<EmailDeliveryResult> {
+    // A driver that doesn't extend `EmailDriver`, or a subclass that only
+    // overrides `send`, is called through `send`.
+    return deliverThrough(this.driver, params);
   }
 }

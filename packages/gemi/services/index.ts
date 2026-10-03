@@ -47,7 +47,12 @@ export { MailServiceProvider } from "./email/MailServiceProvider";
 export { MailManager } from "./email/MailManager";
 export { EmailDriver } from "./email/drivers/EmailDriver";
 export { ResendDriver } from "./email/drivers/ResendDriver";
-export type { EmailAttachment, SendEmailParams } from "./email/drivers/types";
+export type {
+  EmailAttachment,
+  EmailDeliveryResult,
+  EmailSendResult,
+  SendEmailParams,
+} from "./email/drivers/types";
 
 // Router
 export { RouteServiceProvider } from "./router/RouteServiceProvider";
