@@ -31,11 +31,35 @@ function applyParams(url: string, params: Record<string, any> = {}) {
   return out;
 }
 
+/**
+ * How a hook treats a `trigger` that starts while another is in flight.
+ *
+ * - `"latest"` (the default): the newest request wins. An older request that
+ *   settles afterwards is dropped: its callbacks don't run, it writes no state
+ *   and its `trigger` resolves `undefined`. Right for forms and edits, where a
+ *   newer submit supersedes the older one.
+ * - `"parallel"`: every request stands on its own. Each one runs its callbacks
+ *   and resolves its own `trigger`, whatever else is in flight (issue #719).
+ *
+ * Neither mode aborts the older request; only `cancel()` does.
+ */
+export type MutationConcurrency = "latest" | "parallel";
+
 type Config<T> = {
   autoInvalidate?: boolean;
   onSuccess: (data: T) => void;
   onError: (error: MutationError) => void;
   onCanceled?: () => void;
+  concurrency?: MutationConcurrency;
+};
+
+/**
+ * Callbacks for one `trigger` call. They run after the hook's own, and only
+ * when the hook's would: in `"latest"` mode a superseded call runs neither.
+ */
+export type MutationCallConfig<T> = {
+  onSuccess?: (data: T) => void;
+  onError?: (error: MutationError) => void;
 };
 
 const defaultOptions: Config<any> = {
@@ -63,6 +87,8 @@ type State<T> = {
   data: T | null;
   error: MutationError | null;
   loading: boolean;
+  // Requests on the wire, superseded ones included.
+  pending: number;
 };
 
 export function useMutation<
@@ -86,6 +112,7 @@ export function useMutation<
     data: null,
     error: null,
     loading: false,
+    pending: 0,
   });
 
   // A controller per request, held in a ref rather than state. Swapping it
@@ -100,6 +127,10 @@ export function useMutation<
   // error could land after the corrected second one had already succeeded,
   // putting the message back and wiping the result.
   const latestRequest = useRef(0);
+
+  // Every request still on the wire in `"parallel"` mode, so `cancel()` can
+  // abort all of them rather than only the newest.
+  const inFlight = useRef(new Set<AbortController>());
 
   const formData = useRef(new FormData());
 
@@ -119,19 +150,59 @@ export function useMutation<
   // Rejecting instead would turn every `onClick={() => trigger()}` — and
   // `<Form>`'s own submit — into an unhandled rejection, so the type changed
   // and the behaviour did not (issue #623).
-  async function trigger(input?: U): Promise<T | undefined> {
+  //
+  // In `"parallel"` mode no call is superseded: each one resolves to its own
+  // body and runs its own callbacks, and `data`/`error` hold the outcome of
+  // whichever call settled last.
+  const parallel = options.concurrency === "parallel";
+
+  async function trigger(
+    input?: U,
+    call: MutationCallConfig<T> = {},
+  ): Promise<T | undefined> {
     const controller = new AbortController();
     abortController.current = controller;
+    if (parallel) inFlight.current.add(controller);
     const requestId = ++latestRequest.current;
-    const isLatest = () => latestRequest.current === requestId;
+    const isSuperseded = () =>
+      !parallel && latestRequest.current !== requestId;
 
     // The last response's error is about the last submit. Left in place, a
     // corrected resubmit shows the old validation message until it returns.
+    // In parallel mode it belongs to another call, which is still the last
+    // one to have settled.
     setState((prev) => ({
       data: prev.data,
-      error: null,
+      error: parallel ? prev.error : null,
       loading: true,
+      pending: prev.pending + 1,
     }));
+    // One request off the wire. `update` gives the state it leaves; `loading`
+    // is `pending > 0` in parallel mode, while in latest mode it follows the
+    // newest request alone, as it always has, so a superseded one settling
+    // leaves it as it is.
+    const settle = (
+      update: (prev: State<T>) => Pick<State<T>, "data" | "error">,
+      superseded = false,
+    ) => {
+      inFlight.current.delete(controller);
+      setState((prev) => {
+        const pending = prev.pending - 1;
+        return {
+          ...update(prev),
+          pending,
+          loading: parallel ? pending > 0 : superseded ? prev.loading : false,
+        };
+      });
+    };
+    // The accumulator this call sent, so a parallel call settling doesn't
+    // empty fields gathered since for the next one.
+    const sentFormData = typeof input === "undefined" ? formData.current : null;
+    const resetFormData = () => {
+      if (!parallel || formData.current === sentFormData) {
+        formData.current = new FormData();
+      }
+    };
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
     const search = "search" in inputs ? inputs.search : {};
@@ -167,9 +238,12 @@ export function useMutation<
 
       // A superseded request has nothing left to say: a newer submit is what
       // the user is waiting on, and its state is the state on screen.
-      if (!isLatest()) return;
+      if (isSuperseded()) {
+        settle((prev) => prev, true);
+        return;
+      }
 
-      formData.current = new FormData();
+      resetFormData();
 
       if (!response.ok) {
         // `data.error` rather than the envelope around it: `onError` is typed
@@ -181,46 +255,44 @@ export function useMutation<
         // `data` is the last result the caller was given, and a rejected
         // submit did not replace it — the same reason the pending state above
         // keeps it.
-        setState((prev) => ({
-          data: prev.data,
-          error,
-          loading: false,
-        }));
+        settle((prev) => ({ data: prev.data, error }));
 
         options.onError(error);
+        call.onError?.(error);
         return;
       }
 
       clearPrefetchCache?.();
       options.onSuccess(data);
+      call.onSuccess?.(data);
 
-      setState({
-        data,
-        error: null,
-        loading: false,
-      });
+      settle(() => ({ data, error: null }));
 
       return data as T;
     } catch (error) {
-      if (!isLatest()) return;
+      if (isSuperseded()) {
+        settle((prev) => prev, true);
+        return;
+      }
 
-      formData.current = new FormData();
+      resetFormData();
       // `cancel()` aborts the request, so the fetch rejects here. A cancelled
       // submit is not a failed one: `onCanceled` has already reported it, and
       // a DOMException carries no `kind` for `<Form>` to read, so leaving it
       // in `error` only puts a value there that nothing can act on.
       if ((error as Error)?.name === "AbortError") {
-        setState((prev) => ({ ...prev, loading: false }));
+        settle((prev) => prev);
         return;
       }
       // A `TypeError` from `fetch` (no answer) or a `SyntaxError` from
       // `response.json()` (an answer that was not JSON) — both `Error`s.
       options.onError(error as MutationError);
-      setState({
-        data: null,
+      call.onError?.(error as MutationError);
+      // A parallel call's failure doesn't take back another call's result.
+      settle((prev) => ({
+        data: parallel ? prev.data : null,
         error: error as MutationError,
-        loading: false,
-      });
+      }));
     }
   }
 
@@ -232,10 +304,20 @@ export function useMutation<
     data: state.data as T,
     error: state.error,
     loading: state.loading,
+    // How many requests are on the wire. In parallel mode `loading` is
+    // `pending > 0`.
+    pending: state.pending,
     formData: formData.current,
+    // Aborts the newest request, or in parallel mode every one in flight.
     cancel: () => {
-      abortController.current.abort();
-      setState((prev) => ({ ...prev, loading: false }));
+      if (parallel) {
+        // Each aborted call takes itself off `pending` as it settles, and
+        // `loading` follows.
+        for (const controller of inFlight.current) controller.abort();
+      } else {
+        abortController.current.abort();
+        setState((prev) => ({ ...prev, loading: false }));
+      }
 
       formData.current = new FormData();
       options.onCanceled?.();
@@ -294,7 +376,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Omit<Config<T>, "concurrency">>,
   ]
 ) {
   const [state, setState] = useState<"idle" | "uploading" | "done" | "error">(
