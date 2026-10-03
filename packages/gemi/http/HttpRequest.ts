@@ -342,7 +342,12 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
       for (const { path, value } of resolvePath(data, key)) {
         const messages = this.checkField(value, rules);
         if (messages.length > 0) {
-          errors[errorKey(path)] = messages;
+          // `rounds.0.prompt` and `rounds.*.prompt` can name the same value;
+          // its messages are merged, each once.
+          const reported = (errors[errorKey(path)] ??= []);
+          for (const message of messages) {
+            if (!reported.includes(message)) reported.push(message);
+          }
         }
       }
     }

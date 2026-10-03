@@ -150,6 +150,22 @@ describe("dotted-path rules", () => {
     });
   });
 
+  test("two keys naming the same value report both, each message once", async () => {
+    class Overlap extends HttpRequest<any> {
+      schema = {
+        "rounds.0.prompt": { "min:3": "First prompt is too short", required: "Required" },
+        "rounds.*.prompt": { required: "Required" },
+      };
+    }
+    expect(await errorsOf(new Overlap(jsonRequest({ rounds: [{ prompt: "a" }, {}] })))).toEqual({
+      "rounds.0.prompt": ["First prompt is too short"],
+      "rounds.1.prompt": ["Required"],
+    });
+    expect(await errorsOf(new Overlap(jsonRequest({ rounds: [{}] })))).toEqual({
+      "rounds.0.prompt": ["Required"],
+    });
+  });
+
   test("a body field whose name has a dot is still read as that field", async () => {
     class Legacy extends HttpRequest<any> {
       schema = { "user.name": { required: "Name is required", "min:2": "Too short" } };
