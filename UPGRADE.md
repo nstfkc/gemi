@@ -110,6 +110,41 @@ New:
   to 256 characters is compared, so codes of `emailCode.length` digits or from
   `generateCode` are accepted.
 
+## Chunks from the previous release after a deploy (#548)
+
+**Behaviour change (client).** When a view chunk fails to load during a
+client-side navigation or hydration, the router now does one full load of the
+URL it was going to, instead of leaving the route's error boundary on screen.
+The same applies to a failed lazy `import()` in app code that goes through
+Vite's preload helper (`vite:preloadError`). Only load failures count. A view
+that loads and throws still goes to its error boundary, and a failed prefetch
+reloads nothing. A `sessionStorage` marker (`gemi:chunk-reload`) allows one
+reload per 30 seconds. No reload happens offline or when `sessionStorage`
+cannot be used.
+
+The server's stand-in for a missing `/assets/*.js` chunk reloaded on every
+request, so a chunk that stayed missing reloaded the tab forever. It now uses
+the same guard, and within the cooldown it throws a chunk-load error instead.
+
+`init` takes a `chunkLoadRecovery` option (`{ cooldownMs, onChunkLoadError }`,
+or `false` to turn the recovery off). `gemi/client` exports
+`recoverFromChunkLoadError` and `isChunkLoadError` for an app's own error
+boundaries.
+
+**Action:** if your app has its own `vite:preloadError` handler that reloads
+(e.g. a stale-bundle recovery module), remove it or pass
+`chunkLoadRecovery: false`, so the two do not both reload. Report failures
+from `onChunkLoadError`, and return `false` from it to keep a page with unsaved
+input from reloading.
+
+**Additive (build).** `previousAssets` in `gemi.config.ts` (or
+`GEMI_PREVIOUS_ASSETS=<dir>`) makes `gemi build` copy the outgoing release's
+`dist/client/assets` files into the new build. They are kept for 7 days or 2
+releases by default (`{ maxAge, releases }`), so the server keeps answering an
+old tab's lazy chunks. A container build has to point
+`GEMI_PREVIOUS_ASSETS` at the previous image's `dist/client`. The
+[docs](docs/configuration.md#missing-chunks-after-a-deploy) have a Dockerfile
+recipe. Off by default.
 
 # Upgrading from 0.86.1 to 0.87.0
 

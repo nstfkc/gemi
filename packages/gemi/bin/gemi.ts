@@ -1,5 +1,7 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
 import { runMigrate } from "./migrate";
@@ -7,6 +9,11 @@ import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
 import { build } from "vite";
 import gemiVite from "../vite";
+import {
+  resolvePreviousAssets,
+  restorePreviousAssets,
+  stagePreviousAssets,
+} from "../vite/previousAssets";
 
 import { program } from "commander";
 import { CheckModelsError, checkModels, printReport } from "./check-models";
@@ -93,13 +100,42 @@ program.command("build").action(async () => {
   // discover, so the gemi plugin is passed explicitly (with `configFile: false`).
   process.env.GEMI_INPUT = JSON.stringify(input);
 
-  console.log("Building client...");
+  // Earlier releases' chunks, carried into this build so a tab still on one
+  // of them can finish loading (#548). Staged out first because the client
+  // build empties `dist/client`, which is usually where they are.
+  const previousAssets = resolvePreviousAssets(config.previousAssets, rootDir);
+  const stagingDir = previousAssets
+    ? await mkdtemp(path.join(tmpdir(), "gemi-previous-assets-"))
+    : undefined;
 
-  await build({
-    configFile: false,
-    plugins: [gemiVite()],
-    build: { outDir: "dist/client" },
-  });
+  try {
+    const retained =
+      previousAssets && stagingDir ? await stagePreviousAssets(previousAssets, stagingDir) : [];
+
+    console.log("Building client...");
+
+    await build({
+      configFile: false,
+      plugins: [gemiVite()],
+      build: { outDir: "dist/client" },
+    });
+
+    if (stagingDir) {
+      const carried = await restorePreviousAssets(
+        stagingDir,
+        path.join(rootDir, "dist", "client"),
+        retained,
+      );
+      console.log(
+        `Kept ${carried.files} asset file(s) from ${carried.releases} earlier release(s).`,
+      );
+    }
+  } finally {
+    // A failed build must not leave a copy of the previous release in tmp.
+    if (stagingDir) {
+      await rm(stagingDir, { recursive: true, force: true });
+    }
+  }
 
   console.log("Building server...");
 

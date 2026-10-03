@@ -70,6 +70,18 @@ export { Link } from "./Link";
 export type { ExternalLinkProps, LinkProps, PrefetchStrategy } from "./Link";
 export { Redirect } from "./Redirect";
 export { init, create } from "./init";
+export type { InitOptions } from "./init";
+export {
+  isChunkLoadError,
+  recoverFromChunkLoadError,
+  CHUNK_RELOAD_MARKER,
+} from "./chunkLoadRecovery";
+export type {
+  ChunkLoadErrorContext,
+  ChunkLoadErrorSource,
+  ChunkLoadRecoveryOptions,
+  ChunkReloadBlock,
+} from "./chunkLoadRecovery";
 export { createRoot } from "./createRoot";
 
 export type {

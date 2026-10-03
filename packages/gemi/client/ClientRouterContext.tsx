@@ -367,8 +367,10 @@ export const ClientRouterProvider = (
     preloadRouteModules(routePath);
     // Through `loadViewModule` so each view's `Loading`/`Error`
     // exports are registered by the time the route commits.
+    // A failure here is nobody's yet: the navigation that needs the chunk
+    // meets it again and recovers then (see `ViewModulePurpose`).
     for (const view of routeManifest[routePath] ?? []) {
-      loadViewModule(view);
+      loadViewModule(view, "prefetch").catch(() => {});
     }
 
     await prefetchCache.prime(url, async () => {

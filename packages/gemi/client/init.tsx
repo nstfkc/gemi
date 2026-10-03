@@ -5,6 +5,11 @@ import { ClientRouter } from "./ClientRouter";
 import type { QueryConfig } from "./QueryManagerContext";
 import { ErrorBoundary } from "react-error-boundary";
 import { initialViewModulesReady } from "./ComponentContext";
+import {
+  configureChunkLoadRecovery,
+  recoverFromChunkLoadError,
+  type ChunkLoadRecoveryOptions,
+} from "./chunkLoadRecovery";
 
 export interface InitOptions {
   /**
@@ -13,6 +18,29 @@ export interface InitOptions {
    * server render and hydration agree.
    */
   queryConfig?: QueryConfig;
+  /**
+   * What happens when a chunk fails to load — usually a page from an earlier
+   * release after a deploy. By default gemi reloads the page it was going to
+   * once, and not again within 30 seconds. Pass options to report the failure
+   * or veto the reload, or `false` to leave every failure to the route's error
+   * boundary. See `recoverFromChunkLoadError`.
+   */
+  chunkLoadRecovery?: ChunkLoadRecoveryOptions | false;
+}
+
+/**
+ * Vite's preload helper fires `vite:preloadError` on `window` when a lazy
+ * `import()` in app code — a `lazy(() => import("./Chart"))` inside a view —
+ * cannot load a dependency. `preventDefault()` stops the helper rethrowing,
+ * which is only right when a reload is actually under way.
+ */
+function installPreloadErrorRecovery() {
+  window.addEventListener("vite:preloadError", (event) => {
+    const error = (event as Event & { payload?: unknown }).payload;
+    if (recoverFromChunkLoadError(error, { source: "preload" })) {
+      event.preventDefault();
+    }
+  });
 }
 
 const StackTrace = () => {
@@ -37,6 +65,10 @@ export function init(
   RootLayout: ComponentType<any>,
   options: InitOptions = {},
 ) {
+  configureChunkLoadRecovery(options.chunkLoadRecovery);
+  if (typeof window !== "undefined" && options.chunkLoadRecovery !== false) {
+    installPreloadErrorRecovery();
+  }
   if (typeof window !== "undefined" && (window as any).render_error) {
     createRoot(document.body).render(<StackTrace />);
   } else {

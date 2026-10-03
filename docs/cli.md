@@ -73,6 +73,8 @@ Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfi
 
 `GEMI_ASSET_BASE` (or `assetBase` in `gemi.config.ts`) builds the client bundle to be served from a CDN; the base is recorded in `dist/client/.vite/gemi.json` for `gemi start` to read. See [Asset base](./configuration.md#asset-base).
 
+`GEMI_PREVIOUS_ASSETS` (or `previousAssets` in `gemi.config.ts`) copies the previous release's `dist/client/assets` files into the new build, so a tab still on that release can load its chunks after the deploy. See [Missing chunks after a deploy](./configuration.md#missing-chunks-after-a-deploy).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
 
 ## `gemi start`

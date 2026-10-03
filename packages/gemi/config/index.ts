@@ -1,5 +1,8 @@
 import type { PluginOption } from "vite";
 import type { BunPlugin } from "bun";
+import type { PreviousAssetsConfig } from "../vite/previousAssets";
+
+export type { PreviousAssetsConfig };
 
 // Vite configuration contributed by the app. `plugins` are appended to gemi's
 // own Vite plugins; every other key is a standard Vite `UserConfig` field and is
@@ -29,6 +32,16 @@ export interface GemiConfig {
    * root-relative (`/assets/...`), as they always were.
    */
   assetBase?: string;
+  /**
+   * Keep serving earlier releases' client assets after a deploy, so a tab
+   * still on the old release can load its lazy chunks. `gemi build` copies the
+   * previous `dist/client/assets` files into the new build and drops them
+   * after `maxAge` seconds (default 7 days) or `releases` deploys (default 2).
+   * `true` uses the defaults with this app's own `dist/client` as the source;
+   * a container build points `from` (or `GEMI_PREVIOUS_ASSETS`) at the
+   * previous image's. Off by default.
+   */
+  previousAssets?: PreviousAssetsConfig | boolean;
 }
 
 // Identity helper that gives `gemi.config.ts` full type-checking and editor
