@@ -520,14 +520,6 @@ export class PendingEscalation extends Error {
 }
 
 /**
- * A tool either resolves once, or yields progress and then returns.
- *
- * The generator form exists because a tool that takes twenty seconds is the
- * normal case, not the exotic one, and a chat UI that shows nothing for twenty
- * seconds looks broken. Yields become `tool-progress` events; the return value
- * is the result the model sees.
- */
-/**
  * What a per-run `inputSchema` is resolved from: the run's caller and the
  * app's request body, the same `context` and `body` its tools are given.
  */
@@ -560,6 +552,14 @@ export type ToolInputSchema<Input> =
   | Schema<Input>
   | ((ctx: ToolSchemaContext) => Schema<Input> | Promise<Schema<Input>>);
 
+/**
+ * A tool either resolves once, or yields progress and then returns.
+ *
+ * The generator form exists because a tool that takes twenty seconds is the
+ * normal case, not the exotic one, and a chat UI that shows nothing for twenty
+ * seconds looks broken. Yields become `tool-progress` events; the return value
+ * is the result the model sees.
+ */
 export type ToolExecute<Input, Output, Progress = unknown> = (
   input: Input,
   ctx: ToolContext,
@@ -2341,7 +2341,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * Returns the run's error when a resolver throws or returns a schema the
    * provider cannot take; the caller fails the run with it. Its message names
    * the tool and the cause — server-side only, since the client's copy is
-   * redacted like any `tool_error`.
+   * redacted like any `tool_error`. The run fails before the turn is ingested,
+   * so a client turn it carried is not reported to `onMessage`.
    */
   private async resolveToolSchemas(): Promise<AgentError | undefined> {
     const pending = [...this.config.registry.values()].filter((entry) => !entry.inputSchema);
@@ -2354,24 +2355,27 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       signal: this.controller.signal,
     };
     const schemas = new Map<string, Schema<any>>();
-    try {
-      await Promise.all(
-        pending.map(async (entry) => {
+    const failures = await Promise.all(
+      pending.map(async (entry) => {
+        try {
           const resolve = entry.tool.inputSchema as (
             ctx: ToolSchemaContext,
           ) => Schema<any> | Promise<Schema<any>>;
           const schema = await resolve(ctx);
           assertObjectRoot(schema, `The tool "${entry.tool.name}"`, "inputSchema");
           schemas.set(entry.tool.name, schema);
-        }),
-      );
-    } catch (error) {
-      if (this.controller.signal.aborted) throw error;
+          return undefined;
+        } catch (error) {
+          return `"${entry.tool.name}": ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
+    );
+    if (this.controller.signal.aborted) throw new RunAborted();
+    const failed = failures.filter((failure) => failure !== undefined);
+    if (failed.length > 0) {
       return {
         code: "tool_error",
-        message: `Could not resolve the input schema of a tool for this run: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        message: `Could not resolve the input schema of ${failed.join("; ")}`,
         retryable: false,
       };
     }

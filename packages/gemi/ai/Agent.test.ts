@@ -5005,7 +5005,7 @@ describe("per-run tool input schemas", () => {
       const result = await agent.stream({ messages: [] }).result();
       expect(result.finishReason).toBe("error");
       expect(result.error).toMatchObject({ code: "tool_error" });
-      expect(result.error!.message).toMatch(/Could not resolve the input schema/);
+      expect(result.error!.message).toMatch(/Could not resolve the input schema of "broken"/);
       expect(provider.calls).toHaveLength(0);
     }
   });
