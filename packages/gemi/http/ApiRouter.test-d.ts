@@ -22,6 +22,7 @@ import { Agent, AgentTool, type ToolShapesOf } from "../ai/Agent";
 import { AgentController } from "../ai/AgentController";
 import { OpenAIProvider } from "../ai/AgentProvider";
 import { s } from "../ai/Schema";
+import { Storage } from "../facades/Storage";
 import { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -49,6 +50,13 @@ class Root extends ApiRouter {
     "/download": this.file(() => null),
     "/video": this.stream(() => null),
     "/video-guarded": this.stream(() => null).middleware(["auth"]),
+    // #727: a read decorated in place, without unpacking it.
+    "/report": this.stream(async () => ({
+      ...(await Storage.read("k")),
+      name: "report.pdf",
+      download: true,
+      headers: { "Cache-Control": "private" },
+    })),
     "/sub": SubRouter,
     // #707: a stream or file `get` next to other verbs on one path.
     "/assets/:fileId": {

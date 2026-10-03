@@ -22,6 +22,7 @@ export {
   createUnsatisfiableResponse,
   type StreamOutput,
   type StreamDescriptor,
+  type StreamReadResult,
 } from "./createStreamResponse";
 export {
   formatContentRange,

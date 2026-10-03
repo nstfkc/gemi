@@ -1,3 +1,18 @@
+# Unreleased
+
+## Stream routes: `nosniff` by default, and decorated reads (#727)
+
+**Behaviour change.** Every response a `this.stream(...)` route builds (200, 206, 416, the 404 for a missing object, and `HEAD`) now sends `X-Content-Type-Options: nosniff`. Stored uploads served from the app's own origin can no longer be sniffed into HTML or script. A route that relied on sniffing (serving a file with a wrong or missing type) should set `type` correctly; to keep the old behaviour on one route, return `headers: { "X-Content-Type-Options": "" }`, or build the `Response` yourself. Returning a `Response` from the handler is still passed through untouched.
+
+A `FileStorage.read()` result can now be decorated in place, so there is no need to unpack it into a `StreamDescriptor`:
+
+```ts
+const read = await FileStorage.read(key);
+return { ...read, name: originalName, download: true, headers: { "Cache-Control": "private" } };
+```
+
+`download`, `status` and `headers` on a read result used to be ignored; they are now honoured (typed as `StreamReadResult`). `Range`/206 responses keep these headers. Apps that unpack the read by hand (for example `file: read.body, total, start, end, partial, ...`) keep working and can switch to the spread.
+
 # Upgrading from 0.88.1 to 0.88.2
 
 - `useEmailCode()`: `error` is now the outcome of the latest call (`request` or `verify`). A stale `invalid_code` no longer hides a newer request error (a 429, say) or lingers after a successful `request`. New `requestError` and `verifyError` hold each call's own last error. Code that relied on `error` keeping a verify error across a `request` should read `verifyError` (#724).

@@ -209,6 +209,119 @@ describe("createStreamResponse() with a driver ReadResult", () => {
   });
 });
 
+describe("createStreamResponse() nosniff (#727)", () => {
+  test("sends nosniff on a 200", async () => {
+    const res = await serve(blob());
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  test("sends nosniff on a 206", async () => {
+    const res = await serve(blob(), "bytes=2-4");
+    expect(res.status).toBe(206);
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  test("sends nosniff on a 416 and a 404", async () => {
+    expect((await serve(blob(), "bytes=50-60")).headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect((await serve(null)).headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  test("sends nosniff on a HEAD", async () => {
+    const res = await serve(blob(), undefined, "HEAD");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  test("leaves a handler's own Response alone", async () => {
+    const res = await serve(new Response("x"));
+    expect(res.headers.get("X-Content-Type-Options")).toBeNull();
+  });
+});
+
+describe("createStreamResponse() with a decorated ReadResult (#727)", () => {
+  const read = () => ({
+    body: streamOf("2345"),
+    start: 2,
+    end: 5,
+    total: 10,
+    partial: true,
+    type: "application/pdf",
+    etag: '"abc"',
+    name: "abc123",
+  });
+
+  test("applies name, download and headers without unpacking", async () => {
+    const res = await serve({
+      ...read(),
+      name: "Quarterly report.pdf",
+      download: true,
+      headers: { "Cache-Control": "private, max-age=60" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Disposition")).toContain("attachment");
+    expect(res.headers.get("Content-Disposition")).toContain("Quarterly");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=60");
+    expect(res.headers.get("ETag")).toBe('"abc"');
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  test("keeps a driver-applied range a 206 with all its headers", async () => {
+    const res = await serve(
+      {
+        ...read(),
+        name: "report.pdf",
+        download: true,
+        headers: { "Cache-Control": "private" },
+      },
+      "bytes=2-5",
+    );
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 2-5/10");
+    expect(res.headers.get("Content-Length")).toBe("4");
+    expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(res.headers.get("Content-Disposition")).toContain("attachment");
+    expect(res.headers.get("Cache-Control")).toBe("private");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(await res.text()).toBe("2345");
+  });
+
+  test("slices a whole-object blob read and keeps the decoration", async () => {
+    const res = await serve(
+      {
+        body: blob(),
+        start: 0,
+        end: 9,
+        total: 10,
+        partial: false,
+        type: "text/plain",
+        download: true,
+        name: "notes.txt",
+      },
+      "bytes=2-4",
+    );
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 2-4/10");
+    expect(res.headers.get("Content-Disposition")).toContain("attachment");
+    expect(await res.text()).toBe("234");
+  });
+
+  test("lets handler headers override nosniff", async () => {
+    const res = await serve({
+      ...read(),
+      partial: false,
+      headers: { "X-Content-Type-Options": "custom" },
+    });
+    expect(res.headers.get("X-Content-Type-Options")).toBe("custom");
+  });
+
+  test("a plain ReadResult still sends inline", async () => {
+    const res = await serve(read());
+    expect(res.headers.get("Content-Disposition")).toContain("inline");
+  });
+});
+
 describe("createStreamResponse() output forms", () => {
   test("passes a Response through untouched", async () => {
     const original = new Response("hi", { status: 418 });
