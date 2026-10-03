@@ -983,11 +983,14 @@ export function useChat<P extends keyof AgentRoutes>(
 
       const previous = superseded ? markAborted(stateRef.current!) : stateRef.current!;
       const history = previous.messages;
+      // The id this turn's message shows under until the server's `message-id`
+      // renames it (#466). The app's own when it passed one.
+      const ownId = turn.localId || localId();
       const authored: AgentMessage[] =
         turn.text || turn.files?.length
           ? [
               {
-                id: localId(),
+                id: ownId,
                 role: "user",
                 content: [
                   ...(turn.text ? [{ type: "text" as const, text: turn.text }] : []),
@@ -1029,7 +1032,9 @@ export function useChat<P extends keyof AgentRoutes>(
           // index signature, and a spread of an unresolved type parameter is
           // refused without one.
           ...(body as Record<string, unknown> | undefined),
-          turn,
+          // With the id of the copy just shown, so the server can say what it
+          // stored it as. A turn that adds no message has no copy to name.
+          turn: authored.length > 0 ? { ...turn, localId: ownId } : turn,
           clientRunId,
           // BOTH KEYS, ALWAYS, one of them `undefined` — which `JSON.stringify`
           // omits, so the wire carries exactly one of them as before.

@@ -108,7 +108,9 @@ class ChatSessionTest {
 
     val body = transport.requests[0].body.body
     assertEquals("/api/support", transport.requests[0].path)
-    assertEquals(jsonOf("""{"text":"Hi"}"""), body["turn"])
+    assertEquals("Hi", body["turn"].body.string("text"))
+    // The copy shown, named so the server can rename it (gemi #466).
+    assertEquals(chat.state.value.messages[0].id, body["turn"].body.string("localId"))
     // The turn itself is never in `messages`, or the server would see it twice.
     assertEquals(JsonArray(emptyList()), body["messages"])
     assertNull(body["threadId"])
@@ -417,7 +419,7 @@ class ChatSessionTest {
 
     chat.regenerate()
 
-    assertEquals(jsonOf("""{"text":"Q"}"""), transport.requests[0].body.body["turn"])
+    assertEquals("Q", transport.requests[0].body.body["turn"].body.string("text"))
     assertEquals(JsonArray(emptyList()), transport.requests[0].body.body["messages"])
     assertEquals(null, transport.requests[0].body.body["regenerate"])
     assertEquals(listOf("Q", "Try two."), chat.state.value.messages.map { it.text })
@@ -512,7 +514,9 @@ class ChatSessionTest {
 
     chat.send(ClientTurn(text = "See attached", files = listOf(ChatFile("file_1", "a.pdf"))))
 
-    assertTrue(jsonEquals(jsonOf("""{"text":"See attached","files":[{"fileId":"file_1","name":"a.pdf"}]}"""), transport.requests[0].body.body["turn"]))
+    val turn = transport.requests[0].body.body["turn"].body
+    assertEquals("See attached", turn.string("text"))
+    assertTrue(jsonEquals(jsonOf("""[{"fileId":"file_1","name":"a.pdf"}]"""), turn["files"]))
     assertTrue(
       jsonEquals(
         jsonOf("""[{"type":"text","text":"See attached"},{"type":"file","fileId":"file_1","name":"a.pdf"}]"""),
@@ -580,5 +584,33 @@ class ChatSessionTest {
     val form = transport.requests[0].request.body.decodeToString()
     assertTrue(form.contains("""filename="a%22b%0D%0AX-Injected: 1.pdf""""))
     assertTrue(!form.contains("\r\nX-Injected"))
+  }
+
+  /** gemi #466: the user's message is minted on the server, and the copy shown
+   *  is renamed to that id when the server answers with it. */
+  @Test
+  fun theCopyShownTakesTheIdTheServerStoredItUnder() = runTest {
+    val transport = FakeTransport { request ->
+      val localId = jsonOf(request.body.decodeToString()).body["turn"].body.string("localId")
+      val events = answer("Hello.").toMutableList()
+      events.add(1, """{"type":"message-id","localId":"$localId","messageId":"msg_server"}""")
+      sse(*events.toTypedArray())
+    }
+    val chat = session(transport)
+
+    chat.send("Hi")
+
+    assertTrue(transport.requests[0].body.body["turn"].body.string("localId")!!.startsWith("local_"))
+    assertEquals(listOf("msg_server", "m1"), chat.state.value.messages.map { it.id })
+  }
+
+  @Test
+  fun aTurnThatAddsNoMessageNamesNoCopy() = runTest {
+    val transport = FakeTransport { sse(*answer("Ok.")) }
+    val chat = session(transport)
+
+    chat.send(ClientTurn(toolResults = emptyList()))
+
+    assertEquals(JsonObject(emptyMap()), transport.requests[0].body.body["turn"])
   }
 }

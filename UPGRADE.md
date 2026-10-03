@@ -1,3 +1,18 @@
+# Unreleased
+
+## `gemi/ai`: the user's message keeps the server's id on the client (#466)
+
+The server mints the id of the user's message (`msg_<uuid>`), but `useChat` kept showing its optimistic copy under its own `local_<uuid>` id. After a reload from the store every user message changed id, so React keys changed, app data keyed on the id no longer matched, and a stateless client posted back a message the server never wrote.
+
+A turn may now carry `turn.localId`, the id the client gave its own copy. When it does, a top-level run answers with a new stream event, `{ type: "message-id", localId, messageId }`, right after it stores the message, and the reducer renames the copy to `messageId`. `useChat`, the Swift `ChatSession` and the Kotlin `ChatSession` send `localId` on every turn that adds a message, so the copy ends up with the stored id without any app change. `sendMessage({ text, localId })` lets an app choose the id its copy is shown under. The server never stores the client's id. The turn itself is still not echoed at the top level, and a sub-run's user turn still arrives whole as a `message` event.
+
+No change is needed to upgrade. Things to know:
+
+- A user message's `id` in `useChat`'s `messages` changes once while the run starts. A React list keyed on `message.id` remounts that one item once.
+- `AgentStreamEvent` has a new member. A `switch` over it with an exhaustiveness check needs a `message-id` case. Older clients ignore the event.
+- `turn.localId` is read only from the `{ turn: { ... } }` envelope, not from the flat body form, so an app field named `localId` is left alone. A `localId` that is not a string, or is longer than 200 characters, is a 400.
+- A threaded `regenerate` stores the turn again under a new id, and the client is told that id the same way.
+
 # Upgrading from 0.96.0 to 0.97.0
 
 ## `gemi/ai`: nested runs stream their seed and report their errors (#470, #468)

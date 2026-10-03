@@ -218,6 +218,9 @@ public final class ChatSession<Agent: AgentSchema> {
     }
 
     let history = state.messages
+    // The id this turn's message shows under until the server's `message-id`
+    // renames it (gemi #466).
+    let ownId = localId()
     var authored: [AgentMessage] = []
     if turn.text?.isEmpty == false || !turn.files.isEmpty {
       var content: [JSONValue] = []
@@ -231,7 +234,7 @@ public final class ChatSession<Agent: AgentSchema> {
       }
       authored.append(
         AgentMessage(json: [
-          "id": .string(localId()), "role": "user", "content": .array(content),
+          "id": .string(ownId), "role": "user", "content": .array(content),
           "createdAt": .string(ChatState.timestamp()),
         ]))
     }
@@ -242,7 +245,11 @@ public final class ChatSession<Agent: AgentSchema> {
     state.pending = []
     phase = .submitted
 
-    var payload: JSONObject = ["turn": turn.json, "clientRunId": .string(clientRunId)]
+    // With the id of the copy just shown, so the server can say what it stored
+    // it as. A turn that adds no message has no copy to name.
+    var wireTurn = turn.json.objectValue ?? [:]
+    if !authored.isEmpty { wireTurn["localId"] = .string(ownId) }
+    var payload: JSONObject = ["turn": .object(wireTurn), "clientRunId": .string(clientRunId)]
     if let threadId = state.threadId {
       payload["threadId"] = .string(threadId)
     } else {

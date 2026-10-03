@@ -1599,3 +1599,55 @@ describe("the attachment memo on a tool call", () => {
     expect(part.attachments).toEqual([record]);
   });
 });
+
+describe("the server's id for the user's own turn (#466)", () => {
+  const typed = (id: string): AgentMessage => ({
+    id,
+    role: "user",
+    content: [{ type: "text", text: "hello" }],
+    createdAt: NOW,
+  });
+  const start: AgentStreamFrame = {
+    seq: 0,
+    event: { type: "run-start", runId: "run_1", threadId: "t1" },
+  };
+  const renamed = (seq: number): AgentStreamFrame => ({
+    seq,
+    event: { type: "message-id", localId: "local_1", messageId: "msg_1" },
+  });
+
+  test("renames the client's copy in place and changes nothing else", () => {
+    const earlier: AgentMessage = { ...typed("msg_0"), finishReason: "stop" };
+    const state = fold(initialChatState({ messages: [earlier, typed("local_1")] }), [
+      start,
+      renamed(1),
+    ]);
+    expect(state.messages).toEqual([earlier, { ...typed("local_1"), id: "msg_1" }]);
+  });
+
+  test("is not a message the run touched, so run-end leaves it as typed", () => {
+    const state = fold(initialChatState({ messages: [typed("local_1")] }), [
+      start,
+      renamed(1),
+      { seq: 2, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+    ]);
+    expect(state.runMessageIds).toEqual([]);
+    expect(state.messages).toEqual([{ ...typed("local_1"), id: "msg_1" }]);
+  });
+
+  test("is a no-op for a client that never held the copy, or already renamed it", () => {
+    // A client attached from another tab, or a replay after the rename.
+    const attached = fold(initialChatState({ messages: [typed("msg_1")] }), [start, renamed(1)]);
+    expect(attached.messages).toEqual([typed("msg_1")]);
+    const fresh = fold(initialChatState(), [start, renamed(1)]);
+    expect(fresh.messages).toEqual([]);
+  });
+
+  test("drops the copy when the server's message is already there", () => {
+    const state = fold(initialChatState({ messages: [typed("msg_1"), typed("local_1")] }), [
+      start,
+      renamed(1),
+    ]);
+    expect(state.messages).toEqual([typed("msg_1")]);
+  });
+});

@@ -491,6 +491,17 @@ export type ClientToolResult =
 export type ClientTurn = {
   text?: string;
   /**
+   * The id the client gave its own copy of this turn's message — the one it
+   * shows while the run is under way (#466). The server does not take it as the
+   * message's id: it mints its own, and answers with a `message-id` event
+   * naming both, so the client can rename its copy to the id the store and
+   * every later load use. A client-chosen id is never stored, because a store
+   * keyed by message id across threads would let a client that names someone
+   * else's id write over their message. Ignored on a turn that adds no message
+   * (answers only).
+   */
+  localId?: string;
+  /**
    * What `attach()` answered, passed on whole: `fileId` for the model to look
    * at, `attachmentId` for a tool to be handed. Either may be absent (see
    * `FilePart`), never both. The server checks the shape before anything runs,
@@ -595,6 +606,22 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    * is safe — the server is the sole author and the message is immutable.
    */
   | { type: "message"; message: AgentMessage<T, O> }
+  /**
+   * The id the server gave the user's own message, for the client that sent it
+   * (#466). Only on a top-level turn whose `ClientTurn` carried a `localId`,
+   * right after the run stored the message.
+   *
+   * The turn itself is not echoed: the client already holds it, and an echo
+   * would show the question twice on any client that does not reconcile the
+   * two. What it lacks is the id, and without it the copy it shows never
+   * matches the stored one — a reload changes the React key, anything the app
+   * keyed on the id (reactions, edits, citations) is lost, and a stateless
+   * client posts back a message the server never wrote. So the reducer renames
+   * its `localId` message to `messageId`, and a client that never sent a
+   * `localId` gets nothing. A sub-run's user turn is not the client's and comes
+   * whole, as `message`.
+   */
+  | { type: "message-id"; localId: string; messageId: string }
   /**
    * Terminal for this stream: the run is finished, not parked. Everything
    * needed to answer is in the event and in the messages already delivered, so

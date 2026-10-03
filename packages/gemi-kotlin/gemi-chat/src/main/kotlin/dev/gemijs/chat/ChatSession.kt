@@ -178,6 +178,9 @@ public class ChatSession(
     }
 
     val history = chat.messages
+    // The id this turn's message shows under until the server's `message-id`
+    // renames it (gemi #466).
+    val ownId = localId()
     val authored =
       if (!turn.text.isNullOrEmpty() || turn.files.isNotEmpty()) {
         val content =
@@ -186,7 +189,7 @@ public class ChatSession(
         listOf(
           AgentMessage(
             jsonObjectOf(
-              "id" to JsonPrimitive(localId()),
+              "id" to JsonPrimitive(ownId),
               "role" to JsonPrimitive("user"),
               "content" to JsonArray(content),
               "createdAt" to JsonPrimitive(ChatState.timestamp()),
@@ -200,8 +203,11 @@ public class ChatSession(
     phase = Phase.Submitted
     publish()
 
+    // With the id of the copy just shown, so the server can say what it stored
+    // it as. A turn that adds no message has no copy to name.
+    val wireTurn = if (authored.isEmpty()) turn.json else turn.json.with("localId", JsonPrimitive(ownId))
     var payload =
-      jsonObjectOf("turn" to turn.json, "clientRunId" to JsonPrimitive(clientRunId))
+      jsonObjectOf("turn" to wireTurn, "clientRunId" to JsonPrimitive(clientRunId))
         .with("threadId", chat.threadId.json())
         .with("messages", if (chat.threadId == null) JsonArray(forWire(history).map { it.json }) else null)
     body.forEach { (key, value) -> payload = payload.with(key, value) }

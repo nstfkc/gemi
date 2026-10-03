@@ -149,14 +149,18 @@ function calls() {
 }
 
 /**
- * The request body, minus the correlation id.
+ * The request body, minus the correlation ids.
  *
- * `clientRunId` is a fresh uuid on every send, so it cannot appear in an
- * equality assertion; it has its own tests below, which are the only place it is
- * interesting.
+ * `clientRunId` and `turn.localId` are fresh uuids on every send, so they cannot
+ * appear in an equality assertion; they have their own tests below, which are
+ * the only place they are interesting.
  */
 function bodyOf(index: number) {
   const { clientRunId: _, ...body } = JSON.parse(calls()[index]![1]!.body as string);
+  if (body.turn) {
+    const { localId: __, ...turn } = body.turn;
+    body.turn = turn;
+  }
   return body;
 }
 
@@ -2121,7 +2125,7 @@ describe("an app body that collides with the turn envelope", () => {
     });
 
     const sent = rawBodyOf(0);
-    expect(sent.turn).toEqual({ text: "the real message" });
+    expect(sent.turn).toEqual({ text: "the real message", localId: expect.any(String) });
     expect(sent.messages).toEqual([]);
     expect(sent.clientRunId).not.toBe("forged");
   });
@@ -2504,5 +2508,57 @@ describe("attach()", () => {
       });
       await expect(pending).resolves.toMatchObject({ fileId: "f_1" });
     });
+  });
+});
+
+/**
+ * #466. The user's message is minted on the server, and the hook's optimistic
+ * copy kept its `local_` id for good, so a reload from the store changed every
+ * key. The hook now names its copy on the turn and renames it when the server
+ * answers with the id it stored the message under.
+ */
+describe("the server's id for the user's own message", () => {
+  const renaming = (localId: string): AgentStreamFrame[] => [
+    ANSWER[0]!,
+    { seq: 1, event: { type: "message-id", localId, messageId: "msg_server" } },
+    ...ANSWER.slice(1).map((frame) => ({ ...frame, seq: frame.seq + 1 })),
+  ];
+
+  test("the turn names the copy the hook shows, and the copy takes the server's id", async () => {
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    const { box } = mount({ attach: false });
+    let sending!: Promise<void>;
+    await act(async () => {
+      sending = box.api.sendMessage("hello");
+    });
+
+    const sent = rawBodyOf(0);
+    expect(sent.turn.localId).toMatch(/^local_/);
+    expect(box.api.messages.map((m) => m.id)).toEqual([sent.turn.localId]);
+
+    await act(async () => {
+      run.push(...renaming(sent.turn.localId));
+      run.close();
+      await sending;
+    });
+    expect(box.api.messages.map((m) => m.id)).toEqual(["msg_server", "m1"]);
+  });
+
+  test("a turn that adds no message names no copy", async () => {
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage({ toolResults: [] });
+    });
+    expect(rawBodyOf(0).turn).toEqual({ toolResults: [] });
+  });
+
+  test("an app's own localId is the id its copy shows under", async () => {
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage({ text: "hi", localId: "mine_1" });
+    });
+    expect(rawBodyOf(0).turn).toEqual({ text: "hi", localId: "mine_1" });
+    expect(box.api.messages[0]!.id).toBe("mine_1");
   });
 });

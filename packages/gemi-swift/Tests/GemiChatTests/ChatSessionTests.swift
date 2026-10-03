@@ -112,7 +112,9 @@ func eventually(_ condition: () -> Bool) async {
 
     let body = transport.requests[0].body
     #expect(transport.requests[0].path == "/api/support")
-    #expect(body["turn"] == ["text": "Hi"])
+    #expect(body["turn"]?["text"] == "Hi")
+    // The copy shown, named so the server can rename it (gemi #466).
+    #expect(body["turn"]?["localId"]?.stringValue == chat.messages[0].id)
     // The turn itself is never in `messages`, or the server would see it twice.
     #expect(body["messages"] == [])
     #expect(body["threadId"] == nil)
@@ -500,7 +502,7 @@ func eventually(_ condition: () -> Bool) async {
 
     await chat.regenerate()
 
-    #expect(transport.requests[0].body["turn"] == ["text": "Q"])
+    #expect(transport.requests[0].body["turn"]?["text"] == "Q")
     #expect(transport.requests[0].body["messages"] == [])
     #expect(transport.requests[0].body["regenerate"] == nil)
     #expect(chat.messages.map(\.text) == ["Q", "Try two."])
@@ -616,15 +618,41 @@ func eventually(_ condition: () -> Bool) async {
     await chat.send(
       ClientTurn(text: "See attached", files: [ChatFile(fileId: "file_1", name: "a.pdf")]))
 
-    #expect(
-      transport.requests[0].body["turn"] == [
-        "text": "See attached", "files": [["fileId": "file_1", "name": "a.pdf"]],
-      ])
+    #expect(transport.requests[0].body["turn"]?["text"] == "See attached")
+    #expect(transport.requests[0].body["turn"]?["files"] == [["fileId": "file_1", "name": "a.pdf"]])
     #expect(
       chat.messages[0].json["content"] == [
         ["type": "text", "text": "See attached"],
         ["type": "file", "fileId": "file_1", "name": "a.pdf"],
       ])
+  }
+
+  /// gemi #466: the user's message is minted on the server, and the copy shown
+  /// is renamed to that id when the server answers with it.
+  @Test func theCopyShownTakesTheIdTheServerStoredItUnder() async {
+    let transport = FakeTransport { request in
+      let turn = JSONValue.parse(request.httpBody ?? Data())?["turn"]
+      var events = answer("Hello.")
+      events.insert(
+        ["type": "message-id", "localId": turn?["localId"] ?? .null, "messageId": "msg_server"],
+        at: 1)
+      return sse(events)
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+
+    await chat.send("Hi")
+
+    #expect(transport.requests[0].body["turn"]?["localId"]?.stringValue?.hasPrefix("local_") == true)
+    #expect(chat.messages.map(\.id) == ["msg_server", "m1"])
+  }
+
+  @Test func aTurnThatAddsNoMessageNamesNoCopy() async {
+    let transport = FakeTransport { _ in sse(answer("Ok.")) }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+
+    await chat.send(ClientTurn(toolResults: []))
+
+    #expect(transport.requests[0].body["turn"] == [:])
   }
 }
 

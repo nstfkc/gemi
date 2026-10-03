@@ -909,7 +909,9 @@ export abstract class AgentController<
             removed.map((message) => message.id),
           );
           messages = messages.slice(0, cut.index);
-          turn = cut.turn;
+          // The stored turn, under the client's `localId` for it: the message
+          // is minted again, and the client has to be told the new id (#466).
+          turn = turn?.localId ? { ...cut.turn, localId: turn.localId } : cut.turn;
         }
       } else {
         messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
@@ -2513,8 +2515,30 @@ function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: s
   if (Array.isArray(source.toolResults)) {
     turn.toolResults = source.toolResults;
   }
-  return Object.keys(turn).length > 0 ? { turn } : {};
+  if (Object.keys(turn).length === 0) return {};
+  // Envelope only: in the bare form the top level is shared with the app's own
+  // fields, and an app that already sends a `localId` of its own would lose it
+  // to the turn. `null` and `""` read as absent, as they do for `files`.
+  if (
+    source === body.turn &&
+    source.localId !== undefined &&
+    source.localId !== null &&
+    source.localId !== ""
+  ) {
+    const { localId } = source;
+    if (typeof localId !== "string") return { error: "turn.localId must be a string." };
+    // Echoed back on the stream and nothing else, so the only thing to bound
+    // is what one frame carries.
+    if (localId.length > MAX_LOCAL_ID_LENGTH) {
+      return { error: `turn.localId is longer than ${MAX_LOCAL_ID_LENGTH} characters.` };
+    }
+    turn.localId = localId;
+  }
+  return { turn };
 }
+
+/** How long `turn.localId` may be. Comfortably above `local_<uuid>`. */
+const MAX_LOCAL_ID_LENGTH = 200;
 
 /**
  * `turn.files`, checked field by field, or the sentence refusing it.
