@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.94.0 to 0.95.0
 
 ## `FallbackProvider`: an ordered provider chain for `gemi/ai` (#666)
 
