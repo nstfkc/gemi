@@ -1,3 +1,30 @@
+# Unreleased
+
+## `ai`: purpose-specific signing keys, and approvals bound to the run owner (#447)
+
+**Behaviour change (security).** Pending-call signatures (approvals, questions,
+client tools) and parked sub-run records were HMACed with the raw `SECRET`,
+the same key CSRF tokens and sessions use, and an approval token was not bound
+to who it was asked of, so it could be answered from another user's session.
+
+- Each token kind now has its own key, derived from `SECRET` with HKDF-SHA256
+  (`info: "gemi.ai.pending-call.v1"` / `"gemi.ai.nested-run.v1"`).
+- Both token kinds now bind a `subject`: the run's owner from
+  `AgentController.runOwner` (`user:<id>` by default, `null` when anonymous).
+  An answer is only accepted on a turn whose `runOwner` is the same as the
+  turn that asked; anyone else gets the usual `invalid_tool_result` error and
+  the call is refused. `Agent.stream` takes the principal as `subject`.
+- New tokens are tagged `agt2` / `agn2`. Tokens minted before the upgrade
+  (`agt1` / `agn1`) still verify (raw key, no subject) until they expire, 24
+  hours by default, so a question pending across the deploy can still be
+  answered. Support for the old tags will be removed in a later release.
+
+**Action:** none for most apps. If you override `runOwner`, it must return
+the same key on the turn that asks and the turn that answers (a value derived
+from something that changes between requests will make every approval fail).
+If you call `Agent.stream` yourself and want answers bound to a user, pass
+`subject`.
+
 # Upgrading from 0.84.1 to 0.85.0
 
 ## `ai`: `regenerate` replaces the answer on a thread (#451)

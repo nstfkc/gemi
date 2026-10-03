@@ -1177,6 +1177,18 @@ interface AgentStreamParamsBase {
    */
   nonces?: NonceStore;
   /**
+   * Who this run is answering: the principal every pending call and parked
+   * sub-run record it mints is bound to (#447). An answer, or a record, only
+   * verifies on a later run with the same `subject`, so a token lifted from
+   * one user's history cannot be spent in another user's turn. `null`, or
+   * omitted, is an anonymous run, and only verifies on another anonymous one.
+   *
+   * `AgentController` sets this from `runOwner` (`user:<id>` by default), so it
+   * must answer the same on the turn that asks and the turn that answers.
+   * Handed down unchanged to a sub-run.
+   */
+  subject?: string | null;
+  /**
    * The attachment handle every tool of this run is given as `ctx.attachments`.
    *
    * Resolved by the controller from the request — `attachmentsFor(req,
@@ -2791,6 +2803,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // Absent rather than empty at the top level, so the signature a root run
       // mints is byte-for-byte the one it minted before nesting existed.
       path: this.pathPrefix.length > 0 ? [...this.pathPrefix] : undefined,
+      // The principal the question is asked of (#447): an answer presented by
+      // anyone else fails the MAC.
+      subject: this.params.subject ?? null,
     };
   }
 
@@ -3191,6 +3206,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // The same store, so a sub-run's answers are single-use across every
       // instance exactly as the parent's are.
       nonces: this.params.nonces,
+      // The same principal, so a sub-agent's question is bound to the user the
+      // root run was started for.
+      subject: this.params.subject,
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3260,6 +3278,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
                 nestedRunId: sub.runId,
                 open: [...openCallIds(messages)],
                 input: call.input,
+                subject: this.params.subject ?? null,
               }),
             }
           : {}),
@@ -4061,6 +4080,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       nestedRunId: parked.runId,
       open: [...openCallIds(parked.messages)],
       input: call.input,
+      subject: this.params.subject ?? null,
     });
     if (verified.ok === false) {
       return { ok: false, reason: verified.reason === "expired" ? "expired" : "unsigned" };
