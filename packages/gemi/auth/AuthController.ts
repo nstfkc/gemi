@@ -61,6 +61,48 @@ async function passwordMatches(
   return false;
 }
 
+/**
+ * The digits of a magic-link PIN, as `AuthManager.createMagicLinkToken` makes
+ * them.
+ */
+export const PIN_PATTERN = /^\d{6}$/;
+
+/**
+ * Request input is checked for its runtime type before it reaches a query.
+ *
+ * A JSON body can carry an object or an array wherever a string was expected,
+ * and the type parameter on `HttpRequest` checks nothing at runtime. Handed to
+ * the ORM, such a value is not a value to match but a filter, so every auth
+ * route takes its identifiers through these and answers anything that is not a
+ * string exactly as it answers a wrong one.
+ */
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function emailInput(value: unknown): string | null {
+  const email = nonEmptyString(value)?.toLowerCase().trim();
+  return email ? email : null;
+}
+
+/**
+ * The email and PIN of a PIN sign-in, or the same `Invalid pin` a wrong PIN
+ * gets: a value that is not a string, or a PIN that is not six digits, never
+ * reaches the lookup.
+ */
+async function pinInput(req: HttpRequest<{ email: string; pin: string }>) {
+  const input = await req.input();
+  const { email: rawEmail, pin: rawPin } = input.toJSON() as Record<string, unknown>;
+  const email = emailInput(rawEmail);
+  const pin = typeof rawPin === "string" && PIN_PATTERN.test(rawPin) ? rawPin : null;
+  if (!email || !pin) {
+    throw new ValidationError({
+      pin: ["Invalid pin"],
+    });
+  }
+  return { email, pin };
+}
+
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
 
@@ -127,9 +169,12 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { userProvider } = app(AuthManager);
 
-    const user = await userProvider.findUserByVerificationToken(
-      input.get("token"),
-    );
+    const token = nonEmptyString(input.get("token"));
+    if (!token) {
+      return { email: null };
+    }
+
+    const user = await userProvider.findUserByVerificationToken(token);
 
     if (!user) {
       return { email: null };
@@ -145,10 +190,17 @@ export class AuthController extends Controller {
   async signInWithMagicLink(req = new HttpRequest()) {
     const auth = app(AuthManager);
     const { userProvider } = auth;
-    const token = req.search.get("token");
-    const email = decodeURIComponent(req.search.get("email"))
-      .toLowerCase()
-      .trim();
+    const token = nonEmptyString(req.search.get("token"));
+    let email: string | null = null;
+    try {
+      email = emailInput(decodeURIComponent(req.search.get("email") ?? ""));
+    } catch {}
+
+    // Without a token there is nothing to check: `findUserMagicLinkToken`
+    // would otherwise look for a PIN instead.
+    if (!token || !email) {
+      return { error: "Invalid token" };
+    }
 
     let magicLink = null;
 
@@ -158,8 +210,9 @@ export class AuthController extends Controller {
         token,
       });
     } catch (err) {
-      console.log(err);
-      return { error: JSON.stringify(err) };
+      // Logged, not returned: a failed lookup answers like a wrong token.
+      console.error(err);
+      return { error: "Invalid token" };
     }
 
     if (!magicLink) {
@@ -188,9 +241,7 @@ export class AuthController extends Controller {
   ) {
     const auth = app(AuthManager);
     const { userProvider } = auth;
-    const input = await req.input();
-    const { email: _email, pin } = input.toJSON();
-    const email = _email.toLowerCase().trim();
+    const { email, pin } = await pinInput(req);
 
     const magicLinkToken = await userProvider.findUserMagicLinkToken({
       email,
@@ -224,9 +275,7 @@ export class AuthController extends Controller {
   async signInWithPin(req = new HttpRequest<{ email: string; pin: string }>()) {
     const auth = app(AuthManager);
     const { userProvider } = auth;
-    const input = await req.input();
-    const { email: _email, pin } = input.toJSON();
-    const email = _email.toLowerCase().trim();
+    const { email, pin } = await pinInput(req);
 
     const magicLinkToken = await userProvider.findUserMagicLinkToken({
       email,
@@ -271,11 +320,11 @@ export class AuthController extends Controller {
 
     // An unknown address is checked too, against a decoy, so it answers like a
     // wrong password in time as well as in body.
-    const isPasswordValid = await passwordMatches(
-      auth.config,
-      password,
-      user?.password,
-    );
+    // `SignInRequest` checks the email is a string; the password only that it
+    // is present. Anything else is a wrong password.
+    const isPasswordValid =
+      typeof password === "string" &&
+      (await passwordMatches(auth.config, password, user?.password));
 
     if (!user || !isPasswordValid) {
       throw new ValidationError({
@@ -317,11 +366,11 @@ export class AuthController extends Controller {
 
     // An unknown address is checked too, against a decoy, so it answers like a
     // wrong password in time as well as in body.
-    const isPasswordValid = await passwordMatches(
-      auth.config,
-      password,
-      user?.password,
-    );
+    // `SignInRequest` checks the email is a string; the password only that it
+    // is present. Anything else is a wrong password.
+    const isPasswordValid =
+      typeof password === "string" &&
+      (await passwordMatches(auth.config, password, user?.password));
 
     if (!user || !isPasswordValid) {
       throw new ValidationError({
@@ -359,8 +408,20 @@ export class AuthController extends Controller {
       password,
       name,
       invitationId,
-    } = input.toJSON();
-    const email = _email.toLowerCase().trim();
+    } = input.toJSON() as Record<string, any>;
+
+    // `signUpRequest` is the application's to replace, so the types the
+    // queries below depend on are checked here as well as by its schema.
+    const email = emailInput(_email);
+    if (!email) {
+      throw new ValidationError({ email: ["Invalid email"] });
+    }
+    if (password != null && typeof password !== "string") {
+      throw new ValidationError({ password: ["Invalid password"] });
+    }
+    if (invitationId != null && typeof invitationId !== "string") {
+      throw new ValidationError({ invitationId: ["Invalid invitation"] });
+    }
 
     const user = await userProvider.findUserByEmailAddress(email, false);
 
@@ -490,7 +551,11 @@ export class AuthController extends Controller {
 
   async forgotPassword(req = new ForgotPasswordRequest()) {
     const input = await req.input();
-    const email = input.get("email").toLowerCase().trim();
+    const email = emailInput(input.get("email"));
+
+    if (!email) {
+      return {};
+    }
 
     const { userProvider, config } = app(AuthManager);
 
@@ -520,11 +585,12 @@ export class AuthController extends Controller {
   async resetPassword(req = new ResetPasswordRequest()) {
     const { userProvider, config } = app(AuthManager);
     const input = await req.input();
-    const { password, token } = input.toJSON();
+    const { password, token: rawToken } = input.toJSON();
+    const token = nonEmptyString(rawToken);
 
-    const passwordResetToken = await userProvider.findPasswordResetToken({
-      token,
-    });
+    const passwordResetToken = token
+      ? await userProvider.findPasswordResetToken({ token })
+      : null;
 
     if (!passwordResetToken) {
       throw new ValidationError({
@@ -579,16 +645,20 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { oldPassword, newPassword } = input.toJSON();
 
+    if (typeof newPassword !== "string") {
+      throw new ValidationError({
+        newPassword: ["Invalid password"],
+      });
+    }
+
     const stored = await userProvider.findUserByEmailAddress(
       user.email,
       config.verifyEmail,
     );
 
-    const isPasswordValid = await passwordMatches(
-      config,
-      oldPassword,
-      stored?.password,
-    );
+    const isPasswordValid =
+      typeof oldPassword === "string" &&
+      (await passwordMatches(config, oldPassword, stored?.password));
 
     if (!isPasswordValid) {
       throw new ValidationError({
@@ -866,7 +936,10 @@ export class AuthController extends Controller {
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
     const input = await req.input();
-    const email = input.get("email").toLowerCase().trim();
+    const email = emailInput(input.get("email"));
+    if (!email) {
+      return { email: null };
+    }
     const auth = app(AuthManager);
     const { user, pin, token } = await auth.createMagicLinkToken(email);
 

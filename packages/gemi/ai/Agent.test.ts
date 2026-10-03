@@ -486,13 +486,13 @@ function approvalAgent(...scripts: ProviderEvent[][]) {
 }
 
 /** Runs the first turn of the approval conversation. */
-async function askForApproval() {
+async function askForApproval(subject?: string | null) {
   refundCalls.length = 0;
   const { agent, provider } = approvalAgent([
     toolCall("c1", "refundOrder", { orderId: "ord_1" }),
     finish(),
   ]);
-  const run = agent.stream({ messages: [], turn: { text: "refund it" } });
+  const run = agent.stream({ messages: [], turn: { text: "refund it" }, subject });
   const { events, done } = collect(run);
   const result = await run.result();
   await done;
@@ -752,6 +752,55 @@ describe("an approval", () => {
       status: "denied",
       cause: "refused",
     });
+  });
+
+  describe("bound to the principal it was asked of (#447)", () => {
+    const approveAs = (
+      subject: string | null,
+      messages: AgentMessage[],
+      answer: ClientToolResult,
+    ) =>
+      Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [refundOrder, askUser],
+      }).stream({ messages, turn: { toolResults: [answer] }, subject });
+
+    test("is accepted from the subject it was minted for", async () => {
+      const first = await askForApproval("user:a");
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      await approveAs("user:a", first.result.messages, answer).result();
+      expect(refundCalls).toEqual(["ord_1"]);
+    });
+
+    test.each([
+      ["another user", "user:a", "user:b"],
+      ["an anonymous caller", "user:a", null],
+      ["a signed-in user, for an anonymous question", null, "user:b"],
+    ] as const)(
+      "is refused from %s, with the asker's whole history in hand",
+      async (_, asker, answerer) => {
+        const first = await askForApproval(asker);
+        const answer: ClientToolResult = {
+          toolCallId: "c1",
+          signature: first.pending[0].signature,
+          approve: true,
+        };
+        const run = approveAs(answerer, first.result.messages, answer);
+        const { events, done } = collect(run);
+        await run.result();
+        await done;
+
+        expect(refundCalls).toEqual([]);
+        expect(events.find((event) => event.type === "error")).toMatchObject({
+          error: { code: "invalid_tool_result" },
+        });
+      },
+    );
   });
 
   describe("spent on the run's nonce store (#445)", () => {
@@ -4898,6 +4947,115 @@ describe("a file the provider refused", () => {
       );
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * `inputSchema` as a function (#710): resolved once per run from the run's
+ * body and context, shown to the model and used to validate the calls.
+ */
+describe("per-run tool input schemas", () => {
+  const saveItems = (seen: unknown[]) =>
+    AgentTool.create({
+      name: "saveItems",
+      description: "Save items into the page's collection",
+      inputSchema: async (ctx) => {
+        seen.push(ctx.body);
+        const fields = (ctx.body.fields as string[]) ?? [];
+        return s.object({
+          items: s.array(
+            s.fromJSONSchema({
+              type: "object",
+              properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
+              required: fields,
+            }),
+          ),
+        });
+      },
+      outputSchema: anything(),
+      execute: async (input) => ({ saved: input.items.length }),
+    });
+
+  test("the resolved schema is what the model sees and what calls are checked against", async () => {
+    const seen: unknown[] = [];
+    const provider = fakeProvider(
+      [toolCall("c1", "saveItems", { items: [{ name: "a" }] }), finish()],
+      [toolCall("c2", "saveItems", { items: [{ name: "a", price: "1" }] }), finish()],
+      [finish()],
+    );
+    const agent = Agent.create({
+      name: "builder",
+      provider,
+      tools: [saveItems(seen), grep],
+    });
+    const result = await agent
+      .stream({ messages: [], body: { fields: ["name", "price"] } })
+      .result();
+
+    expect(seen).toEqual([{ fields: ["name", "price"] }]);
+    const spec = (provider.calls[0].tools as any[]).find((tool) => tool.name === "saveItems");
+    expect(spec.strict).toBe(true);
+    expect(spec.parameters.properties.items.items.properties).toEqual({
+      name: { type: "string" },
+      price: { type: "string" },
+    });
+    // A fixed sibling is untouched.
+    expect((provider.calls[0].tools as any[]).find((tool) => tool.name === "grep")).toBeDefined();
+
+    const results = partsOf(result.messages, "tool-result");
+    expect(results[0]).toMatchObject({ status: "error", error: { code: "invalid_tool_input" } });
+    expect(results[0].error.message).toContain("items[0].price: expected string, got undefined");
+    expect(results[1]).toMatchObject({ status: "ok", output: { saved: 1 } });
+  });
+
+  test("each run resolves its own schema", async () => {
+    const seen: unknown[] = [];
+    const tool = saveItems(seen);
+    const agent = Agent.create({
+      name: "builder",
+      provider: fakeProvider([finish()]),
+      tools: [tool],
+    });
+    const first = fakeProvider([finish()]);
+    const second = fakeProvider([finish()]);
+    await agent.stream({ messages: [], provider: first, body: { fields: ["a"] } }).result();
+    await agent.stream({ messages: [], provider: second, body: { fields: ["b"] } }).result();
+    const props = (provider: typeof first) =>
+      Object.keys(
+        (provider.calls[0].tools as any[])[0].parameters.properties.items.items.properties,
+      );
+    expect(props(first)).toEqual(["a"]);
+    expect(props(second)).toEqual(["b"]);
+  });
+
+  test("a resolver that throws, or returns a non-object, fails the run before the model is called", async () => {
+    for (const inputSchema of [
+      async () => {
+        throw new Error("collections table is down");
+      },
+      () => s.string() as any,
+    ]) {
+      const provider = fakeProvider([finish()]);
+      const agent = Agent.create({
+        name: "builder",
+        provider,
+        logErrors: false,
+        tools: [
+          AgentTool.create({
+            name: "broken",
+            description: "x",
+            inputSchema,
+            outputSchema: anything(),
+            execute: async () => ({}),
+          }),
+        ],
+      });
+      const result = await agent.stream({ messages: [] }).result();
+      expect(result.finishReason).toBe("error");
+      expect(result.error).toMatchObject({ code: "tool_error" });
+      expect(result.error!.message).toMatch(/Could not resolve the input schema of "broken"/);
+      expect(provider.calls).toHaveLength(0);
     }
   });
 });

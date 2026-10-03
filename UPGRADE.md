@@ -1,4 +1,137 @@
-# Unreleased
+# Upgrading from 0.86.1 to 0.87.0
+
+## `ai`: purpose-specific signing keys, and approvals bound to the run owner (#447)
+
+**Behaviour change (security).** Pending-call signatures (approvals, questions,
+client tools) and parked sub-run records were HMACed with the raw `SECRET`,
+the same key CSRF tokens and sessions use, and an approval token was not bound
+to who it was asked of, so it could be answered from another user's session.
+
+- Each token kind now has its own key, derived from `SECRET` with HKDF-SHA256
+  (`info: "gemi.ai.pending-call.v1"` / `"gemi.ai.nested-run.v1"`).
+- Both token kinds now bind a `subject`: the run's owner from
+  `AgentController.runOwner` (`user:<id>` by default, `null` when anonymous).
+  An answer is only accepted on a turn whose `runOwner` is the same as the
+  turn that asked; anyone else gets the usual `invalid_tool_result` error and
+  the call is refused. `Agent.stream` takes the principal as `subject`.
+- New tokens are tagged `agt2` / `agn2`. Tokens minted before the upgrade
+  (`agt1` / `agn1`) still verify (raw key, no subject) until they expire, 24
+  hours by default, so a question pending across the deploy can still be
+  answered. Support for the old tags will be removed in a later release.
+
+This means a teammate can no longer approve or answer a question that was
+asked of a colleague: with the default `runOwner` (`user:<id>`) only the user
+whose turn asked can answer. If your app lets several people act on one run
+(a shared workspace or team inbox), override `runOwner` to return a key they
+share, such as `team:<id>`. Tokens issued before the upgrade stay valid for
+at most 24 hours.
+
+**Action:** none for most apps. If you override `runOwner`, it must return
+the same key on the turn that asks and the turn that answers (a value derived
+from something that changes between requests will make every approval fail).
+If you call `Agent.stream` yourself and want answers bound to a user, pass
+`subject`.
+
+## `ai`: `s.fromJSONSchema`, `validate()` and per-run tool input schemas (#710)
+
+**New, opt-in.** Three additions for tools whose input shape comes from data
+(a collection a user defined) rather than code:
+
+- `s.fromJSONSchema(schema, { formats?, ignoreKeywords? })` builds an `s`
+  schema from a JSON Schema in the subset `s` models: `string`, `number`,
+  `integer`, `boolean`, `object` (`properties`, `required`,
+  `additionalProperties: false`), `array` (one `items`, `minItems`,
+  `maxItems`), `enum`, `const`, `anyOf`, `[T, "null"]`, `minLength`,
+  `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
+  and `format`. Annotations (`title`, `default`, `examples`, `$schema`, every
+  `x-` keyword, plus `ignoreKeywords`) are skipped. Anything else (`pattern`,
+  `oneOf`, `$ref`, tuples, an open `additionalProperties`, a `format` with no
+  check in `formats`) throws a `JSONSchemaError` whose `problems` list every
+  issue with its path. A format check is `true`, a `RegExp` or
+  `(value) => boolean`. The result stays strict-mode safe: the length, range
+  and format constraints are enforced on parse and told to the model in the
+  field's description, not sent as keywords. A property not in `required` is
+  `optional()`, and unknown object keys are dropped from the parsed value
+  rather than reported.
+- `schema.validate(value)` on every `s` schema returns `{ ok: true, value }` or
+  `{ ok: false, issues }`, where each issue has a `path` (`["items", 0,
+  "price"]`), a `code` named after the JSON Schema keyword (`required`,
+  `type`, `enum`, `minLength`, `maximum`, `format`, …, the same names as
+  Ajv's `keyword`), `params` (`limit`, `format`, `allowedValues`) and a
+  `message`. `parse`/`safeParse` are unchanged.
+- `AgentTool.create({ inputSchema })` also takes
+  `(ctx: ToolSchemaContext) => Schema | Promise<Schema>`, resolved once when a
+  run starts from `ctx.body`/`ctx.context`. The resolved schema is what the
+  model sees and what that run's calls are validated against. A resolver that
+  throws, or returns a non-object schema, fails the run with `tool_error`
+  before the model is called.
+
+New exports from `gemi/ai`: `JSONSchemaError`, and the types
+`FromJSONSchemaOptions`, `JSONSchemaFormat`, `SchemaIssue`, `SchemaIssueCode`,
+`ToolInputSchema` and `ToolSchemaContext`. `AgentTool#inputSchema` is now typed
+`ToolInputSchema<Input>`. Code that reads it off a tool needs to handle the
+function form.
+
+**Action:** none. To replace Ajv for a JSON Schema in this subset, build it once
+with `s.fromJSONSchema(schema, { formats })`, call `.validate(value)` and map
+`issue.code`/`issue.params` the way you mapped Ajv's `keyword`/`params`.
+
+# Upgrading from 0.86.0 to 0.86.1
+
+## `auth`: request input is type-checked before it reaches a query (security hardening)
+
+Recommended for every app using gemi's auth routes. The auth routes now check
+the runtime type of the values they read from the request body or query string
+(`email`, `pin`, `token`, `password`, `invitationId`, …) before passing them to
+a database lookup. A JSON body can carry an object or an array where a string
+is expected, and the ORM reads an object in a `where` as a filter rather than a
+value, so only strings are passed on.
+
+A value of the wrong type is answered exactly like a wrong value: a PIN is
+`Invalid pin`, a reset or magic-link token is `Invalid token`, and so on. A PIN
+must be six digits, the format gemi issues. `UserProvider`'s token, PIN and
+invitation lookups return `null` for a value that is not a non-empty string.
+
+**ORM, behaviour change.** A unique key in `findUnique`, `findUniqueOrThrow`,
+`update`, `delete`, `upsert` and nested `connect`/`where`, and a compound key
+(`a_b: { a, b }`) anywhere, now takes plain values only. A filter object, an
+array or `null` there throws `InvalidArgumentError`; before, it compiled as a
+filter. Prisma types these positions as plain values, so code that typechecks
+against the generated models is unaffected. Extra non-unique filters beside the
+key still work. `findFirst`/`findMany`/`updateMany`/`deleteMany` still take
+filters on any field, so request input passed into their `where` must be
+type-checked by the app (a `string` rule in the request schema does it).
+
+**Action:** upgrade. If you override `AuthController` routes or `UserProvider`
+lookups, or query auth tables from your own routes, make sure request values
+are checked to be strings before they reach a `where`. If you call
+`findUnique` with `null` or a filter in a key, switch to `findFirst`.
+
+# Upgrading from 0.85.0 to 0.86.0
+
+## `client`: `concurrency: "parallel"` for mutation hooks (#719)
+
+**New, opt-in.** `useMutation`, `usePost`, `usePut`, `usePatch` and
+`useDelete` are latest-wins: a `trigger` that starts while another is in
+flight drops the older one's callbacks, state and result. A third-argument
+`concurrency: "parallel"` makes every call stand on its own: each `trigger`
+resolves to its own body (or `undefined`), and the hook's `onSuccess`/`onError`
+run for every call.
+
+- `trigger(input, { onSuccess, onError })` takes per-call callbacks in both
+  modes. They run after the hook's own, and only when the hook's would (in
+  latest mode, not for a superseded call).
+- The hooks return `pending`, the number of requests on the wire. In parallel
+  mode `loading` is `pending > 0`.
+- In parallel mode `data` is the last success's body, `error` is the last
+  settled call's outcome (a success clears it, starting a call does not), and
+  `cancel()` aborts every call in flight.
+- No mode aborts a request because a newer one started.
+- New exported types: `MutationConcurrency`, `MutationCallConfig`.
+
+**Action:** none. The default (`"latest"`) behaves as before.
+
+# Upgrading from 0.84.1 to 0.85.0
 
 ## Chunks from the previous release after a deploy (#548)
 
@@ -445,6 +578,44 @@ RequestBreakerError.legacyStringPayload = true;
 now reports its message instead of the status text. Agent routes' own errors
 (`{ code, message }`) and run errors (`AgentRunFailure`) are unchanged. A route
 tool's refusal shown to the model includes the new fields.
+
+## Behaviour change: a failed `attach()` no longer fails the chat (#683)
+
+Before, when `useChat().attach(file)` failed, it set the chat's `error`,
+called `onError`, and then rejected. Now it only rejects, with an
+`AttachError` (`{ code, message, status }`). `code` is the server's own:
+`unsupported_file_type`, `file_too_large`, `file_rejected` or
+`invalid_request` from the agent route, or a refusal's `kind` such as
+`authentication`. Otherwise it is `upload_failed` (an answer that wasn't JSON)
+or `network_error` (no answer). The chat's `error`, `status` and `onError` are
+left alone, so a refused file no longer looks like a failed run.
+
+- **If your `onError` handled upload failures**, catch them where you call
+  `attach()` instead:
+  ```ts
+  try {
+    files.push(await attach(file));
+  } catch (error) {
+    if (error instanceof AttachError) markChip(file, error.message);
+  }
+  ```
+  `AttachError` is exported from `gemi/ai/client`.
+
+New, nothing to change:
+
+- `attach(file, { signal, onProgress })`. `signal` aborts the upload and
+  rejects with a `DOMException` named `AbortError`. `onProgress({ loaded,
+  total })` reports bytes sent; when it is given, the upload goes over
+  `XMLHttpRequest`. `total` is 0 when the browser can't tell.
+- `attach()` sends the hook's `threadId` (when it has one) in the upload form,
+  so an unauthenticated chat on a thread gets an `attachmentId` without
+  overriding `attachmentScope`. The server still uses only a thread its store
+  knows.
+- `AgentController.attachmentLimits(req)` returns `{ maxBytes?, accept? }`
+  (`accept` takes `<input accept>` entries such as `".pdf"`, `"image/*"` or
+  `"text/csv"`). A file outside it gets a **422** `{ error: { code, message }
+  }` (`file_too_large` or `unsupported_file_type`) before anything is stored
+  or sent to the provider. The default is no limits.
 
 ## A stored file the provider refuses no longer breaks the thread (#684)
 

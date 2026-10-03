@@ -123,7 +123,56 @@ interface SchemaBuilder<T> extends Schema<T> {
    */
   optional(): OptionalSchemaBuilder<T>;
   nullable(): SchemaBuilder<T | null>;
+  /**
+   * `safeParse` with the failures as structured issues rather than sentences:
+   * each one names the path it is about, a JSON Schema keyword as its `code`
+   * and the keyword's argument in `params`. For an app that validates a value
+   * against a schema itself — a form, a stored record — and wants to word or
+   * group the problems per field. All failures are reported, not the first.
+   */
+  validate(value: unknown): { ok: true; value: T } | { ok: false; issues: SchemaIssue[] };
 }
+
+/**
+ * One reason a value failed `validate`.
+ *
+ * `code` is the JSON Schema keyword the value broke — the same names Ajv puts
+ * on its `keyword` — so a mapping written against one reads the other:
+ *
+ * - `required`: the key is missing (`path` ends in it).
+ * - `type`: the wrong kind of value, an integer that isn't whole, or a value
+ *   that isn't JSON at all.
+ * - `const`, `enum`: a literal or a choice that didn't match (`params.allowedValues`).
+ * - `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`,
+ *   `exclusiveMaximum`, `minItems`, `maxItems`: `params.limit` is the bound.
+ * - `format`: `params.format` names the format the string failed.
+ * - `anyOf`: no union member matched; `message` names the closest one's problems.
+ *
+ * `message` is the sentence `safeParse` reports for it, without the path.
+ */
+export type SchemaIssueCode =
+  | "required"
+  | "type"
+  | "const"
+  | "enum"
+  | "anyOf"
+  | "minLength"
+  | "maxLength"
+  | "minimum"
+  | "maximum"
+  | "exclusiveMinimum"
+  | "exclusiveMaximum"
+  | "minItems"
+  | "maxItems"
+  | "format";
+
+export type SchemaIssue = {
+  /** Keys and array indices from the root, `[]` for the root itself. */
+  path: (string | number)[];
+  code: SchemaIssueCode;
+  message: string;
+  params: Record<string, unknown>;
+};
 
 interface OptionalSchemaBuilder<T> extends SchemaBuilder<T | undefined>, OptionalSchema<T> {}
 
@@ -141,25 +190,55 @@ type Definition = {
   nullable: boolean;
 };
 
+/**
+ * The constraints `s.fromJSONSchema` can carry over from a JSON Schema. None of
+ * the builders set them; they exist so that a schema read from data validates
+ * what it says it does.
+ *
+ * They are CHECKED, NOT EMITTED as keywords. Strict structured output refuses
+ * most of them (`minLength`, `maxLength`, `minimum` on Anthropic; any `format`
+ * outside a short list on both), so the model is told them in the field's
+ * description instead, and `parse` enforces them — a model that ignores the
+ * prose gets an `invalid_tool_input` it can correct, the same as a wrong type.
+ */
+type StringChecks = {
+  minLength?: number;
+  maxLength?: number;
+  format?: { name: string; test: (value: string) => boolean };
+};
+
+type NumberChecks = {
+  integer?: boolean;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+};
+
+type ArrayChecks = { minItems?: number; maxItems?: number };
+
 type SchemaNode =
-  | { kind: "string" }
-  | { kind: "number" }
+  | { kind: "string"; checks?: StringChecks }
+  | { kind: "number"; checks?: NumberChecks }
   | { kind: "boolean" }
   | { kind: "literal"; value: string | number | boolean }
-  | { kind: "enum"; values: readonly string[] }
+  | { kind: "enum"; values: readonly string[]; checks?: StringChecks }
   | { kind: "object"; shape: Record<string, Definition> }
-  | { kind: "array"; item: Definition }
+  | { kind: "array"; item: Definition; checks?: ArrayChecks }
   | { kind: "union"; members: readonly Definition[] }
   /** Constrains nothing. The node strict mode has no spelling for. */
   | { kind: "json" };
 
 type ParseResult = { ok: true; value: unknown } | { ok: false; errors: string[] };
 
+type Path = (string | number)[];
+
 /** The public interface with the phantoms and the generic taken off. */
 interface RuntimeSchema {
   toJSONSchema(): JSONSchema;
   parse(value: unknown): unknown;
   safeParse(value: unknown): ParseResult;
+  validate(value: unknown): { ok: true; value: unknown } | { ok: false; issues: SchemaIssue[] };
   describe(description: string): RuntimeSchema;
   optional(): RuntimeSchema;
   nullable(): RuntimeSchema;
@@ -189,7 +268,35 @@ function emit(definition: Definition): JSONSchema {
   // whose second branch is a strictly narrower repeat of its first.
   const widen = (definition.optional || definition.nullable) && definition.node.kind !== "json";
   const body = allowNull(emitNode(definition.node), widen);
-  return definition.description ? { description: definition.description, ...body } : body;
+  const description = [definition.description, hint(definition.node)].filter(Boolean).join(" ");
+  return description ? { description, ...body } : body;
+}
+
+/**
+ * The checks a node carries, in words, for the description — the one place a
+ * strict-mode provider lets them through. See `StringChecks`.
+ */
+function hint(node: SchemaNode): string {
+  const said: string[] = [];
+  if (node.kind === "string" || node.kind === "enum") {
+    const checks = node.checks;
+    if (checks?.format) said.push(`Format: ${checks.format.name}.`);
+    if (checks?.minLength !== undefined) said.push(`At least ${checks.minLength} characters.`);
+    if (checks?.maxLength !== undefined) said.push(`At most ${checks.maxLength} characters.`);
+  } else if (node.kind === "number") {
+    const checks = node.checks;
+    if (checks?.minimum !== undefined) said.push(`Minimum ${checks.minimum}.`);
+    if (checks?.exclusiveMinimum !== undefined) {
+      said.push(`Greater than ${checks.exclusiveMinimum}.`);
+    }
+    if (checks?.maximum !== undefined) said.push(`Maximum ${checks.maximum}.`);
+    if (checks?.exclusiveMaximum !== undefined) said.push(`Less than ${checks.exclusiveMaximum}.`);
+  } else if (node.kind === "array") {
+    const checks = node.checks;
+    if (checks?.minItems !== undefined) said.push(`At least ${checks.minItems} items.`);
+    if (checks?.maxItems !== undefined) said.push(`At most ${checks.maxItems} items.`);
+  }
+  return said.join(" ");
 }
 
 function emitNode(node: SchemaNode): JSONSchema {
@@ -197,7 +304,8 @@ function emitNode(node: SchemaNode): JSONSchema {
     case "string":
       return { type: "string" };
     case "number":
-      return { type: "number" };
+      // `integer` is in the strict subset of every provider gemi speaks to.
+      return { type: node.checks?.integer ? "integer" : "number" };
     case "boolean":
       return { type: "boolean" };
     // `const` rather than a one-member `enum`, because a boolean literal has no
@@ -276,8 +384,9 @@ function wanted(definition: Definition): string {
   const node = definition.node;
   const base = (() => {
     switch (node.kind) {
-      case "string":
       case "number":
+        return node.checks?.integer ? "integer" : "number";
+      case "string":
       case "boolean":
         return node.kind;
       case "literal":
@@ -297,9 +406,24 @@ function wanted(definition: Definition): string {
   return definition.optional || definition.nullable ? `${base} or null` : base;
 }
 
+/** `orders[2].total` — keys joined with dots, indices in brackets. */
+function formatPath(path: Path): string {
+  let out = "";
+  for (const segment of path) {
+    out += typeof segment === "number" ? `[${segment}]` : out ? `.${segment}` : segment;
+  }
+  return out;
+}
+
 /** `orders[2].total: ` — empty at the root, where a prefix would be noise. */
-function at(path: string): string {
-  return path ? `${path}: ` : "";
+function at(path: Path): string {
+  const text = formatPath(path);
+  return text ? `${text}: ` : "";
+}
+
+/** The sentence `safeParse` reports for an issue. */
+function render(issue: SchemaIssue): string {
+  return `${at(issue.path)}${issue.message}`;
 }
 
 /**
@@ -353,7 +477,7 @@ function score(definition: Definition, value: unknown): number {
 /** `drop` is a key that should not appear in the parsed object at all. */
 type Reading = { drop: boolean; value: unknown };
 
-function read(definition: Definition, value: unknown, path: string, errors: string[]): Reading {
+function read(definition: Definition, value: unknown, path: Path, issues: SchemaIssue[]): Reading {
   // `optional` is checked before `nullable`, so a schema that is both treats
   // null as "absent". They are not distinguishable on the wire: strict mode
   // gives the model one spelling for "nothing", and pretending otherwise would
@@ -364,42 +488,91 @@ function read(definition: Definition, value: unknown, path: string, errors: stri
     return { drop: true, value: undefined };
   }
   if (definition.nullable && value === null) return { drop: false, value: null };
-  return { drop: false, value: readNode(definition, value, path, errors) };
+  return { drop: false, value: readNode(definition, value, path, issues) };
 }
 
-function readNode(definition: Definition, value: unknown, path: string, errors: string[]): unknown {
+function readNode(
+  definition: Definition,
+  value: unknown,
+  path: Path,
+  issues: SchemaIssue[],
+): unknown {
   const node = definition.node;
   const fail = () => {
-    errors.push(`${at(path)}expected ${wanted(definition)}, got ${saw(node, value)}`);
+    const code: SchemaIssueCode =
+      value === undefined
+        ? "required"
+        : node.kind === "literal"
+          ? "const"
+          : node.kind === "enum" && typeof value === "string"
+            ? "enum"
+            : "type";
+    const params =
+      code === "const"
+        ? { allowedValue: (node as { value: unknown }).value }
+        : code === "enum"
+          ? { allowedValues: (node as { values: readonly string[] }).values }
+          : {};
+    issues.push({
+      path,
+      code,
+      message: `expected ${wanted(definition)}, got ${saw(node, value)}`,
+      params,
+    });
     return undefined;
   };
 
   switch (node.kind) {
     case "string":
-      return typeof value === "string" ? value : fail();
+      if (typeof value !== "string") return fail();
+      checkString(node.checks, value, path, issues);
+      return value;
     case "number":
       // NaN and Infinity do not survive `JSON.stringify`, so a tool that
       // returns one produces a body the provider cannot be sent.
-      return typeof value === "number" && Number.isFinite(value) ? value : fail();
+      if (typeof value !== "number" || !Number.isFinite(value)) return fail();
+      if (node.checks?.integer && !Number.isInteger(value)) return fail();
+      checkNumber(node.checks, value, path, issues);
+      return value;
     case "boolean":
       return typeof value === "boolean" ? value : fail();
     case "literal":
       return value === node.value ? value : fail();
     case "enum":
-      return typeof value === "string" && node.values.includes(value) ? value : fail();
+      if (typeof value !== "string" || !node.values.includes(value)) return fail();
+      checkString(node.checks, value, path, issues);
+      return value;
     case "array": {
       if (!Array.isArray(value)) return fail();
-      return value.map((item, index) => {
-        const element = read(node.item, item, `${path}[${index}]`, errors);
+      const items = value.map((item, index) => {
+        const element = read(node.item, item, [...path, index], issues);
         return element.drop ? undefined : element.value;
       });
+      const { minItems, maxItems } = node.checks ?? {};
+      if (minItems !== undefined && value.length < minItems) {
+        issues.push({
+          path,
+          code: "minItems",
+          message: `expected at least ${minItems} items, got ${value.length}`,
+          params: { limit: minItems },
+        });
+      }
+      if (maxItems !== undefined && value.length > maxItems) {
+        issues.push({
+          path,
+          code: "maxItems",
+          message: `expected at most ${maxItems} items, got ${value.length}`,
+          params: { limit: maxItems },
+        });
+      }
+      return items;
     }
     case "object": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) return fail();
       const source = value as Record<string, unknown>;
       const output: Record<string, unknown> = {};
       for (const [key, child] of Object.entries(node.shape)) {
-        const element = read(child, source[key], path ? `${path}.${key}` : key, errors);
+        const element = read(child, source[key], [...path, key], issues);
         if (!element.drop) output[key] = element.value;
       }
       // Unknown keys are DROPPED, not rejected. `additionalProperties: false`
@@ -410,18 +583,23 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
       return output;
     }
     case "union": {
-      let best: { errors: string[]; score: number } | undefined;
+      let best: { issues: SchemaIssue[]; score: number } | undefined;
       for (const member of node.members) {
-        const attempt: string[] = [];
+        const attempt: SchemaIssue[] = [];
         const element = read(member, value, path, attempt);
         if (attempt.length === 0) return element.drop ? undefined : element.value;
         const points = score(member, value);
-        if (!best || points > best.score) best = { errors: attempt, score: points };
+        if (!best || points > best.score) best = { issues: attempt, score: points };
       }
       // "no match" is useless when one field of a five-field variant was wrong.
       // Naming the closest variant and why it stopped is the difference between
       // a debuggable bad tool call and a shrug.
-      errors.push(`${at(path)}no matching variant; closest: ${best.errors.join("; ")}`);
+      issues.push({
+        path,
+        code: "anyOf",
+        message: `no matching variant; closest: ${best!.issues.map(render).join("; ")}`,
+        params: { closest: best!.issues },
+      });
       return undefined;
     }
     // Passed through by reference, not rebuilt. Two reasons beyond the obvious
@@ -431,9 +609,91 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
     // is exactly the identity cannot disagree with itself.
     case "json":
       if (value === undefined) return fail();
-      checkJson(value, path, errors, new Set());
+      checkJson(value, path, issues, new Set());
       return value;
   }
+}
+
+/**
+ * Length in code points, not UTF-16 units — what JSON Schema (and Ajv) count,
+ * so an emoji is one character against a `maxLength` either way.
+ */
+function length(value: string): number {
+  let count = 0;
+  for (const _ of value) count++;
+  return count;
+}
+
+function checkString(
+  checks: StringChecks | undefined,
+  value: string,
+  path: Path,
+  issues: SchemaIssue[],
+): void {
+  if (!checks) return;
+  const { minLength, maxLength, format } = checks;
+  if (minLength !== undefined || maxLength !== undefined) {
+    const size = length(value);
+    if (minLength !== undefined && size < minLength) {
+      issues.push({
+        path,
+        code: "minLength",
+        message: `expected at least ${minLength} characters, got ${size}`,
+        params: { limit: minLength },
+      });
+    }
+    if (maxLength !== undefined && size > maxLength) {
+      issues.push({
+        path,
+        code: "maxLength",
+        message: `expected at most ${maxLength} characters, got ${size}`,
+        params: { limit: maxLength },
+      });
+    }
+  }
+  if (format) {
+    let ok = false;
+    try {
+      ok = format.test(value) === true;
+    } catch {
+      // A check that throws has not said yes.
+    }
+    if (!ok) {
+      issues.push({
+        path,
+        code: "format",
+        message: `expected a string in format "${format.name}"`,
+        params: { format: format.name },
+      });
+    }
+  }
+}
+
+function checkNumber(
+  checks: NumberChecks | undefined,
+  value: number,
+  path: Path,
+  issues: SchemaIssue[],
+): void {
+  if (!checks) return;
+  const bound = (
+    code: SchemaIssueCode,
+    limit: number | undefined,
+    passes: (limit: number) => boolean,
+    words: string,
+  ) => {
+    if (limit === undefined || passes(limit)) return;
+    issues.push({
+      path,
+      code,
+      message: `expected ${words} ${limit}, got ${value}`,
+      params: { limit },
+    });
+  };
+  bound("minimum", checks.minimum, (limit) => value >= limit, "at least");
+  bound("exclusiveMinimum", checks.exclusiveMinimum, (limit) => value > limit, "more than");
+  bound("maximum", checks.maximum, (limit) => value <= limit, "at most");
+  bound("exclusiveMaximum", checks.exclusiveMaximum, (limit) => value < limit, "less than");
 }
 
 /**
@@ -456,8 +716,8 @@ function readNode(definition: Definition, value: unknown, path: string, errors: 
  */
 function checkJson(
   value: unknown,
-  path: string,
-  errors: string[],
+  path: Path,
+  issues: SchemaIssue[],
   seen: Set<object>,
   // False for the value a `toJSON` just returned: `JSON.stringify` applies
   // `toJSON` once per position, and re-applying it is how a pair of them
@@ -465,7 +725,7 @@ function checkJson(
   applyToJSON = true,
 ): void {
   const reject = (what: string) => {
-    errors.push(`${at(path)}expected a JSON value, got ${what}`);
+    issues.push({ path, code: "type", message: `expected a JSON value, got ${what}`, params: {} });
   };
 
   switch (typeof value) {
@@ -515,13 +775,13 @@ function checkJson(
       // stops changing, so the replacement is checked with it switched off here
       // — its nested values get their own.
       if (replaced === undefined) return reject("a toJSON that returns undefined");
-      return checkJson(replaced, path, errors, seen, false);
+      return checkJson(replaced, path, issues, seen, false);
     }
     if (Array.isArray(value)) {
-      value.forEach((item, index) => checkJson(item, `${path}[${index}]`, errors, seen));
+      value.forEach((item, index) => checkJson(item, [...path, index], issues, seen));
     } else {
       for (const [key, child] of Object.entries(object)) {
-        checkJson(child, path ? `${path}.${key}` : key, errors, seen);
+        checkJson(child, [...path, key], issues, seen);
       }
     }
   } finally {
@@ -557,15 +817,21 @@ function build(definition: Definition): RuntimeSchema {
   const runtime: RuntimeSchema = {
     toJSONSchema: () => emit(definition),
     parse(value) {
-      const errors: string[] = [];
-      const result = read(definition, value, "", errors);
-      if (errors.length > 0) throw new Error(errors.join("; "));
+      const issues: SchemaIssue[] = [];
+      const result = read(definition, value, [], issues);
+      if (issues.length > 0) throw new Error(issues.map(render).join("; "));
       return result.drop ? undefined : result.value;
     },
     safeParse(value) {
-      const errors: string[] = [];
-      const result = read(definition, value, "", errors);
-      if (errors.length > 0) return { ok: false, errors };
+      const issues: SchemaIssue[] = [];
+      const result = read(definition, value, [], issues);
+      if (issues.length > 0) return { ok: false, errors: issues.map(render) };
+      return { ok: true, value: result.drop ? undefined : result.value };
+    },
+    validate(value) {
+      const issues: SchemaIssue[] = [];
+      const result = read(definition, value, [], issues);
+      if (issues.length > 0) return { ok: false, issues };
       return { ok: true, value: result.drop ? undefined : result.value };
     },
     describe: (description) => build({ ...definition, description }),
@@ -582,6 +848,367 @@ function build(definition: Definition): RuntimeSchema {
 
 function leaf(node: SchemaNode): Definition {
   return { node, optional: false, nullable: false };
+}
+
+// --- reading a JSON Schema ---------------------------------------------------
+
+/**
+ * How `s.fromJSONSchema` checks a `format`. `true` accepts any string (a format
+ * that is only a hint, like `markdown`); a `RegExp` or a function decides.
+ */
+export type JSONSchemaFormat = true | RegExp | ((value: string) => boolean);
+
+export type FromJSONSchemaOptions = {
+  /**
+   * The formats the schema may name. A `format` not listed here is refused, not
+   * ignored: gemi ships no format checks of its own, and a format that quietly
+   * checked nothing would be a constraint that only looks enforced.
+   */
+  formats?: Record<string, JSONSchemaFormat>;
+  /**
+   * Keywords to skip as annotations, on top of the ones always skipped:
+   * `title`, `$schema`, `$id`, `$comment`, `examples`, `default`,
+   * `deprecated`, `readOnly`, `writeOnly`, and every `x-` keyword.
+   */
+  ignoreKeywords?: readonly string[];
+};
+
+/**
+ * Thrown by `s.fromJSONSchema` for a schema outside the subset `s` models.
+ * `problems` lists every one found, each starting with the path into the
+ * schema (`properties.price.type: ...`), so a schema written by a user or a
+ * model can be sent back with all of them at once.
+ */
+export class JSONSchemaError extends Error {
+  readonly problems: string[];
+  constructor(problems: string[]) {
+    super(
+      `gemi/ai: s.fromJSONSchema cannot model this schema:\n${problems.map((p) => `- ${p}`).join("\n")}`,
+    );
+    this.name = "JSONSchemaError";
+    this.problems = problems;
+  }
+}
+
+const ANNOTATIONS = new Set([
+  "title",
+  "$schema",
+  "$id",
+  "$comment",
+  "examples",
+  "default",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+]);
+
+/** The keywords each type may carry, beyond `type`, `description`, `enum` and `const`. */
+const KEYWORDS: Record<string, readonly string[]> = {
+  string: ["minLength", "maxLength", "format"],
+  number: ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"],
+  integer: ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"],
+  boolean: [],
+  object: ["properties", "required", "additionalProperties"],
+  array: ["items", "minItems", "maxItems"],
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads a JSON Schema into a definition, collecting every problem rather than
+ * stopping at the first. Returns `undefined` where a node could not be read;
+ * the caller throws once the walk is done.
+ */
+function fromJSON(
+  schema: unknown,
+  options: FromJSONSchemaOptions,
+  where: string,
+  problems: string[],
+): Definition | undefined {
+  const problem = (message: string, at = where) => {
+    problems.push(at ? `${at}: ${message}` : message);
+    return undefined;
+  };
+  const child = (key: string) => (where ? `${where}.${key}` : key);
+  if (!isPlainObject(schema)) return problem("expected a schema object");
+
+  const ignored = new Set(options.ignoreKeywords ?? []);
+  const skip = (key: string) => ANNOTATIONS.has(key) || key.startsWith("x-") || ignored.has(key);
+
+  // `type: [T, "null"]`, `enum` with a null in it and an `anyOf` with a
+  // `{ type: "null" }` member all mean the same: T, nullable.
+  let nullable = false;
+  let type = schema.type;
+  if (Array.isArray(type)) {
+    const rest = type.filter((t) => t !== "null");
+    if (rest.length !== 1) {
+      return problem(
+        `type ${JSON.stringify(type)} is not supported; only one type, optionally with "null". Use anyOf for alternatives`,
+        child("type"),
+      );
+    }
+    nullable = rest.length < type.length;
+    type = rest[0];
+  }
+  if (type !== undefined && (typeof type !== "string" || !(type in KEYWORDS))) {
+    return problem(
+      `type ${JSON.stringify(type)} is not supported; expected one of ${Object.keys(KEYWORDS).join(", ")}`,
+      child("type"),
+    );
+  }
+
+  const allowed = new Set([
+    "type",
+    "description",
+    "enum",
+    "const",
+    "anyOf",
+    ...(type ? KEYWORDS[type as string] : []),
+  ]);
+  let unknown = false;
+  for (const key of Object.keys(schema)) {
+    if (allowed.has(key) || skip(key)) continue;
+    unknown = true;
+    const owner = Object.entries(KEYWORDS).find(([, keys]) => keys.includes(key));
+    problem(
+      owner && owner[0] !== type
+        ? `"${key}" applies to type ${owner[0]}, and this schema is ${type ? `type ${type}` : "untyped"}`
+        : `"${key}" is not supported by s.fromJSONSchema`,
+      child(key),
+    );
+  }
+  if (unknown) return undefined;
+
+  if (schema.description !== undefined && typeof schema.description !== "string") {
+    return problem("expected a string", child("description"));
+  }
+  const description = schema.description as string | undefined;
+  const finish = (node: SchemaNode): Definition => ({
+    node,
+    optional: false,
+    nullable,
+    ...(description ? { description } : {}),
+  });
+
+  if (schema.anyOf !== undefined) {
+    if (type !== undefined || schema.enum !== undefined || schema.const !== undefined) {
+      return problem("anyOf cannot be combined with type, enum or const here", child("anyOf"));
+    }
+    if (!Array.isArray(schema.anyOf) || schema.anyOf.length === 0) {
+      return problem("expected a non-empty array", child("anyOf"));
+    }
+    const members: Definition[] = [];
+    let failed = false;
+    schema.anyOf.forEach((member, index) => {
+      if (isPlainObject(member) && member.type === "null" && Object.keys(member).length === 1) {
+        nullable = true;
+        return;
+      }
+      const read = fromJSON(member, options, child(`anyOf[${index}]`), problems);
+      if (read) members.push(read);
+      else failed = true;
+    });
+    if (failed) return undefined;
+    if (members.length === 0) return problem("anyOf has only null in it", child("anyOf"));
+    if (members.length === 1) {
+      const only = members[0]!;
+      return {
+        ...only,
+        nullable: only.nullable || nullable,
+        ...(description ? { description } : {}),
+      };
+    }
+    return finish({ kind: "union", members });
+  }
+
+  if (schema.const !== undefined) {
+    const value = schema.const;
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      return problem("only a string, number or boolean const is supported", child("const"));
+    }
+    if (type !== undefined && typeof value !== (type === "integer" ? "number" : type)) {
+      return problem(`const ${JSON.stringify(value)} is not of type ${type}`, child("const"));
+    }
+    return finish({ kind: "literal", value });
+  }
+
+  let stringChecks: StringChecks | undefined;
+  if (type === "string") {
+    stringChecks = readStringChecks(schema, options, child, problems);
+    if (stringChecks === null) return undefined;
+  }
+
+  if (schema.enum !== undefined) {
+    if (!Array.isArray(schema.enum) || schema.enum.length === 0) {
+      return problem("expected a non-empty array", child("enum"));
+    }
+    const values = schema.enum.filter((value) => value !== null);
+    if (values.length < schema.enum.length) nullable = true;
+    const bad = values.find(
+      (value) =>
+        !(typeof value === "string" || typeof value === "number" || typeof value === "boolean") ||
+        (type !== undefined && typeof value !== (type === "integer" ? "number" : type)),
+    );
+    if (bad !== undefined || values.length === 0) {
+      return problem(
+        type
+          ? `every value must be of type ${type}${values.length === 0 ? ", and there must be one" : `; ${JSON.stringify(bad)} is not`}`
+          : "only strings, numbers and booleans are supported",
+        child("enum"),
+      );
+    }
+    if (values.every((value) => typeof value === "string")) {
+      return finish({
+        kind: "enum",
+        values: [...new Set(values as string[])],
+        ...(stringChecks ? { checks: stringChecks } : {}),
+      });
+    }
+    const literals = [...new Set(values as (string | number | boolean)[])];
+    if (literals.length === 1) return finish({ kind: "literal", value: literals[0]! });
+    return finish({
+      kind: "union",
+      members: literals.map((value) => leaf({ kind: "literal", value })),
+    });
+  }
+
+  switch (type) {
+    case undefined:
+      return problem("a schema needs a type, an enum, a const or an anyOf");
+    case "string":
+      return finish({ kind: "string", ...(stringChecks ? { checks: stringChecks } : {}) });
+    case "number":
+    case "integer": {
+      const checks: NumberChecks = type === "integer" ? { integer: true } : {};
+      let failed = false;
+      for (const key of KEYWORDS.number!) {
+        const value = schema[key];
+        if (value === undefined) continue;
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          problem("expected a number", child(key));
+          failed = true;
+          continue;
+        }
+        checks[key as "minimum"] = value;
+      }
+      if (failed) return undefined;
+      return finish({ kind: "number", ...(Object.keys(checks).length > 0 ? { checks } : {}) });
+    }
+    case "boolean":
+      return finish({ kind: "boolean" });
+    case "array": {
+      if (!isPlainObject(schema.items)) {
+        return problem(
+          'an array needs "items" to be one schema (tuples are not supported)',
+          child("items"),
+        );
+      }
+      const checks: ArrayChecks = {};
+      let failed = false;
+      for (const key of ["minItems", "maxItems"] as const) {
+        const value = schema[key];
+        if (value === undefined) continue;
+        if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+          problem("expected a non-negative integer", child(key));
+          failed = true;
+          continue;
+        }
+        checks[key] = value;
+      }
+      const item = fromJSON(schema.items, options, child("items"), problems);
+      if (!item || failed) return undefined;
+      return finish({ kind: "array", item, ...(Object.keys(checks).length > 0 ? { checks } : {}) });
+    }
+    case "object": {
+      const properties = schema.properties ?? {};
+      if (!isPlainObject(properties)) return problem("expected an object", child("properties"));
+      if (schema.additionalProperties !== undefined && schema.additionalProperties !== false) {
+        return problem(
+          "only false is supported; a record with arbitrary keys has no strict-mode form (use s.json())",
+          child("additionalProperties"),
+        );
+      }
+      const required = schema.required ?? [];
+      if (!Array.isArray(required) || !required.every((key) => typeof key === "string")) {
+        return problem("expected an array of property names", child("required"));
+      }
+      const missing = required.filter((key) => !Object.hasOwn(properties, key));
+      if (missing.length > 0) {
+        return problem(
+          `lists properties the schema doesn't have: ${missing.join(", ")}`,
+          child("required"),
+        );
+      }
+      const shape: Record<string, Definition> = {};
+      let failed = false;
+      for (const [key, value] of Object.entries(properties)) {
+        const read = fromJSON(value, options, child(`properties.${key}`), problems);
+        if (!read) {
+          failed = true;
+          continue;
+        }
+        // Not in `required` is "may be left out", which is `optional()`: the
+        // model is told to send null, and a parse drops the key.
+        shape[key] = required.includes(key) ? read : { ...read, optional: true };
+      }
+      if (failed) return undefined;
+      return finish({ kind: "object", shape });
+    }
+  }
+  return undefined;
+}
+
+/** `null` when a problem was reported. */
+function readStringChecks(
+  schema: Record<string, unknown>,
+  options: FromJSONSchemaOptions,
+  child: (key: string) => string,
+  problems: string[],
+): StringChecks | undefined | null {
+  const checks: StringChecks = {};
+  let failed = false;
+  for (const key of ["minLength", "maxLength"] as const) {
+    const value = schema[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+      problems.push(`${child(key)}: expected a non-negative integer`);
+      failed = true;
+      continue;
+    }
+    checks[key] = value;
+  }
+  if (schema.format !== undefined) {
+    const name = schema.format;
+    const format = typeof name === "string" ? options.formats?.[name] : undefined;
+    if (typeof name !== "string") {
+      problems.push(`${child("format")}: expected a string`);
+      failed = true;
+    } else if (!format || !Object.hasOwn(options.formats!, name)) {
+      problems.push(
+        `${child("format")}: unknown format ${JSON.stringify(name)}; pass a check for it in the formats option`,
+      );
+      failed = true;
+    } else {
+      checks.format = { name, test: formatTest(format) };
+    }
+  }
+  if (failed) return null;
+  return Object.keys(checks).length > 0 ? checks : undefined;
+}
+
+function formatTest(format: JSONSchemaFormat): (value: string) => boolean {
+  if (format === true) return () => true;
+  if (format instanceof RegExp) {
+    // A `g` or `y` regex keeps `lastIndex` between calls, so the second value
+    // tested would start halfway in. Reset it every time.
+    return (value) => {
+      format.lastIndex = 0;
+      return format.test(value);
+    };
+  }
+  return format;
 }
 
 export const s: {
@@ -637,6 +1264,40 @@ export const s: {
    */
   json(): SchemaBuilder<JsonValue>;
   json<T>(): SchemaBuilder<T>;
+  /**
+   * A schema read from a JSON Schema at runtime — for a shape that comes from
+   * data rather than code, like a collection whose items a user defined.
+   *
+   * Only the subset `s` itself models is accepted, so the result stays
+   * strict-mode safe and can be a tool's `inputSchema` like any other:
+   *
+   * - `type`: `string`, `number`, `integer`, `boolean`, `object`, `array`,
+   *   or one of them with `"null"` (`["string", "null"]`).
+   * - `enum` (strings become `s.enum`, numbers and booleans a union of
+   *   literals; a `null` in it makes the field nullable), `const`, `anyOf`.
+   * - strings: `minLength`, `maxLength`, `format` (checked with
+   *   `options.formats`). Numbers: `minimum`, `maximum`, `exclusiveMinimum`,
+   *   `exclusiveMaximum`. Arrays: `items` (one schema), `minItems`, `maxItems`.
+   * - objects: `properties`, `required`, `additionalProperties: false`. A
+   *   property not in `required` is `optional()`.
+   * - `description`; annotations (`title`, `default`, `examples`, `$schema`,
+   *   `x-*`, … and `options.ignoreKeywords`) are skipped.
+   *
+   * Anything else — `pattern`, `oneOf`, `allOf`, `$ref`, a tuple, an open
+   * `additionalProperties`, an unknown `format` — throws a `JSONSchemaError`
+   * listing every problem with its path.
+   *
+   * The length, range, item-count and format constraints are enforced by
+   * `parse`/`safeParse`/`validate` and told to the model in the field's
+   * description, because strict structured output does not accept them as
+   * keywords. Unlike Ajv, an unknown key in an object is dropped from the
+   * parsed value rather than reported.
+   *
+   * The output type is `JsonValue` (or the `T` you assert). Validate a value
+   * with `.validate(value)` for per-path issues, or `.safeParse(value)`.
+   */
+  fromJSONSchema(schema: unknown, options?: FromJSONSchemaOptions): SchemaBuilder<JsonValue>;
+  fromJSONSchema<T>(schema: unknown, options?: FromJSONSchemaOptions): SchemaBuilder<T>;
 } = {
   string: () => make<string>(leaf({ kind: "string" })),
   number: () => make<number>(leaf({ kind: "number" })),
@@ -662,6 +1323,14 @@ export const s: {
       leaf({ kind: "union", members: members.map(definitionOf) }),
     ),
   json: <T>() => make<T>(leaf({ kind: "json" })),
+  fromJSONSchema: <T>(schema: unknown, options: FromJSONSchemaOptions = {}) => {
+    const problems: string[] = [];
+    const definition = fromJSON(schema, options, "", problems);
+    if (!definition || problems.length > 0) {
+      throw new JSONSchemaError(problems.length > 0 ? problems : ["unreadable schema"]);
+    }
+    return make<T>(definition);
+  },
 };
 
 /**

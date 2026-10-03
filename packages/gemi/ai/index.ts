@@ -30,13 +30,24 @@
 // declaration: it produces the JSON Schema the model is shown and parses what
 // the model sends back, both of which happen beside the tool. The *types* it
 // yields travel to the client on their own, through the route's `RPC` entry.
-export { s } from "./Schema";
+export { JSONSchemaError, s } from "./Schema";
 // `ProviderStreamParams.output` requires `strict`, and this is the only correct
 // way to answer it — the flag is a property of the schema, not a choice. A custom
 // provider or a request harness has to build those params, so leaving the
 // derivation internal would mean requiring an answer and withholding it.
 export { supportsStrict } from "./Schema";
-export type { AnySchema, Infer, JsonValue, JSONSchema, OptionalSchema, Schema } from "./Schema";
+export type {
+  AnySchema,
+  FromJSONSchemaOptions,
+  Infer,
+  JSONSchemaFormat,
+  JsonValue,
+  JSONSchema,
+  OptionalSchema,
+  Schema,
+  SchemaIssue,
+  SchemaIssueCode,
+} from "./Schema";
 
 // --- the wire vocabulary --------------------------------------------------
 //
@@ -101,6 +112,8 @@ export type {
   ToolDefinition,
   ToolEntry,
   ToolExecute,
+  ToolInputSchema,
+  ToolSchemaContext,
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";
@@ -192,6 +205,7 @@ export type {
   AgentStore,
   Attachment,
   AttachmentDestination,
+  AttachmentLimits,
   AttachmentScope,
   AttachmentStorage,
   AttachmentStore,
