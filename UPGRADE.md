@@ -13,6 +13,45 @@ No change is needed to upgrade. Things to know:
 - `turn.localId` is read only from the `{ turn: { ... } }` envelope, not from the flat body form, so an app field named `localId` is left alone. A `localId` that is not a string, or is longer than 200 characters, is a 400.
 - A threaded `regenerate` stores the turn again under a new id, and the client is told that id the same way.
 
+# Upgrading from 0.97.0 to 0.98.0
+
+## `gemi/ai`: execution receipts, so an approved tool runs at most once (#458)
+
+The signature on an approval stops it being forged and its nonce (#445) stops it being accepted twice, but nothing recorded what the approved tool did. A retried submit whose response was lost was refused with "already been used" although the tool had run, and an approval that reached two instances with unshared nonce stores ran the tool twice.
+
+`AgentController` has a new optional `receipts` property taking a `ReceiptStore` (`Agent.stream` takes the same as `receipts`, passed down to sub-runs). When it is set, an approved tool's execution is claimed before it runs, under an id derived from the call the approval covers (an HMAC under its own HKDF key of the issuing run, tool call id, tool, canonical input, nesting path and subject). Then:
+
+- the first presentation runs the tool and records its result;
+- a later presentation of the same approval, on any instance, gets the recorded result as the call's result and the tool does not run again;
+- a presentation that arrives while the first is still running, or after a process died mid-call, gets a `tool_error` result (`retryable: false`) the model can read, and the tool does not run.
+
+If the store throws, the approval is refused ("Ask again"), not run unchecked. Denials and answers to client tools and questions do not touch the store.
+
+```ts
+import { AgentController, RedisReceiptStore } from "gemi/ai";
+
+const receipts = new RedisReceiptStore(); // module scope, like `store` and `nonces`
+
+export class ChatController extends AgentController<typeof chat> {
+  agent = chat;
+  receipts = receipts;
+}
+```
+
+`MemoryReceiptStore` is exact for one instance only. `RedisReceiptStore` uses the app's Redis and needs no migration. A table-backed store needs a new table the app owns, for example:
+
+```sql
+CREATE TABLE agent_tool_receipts (
+  id         text PRIMARY KEY,
+  result     jsonb,             -- NULL while the call is running
+  expires_at timestamptz NOT NULL
+);
+```
+
+with `claim` as `INSERT ... ON CONFLICT (id) DO NOTHING` (claimed when one row was inserted, otherwise `replay` when `result` is set and `blocked` when it is not), `complete` as an `UPDATE` of `result`, `release` as `DELETE ... WHERE result IS NULL`, and a cron deleting rows past `expires_at`. The full sketch is in `ai/store/Receipts.ts`. Rows only need to live until the approval's token expires (24 hours by default).
+
+No change is needed to upgrade: without `receipts` an approved tool runs exactly as before. Once it is set, one behaviour differs: re-presenting an approval that already ran (a retried submit, a rewound stateless history) now returns the recorded result instead of an `invalid_tool_result` error and a `denied` result.
+
 # Upgrading from 0.96.0 to 0.97.0
 
 ## `gemi/ai`: nested runs stream their seed and report their errors (#470, #468)

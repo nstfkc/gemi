@@ -17,6 +17,7 @@ import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
 import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
 import { MemoryNonceStore, type NonceStore } from "./store/Nonces";
+import { MemoryReceiptStore, type ReceiptStore } from "./store/Receipts";
 import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS } from "./store/sse";
 import type {
   AgentMessage,
@@ -895,6 +896,215 @@ describe("an approval", () => {
       } finally {
         errors.mockRestore();
       }
+    });
+  });
+
+  describe("execution receipts (#458)", () => {
+    /** One app instance: its own agent, its own nonce store unless given one. */
+    const approveOn = (
+      receipts: ReceiptStore,
+      messages: AgentMessage[],
+      answer: ClientToolResult,
+      nonces: NonceStore = new MemoryNonceStore(),
+    ) =>
+      Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [refundOrder, askUser],
+      }).stream({ messages, turn: { toolResults: [answer] }, nonces, receipts });
+
+    const approval = async () => {
+      const first = await askForApproval();
+      const answer: ClientToolResult = {
+        toolCallId: "c1",
+        signature: first.pending[0].signature,
+        approve: true,
+      };
+      return { first, answer };
+    };
+
+    test("instances whose nonce stores are not shared run the tool once", async () => {
+      const { first, answer } = await approval();
+      const receipts = new MemoryReceiptStore();
+
+      const once = await approveOn(receipts, first.result.messages, answer).result();
+      const twice = await approveOn(receipts, first.result.messages, answer).result();
+
+      expect(refundCalls).toEqual(["ord_1"]);
+      // The replay is answered with what the tool did, not with a refusal.
+      expect(partsOf(once.messages, "tool-result")[0]).toMatchObject({
+        status: "ok",
+        output: { refundId: "rf_ord_1" },
+      });
+      expect(partsOf(twice.messages, "tool-result")[0]).toMatchObject({
+        toolCallId: "c1",
+        status: "ok",
+        output: { refundId: "rf_ord_1" },
+      });
+    });
+
+    test("a retried submit gets the recorded result instead of 'already used'", async () => {
+      const { first, answer } = await approval();
+      const receipts = new MemoryReceiptStore();
+      const nonces = new MemoryNonceStore();
+
+      await approveOn(receipts, first.result.messages, answer, nonces).result();
+      const retry = approveOn(receipts, first.result.messages, answer, nonces);
+      const { events, done } = collect(retry);
+      const result = await retry.result();
+      await done;
+
+      expect(refundCalls).toEqual(["ord_1"]);
+      expect(events.filter((event) => event.type === "error")).toEqual([]);
+      expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+        status: "ok",
+        output: { refundId: "rf_ord_1" },
+      });
+    });
+
+    test("the same answer raced at several instances runs the tool once", async () => {
+      const { first, answer } = await approval();
+      const receipts = new MemoryReceiptStore();
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          approveOn(receipts, first.result.messages, answer).result(),
+        ),
+      );
+      expect(refundCalls).toEqual(["ord_1"]);
+      for (const result of results) {
+        const part = partsOf(result.messages, "tool-result")[0] as any;
+        // Either the result, or told it is already under way — never run again.
+        if (part.status === "error") {
+          expect(part.error).toMatchObject({ code: "tool_error", retryable: false });
+        } else {
+          expect(part).toMatchObject({ status: "ok", output: { refundId: "rf_ord_1" } });
+        }
+      }
+    });
+
+    test("a claim held without a result is blocked, not run again", async () => {
+      const { first, answer } = await approval();
+      const blocked: ReceiptStore = {
+        claim: async () => ({ status: "blocked" }),
+        complete: async () => {},
+        release: async () => {},
+      };
+      const result = await approveOn(blocked, first.result.messages, answer).result();
+      expect(refundCalls).toEqual([]);
+      expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+        status: "error",
+        error: { code: "tool_error", toolCallId: "c1" },
+      });
+    });
+
+    test("a store that throws refuses the answer instead of running it unchecked", async () => {
+      const { first, answer } = await approval();
+      const failing: ReceiptStore = {
+        claim: async () => {
+          throw new Error("redis down");
+        },
+        complete: async () => {},
+        release: async () => {},
+      };
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const run = approveOn(failing, first.result.messages, answer);
+        const { events, done } = collect(run);
+        const result = await run.result();
+        await done;
+        expect(refundCalls).toEqual([]);
+        expect(events.find((event) => event.type === "error")).toMatchObject({
+          error: { code: "invalid_tool_result" },
+        });
+        expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({ status: "denied" });
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    test("an approval whose nonce was spent by a refusal is refused, and its claim released", async () => {
+      const { first, answer } = await approval();
+      const receipts = new MemoryReceiptStore();
+      const nonces = new MemoryNonceStore();
+
+      await approveOn(
+        receipts,
+        first.result.messages,
+        { ...answer, approve: false },
+        nonces,
+      ).result();
+      const flipped = approveOn(receipts, first.result.messages, answer, nonces);
+      const { events, done } = collect(flipped);
+      await flipped.result();
+      await done;
+
+      expect(refundCalls).toEqual([]);
+      expect(events.find((event) => event.type === "error")).toMatchObject({
+        error: { code: "invalid_tool_result" },
+      });
+      expect(receipts.size).toBe(0);
+    });
+
+    test("a denial and a question's answer never touch the store", async () => {
+      const { first, answer } = await approval();
+      const claims: string[] = [];
+      const watching: ReceiptStore = {
+        claim: async (id) => {
+          claims.push(id);
+          return { status: "claimed" };
+        },
+        complete: async () => {},
+        release: async () => {},
+      };
+      await approveOn(watching, first.result.messages, { ...answer, approve: false }).result();
+      expect(claims).toEqual([]);
+    });
+
+    test("a tool that finishes after a stop still records its result", async () => {
+      const { first, answer } = await approval();
+      let finishRefund!: () => void;
+      const slowRefund = AgentTool.create({
+        name: "refundOrder",
+        description: "Refund an order",
+        inputSchema: stringField("orderId"),
+        outputSchema: anything(),
+        requiresApproval: true,
+        execute: async (input: any) => {
+          refundCalls.push(input.orderId);
+          await new Promise<void>((resolve) => {
+            finishRefund = resolve;
+          });
+          return { refundId: `rf_${input.orderId}` };
+        },
+      });
+      const receipts = new MemoryReceiptStore();
+      const run = Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [slowRefund, askUser],
+      }).stream({
+        messages: first.result.messages,
+        turn: { toolResults: [answer] },
+        nonces: new MemoryNonceStore(),
+        receipts,
+      });
+      await vi.waitFor(() => expect(refundCalls).toEqual(["ord_1"]));
+      run.stop();
+      await run.result();
+
+      // Still running: a replay now is blocked.
+      const during = await approveOn(receipts, first.result.messages, answer).result();
+      expect(partsOf(during.messages, "tool-result")[0]).toMatchObject({ status: "error" });
+
+      finishRefund();
+      await vi.waitFor(async () => {
+        const after = await approveOn(receipts, first.result.messages, answer).result();
+        expect(partsOf(after.messages, "tool-result")[0]).toMatchObject({
+          status: "ok",
+          output: { refundId: "rf_ord_1" },
+        });
+      });
+      expect(refundCalls).toEqual(["ord_1"]);
     });
   });
 

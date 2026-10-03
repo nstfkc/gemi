@@ -39,6 +39,14 @@ import {
   RedisNonceStore,
   type RedisNonceStoreOptions,
 } from "./store/Nonces";
+import {
+  MemoryReceiptStore,
+  type ReceiptClaim,
+  type ReceiptRedisClient,
+  type ReceiptStore,
+  RedisReceiptStore,
+  type RedisReceiptStoreOptions,
+} from "./store/Receipts";
 import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
@@ -182,6 +190,15 @@ export {
 
 /** Who uploaded each provider file id (#443). See `store/FileOwners.ts`. */
 export { defaultFileOwners, type FileOwnerRecord, type FileOwners, MemoryFileOwners };
+/** Where approved tools' executions are recorded (#458). See `store/Receipts.ts`. */
+export {
+  MemoryReceiptStore,
+  type ReceiptClaim,
+  type ReceiptRedisClient,
+  type ReceiptStore,
+  RedisReceiptStore,
+  type RedisReceiptStoreOptions,
+};
 /** Where answered calls' nonces are spent (#445). See `store/Nonces.ts`. */
 export {
   defaultNonceStore,
@@ -507,6 +524,30 @@ export abstract class AgentController<
    * stateless turn served with the in-memory default logs a warning once.
    */
   nonces: NonceStore = defaultNonceStore;
+
+  /**
+   * Where approved tools' executions are claimed and their results recorded,
+   * so that an approval runs its tool at most once (#458). Off by default.
+   *
+   * The nonce makes an answer single-use; it does not remember what the tool
+   * did. So a retried submit whose response was lost is refused ("already
+   * used") although the tool acted, and an answer that reaches two instances
+   * with unshared nonce stores runs the tool twice. With a receipt store the
+   * first presentation claims the execution and records its result; a later
+   * one gets that result back without running anything, and one that arrives
+   * while the first is still running gets a `tool_error` result for the model.
+   *
+   * Assign one built at module scope, like `nonces`, shared by every instance:
+   *
+   *   const receipts = new RedisReceiptStore();
+   *   class ChatController extends AgentController<typeof chat> {
+   *     receipts = receipts;
+   *   }
+   *
+   * or your own `ReceiptStore` over a table (see `store/Receipts.ts`).
+   * `MemoryReceiptStore` is exact for one instance only.
+   */
+  receipts?: ReceiptStore;
 
   /**
    * Whether a turn may name a provider file id that `fileOwners` has no record
@@ -986,6 +1027,8 @@ export abstract class AgentController<
         redactError: (error, info) => this.redactError(error, info, ctx),
         // Where answers' nonces are spent. See `nonces`.
         nonces: this.nonces,
+        // Where approved tools' executions are recorded. See `receipts`.
+        receipts: this.receipts,
         // The principal its pending calls are bound to (#447): an answer is
         // only accepted from the same `runOwner` the question was asked of.
         subject: owner,
