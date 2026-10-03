@@ -198,8 +198,9 @@ import { Form, isPermissionError, isValidationError } from "gemi/client";
 </Form>;
 ```
 
-The error types, the full list of guards and `mutationErrorKind` are in
-[Data Fetching](./data-fetching.md#errors).
+`onError` also receives the route's typed errors, the bodies its handler answers
+with `HttpResponse.error` / `httpError`. The error types, the full list of guards,
+`isHttpError` and `mutationErrorKind` are in [Data Fetching](./data-fetching.md#errors).
 
 ### `FormFieldContainer`
 

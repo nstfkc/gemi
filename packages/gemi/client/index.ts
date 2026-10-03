@@ -31,6 +31,7 @@ export {
   isRateLimitError,
   isServerError,
   isNetworkError,
+  isHttpError,
   mutationErrorKind,
 } from "./MutationError";
 export type {

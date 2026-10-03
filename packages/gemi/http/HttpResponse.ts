@@ -1,3 +1,5 @@
+import type { Refusal } from "./refusal";
+
 /**
  * Marks an `HttpResponse` at runtime. A registered symbol rather than
  * `instanceof`, so a route built against one copy of gemi is still recognised by
@@ -6,9 +8,9 @@
  */
 const HTTP_RESPONSE = Symbol.for("gemi.HttpResponse");
 
-export type HttpResponseOptions = {
+export type HttpResponseOptions<S extends number = number> = {
   /** The status code. `200` when omitted. */
-  status?: number;
+  status?: S;
   /**
    * Set on top of everything the request already put on the response. Each
    * header named here replaces the one the context holds; a `Set-Cookie` is
@@ -43,13 +45,13 @@ type HttpResponseKind = "json";
  * For api routes. A view's handler returns its props; returning one there
  * throws.
  */
-export class HttpResponse<T = unknown> {
+export class HttpResponse<T = unknown, S extends number = number> {
   readonly [HTTP_RESPONSE] = true;
 
   private constructor(
     readonly kind: HttpResponseKind,
     readonly body: T,
-    readonly status: number,
+    readonly status: S,
     readonly headers: Headers,
   ) {}
 
@@ -62,10 +64,43 @@ export class HttpResponse<T = unknown> {
    * behind `cache` would otherwise let a shared cache replay one client's 404
    * to everyone.
    */
-  static json<T>(data: T, options: HttpResponseOptions = {}): HttpResponse<T> {
+  static json<T, S extends number = 200>(
+    data: T,
+    options: HttpResponseOptions<S> = {},
+  ): HttpResponse<T, S> {
     const status = options.status ?? 200;
     assertStatus(status);
-    return new HttpResponse("json", data, status, new Headers(options.headers));
+    return new HttpResponse("json", data, status as S, new Headers(options.headers));
+  }
+
+  /**
+   * A typed error: `{ "error": body }` with a status from 400 to 599, the
+   * envelope gemi's own errors answer.
+   *
+   * ```ts
+   * if (expired(link)) {
+   *   return HttpResponse.error(410, { kind: "gone", message: "Link has expired" });
+   * }
+   * return { catalogId };
+   * ```
+   *
+   * The route's client type leaves it out of the data and adds `body` to the
+   * error type instead: `onError` and `error` on `useMutation`, `usePost`,
+   * `useUpload` and `<Form>` are `MutationError | typeof body` (with `status`
+   * added), so `if (!(e instanceof Error) && e.kind === "gone")` narrows.
+   * `httpError(status, body)` is the same function.
+   */
+  static error<const E, S extends number>(
+    status: S,
+    body: E,
+    options: Omit<HttpResponseOptions, "status"> = {},
+  ): HttpResponse<{ error: E }, S> {
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      throw new RangeError(
+        `HttpResponse.error: status must be an integer from 400 to 599, got ${status}.`,
+      );
+    }
+    return HttpResponse.json({ error: body }, { ...options, status });
   }
 
   /** Whether the status is 2xx, as `Response.ok`. */
@@ -135,15 +170,107 @@ export function isHttpResponse(value: unknown): value is HttpResponse<unknown> {
   return typeof value === "object" && value !== null && (value as any)[HTTP_RESPONSE] === true;
 }
 
-type UnwrapHttpResponse<T> = T extends HttpResponse<infer Data> ? Data : T;
+/**
+ * `HttpResponse.error(status, body)`: a typed error response. See
+ * `HttpResponse.error`.
+ */
+export function httpError<const E, S extends number>(
+  status: S,
+  body: E,
+  options: Omit<HttpResponseOptions, "status"> = {},
+): HttpResponse<{ error: E }, S> {
+  return HttpResponse.error(status, body, options);
+}
+
+type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 
 /**
- * What a handler returning `Output` answers the client with: `Output` itself,
- * with every `HttpResponse<T>` in it — under a `Promise` or not, alone or in a
- * union with plain returns — replaced by its `T`. `any` stays `any`.
+ * Whether `S` is known to be 400 or more: a literal status, or a union of
+ * them, every one of which is. `number`, and a union with a 2xx in it, are
+ * not, so a status picked at run time stays in the data as it always was.
+ */
+type IsErrorStatus<S> = [S] extends [never]
+  ? false
+  : [`${S & number}`] extends [`4${Digit}${Digit}` | `5${Digit}${Digit}`]
+    ? true
+    : false;
+
+// One member of a handler's resolved output, as the client's data: an
+// `HttpResponse` is its body, unless its status is an error one; anything else
+// is itself.
+type SuccessMember<T> =
+  T extends HttpResponse<infer Data, infer S>
+    ? IsErrorStatus<S> extends true
+      ? never
+      : Data
+    : T;
+
+/**
+ * A raw `Response` in a union with typed returns is dropped: the client never
+ * receives a `Response` object, and it was the success type `if (r instanceof
+ * Response)` had to be written against. A route that only ever returns one (a
+ * file, a stream) keeps it, as before.
+ */
+type SuccessData<T> = [Exclude<SuccessMember<T>, Response>] extends [never]
+  ? SuccessMember<T>
+  : Exclude<SuccessMember<T>, Response>;
+
+/**
+ * What a handler returning `Output` answers the client with on success:
+ * `Output` itself, with every `HttpResponse<T>` in it — under a `Promise` or
+ * not, alone or in a union with plain returns — replaced by its `T`.
+ *
+ * Left out: an `HttpResponse` whose status is a literal 400 or more
+ * (`HttpResponse.error`, `httpError`, `HttpResponse.json(x, { status: 409 })`),
+ * which `ResponseError` collects instead, and a raw `Response` in a union with
+ * anything else. `any` stays `any`.
  */
 export type ResponseData<Output> = 0 extends 1 & Output
   ? Output
-  : Output extends Promise<infer Resolved>
-    ? Promise<UnwrapHttpResponse<Resolved>>
-    : UnwrapHttpResponse<Output>;
+  : // Not distributive: `SuccessData` has to see the whole union to know
+    // whether a raw `Response` is alone in it.
+    [Output] extends [Promise<infer Resolved>]
+    ? Promise<SuccessData<Resolved>>
+    : [Extract<Output, Promise<any>>] extends [never]
+      ? SuccessData<Output>
+      : // A sync handler returning a promise on one branch: member by member.
+        Output extends Promise<infer Resolved>
+        ? Promise<SuccessData<Resolved>>
+        : SuccessData<Output>;
+
+/**
+ * The value the client's `onError` receives for an error body `E` answered
+ * with status `S`, as `mutationErrorFromBody` builds it: `status` is added
+ * unless `E` has one, an object with a `message` and no `kind` is given the
+ * kind its status stands for, and a string (or nothing) becomes a refusal.
+ */
+export type ClientHttpError<E, S extends number = number> = E extends string | null | undefined
+  ? Refusal
+  : E extends object
+    ? E extends { kind: string }
+      ? WithStatus<E, S>
+      : E extends { message: string }
+        ? WithStatus<E, S> & { kind: Refusal["kind"] }
+        : WithStatus<E, S>
+    : E;
+
+type WithStatus<E, S extends number> = "status" extends keyof E ? E : E & { status: S };
+
+// The error body the client sees for one `HttpResponse`: the `error` field when
+// there is one, as gemi's own errors carry it, otherwise the body.
+type ErrorMember<T> =
+  T extends HttpResponse<infer Data, infer S>
+    ? IsErrorStatus<S> extends true
+      ? Data extends { error: infer E }
+        ? ClientHttpError<E, S>
+        : ClientHttpError<Data, S>
+      : never
+    : never;
+
+/**
+ * The typed errors a handler returning `Output` can answer: every
+ * `HttpResponse` in it whose status is a literal 400 or more, as the client's
+ * `onError` receives it (see `ClientHttpError`). `never` when there are none,
+ * and for `any`.
+ */
+export type ResponseError<Output> = 0 extends 1 & Output ? never : ErrorMember<Awaited<Output>>;

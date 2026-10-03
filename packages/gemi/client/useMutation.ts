@@ -45,10 +45,17 @@ function applyParams(url: string, params: Record<string, any> = {}) {
  */
 export type MutationConcurrency = "latest" | "parallel";
 
-type Config<T> = {
+type Config<T, E = never> = {
   autoInvalidate?: boolean;
   onSuccess: (data: T) => void;
-  onError: (error: MutationError) => void;
+  /**
+   * A `MutationError`, or one of the route's typed errors (`E`): the bodies
+   * its handler answers with `HttpResponse.error` / `httpError`.
+   *
+   * Method syntax, so a handler written as `(error: MutationError) => …`
+   * before the route had typed errors still compiles.
+   */
+  onError(error: MutationError | E): void;
   onCanceled?: () => void;
   concurrency?: MutationConcurrency;
 };
@@ -57,9 +64,9 @@ type Config<T> = {
  * Callbacks for one `trigger` call. They run after the hook's own, and only
  * when the hook's would: in `"latest"` mode a superseded call runs neither.
  */
-export type MutationCallConfig<T> = {
+export type MutationCallConfig<T, E = never> = {
   onSuccess?: (data: T) => void;
-  onError?: (error: MutationError) => void;
+  onError?(error: MutationError | E): void;
 };
 
 const defaultOptions: Config<any> = {
@@ -81,11 +88,20 @@ type Body<
   K extends keyof Methods[M],
 > = Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
 
+/**
+ * The route's typed errors: what its handler answers with `HttpResponse.error`
+ * or `httpError`, as `onError` receives them. `never` when it has none.
+ */
+type ErrorOf<
+  M extends keyof Methods,
+  K extends keyof Methods[M],
+> = Methods[M][K] extends ApiRouterHandler<any, any, any, infer E> ? E : never;
+
 type ParseParams<T> = UrlParser<`${T & string}`>;
 
-type State<T> = {
+type State<T, E = never> = {
   data: T | null;
-  error: MutationError | null;
+  error: MutationError | E | null;
   loading: boolean;
   // Requests on the wire, superseded ones included.
   pending: number;
@@ -96,19 +112,20 @@ export function useMutation<
   K extends keyof Methods[M],
   T = Data<M, K>,
   U = Body<M, K>,
+  E = ErrorOf<M, K>,
 >(
   method: M,
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>>, search?: Record<string, string> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Config<T, E>>,
   ]
 ) {
   const _params = useParams();
   // A write may have moved the data behind any page warmed ahead of a click,
   // and a prefetched payload is committed wholesale — into the query cache too.
   const { clearPrefetchCache } = useContext(ClientRouterContext);
-  const [state, setState] = useState<State<T>>({
+  const [state, setState] = useState<State<T, E>>({
     data: null,
     error: null,
     loading: false,
@@ -140,7 +157,7 @@ export function useMutation<
   // `options.onSuccess(data)` on `undefined` and reported its own `TypeError`
   // through `onError`.
   const [inputs = {}, config] = args ?? [];
-  const options: Config<T> = { ...defaultOptions, ...config };
+  const options: Config<T, E> = { ...defaultOptions, ...config };
 
   // Resolves `undefined` rather than rejecting whenever there is no result to
   // hand back: a non-2xx response or a network failure (both already reported
@@ -158,7 +175,7 @@ export function useMutation<
 
   async function trigger(
     input?: U,
-    call: MutationCallConfig<T> = {},
+    call: MutationCallConfig<T, E> = {},
   ): Promise<T | undefined> {
     const controller = new AbortController();
     abortController.current = controller;
@@ -186,7 +203,7 @@ export function useMutation<
     // `catch` and settles the call a second time.
     let left = false;
     const settle = (
-      update: (prev: State<T>) => Pick<State<T>, "data" | "error">,
+      update: (prev: State<T, E>) => Pick<State<T, E>, "data" | "error">,
       superseded = false,
     ) => {
       inFlight.current.delete(controller);
@@ -332,21 +349,29 @@ export function useMutation<
   };
 }
 
-export function usePost<K extends keyof Methods["POST"], T = Data<"POST", K>>(
+export function usePost<
+  K extends keyof Methods["POST"],
+  T = Data<"POST", K>,
+  E = ErrorOf<"POST", K>,
+>(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Config<T, E>>,
   ]
 ) {
   return useMutation("POST", url, ...(args as any));
 }
 
-export function usePut<K extends keyof Methods["PUT"], T = Data<"PUT", K>>(
+export function usePut<
+  K extends keyof Methods["PUT"],
+  T = Data<"PUT", K>,
+  E = ErrorOf<"PUT", K>,
+>(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Config<T, E>>,
   ]
 ) {
   return useMutation("PUT", url, ...(args as any));
@@ -355,11 +380,12 @@ export function usePut<K extends keyof Methods["PUT"], T = Data<"PUT", K>>(
 export function usePatch<
   K extends keyof Methods["PATCH"],
   T = Data<"PATCH", K>,
+  E = ErrorOf<"PATCH", K>,
 >(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Config<T, E>>,
   ]
 ) {
   return useMutation("PATCH", url, ...(args as any));
@@ -368,21 +394,26 @@ export function usePatch<
 export function useDelete<
   K extends keyof Methods["DELETE"],
   T = Data<"DELETE", K>,
+  E = ErrorOf<"DELETE", K>,
 >(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Config<T>>,
+    config?: Partial<Config<T, E>>,
   ]
 ) {
   return useMutation("DELETE", url, ...(args as any));
 }
 
-export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
+export function useUpload<
+  K extends keyof Methods["POST"],
+  T = Data<"POST", K>,
+  E = ErrorOf<"POST", K>,
+>(
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Omit<Config<T>, "concurrency">>,
+    config?: Partial<Omit<Config<T, E>, "concurrency">>,
   ]
 ) {
   const [state, setState] = useState<"idle" | "uploading" | "done" | "error">(

@@ -64,6 +64,16 @@ type PatchRequests = {
   >;
 };
 
+type GetError<T> =
+  T extends ApiRouterHandler<Any, Any, Any, infer E> ? E : never;
+
+/** Each route's typed errors (`HttpResponse.error`), by method and path. */
+type ErrorMethods = {
+  [M in keyof Methods]: {
+    [K in keyof RPC as K extends `${M}:${infer P}` ? P : never]: GetError<RPC[K]>;
+  };
+};
+
 type Methods = {
   POST: PostRequests;
   PUT: PutRequests;
@@ -86,12 +96,19 @@ interface FormProps<
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   /**
-   * Called when the request fails. `error` is a `MutationError`; narrow it
-   * with `isValidationError`, `isPermissionError` and the other guards from
+   * Called when the request fails. `error` is a `MutationError`, or one of
+   * the route's typed errors (the bodies its handler answers with
+   * `HttpResponse.error` / `httpError`); narrow it with `isValidationError`,
+   * `isPermissionError`, `isHttpError` and the other guards from
    * `gemi/client`. Validation and form errors are already rendered by
    * `<ValidationErrors>` and `<FormError>`.
    */
-  onError?: (error: MutationError, form: HTMLFormElement) => void;
+  // Method syntax, so a handler typed `(error: MutationError, form) => …`
+  // still compiles for a route that has typed errors.
+  onError?(
+    error: MutationError | ErrorMethods[M][K & keyof ErrorMethods[M]],
+    form: HTMLFormElement,
+  ): void;
   /**
    * Called when a submit is about to send its request, with the exact
    * `FormData` that will be sent (after `dynamicInputs`). Return `false` to
@@ -212,7 +229,7 @@ export function Form<
         onSettled?.(formRef.current);
       },
       onError: (error) => {
-        onError(error, formRef.current);
+        onError(error as Any, formRef.current);
         onSettled?.(formRef.current);
       },
     },

@@ -87,8 +87,10 @@ export interface MutationMessageError {
  *   yours is reported through `onError` as well, as whatever it threw.
  *
  * Never a string since 0.88. A cancelled request is not an error: `onCanceled`
- * runs and `error` stays `null`. A route that answers an error body of its own
- * shape is outside this type: a body with an `error` field
+ * runs and `error` stays `null`. A route's typed errors — the bodies its
+ * handler answers with `HttpResponse.error(status, body)` / `httpError` — are
+ * added to this union on its hooks and `<Form>` (`MutationError | E`). Any
+ * other error body of the route's own shape is outside this type: a body with an `error` field
  * (`HttpResponse.json({ error }, { status: 409 })`) hands over that field, as
  * gemi's own errors do, and any other body is handed over whole. Either is
  * given a `kind` (from the status) and the `status` when it is an object with
@@ -279,4 +281,26 @@ export function mutationErrorKind(error: unknown): MutationErrorKind {
   if (isServerError(error)) return "server";
   if (isNetworkError(error)) return "network";
   return "unknown";
+}
+
+/**
+ * An error answered with `status`: a route's typed error from
+ * `HttpResponse.error(status, body)` / `httpError`, narrowed to the members
+ * of `error`'s type with that status.
+ *
+ * ```ts
+ * onError: (error) => {
+ *   if (isHttpError(error, 410)) toast(error.message);
+ * }
+ * ```
+ *
+ * At run time it checks the status alone, so gemi's own refusals with the
+ * same status (a 404 `not_found`, a 429 `rate_limit`) pass it too; pick a
+ * status gemi does not use for its own errors, or check `kind` after it.
+ */
+export function isHttpError<E, S extends number>(
+  error: E,
+  status: S,
+): error is E & Extract<E, { status: S }> {
+  return isObject(error) && !(error instanceof Error) && error.status === status;
 }

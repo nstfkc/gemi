@@ -55,6 +55,15 @@ async update(req: HttpRequest) {
 **`ValidationError` already yields the right status and body** — do not wrap it, and
 do not build a parallel error convention per endpoint.
 
+**When the client must branch on a refusal of the app's own** (an expired link, a
+taken slug), return `httpError(status, body)` from `gemi/http` instead of throwing:
+`body` becomes the route's typed error, so `onError` narrows on `error.kind` or
+`isHttpError(error, 410)`, and it stays out of the success type.
+
+```ts
+if (expired(link)) return httpError(410, { kind: "gone", message: "Link has expired" });
+```
+
 **Do not construct a `Response` by hand** to set a status, header or redirect. The
 facades cover it: `Redirect.to(...)`, `Cookie.set(...)`, `Meta.title(...)`. A handler
 returns plain data and the framework serializes it.
