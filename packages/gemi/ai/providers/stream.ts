@@ -103,8 +103,8 @@ export async function* parseResponsesStream(
   const searchesReported = new Set<string>();
   let finished = false;
   // What the vendor says answered (#741): `response.model` on the lifecycle
-  // frames. Taken from the earliest one that has it, so a stream that dies
-  // after `response.created` still says who it was talking to.
+  // frames. Kept from every frame that has it, so a stream that dies after
+  // `response.created` still says who it was talking to.
   let responseModel: string | undefined;
   const ended = (reason: FinishReason, usage: Usage): ProviderEvent => ({
     type: "finish",
