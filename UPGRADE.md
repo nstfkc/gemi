@@ -1,3 +1,14 @@
+# Unreleased
+
+## Locale- and time-zone-aware formatting (#670)
+
+`useFormatter()` (from `gemi/client`), `useDictionary(dict).format` and `Lang.formatter()` format dates, times, numbers, relative times, lists and plural categories in the active locale and in one time zone, so a server-rendered date and its hydrated copy print the same text. The zone comes from the new `translation.timeZone` setting (default `"UTC"`), or per request from `translation.detectTimeZone(req)`, and a call can override it with `{ timeZone }`. The server ships the resolved zone with the page. `Lang.timeZone()`, `Translator#formatter(locale?, timeZone?)` and `createFormatter({ locale, timeZone })` (from `gemi/i18n`) are also new. See `docs/i18n.md`, "Formatting dates and numbers".
+
+No change is needed to upgrade: existing `toLocale*String()` and `Intl` calls behave as before. To fix server/browser date mismatches, move them to the formatter. Two small changes to know about:
+
+- The page payload's `i18n` object now always has `timeZone` and `defaultLocale`, also in apps without `supportedLocales`. Code that tested `Object.keys(i18n).length === 0` to mean "i18n is off" should check `i18n.currentLocale` instead.
+- An unknown `translation.timeZone` makes the app fail at boot.
+
 # Upgrading from 0.94.0 to 0.95.0
 
 ## `FallbackProvider`: an ordered provider chain for `gemi/ai` (#666)

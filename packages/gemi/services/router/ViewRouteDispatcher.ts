@@ -1038,16 +1038,22 @@ export class ViewRouteDispatcher {
         // the locale-prefix redirect above uses — they have to agree.
         const hasLegacyDictionaries = translator.isEnabled;
         const isI18nEnabled = translator.isLocaleAware;
-        let i18n: Record<string, any> = {};
+        // Shipped whether or not the app is locale-aware: `useFormatter` and
+        // `useDictionary(...).format` read the zone (and, without a resolved
+        // locale, the default one) from here, so the browser formats in exactly
+        // what the server rendered with and hydration finds the same text.
+        const detectionRequest = new HttpRequest(req, httpRequest.params as any);
+        let i18n: Record<string, any> = {
+          defaultLocale: translator.defaultLocale,
+          timeZone: translator.detectTimeZone(detectionRequest),
+        };
         if (isI18nEnabled) {
           let locale = null;
           if (urlLocale) {
             locale = urlLocale.replaceAll("/", "");
             ctx.setLocale(locale);
           } else {
-            locale = translator.detectLocale(
-              new HttpRequest(req, httpRequest.params as any),
-            );
+            locale = translator.detectLocale(detectionRequest);
             ctx.setLocale(locale);
           }
 
@@ -1056,6 +1062,7 @@ export class ViewRouteDispatcher {
             : {};
 
           i18n = {
+            ...i18n,
             supportedLocales: translator.supportedLocales,
             currentLocale: locale,
             dictionary: {

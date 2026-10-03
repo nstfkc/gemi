@@ -2,6 +2,11 @@ import type { HttpRequest } from "../http/HttpRequest";
 import type { Dictionary } from "./Dictionary";
 import type { TranslationConfig } from "./config";
 import { resolveLocale } from "./resolveLocale";
+import {
+  createFormatter,
+  isValidTimeZone,
+  type Formatter,
+} from "./formatter";
 
 export class Translator {
   static token = "translator";
@@ -10,6 +15,14 @@ export class Translator {
   isEnabled = false;
 
   constructor(public config: Required<TranslationConfig>) {
+    // Fail at boot rather than on the first page that prints a date: `Intl`
+    // throws a `RangeError` for a zone it does not know.
+    if (!isValidTimeZone(this.config.timeZone)) {
+      throw new Error(
+        `translation.timeZone: "${String(this.config.timeZone)}" is not a time zone this runtime knows. Use an IANA name such as "UTC" or "Europe/Istanbul".`,
+      );
+    }
+
     const translations = {};
 
     for (const [route, dicArray] of Object.entries(this.config.prefetch)) {
@@ -55,6 +68,40 @@ export class Translator {
 
   get components(): Record<string, Dictionary<any>> {
     return this.config.components;
+  }
+
+  /** The configured zone; `UTC` unless `translation.timeZone` says otherwise. */
+  get timeZone(): string {
+    return this.config.timeZone;
+  }
+
+  /**
+   * The zone dates are formatted in for this request: `detectTimeZone`'s
+   * answer when it gives a zone `Intl` knows, the configured zone otherwise.
+   * A bad value from a cookie must not take the page down, so it is ignored
+   * rather than thrown.
+   */
+  detectTimeZone(req: HttpRequest<any, any> | null | undefined): string {
+    if (req) {
+      const detected = this.config.detectTimeZone(req);
+      if (isValidTimeZone(detected)) {
+        return detected;
+      }
+    }
+    return this.config.timeZone;
+  }
+
+  /**
+   * A formatter for `locale` (the default locale when omitted) in `timeZone`
+   * (the configured zone when omitted). For server code outside a request —
+   * jobs, emails. Inside a request, `Lang.formatter()` picks up the request's
+   * locale and zone.
+   */
+  formatter(locale?: string, timeZone?: string): Formatter {
+    return createFormatter({
+      locale: locale || this.defaultLocale,
+      timeZone: isValidTimeZone(timeZone) ? timeZone : this.timeZone,
+    });
   }
 
   onLocaleChange(locale: string): Promise<void> | void {

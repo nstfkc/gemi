@@ -76,6 +76,8 @@ export interface PageProps {
    */
   defaultLocale?: string;
   supportedLocales?: string[];
+  /** The zone `useFormatter` formats dates in. Defaults to `UTC`, like an app with no `translation.timeZone`. */
+  timeZone?: string;
   /**
    * Dictionaries the components under test translate against — the app's own,
    * or literals of the same shape.
@@ -374,6 +376,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     hash = "",
     locale = "en-US",
     defaultLocale = locale,
+    timeZone = "UTC",
     dictionaries = [],
     translations = {},
     queryData = {},
@@ -476,7 +479,13 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       routePath,
       locale: urlLocaleSegment,
       data: {},
-      i18n: { currentLocale: locale, dictionary, supportedLocales },
+      i18n: {
+        currentLocale: locale,
+        dictionary,
+        supportedLocales,
+        defaultLocale,
+        timeZone,
+      },
       prefetchedData,
       breadcrumbs: breadcrumbsRecord,
       features: features as Record<string, boolean>,
@@ -492,6 +501,8 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       locale,
       dictionary,
       supportedLocales,
+      defaultLocale,
+      timeZone,
       prefetchedData,
       breadcrumbsRecord,
       features,
@@ -543,6 +554,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
         currentLocale: locale,
         supportedLocales,
         defaultLocale,
+        timeZone,
       },
       componentTree: [],
       auth: { user: user as User },
@@ -565,6 +577,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       locale,
       supportedLocales,
       defaultLocale,
+      timeZone,
       user,
       features,
     ],

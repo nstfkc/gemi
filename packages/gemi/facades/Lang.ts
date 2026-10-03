@@ -33,6 +33,33 @@ export class Lang extends Facade {
     return translator.defaultLocale;
   }
 
+  /**
+   * The time zone dates are formatted in for the current request: what
+   * `translation.detectTimeZone` resolves, else `translation.timeZone`
+   * (`UTC` by default). Outside a request, the configured zone.
+   */
+  static timeZone() {
+    const translator = this.getFacadeRoot();
+    return translator.detectTimeZone(RequestContext.getStore()?.req);
+  }
+
+  /**
+   * A formatter bound to the current request's locale and time zone — the
+   * same ones the page renders with, so a date in a flash message or an email
+   * matches the one on screen.
+   *
+   * ```ts
+   * Lang.formatter().date(order.createdAt, { dateStyle: "long" });
+   * ```
+   */
+  static formatter(options: { locale?: string; timeZone?: string } = {}) {
+    const translator = this.getFacadeRoot();
+    return translator.formatter(
+      options.locale ?? Lang.locale(),
+      options.timeZone ?? Lang.timeZone(),
+    );
+  }
+
   static setLocale(locale = Lang.locale()) {
     const translator = this.getFacadeRoot();
     let _locale = locale;

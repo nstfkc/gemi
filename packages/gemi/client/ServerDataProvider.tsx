@@ -32,6 +32,8 @@ export interface ServerDataContextValue {
     currentLocale: string;
     supportedLocales: string[];
     defaultLocale: string;
+    /** The IANA zone dates are formatted in, resolved on the server. */
+    timeZone?: string;
   };
   componentTree: ComponentTree;
   auth: {
