@@ -634,8 +634,22 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    * An error after the headers are flushed cannot be an HTTP status, so it is an
    * event. Pre-flight failures — auth, validation, an unknown agent — stay
    * ordinary HTTP errors and never reach this union.
+   *
+   * `nested` is set when the error is a sub-run's, re-raised on this stream
+   * (#468), right after the `nested-event` that carries the original. This
+   * copy is what the parent's `useChat.error` and the `onError` hooks see;
+   * the wrapped one alone reached none of them. It is not
+   * terminal: the parent run goes on, and the tool that started the sub-run
+   * decides what its failure means (it gets it on `NestedRunResult.error`).
+   * `toolCallId` is the parent's tool call the sub-run hangs off, `runId` and
+   * `agent` the sub-run's. A failure two levels down is re-raised at each
+   * level, so here it names this stream's tool call and sub-run.
    */
-  | { type: "error"; error: AgentError }
+  | {
+      type: "error";
+      error: AgentError;
+      nested?: { toolCallId: string; runId: string; agent: string };
+    }
   | { type: "run-end"; runId: string; finishReason: FinishReason };
 
 /**

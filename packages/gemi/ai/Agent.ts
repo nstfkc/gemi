@@ -3359,17 +3359,46 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }) as AgentRun;
 
     let asked: PendingToolCall[] = [];
+    const forward = (event: AgentStreamEvent) =>
+      this.emit({
+        type: "nested-event",
+        toolCallId: call.toolCallId,
+        runId: sub.runId,
+        agent: agent.name,
+        label,
+        event,
+      });
     const forwarding: Promise<void> = (async () => {
       for await (const event of sub as AsyncIterable<AgentStreamEvent>) {
         if (event.type === "awaiting-input") asked = event.pending;
-        this.emit({
-          type: "nested-event",
-          toolCallId: call.toolCallId,
-          runId: sub.runId,
-          agent: agent.name,
-          label,
-          event,
-        });
+        forward(event);
+        if (event.type === "run-start" && !resuming) {
+          // The seed, streamed (#470). It is recorded below as the head of the
+          // transcript, but the sub-run never emits it — a run streams only the
+          // messages it makes — so a client building the transcript from these
+          // frames had none of it, while one that loaded the record (or got the
+          // re-sent `tool-call`) did, and the two rendered different
+          // conversations. Whole `message` frames, because the seed is finished
+          // before the sub-run starts. A `prompt` is the sub-run's own turn and
+          // is emitted by the sub-run itself (`ingestTurn`). A resume emits
+          // nothing here: the record it continues already holds the seed.
+          for (const message of params.messages ?? []) forward({ type: "message", message });
+        }
+        if (event.type === "error") {
+          // Re-raised on the parent's own stream (#468). Wrapped in a
+          // `nested-event` it reaches nobody: the client reduces it into a
+          // throwaway sub-state, and the controller's hooks only hear
+          // top-level frames, so `useChat.error`, `onError` and the
+          // controller's `onError` never heard that a sub-agent failed. The
+          // same object, not a copy: it was redacted by the sub-run already,
+          // and the controller's `onError` finds the unredacted original by
+          // identity. Not terminal — the tool decides what the failure means.
+          this.emit({
+            type: "error",
+            error: event.error,
+            nested: { toolCallId: call.toolCallId, runId: sub.runId, agent: agent.name },
+          });
+        }
       }
     })();
 
@@ -4164,6 +4193,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       };
       this.history.push(message);
       this.produced.push(message);
+      // A sub-run's turn was written by the tool that started it, not typed by
+      // the client watching, so nothing on the stream would ever tell that
+      // client it exists (#470). A top-level turn needs no frame: the client
+      // sent it and already has it.
+      if (this.depth > 0) this.emit({ type: "message", message });
       await this.report(message);
     }
 

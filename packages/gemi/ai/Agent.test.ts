@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { RequestContext } from "../http/requestContext";
 import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
+import { applyFrame, initialChatState } from "./client/reducer";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeImageProvider, fakeProvider } from "./providers/fakeProvider";
 import { ImageModel } from "./ImageModel";
@@ -3603,6 +3604,233 @@ describe("a sub-run started from a message list", () => {
   });
 });
 
+/**
+ * What a client watching the stream would have, reduced from the frames the
+ * way `useChat` does. The top-level user turn is the client's own, so it starts
+ * from the messages the run was handed.
+ */
+function watched(frames: any[], messages: AgentMessage[] = []) {
+  return frames.reduce((state, frame) => applyFrame(state, frame), initialChatState({ messages }));
+}
+
+/**
+ * `collectFrames`, but each frame copied as it arrives, which is what the wire
+ * does. The run keeps writing to the tool-call part a buffered `tool-call`
+ * frame points at — `nested` lands on it when the sub-run finishes — so frames
+ * held by reference would show a client the server's record, not what it was
+ * sent.
+ */
+function collectWire(run: { frames(from?: number): AsyncIterable<any> }) {
+  const frames: any[] = [];
+  const done = (async () => {
+    for await (const frame of run.frames()) frames.push(JSON.parse(JSON.stringify(frame)));
+  })();
+  return { frames, done };
+}
+
+/** A transcript reduced to what renders, so a live copy and a stored one compare. */
+const shapeOf = (messages: AgentMessage[]) =>
+  messages.map((message) => ({ id: message.id, role: message.role, text: textOf(message) }));
+
+describe("a nested transcript, watched live and loaded later (#470)", () => {
+  async function run(params: any) {
+    const sub = answeringAgent("researcher", "eleven");
+    const research = nestingTool("research", async (ctx) => {
+      await ctx.runAgent(sub.agent, params);
+      return { ok: true };
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider(
+        [toolCall("c1", "research", {}), finish()],
+        [{ type: "text-delta", delta: "done" }, finish()],
+      ),
+      tools: [research],
+    });
+    const stream = agent.stream({ messages: [], turn: { text: "go" } });
+    const { frames, done } = collectWire(stream);
+    const result = await stream.result();
+    await done;
+    return {
+      stored: callPartOf(result.messages, "c1").nested[0].messages as AgentMessage[],
+      live: callPartOf(watched(frames).messages, "c1").nested[0].messages as AgentMessage[],
+    };
+  }
+
+  test("a prompt is streamed as the sub-run's opening user message", async () => {
+    const { stored, live } = await run({ prompt: "how many?" });
+    expect(shapeOf(stored)).toEqual([
+      { id: expect.any(String), role: "user", text: "how many?" },
+      { id: expect.any(String), role: "assistant", text: "eleven" },
+    ]);
+    expect(shapeOf(live)).toEqual(shapeOf(stored));
+  });
+
+  test("a seed message list is streamed ahead of the sub-run's own messages", async () => {
+    const seed: AgentMessage[] = [
+      {
+        id: "seed_1",
+        role: "user",
+        content: [{ type: "text", text: "here is the context" }],
+        createdAt: new Date().toISOString(),
+        finishReason: "stop",
+      },
+    ];
+    const { stored, live } = await run({ messages: seed, prompt: "and now?" });
+    expect(shapeOf(stored).map((message) => message.text)).toEqual([
+      "here is the context",
+      "and now?",
+      "eleven",
+    ]);
+    expect(shapeOf(live)).toEqual(shapeOf(stored));
+  });
+
+  test("a top-level turn is still not echoed back to the client that sent it", async () => {
+    const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
+    const stream = greetAgent(provider).stream({ messages: [], turn: { text: "hello" } });
+    const { events, done } = collect(stream);
+    await stream.result();
+    await done;
+    expect(events.some((event) => event.type === "message")).toBe(false);
+  });
+
+  test("a resumed sub-run does not stream its seed a second time", async () => {
+    const asking = askingAgent("reviewer", "ship it?", [
+      { type: "text-delta", delta: "shipped" },
+      finish(),
+    ]);
+    const review = nestingTool("review", async (ctx) => {
+      await ctx.runAgent(asking.agent, { prompt: "review it" });
+      return { ok: true };
+    });
+    const first = await escalate({ tool: review });
+    expect(
+      nestedEventsOf(first.events).filter((event) => event.event.type === "message"),
+    ).toHaveLength(1);
+
+    const stream = Agent.create({
+      name: "lead",
+      provider: fakeProvider([{ type: "text-delta", delta: "all done" }, finish()]),
+      tools: [review],
+    }).stream({
+      messages: first.result.messages,
+      turn: {
+        toolResults: [
+          {
+            toolCallId: "s1",
+            signature: first.pending[0].signature,
+            path: first.pending[0].path,
+            output: { answer: "yes" },
+          },
+        ],
+      },
+    });
+    const { frames, done } = collectWire(stream);
+    const result = await stream.result();
+    await done;
+    const events = frames.map((frame) => frame.event) as AgentStreamEvent[];
+    expect(nestedEventsOf(events).some((event) => event.event.type === "message")).toBe(false);
+    // The client that watched turn one and then this one ends up where the
+    // store is.
+    const live = watched(frames, first.result.messages);
+    expect(shapeOf(callPartOf(live.messages, "c1").nested[0].messages)).toEqual(
+      shapeOf(callPartOf(result.messages, "c1").nested[0].messages),
+    );
+  });
+});
+
+describe("a sub-run that fails (#468)", () => {
+  const failing = () => {
+    const provider = fakeProvider([
+      { type: "error", error: { code: "content_filtered", message: "blocked", retryable: false } },
+      finish(),
+    ]);
+    return Agent.create({ name: "researcher", provider });
+  };
+
+  test("is reported on the parent's own stream, naming the tool call and the sub-run", async () => {
+    const sub = failing();
+    let seen: unknown;
+    const research = nestingTool("research", async (ctx) => {
+      const run = await ctx.runAgent(sub, { prompt: "how many?" });
+      seen = run.error;
+      return { failed: run.finishReason === "error" };
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider(
+        [toolCall("c1", "research", {}), finish()],
+        [{ type: "text-delta", delta: "sorry" }, finish()],
+      ),
+      tools: [research],
+    });
+    const stream = agent.stream({ messages: [], turn: { text: "go" } });
+    const { frames, done } = collectFrames(stream);
+    const result = await stream.result();
+    await done;
+    const events = frames.map((frame) => frame.event) as AgentStreamEvent[];
+
+    const nestedError = nestedEventsOf(events).find((event) => event.event.type === "error");
+    const topLevel = events.filter((event) => event.type === "error") as any[];
+    expect(topLevel).toHaveLength(1);
+    expect(topLevel[0]).toEqual({
+      type: "error",
+      error: nestedError.event.error,
+      nested: { toolCallId: "c1", runId: nestedError.runId, agent: "researcher" },
+    });
+    expect(topLevel[0].error).toMatchObject({ code: "content_filtered" });
+    // Right after the nested copy, so a client sees the two together.
+    const at = events.indexOf(topLevel[0]);
+    expect(events[at - 1]).toBe(nestedError);
+
+    // Not terminal: the parent goes on, and the tool still had the failure in
+    // hand to decide what it means.
+    expect(seen).toMatchObject({ code: "content_filtered" });
+    expect(result.finishReason).toBe("stop");
+    expect(result.error).toBeUndefined();
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "ok",
+      output: { failed: true },
+    });
+
+    // And a client watching the parent has it on `error`.
+    expect(watched(frames).error).toMatchObject({ code: "content_filtered" });
+  });
+
+  test("two levels down, it reaches the top once, naming the top-level tool call", async () => {
+    const leaf = failing();
+    const inner = nestingTool("inner", async (ctx) => {
+      await ctx.runAgent(leaf, { prompt: "deeper" });
+      return {};
+    });
+    const middle = Agent.create({
+      name: "middle",
+      provider: fakeProvider([toolCall("m1", "inner", {}), finish()], [finish()]),
+      tools: [inner],
+    });
+    const outer = nestingTool("outer", async (ctx) => {
+      await ctx.runAgent(middle, { prompt: "go" });
+      return {};
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "outer", {}), finish()], [finish()]),
+      tools: [outer],
+    });
+    const stream = agent.stream({ messages: [], turn: { text: "go" } });
+    const { events, done } = collect(stream);
+    await stream.result();
+    await done;
+
+    const topLevel = events.filter((event) => event.type === "error") as any[];
+    expect(topLevel).toHaveLength(1);
+    expect(topLevel[0]).toMatchObject({
+      error: { code: "content_filtered" },
+      nested: { toolCallId: "c1", agent: "middle" },
+    });
+  });
+});
+
 // --- files a tool made ---------------------------------------------------
 
 /** A `FileStorage` that is a map, so these tests need no container and no disk. */
@@ -4511,12 +4739,13 @@ describe("a file shown inside a sub-run", () => {
 
     // On the parent's stream it arrives wrapped, like every other event a
     // sub-run produces: one `message` event, under the sub-run's id, so a client
-    // rendering the tree shows it in the branch that made it.
+    // rendering the tree shows it in the branch that made it. (The other
+    // wrapped `message` is the sub-run's opening prompt, #470.)
     const wrapped = events.filter(
       (event) => event.type === "nested-event" && (event as any).event.type === "message",
     ) as any[];
-    expect(wrapped).toHaveLength(1);
-    expect(wrapped[0].event.message.content[0]).toMatchObject({ type: "file", fileId: "file_1" });
+    expect(wrapped.map((event) => event.event.message.content[0].type)).toEqual(["text", "file"]);
+    expect(wrapped[1].event.message.content[0]).toMatchObject({ type: "file", fileId: "file_1" });
   });
 });
 

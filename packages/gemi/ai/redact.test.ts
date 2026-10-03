@@ -354,6 +354,49 @@ describe("AgentController", () => {
     // The hook context names the run the client was told about.
     expect(body).toContain(`"runId":"${runIds[0]}"`);
   });
+
+  test("a sub-agent's failure reaches onError too, unredacted (#468)", async () => {
+    const sub = Agent.create({
+      name: "researcher",
+      provider: fakeProvider([
+        { type: "error", error: { code: "provider_error", message: SECRET, retryable: false } },
+      ]),
+    });
+    const research = AgentTool.create({
+      name: "research",
+      description: "Delegate",
+      inputSchema: s.object({}),
+      execute: async (_input: any, ctx: any) => {
+        await ctx.runAgent(sub, { prompt: "go" });
+        return {};
+      },
+    });
+    const seenByHook: AgentError[] = [];
+
+    class Chat extends AgentController {
+      agent = Agent.create({
+        name: "lead",
+        provider: fakeProvider(
+          [{ type: "tool-call", toolCallId: "c1", name: "research", args: "{}" }],
+          [{ type: "text-delta", delta: "sorry" }],
+        ),
+        tools: [research],
+      });
+      liveRuns = new MemoryLiveRuns();
+      protected onError(error: AgentError) {
+        seenByHook.push(error);
+      }
+    }
+
+    const response = await new Chat().stream(request());
+    const body = await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(body).not.toContain("hunter2");
+    expect(body).toContain('"nested":{"toolCallId":"c1"');
+    expect(seenByHook).toHaveLength(1);
+    expect(seenByHook[0]).toMatchObject({ code: "provider_error", message: SECRET });
+  });
 });
 
 describe("the SSE transport", () => {
