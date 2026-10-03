@@ -48,7 +48,10 @@ class AppKernel extends Kernel {
     route: {
       api: {
         rootRouter: class extends ApiRouter {
-          routes = { "/ping": this.get(() => ({ ok: true })) };
+          routes = {
+            "/ping": this.get(() => ({ ok: true })),
+            "/clip": this.stream(async () => new Blob(["0123456789"])),
+          };
         },
       },
       view: {
@@ -359,6 +362,15 @@ describe("httpProd's static handler", () => {
     const suffix = await get("/loopVideo.mp4", { ...THROUGH_FRONT_DOOR, Range: "bytes=-5" });
     expect(suffix.status).toBe(206);
     expect(await suffix.text()).toBe(VIDEO.slice(-5));
+  });
+
+  test("answers a byte range of a stream route with only the window (#725)", async () => {
+    const res = await get("/api/clip", { ...THROUGH_FRONT_DOOR, Range: "bytes=2-4" });
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 2-4/10");
+    expect(res.headers.get("Content-Length")).toBe("3");
+    expect(await res.text()).toBe("234");
   });
 
   test("answers an unsatisfiable range with a 416", async () => {

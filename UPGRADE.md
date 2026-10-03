@@ -1,3 +1,7 @@
+# Unreleased
+
+- Fixed: on Linux with Bun 1.3.14, a `Range` request to a `this.stream()` route got a 206 whose body ran past the window (with compression on, the server sent the rest of the object and a matching `Content-Length`). No change is needed to upgrade; app code that reads `response.body` of such a Range response itself can still hit the Bun bug (#725).
+
 # Upgrading from 0.88.0 to 0.88.1
 
 ## `ApiRouter`: a stream or file `get` can share a path with other verbs (#707)
