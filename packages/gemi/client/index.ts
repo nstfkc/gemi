@@ -19,6 +19,7 @@ export type {
   RetryDelayOption,
 } from "./retryPolicy";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
+export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
 export {
   isValidationError,
