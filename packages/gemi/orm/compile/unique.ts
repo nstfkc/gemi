@@ -1,4 +1,4 @@
-import { UnsupportedQueryError } from "../errors";
+import { InvalidArgumentError, UnsupportedQueryError } from "../errors";
 import type { ModelSchema } from "../schema";
 
 /**
@@ -59,15 +59,80 @@ export function matchUniqueKey(
     (key) => (where as Record<string, unknown>)[key] !== undefined,
   );
 
+  const record = where as Record<string, unknown>;
+
   for (const candidate of candidates) {
-    if (candidate.length === 1 && keys.includes(candidate[0])) return candidate;
+    if (candidate.length === 1 && keys.includes(candidate[0])) {
+      assertKeyValue(schema, op, candidate[0], record[candidate[0]]);
+      return candidate;
+    }
     // Prisma's compound form: one key named after the fields joined by `_`.
-    if (candidate.length > 1 && keys.includes(candidate.join("_"))) {
+    const compound = candidate.join("_");
+    if (candidate.length > 1 && keys.includes(compound)) {
+      const members = record[compound];
+      if (members && typeof members === "object" && !Array.isArray(members)) {
+        for (const member of candidate) {
+          assertKeyValue(
+            schema,
+            op,
+            `${compound}.${member}`,
+            (members as Record<string, unknown>)[member],
+          );
+        }
+      }
       return candidate;
     }
   }
 
   throw missingUnique(schema, op, candidates);
+}
+
+/**
+ * Whether `value` can stand for one column of a unique key: a plain value the
+ * row is matched *equal* to, never a filter.
+ *
+ * Primitives, a `Date`, `Bytes` (a typed array), and any class instance (a
+ * `Decimal`) qualify. A plain object or an array does not — on a scalar field
+ * either is read as a filter (`{ not: … }`, `{ in: […] }`, `{}`), and a filter
+ * in a unique key turns "the row whose key is this" into "any row the filter
+ * matches". Prisma types a unique key the same way, so nothing a Prisma caller
+ * writes is refused. `null` does not qualify either: a unique column may hold
+ * any number of nulls.
+ *
+ * The case this exists for is a request body handed to `findUnique` unchecked:
+ * JSON can carry an object wherever a string was expected.
+ */
+export function isUniqueKeyValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const type = typeof value;
+  if (type !== "object") return type !== "function" && type !== "symbol";
+  if (Array.isArray(value)) return false;
+  if (value instanceof Date || ArrayBuffer.isView(value)) return true;
+  const proto = Object.getPrototypeOf(value);
+  return proto !== Object.prototype && proto !== null;
+}
+
+/**
+ * Refuses a unique key whose value is not a plain value — see
+ * `isUniqueKeyValue`. An undefined compound member is left to
+ * `compileCompoundKey`, which already names it as missing.
+ */
+function assertKeyValue(
+  schema: ModelSchema,
+  op: RefusalOrigin,
+  path: string,
+  value: unknown,
+): void {
+  if (value === undefined || isUniqueKeyValue(value)) return;
+  throw new InvalidArgumentError(
+    `${op.argument}.${path}`,
+    op.model,
+    op.operation,
+    `A unique key takes a plain value to match, not ` +
+      `${value === null ? "null" : Array.isArray(value) ? "an array" : "a filter object"}. ` +
+      `Use findFirst/findMany (or updateMany/deleteMany) to filter on ` +
+      `${schema.name}.${path.split(".").pop()}.`,
+  );
 }
 
 export function assertUniqueWhere(

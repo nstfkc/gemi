@@ -1,3 +1,34 @@
+# Unreleased
+
+## `auth`: request input is type-checked before it reaches a query (security hardening)
+
+Recommended for every app using gemi's auth routes. The auth routes now check
+the runtime type of the values they read from the request body or query string
+(`email`, `pin`, `token`, `password`, `invitationId`, …) before passing them to
+a database lookup. A JSON body can carry an object or an array where a string
+is expected, and the ORM reads an object in a `where` as a filter rather than a
+value, so only strings are passed on.
+
+A value of the wrong type is answered exactly like a wrong value: a PIN is
+`Invalid pin`, a reset or magic-link token is `Invalid token`, and so on. A PIN
+must be six digits, the format gemi issues. `UserProvider`'s token, PIN and
+invitation lookups return `null` for a value that is not a non-empty string.
+
+**ORM, behaviour change.** A unique key in `findUnique`, `findUniqueOrThrow`,
+`update`, `delete`, `upsert` and nested `connect`/`where`, and a compound key
+(`a_b: { a, b }`) anywhere, now takes plain values only. A filter object, an
+array or `null` there throws `InvalidArgumentError`; before, it compiled as a
+filter. Prisma types these positions as plain values, so code that typechecks
+against the generated models is unaffected. Extra non-unique filters beside the
+key still work. `findFirst`/`findMany`/`updateMany`/`deleteMany` still take
+filters on any field, so request input passed into their `where` must be
+type-checked by the app (a `string` rule in the request schema does it).
+
+**Action:** upgrade. If you override `AuthController` routes or `UserProvider`
+lookups, or query auth tables from your own routes, make sure request values
+are checked to be strings before they reach a `where`. If you call
+`findUnique` with `null` or a filter in a key, switch to `findFirst`.
+
 # Upgrading from 0.85.0 to 0.86.0
 
 ## `client`: `concurrency: "parallel"` for mutation hooks (#719)
