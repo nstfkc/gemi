@@ -355,4 +355,56 @@ describe.each(backends)("locks across instances on $name", (backend) => {
     );
     expect(runs).toBe(2);
   });
+
+  test("concurrency: a per-key cap holds across instances (#661)", async () => {
+    const database = await open();
+    let running = 0;
+    let most = 0;
+    let done = 0;
+    class Sync extends Job {
+      static name = "Sync";
+      concurrency(account: string) {
+        return { key: `sync:${account}`, limit: 2 };
+      }
+      async run() {
+        running++;
+        most = Math.max(most, running);
+        await sleep(80);
+        running--;
+        done++;
+      }
+    }
+    const a = instance(database, [Sync]);
+    const b = instance(database, [Sync]);
+    for (let i = 0; i < 8; i++) await a.push(Sync, '["acme"]');
+    a.start();
+    b.start();
+    await until(() => done === 8, 15_000);
+    expect(most).toBe(2);
+  });
+
+  test("throttle: a shared budget holds across instances, and waiting costs no attempt (#661)", async () => {
+    const database = await open();
+    const runs: number[] = [];
+    const start = Date.now();
+    class Send extends Job {
+      static name = "Send";
+      maxAttempts = 1;
+      throttle() {
+        return { key: "provider", limit: 3, window: 1_500 };
+      }
+      run() {
+        runs.push(Date.now() - start);
+      }
+    }
+    const a = instance(database, [Send]);
+    const b = instance(database, [Send]);
+    for (let i = 0; i < 5; i++) await a.push(Send, "[]");
+    a.start();
+    b.start();
+    await until(() => runs.length === 5, 15_000);
+    // Three in the first window, the rest only after it ended.
+    expect(runs.filter((at) => at < 1_200)).toHaveLength(3);
+    expect(await countJobs(database)).toBe(0);
+  });
 });

@@ -34,6 +34,56 @@ export class Job {
    */
   uniqueFor = 60 * 60_000;
 
+  /**
+   * Rate limits per key, computed from the dispatch arguments: at most
+   * `limit` jobs admitted per fixed `window` (milliseconds) under each `key`,
+   * across every process sharing the queue's storage. A job over a limit is
+   * put back until the window resets, without spending an attempt. Counted
+   * when the job is admitted to run, whether it then succeeds or not.
+   */
+  throttle(..._args: any[]): JobThrottle | JobThrottle[] | undefined | null {
+    return undefined;
+  }
+
+  /**
+   * At most `limit` jobs with this `key` running at once, across every process
+   * sharing the queue's storage. A job with no free slot waits, without
+   * spending an attempt.
+   */
+  concurrency(..._args: any[]): JobConcurrency | undefined | null {
+    return undefined;
+  }
+
+  /**
+   * Called from `run`: puts the job back to wait `delayMs` once `run`
+   * returns, without counting the attempt or calling any hook. For a provider
+   * that answered "slow down". Not available to `worker` jobs.
+   */
+  release(delayMs = 0): void {
+    this.$outcome = { kind: "release", delayMs };
+  }
+
+  /**
+   * Called from `run`: fails this attempt once `run` returns, as a throw
+   * would. With `retry: false` it is dead-lettered at once, whatever
+   * `maxAttempts` says: for work that must not be repeated, such as a send
+   * whose acceptance is uncertain. A throw after `fail(..., { retry: false })`
+   * is dead-lettered too. Not available to `worker` jobs.
+   */
+  fail(error: unknown, options: { retry?: boolean } = {}): void {
+    this.$outcome = {
+      kind: "fail",
+      error: error instanceof Error ? error : new Error(String(error)),
+      retry: options.retry ?? true,
+    };
+  }
+
+  /** @internal What `release` or `fail` asked for during this run. */
+  $outcome:
+    | { kind: "release"; delayMs: number }
+    | { kind: "fail"; error: Error; retry: boolean }
+    | undefined;
+
   run(..._args: any[]): Promise<any> | any {}
 
   onFail(_error: Error, ..._args: any[]): void {}
@@ -60,3 +110,13 @@ export class Job {
     return app(QueueManager).push(this, JSON.stringify(args));
   }
 }
+
+export type JobThrottle = {
+  /** Shared by every job that counts against the same budget. */
+  key: string;
+  limit: number;
+  /** The window, in milliseconds. */
+  window: number;
+};
+
+export type JobConcurrency = { key: string; limit: number };

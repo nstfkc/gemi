@@ -68,6 +68,25 @@ export class MemoryLockStore implements LockStore {
     }
   }
 
+  private readonly windows = new Map<string, { count: number; endsAt: number }>();
+
+  async hit(name: string, limit: number, windowMs: number) {
+    const now = Date.now();
+    let window = this.windows.get(name);
+    if (!window || window.endsAt <= now) {
+      window = { count: 0, endsAt: now + Math.max(1, windowMs) };
+      this.windows.set(name, window);
+    }
+    if (window.count >= limit) return { allowed: false, resetInMs: window.endsAt - now };
+    window.count++;
+    return { allowed: true, resetInMs: window.endsAt - now };
+  }
+
+  async refund(name: string) {
+    const window = this.windows.get(name);
+    if (window && window.endsAt > Date.now() && window.count > 0) window.count--;
+  }
+
   private current(name: string, owner: string, token?: number) {
     const entry = this.entries.get(name);
     if (!entry || entry.owner !== owner || entry.expiresAt <= Date.now()) return undefined;

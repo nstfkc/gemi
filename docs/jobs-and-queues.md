@@ -386,6 +386,43 @@ const b = await RebuildReport.dispatch("42"); // b === a while that job waits or
 
 The key is freed when the job completes or is dead-lettered, not between retries. With the database driver the key is a row in `gemi_locks`, so it holds across every process sharing the database. Inside a transaction, a unique dispatch waits for the commit (also on a driver that could write it on the transaction), and is dropped at the commit if a job with that key was queued by then.
 
+### Per-key throttles and concurrency — `throttle`, `concurrency`
+
+A job can limit itself per key, computed from its arguments. The limits hold across every process sharing the queue's storage (the `gemi_locks` table with the database driver; see [Locks](#locks--the-lock-facade)):
+
+```typescript
+import { Job } from "gemi/services";
+
+export class SendPush extends Job {
+  static name = "SendPush";
+  maxAttempts = 5;
+
+  throttle(userId: string) {
+    return [
+      { key: "push:global", limit: 20, window: 60_000 },
+      { key: `push:user:${userId}`, limit: 1, window: 86_400_000 },
+    ];
+  }
+
+  concurrency(userId: string) {
+    return { key: `push:user:${userId}`, limit: 1 }; // across all workers
+  }
+
+  async run(userId: string, payload: Payload) {
+    const response = await provider.send(userId, payload);
+    if (response.status === 429) return this.release(30_000); // try again later, no attempt spent
+    if (response.uncertain) return this.fail(new Error("acceptance unknown"), { retry: false });
+  }
+}
+```
+
+- **`throttle`** returns one or more `{ key, limit, window }` budgets. A job that would go over one is put back until that window ends. It does not spend an attempt, so it never reaches the dead-letter queue by waiting. Windows are fixed (they start at the first job admitted after the last one ended), and a job is counted when it is admitted to run, whether it then succeeds or not.
+- **`concurrency`** returns `{ key, limit }`: at most `limit` jobs with that key run at once. A job with no free slot waits, again without spending an attempt. Each slot is a lock leased for `visibilityTimeout` and renewed while the job runs, so a slot held by a process that died frees itself.
+- **`this.release(delayMs)`** inside `run` puts the job back to wait `delayMs` once `run` returns, without counting the attempt and without calling `onSuccess` or `onFail`.
+- **`this.fail(error, { retry: false })`** inside `run` dead-letters the job once `run` returns, whatever `maxAttempts` says. Use it where repeating the work is worse than losing it. Without `retry: false` it fails the attempt like a throw.
+
+`release` and `fail` are not available to `worker = true` jobs, whose `run` happens in another thread.
+
 ### Locks — the `Lock` facade
 
 Underneath is a lock with a lease and a fencing token. The queue keeps it where it keeps jobs: the `gemi_locks` table with the database driver, this process's memory with the memory driver. No Redis is needed.

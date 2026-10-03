@@ -140,5 +140,33 @@ export function lockStoreContract(
         const after = taken ?? (await s.store().acquire("fenced", "b", 60_000));
         expect(after).toBeGreaterThan(token);
       }));
+
+    test("hit counts a fixed window, refuses past the limit, and resets", () =>
+      each(async (s) => {
+        // Long enough that a slow runner cannot see the window end mid-test.
+        const WINDOW = 1_500;
+        const a = s.store();
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        expect(await s.store().hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        const refused = await a.hit("budget", 2, WINDOW);
+        expect(refused.allowed).toBe(false);
+        expect(refused.resetInMs).toBeGreaterThan(0);
+        expect(refused.resetInMs).toBeLessThanOrEqual(WINDOW);
+
+        await a.refund("budget");
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: false });
+
+        await sleep(WINDOW + 150);
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+      }));
+
+    test("concurrent hits from many clients never exceed the limit", () =>
+      each(async (s) => {
+        const results = await Promise.all(
+          Array.from({ length: 12 }, () => s.store().hit("race-budget", 5, 60_000)),
+        );
+        expect(results.filter((r) => r.allowed)).toHaveLength(5);
+      }));
   });
 }

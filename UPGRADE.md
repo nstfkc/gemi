@@ -1,5 +1,11 @@
 # Unreleased
 
+## Per-key throttles and concurrency for jobs (#661)
+
+`Job` has `throttle(...args)` (one or more `{ key, limit, window }` budgets, fixed windows) and `concurrency(...args)` (`{ key, limit }`), held across every process sharing the queue's storage. A job over a limit waits without spending an attempt. Inside `run`, `this.release(delayMs)` puts the job back without counting the attempt, and `this.fail(error, { retry: false })` dead-letters it at once. The counters and slots use the same lock store as #662, so with the database driver they need the `gemi_locks` table.
+
+No change is needed to upgrade: jobs without these methods behave as before. A job class that already defines its own `release`, `fail`, `throttle` or `concurrency` method now overrides the queue's meaning of that name, so rename it.
+
 ## Cross-instance locks: unique jobs, `withoutOverlapping` and `onOneServer` (#662)
 
 A queued job can declare `uniqueId(...args)` (and `uniqueFor`, default one hour). While a job with that key is waiting or running, another dispatch is not queued and resolves to the existing job's id. Cron jobs take `withoutOverlapping = true | { expiresAfter }` (skip a tick while the last one still runs on any instance) and `onOneServer = true` (each tick runs on one instance). Underneath is a lock with a lease and a fencing token, also available as the `Lock` facade (`Lock.run`, `Lock.acquire`, `lock.fence`, `lock.lost`).
