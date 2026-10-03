@@ -1751,6 +1751,15 @@ Returning a `Response` yourself opts out of all of the above and is passed throu
 
 Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
 
+A stream (or `this.file(...)`) route can share its path with other methods: put it under `get` in a method map. The `GET` and `HEAD` behave as above, and the other methods are typed as usual:
+
+```typescript
+"/assets/files/:fileId": {
+  get: this.stream(AssetController, "file"),
+  delete: this.delete(AssetController, "deleteFile"),
+},
+```
+
 ### Per-route middleware
 
 Every handler returned by `this.get`/`this.post`/… (and `this.resource`) has a fluent `.middleware([...])` that adds middleware to that route only:

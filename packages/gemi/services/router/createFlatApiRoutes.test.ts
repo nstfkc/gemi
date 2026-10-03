@@ -157,6 +157,71 @@ describe("createFlatApiRoutes - stream routes", () => {
   });
 });
 
+describe("createFlatApiRoutes - verb maps (#707)", () => {
+  test("a stream get shares its path with other verbs and keeps its HEAD", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/files/:fileId": {
+          get: this.stream(() => null).middleware(["auth"]),
+          delete: this.delete(() => ({ ok: true })).middleware(["admin"]),
+        },
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+    expect(Object.keys(routes["/files/:fileId"]).sort()).toEqual([
+      "DELETE",
+      "GET",
+      "HEAD",
+      "OPTIONS",
+    ]);
+
+    const middlewares = middlewaresOf(routes);
+    expect(middlewares["GET /files/:fileId"]).toEqual(["auth"]);
+    expect(middlewares["HEAD /files/:fileId"]).toEqual(["auth"]);
+    expect(middlewares["DELETE /files/:fileId"]).toEqual(["admin"]);
+  });
+
+  test("a file get shares its path too, GET only", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/report": {
+          get: this.file(() => null),
+          post: this.post(() => ({ ok: true })),
+        },
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+    expect(Object.keys(routes["/report"]).sort()).toEqual(["GET", "OPTIONS", "POST"]);
+  });
+
+  test("a plain get in a verb map gets no HEAD", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/thing": {
+          get: this.get(() => ({ ok: true })),
+          post: this.post(() => ({ ok: true })),
+        },
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+    expect(Object.keys(routes["/thing"]).sort()).toEqual(["GET", "OPTIONS", "POST"]);
+  });
+
+  test("a map of only patch is registered", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/thing": { patch: this.patch(() => ({ ok: true })) },
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+    expect(Object.keys(routes["/thing"]).sort()).toEqual(["OPTIONS", "PATCH"]);
+  });
+});
+
 class ReportController extends Controller {
   export() {
     return {};
