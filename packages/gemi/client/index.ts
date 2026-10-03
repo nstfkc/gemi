@@ -116,6 +116,8 @@ export { useDictionary } from "./useDictionary";
 // to the component that reads it, so both halves come from one import.
 export { defineDictionary, type DictionaryHandle } from "../i18n/defineDictionary";
 export { useLocale } from "./useLocale";
+export { useFormatter } from "./useFormatter";
+export type { Formatter, DateInput } from "../i18n/formatter";
 
 // Open Graph
 export { OpenGraphImage } from "./OpenGraphImage";

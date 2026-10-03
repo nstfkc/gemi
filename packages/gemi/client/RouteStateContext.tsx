@@ -19,6 +19,9 @@ export type PageData = {
     currentLocale: string;
     dictionary: Record<string, Record<string, unknown>>;
     supportedLocales: string[];
+    defaultLocale?: string;
+    /** The IANA zone dates are formatted in, resolved on the server. */
+    timeZone?: string;
   };
   prefetchedData: Record<string, unknown>;
   breadcrumbs: any;

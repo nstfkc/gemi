@@ -5,6 +5,7 @@ import type { DictionaryTranslations } from "../i18n/dictionaryShape";
 import { parseTranslation } from "../utils/parseTranslation";
 import type { ParseTranslationParams, Prettify } from "../utils/type";
 import { DictionarySinkContext } from "./DictionarySinkContext";
+import { useFormatter } from "./useFormatter";
 import { useRouteData } from "./useRouteData";
 
 type Parser<T extends Record<string, string>> = Prettify<
@@ -48,6 +49,9 @@ export function useDictionary<const T extends DictionaryTranslations>(
   // Tells the view loader which locale's chunks to warm on the next
   // navigation. `__GEMI_DATA__` only knows the locale the document loaded in.
   setActiveLocale(locale);
+  // Before `use()` below, so the hook order is the same on a replayed render.
+  // Same locale the strings resolve in, so `t.format` never disagrees with `t`.
+  const format = useFormatter({ locale });
 
   // `loadForRender`, not the plain loader: a rejected locale chunk must not
   // rethrow out of `use()` and take the route down. It degrades to no strings,
@@ -99,6 +103,12 @@ export function useDictionary<const T extends DictionaryTranslations>(
   ) => {
     return parse(key, ...(args as any)) as unknown as JSX.Element;
   };
+
+  /**
+   * Formatting in this dictionary's locale and the app's time zone. See
+   * `useFormatter`.
+   */
+  parse.format = format;
 
   return parse;
 }

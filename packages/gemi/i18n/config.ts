@@ -1,3 +1,4 @@
+import { DEFAULT_TIME_ZONE } from "./formatter";
 import type { Dictionary } from "./Dictionary";
 import type { HttpRequest } from "../http/HttpRequest";
 
@@ -17,6 +18,22 @@ export interface TranslationConfig {
   // Returning `null` falls back to gemi's own locale detection.
   detectLocale?: (req: HttpRequest) => string | null;
   onLocaleChange?: (locale: string) => Promise<void> | void;
+
+  /**
+   * The IANA time zone dates are formatted in by `useFormatter`,
+   * `useDictionary(...).format` and `Lang.formatter()`. Defaults to `UTC`.
+   *
+   * One zone for server and browser alike, so a server-rendered date and its
+   * hydrated copy print the same text. Override per call with
+   * `format.date(value, { timeZone })`.
+   */
+  timeZone?: string;
+  /**
+   * Resolve the zone for one request, e.g. from a cookie or the signed-in
+   * user's profile. Returning `null` (or a zone `Intl` does not know) falls back
+   * to `timeZone`. Runs on the server; the result ships with the page.
+   */
+  detectTimeZone?: (req: HttpRequest) => string | null;
 }
 
 export function defineTranslationConfig(
@@ -35,5 +52,7 @@ export function translationConfigDefaults(): Required<TranslationConfig> {
     onLocaleChange: (locale) => {
       console.log(`Locale changed to ${locale}`);
     },
+    timeZone: DEFAULT_TIME_ZONE,
+    detectTimeZone: () => null,
   };
 }

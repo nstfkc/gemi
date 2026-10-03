@@ -91,7 +91,9 @@ export const I18nProvider = (props: PropsWithChildren) => {
     locale?: string,
     signal?: AbortSignal,
   ) => {
-    if (Object.keys(i18n).length === 0) {
+    // The payload always carries the formatting zone; a resolved locale is
+    // what marks an i18n app.
+    if (!i18n?.currentLocale) {
       return;
     }
     const response = await fetch(

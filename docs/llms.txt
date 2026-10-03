@@ -51,7 +51,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Cron](https://nstfkc.github.io/gemi/cron.md): scheduling recurring CronJobs with Bun.cron.
 - [Commands](https://nstfkc.github.io/gemi/commands.md): one-off application commands written with defineCommand and run with `gemi run <name>`.
 - [Events & Listeners](https://nstfkc.github.io/gemi/events.md): Event subclasses dispatched with Event.dispatch/dispatchAndWait, Listener subclasses under app/listeners bound with `static event`, sync fan-out that no listener can cancel, `queued = true` to run one on the queue instead, `static afterCommit` to hold a dispatch until the surrounding transaction commits, and `Event.fake()` for asserting what a request dispatched.
-- [Internationalization](https://nstfkc.github.io/gemi/i18n.md): component-scoped dictionaries, useTranslator, useLocale, locale detection.
+- [Internationalization](https://nstfkc.github.io/gemi/i18n.md): component-scoped dictionaries, useDictionary, useLocale, useFormatter (locale- and time-zone-aware dates and numbers), locale detection.
 
 ## Notes
 

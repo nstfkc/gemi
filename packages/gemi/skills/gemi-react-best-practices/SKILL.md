@@ -191,6 +191,7 @@ carried for free.
 ### 9. Internationalization (MEDIUM)
 
 - `i18n-define-dictionary-inline` - The `defineDictionary` literal must be inline — a helper fails the BUILD
+- `i18n-format-with-use-formatter` - Format dates and numbers with `useFormatter`, never `toLocale*String()`
 
 ### 10. Testing (MEDIUM)
 
