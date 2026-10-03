@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.92.0 to 0.93.0
 
 ## ORM: skip no-op updates, and JSON key-exists filters (#664)
 
