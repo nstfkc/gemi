@@ -113,6 +113,72 @@ describe("FallbackProvider", () => {
     ]);
   });
 
+  describe("which model answered (#741)", () => {
+    const answered = (u: Usage, model: string): ProviderEvent => ({
+      type: "finish",
+      reason: "stop",
+      usage: u,
+      model,
+    });
+
+    test("each leg's report carries the model its vendor says answered", async () => {
+      const primary = leg("sol", [
+        { type: "error", error: retryable, status: 429 },
+        { type: "finish", reason: "error", usage: usage(3, 0), model: "gpt-5.6-sol-2026-09-01" },
+      ]);
+      const secondary = leg("gpt-5.4", [
+        { type: "text-delta", delta: "b" },
+        answered(usage(10, 5), "gpt-5.4-2026-03-05"),
+      ]);
+      const reports: FallbackUsage[] = [];
+      const chain = FallbackProvider.chain([{ provider: primary }, { provider: secondary }], {
+        onUsage: (r) => reports.push(r),
+      });
+
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(reports.map((r) => [r.model, r.responseModel, r.outcome])).toEqual([
+        ["sol", "gpt-5.6-sol-2026-09-01", "fallback"],
+        ["gpt-5.4", "gpt-5.4-2026-03-05", "ok"],
+      ]);
+      // The closing finish is the answering leg's, with the failed leg's cost on it.
+      expect(events.at(-1)).toEqual({
+        type: "finish",
+        reason: "stop",
+        usage: usage(13, 5),
+        model: "gpt-5.4-2026-03-05",
+      });
+    });
+
+    test("a leg whose provider does not say has no responseModel key", async () => {
+      const reports: FallbackUsage[] = [];
+      const chain = FallbackProvider.chain(
+        [{ provider: leg("a", [{ type: "text-delta", delta: "a" }, finish()]) }],
+        { onUsage: (r) => reports.push(r) },
+      );
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(Object.keys(reports[0]!)).not.toContain("responseModel");
+      expect(Object.keys(events.at(-1)!)).not.toContain("model");
+    });
+
+    test("a final failure keeps the model on the closing finish it writes", async () => {
+      const chain = FallbackProvider.chain([
+        {
+          provider: leg("a", [
+            { type: "error", error: final },
+            { type: "finish", reason: "error", usage: usage(1, 0), model: "gpt-4o" },
+          ]),
+        },
+      ]);
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(events.at(-1)).toEqual({
+        type: "finish",
+        reason: "error",
+        usage: usage(1, 0),
+        model: "gpt-4o",
+      });
+    });
+  });
+
   test("a failed leg that billed tokens is added to the closing usage", async () => {
     const primary = leg("a", [
       { type: "error", error: retryable },

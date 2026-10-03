@@ -141,7 +141,15 @@ export type ProviderEvent =
    */
   | { type: "tool-search"; loaded: string[]; namespaces: string[] }
   | { type: "output-delta"; delta: string }
-  | { type: "finish"; reason: FinishReason; usage: Usage }
+  /**
+   * `model` is the model the vendor says produced the response (`response.model`
+   * on the Responses API), which is not always the one asked for: an Azure
+   * deployment name answers with the model behind it, and an alias like
+   * `gpt-5.4` with a dated snapshot. Absent when the vendor did not say — a
+   * request that failed before any response, or a provider that does not know.
+   * Optional so a custom provider need not fill it in (#741).
+   */
+  | { type: "finish"; reason: FinishReason; usage: Usage; model?: string }
   /**
    * `status` and `requestId` describe the HTTP response the error came from,
    * when there was one. They are for the server's record of the run

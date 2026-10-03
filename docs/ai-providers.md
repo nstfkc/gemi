@@ -32,8 +32,8 @@ const chat = FallbackProvider.chain(
   ],
   {
     fallbackOn: (error, failure) => error.retryable,
-    onUsage: ({ index, model, attempt, usage, outcome, error }) => {
-      console.log({ index, model, attempt, usage, outcome, error: error?.code });
+    onUsage: ({ index, model, responseModel, attempt, usage, outcome, error }) => {
+      console.log({ index, model, responseModel, attempt, usage, outcome, error: error?.code });
     },
   },
 );
@@ -50,7 +50,8 @@ How a call moves through the chain:
 - **No fallback once output has streamed.** Once a leg sends its first text, reasoning, tool-call or structured-output delta, the consumer has it. Any error after that is final and is reported as the call's error. Starting over on another model would put two answers in one message.
 - **`timeoutMs` covers the first event only.** A leg that sends nothing within `timeoutMs` is aborted, and its failure is retryable. After the first event, the leg's own request timeout applies.
 - **`reasoning` per leg.** An entry's `reasoning` overrides the agent's `reasoning` for that leg only.
-- **Usage per leg.** `onUsage` is called once for each leg that was tried. The report has its `index`, `model`, `attempt` (1 for the first leg tried in this call), `usage` (when the leg reported any), `outcome` (`ok`, `fallback`, `failed` or `aborted`) and `error`. Tokens billed by abandoned legs are added to the call's closing usage, so the run's usage is what the call actually cost. If `onUsage` throws, the error is ignored.
+- **Usage per leg.** `onUsage` is called once for each leg that was tried. The report has its `index`, `model` (the leg's configured model), `responseModel` (the model the vendor says answered, such as the dated snapshot behind `gpt-5.4` or the model behind an Azure deployment name; absent when the leg never got a response), `attempt` (1 for the first leg tried in this call), `usage` (when the leg reported any), `outcome` (`ok`, `fallback`, `failed` or `aborted`) and `error`. Tokens billed by abandoned legs are added to the call's closing usage, so the run's usage is what the call actually cost. If `onUsage` throws, the error is ignored.
+- **Which model answered.** The call's closing `finish` event carries `model`, the answering leg's `responseModel`, so code reading the provider stream directly sees it without `onUsage`. The built-in OpenAI and Azure providers set `finish.model` on every call, chain or not.
 - **User aborts.** Stopping the run never tries the next leg.
 - **Capabilities** are the intersection of the legs' capabilities, so a feature one leg lacks is turned off for the whole chain. Without this, a chain could work only while the primary is up.
 - **Uploads** go to the first leg only. A provider's file id only works on that provider's account or resource. Legs on the same Azure resource share files. For a chain across accounts, keep provider file ids out of the fallback path or store attachments with gemi.

@@ -1,5 +1,5 @@
 import type { ProviderEvent } from "../AgentProvider";
-import type { Usage } from "../types";
+import type { FinishReason, Usage } from "../types";
 
 /**
  * The Responses SSE stream to `ProviderEvent`.
@@ -102,6 +102,16 @@ export async function* parseResponsesStream(
   const calls = new Map<string, PendingCall>();
   const searchesReported = new Set<string>();
   let finished = false;
+  // What the vendor says answered (#741): `response.model` on the lifecycle
+  // frames. Kept from every frame that has it, so a stream that dies after
+  // `response.created` still says who it was talking to.
+  let responseModel: string | undefined;
+  const ended = (reason: FinishReason, usage: Usage): ProviderEvent => ({
+    type: "finish",
+    reason,
+    usage,
+    ...(responseModel ? { model: responseModel } : {}),
+  });
 
   for await (const message of sseMessages(chunks)) {
     if (message.data === "[DONE]") break;
@@ -119,6 +129,9 @@ export async function* parseResponsesStream(
     // payload means a gateway that drops the `event:` line still parses, and
     // the two never disagree in practice.
     const type: string = typeof payload.type === "string" ? payload.type : message.event;
+
+    const model = payload.response?.model;
+    if (typeof model === "string" && model) responseModel = model;
 
     switch (type) {
       case "response.output_text.delta": {
@@ -274,7 +287,7 @@ export async function* parseResponsesStream(
 
       case "response.completed": {
         finished = true;
-        yield { type: "finish", reason: "stop", usage: toUsage(payload.response?.usage) };
+        yield ended("stop", toUsage(payload.response?.usage));
         break;
       }
 
@@ -309,14 +322,10 @@ export async function* parseResponsesStream(
               retryable: false,
             },
           };
-          yield { type: "finish", reason: "error", usage };
+          yield ended("error", usage);
           break;
         }
-        yield {
-          type: "finish",
-          reason: reason === "max_output_tokens" ? "length" : "stop",
-          usage,
-        };
+        yield ended(reason === "max_output_tokens" ? "length" : "stop", usage);
         break;
       }
 
@@ -325,7 +334,7 @@ export async function* parseResponsesStream(
         finished = true;
         const raw = payload.response?.error ?? payload.error ?? payload;
         yield { type: "error", error: normalizeStreamError(raw) };
-        yield { type: "finish", reason: "error", usage: toUsage(payload.response?.usage) };
+        yield ended("error", toUsage(payload.response?.usage));
         break;
       }
     }
@@ -346,7 +355,7 @@ export async function* parseResponsesStream(
         retryable: true,
       },
     };
-    yield { type: "finish", reason: "error", usage: emptyUsage() };
+    yield ended("error", emptyUsage());
   }
 }
 
