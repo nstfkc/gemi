@@ -241,9 +241,51 @@ export class CustomerController extends ResourceController {
 }
 ```
 
-The schema is a map of field → `{ rule: message }`. The built-in rules are `required`, `string`, `boolean`, `number`, `email`, `password`, `min:N` / `max:N` (length of a string or array), `gte:N` / `lte:N` (size of a number), `file`, `fileType:png|jpg|pdf|…`, and `fileSize:5MB`. `string`, `boolean` and `number` check the JSON type and do not coerce, so `"true"` is not a boolean; a form-encoded or multipart body carries only strings and files. A rule name the list does not have, or a parameter it cannot read (`min:abc`, `fileSize:5mb`), throws `InvalidValidationRuleError` when the request is validated, instead of passing silently. A rule value may also be a function for custom messages (its key is then only a label), and `refine()` can be overridden for cross-field checks. When you need errors without throwing, use `await req.safeInput()`, which returns `{ isValid, errors, input }`. See [Forms](./forms.md).
+The schema is a map of field → `{ rule: message }`. The built-in rules are `required`, `string`, `boolean`, `number`, `array`, `object` (a plain object), `in:a,b,c` (one of the listed strings), `email`, `password`, `min:N` / `max:N` (length of a string or array), `gte:N` / `lte:N` (size of a number), `file`, `fileType:png|jpg|pdf|…`, and `fileSize:5MB`. `string`, `boolean` and `number` check the JSON type and do not coerce, so `"true"` is not a boolean; a form-encoded or multipart body carries only strings and files. A rule name the list does not have, or a parameter it cannot read (`min:abc`, `fileSize:5mb`), throws `InvalidValidationRuleError` when the request is validated, instead of passing silently. A rule value may also be a function for custom messages (its key is then only a label), and `refine()` can be overridden for cross-field checks. When you need errors without throwing, use `await req.safeInput()`, which returns `{ isValid, errors, input }`. See [Forms](./forms.md).
 
 > **Note:** Fields with no value (missing, `null` or `""`) and no `required` rule are skipped, so optional fields (e.g. an omitted `email`) don't fail their format rules. `0` and `false` are values and are checked. A field that fails `required` reports only the `required` message. This makes partial-update schemas easy — leave `required` off `update` fields.
+
+### Nested objects and arrays
+
+A schema key can be a dotted path. `address.city` steps into an object, a number steps into an array (`rounds.0.prompt`), and `*` stands for every item of an array:
+
+```typescript
+class CreateAgentRequest extends HttpRequest<{ name: string; rounds: { prompt: string; kind: string }[] }> {
+  schema = {
+    name: { required: "Name is required", string: "Name must be text" },
+    rounds: { required: "Add a round", array: "Rounds must be a list", "min:1": "Add a round", "max:10": "At most 10 rounds" },
+    "rounds.*.prompt": { required: "Prompt is required", "max:2000": "Prompt is too long" },
+    "rounds.*.kind": { required: "Kind is required", "in:question,choice": "Unknown kind" },
+  };
+}
+```
+
+Each item is checked on its own, and a failure is reported under the item's concrete path, its keys and indices joined with dots:
+
+```json
+{ "error": { "kind": "validation_error", "messages": { "rounds.1.prompt": ["Prompt is required"] }, "status": 400 } }
+```
+
+That key is `issue.path.join(".")` for the same field's `SchemaIssue` from an `s` schema's `validate()` (below), so both ways of validating report a nested field under the same name. The rules work as they do for top-level fields: an item field without a value is skipped unless it is `required`, and a function rule gets the item's value. A `*` over a missing parent, or over a value that is not an array or object, names nothing, so the parent's own rules (`required`, `array`) decide whether it had to be there. A path without `*` always names one value (`undefined` when a parent is missing), so `required` on `address.city` fails when `address` is absent. A body that has a dotted key of its own (a form field named `user.name`) is still read as that field. Nested paths are for JSON bodies: a form-encoded body is flat.
+
+### An `s` schema as the validator
+
+`schema` can instead be an `s` schema from `gemi/ai`, the builder used for tool inputs and structured output. Declare it once and get the body's type from it:
+
+```typescript
+import { s, type Infer } from "gemi/ai";
+
+const AgentBody = s.object({
+  name: s.string(),
+  rounds: s.array(s.object({ prompt: s.string(), kind: s.enum(["question", "choice"]) })),
+});
+
+class CreateAgentRequest extends HttpRequest<Infer<typeof AgentBody>> {
+  schema = AgentBody;
+}
+```
+
+`req.input()` runs `AgentBody.validate(body)` and throws the usual `ValidationError` when it fails, with each issue's `message` under `issue.path.join(".")` (`""` for the body itself, e.g. an array where an object was expected). A valid body is replaced by the parsed value, so unknown keys are dropped and an `.optional()` field sent as `null` is left out. `refine()` still runs, on the parsed value. The messages are the schema's own; use rules when you need to word them per field. An `s` schema has no file type, so use rules for multipart uploads. Constraints such as lengths and ranges come from `s.fromJSONSchema` (`minLength`, `maximum`, …).
 
 ### Auth and other errors
 

@@ -8,6 +8,7 @@ import { requestDomain } from "./requestDomain";
 import { ValidationError } from "./Router";
 import { InvalidValidationRuleError, validate } from "./validate";
 import type { ResolvedDomain } from "../services/router/DomainResolver";
+import { isSchema, type SchemaIssue } from "../ai/Schema";
 
 class Input<T> {
   constructor(private data: T) {}
@@ -44,6 +45,9 @@ type FileTypeType = `fileType:${string}`;
 type FileSizeType = `fileSize:${string}`;
 type EmailType = "email";
 type PasswordType = "password";
+type ArrayType = "array";
+type ObjectType = "object";
+type InType = `in:${string}`;
 /** One entry per rule in `validate`'s `RULES`; `validate.test-d.ts` holds them
  *  to each other, so an offered rule cannot go unimplemented again (#609). */
 export type SchemaKey =
@@ -59,9 +63,74 @@ export type SchemaKey =
   | FileTypeType
   | FileSizeType
   | EmailType
-  | PasswordType;
+  | PasswordType
+  | ArrayType
+  | ObjectType
+  | InType;
 
-export type Schema<T extends Body> = Record<keyof T, Partial<Record<SchemaKey, string>>>;
+type FieldRules = Partial<Record<SchemaKey, string>>;
+
+/**
+ * A field's rules by its key, plus nested ones by dotted path: `"address.city"`
+ * for a nested object, `"rounds.*.prompt"` for every item of an array (#711).
+ */
+export type Schema<T extends Body> = Record<keyof T, FieldRules> & {
+  [path: `${string}.${string}`]: FieldRules;
+};
+
+type PathSegment = string | number;
+
+function isContainer(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !(value instanceof Blob);
+}
+
+/**
+ * The values a schema key names, each with its concrete path.
+ *
+ * A key without a dot, or one the body has as a key of its own (a form field
+ * named `user.name`), is a plain field, as it always was. Otherwise it is a
+ * path: `address.city` steps into an object, a number steps into an array, and
+ * `*` stands for every item of an array (or every key of an object). A `*`
+ * over anything else, a missing parent included, names nothing, so only the
+ * parent's own rules decide whether it had to be there. The path is reported
+ * as `SchemaIssue["path"]` is: keys as strings, array indices as numbers.
+ */
+function resolvePath(data: Body, key: string): { path: PathSegment[]; value: unknown }[] {
+  if (!key.includes(".") || Object.hasOwn(data, key)) {
+    return [{ path: [key], value: data[key] }];
+  }
+  let found: { path: PathSegment[]; value: unknown }[] = [{ path: [], value: data }];
+  for (const segment of key.split(".")) {
+    const next: typeof found = [];
+    for (const { path, value } of found) {
+      if (segment === "*") {
+        if (Array.isArray(value)) {
+          value.forEach((item, index) => next.push({ path: [...path, index], value: item }));
+        } else if (isContainer(value)) {
+          for (const [k, item] of Object.entries(value))
+            next.push({ path: [...path, k], value: item });
+        }
+        continue;
+      }
+      if (Array.isArray(value) && /^\d+$/.test(segment)) {
+        next.push({ path: [...path, Number(segment)], value: value[Number(segment)] });
+        continue;
+      }
+      next.push({
+        path: [...path, segment],
+        value: isContainer(value) && Object.hasOwn(value, segment) ? value[segment] : undefined,
+      });
+    }
+    found = next;
+  }
+  return found;
+}
+
+/** `["rounds", 2, "prompt"]` → `"rounds.2.prompt"`, the key a
+ *  `ValidationError` reports a nested field under. The root is `""`. */
+function errorKey(path: PathSegment[]): string {
+  return path.join(".");
+}
 
 export type Body = Record<string, any>;
 export type HttpRequestKind = "view" | "api";
@@ -72,6 +141,11 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
   headers: Omit<Headers, "set" | "delete">;
   cookies: Omit<Map<string, string>, "set" | "delete">;
   search: Input<any>;
+  /**
+   * What `input()` validates the body against: a map of field (or dotted
+   * path, `"rounds.*.prompt"`) to `{ rule: message }`, or an `s` schema from
+   * `gemi/ai` (#711). See `docs/controllers.md`.
+   */
   schema: any = {};
   routePath: string;
   params: Params;
@@ -243,7 +317,11 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     return parsed as Body;
   }
 
-  private validateInput(input: Input<T>) {
+  private validateInput(input: Input<T>): Input<T> {
+    if (isSchema(this.schema)) {
+      return this.validateWithSchema(input);
+    }
+    const data = (input.toJSON() ?? {}) as Body;
     const errors: Record<string, string[]> = {};
     const fields = Object.entries(this.schema as Record<string, Record<string, unknown>>).map(
       ([key, rules]) => ({
@@ -261,63 +339,102 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     );
 
     for (const { key, rules } of fields) {
-      const value = input.get(key as keyof T);
-      const isRequired = rules.some(({ rule }) => rule === "required");
-      // Absent: skipped unless `required`. `0` and `false` are values, and are
-      // checked like any other — skipping every falsy value let `0` and `false` through a
-      // `string` rule and `0` through a `boolean` one.
-      const isAbsent = value === undefined || value === null || (value as unknown) === "";
-      const messages: string[] = [];
-
-      for (const { rule, message, check } of rules) {
-        let _message = message;
-        let _isValid = false;
-        if (typeof message === "function") {
-          _message = message(value);
-          _isValid = typeof _message === "undefined";
-        } else {
-          _isValid = check!(value);
+      for (const { path, value } of resolvePath(data, key)) {
+        const messages = this.checkField(value, rules);
+        if (messages.length > 0) {
+          errors[errorKey(path)] = messages;
         }
-
-        if (_isValid) {
-          continue;
-        }
-
-        if (isAbsent && !isRequired) {
-          continue;
-        }
-
-        if (rule === "required") {
-          // A missing field reports that it is missing, and only that — not
-          // also that `undefined` is not a string. Wherever `required` sits
-          // among the field's rules.
-          messages.splice(0, messages.length, String(_message));
-          break;
-        }
-
-        // Two rules can share a message (`string` and `email` both saying
-        // "Invalid email"); the field reports it once (#675).
-        if (!messages.includes(String(_message))) {
-          messages.push(String(_message));
-        }
-      }
-
-      if (messages.length > 0) {
-        errors[key] = messages;
       }
     }
 
-    for (const [key, value] of Object.entries(this.refine(input.toJSON()) ?? {})) {
-      const messages = errors[key] ?? [];
-      // A `refine` message the rules already reported is not repeated (#675).
-      errors[key] = messages.includes(value as string) ? messages : [...messages, value as string];
-    }
-
+    this.addRefinements(errors, data);
     if (Object.keys(errors).length > 0) {
       throw new ValidationError(errors);
     }
 
     return input;
+  }
+
+  private checkField(
+    value: unknown,
+    rules: { rule: string; message: unknown; check: ((value: unknown) => boolean) | null }[],
+  ): string[] {
+    const isRequired = rules.some(({ rule }) => rule === "required");
+    // Absent: skipped unless `required`. `0` and `false` are values, and are
+    // checked like any other — skipping every falsy value let `0` and `false` through a
+    // `string` rule and `0` through a `boolean` one.
+    const isAbsent = value === undefined || value === null || value === "";
+    const messages: string[] = [];
+
+    for (const { rule, message, check } of rules) {
+      let _message = message;
+      let _isValid = false;
+      if (typeof message === "function") {
+        _message = message(value);
+        _isValid = typeof _message === "undefined";
+      } else {
+        _isValid = check!(value);
+      }
+
+      if (_isValid) {
+        continue;
+      }
+
+      if (isAbsent && !isRequired) {
+        continue;
+      }
+
+      if (rule === "required") {
+        // A missing field reports that it is missing, and only that — not
+        // also that `undefined` is not a string. Wherever `required` sits
+        // among the field's rules.
+        return [String(_message)];
+      }
+
+      // Two rules can share a message (`string` and `email` both saying
+      // "Invalid email"); the field reports it once (#675).
+      if (!messages.includes(String(_message))) {
+        messages.push(String(_message));
+      }
+    }
+    return messages;
+  }
+
+  /**
+   * An `s` schema as the body's validator (#711). Each `SchemaIssue` is
+   * reported under its path joined with dots, the same key a dotted rule uses,
+   * and its `message`. A valid body is replaced by the parsed value, so what
+   * the handler reads is what the schema's type says: unknown keys dropped, an
+   * optional field sent as `null` left out.
+   */
+  private validateWithSchema(input: Input<T>): Input<T> {
+    const result = this.schema.validate(input.toJSON()) as
+      | { ok: true; value: unknown }
+      | { ok: false; issues: SchemaIssue[] };
+    const errors: Record<string, string[]> = {};
+    // `in`, not `!result.ok`: without `strictNullChecks` the union does not
+    // narrow on its boolean tag.
+    if ("issues" in result) {
+      for (const issue of result.issues) {
+        const key = errorKey(issue.path);
+        const messages = (errors[key] ??= []);
+        if (!messages.includes(issue.message)) messages.push(issue.message);
+      }
+    }
+    const parsed = "value" in result ? new Input<T>(result.value as T) : input;
+    this.addRefinements(errors, parsed.toJSON());
+    if (Object.keys(errors).length > 0) {
+      throw new ValidationError(errors);
+    }
+    return parsed;
+  }
+
+  private addRefinements(errors: Record<string, string[]>, data: unknown) {
+    for (const [key, value] of Object.entries(this.refine(data) ?? {})) {
+      const messages = errors[key] ?? [];
+      // A `refine` message the rules already reported is not repeated (#675).
+      errors[key] = messages.includes(value as string) ? messages : [...messages, value as string];
+    }
   }
 
   private ruleFor(key: string, rule: string) {
@@ -344,11 +461,10 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
   }> {
     const input = await this.parseBody();
     try {
-      this.validateInput(input);
       return {
         isValid: true,
         errors: {},
-        input,
+        input: this.validateInput(input),
       };
     } catch (err) {
       if (!(err instanceof ValidationError)) {
