@@ -391,7 +391,7 @@ describe.each(backends)("locks across instances on $name", (backend) => {
       static name = "Send";
       maxAttempts = 1;
       throttle() {
-        return { key: "provider", limit: 3, window: 600 };
+        return { key: "provider", limit: 3, window: 1_500 };
       }
       run() {
         runs.push(Date.now() - start);
@@ -404,7 +404,7 @@ describe.each(backends)("locks across instances on $name", (backend) => {
     b.start();
     await until(() => runs.length === 5, 15_000);
     // Three in the first window, the rest only after it ended.
-    expect(runs.filter((at) => at < 500)).toHaveLength(3);
+    expect(runs.filter((at) => at < 1_200)).toHaveLength(3);
     expect(await countJobs(database)).toBe(0);
   });
 });

@@ -34,7 +34,7 @@ describe("throttle", () => {
       throttle(user: string) {
         return [
           { key: "push:global", limit: 10, window: 60_000 },
-          { key: `push:user:${user}`, limit: 2, window: 300 },
+          { key: `push:user:${user}`, limit: 2, window: 1_000 },
         ];
       }
       run(user: string) {
@@ -48,8 +48,8 @@ describe("throttle", () => {
     const a = runs.filter((run) => run.user === "a");
     // The third "a" ran in the next window, not dead-lettered (maxAttempts 1).
     expect(a).toHaveLength(3);
-    expect(a[2]!.at).toBeGreaterThanOrEqual(250);
-    expect(runs.find((run) => run.user === "b")!.at).toBeLessThan(250);
+    expect(a[2]!.at).toBeGreaterThanOrEqual(950);
+    expect(runs.find((run) => run.user === "b")!.at).toBeLessThan(900);
     expect((queue.driver as MemoryQueueDriver).waiting).toBe(0);
   });
 

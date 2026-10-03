@@ -143,20 +143,22 @@ export function lockStoreContract(
 
     test("hit counts a fixed window, refuses past the limit, and resets", () =>
       each(async (s) => {
+        // Long enough that a slow runner cannot see the window end mid-test.
+        const WINDOW = 1_500;
         const a = s.store();
-        expect(await a.hit("budget", 2, 300)).toMatchObject({ allowed: true });
-        expect(await s.store().hit("budget", 2, 300)).toMatchObject({ allowed: true });
-        const refused = await a.hit("budget", 2, 300);
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        expect(await s.store().hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        const refused = await a.hit("budget", 2, WINDOW);
         expect(refused.allowed).toBe(false);
         expect(refused.resetInMs).toBeGreaterThan(0);
-        expect(refused.resetInMs).toBeLessThanOrEqual(300);
+        expect(refused.resetInMs).toBeLessThanOrEqual(WINDOW);
 
         await a.refund("budget");
-        expect(await a.hit("budget", 2, 300)).toMatchObject({ allowed: true });
-        expect(await a.hit("budget", 2, 300)).toMatchObject({ allowed: false });
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: false });
 
-        await sleep(400);
-        expect(await a.hit("budget", 2, 300)).toMatchObject({ allowed: true });
+        await sleep(WINDOW + 150);
+        expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
       }));
 
     test("concurrent hits from many clients never exceed the limit", () =>
