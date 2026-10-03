@@ -1,3 +1,13 @@
+# Unreleased
+
+## `gemi/ai`: nested runs stream their seed and report their errors (#470, #468)
+
+A sub-run started with `ctx.runAgent` now streams its opening messages. Each message in `params.messages` and the user message built from `params.prompt` arrive as a `message` event inside the `nested-event`s, right after the sub-run's `run-start`. Before, they were only in the stored record, so a client that watched the run live showed a nested transcript without its first message, and one that loaded it later showed it with. A resumed sub-run does not send them again. Top-level runs still do not echo the user's own turn.
+
+An `error` from a sub-run is now also emitted on the parent's stream, as `{ type: "error", error, nested: { toolCallId, runId, agent } }`, right after the `nested-event` that carries it. `useChat`'s `error` and `onError`, the native clients' `onError` and `AgentController.onError` now see sub-agent failures. The error does not end the parent run: the tool still gets it on `NestedRunResult.error` and decides what to do. A failure two levels down is reported once at the top, naming the top-level tool call.
+
+Behaviour change: a parent run whose sub-agent failed now leaves `useChat` with `error` set and `status === "error"` when it ends, even if the tool recovered. If a recovered sub-agent failure should not be shown, clear or ignore it in the UI. Only the raw frame carries `nested`; `useChat`'s `error` is the `AgentError` as before. Code that counted `message` events inside nested events, or expected a nested transcript to start with the assistant, will now also see the seed.
+
 # Upgrading from 0.95.0 to 0.96.0
 
 ## Locale- and time-zone-aware formatting (#670)
