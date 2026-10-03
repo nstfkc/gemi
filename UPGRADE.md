@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.88.1 to 0.88.2
 
 - `useEmailCode()`: `error` is now the outcome of the latest call (`request` or `verify`). A stale `invalid_code` no longer hides a newer request error (a 429, say) or lingers after a successful `request`. New `requestError` and `verifyError` hold each call's own last error. Code that relied on `error` keeping a verify error across a `request` should read `verifyError` (#724).
 - Fixed: on Linux with Bun 1.3.14, a `Range` request to a `this.stream()` route got a 206 whose body ran past the window (with compression on, the server sent the rest of the object and a matching `Content-Length`). No change is needed to upgrade; app code that reads `response.body` of such a Range response itself can still hit the Bun bug (#725).
