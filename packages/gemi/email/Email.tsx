@@ -3,8 +3,8 @@ import { render } from "jsx-email";
 import open from "open";
 import { app } from "../foundation/app";
 import { MailManager } from "../services/email/MailManager";
+import { deliverThrough } from "../services/email/deliver";
 import type {
-  EmailDeliveryResult,
   EmailSendResult,
   SendEmailParams,
 } from "../services/email/drivers/types";
@@ -14,21 +14,6 @@ import { writeDebugEmail } from "./debugEmail";
 interface SendEmailArgs<T> extends Partial<Omit<SendEmailParams, "html">> {
   data: Omit<T, "locale">;
   locale?: string;
-}
-
-/**
- * A `MailManager` swapped in by an app (see "Replacing the manager entirely"
- * in the email docs) may predate `deliver`; fall back to its `send`.
- */
-async function deliver(
-  mail: MailManager,
-  params: SendEmailParams,
-): Promise<EmailDeliveryResult> {
-  if (typeof mail.deliver === "function") {
-    return mail.deliver(params);
-  }
-  const ok = await (mail as Pick<MailManager, "send">).send(params);
-  return { ok: Boolean(ok), id: null };
 }
 
 export class Email {
@@ -116,7 +101,10 @@ export class Email {
       return { id: `debug_${crypto.randomUUID()}`, provider, status: "debug" };
     }
 
-    const result = await deliver(mail, params);
+    // A manager replaced by the app (see "Replacing the manager entirely")
+    // that predates `deliver`, or only overrides `send`, is called through
+    // `send`.
+    const result = await deliverThrough(mail, params);
 
     return result.ok
       ? { id: result.id, provider, status: "sent" }

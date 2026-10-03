@@ -145,6 +145,42 @@ describe("Email.send", () => {
     expect(result).toEqual({ id: null, provider: "custom", status: "sent" });
   });
 
+  test("a MailManager subclass that only overrides `send` is still called", async () => {
+    const audited: SendEmailParams[] = [];
+    class AuditedMailManager extends MailManager {
+      override send(params: SendEmailParams) {
+        audited.push(params);
+        return super.send(params);
+      }
+    }
+    const driver = new RecordingDriver();
+    mail = new AuditedMailManager({ driver });
+
+    const result = await ReportEmail.send({ to: ["ada@example.com"], data: { name: "Ada" } });
+
+    expect(audited).toHaveLength(1);
+    // It went through `send`, so there is no id to report.
+    expect(result).toEqual({ id: null, provider: "recording", status: "sent" });
+  });
+
+  test("a ResendDriver subclass that only overrides `send` is still called", async () => {
+    resendSend.mockResolvedValue({ data: { id: "re_1" }, error: null });
+    const rewritten: string[] = [];
+    class TaggedResendDriver extends ResendDriver {
+      override send(params: SendEmailParams) {
+        rewritten.push(params.subject);
+        return super.send({ ...params, subject: `[tag] ${params.subject}` });
+      }
+    }
+    mail = new MailManager({ driver: new TaggedResendDriver("key") });
+
+    const result = await ReportEmail.send({ to: ["ada@example.com"], data: { name: "Ada" } });
+
+    expect(rewritten).toEqual(["Your report"]);
+    expect(resendSend.mock.calls[0][0].subject).toBe("[tag] Your report");
+    expect(result).toEqual({ id: null, provider: "resend", status: "sent" });
+  });
+
   test("EMAIL_DEBUG records the key and returns a fake id", async () => {
     process.env.EMAIL_DEBUG = "true";
     const driver = new RecordingDriver();

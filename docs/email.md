@@ -200,7 +200,7 @@ export default defineMailConfig({
 
 ### Custom drivers
 
-Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider, then point the config at it. To report the provider's message id from `Email.send`, also override `deliver`, which returns `{ ok, id, error? }`; the default calls `send` and reports `id: null`. Set `provider` to name the driver in send results, and `supportsIdempotencyKey` if it forwards `params.idempotencyKey`:
+Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider, then point the config at it. To report the provider's message id from `Email.send`, also override `deliver`, which returns `{ ok, id, error? }`; the default calls `send` and reports `id: null`. A driver (or `MailManager` subclass) that overrides only `send` keeps being called through `send`. Set `provider` to name the driver in send results, and `supportsIdempotencyKey` if it forwards `params.idempotencyKey`:
 
 ```typescript
 import {
