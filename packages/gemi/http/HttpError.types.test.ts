@@ -132,6 +132,17 @@ const snippets = {
         onError: (error: MutationError) => console.log(error),
       });
     }`,
+  isHttpErrorUntyped: `
+    export function f(error: unknown, known: MutationError) {
+      if (isHttpError(error, 410)) {
+        const status: 410 = error.status;
+        return status;
+      }
+      if (isHttpError(known, 404)) {
+        const status: 404 = known.status;
+        return status;
+      }
+    }`,
   errorStatusRange: `
     export const a = httpError(200, { kind: "x" });`,
 };
@@ -210,6 +221,10 @@ describe("typed errors (#665)", () => {
 
   test("handlers typed (error: MutationError) still compile", () => {
     expect(diagnostics.oldHandlersCompile).toEqual([]);
+  });
+
+  test("isHttpError on an unknown or untyped error narrows to the status, not never", () => {
+    expect(diagnostics.isHttpErrorUntyped).toEqual([]);
   });
 
   test("httpError compiles for any number; the range is checked at run time", () => {

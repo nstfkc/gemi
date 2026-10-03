@@ -284,6 +284,15 @@ export function mutationErrorKind(error: unknown): MutationErrorKind {
 }
 
 /**
+ * The members of `E` answered with status `S`. When none of them names it — an
+ * `unknown`, or a `MutationError` alone — `E` with that status, rather than
+ * `never`.
+ */
+export type HttpErrorWithStatus<E, S extends number> = [Extract<E, { status: S }>] extends [never]
+  ? E & { status: S }
+  : Extract<E, { status: S }>;
+
+/**
  * An error answered with `status`: a route's typed error from
  * `HttpResponse.error(status, body)` / `httpError`, narrowed to the members
  * of `error`'s type with that status.
@@ -301,6 +310,6 @@ export function mutationErrorKind(error: unknown): MutationErrorKind {
 export function isHttpError<E, S extends number>(
   error: E,
   status: S,
-): error is E & Extract<E, { status: S }> {
+): error is HttpErrorWithStatus<E, S> {
   return isObject(error) && !(error instanceof Error) && error.status === status;
 }
