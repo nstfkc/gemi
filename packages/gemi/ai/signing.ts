@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from "crypto";
 import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 
 /**
@@ -34,6 +34,14 @@ import { defaultNonceStore, type NonceStore } from "./store/Nonces";
  * output" arm of `ClientToolResult` would be fabricating a server tool's result
  * rather than approving it. Binding the kind makes that a forgery instead of a
  * shape the caller has to remember to check.
+ *
+ * Keys and principals (#447). Neither token kind is MACed with `SECRET`
+ * itself: each is keyed with its own HKDF-derived key (`purposeKey` below), so
+ * a MAC minted for one purpose — a pending call, a parked-run record, or
+ * anything else in the app keyed off `SECRET` (CSRF, sessions) — is never a
+ * MAC for another. And each binds the `subject`, the principal the run was
+ * started for (`AgentController.runOwner`), so a token minted while user A was
+ * asked cannot be answered by user B, even with A's history in hand.
  */
 
 /** Everything the signature commits to. */
@@ -54,6 +62,14 @@ export type PendingCallClaims = {
    * being replayed as a top-level call, or as one nested under Y.
    */
   path?: string[];
+  /**
+   * Who the question was asked of: the run's owner (`AgentController.runOwner`,
+   * `user:<id>` by default). `null` or absent is nobody in particular — an
+   * anonymous run — and the two are the same claim. A token minted for one
+   * subject fails verification for any other, `null` included, so an approval
+   * cannot be carried from one user's session to another's.
+   */
+  subject?: string | null;
 };
 
 export type SignOptions = {
@@ -85,8 +101,66 @@ export type VerifyResult =
   | { ok: true; runId: string; nonce: string; expiresAt: number }
   | { ok: false; reason: "malformed" | "expired" | "forged" };
 
-const VERSION = "agt1";
+/**
+ * `agt2` is minted; `agt1` is still verified. A v1 token was MACed with the raw
+ * `SECRET` and binds no subject — it is accepted so that a question asked
+ * before the upgrade can still be answered after it, and it stops mattering on
+ * its own when the last one expires (`DEFAULT_TTL_MS` after the deploy). Drop
+ * `LEGACY_VERSION` from the accepted set once that window is long past.
+ */
+const VERSION = "agt2";
+const LEGACY_VERSION = "agt1";
+const PENDING_VERSIONS = [VERSION, LEGACY_VERSION];
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The latest expiry a legacy token may claim. Every v1 token this process can
+ * legitimately see was minted by an earlier deploy with the default TTL, so it
+ * expires no later than one TTL after this module loaded. Bounding it here
+ * means a v1 token — MACed with the raw `SECRET`, the key this change exists to
+ * stop relying on — cannot be forged with a far-future expiry, and that after
+ * one TTL of uptime no v1 token verifies at all.
+ */
+const LEGACY_ACCEPTED_UNTIL = Date.now() + DEFAULT_TTL_MS;
+
+function legacyExpiryOk(expiresAt: number): boolean {
+  return expiresAt <= LEGACY_ACCEPTED_UNTIL;
+}
+
+/**
+ * HKDF `info` labels, one per thing a key signs. Changing a label is a key
+ * rotation for that purpose alone.
+ */
+const PENDING_CALL_PURPOSE = "gemi.ai.pending-call.v1";
+const NESTED_RUN_PURPOSE = "gemi.ai.nested-run.v1";
+const HKDF_SALT = "gemi.ai.signing";
+
+const derivedKeys = new Map<string, Buffer>();
+
+/**
+ * A key for one purpose, derived from the app secret with HKDF-SHA256.
+ *
+ * `SECRET` is also what CSRF tokens and sessions are keyed with. Using it as
+ * the HMAC key here would make every one of those a potential oracle for the
+ * others; HKDF with a purpose label gives each its own independent key, so a
+ * weakness or leak in one use cannot be turned against another — including
+ * the two token kinds in this file against each other.
+ *
+ * Memoized per (purpose, secret): verification is on the request path and the
+ * derivation is pure. The map is bounded by the number of purposes times the
+ * secrets a process ever sees, which is one outside of tests.
+ */
+export function purposeKey(purpose: string, override?: string): Buffer {
+  const secret = secretKey(override);
+  const cacheKey = `${purpose}\u0000${secret}`;
+  let key = derivedKeys.get(cacheKey);
+  if (!key) {
+    key = Buffer.from(hkdfSync("sha256", secret, HKDF_SALT, purpose, 32));
+    if (derivedKeys.size > 64) derivedKeys.clear();
+    derivedKeys.set(cacheKey, key);
+  }
+  return key;
+}
 
 function secretKey(override?: string): string {
   const secret = override ?? process.env.SECRET;
@@ -135,11 +209,45 @@ function payload(fields: string[]): string {
   return fields.map((field) => `${field.length}:${field}`).join("");
 }
 
-function mac(secret: string, fields: string[]): Buffer {
-  return createHmac("sha256", secret).update(payload(fields)).digest();
+function mac(key: string | Buffer, fields: string[]): Buffer {
+  return createHmac("sha256", key).update(payload(fields)).digest();
+}
+
+function macMatches(signature: string, expected: Buffer): boolean {
+  const presented = Buffer.from(signature.split(".")[4], "base64url");
+  // `timingSafeEqual` throws on a length mismatch, and a wrong length is
+  // already a public fact about the token — nothing is leaked by checking it
+  // first, and everything is leaked by comparing the bytes with `===`.
+  return presented.length === expected.length && timingSafeEqual(presented, expected);
+}
+
+/** The principal as a field: absent and `null` are the same claim. */
+function subjectField(subject: string | null | undefined): string {
+  return canonicalize(subject ?? null);
 }
 
 /**
+ * The v2 claim set. Fixed-length: the path is always present (`[]` at the top
+ * level) and so is the subject, so there is no optional field to reason about.
+ */
+function claimFields(claims: PendingCallClaims, nonce: string, expiresAt: number): string[] {
+  return [
+    VERSION,
+    claims.runId,
+    claims.toolCallId,
+    claims.name,
+    claims.kind,
+    nonce,
+    String(expiresAt),
+    canonicalize(claims.input),
+    canonicalize(claims.path ?? []),
+    subjectField(claims.subject),
+  ];
+}
+
+/**
+ * The v1 claim set, kept only to verify tokens minted before #447.
+ *
  * The path is appended, and only when there is one.
  *
  * Byte-identical output for a call with no path is the whole requirement here:
@@ -153,9 +261,9 @@ function mac(secret: string, fields: string[]): Buffer {
  * longer value in the one before it; that is why this can be an append rather
  * than a new version tag.
  */
-function claimFields(claims: PendingCallClaims, nonce: string, expiresAt: number): string[] {
+function legacyClaimFields(claims: PendingCallClaims, nonce: string, expiresAt: number): string[] {
   const fields = [
-    VERSION,
+    LEGACY_VERSION,
     claims.runId,
     claims.toolCallId,
     claims.name,
@@ -173,13 +281,13 @@ function claimFields(claims: PendingCallClaims, nonce: string, expiresAt: number
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
 const decode = (value: string) => Buffer.from(value, "base64url").toString("utf8");
 
-/** `agt1.<runId>.<nonce>.<expiry>.<mac>`, all base64url or base36. */
+/** `agt2.<runId>.<nonce>.<expiry>.<mac>`, all base64url or base36. */
 export function signPendingCall(claims: PendingCallClaims, options: SignOptions = {}): string {
-  const secret = secretKey(options.secret);
+  const key = purposeKey(PENDING_CALL_PURPOSE, options.secret);
   const now = options.now ?? Date.now();
   const expiresAt = now + (options.ttlMs ?? DEFAULT_TTL_MS);
   const nonce = randomBytes(12).toString("base64url");
-  const signature = mac(secret, claimFields(claims, nonce, expiresAt)).toString("base64url");
+  const signature = mac(key, claimFields(claims, nonce, expiresAt)).toString("base64url");
   return [VERSION, encode(claims.runId), nonce, expiresAt.toString(36), signature].join(".");
 }
 
@@ -196,7 +304,7 @@ export function signPendingCall(claims: PendingCallClaims, options: SignOptions 
 export function readSignature(
   signature: string,
 ): { runId: string; nonce: string; expiresAt: number } | null {
-  return readToken(signature, VERSION);
+  return readToken(signature, PENDING_VERSIONS);
 }
 
 /**
@@ -209,10 +317,10 @@ export function readSignature(
  */
 function readToken(
   signature: string,
-  version: string,
-): { runId: string; nonce: string; expiresAt: number } | null {
+  versions: readonly string[],
+): { runId: string; nonce: string; expiresAt: number; version: string } | null {
   const parts = signature.split(".");
-  if (parts.length !== 5 || parts[0] !== version) {
+  if (parts.length !== 5 || !versions.includes(parts[0])) {
     return null;
   }
   const expiresAt = Number.parseInt(parts[3], 36);
@@ -220,7 +328,7 @@ function readToken(
     return null;
   }
   try {
-    return { runId: decode(parts[1]), nonce: parts[2], expiresAt };
+    return { runId: decode(parts[1]), nonce: parts[2], expiresAt, version: parts[0] };
   } catch {
     return null;
   }
@@ -231,18 +339,23 @@ export function verifyPendingCall(
   claims: PendingCallClaims,
   options: VerifyOptions = {},
 ): VerifyResult {
-  const secret = secretKey(options.secret);
-  const parsed = readSignature(signature);
+  const parsed = readToken(signature, PENDING_VERSIONS);
   if (!parsed) {
     return { ok: false, reason: "malformed" };
   }
 
-  const presented = Buffer.from(signature.split(".")[4], "base64url");
-  const expected = mac(secret, claimFields(claims, parsed.nonce, parsed.expiresAt));
-  // `timingSafeEqual` throws on a length mismatch, and a wrong length is
-  // already a public fact about the token — nothing is leaked by checking it
-  // first, and everything is leaked by comparing the bytes with `===`.
-  if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+  if (parsed.version === LEGACY_VERSION && !legacyExpiryOk(parsed.expiresAt)) {
+    return { ok: false, reason: "forged" };
+  }
+  const expected =
+    parsed.version === LEGACY_VERSION
+      ? // Raw secret, no subject: see `LEGACY_VERSION`.
+        mac(secretKey(options.secret), legacyClaimFields(claims, parsed.nonce, parsed.expiresAt))
+      : mac(
+          purposeKey(PENDING_CALL_PURPOSE, options.secret),
+          claimFields(claims, parsed.nonce, parsed.expiresAt),
+        );
+  if (!macMatches(signature, expected)) {
     return { ok: false, reason: "forged" };
   }
 
@@ -303,13 +416,32 @@ export type NestedRunClaims = {
    * pending call makes: the input executed is the input signed.
    */
   input: unknown;
+  /** The run's owner, as on `PendingCallClaims.subject`: a record parked for
+   *  one principal does not re-enter a tool for another. */
+  subject?: string | null;
 };
 
-const NESTED_VERSION = "agn1";
+/** `agn2` is minted; `agn1` (raw secret, no subject) is still verified. See
+ *  `LEGACY_VERSION`. */
+const NESTED_VERSION = "agn2";
+const LEGACY_NESTED_VERSION = "agn1";
+const NESTED_VERSIONS = [NESTED_VERSION, LEGACY_NESTED_VERSION];
 
 function nestedFields(claims: NestedRunClaims, nonce: string, expiresAt: number): string[] {
   return [
-    NESTED_VERSION,
+    ...legacyNestedFields(claims, nonce, expiresAt, NESTED_VERSION),
+    subjectField(claims.subject),
+  ];
+}
+
+function legacyNestedFields(
+  claims: NestedRunClaims,
+  nonce: string,
+  expiresAt: number,
+  version = LEGACY_NESTED_VERSION,
+): string[] {
+  return [
+    version,
     claims.runId,
     canonicalize(claims.path),
     claims.nestedRunId,
@@ -332,11 +464,11 @@ function nestedFields(claims: NestedRunClaims, nonce: string, expiresAt: number)
  * legitimate re-park nothing.
  */
 export function signNestedRun(claims: NestedRunClaims, options: SignOptions = {}): string {
-  const secret = secretKey(options.secret);
+  const key = purposeKey(NESTED_RUN_PURPOSE, options.secret);
   const now = options.now ?? Date.now();
   const expiresAt = now + (options.ttlMs ?? DEFAULT_TTL_MS);
   const nonce = randomBytes(12).toString("base64url");
-  const signature = mac(secret, nestedFields(claims, nonce, expiresAt)).toString("base64url");
+  const signature = mac(key, nestedFields(claims, nonce, expiresAt)).toString("base64url");
   return [NESTED_VERSION, encode(claims.runId), nonce, expiresAt.toString(36), signature].join(".");
 }
 
@@ -352,18 +484,23 @@ export function verifyNestedRun(
   claims: Omit<NestedRunClaims, "runId">,
   options: VerifyOptions = {},
 ): VerifyResult {
-  const secret = secretKey(options.secret);
-  const parsed = readToken(signature, NESTED_VERSION);
+  const parsed = readToken(signature, NESTED_VERSIONS);
   if (!parsed) {
     return { ok: false, reason: "malformed" };
   }
 
-  const presented = Buffer.from(signature.split(".")[4], "base64url");
-  const expected = mac(
-    secret,
-    nestedFields({ ...claims, runId: parsed.runId }, parsed.nonce, parsed.expiresAt),
-  );
-  if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+  if (parsed.version === LEGACY_NESTED_VERSION && !legacyExpiryOk(parsed.expiresAt)) {
+    return { ok: false, reason: "forged" };
+  }
+  const full = { ...claims, runId: parsed.runId };
+  const expected =
+    parsed.version === LEGACY_NESTED_VERSION
+      ? mac(secretKey(options.secret), legacyNestedFields(full, parsed.nonce, parsed.expiresAt))
+      : mac(
+          purposeKey(NESTED_RUN_PURPOSE, options.secret),
+          nestedFields(full, parsed.nonce, parsed.expiresAt),
+        );
+  if (!macMatches(signature, expected)) {
     return { ok: false, reason: "forged" };
   }
 
@@ -422,7 +559,7 @@ export function spendPendingCall(signature: string, store: NonceStore): Promise<
  * must not run again on it.
  */
 export function spendNestedRun(signature: string, store: NonceStore): Promise<boolean> {
-  return spendIn(store, readToken(signature, NESTED_VERSION));
+  return spendIn(store, readToken(signature, NESTED_VERSIONS));
 }
 
 async function spendIn(
@@ -437,11 +574,15 @@ async function spendIn(
  *  `now` is injectable for tests. */
 export function consumePendingCall(signature: string, options: VerifyOptions = {}): boolean {
   const parsed = readSignature(signature);
-  return parsed ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now) : false;
+  return parsed
+    ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now)
+    : false;
 }
 
 /** `spendNestedRun` on the process-wide default store, synchronously. */
 export function consumeNestedRun(signature: string, options: VerifyOptions = {}): boolean {
-  const parsed = readToken(signature, NESTED_VERSION);
-  return parsed ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now) : false;
+  const parsed = readToken(signature, NESTED_VERSIONS);
+  return parsed
+    ? defaultNonceStore.consumeSync(parsed.nonce, parsed.expiresAt, options.now)
+    : false;
 }

@@ -730,6 +730,11 @@ export abstract class AgentController<
    * turn the check off. Whatever it reads must be present on all of `stream`,
    * `attach` and `stop`, the same rule `attachmentScope` states: guard the three
    * routes with the same middleware.
+   *
+   * It is also the `subject` every pending call of the run is signed for
+   * (#447): an approval or answer is accepted only on a turn whose `runOwner`
+   * is the one the question was asked of. So it must answer the same on the
+   * turn that asks and the turn that answers.
    */
   protected runOwner(req: HttpRequest<any, any>): string | null | Promise<string | null> {
     const user = req.ctx?.()?.user;
@@ -979,6 +984,9 @@ export abstract class AgentController<
         redactError: (error, info) => this.redactError(error, info, ctx),
         // Where answers' nonces are spent. See `nonces`.
         nonces: this.nonces,
+        // The principal its pending calls are bound to (#447): an answer is
+        // only accepted from the same `runOwner` the question was asked of.
+        subject: owner,
       }) as AgentRun;
 
       // Registered before the response is built: the run is now owned by the
