@@ -188,6 +188,22 @@ describe("isCompressible()", () => {
 });
 
 describe("compressResponse()", () => {
+  test("leaves a sliced-blob range response's body intact (#725)", async () => {
+    const res = new Response(new Blob(["0123456789"]).slice(2, 5), {
+      status: 206,
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Range": "bytes 2-4/10",
+        "Content-Length": "3",
+      },
+    });
+
+    const out = compressResponse(new Request("http://x/", { headers: { "Accept-Encoding": "gzip" } }), res);
+
+    expect(out).toBe(res);
+    expect(await out.text()).toBe("234");
+  });
+
   test("encodes a streamed HTML body to exactly the same bytes", async () => {
     const res = compressResponse(get("br, gzip"), htmlResponse(chunkedHtml()));
 

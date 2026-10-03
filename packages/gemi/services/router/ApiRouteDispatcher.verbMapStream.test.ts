@@ -39,6 +39,7 @@ class RootApiRouter extends ApiRouter {
       get: this.stream(async () => new Blob(["0123456789"])),
       patch: this.patch(async () => ({ patched: true })),
     },
+    "/solo": this.stream(async () => new Blob(["0123456789"])),
   };
 }
 
@@ -72,9 +73,15 @@ describe("a verb map with a stream get", () => {
     expect(res.status).toBe(206);
     expect(res.headers.get("Content-Range")).toBe("bytes 2-4/10");
     expect(res.headers.get("Content-Length")).toBe("3");
-    // The body is not asserted: on Linux with Bun 1.3.14 a Range response
-    // through `app.fetch` sends past the window, standalone stream routes
-    // included (#725).
+    expect(await res.text()).toBe("234");
+  });
+
+  test("a standalone stream route sends only the window (#725)", async () => {
+    const res = await app.fetch(new Request(url("/solo"), { headers: { Range: "bytes=2-4" } }));
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Length")).toBe("3");
+    expect(await res.text()).toBe("234");
   });
 
   test("HEAD answers with the size and no body", async () => {
