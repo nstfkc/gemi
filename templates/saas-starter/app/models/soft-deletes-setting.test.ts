@@ -395,6 +395,15 @@ function suite(label: string, url?: string) {
         ).toBe("x");
       });
 
+      test("a nested connect cannot reach a trashed row", async () => {
+        await expect(
+          TrashUser.update({
+            where: { id: bob },
+            data: { accounts: { connect: { id: goneAccount } } },
+          }),
+        ).rejects.toBeInstanceOf(RecordNotFoundError);
+      });
+
       test("delete stays a hard delete, and a trashed row needs withTrashed", async () => {
         await expect(
           TrashUser.delete({ where: { id: gone } }),
