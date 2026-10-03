@@ -1,3 +1,49 @@
+# Unreleased
+
+## `ai`: `s.fromJSONSchema`, `validate()` and per-run tool input schemas (#710)
+
+**New, opt-in.** Three additions for tools whose input shape comes from data
+(a collection a user defined) rather than code:
+
+- `s.fromJSONSchema(schema, { formats?, ignoreKeywords? })` builds an `s`
+  schema from a JSON Schema in the subset `s` models: `string`, `number`,
+  `integer`, `boolean`, `object` (`properties`, `required`,
+  `additionalProperties: false`), `array` (one `items`, `minItems`,
+  `maxItems`), `enum`, `const`, `anyOf`, `[T, "null"]`, `minLength`,
+  `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
+  and `format`. Annotations (`title`, `default`, `examples`, `$schema`, every
+  `x-` keyword, plus `ignoreKeywords`) are skipped. Anything else (`pattern`,
+  `oneOf`, `$ref`, tuples, an open `additionalProperties`, a `format` with no
+  check in `formats`) throws a `JSONSchemaError` whose `problems` list every
+  issue with its path. A format check is `true`, a `RegExp` or
+  `(value) => boolean`. The result stays strict-mode safe: the length, range
+  and format constraints are enforced on parse and told to the model in the
+  field's description, not sent as keywords. A property not in `required` is
+  `optional()`, and unknown object keys are dropped from the parsed value
+  rather than reported.
+- `schema.validate(value)` on every `s` schema returns `{ ok: true, value }` or
+  `{ ok: false, issues }`, where each issue has a `path` (`["items", 0,
+  "price"]`), a `code` named after the JSON Schema keyword (`required`,
+  `type`, `enum`, `minLength`, `maximum`, `format`, …, the same names as
+  Ajv's `keyword`), `params` (`limit`, `format`, `allowedValues`) and a
+  `message`. `parse`/`safeParse` are unchanged.
+- `AgentTool.create({ inputSchema })` also takes
+  `(ctx: ToolSchemaContext) => Schema | Promise<Schema>`, resolved once when a
+  run starts from `ctx.body`/`ctx.context`. The resolved schema is what the
+  model sees and what that run's calls are validated against. A resolver that
+  throws, or returns a non-object schema, fails the run with `tool_error`
+  before the model is called.
+
+New exports from `gemi/ai`: `JSONSchemaError`, and the types
+`FromJSONSchemaOptions`, `JSONSchemaFormat`, `SchemaIssue`, `SchemaIssueCode`,
+`ToolInputSchema` and `ToolSchemaContext`. `AgentTool#inputSchema` is now typed
+`ToolInputSchema<Input>`. Code that reads it off a tool needs to handle the
+function form.
+
+**Action:** none. To replace Ajv for a JSON Schema in this subset, build it once
+with `s.fromJSONSchema(schema, { formats })`, call `.validate(value)` and map
+`issue.code`/`issue.params` the way you mapped Ajv's `keyword`/`params`.
+
 # Upgrading from 0.85.0 to 0.86.0
 
 ## `client`: `concurrency: "parallel"` for mutation hooks (#719)

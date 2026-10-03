@@ -9,7 +9,7 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 
-import { s, type Infer, type JsonValue } from "./Schema";
+import { s, type Infer, type JsonValue, type SchemaIssue } from "./Schema";
 
 describe("Infer over the leaves", () => {
   test("reads scalars back", () => {
@@ -223,5 +223,16 @@ describe("Infer through nesting", () => {
     type Result = ReturnType<typeof schema.safeParse>;
     expectTypeOf<Extract<Result, { ok: true }>["value"]>().toEqualTypeOf<Infer<typeof schema>>();
     expectTypeOf<Extract<Result, { ok: false }>["errors"]>().toEqualTypeOf<string[]>();
+  });
+});
+
+describe("s.fromJSONSchema", () => {
+  test("is JsonValue unless a type is asserted, and has validate", () => {
+    const loose = s.fromJSONSchema({ type: "string" });
+    expectTypeOf<Infer<typeof loose>>().toEqualTypeOf<JsonValue>();
+    const typed = s.fromJSONSchema<{ title: string }>({ type: "object" });
+    expectTypeOf<Infer<typeof typed>>().toEqualTypeOf<{ title: string }>();
+    const result = typed.validate({});
+    if (result.ok === false) expectTypeOf(result.issues).toEqualTypeOf<SchemaIssue[]>();
   });
 });
