@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.88.2 to 0.89.0
 
 ## Stream routes: `nosniff` by default, and decorated reads (#727)
 
