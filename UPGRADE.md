@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.93.0 to 0.94.0
 
 ## Per-key throttles and concurrency for jobs (#661)
 
