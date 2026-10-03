@@ -155,10 +155,10 @@ describe("the errors a mutation reports", () => {
 });
 
 /**
- * What a server before 0.85 sent, which a newer client still reads during a
+ * What a server before 0.88 sent, which a newer client still reads during a
  * rolling deploy: bare strings, and `{ message }` with no kind.
  */
-describe("a server before 0.85", () => {
+describe("a server before 0.88", () => {
   const legacy = (status: number, error: unknown) =>
     new Response(JSON.stringify({ error }), { status });
 

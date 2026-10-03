@@ -8,6 +8,7 @@ import type {
   AuthModels,
   CreateAccountArgs,
   CreateMagicLinkTokenArgs,
+  MagicLinkTokenRow,
   CreatePasswordResetTokenArgs,
   CreateSessionArgs,
   CreateSocialAccountArgs,
@@ -577,6 +578,11 @@ export class UserProvider<TSession = SessionWithUser> {
     );
   }
 
+  /**
+   * @deprecated Looks the row up by the value as given, and since 0.88 the
+   * columns hold hashes (#708), so a code or token as issued no longer finds
+   * its row. gemi's routes do not call this; use `findMagicLinkTokenByEmail`.
+   */
   async findUserMagicLinkToken(args: {
     token?: string;
     pin?: string;
@@ -603,6 +609,32 @@ export class UserProvider<TSession = SessionWithUser> {
             where: { pin_email: { pin: args.pin, email: args.email } },
           }),
     );
+  }
+
+  /**
+   * The newest one-time-code row for `email`, or null. `AuthManager` compares
+   * the hashes itself, in constant time, rather than asking the database for a
+   * row matching the code (#708).
+   */
+  async findMagicLinkTokenByEmail(email: string): Promise<MagicLinkTokenRow | null> {
+    return await this.run(() =>
+      this.models.MagicLinkToken.findFirst({
+        where: { email },
+        orderBy: { id: "desc" },
+      }),
+    );
+  }
+
+  /**
+   * Deletes row `id` and reports whether this call is the one that deleted it.
+   * Two requests verifying the same code at once both match it; only the one
+   * that gets `true` here may sign in.
+   */
+  async claimMagicLinkToken(id: number): Promise<boolean> {
+    const { count }: { count: number } = await this.run(() =>
+      this.models.MagicLinkToken.deleteMany({ where: { id } }),
+    );
+    return count === 1;
   }
 
   async deleteMagicLinkToken(email: string): Promise<void> {

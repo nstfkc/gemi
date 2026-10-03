@@ -39,5 +39,9 @@ export class AuthApiRouter extends ApiRouter {
     "/magic-link": this.post(AuthController, "createMagicLinkToken"),
     "/sign-in-with-pin": this.post(AuthController, "signInWithPin"),
     "/sign-in-with-pin-v2": this.post(AuthController, "signInWithPinV2"),
+    // Sign-up-or-sign-in with a one-time email code (#708). 404 unless
+    // `auth.emailCode.enabled`.
+    "/email-code": this.post(AuthController, "requestEmailCode"),
+    "/email-code/verify": this.post(AuthController, "verifyEmailCode"),
   };
 }

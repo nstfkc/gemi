@@ -1,11 +1,17 @@
-import { randomBytes } from "crypto";
 import { HttpRequest } from "../http";
 import { AuthenticationError } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import { isSessionToken, migratedSessionToken, mintSessionToken } from "./sessionToken";
-import type { SessionWithUser } from "./types";
+import type { MagicLinkTokenRow, SessionWithUser } from "./types";
+import {
+  countCodeAttempt,
+  hashOneTimeSecret,
+  oneTimeSecretMatches,
+  randomDigits,
+} from "./oneTimeCode";
 import {
   authConfigDefaults,
+  emailCodeDefaults,
   type AuthConfig,
   type LegacySessionMigrator,
 } from "./config";
@@ -73,7 +79,12 @@ export class AuthManager {
     config: AuthConfig = {},
     provider: UserProvider<any> = new UserProvider(),
   ) {
-    this.config = withDefaults(authConfigDefaults(config), config);
+    this.config = {
+      ...withDefaults(authConfigDefaults(config), config),
+      // Nested, so the shallow merge above would drop the defaults of every
+      // key the app's `emailCode` leaves out.
+      emailCode: emailCodeDefaults(config.emailCode),
+    };
     this.provider = provider;
   }
 
@@ -473,24 +484,19 @@ export class AuthManager {
     return found?.user ? found : created;
   }
 
+  /**
+   * Issues a magic link and PIN for an existing user, as `/auth/magic-link`
+   * and `Auth.createMagicLink` always have, and returns them as issued for the
+   * app to mail. An address with no user gets `{}` and nothing is written.
+   *
+   * Since 0.88 the stored row holds hashes of both (#708); the plain values
+   * exist only in what this returns.
+   */
   async createMagicLinkToken(email: string) {
     const user = await this.userProvider.findUserByEmailAddress(email, false);
 
     if (user) {
-      await this.userProvider.deleteMagicLinkToken(email);
-
-      const token = await this.config.generateMagicLinkToken(email);
-
-      const pin = (Number.parseInt(randomBytes(4).toString("hex"), 16) % 1000000)
-        .toString()
-        .padStart(6, "0");
-
-      await this.userProvider.createMagicLinkToken({
-        email,
-        token,
-        pin,
-      });
-
+      const { pin, token } = await this.issueOneTimeCode(email, 6);
       return {
         user,
         email,
@@ -500,5 +506,92 @@ export class AuthManager {
     }
 
     return {};
+  }
+
+  /**
+   * Replaces any outstanding code for `email` with a new one and stores it
+   * hashed. Writes whether or not a user has the address; callers decide that.
+   */
+  async issueOneTimeCode(email: string, length: number) {
+    await this.userProvider.deleteMagicLinkToken(email);
+
+    const token = await this.config.generateMagicLinkToken(email);
+    const custom = await this.config.generateCode(email);
+    const pin = typeof custom === "string" && custom !== "" ? custom : randomDigits(length);
+
+    await this.userProvider.createMagicLinkToken({
+      email,
+      token: hashOneTimeSecret("link", email, token),
+      pin: hashOneTimeSecret("pin", email, pin),
+    });
+
+    return { email, pin, token };
+  }
+
+  /**
+   * Checks a typed code against the outstanding row for `email`, and on a
+   * match deletes the row, so the code works once. Every guess counts against
+   * `emailCode.maxAttempts`, the right one included, before the comparison;
+   * the guess past the limit deletes the row. The comparison is of keyed
+   * hashes, in constant time.
+   *
+   * `claim: false` leaves the row for the caller to claim (with
+   * `userProvider.claimMagicLinkToken`) inside a transaction of its own.
+   */
+  async verifyOneTimeCode(
+    email: string,
+    code: unknown,
+    options: { claim?: boolean } = {},
+  ): Promise<
+    | { status: "ok"; row: MagicLinkTokenRow }
+    | { status: "invalid" | "expired" | "too_many_attempts" }
+  > {
+    const { expiresInMinutes, maxAttempts } = this.config.emailCode;
+    const row = await this.userProvider.findMagicLinkTokenByEmail(email);
+    if (!row) {
+      // Hashed anyway, so an address with no code costs what a wrong code does.
+      oneTimeSecretMatches("pin", email, null, code);
+      return { status: "invalid" };
+    }
+
+    const issuedAt = expiryMs(row.createdAt);
+    if (issuedAt + expiresInMinutes * 60_000 <= Date.now()) {
+      oneTimeSecretMatches("pin", email, null, code);
+      return { status: "expired" };
+    }
+
+    if (!(await countCodeAttempt(row.id, issuedAt, maxAttempts, expiresInMinutes))) {
+      await this.userProvider.claimMagicLinkToken(row.id);
+      return { status: "too_many_attempts" };
+    }
+
+    if (!oneTimeSecretMatches("pin", email, row.pin, code)) {
+      return { status: "invalid" };
+    }
+
+    if (options.claim !== false && !(await this.userProvider.claimMagicLinkToken(row.id))) {
+      // A concurrent request with the same code got there first.
+      return { status: "invalid" };
+    }
+
+    return { status: "ok", row };
+  }
+
+  /**
+   * The link counterpart of `verifyOneTimeCode`, for
+   * `/auth/sign-in/magic-link`: valid for `emailCode.linkExpiresInMinutes`,
+   * single use. Not attempt-counted: a 256-bit token is not guessed.
+   */
+  async verifyMagicLinkToken(email: string, token: unknown): Promise<boolean> {
+    const row = await this.userProvider.findMagicLinkTokenByEmail(email);
+    const matches = oneTimeSecretMatches("link", email, row?.token, token);
+    if (!row || !matches) {
+      return false;
+    }
+    const issuedAt = expiryMs(row.createdAt);
+    if (issuedAt + this.config.emailCode.linkExpiresInMinutes * 60_000 <= Date.now()) {
+      return false;
+    }
+    return await this.userProvider.claimMagicLinkToken(row.id);
   }
 }

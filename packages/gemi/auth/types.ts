@@ -157,3 +157,12 @@ export interface CreateMagicLinkTokenArgs {
   token: string;
   pin: string;
 }
+
+/** A `MagicLinkToken` row. `token` and `pin` hold hashes (see `auth/oneTimeCode.ts`). */
+export interface MagicLinkTokenRow {
+  id: number;
+  email: string;
+  token: string;
+  pin: string;
+  createdAt: Date;
+}

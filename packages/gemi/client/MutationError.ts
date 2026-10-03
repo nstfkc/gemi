@@ -12,7 +12,7 @@ import { refusalKindForStatus, type RefusalKind } from "../http/refusal";
  * member by member, read off the server's error payloads and the client's
  * fetch code (issue #626).
  *
- * Since 0.85 every refusal is an object with a `kind`, its `message` and the
+ * Since 0.88 every refusal is an object with a `kind`, its `message` and the
  * `status` it came with (issue #673). Most refusals were a bare string before,
  * which carried no status, so a refusal thrown with a message of its own could
  * not be told apart from any other string. A server older than 0.85 still sends
@@ -68,7 +68,7 @@ export interface MutationRefusal<K extends MutationRefusalKind = MutationRefusal
 
 /**
  * @deprecated A `{ message }` body is wrapped into a `MutationRefusal` or
- * `MutationFormError` since 0.85, and `MutationError` no longer includes this.
+ * `MutationFormError` since 0.88, and `MutationError` no longer includes this.
  */
 export interface MutationMessageError {
   kind?: undefined;
@@ -86,7 +86,7 @@ export interface MutationMessageError {
  *   JSON (a proxy's HTML error page, say). A throw from an `onSuccess` of
  *   yours is reported through `onError` as well, as whatever it threw.
  *
- * Never a string since 0.85. A cancelled request is not an error: `onCanceled`
+ * Never a string since 0.88. A cancelled request is not an error: `onCanceled`
  * runs and `error` stays `null`. A route that answers an error body of its own
  * shape is outside this type: a body with an `error` field
  * (`HttpResponse.json({ error }, { status: 409 })`) hands over that field, as
@@ -114,7 +114,7 @@ export type MutationErrorKind =
   | "network"
   | "unknown";
 
-// What a server before 0.85 sent: the framework's own messages, as bare
+// What a server before 0.88 sent: the framework's own messages, as bare
 // strings, or as `{ message }`. Read so a client on 0.85 classifies an older
 // server's refusals during a rolling deploy. Remove in 0.86.
 const LEGACY_MESSAGES: Record<string, RefusalKind> = {
@@ -132,7 +132,7 @@ function isObject(error: unknown): error is Record<string, unknown> {
   return typeof error === "object" && error !== null;
 }
 
-// A bare string from a server before 0.85. Its own message names the kind when
+// A bare string from a server before 0.88. Its own message names the kind when
 // it is one of the framework's; otherwise the status does, and a 401 with a
 // message of its own can only be an `AuthorizationError` — an
 // `AuthenticationError` always says "Authentication error".
@@ -151,7 +151,7 @@ function legacyKind(message: string, status: number): RefusalKind {
  * whole. A body with no content (`null`) becomes a refusal naming the status.
  *
  * What is handed over carries `status`, and a `kind` when it has a `message`:
- * a bare string, which servers before 0.85 sent for most refusals, becomes
+ * a bare string, which servers before 0.88 sent for most refusals, becomes
  * `{ kind, message, status }`, and so does a `{ message }` without a kind.
  *
  * @internal
@@ -195,7 +195,7 @@ function kindOf(error: unknown): string | undefined {
 }
 
 // The guards read `kind`, falling back to `status`, and accept the bare
-// strings and `{ message }` bodies of a server before 0.85 for one minor. What
+// strings and `{ message }` bodies of a server before 0.88 for one minor. What
 // the hooks hand over is already wrapped, so those fallbacks only matter for a
 // body passed in by hand.
 

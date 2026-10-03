@@ -84,7 +84,7 @@ const snippets = {
   neverAString: `
     export function f(error: MutationError) {
       const notString: string extends MutationError ? false : true = true;
-      // @ts-expect-error a refusal is never a bare string since 0.85
+      // @ts-expect-error a refusal is never a bare string since 0.88
       const s: string = error;
       return [notString, s];
     }`,

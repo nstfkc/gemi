@@ -291,6 +291,9 @@ export {
   defineAuthConfig,
   authConfigDefaults,
   type AuthConfig,
+  type AuthenticatedArgs,
+  type EmailCodeConfig,
+  type EmailCodeSendArgs,
   type LegacySessionMigrator,
 } from "../auth/config";
 export {
