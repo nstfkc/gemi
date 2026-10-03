@@ -105,6 +105,7 @@ describe("Email.send with EMAIL_DEBUG", () => {
       },
       attachments: [{ filename: "invoice.pdf", bytes: 5 }],
       scheduledAt: "2026-10-02T10:00:00.000Z",
+      idempotencyKey: null,
       locale: "tr-TR",
       text: expect.stringContaining("Ada"),
     });

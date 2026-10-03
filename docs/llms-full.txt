@@ -11171,8 +11171,22 @@ The argument shape:
   headers?: Record<string, string>;
   locale?: string;
   scheduledAt?: string;
+  idempotencyKey?: string;
 }
 ```
+
+`send` resolves to an `EmailSendResult`:
+
+```typescript
+{
+  id: string | null;      // the provider's message id
+  provider: string;       // "resend", your driver's `provider`, or "debug"
+  status: "sent" | "failed" | "skipped" | "debug";
+  error?: unknown;        // what the driver reported, when status is "failed"
+}
+```
+
+`status` is `skipped` when `filterRecipients` left nobody to send to, and `failed` when the driver rejected the message (`send` does not throw for that, as before). Store `id` if you track delivery, for example against Resend webhooks.
 
 Key points:
 
@@ -11193,6 +11207,7 @@ Key points:
 >   "headers": {},
 >   "attachments": [{ "filename": "invoice.pdf", "bytes": 1234 }],
 >   "scheduledAt": null,
+>   "idempotencyKey": null,
 >   "locale": "tr-TR",
 >   "text": "..."
 > }
@@ -11277,14 +11292,25 @@ export default defineMailConfig({
 
 ### Custom drivers
 
-Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider, then point the config at it:
+Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider, then point the config at it. To report the provider's message id from `Email.send`, also override `deliver`, which returns `{ ok, id, error? }`; the default calls `send` and reports `id: null`. Set `provider` to name the driver in send results, and `supportsIdempotencyKey` if it forwards `params.idempotencyKey`:
 
 ```typescript
-import { EmailDriver, type SendEmailParams } from "gemi/services";
+import {
+  EmailDriver,
+  type EmailDeliveryResult,
+  type SendEmailParams,
+} from "gemi/services";
 
 export class PostmarkDriver extends EmailDriver {
+  override readonly provider = "postmark";
+
   async send(params: SendEmailParams) {
-    /* ... */
+    return (await this.deliver(params)).ok;
+  }
+
+  override async deliver(params: SendEmailParams): Promise<EmailDeliveryResult> {
+    /* call the provider, then: */
+    return { ok: true, id: "<provider message id>" };
   }
 }
 ```
@@ -11365,6 +11391,22 @@ await WelcomeEmail.send({
   scheduledAt: "in 3 min",
 });
 ```
+
+## Retries and idempotency
+
+A send from a job that may run twice (a queue retry, a cron run that overlaps) can pass an `idempotencyKey`. The provider delivers the first request with a key and answers a repeat without sending again:
+
+```typescript
+const { id, status } = await ReportEmail.send({
+  to: [recipient.email],
+  data: { report },
+  idempotencyKey: `report:${report.id}:${recipient.id}`,
+});
+```
+
+Make the key stable per delivery (the same report to the same recipient), not per attempt. `ResendDriver` sends it as Resend's `Idempotency-Key` header; Resend keeps keys for 24 hours, so a retry after that sends again, and reusing a key with a different payload is rejected. Stop retrying before the key expires.
+
+Drivers that don't support keys ignore them: check `driver.supportsIdempotencyKey` (`true` for `ResendDriver`, `false` by default). Under `EMAIL_DEBUG=true` the key is recorded in the `.json` sidecar and `send` returns a fake id (`debug_<uuid>`).
 
 ## Attachments
 
