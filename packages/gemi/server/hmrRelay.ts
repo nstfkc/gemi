@@ -71,25 +71,35 @@ export function isHmrUpgrade(req: Request): boolean {
 }
 
 export type HmrRelayData = {
-  /** `ws://127.0.0.1:<port><path>?<query>` */
-  target: string;
-  protocol: string;
-  headers: Record<string, string>;
-  upstream?: WebSocket;
-  /** Frames from the browser that arrived before the upstream opened. */
-  pending: (string | Buffer)[];
+  /** The socket to Vite, already open when the browser's is accepted. */
+  upstream: WebSocket;
+  /** Frames Vite sent before the browser's socket opened (its `connected`). */
+  early: (string | Uint8Array)[];
+  browser?: ServerWebSocket<HmrRelayData>;
 };
 
+type Frame = string | Uint8Array;
+
+const frameOf = (data: unknown): Frame =>
+  typeof data === "string" ? data : new Uint8Array(data as ArrayBuffer);
+
 /**
- * Upgrade the browser's socket and mark it for relaying to `port`. Returns
- * `undefined` once Bun has taken the request over, or a `Response` when the
- * upgrade could not be made.
+ * Open the socket to Vite first, and accept the browser's upgrade only once
+ * Vite has accepted it. Returns `undefined` once Bun has taken the request
+ * over, or a refusal.
+ *
+ * The order matters. Vite refuses a socket whose host is not in
+ * `allowedHosts`, or a cross-origin one without its token. Had the browser's
+ * socket been accepted first and closed when Vite refused, the client would
+ * read that as "server connection lost", ping (which Vite always answers),
+ * and reload the page, forever. Refused before it opens, the client logs one
+ * "failed to connect to websocket" and the page keeps working.
  */
-export function upgradeHmr(
+export async function upgradeHmr(
   req: Request,
   server: Server<HmrRelayData>,
   port: number,
-): Response | undefined {
+): Promise<Response | undefined> {
   const url = new URL(req.url);
   const protocol = req.headers.get("sec-websocket-protocol") ?? "vite-hmr";
   // `Host` is what Vite's `allowedHosts` check reads; the URL's host is the
@@ -99,20 +109,48 @@ export function upgradeHmr(
   };
   const origin = req.headers.get("origin");
   if (origin) headers.origin = origin;
+
+  const upstream = new WebSocket(
+    `ws://127.0.0.1:${port}${url.pathname}${url.search}`,
+    {
+      protocols: [protocol],
+      headers,
+    } as any,
+  );
+  upstream.binaryType = "arraybuffer";
+  const data: HmrRelayData = { upstream, early: [] };
+
+  upstream.onmessage = (event) => {
+    const frame = frameOf(event.data);
+    if (data.browser) data.browser.send(frame);
+    else data.early.push(frame);
+  };
+  upstream.onclose = (event) => {
+    data.browser?.close(sendableCloseCode(event.code), event.reason);
+  };
+  upstream.onerror = () => {
+    // A `close` follows; it ends the browser's socket if there is one.
+  };
+
+  const opened = await new Promise<boolean>((resolve) => {
+    upstream.addEventListener("open", () => resolve(true), { once: true });
+    upstream.addEventListener("close", () => resolve(false), { once: true });
+  });
+  if (!opened) {
+    return new Response("Vite refused the HMR websocket", { status: 403 });
+  }
+
   const upgraded = server.upgrade(req, {
     // The browser fails a connection whose response does not echo the
     // subprotocol it asked for.
     headers: { "Sec-WebSocket-Protocol": protocol },
-    data: {
-      target: `ws://127.0.0.1:${port}${url.pathname}${url.search}`,
-      protocol,
-      headers,
-      pending: [],
-    },
+    data,
   });
-  return upgraded
-    ? undefined
-    : new Response("WebSocket upgrade failed", { status: 400 });
+  if (!upgraded) {
+    upstream.close();
+    return new Response("WebSocket upgrade failed", { status: 400 });
+  }
+  return undefined;
 }
 
 // A close code that may be sent in a close frame. 1005, 1006 and 1015 are
@@ -133,43 +171,19 @@ function sendableCloseCode(code: number): number {
 export const hmrRelayHandler: WebSocketHandler<HmrRelayData> = {
   open(ws: ServerWebSocket<HmrRelayData>) {
     const data = ws.data;
-    const upstream = new WebSocket(data.target, {
-      protocols: [data.protocol],
-      headers: data.headers,
-    } as any);
-    upstream.binaryType = "arraybuffer";
-    data.upstream = upstream;
-
-    upstream.onopen = () => {
-      for (const frame of data.pending) upstream.send(frame);
-      data.pending = [];
-    };
-    upstream.onmessage = (event) => {
-      ws.send(
-        typeof event.data === "string"
-          ? event.data
-          : new Uint8Array(event.data as ArrayBuffer),
-      );
-    };
-    upstream.onclose = (event) => {
-      ws.close(sendableCloseCode(event.code), event.reason);
-    };
-    upstream.onerror = () => {
-      // A `close` follows, which ends the browser's socket.
-    };
+    for (const frame of data.early) ws.send(frame);
+    data.early = [];
+    data.browser = ws;
+    // Vite may have hung up while the upgrade was in flight.
+    if (data.upstream.readyState !== WebSocket.OPEN) ws.close(1000);
   },
   message(ws: ServerWebSocket<HmrRelayData>, message) {
-    const { upstream, pending } = ws.data;
-    if (upstream?.readyState === WebSocket.OPEN) {
-      upstream.send(message);
-    } else {
-      pending.push(message);
+    if (ws.data.upstream.readyState === WebSocket.OPEN) {
+      ws.data.upstream.send(message);
     }
   },
   close(ws: ServerWebSocket<HmrRelayData>) {
-    const upstream = ws.data.upstream;
-    if (upstream && upstream.readyState <= WebSocket.OPEN) {
-      upstream.close();
-    }
+    const { upstream } = ws.data;
+    if (upstream.readyState <= WebSocket.OPEN) upstream.close();
   },
 };

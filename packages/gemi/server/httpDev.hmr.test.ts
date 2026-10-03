@@ -28,12 +28,15 @@ vi.mock("./hmrPort", () => ({ resolveHmrPort }));
 
 // The loopback server Vite's websocket is attached to. Stubbed so this file
 // binds nothing; `hmrRelay.test.ts` runs the real one against a real Vite.
-const { listenHmrServer } = vi.hoisted(() => ({
+// `upgradeHmr` is stubbed too: the real one dials Vite before accepting.
+const { listenHmrServer, upgradeHmr } = vi.hoisted(() => ({
   listenHmrServer: vi.fn(async (port: number) => ({ address: () => ({ port }) })),
+  upgradeHmr: vi.fn(async () => undefined),
 }));
 vi.mock("./hmrRelay", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./hmrRelay")>()),
   listenHmrServer,
+  upgradeHmr,
 }));
 
 vi.mock("vite", () => ({
@@ -70,6 +73,7 @@ beforeEach(() => {
   servedOptions.length = 0;
   resolveHmrPort.mockClear();
   listenHmrServer.mockClear();
+  upgradeHmr.mockClear();
   // `httpDev` caches its Vite server here across `bun --hot` reloads, so a test
   // that left one behind would stop the next one from creating a config at all.
   delete (globalThis as any).__gemiVite;
@@ -154,30 +158,19 @@ describe("httpDev's HMR websocket behind a proxy", () => {
     expect(createdConfigs[0].server.ws.clientPort).toBeUndefined();
   });
 
-  test("upgrades the Vite client's socket on the page's port and relays it", async () => {
+  test("relays the Vite client's socket on the page's port to Vite's loopback server", async () => {
     delete process.env.PORT;
     await startDev();
     const { fetch, websocket } = servedOptions[0];
     expect(websocket).toBeDefined();
 
-    const upgrade = vi.fn(() => true);
+    const server = { upgrade: vi.fn() };
     const req = new Request("http://tunnel.example/?token=t", {
-      headers: {
-        upgrade: "websocket",
-        "sec-websocket-protocol": "vite-hmr",
-        origin: "https://tunnel.example",
-      },
+      headers: { upgrade: "websocket", "sec-websocket-protocol": "vite-hmr" },
     });
-    expect(await fetch(req, { upgrade })).toBeUndefined();
+    expect(await fetch(req, server)).toBeUndefined();
 
-    expect(upgrade).toHaveBeenCalledWith(req, {
-      headers: { "Sec-WebSocket-Protocol": "vite-hmr" },
-      data: expect.objectContaining({
-        target: "ws://127.0.0.1:15173/?token=t",
-        protocol: "vite-hmr",
-        headers: { host: "tunnel.example", origin: "https://tunnel.example" },
-      }),
-    });
+    expect(upgradeHmr).toHaveBeenCalledWith(req, server, 15_173);
   });
 
   test("hands every other request, other websockets included, to the app", async () => {
@@ -187,6 +180,7 @@ describe("httpDev's HMR websocket behind a proxy", () => {
     const upgrade = vi.fn(() => true);
 
     const page = await fetch(new Request("http://localhost:5173/"), { upgrade });
+    expect(upgradeHmr).not.toHaveBeenCalled();
     const otherSocket = await fetch(
       new Request("http://localhost:5173/", {
         headers: { upgrade: "websocket", "sec-websocket-protocol": "chat" },
@@ -222,6 +216,6 @@ describe("httpDev's HMR websocket behind a proxy", () => {
     );
 
     expect(await res.text()).toBe("ok");
-    expect(upgrade).not.toHaveBeenCalled();
+    expect(upgradeHmr).not.toHaveBeenCalled();
   });
 });

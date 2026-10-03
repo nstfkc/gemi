@@ -125,15 +125,32 @@ describe("the HMR relay", () => {
     ws.close();
   });
 
-  test("still lets Vite refuse a cross-origin socket without its token", async () => {
-    const ws = openHmrSocket("wrong-token", "https://evil.example");
-    const closed = await new Promise<number>((resolve) =>
-      ws.addEventListener("close", (event) => resolve(event.code), {
-        once: true,
-      }),
+  // Refused before it opens, not opened and then closed: an opened-then-closed
+  // socket makes Vite's client ping, succeed, and reload the page, forever.
+  async function outcome(ws: WebSocket) {
+    let opened = false;
+    ws.addEventListener("open", () => (opened = true));
+    await new Promise((resolve) =>
+      ws.addEventListener("close", resolve, { once: true }),
     );
-    expect(closed).not.toBe(1000);
-    expect(ws.readyState).toBe(WebSocket.CLOSED);
+    return { opened };
+  }
+
+  test("still lets Vite refuse a cross-origin socket without its token, before it opens", async () => {
+    const ws = openHmrSocket("wrong-token", "https://evil.example");
+    expect(await outcome(ws)).toEqual({ opened: false });
+  });
+
+  test("still lets Vite refuse a host it does not allow, before it opens", async () => {
+    // Vite's default `allowedHosts` admits localhost and IPs only.
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${page.port}/?token=${vite.config.webSocketToken}`,
+      {
+        protocols: ["vite-hmr"],
+        headers: { host: "tunnel.example" },
+      } as any,
+    );
+    expect(await outcome(ws)).toEqual({ opened: false });
   });
 });
 
