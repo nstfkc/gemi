@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.86.0 to 0.86.1
 
 ## `auth`: request input is type-checked before it reaches a query (security hardening)
 
