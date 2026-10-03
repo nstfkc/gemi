@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.87.0 to 0.88.0
 
 ## `auth`: email-code sign-in, and hardened magic-link PINs (#708)
 
