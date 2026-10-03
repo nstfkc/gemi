@@ -69,6 +69,10 @@ export default class Root extends ApiRouter {
     "/(group)/grouped": this.get(() => ({ grouped: true })),
     "/download": this.file(() => null),
     "/video": this.stream(() => null),
+    "/media/:mediaId": {
+      get: this.stream(() => null),
+      delete: this.delete(() => ({ ok: true })),
+    },
   };
 }
 `;

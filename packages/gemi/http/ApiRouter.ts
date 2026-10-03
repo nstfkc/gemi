@@ -229,11 +229,22 @@ export class StreamHandler {
   declare middleware: (middlewareList: string[]) => StreamHandler;
 }
 
+/**
+ * A verb map: several methods on one path.
+ *
+ * `get` also takes `this.stream(...)` and `this.file(...)`, so a path can
+ * serve its bytes and accept writes — `{ get: this.stream(...), delete:
+ * this.delete(...) }` (#707). Neither is a `RouteHandler` at the type level,
+ * so `RouteHandlersParser` drops that `GET` from the RPC types and keeps the
+ * other verbs, the same way a stream or file route on its own path is left
+ * out. `createFlatApiRoutes` gives a stream `get` its `HEAD` as well.
+ */
 export type RouteHandlers = Partial<{
   post: RouteHandler<"POST", any, any, any>;
-  get: RouteHandler<"GET", any, any, any>;
+  get: RouteHandler<"GET", any, any, any> | StreamHandler | FileHandler;
   delete: RouteHandler<"DELETE", any, any, any>;
   put: RouteHandler<"PUT", any, any, any>;
+  patch: RouteHandler<"PATCH", any, any, any>;
 }>;
 
 export type ApiRoutes = Record<

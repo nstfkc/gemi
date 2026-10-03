@@ -1,3 +1,27 @@
+# Unreleased
+
+## `ApiRouter`: a stream or file `get` can share a path with other verbs (#707)
+
+A verb map now takes `this.stream(...)` or `this.file(...)` for `get`, next to
+the other methods:
+
+```ts
+"/pages/:pageId/assets/files/:fileId": {
+  get: this.stream(AssetController, "file"),
+  delete: this.delete(AssetController, "deleteFile"),
+},
+```
+
+The stream `get` answers `HEAD` and `Range` exactly as a stream route on its
+own path does. As before, the byte `GET` stays out of the RPC types, so
+`useQuery` does not offer it; the other verbs (`DELETE` above) are typed as
+usual. Apps that split one resource across two URLs to work around this can
+merge them.
+
+Also fixed: `patch` is now part of the verb map's type, and a map whose only
+key is `patch` (`{ patch: this.patch(...) }`) is registered. It used to be
+silently dropped at runtime. No other change is needed to upgrade.
+
 # Upgrading from 0.87.0 to 0.88.0
 
 ## `auth`: email-code sign-in, and hardened magic-link PINs (#708)

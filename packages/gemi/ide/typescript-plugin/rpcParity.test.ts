@@ -76,6 +76,7 @@ describe("the route table against the RPC types", () => {
     expect(fromTypes).toContain("DELETE:/org/:orgId/products/:productId");
     expect(fromTypes).toContain("GET:/grouped");
     expect(fromTypes).toContain("POST:/thing");
+    expect(fromTypes).toContain("DELETE:/media/:mediaId");
     expect(fromTypes.length).toBeGreaterThanOrEqual(16);
   });
 
@@ -111,6 +112,6 @@ describe("the route table against the RPC types", () => {
       .map((entry) => `${entry.verb}:${entry.path}`)
       .sort();
 
-    expect(excluded).toEqual(["GET:/download", "GET:/video"]);
+    expect(excluded).toEqual(["GET:/download", "GET:/media/:mediaId", "GET:/video"]);
   });
 });

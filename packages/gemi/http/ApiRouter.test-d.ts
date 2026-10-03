@@ -50,6 +50,16 @@ class Root extends ApiRouter {
     "/video": this.stream(() => null),
     "/video-guarded": this.stream(() => null).middleware(["auth"]),
     "/sub": SubRouter,
+    // #707: a stream or file `get` next to other verbs on one path.
+    "/assets/:fileId": {
+      get: this.stream(() => null),
+      delete: this.delete(() => ({ deleted: true })),
+    },
+    "/reports/:id": {
+      get: this.file(() => null).middleware(["auth"]),
+      post: this.post(() => ({ created: 1 })),
+      patch: this.patch(() => ({ patched: 1 })),
+    },
   };
 }
 
@@ -90,6 +100,54 @@ describe("CreateRPC", () => {
     expectTypeOf<"GET:/download">().not.toExtend<Keys>();
     expectTypeOf<"GET:/video">().not.toExtend<Keys>();
     expectTypeOf<"GET:/video-guarded">().not.toExtend<Keys>();
+  });
+});
+
+describe("verb maps with a stream or file get (#707)", () => {
+  test("keep their JSON verbs in the RPC types", () => {
+    expectTypeOf<"DELETE:/assets/:fileId">().toExtend<Keys>();
+    expectTypeOf<"POST:/reports/:id">().toExtend<Keys>();
+    expectTypeOf<"PATCH:/reports/:id">().toExtend<Keys>();
+    expectTypeOf<ReturnType<RPC["DELETE:/assets/:fileId"]>>().toEqualTypeOf<{
+      deleted: boolean;
+    }>();
+    expectTypeOf<ReturnType<RPC["PATCH:/reports/:id"]>>().toEqualTypeOf<{ patched: number }>();
+  });
+
+  test("drop the byte GET, as a stream or file route on its own path is dropped", () => {
+    expectTypeOf<"GET:/assets/:fileId">().not.toExtend<Keys>();
+    expectTypeOf<"GET:/reports/:id">().not.toExtend<Keys>();
+  });
+
+  test("accept a controller-backed stream next to a controller-backed delete", () => {
+    class AssetController extends Controller {
+      file() {
+        return new Blob(["x"]);
+      }
+      deleteFile() {
+        return { ok: true };
+      }
+    }
+    class R extends ApiRouter {
+      routes = {
+        "/pages/:pageId/assets/files/:fileId": {
+          get: this.stream(AssetController, "file"),
+          delete: this.delete(AssetController, "deleteFile"),
+        },
+      };
+    }
+    expectTypeOf<R["routes"]>().toExtend<ApiRoutes>();
+    expectTypeOf<"DELETE:/pages/:pageId/assets/files/:fileId">().toExtend<keyof CreateRPC<R>>();
+    expectTypeOf<"GET:/pages/:pageId/assets/files/:fileId">().not.toExtend<keyof CreateRPC<R>>();
+  });
+
+  test("still reject a stream or file under a verb other than get", () => {
+    // Both are GET routes; only `get` takes them.
+    expectTypeOf<{ delete: StreamHandler }>().not.toExtend<ApiRoutes[string]>();
+    expectTypeOf<{ post: FileHandler }>().not.toExtend<ApiRoutes[string]>();
+    expectTypeOf<{ get: StreamHandler; delete: RouteHandler<"DELETE", any, any, any> }>().toExtend<
+      ApiRoutes[string]
+    >();
   });
 });
 

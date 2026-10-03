@@ -34,6 +34,7 @@ function isRouteHandlers(option: ApiRoutes[string]): option is RouteHandlers {
     Object.hasOwn(option, "get") ||
     Object.hasOwn(option, "post") ||
     Object.hasOwn(option, "put") ||
+    Object.hasOwn(option, "patch") ||
     Object.hasOwn(option, "delete")
   );
 }
@@ -128,10 +129,19 @@ export function createFlatApiRoutes(
     }
 
     if (isRouteHandlers(option)) {
-      for (const [method, routeHandler] of Object.entries(option)) {
+      for (const [method, handler] of Object.entries(option)) {
+        // At runtime every value is a `RouteHandler`: `FileHandler` and
+        // `StreamHandler` construct one. Their types are kept apart only so
+        // they stay out of the RPC client.
+        const routeHandler = handler as RouteHandler<any, any, any, any>;
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
         addRoute(path, method, exec, middleware, routeHandler.source);
+        // `get: this.stream(...)` answers HEAD too, as a stream route on its
+        // own path does. An explicit `head` key is not part of the map.
+        if (method === "get" && isStreamHandler(routeHandler)) {
+          addRoute(path, "HEAD", exec, middleware, routeHandler.source);
+        }
       }
     }
 
