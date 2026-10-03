@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.85.0 to 0.86.0
 
 ## `client`: `concurrency: "parallel"` for mutation hooks (#719)
 
