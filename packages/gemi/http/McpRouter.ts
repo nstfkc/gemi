@@ -148,8 +148,16 @@ type BodyOf<H> = H extends ApiRouterHandler<infer T, any, any> ? T : never;
  * What the route answers on success, as `useQuery` reads it. The registry
  * hands `result` the parsed JSON, so a `Date` in a handler's return arrives as
  * the string it was serialised to.
+ *
+ * Read off the return type alone. Matching `ApiRouterHandler<any, infer O,
+ * any, any>` instead goes through its `__error?: [Error]` parameter, which
+ * `strictFunctionTypes` checks contravariantly: `[any]` is not assignable to a
+ * route's `[never]`, so under `strict: true` no route matched and every
+ * `result` got `unknown` (#769). The RPC entry's return is already
+ * `ResponseData`, so an `HttpResponse` in it is unwrapped by the time it gets
+ * here. See `McpRouter.strict.test.ts`.
  */
-export type DataOf<H> = H extends ApiRouterHandler<any, infer O, any, any> ? Awaited<O> : unknown;
+export type DataOf<H> = H extends (...args: any[]) => infer O ? Awaited<O> : unknown;
 
 /**
  * A body there is nothing to check against: a handler that never names its
