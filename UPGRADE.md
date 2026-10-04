@@ -1,3 +1,9 @@
+# Unreleased
+
+## A view used by several routes renders once (#788)
+
+Bug fix, nothing to change. When two routes used the same view (a legacy path and its replacement, say), or one layout was mounted under two prefixes, a request to either path rendered the view once per route: two Suspense boundaries in the document and two React trees after hydration. The component tree now lists a view once per level (a repeated layout's children are merged), and each level of the tree renders only the view at that position in the matched route's chain. If your app hid the duplicate (CSS, `:first-child` selectors, a guard in the view), you can drop that.
+
 # Upgrading from 0.106.0 to 0.107.0
 
 ## `gemi/http`: `safeFetch` for URLs that users give (#754)
