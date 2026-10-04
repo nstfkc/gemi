@@ -4,6 +4,7 @@ Status: draft
 Author: Enes Tufekci
 Date: 2026-09-06
 Updated: 2026-09-21 — "Files" rewritten against the attachment store that landed in #491–#493
+Updated: 2026-10-04 — "Params the model names in its own terms" (#767)
 
 ## Summary
 
@@ -109,9 +110,14 @@ type Meta<M, K> = {
    *  route's. Parsed, so undeclared fields are dropped; the descriptor's and
    *  the `AgentTool`'s `outputSchema` (#757). */
   output?: Schema<…>;
-  /** Per-param: bound from the request, or supplied by the model. */
+  /** Per-param: bound from the request, supplied by the model as the raw
+   *  segment, or named by the model in its own terms and translated by the
+   *  app (`this.param(...)`, #767). */
   params?: {
-    [P in keyof ParseParams<K>]: ((req: HttpRequest, call: McpCallContext) => string) | "input";
+    [P in keyof ParseParams<K>]:
+      | ((req: HttpRequest, call: McpCallContext) => string)
+      | "input"
+      | McpModelParam;
   };
   /** Required for every `Blob`/`File` field of the body, and rejected when
    *  there are none. Same two modes as `params`. See "Files" below. */
@@ -126,6 +132,67 @@ type Meta<M, K> = {
 `ParseParams`/`UrlParser` already exist (`client/useMutation.ts:81`) and extract
 `:params` from the url _type_, so a param that is neither bound nor declared
 `"input"` is a compile error rather than a runtime 404.
+
+### Params the model names in its own terms (#767)
+
+A bound param leaves the model no say, and an `"input"` one makes it send the
+raw segment. Neither fits a param the model should choose but cannot know: a
+site agent's page tools address `/pages/:pageId/...` by an unguessable id, and
+the model knows the page as `/about`, or as "the page this chat is on". Asking
+it to copy ids around wastes context and invites invented ones; adding a fake
+`page` field to every route's body would put the translation in every handler.
+
+The third mode lets the model choose, in its own vocabulary, and the app
+translate:
+
+```ts
+export default class extends McpRouter {
+  // Plain data: declared once, above `routes`, and shared by every page tool.
+  page = this.param({
+    as: "page",
+    input: s.string().nullable().describe("The page's path, like /about; null for this chat's page."),
+    bind: async (path, _req, { ctx }) => {
+      const site = ctx?.context.siteId;
+      const page = path === null ? ctx?.context.pageId : await pageIdByPath(site, path);
+      if (!page) throw new McpToolError(`There is no page ${path} in this site.`, 404);
+      return page;
+    },
+  });
+
+  routes = {
+    outline: this.fromApiRoute("GET", "/pages/:pageId/outline", {
+      description: "Outline a page of the site",
+      params: { pageId: this.page },
+    }),
+  };
+}
+```
+
+- **The schema shows the model's field, not the param.** `page` goes into the
+  tool's `inputSchema` under the `as` name (the param's own name by default),
+  with the app's schema and description verbatim; `pageId` does not appear.
+  The value is parsed by that schema before anything runs, so a wrong type is
+  an "Invalid arguments" the model reads, and `bind` never sees it.
+- **It is never sent to the route.** Not in the body, not in the query: it
+  reaches `bind`, and `call.input`, and nothing else.
+- **`bind(value, req, call)` is typed from `input`.** `value` is `Infer<S>` —
+  `string | null` above — and the answer must be a `string | number`.
+  `this.param` exists to carry that inference: a plain object in `params`
+  cannot type `value` from a sibling field, and is refused.
+- **A refusal is the model's to read.** A `ToolError` thrown by `bind` (an
+  `McpToolError` is one) is passed on with its message and status, so "there
+  is no page /abuot" can be corrected on the next step. Anything else thrown,
+  or an empty answer, is the server's failure, logged, exactly as for a bound
+  param. Only the resolver gets this: a plain binder translates nothing of
+  the model's, so its throw stays a server failure.
+- **The route still decides.** The answer is treated exactly as a segment the
+  model sent: encoded as one segment, `.` and `..` refused, routed afresh and
+  checked against the tool's own route, then dispatched through the route's
+  middleware as the run's user. A resolver that answers another tenant's id
+  reaches nothing a direct request with that id could not.
+- **Key collisions fail the boot.** An `as` equal to an `input` field, a
+  file field or another param's input key is refused when the registry is
+  built, since the model could only send one value for both.
 
 ### Files: by scoped attachment reference
 

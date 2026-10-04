@@ -6,6 +6,7 @@ import type { HttpRequest } from "../../http/HttpRequest";
 import type {
   McpFileBinder,
   McpMethod,
+  McpModelParam,
   McpParamBinder,
   McpResultProjection,
   McpRouteDeclaration,
@@ -97,8 +98,10 @@ export interface McpToolDescriptor {
   readonly url: string;
   /**
    * What the model fills in: the declared `input`, plus a string for every
-   * `"input"` path param and every `"input"` file field. Bound params and
-   * bound files are not in it at all.
+   * `"input"` path param and every `"input"` file field, and the model-facing
+   * field of every `this.param(...)` (#767), under its own name and schema.
+   * Bound params and bound files are not in it at all, and neither is the raw
+   * name of a param the model names in its own terms.
    */
   readonly inputSchema: Schema<Record<string, unknown>>;
   /**
@@ -172,6 +175,8 @@ type Plan = {
   descriptor: McpToolDescriptor;
   params: PathParam[];
   paramBinders: Map<string, McpParamBinder>;
+  /** Params the model names in its own terms: the input key, and the resolver. */
+  modelParams: Map<string, { key: string; param: McpModelParam<any> }>;
   fileFields: { name: string; binder: McpFileBinder | "input" }[];
   jsonKeys: string[];
   result?: McpResultProjection;
@@ -375,7 +380,11 @@ export class McpRegistry {
       if (!params.some((param) => param.name === key)) {
         throw new Error(`${where}: "${key}" in params is not a param of the url.`);
       }
-      assertBinder(where, `params.${key}`, binder);
+      if (isModelParam(binder)) {
+        assertModelParam(where, `params.${key}`, binder);
+      } else {
+        assertBinder(where, `params.${key}`, binder);
+      }
     }
 
     let jsonKeys: string[] = [];
@@ -408,24 +417,44 @@ export class McpRegistry {
     }
 
     const extras: Record<string, AnySchema> = {};
+    // Two params, or a param and a file, can name the same input key only by
+    // a `this.param` `as`; the model could send one value for both.
+    const addExtra = (key: string, schema: AnySchema) => {
+      if (key in extras) {
+        throw new Error(
+          `${where}: "${key}" is the input key of two params or files, and the model can only send one.`,
+        );
+      }
+      extras[key] = schema;
+    };
     const paramBinders = new Map<string, McpParamBinder>();
+    const modelParams = new Map<string, { key: string; param: McpModelParam<any> }>();
     for (const param of params) {
       const binder = declared[param.name];
       if (binder === "input") {
         const field = s.string().describe(`The ":${param.name}" segment of the url.`);
-        extras[param.name] =
-          param.modifier === "?" || param.modifier === "*" ? field.optional() : field;
+        addExtra(
+          param.name,
+          param.modifier === "?" || param.modifier === "*" ? field.optional() : field,
+        );
+      } else if (isModelParam(binder)) {
+        const key = binder.as ?? param.name;
+        addExtra(key, binder.input);
+        modelParams.set(param.name, { key, param: binder });
       } else {
         paramBinders.set(param.name, binder);
       }
     }
     for (const file of fileFields) {
       if (file.binder === "input") {
-        extras[file.name] = s
-          .string()
-          .describe(
-            "The id of an attachment the user uploaded or a tool produced (gemi_att_…), whose file is sent as this field.",
-          );
+        addExtra(
+          file.name,
+          s
+            .string()
+            .describe(
+              "The id of an attachment the user uploaded or a tool produced (gemi_att_…), whose file is sent as this field.",
+            ),
+        );
       }
     }
     // A bound file is not the model's, but it shares the form with the input,
@@ -454,6 +483,7 @@ export class McpRegistry {
       }),
       params,
       paramBinders,
+      modelParams,
       fileFields,
       jsonKeys,
       ...(meta.result ? { result: meta.result } : {}),
@@ -467,12 +497,20 @@ export class McpRegistry {
     let path = plan.descriptor.url;
     for (const param of plan.params) {
       const binder = plan.paramBinders.get(param.name);
+      const modelParam = plan.modelParams.get(param.name);
       let value: unknown;
-      if (binder) {
-        value = await this.bind(plan, `the param "${param.name}"`, () => binder(req, call));
+      if (binder || modelParam) {
+        value = modelParam
+          ? await this.bind(
+              plan,
+              `the param "${param.name}"`,
+              () => modelParam.param.bind(input[modelParam.key], req, call),
+              { refusals: true },
+            )
+          : await this.bind(plan, `the param "${param.name}"`, () => binder!(req, call));
         if (value === undefined || value === null || value === "") {
           console.error(
-            `[gemi/mcp] The binder for "${param.name}" of "${plan.descriptor.name}" returned ${JSON.stringify(value)}.`,
+            `[gemi/mcp] The ${modelParam ? "resolver" : "binder"} for "${param.name}" of "${plan.descriptor.name}" returned ${JSON.stringify(value)}.`,
           );
           throw new McpToolError(`"${plan.descriptor.name}" failed on the server.`, 500);
         }
@@ -594,11 +632,24 @@ export class McpRegistry {
   /**
    * Runs an app's binder. Its failure is the server's, not the model's, so the
    * model is told only that; the app gets the error in its log.
+   *
+   * With `refusals`, a `ToolError` (an `McpToolError` is one) is the app
+   * refusing what the model sent, and is passed on for the model to read. Only
+   * a model-facing param's resolver gets that: it is translating the model's
+   * own words, so "there is no such page" is something the model can fix. A
+   * plain binder reads nothing of the model's, and its throw stays the
+   * server's.
    */
-  private async bind<T>(plan: Plan, what: string, fn: () => T | Promise<T>): Promise<T> {
+  private async bind<T>(
+    plan: Plan,
+    what: string,
+    fn: () => T | Promise<T>,
+    options: { refusals?: boolean } = {},
+  ): Promise<T> {
     try {
       return await fn();
     } catch (error) {
+      if (options.refusals && error instanceof ToolError) throw error;
       console.error(`[gemi/mcp] Binding ${what} of "${plan.descriptor.name}" failed:`, error);
       throw new McpToolError(`"${plan.descriptor.name}" failed on the server.`, 500);
     }
@@ -617,6 +668,28 @@ function assertLocal(caller: McpCaller): asserts caller is Extract<McpCaller, { 
 function assertBinder(where: string, at: string, binder: unknown) {
   if (binder !== "input" && typeof binder !== "function") {
     throw new Error(`${where}: ${at} must be a function or "input".`);
+  }
+}
+
+/**
+ * By brand, as a declaration is, rather than `instanceof`: an app that ends up
+ * with two copies of gemi would otherwise see its params as broken binders.
+ */
+function isModelParam(value: unknown): value is McpModelParam<any> {
+  return value instanceof Object && (value as McpModelParam).__internal_brand === "McpModelParam";
+}
+
+/** A `this.param(...)`, checked for a router written in JavaScript or behind a cast. */
+function assertModelParam(where: string, at: string, param: McpModelParam<any>) {
+  if (param.as !== undefined && (typeof param.as !== "string" || param.as === "")) {
+    throw new Error(`${where}: ${at}.as must be a non-empty string.`);
+  }
+  const schema = param.input;
+  if (typeof schema?.safeParse !== "function" || typeof schema.toJSONSchema !== "function") {
+    throw new Error(`${where}: ${at}.input must be a schema, built with s.`);
+  }
+  if (typeof param.bind !== "function") {
+    throw new Error(`${where}: ${at}.bind must be a function.`);
   }
 }
 

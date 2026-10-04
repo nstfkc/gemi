@@ -17,7 +17,7 @@ import { ApiRouter, type CreateRPC } from "./ApiRouter";
 import { Controller, ResourceController } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
 import type { McpCallContext } from "../services/mcp/McpRegistry";
-import { McpRouteDeclaration, McpRouter } from "./McpRouter";
+import { McpModelParam, McpRouteDeclaration, McpRouter } from "./McpRouter";
 
 class CreateProductRequest extends HttpRequest<
   { name: string; price: number; image: File },
@@ -332,6 +332,84 @@ describe("fromApiRoute", () => {
         wrongWithoutResult: this.fromApiRoute("GET", "/health", {
           description: "Health",
           output: s.object({ status: s.string() }),
+        }),
+      };
+    }
+    void Mcp;
+  });
+
+  test("a param the model names in its own terms is typed from its schema (#767)", () => {
+    class Mcp extends McpRouter<Routes> {
+      // Plain data, so one declaration serves every tool that takes a page.
+      order = this.param({
+        as: "order",
+        input: s.string().nullable().describe("The order's number, or null for the latest"),
+        bind: async (value, req, call) => {
+          expectTypeOf(value).toEqualTypeOf<string | null>();
+          expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+          expectTypeOf(call).toEqualTypeOf<McpCallContext>();
+          return value ?? String(call.ctx?.context);
+        },
+      });
+
+      routes = {
+        "show-order": this.fromApiRoute("GET", "/org/:orgId/orders/:orderId", {
+          description: "Show an order",
+          params: { orgId: () => "org_1", orderId: this.order },
+        }),
+        "rename-product": this.fromApiRoute("PUT", "/products/:id/name", {
+          description: "Rename a product",
+          input: s.object({ name: s.string() }),
+          // `as` defaults to the param's own name; a number is a segment too.
+          params: {
+            id: this.param({
+              input: s.object({ sku: s.string() }),
+              bind: ({ sku }) => {
+                expectTypeOf(sku).toEqualTypeOf<string>();
+                return sku.length;
+              },
+            }),
+          },
+        }),
+      };
+    }
+    expectTypeOf(new Mcp().order).toEqualTypeOf<McpModelParam<string | null>>();
+  });
+
+  test("a model-facing param must answer a segment, from a schema", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {
+        wrongReturn: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "x",
+          params: {
+            orgId: this.param({
+              input: s.string(),
+              // @ts-expect-error a resolver answers a string or a number
+              bind: (value) => ({ id: value }),
+            }),
+          },
+        }),
+        wrongValue: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "x",
+          params: {
+            orgId: this.param({
+              input: s.number(),
+              // @ts-expect-error the model's value is a number, as its schema says
+              bind: (value: string) => value,
+            }),
+          },
+        }),
+        noSchema: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "x",
+          params: {
+            // @ts-expect-error `input` is the field's schema, and required
+            orgId: this.param({ as: "org", bind: () => "org_1" }),
+          },
+        }),
+        notAParam: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "x",
+          // @ts-expect-error a plain object is not a declaration; build it with this.param
+          params: { orgId: { as: "org", input: s.string(), bind: () => "org_1" } },
         }),
       };
     }

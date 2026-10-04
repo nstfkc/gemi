@@ -52,6 +52,65 @@ export type McpParamBinder = (
 ) => string | number | Promise<string | number>;
 
 /**
+ * A path param the model names in its own terms, and the app translates (#767).
+ *
+ * A bound param leaves the model no say, and an `"input"` one makes it send
+ * the raw segment — an id it would have to copy around. This is the third
+ * mode: the tool's input schema carries a field in the model's vocabulary
+ * (`page: "/about"`), and `bind` turns what the model sent into the segment
+ * (`:pageId`) before the url is built.
+ *
+ * Built with `McpRouter.param`, which is what types `bind`'s `value` from
+ * `input`. See `McpModelParamOptions`.
+ */
+export class McpModelParam<V = unknown> {
+  readonly __internal_brand = "McpModelParam";
+
+  constructor(
+    /** The key in the tool's input schema, or `undefined` for the param's own name. */
+    readonly as: string | undefined,
+    readonly input: AnySchema,
+    readonly bind: McpModelParamResolver<V>,
+  ) {}
+}
+
+/**
+ * Turns what the model sent for a model-facing param into the url segment.
+ *
+ * `value` is the model's field, parsed by its schema. `req` and `call` are what
+ * a binder gets, so a resolver can look the value up within the resource the
+ * run is about (`call.ctx`).
+ *
+ * To refuse, throw an `McpToolError` (or any `ToolError`): its message reaches
+ * the model, which can correct the call — `There is no page "/abuot"`. Any
+ * other throw, or an empty answer, is the server's failure: logged, and the
+ * model reads only that the tool failed.
+ */
+export type McpModelParamResolver<V> = (
+  value: V,
+  req: HttpRequest<any, any>,
+  call: McpCallContext,
+) => string | number | Promise<string | number>;
+
+/** What `McpRouter.param` takes. */
+export type McpModelParamOptions<S extends AnySchema> = {
+  /**
+   * The field's name in the tool's input schema. Defaults to the param's own
+   * name. It is never sent to the route, in the body or the query: it only
+   * reaches `bind`, and `call.input`.
+   */
+  as?: string;
+  /**
+   * The field's schema, as the model sees it. Describe it here — it is the
+   * only thing the model reads about the field:
+   * `s.string().nullable().describe("A page path, like /about, or null for this chat's page")`.
+   */
+  input: S;
+  /** Maps the model's value to the segment. See `McpModelParamResolver`. */
+  bind: McpModelParamResolver<Infer<S>>;
+};
+
+/**
  * Picks the attachment a bound file field sends, usually out of `ctx.turn`.
  * The id still resolves through `ctx.attachments`, so a binder can narrow which
  * of the caller's files is sent and can never reach anybody else's. `undefined`
@@ -164,16 +223,20 @@ type InputCheck<I, B> =
 
 type ParamsOf<K> = UrlParser<`${K & string}`>;
 
+/** One path param's declaration: bound, the model's raw segment, or the model's in its own terms. */
+export type McpParamDeclaration = McpParamBinder | "input" | McpModelParam<any>;
+
 /**
- * Every path param is either bound or `"input"`, and there is no default: a
- * param left for the model by omission is exactly the tenant-isolation bug
- * this field exists to prevent, so omitting one is a compile error.
+ * Every path param is bound, `"input"` or a `this.param(...)`, and there is no
+ * default: a param left for the model by omission is exactly the
+ * tenant-isolation bug this field exists to prevent, so omitting one is a
+ * compile error.
  */
 type ParamsMeta<K> = string extends keyof ParamsOf<K>
   ? { params?: never }
   : [keyof ParamsOf<K>] extends [never]
     ? { params?: never }
-    : { params: { [P in keyof ParamsOf<K>]-?: McpParamBinder | "input" } };
+    : { params: { [P in keyof ParamsOf<K>]-?: McpParamDeclaration } };
 
 /**
  * Required for every binary field, and refused on a route that has none. For
@@ -319,7 +382,7 @@ export type McpRouteMetaRuntime = {
   input?: AnySchema;
   tags?: readonly string[];
   requiresApproval?: boolean;
-  params?: Record<string, McpParamBinder | "input">;
+  params?: Record<string, McpParamDeclaration>;
   files?: Record<string, McpFileBinder | "input">;
   result?: McpResultProjection;
   output?: AnySchema;
@@ -399,6 +462,33 @@ export class McpRouter<R = McpRoutes> {
    * can reach nothing a direct request carrying the same values could not.
    */
   credentials?(call: McpCallContext): McpCredentials | undefined | Promise<McpCredentials | undefined>;
+
+  /**
+   * A path param the model names in its own terms, for `params` (#767).
+   *
+   * ```ts
+   * params: {
+   *   pageId: this.param({
+   *     as: "page",
+   *     input: s.string().nullable().describe("A page path, like /about, or null for this chat's page"),
+   *     bind: (path, _req, { ctx }) => pageIdFor(ctx, path),
+   *   }),
+   * }
+   * ```
+   *
+   * The tool's input schema has `page`, described as written, and no `pageId`.
+   * `bind` gets the model's value, parsed and typed by `input`, and answers the
+   * segment; a `McpToolError` it throws reaches the model. The answer is then
+   * treated exactly as a model-supplied segment would be: encoded as one
+   * segment and dispatched through the route's own middleware, which decides
+   * whether the caller may reach it.
+   *
+   * The result is plain data and can be shared by several tools: declare it as
+   * a field above `routes` and use it in each.
+   */
+  param<S extends AnySchema>(options: McpModelParamOptions<S>): McpModelParam<Infer<S>> {
+    return new McpModelParam(options.as, options.input, options.bind);
+  }
 
   fromApiRoute<
     M extends McpMethod,
