@@ -1,5 +1,23 @@
 # Unreleased
 
+## Static views and islands: server-rendered pages with no React on the client (#790)
+
+New, and opt-in. Nothing changes for a view that isn't declared static. See [Static Views & Islands](docs/static-views-and-islands.md).
+
+- **`this.view(...).static(options?)`** serves a view as a settled, server-rendered document with no client runtime: no client entry, `modulepreload`s, `__GEMI_DATA__`, theme script, query or dictionary payloads, or React streaming scripts. Handlers, middleware, redirects, `Query.prefetch`/`useQuery`, dictionaries, `Head`/`Meta` and the 404 view work as for any view. Without islands, the page has no `<script>` at all.
+- **`.static({ layout: "site/SiteLayout" })`** renders the page in that view module (a document layout: `<html>`, `<Head />`, `<body>`) instead of `RootLayout`, with that layout's and the views' CSS instead of the app's stylesheet.
+- **`island(name, Component, () => import("./x.island"), { load, props })`** from `gemi/client`. In a static view it renders the component inside a `<gemi-island>` marker and adds a constant inline loader plus the island's own module, only for islands the page used. In a hydrated view it renders the plain component. The client module (`*.island.ts`) default-exports `mount(root, props)` (type `IslandMount`). `load` is `"eager"` (default), `"idle"` or `"visible"`, and `props` is off by default.
+- **`ISLAND_LOADER_CSP_HASH`** from `gemi/services`: the `'sha256-…'` of the loader, for `script-src`.
+- New types: `StaticViewOptions` (`gemi/http`); `IslandLoad`, `IslandMount`, `IslandOptions` and `IslandLoader` (`gemi/client`).
+
+Behaviour changes to know:
+
+- **`*.island.{ts,tsx,js,jsx}` files under `app/` are client build entries**, and are left out of the SSR build. A file under `app/views/` with that name is no longer built as a view.
+- **The document payload carries `staticRoutes`** when an app has static routes, and the client router turns a navigation to one into a full page load (`location.replace`), since nothing on the client can render it. `Link` prefetching skips them.
+- **`getStyles(views, { layout })`**, the render callback the servers pass to the view router, takes an optional second argument. This only matters to code that calls the dispatcher's render function itself (tests that stub `getStyles` keep working).
+
+An app that serves public, mostly-static pages (kyte's published sites and previews) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
+
 ## A view used by several routes renders once (#788)
 
 Bug fix, nothing to change. When two routes used the same view (a legacy path and its replacement, say), or one layout was mounted under two prefixes, a request to either path rendered the view once per route: two Suspense boundaries in the document and two React trees after hydration. The component tree now lists a view once per level (a repeated layout's children are merged), and each level of the tree renders only the view at that position in the matched route's chain. If your app hid the duplicate (CSS, `:first-child` selectors, a guard in the view), you can drop that.
