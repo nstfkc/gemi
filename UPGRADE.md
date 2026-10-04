@@ -11,6 +11,32 @@ New, and opt-in: nothing changes for an app that does not use it.
 
 An app that already refuses large bodies by hand (checking `Content-Length` in the handler) can replace that with `body-limit`, which also reads a chunked body up to the limit instead of refusing it.
 
+## `gemi/vitest`: dispatch an app's routes under vitest (#772)
+
+A route handler or controller method written `async (req: HttpRequest<…>) => …` only gets its request because the build rewrites the parameter to `req = new HttpRequest()`. That rewrite only ran in the Bun plugin, and vitest loads modules through Vite (also under `bun --bun vitest`), so a route dispatched with `App.fetch` in a test saw `req === undefined`.
+
+The new `gemi/vitest` entrypoint exports `gemiRequestPlugin()`, the same rewrite as a Vite plugin, on the same files (`http/controllers/` and `http/routes/`). To test routes, add it to `vitest.config.ts`:
+
+```ts
+import { gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin()], /* … */ });
+```
+
+Nothing changes for an app that does not opt in. See [Testing routes](https://nstfkc.github.io/gemi/testing.md#testing-routes) for the setup, including MCP tools. The docs page "Testing Views" is now "Testing".
+
+## `ai`: `s.fromJSONSchema` can report unknown keys (#753)
+
+**New, opt-in.** `s.fromJSONSchema(schema, { unknownKeys })` chooses what `parse`, `safeParse` and `validate` do with a key an object in the schema doesn't declare:
+
+- `"strip"` (the default, unchanged): the key is dropped from the parsed value.
+- `"error"`: the value fails with one issue per key, `{ path: [..., key], code: "additionalProperties", params: { additionalProperty: key }, message: "unknown key" }`. The code and params are Ajv's; unlike Ajv, `path` ends in the key.
+- `"passthrough"`: the key is kept in the parsed value as it came, checked only for being JSON.
+
+It applies to every object of that schema at any depth (inside arrays, `anyOf` members, and when the schema is nested in an `s.object` or an `s.recursive` body), whether or not the object says `additionalProperties: false`. The emitted JSON Schema is unchanged. A key whose value is `undefined` counts as absent. `SchemaIssueCode` gains `"additionalProperties"`; code that switches over it exhaustively needs the new case.
+
+**Action:** none. An app that checks a body's keys itself before `validate` (kyte's form submissions) can pass `unknownKeys: "error"` instead.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
