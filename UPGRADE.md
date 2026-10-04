@@ -1,3 +1,19 @@
+# Unreleased
+
+## `gemi/vitest`: dispatch an app's routes under vitest (#772)
+
+A route handler or controller method written `async (req: HttpRequest<…>) => …` only gets its request because the build rewrites the parameter to `req = new HttpRequest()`. That rewrite only ran in the Bun plugin, and vitest loads modules through Vite (also under `bun --bun vitest`), so a route dispatched with `App.fetch` in a test saw `req === undefined`.
+
+The new `gemi/vitest` entrypoint exports `gemiRequestPlugin()`, the same rewrite as a Vite plugin, on the same files (`http/controllers/` and `http/routes/`). To test routes, add it to `vitest.config.ts`:
+
+```ts
+import { gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin()], /* … */ });
+```
+
+Nothing changes for an app that does not opt in. See [Testing routes](https://nstfkc.github.io/gemi/testing.md#testing-routes) for the setup, including MCP tools. The docs page "Testing Views" is now "Testing".
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)

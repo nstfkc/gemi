@@ -42,7 +42,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
-- **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
+- **[Testing](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user. Route tests: `App.fetch` with a test `Kernel`, and `gemiRequestPlugin()` from `gemi/vitest`.
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
 
