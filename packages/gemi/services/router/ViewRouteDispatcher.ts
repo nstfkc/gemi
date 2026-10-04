@@ -1047,6 +1047,14 @@ export class ViewRouteDispatcher {
       throw err;
     }
 
+    // A static view's handler output reaches the browser only as the markup
+    // it renders, and an app may rely on that (return a whole record, render
+    // part of it). The `.json` payload would hand over all of it, and nothing
+    // asks for one: the client router loads static routes as documents.
+    if (staticView && isViewDataRequest) {
+      return new Response("Not found", { status: 404 });
+    }
+
     const httpRequest = new HttpRequest(req, params, "view", currentPathName);
     this.hooks.onRequestStart(httpRequest);
     return await RequestContext.run(httpRequest, async () => {
@@ -1371,8 +1379,9 @@ export class ViewRouteDispatcher {
         // fallbacks and reveal scripts gets served to a bot. `no-stream`
         // routes serve one settled body to everyone, so they stay cacheable
         // without the (CDN-hostile) Vary.
-        // A static view is one settled body for everyone, like `no-stream`.
-        if (!noStream && !staticView) {
+        // A static view is one settled body for everyone, like `no-stream` —
+        // unless the request became a 404, which renders as usual.
+        if (!noStream && !(staticView && currentPathName)) {
           headers.append("Vary", "User-Agent");
         }
 

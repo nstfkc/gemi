@@ -47,6 +47,10 @@ streaming, every `Suspense` boundary resolved) and sends it without:
 
 The response is one body for every visitor, so it doesn't vary on `User-Agent`.
 
+The handler's output reaches the browser only as the markup the view renders. A
+static route doesn't answer the `.json` navigation request (it returns `404`), so
+a handler can return a whole record and the page can show only part of it.
+
 ### What doesn't run
 
 Nothing hydrates, so event handlers, effects, state updates and refs never run

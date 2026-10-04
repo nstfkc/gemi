@@ -13,6 +13,7 @@ New, and opt-in. Nothing changes for a view that isn't declared static. See [Sta
 Behaviour changes to know:
 
 - **`*.island.{ts,tsx,js,jsx}` files under `app/` are client build entries**, and are left out of the SSR build. A file under `app/views/` with that name is no longer built as a view.
+- **A static route answers its `.json` navigation request with `404`**, so the handler's output reaches the browser only as rendered markup.
 - **The document payload carries `staticRoutes`** when an app has static routes, and the client router turns a navigation to one into a full page load (`location.replace`), since nothing on the client can render it. `Link` prefetching skips them.
 - **`getStyles(views, { layout })`**, the render callback the servers pass to the view router, takes an optional second argument. This only matters to code that calls the dispatcher's render function itself (tests that stub `getStyles` keep working).
 

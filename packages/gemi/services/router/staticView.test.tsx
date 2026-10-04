@@ -202,6 +202,14 @@ describe("static views", () => {
     expect(html).toContain("__GEMI_DATA__");
   });
 
+  test("do not answer a .json navigation, so the handler's output stays on the server", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/plain.json"));
+
+    expect(res).toBeInstanceOf(Response);
+    expect((res as Response).status).toBe(404);
+    expect(await (res as Response).text()).not.toContain("Hello");
+  });
+
   test("are listed for the client router, so navigating there loads the page", async () => {
     const html = await (await fetchDocument("/hydrated")).text();
     const data = JSON.parse(html.match(/window\.__GEMI_DATA__ = (\{.*?\});window\.loaders/s)![1]);
