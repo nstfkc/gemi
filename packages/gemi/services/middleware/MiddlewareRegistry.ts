@@ -100,38 +100,73 @@ export class MiddlewareRegistry {
     return this.runMiddleware(this.config.global);
   }
 
+  /**
+   * Runs a middleware list in order, merging what each returns.
+   *
+   * When one throws — a refusal such as a `body-limit` 413 or a `rate-limit`
+   * 429, or anything else — the middleware after it that declare
+   * `static runsOnRefusal = true` (`CorsMiddleware`) still run before the
+   * error goes on, so the headers they set reach the refusal. Without that, a
+   * `cors` listed after the middleware that refused, which is where a router's
+   * inherited middleware puts it, left the refusal without CORS headers, and
+   * the browser reported a network error instead of the status.
+   */
   public runMiddleware(
     middleware: (string | RouterMiddleware | (new (req: HttpRequest) => Middleware))[],
   ) {
     const req = new HttpRequest();
     const aliases = this.aliases;
-    return Array.from(transformMiddleware(middleware).entries())
-      .map(([key, params]) => {
-        if (typeof key === "string") {
-          const Middleware = aliases[key];
-          if (Middleware) {
-            const middleware = new Middleware(req);
-            return () => middleware.run.call(middleware, ...params);
-          }
-        } else {
-          if (isConstructor(key)) {
-            const middleware = new key(req);
-            return middleware.run.bind(middleware);
-          }
-          return key;
+    const chain: { run: () => any; runsOnRefusal: boolean }[] = [];
+    for (const [key, params] of transformMiddleware(middleware).entries()) {
+      if (typeof key === "string") {
+        const Middleware = aliases[key];
+        if (Middleware) {
+          const middleware = new Middleware(req);
+          chain.push({
+            run: () => middleware.run.call(middleware, ...params),
+            runsOnRefusal: runsOnRefusal(Middleware),
+          });
         }
-      })
-      .filter(Boolean)
-      .reduce(
-        (acc: any, middleware: any) => {
-          return async () => {
-            return {
-              ...(await acc()),
-              ...(await middleware()),
-            };
-          };
-        },
-        () => Promise.resolve({}),
-      )();
+      } else if (isConstructor(key)) {
+        const middleware = new key(req);
+        chain.push({ run: middleware.run.bind(middleware), runsOnRefusal: runsOnRefusal(key) });
+      } else {
+        chain.push({ run: key as () => any, runsOnRefusal: false });
+      }
+    }
+
+    return (async () => {
+      let result = {};
+      for (let i = 0; i < chain.length; i++) {
+        try {
+          result = { ...result, ...(await chain[i].run()) };
+        } catch (err) {
+          await runAfterRefusal(chain.slice(i + 1));
+          throw err;
+        }
+      }
+      return result;
+    })();
+  }
+}
+
+function runsOnRefusal(middleware: unknown): boolean {
+  return (middleware as { runsOnRefusal?: unknown })?.runsOnRefusal === true;
+}
+
+/**
+ * The `runsOnRefusal` middleware left in a chain that was refused. One that
+ * throws itself is logged and skipped: the refusal already decided the answer.
+ */
+async function runAfterRefusal(rest: { run: () => any; runsOnRefusal: boolean }[]) {
+  for (const entry of rest) {
+    if (!entry.runsOnRefusal) {
+      continue;
+    }
+    try {
+      await entry.run();
+    } catch (err) {
+      console.error(err);
+    }
   }
 }
