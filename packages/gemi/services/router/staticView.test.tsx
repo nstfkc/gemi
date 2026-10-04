@@ -94,7 +94,6 @@ class TestViewRouter extends ViewRouter {
     "/site": this.view("site/WithIslands", () => ({
       note: `</gemi-island><script>alert("x")</script>&"'`,
     })).static({ layout: "site/Layout" }),
-    // Its own view: two routes sharing one is #788, a separate bug.
     "/missing": this.view("site/Missing", () => {
       throw new RecordNotFoundError("Page", "findUniqueOrThrow");
     }).static(),
