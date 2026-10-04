@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.102.0 to 0.103.0
 
 ## `gemi/http`: an MCP path param the model names in its own terms, `this.param` (#767)
 
