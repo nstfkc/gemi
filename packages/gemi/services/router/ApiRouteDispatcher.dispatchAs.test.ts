@@ -12,6 +12,7 @@ import { ApiRouter } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
+import { RequestBreakerError } from "../../http/Error";
 import { Middleware } from "../../http/Middleware";
 import { markModelOriginated } from "../../http/modelOriginated";
 import { clientIp, RateLimitMiddleware } from "../../http/RateLimitMiddleware";
@@ -80,6 +81,20 @@ class OrdersMiddleware extends Middleware {
   }
 }
 
+/**
+ * An app's own credential, the way an app guards a resource a visitor owns
+ * before signing up: a cookie, or a grant header the app signed.
+ */
+class OwnerMiddleware extends Middleware {
+  run() {
+    const owner = this.req.cookies.get("owner");
+    const grant = this.req.headers.get("x-grant");
+    if (owner !== "o1" && grant !== "signed:o1") {
+      throw new RequestBreakerError("Not yours", { status: 403 });
+    }
+  }
+}
+
 class UploadRequest extends HttpRequest<{ image: File; title: string }, {}> {
   schema = {
     image: { required: "Image is required", file: "Image must be a file" },
@@ -130,6 +145,12 @@ class RootApiRouter extends ApiRouter {
       return seen;
     }).middleware(["auth"]),
     "/orders": this.get(() => readOrders()).middleware(["auth"]),
+    "/owned": this.get(() => {
+      const req = new HttpRequest<any, any>();
+      const seen: Record<string, string> = {};
+      req.rawRequest.headers.forEach((value, key) => (seen[key] = value));
+      return seen;
+    }).middleware(["owner"]),
     "/public-orders": this.get(() => readOrders()),
     // A denial thrown by a second copy of `gemi/orm`: the same name and shape,
     // a different class object, so `instanceof` alone would miss it.
@@ -165,6 +186,7 @@ class AppKernel extends Kernel {
       aliases: {
         auth: AuthenticationMiddleware,
         orders: OrdersMiddleware,
+        owner: OwnerMiddleware,
         "rate-limit": RateLimitMiddleware,
         "origin-limit": OriginRateLimit,
       },
@@ -284,6 +306,93 @@ describe("dispatchAs", () => {
     expect(result).toEqual({
       cookie: "access_token=v2.tok-alice",
       "user-agent": "agent-test",
+    });
+  });
+
+  describe("the app's own credentials", () => {
+    const visitor = { Cookie: "owner=o1; theme=dark" };
+
+    test("an app cookie of the initiator's is not carried unless the app passes it", async () => {
+      const viaHttp = await direct("/owned", { headers: visitor });
+      expect(viaHttp.status).toBe(200);
+
+      const { result } = await fromAgent(visitor, async (req, dispatcher) =>
+        (await dispatcher.dispatchAs(req, "GET", "/owned")).status,
+      );
+
+      expect(result).toBe(403);
+    });
+
+    test("a cookie the app passes reaches the route's middleware", async () => {
+      const { result } = await fromAgent(visitor, async (req, dispatcher) =>
+        snapshot(
+          await dispatcher.dispatchAs(req, "GET", "/owned", undefined, {
+            credentials: { cookies: { owner: req.cookies.get("owner") } },
+          }),
+        ),
+      );
+
+      expect(result.status).toBe(200);
+      // Only what the app named: `theme` stays behind.
+      expect(result.body.cookie).toBe("owner=o1");
+    });
+
+    test("a header the app signs reaches the route's middleware", async () => {
+      const { result } = await fromAgent({}, async (req, dispatcher) =>
+        (
+          await dispatcher.dispatchAs(req, "GET", "/owned", undefined, {
+            credentials: { headers: { "X-Grant": "signed:o1" } },
+          })
+        ).status,
+      );
+
+      expect(result).toBe(200);
+    });
+
+    test("they ride beside the access token, and null values are skipped", async () => {
+      const { result } = await fromAgent(
+        { Cookie: "access_token=v2.tok-alice; owner=o1" },
+        async (req, dispatcher) =>
+          (
+            await dispatcher.dispatchAs(req, "GET", "/headers", undefined, {
+              credentials: {
+                cookies: { owner: req.cookies.get("owner"), missing: req.cookies.get("missing") },
+                headers: { "X-Grant": "signed:o1", "X-None": undefined, "X-Null": null },
+              },
+            })
+          ).json(),
+      );
+
+      expect(result).toEqual({
+        cookie: "access_token=v2.tok-alice; owner=o1",
+        "x-grant": "signed:o1",
+      });
+    });
+
+    test.each([
+      [{ cookies: { access_token: "v2.tok-bob" } }, /may not set the "access_token" cookie/],
+      [{ headers: { access_token: "v2.tok-bob" } }, /may not set the "access_token" header/],
+      [{ headers: { Cookie: "access_token=v2.tok-bob" } }, /may not set the "Cookie" header/],
+      [{ headers: { "Content-Type": "text/plain" } }, /may not set the "Content-Type" header/],
+      [{ headers: { Host: "evil.example" } }, /may not set the "Host" header/],
+      [{ headers: { "User-Agent": "other" } }, /may not set the "User-Agent" header/],
+      [{ headers: { "X-Forwarded-For": "1.2.3.4" } }, /may not set the "X-Forwarded-For" header/],
+      [{ cookies: { owner: "o1; access_token=v2.tok-bob" } }, /"owner" is not a cookie/],
+      [{ cookies: { "a=b": "1" } }, /"a=b" is not a cookie/],
+    ])("refuses %o, and the route never runs", async (credentials, message) => {
+      const { result } = await fromAgent(
+        { Cookie: "access_token=v2.tok-alice" },
+        async (req, dispatcher) =>
+          dispatcher
+            .dispatchAs(req, "GET", "/me", undefined, { credentials: credentials as any })
+            .then(
+              () => null,
+              (error: Error) => error.message,
+            ),
+      );
+
+      expect(result).toMatch(message);
+      expect(started.map((entry) => entry.path)).toEqual(["/api/agent"]);
     });
   });
 

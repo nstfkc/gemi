@@ -16,6 +16,8 @@ import { app as resolve } from "../../foundation/app";
 import { ApiRouter, type CreateRPC } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
+import { RequestBreakerError } from "../../http/Error";
+import { Middleware } from "../../http/Middleware";
 import { HttpRequest } from "../../http/HttpRequest";
 import { McpRouter } from "../../http/McpRouter";
 import { ViewRouter } from "../../http/ViewRouter";
@@ -25,7 +27,7 @@ import type { ReadResult } from "../file-storage/drivers/types";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
 import { createFlatApiRoutes } from "../router/createFlatApiRoutes";
-import { McpRegistry, McpToolError, type McpCaller } from "./McpRegistry";
+import { McpRegistry, McpToolError, type McpCallContext, type McpCaller } from "./McpRegistry";
 import { toAgentTools } from "./toAgentTools";
 
 /**
@@ -67,6 +69,15 @@ const handled: { route: string; user: number | null; body?: unknown; params?: un
 
 function userOf(req: HttpRequest<any, any>) {
   return req.ctx().user?.id ?? null;
+}
+
+/** An app's own credential: a visitor who owns a draft before signing up. */
+class OwnerMiddleware extends Middleware {
+  run() {
+    if (this.req.cookies.get("owner") !== "o1") {
+      throw new RequestBreakerError("Not yours", { status: 403 });
+    }
+  }
 }
 
 class ProductRequest extends HttpRequest<
@@ -128,6 +139,11 @@ class Api extends ApiRouter {
       return { archived: "everything" };
     }),
     "/products/:id": this.put(ProductController, "rename").middleware(["auth"]),
+    "/drafts/:id": this.get(async () => {
+      const req = new HttpRequest<any, any>();
+      handled.push({ route: "draft", user: null, params: req.params });
+      return { id: req.params.id, cookie: req.rawRequest.headers.get("cookie") };
+    }).middleware(["owner"]),
     // Shaped for a UI: whole records, of which a model needs two fields.
     "/pages": this.get(async () => {
       handled.push({ route: "pages", user: null });
@@ -218,7 +234,25 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       description: "Refund an order",
       params: { id: "input" },
     }),
+    "read-draft": this.fromApiRoute("GET", "/drafts/:id", {
+      description: "Read a draft",
+      params: { id: "input" },
+    }),
   };
+}
+
+/** What `OwnedMcp.credentials` was asked with, per call. */
+const credentialCalls: McpCallContext[] = [];
+let credentialsFor: (call: McpCallContext) => unknown = ({ req }) => ({
+  cookies: { owner: req.cookies.get("owner") },
+});
+
+/** The same tools, with the app forwarding its own cookie. */
+class OwnedMcp extends Mcp {
+  credentials(call: McpCallContext) {
+    credentialCalls.push(call);
+    return credentialsFor(call) as any;
+  }
 }
 
 let pageCount = 2;
@@ -267,7 +301,7 @@ class ProjectingMcp extends McpRouter<CreateRPC<Api>> {
 class AppKernel extends Kernel {
   protected providers = [StubAuthProvider];
   config = {
-    middleware: { aliases: { auth: AuthenticationMiddleware } },
+    middleware: { aliases: { auth: AuthenticationMiddleware, owner: OwnerMiddleware } },
     route: {
       api: { rootRouter: Api },
       view: {
@@ -333,7 +367,12 @@ async function runTool(
   headers: Record<string, string>,
   name: string,
   args: unknown,
-  options: { attachments?: ScopedAttachments; turn?: ClientTurn; registry?: McpRegistry } = {},
+  options: {
+    attachments?: ScopedAttachments;
+    turn?: ClientTurn;
+    registry?: McpRegistry;
+    context?: Record<string, unknown>;
+  } = {},
 ) {
   const provider = fakeProvider([toolCall("c1", name, args), finish()], [finish()]);
   const agent = Agent.create({
@@ -348,6 +387,7 @@ async function runTool(
         messages: [],
         turn: options.turn ?? { text: "go" },
         attachments: options.attachments ?? null,
+        ...(options.context ? { context: options.context as any } : {}),
       })
       .result();
     messages = result.messages as AgentMessage[];
@@ -415,6 +455,8 @@ beforeEach(() => {
   projected.length = 0;
   pageCount = 2;
   projectPages = (data) => data.map(({ path, title }: any) => ({ path, title }));
+  credentialCalls.length = 0;
+  credentialsFor = ({ req }) => ({ cookies: { owner: req.cookies.get("owner") } });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -511,6 +553,7 @@ describe("an agent calling the app's routes", () => {
       "import-layout",
       "list-orders",
       "my-orders",
+      "read-draft",
       "refund-order",
       "rename-product",
       "whoami",
@@ -675,6 +718,196 @@ describe("an agent calling the app's routes", () => {
   });
 });
 
+describe("the app's own credentials", () => {
+  const owned = () => new McpRegistry(new OwnedMcp(), resolve(ApiRouteDispatcher));
+  const visitor = { Cookie: "owner=o1; theme=dark" };
+
+  test("without a credentials hook an app cookie is not forwarded, and the route refuses", async () => {
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" });
+
+    expect(result.status).toBe("error");
+    expect(result.error.message).toMatch(/^"read-draft" was refused with 403/);
+    expect(handled).toEqual([]);
+  });
+
+  test("the hook's cookie reaches the route's middleware, and nothing else does", async () => {
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(result).toMatchObject({ status: "ok", output: { id: "d1", cookie: "owner=o1" } });
+    expect(handled).toEqual([{ route: "draft", user: null, params: { id: "d1" } }]);
+  });
+
+  test("the hook is asked per call, with the tool, its input and the run's context", async () => {
+    await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(credentialCalls).toHaveLength(1);
+    const [call] = credentialCalls;
+    expect(call.caller.kind).toBe("local");
+    expect(call.req).toBe(call.caller.req);
+    expect(call.req.cookies.get("owner")).toBe("o1");
+    expect(call.tool.name).toBe("read-draft");
+    expect(call.input).toEqual({ id: "d1" });
+    expect(call.ctx?.toolCallId).toBe("c1");
+  });
+
+  test("a hook that throws is a server failure, logged, and nothing is dispatched", async () => {
+    const failure = new Error("signing key missing");
+    credentialsFor = () => {
+      throw failure;
+    };
+
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"read-draft" failed on the server.' },
+    });
+    expect(JSON.stringify(result)).not.toContain("signing key");
+    expect(console.error).toHaveBeenCalledWith(
+      '[gemi/mcp] Binding the credentials of "read-draft" failed:',
+      failure,
+    );
+    expect(handled).toEqual([]);
+  });
+
+  test("a hook cannot swap the user: an access_token of its own fails the call", async () => {
+    credentialsFor = () => ({ cookies: { access_token: "v2.tok-bob" } });
+
+    const { result } = await runTool(alice, "whoami", {}, { registry: owned() });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"whoami" failed on the server.' },
+    });
+    expect(handled).toEqual([]);
+  });
+
+  test("a hook answering nothing dispatches with the access token alone", async () => {
+    credentialsFor = () => undefined;
+
+    const { result } = await runTool(alice, "whoami", {}, { registry: owned() });
+
+    expect(result).toMatchObject({ status: "ok", output: { id: 1 } });
+  });
+});
+
+describe("binders given the call (#756)", () => {
+  /** What each binder was handed, per call. */
+  const seen: { req: HttpRequest<any, any>; call: McpCallContext }[] = [];
+  const fileSeen: { ctx: unknown; call: McpCallContext }[] = [];
+
+  class ContextMcp extends McpRouter<CreateRPC<Api>> {
+    routes = {
+      // The resource the run is about, from what the server handed the run —
+      // not from the url of the route that started it.
+      "site-orders": this.fromApiRoute("GET", "/:orgId/orders", {
+        description: "List the orders of the site this run is about",
+        input: s.object({ status: s.string() }),
+        params: {
+          orgId: (req, call) => {
+            seen.push({ req, call });
+            return (call.ctx?.context as { siteId?: string } | undefined)?.siteId ?? "";
+          },
+        },
+      }),
+      "create-product-from-upload": this.fromApiRoute("POST", "/:orgId/products", {
+        description: "Create a product from the image the user attached",
+        input: s.object({ name: s.string(), price: s.number() }),
+        params: { orgId: (_req, { ctx }) => (ctx!.context as { siteId: string }).siteId },
+        files: {
+          image: (ctx, call) => {
+            fileSeen.push({ ctx, call });
+            return ctx.turn.attachments[0];
+          },
+        },
+      }),
+    };
+  }
+  const registry = () => new McpRegistry(new ContextMcp(), resolve(ApiRouteDispatcher));
+
+  beforeEach(() => {
+    seen.length = 0;
+    fileSeen.length = 0;
+  });
+
+  test("a param binder reads the run's context, and the model has no say", async () => {
+    const { result, offered } = await runTool(
+      alice,
+      "site-orders",
+      { status: "open", orgId: "org_bob" },
+      { registry: registry(), context: { siteId: "site_9" } },
+    );
+
+    expect(result).toMatchObject({ status: "ok", output: { orgId: "site_9", status: "open" } });
+    expect(handled).toEqual([{ route: "orders", user: 1, params: { orgId: "site_9" } }]);
+    const spec = offered.find((tool) => tool.name === "site-orders")!;
+    expect(Object.keys(spec.parameters.properties!)).toEqual(["status"]);
+  });
+
+  test("the call carries the caller, the tool, the parsed input and the ToolContext", async () => {
+    await runTool(
+      alice,
+      "site-orders",
+      { status: "open" },
+      { registry: registry(), context: { siteId: "site_9" } },
+    );
+
+    expect(seen).toHaveLength(1);
+    const [{ req, call }] = seen;
+    // The first argument is unchanged: the run's request.
+    expect(req).toBe(call.req);
+    expect(call.caller).toEqual({ kind: "local", req });
+    expect(call.tool.name).toBe("site-orders");
+    expect(call.input).toEqual({ status: "open" });
+    expect(call.ctx?.toolCallId).toBe("c1");
+    expect(call.ctx?.context).toEqual({ siteId: "site_9" });
+  });
+
+  test("a file binder gets the same call as its second argument", async () => {
+    const mine = scopeFor("user:1");
+    const upload = await mine.put(new File(["photo"], "photo.jpg", { type: "image/jpeg" }));
+
+    const { result } = await runTool(
+      alice,
+      "create-product-from-upload",
+      { name: "Photo", price: 3 },
+      {
+        registry: registry(),
+        attachments: mine,
+        context: { siteId: "site_9" },
+        turn: {
+          text: "make a product of this",
+          files: [{ attachmentId: upload.id, name: "photo.jpg", mimeType: "image/jpeg" }],
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "ok",
+      output: { orgId: "site_9", image: { name: "photo.jpg" } },
+    });
+    expect(fileSeen).toHaveLength(1);
+    expect(fileSeen[0].call.ctx).toBe(fileSeen[0].ctx);
+    expect(fileSeen[0].call.tool.name).toBe("create-product-from-upload");
+    expect(fileSeen[0].call.input).toEqual({ name: "Photo", price: 3 });
+  });
+
+  test("called without a tool context, the call has none", async () => {
+    const req = new HttpRequest(new Request("http://gemi.dev/api/agent", { headers: alice }));
+    const error = await registry()
+      .execute({ kind: "local", req }, "site-orders", { status: "open" })
+      .then(
+        () => null,
+        (e: Error) => e,
+      );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].call.ctx).toBeUndefined();
+    // No site, so the binder answered "" — a server failure, not the model's.
+    expect(error?.message).toBe('"site-orders" failed on the server.');
+  });
+});
+
 describe("projecting what the route answers (#757)", () => {
   const registry = () => new McpRegistry(new ProjectingMcp(), resolve(ApiRouteDispatcher));
   const run = (name: string, headers: Record<string, string> = {}) =>
@@ -695,7 +928,7 @@ describe("projecting what the route answers (#757)", () => {
     expect(JSON.stringify(result)).not.toContain("<main>");
   });
 
-  test("result is handed the parsed answer, the tool and the model's input", async () => {
+  test("result is handed the parsed answer and the call", async () => {
     await run("list-pages");
 
     expect(projected).toHaveLength(1);
@@ -703,6 +936,9 @@ describe("projecting what the route answers (#757)", () => {
     expect(data[0]).toMatchObject({ path: "/p0", html: expect.any(String) });
     expect(call.tool.name).toBe("list-pages");
     expect(call.input).toEqual({});
+    // The whole call, as binders get it.
+    expect(call.ctx?.toolCallId).toBe("c1");
+    expect(call.caller.kind).toBe("local");
   });
 
   test("output alone drops every field it does not declare", async () => {
@@ -910,7 +1146,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(10);
+    expect(registry().list(caller)).toHaveLength(11);
   });
 
   test("a remote caller is typed and refused", async () => {

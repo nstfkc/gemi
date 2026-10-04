@@ -16,6 +16,7 @@ import { s } from "../ai/Schema";
 import { ApiRouter, type CreateRPC } from "./ApiRouter";
 import { Controller, ResourceController } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
+import type { McpCallContext } from "../services/mcp/McpRegistry";
 import { McpRouteDeclaration, McpRouter } from "./McpRouter";
 
 class CreateProductRequest extends HttpRequest<
@@ -235,6 +236,62 @@ describe("fromApiRoute", () => {
         }),
       };
     }
+  });
+
+  test("credentials answers headers and cookies, and nothing else", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {};
+      credentials({ req, tool, input, ctx }: McpCallContext) {
+        expectTypeOf(tool.name).toBeString();
+        expectTypeOf(input).toEqualTypeOf<Record<string, unknown>>();
+        expectTypeOf(ctx?.runId).toEqualTypeOf<string | undefined>();
+        return { cookies: { owner: req.cookies.get("owner") }, headers: { "x-grant": "g" } };
+      }
+    }
+    class Async extends McpRouter<Routes> {
+      async credentials() {
+        return undefined;
+      }
+    }
+    class Wrong extends McpRouter<Routes> {
+      // @ts-expect-error a header value is a string
+      credentials() {
+        return { headers: { "x-grant": 1 } };
+      }
+    }
+    void [Mcp, Async, Wrong];
+  });
+
+  test("binders are handed the call as their second argument", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {
+        create: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "x",
+          input: s.object({ name: s.string(), price: s.number() }),
+          params: {
+            orgId: (req, call) => {
+              expectTypeOf(call).toEqualTypeOf<McpCallContext>();
+              expectTypeOf(call.ctx?.runId).toEqualTypeOf<string | undefined>();
+              return String(call.input.orgId ?? req.params.orgId);
+            },
+          },
+          files: {
+            image: (ctx, call) => {
+              expectTypeOf(call.tool.name).toBeString();
+              return ctx.turn.attachments[0];
+            },
+          },
+        }),
+        // A one-argument binder still fits.
+        legacy: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "x",
+          input: s.object({ name: s.string(), price: s.number() }),
+          params: { orgId: (req) => req.ctx().user.orgId },
+          files: { image: "input" },
+        }),
+      };
+    }
+    void Mcp;
   });
 
   test("result is handed the route's answer, and output must describe what is answered", () => {

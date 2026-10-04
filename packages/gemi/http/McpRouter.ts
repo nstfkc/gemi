@@ -1,7 +1,7 @@
 import type { ToolContext } from "../ai/Agent";
-import type { McpToolDescriptor } from "../services/mcp/McpRegistry";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
+import type { McpCallContext, McpCredentials } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -26,16 +26,29 @@ export type McpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  * say in it: the param is absent from the tool's input schema, and anything
  * the model sends under its name is dropped before the url is built.
  *
- * It is handed the run's request, not a tool context, so the same binder
- * keeps meaning something for a caller that is not an agent run. A binder may
- * read the user as `req.ctx().user`: that is the store of the request that
- * started the run, and it stays open until the run settles — through a
- * streamed response, and after the client has disconnected, since leaving does
- * not stop the run. `user` is whatever that route's middleware set, so the
- * route that starts the run must be behind `auth` for it to be there.
+ * It is handed the run's request first, so the same binder keeps meaning
+ * something for a caller that is not an agent run. A binder may read the user
+ * as `req.ctx().user`: that is the store of the request that started the run,
+ * and it stays open until the run settles — through a streamed response, and
+ * after the client has disconnected, since leaving does not stop the run.
+ * `user` is whatever that route's middleware set, so the route that starts the
+ * run must be behind `auth` for it to be there.
+ *
+ * The second argument is the whole call (#756): the caller, the tool, the
+ * model's parsed arguments, and `ctx`, the run's `ToolContext` — absent when
+ * the registry is called without one. A param that names "the resource this
+ * run is about" reads it from there rather than from the chat route's url:
+ *
+ * ```ts
+ * params: { siteId: (_req, { ctx }) => ctx?.context.siteId }
+ * ```
+ *
+ * `ctx.body` is the client's, as untrusted as a request body: bind from it
+ * only what the route's own middleware checks anyway.
  */
 export type McpParamBinder = (
   req: HttpRequest<any, any>,
+  call: McpCallContext,
 ) => string | number | Promise<string | number>;
 
 /**
@@ -43,8 +56,13 @@ export type McpParamBinder = (
  * The id still resolves through `ctx.attachments`, so a binder can narrow which
  * of the caller's files is sent and can never reach anybody else's. `undefined`
  * means there is no file to send, and the model is told so.
+ *
+ * The second argument is the whole call, as a param binder gets it.
  */
-export type McpFileBinder = (ctx: ToolContext) => string | undefined | Promise<string | undefined>;
+export type McpFileBinder = (
+  ctx: ToolContext,
+  call: McpCallContext,
+) => string | undefined | Promise<string | undefined>;
 
 // --- reading the route table -------------------------------------------------
 
@@ -207,13 +225,11 @@ type InputProp<B, I> = {
 };
 
 /**
- * What `result` is handed beside the route's answer: the tool, and the
- * arguments the model called it with, parsed.
+ * What `result` is handed beside the route's answer: the whole call, as the
+ * binders and the `credentials` hook get it — the tool, the model's parsed
+ * arguments, the caller and the run's `ToolContext`.
  */
-export type McpResultContext = {
-  tool: McpToolDescriptor;
-  input: Record<string, unknown>;
-};
+export type McpResultContext = McpCallContext;
 
 /**
  * Turns the route's answer into what the model is shown. See `ResultMeta`.
@@ -356,6 +372,33 @@ export class McpRouter<R = McpRoutes> {
   static __brand = "McpRouter";
 
   routes: Record<string, McpRouteDeclaration> = {};
+
+  /**
+   * The app's own credentials for one tool call, sent beside the access token
+   * of the user who started the run. Optional; without it a tool call carries
+   * gemi's access token and nothing else.
+   *
+   * For routes whose middleware reads something gemi does not know about: a
+   * cookie naming an anonymous owner, or a header the app signs per run so a
+   * route can check what this run may touch.
+   *
+   * ```ts
+   * credentials({ req, ctx }: McpCallContext) {
+   *   return {
+   *     cookies: { owner: req.cookies.get("owner") },
+   *     headers: { "x-run-grant": signGrant(ctx?.runId) },
+   *   };
+   * }
+   * ```
+   *
+   * Nothing of the initiator's is forwarded unless it is returned here, value
+   * by value. `access_token`, `Cookie`, `Host`, `User-Agent`, the body's
+   * framing headers and `x-forwarded-*` cannot be set: the identity stays the
+   * initiator's, and the call fails on the server, logged, if one is returned.
+   * The route's middleware still decides what a credential is worth, so this
+   * can reach nothing a direct request carrying the same values could not.
+   */
+  credentials?(call: McpCallContext): McpCredentials | undefined | Promise<McpCredentials | undefined>;
 
   fromApiRoute<
     M extends McpMethod,
