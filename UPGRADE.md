@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.107.0 to 0.108.0
 
 ## A view used by several routes renders once (#788)
 
