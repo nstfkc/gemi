@@ -63,11 +63,12 @@ Produces a production build.
 gemi build
 ```
 
-The command runs in three stages:
+The command runs in four stages:
 
 1. **Client build** — `vite build` (under `bun --bun`) emits the browser bundle to `dist/client`.
-2. **Server (SSR) build** — `vite build --ssr` emits per-view server chunks plus `dist/server/.vite/manifest.json` to `dist/server`. This mirrors the client build so each `app/views/*.tsx` maps to its built server module.
-3. **Server entry** — `Bun.build` emits a runnable `dist/server/server.mjs` that `gemi start` launches. `node_modules` dependencies are kept external (resolved at runtime) so native/dev-only packages like sharp, the Prisma engine, and Vite aren't bundled.
+2. **Precompression** — every compressible file the client build wrote under `dist/client/assets` (at least 1 kB) gets a `.br` (brotli 11) and a `.gz` (gzip 9) sibling, and the list goes to `dist/client/.vite/static-assets.json`. `gemi start` serves the sibling the browser accepts. See [Static assets](./configuration.md#static-assets).
+3. **Server (SSR) build** — `vite build --ssr` emits per-view server chunks plus `dist/server/.vite/manifest.json` to `dist/server`. This mirrors the client build so each `app/views/*.tsx` maps to its built server module.
+4. **Server entry** — `Bun.build` emits a runnable `dist/server/server.mjs` that `gemi start` launches. `node_modules` dependencies are kept external (resolved at runtime) so native/dev-only packages like sharp, the Prisma engine, and Vite aren't bundled.
 
 Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
 

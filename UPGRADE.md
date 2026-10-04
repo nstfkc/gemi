@@ -1,3 +1,24 @@
+# Unreleased
+
+## `gemi build` precompresses the client bundle; `/assets/*` is served compressed and `immutable` (#789)
+
+`gemi start` compressed SSR HTML but sent `/assets/*.js` and `*.css` at their raw size, so a page's JavaScript went over the wire about three times larger than it needed to (a kyte page: 917 kB instead of ~231 kB brotli).
+
+What changes:
+
+- **`gemi build` writes `.br` and `.gz` files** next to every compressible file the client build emitted under `dist/client/assets` (`.js`, `.mjs`, `.css`, `.svg`, `.json`, `.wasm`, `.txt`, `.xml`, `.ttf`, `.otf`, …) of at least 1 kB, at brotli quality 11 and gzip level 9, and records them in `dist/client/.vite/static-assets.json`. A sibling that isn't smaller than its file isn't kept. The build takes a little longer (about 0.4 s for 520 kB of assets) and `dist/client/assets` has up to three files per chunk.
+- **`gemi start` serves them** by `Accept-Encoding` (brotli, then gzip, then identity), with the original `Content-Type`, the encoded `Content-Length`, `Content-Encoding` and `Vary: Accept-Encoding`. Nothing is compressed per request. A `Range` request still gets a `206` of the uncompressed file.
+- **Build assets are sent with `Cache-Control: public, max-age=31536000, immutable`** (was `must-revalidate`). Files copied from `public/`, including `public/assets/`, keep `must-revalidate` and are not compressed.
+- **`previousAssets` carries a file's `.br`/`.gz` with it**, and gives carried files from a release built before this their siblings.
+
+Nothing to change in an app. Rebuild to get it: a `dist/` built by an older gemi has no `static-assets.json`, and `gemi start` serves it exactly as before.
+
+Check your deploy if:
+
+- **you upload `dist/client` to a CDN or bucket** (`GEMI_ASSET_BASE`): the `.br`/`.gz` files go up too. Either configure the CDN to serve them for `Accept-Encoding`, or skip them and let the CDN compress (`--exclude "*.br" --exclude "*.gz"` or your uploader's equivalent).
+- **a CDN or proxy pulls from `gemi start`**: it now receives compressed bodies with `Vary: Accept-Encoding`. Make sure it caches per encoding (most do, or normalise `Accept-Encoding`) and doesn't compress the response again. A proxy that decompresses before forwarding (some do for HTML rewriting) undoes the saving but stays correct.
+- **something checks file counts or sizes in `dist/client/assets`** (a size budget, a Docker layer check): the siblings add about 60% of the compressible files' size on disk (on the template app, 523 kB of JS and CSS gained 150 kB of `.br` and 172 kB of `.gz`).
+
 # Upgrading from 0.106.0 to 0.107.0
 
 ## `gemi/http`: `safeFetch` for URLs that users give (#754)

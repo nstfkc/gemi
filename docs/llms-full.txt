@@ -955,7 +955,7 @@ export default defineConfig({
 });
 ```
 
-Hashed filenames never collide across releases, so the files sit side by side under `/assets/`. `gemi build` records in `dist/client/.vite/previous-assets.json` which files belong to which earlier release, and drops a release once it was replaced more than `maxAge` seconds ago (default 7 days) or is more than `releases` deploys back (default 2). The age is checked when the next build runs. Nothing changes at runtime.
+Hashed filenames never collide across releases, so the files sit side by side under `/assets/`. A file's precompressed `.br`/`.gz` siblings (see [Static assets](#static-assets)) are carried and dropped with it, and a carried file that has none, from a release built before gemi precompressed, gets them in the new build. `gemi build` records in `dist/client/.vite/previous-assets.json` which files belong to which earlier release, and drops a release once it was replaced more than `maxAge` seconds ago (default 7 days) or is more than `releases` deploys back (default 2). The age is checked when the next build runs. Nothing changes at runtime.
 
 The previous build is read from `dist/client` by default, which only exists when you build where the last build ran. A container build starts from a clean tree, so point `GEMI_PREVIOUS_ASSETS` (or `previousAssets.from`) at the previous image's `dist/client`. Setting the variable turns the feature on by itself. A directory that does not exist is skipped with a notice, so the first deploy needs nothing special:
 
@@ -1068,7 +1068,7 @@ Brotli is preferred when the client accepts both. gemi runs it at quality 5 rath
 
 ### What is and isn't compressed
 
-- **`text/html` responses only.** JSON view-data responses (`.json`), API routes, static assets from `dist/`, and OG images are untouched — same response object, same headers.
+- **`text/html` responses only.** JSON view-data responses (`.json`), API routes, and OG images are untouched — same response object, same headers. The client bundle under `/assets/` is compressed at build time instead; see [Static assets](#static-assets).
 - **Streaming is preserved.** The compressor flushes on every write, so React's shell still reaches the browser before the rest of the document is rendered. Compression does not cost you time to first byte.
 - **The transport layer only.** What the browser decodes is byte-for-byte the HTML React rendered, so hydration sees exactly what it would have without compression.
 - Responses are left alone when they are already encoded, carry `Cache-Control: no-transform`, are a `206` byte range, or answer a `HEAD`.
@@ -1077,6 +1077,24 @@ Brotli is preferred when the client accepts both. gemi runs it at quality 5 rath
 ### Why the framework and not the CDN
 
 Compression could live at the edge, in the runtime, or in the app. gemi puts it in the runtime because it is the only layer where the behaviour is portable: every gemi app serves the same shape of response, so the win doesn't depend on each deployment configuring a CDN to compress on the origin's behalf. It also cuts **origin→edge** bandwidth, which edge compression cannot do. Edge compression still composes on top of it — the `Vary` header is what makes that safe.
+
+### Static assets
+
+The JavaScript and CSS under `/assets/` are compressed once, by `gemi build`, not per request. Next to every build asset that compresses well (`.js`, `.mjs`, `.css`, `.svg`, `.json`, `.wasm`, `.txt`, `.xml`, `.ttf`, `.otf`, …) of at least 1 kB, the build writes `file.br` (brotli quality 11) and `file.gz` (gzip level 9), and keeps one only when it is smaller than the file. Images, `woff2` fonts and source maps are left as they are. What it wrote is recorded in `dist/client/.vite/static-assets.json`, which `gemi start` reads at boot.
+
+A request for a build asset then gets the sibling its `Accept-Encoding` prefers (brotli, then gzip, then the file itself), with the original's `Content-Type`, the encoded `Content-Length` and `Vary: Accept-Encoding`. A `Range` request always gets a `206` slice of the uncompressed file. Build assets are content-hashed, so they are sent with `Cache-Control: public, max-age=31536000, immutable`.
+
+On the template app's home page, the 37 JS and CSS files it loads come to:
+
+| Encoding | Transferred |
+| --- | ---: |
+| identity (before) | 446,940 B |
+| `gzip` (level 9) | 155,400 B |
+| `br` (quality 11) | 135,838 B |
+
+Only files the client build wrote are served this way. Anything copied from `public/` (including `public/assets/`) is served as it was, uncompressed and with `must-revalidate`, and a `dist/` built by an older gemi has no record, so `gemi start` serves it as before. `GEMI_COMPRESSION=off` does not change static assets.
+
+> **Gotcha:** if you upload `dist/client` to a CDN or object store yourself (an [asset base](#asset-base)), the `.br`/`.gz` files are uploaded beside the originals but nothing serves them by `Accept-Encoding` there. Either let the CDN compress, or configure it to serve the precompressed siblings (and skip uploading them if it can't). A CDN or proxy pulling from `gemi start` as its origin needs nothing: it keys on `Vary: Accept-Encoding`, or forwards a normalised `Accept-Encoding`, as for HTML.
 
 ### Opting out
 
@@ -1308,11 +1326,12 @@ Produces a production build.
 gemi build
 ```
 
-The command runs in three stages:
+The command runs in four stages:
 
 1. **Client build** — `vite build` (under `bun --bun`) emits the browser bundle to `dist/client`.
-2. **Server (SSR) build** — `vite build --ssr` emits per-view server chunks plus `dist/server/.vite/manifest.json` to `dist/server`. This mirrors the client build so each `app/views/*.tsx` maps to its built server module.
-3. **Server entry** — `Bun.build` emits a runnable `dist/server/server.mjs` that `gemi start` launches. `node_modules` dependencies are kept external (resolved at runtime) so native/dev-only packages like sharp, the Prisma engine, and Vite aren't bundled.
+2. **Precompression** — every compressible file the client build wrote under `dist/client/assets` (at least 1 kB) gets a `.br` (brotli 11) and a `.gz` (gzip 9) sibling, and the list goes to `dist/client/.vite/static-assets.json`. `gemi start` serves the sibling the browser accepts. See [Static assets](./configuration.md#static-assets).
+3. **Server (SSR) build** — `vite build --ssr` emits per-view server chunks plus `dist/server/.vite/manifest.json` to `dist/server`. This mirrors the client build so each `app/views/*.tsx` maps to its built server module.
+4. **Server entry** — `Bun.build` emits a runnable `dist/server/server.mjs` that `gemi start` launches. `node_modules` dependencies are kept external (resolved at runtime) so native/dev-only packages like sharp, the Prisma engine, and Vite aren't bundled.
 
 Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
 
