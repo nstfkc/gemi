@@ -139,13 +139,24 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 });
 
 export const Tree = memo(
-  (props: { action: Action; tree: ComponentTree; entries: string[]; pathname: string }) => {
-    const { entries, tree, pathname, action } = props;
+  (props: {
+    action: Action;
+    tree: ComponentTree;
+    entries: string[];
+    pathname: string;
+    /** Index into `entries` this level of the tree renders. */
+    depth?: number;
+  }) => {
+    const { entries, tree, pathname, action, depth = 0 } = props;
 
     return (
       <>
+        {/* `entries` is the matched route's chain, outermost layout first, so
+            each level renders the one view at its own position. Matching on
+            membership instead mounted a view twice when it also sat at
+            another depth of the tree (#788). */}
         {tree
-          .filter(([path]) => entries.includes(path))
+          .filter(([path]) => path === entries[depth])
           .map((node, slot) => {
             const [path, subtree] = node;
             // Keyed by tree SLOT, not by view path: the Suspense/error
@@ -165,7 +176,13 @@ export const Tree = memo(
                   componentPath={path}
                   pathname={pathname}
                 >
-                  <Tree action={action} tree={subtree} entries={entries} pathname={pathname} />
+                  <Tree
+                    action={action}
+                    tree={subtree}
+                    entries={entries}
+                    pathname={pathname}
+                    depth={depth + 1}
+                  />
                 </Route>
               );
             }
