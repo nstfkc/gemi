@@ -3,14 +3,14 @@ import { ToolError } from "../../ai/redact";
 import { s, type AnySchema, type JSONSchema, type Schema } from "../../ai/Schema";
 import type { RouteSource } from "../../http/ApiRouter";
 import type { HttpRequest } from "../../http/HttpRequest";
-import {
+import type {
+  McpFileBinder,
+  McpMethod,
   McpModelParam,
-  type McpFileBinder,
-  type McpMethod,
-  type McpParamBinder,
-  type McpResultProjection,
-  type McpRouteDeclaration,
-  type McpRouter,
+  McpParamBinder,
+  McpResultProjection,
+  McpRouteDeclaration,
+  McpRouter,
 } from "../../http/McpRouter";
 import type { ApiRouteDispatcher, DispatchCredentials } from "../router/ApiRouteDispatcher";
 
@@ -380,7 +380,7 @@ export class McpRegistry {
       if (!params.some((param) => param.name === key)) {
         throw new Error(`${where}: "${key}" in params is not a param of the url.`);
       }
-      if (binder instanceof McpModelParam) {
+      if (isModelParam(binder)) {
         assertModelParam(where, `params.${key}`, binder);
       } else {
         assertBinder(where, `params.${key}`, binder);
@@ -437,7 +437,7 @@ export class McpRegistry {
           param.name,
           param.modifier === "?" || param.modifier === "*" ? field.optional() : field,
         );
-      } else if (binder instanceof McpModelParam) {
+      } else if (isModelParam(binder)) {
         const key = binder.as ?? param.name;
         addExtra(key, binder.input);
         modelParams.set(param.name, { key, param: binder });
@@ -669,6 +669,14 @@ function assertBinder(where: string, at: string, binder: unknown) {
   if (binder !== "input" && typeof binder !== "function") {
     throw new Error(`${where}: ${at} must be a function or "input".`);
   }
+}
+
+/**
+ * By brand, as a declaration is, rather than `instanceof`: an app that ends up
+ * with two copies of gemi would otherwise see its params as broken binders.
+ */
+function isModelParam(value: unknown): value is McpModelParam<any> {
+  return value instanceof Object && (value as McpModelParam).__internal_brand === "McpModelParam";
 }
 
 /** A `this.param(...)`, checked for a router written in JavaScript or behind a cast. */
