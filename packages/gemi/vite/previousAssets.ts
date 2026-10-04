@@ -116,10 +116,14 @@ export async function stagePreviousAssets(
 
   const carried = await readRecord(from);
   const carriedFiles = new Set(carried.flatMap((release) => release.files));
+  const listed = await listFiles(from, ASSETS_DIR);
+  const listedSet = new Set(listed);
   // The outgoing release's own files: everything it served that it was not
-  // itself only carrying for an earlier one.
-  const own = (await listFiles(from, ASSETS_DIR)).filter(
-    (file) => isCarriable(file) && !carriedFiles.has(file),
+  // itself only carrying for an earlier one. A precompressed sibling
+  // (`x.js.br`) is not a file of its own: it travels with `x.js`, whichever
+  // release that belongs to, and is dropped with it.
+  const own = listed.filter(
+    (file) => isCarriable(file) && !carriedFiles.has(file) && !isSiblingIn(file, listedSet),
   );
 
   const releases = [
@@ -142,6 +146,7 @@ export async function stagePreviousAssets(
       const target = join(stagingDir, file);
       await mkdir(dirname(target), { recursive: true });
       await copyFile(source, target);
+      await copySiblings(source, target);
       files.push(file);
     }
     if (files.length > 0) {
@@ -162,8 +167,9 @@ export async function restorePreviousAssets(
   stagingDir: string,
   clientDir: string,
   releases: RetainedRelease[],
-): Promise<{ files: number; releases: number }> {
+): Promise<{ files: number; releases: number; paths: string[] }> {
   const record: RetainedRelease[] = [];
+  const paths: string[] = [];
   let count = 0;
   for (const release of releases) {
     const files: string[] = [];
@@ -174,7 +180,9 @@ export async function restorePreviousAssets(
       }
       await mkdir(dirname(target), { recursive: true });
       await copyFile(join(stagingDir, file), target);
+      await copySiblings(join(stagingDir, file), target);
       files.push(file);
+      paths.push(file);
     }
     if (files.length > 0) {
       record.push({ retiredAt: release.retiredAt, files });
@@ -185,7 +193,25 @@ export async function restorePreviousAssets(
   const recordPath = join(clientDir, PREVIOUS_ASSETS_RECORD);
   await mkdir(dirname(recordPath), { recursive: true });
   await writeFile(recordPath, `${JSON.stringify({ releases: record }, null, 2)}\n`);
-  return { files: count, releases: record.length };
+  return { files: count, releases: record.length, paths };
+}
+
+const SIBLING_SUFFIXES = [".br", ".gz"];
+
+function isSiblingIn(file: string, files: Set<string>): boolean {
+  const suffix = SIBLING_SUFFIXES.find((ext) => file.endsWith(ext));
+  return suffix !== undefined && files.has(file.slice(0, -suffix.length));
+}
+
+// The `.br`/`.gz` a build wrote beside a file (#789), so a carried chunk is
+// still served compressed. A missing one is skipped: the build writes it
+// again, and a release built before precompression has none.
+async function copySiblings(source: string, target: string) {
+  for (const ext of SIBLING_SUFFIXES) {
+    if (await isFile(source + ext)) {
+      await copyFile(source + ext, target + ext);
+    }
+  }
 }
 
 async function readRecord(clientDir: string): Promise<RetainedRelease[]> {

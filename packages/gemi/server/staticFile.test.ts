@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { listPublicFiles } from "./staticFile";
+import { gzipSync, brotliCompressSync } from "node:zlib";
+
+import { listPublicFiles, staticFileResponse } from "./staticFile";
 
 let dir: string;
 
@@ -44,5 +46,108 @@ describe("listPublicFiles", () => {
 
   test("is empty for a missing directory", async () => {
     expect((await listPublicFiles(join(dir, "nope"))).size).toBe(0);
+  });
+});
+
+describe("staticFileResponse", () => {
+  const source = "export const answer = 42;\n".repeat(100);
+  let assets: string;
+  let chunk: string;
+
+  beforeAll(async () => {
+    assets = await mkdtemp(join(tmpdir(), "gemi-static-response-"));
+    chunk = join(assets, "client-abc.js");
+    await writeFile(chunk, source);
+    await writeFile(`${chunk}.br`, brotliCompressSync(source));
+    await writeFile(`${chunk}.gz`, gzipSync(source));
+  });
+
+  afterAll(async () => {
+    await rm(assets, { recursive: true, force: true });
+  });
+
+  function get(headers: Record<string, string> = {}) {
+    return new Request("http://localhost/assets/client-abc.js", { headers });
+  }
+
+  test("sends the brotli sibling when it is accepted, with the original's type", async () => {
+    const res = await staticFileResponse(get({ "Accept-Encoding": "gzip, deflate, br" }), chunk, {
+      immutable: true,
+      encodings: ["br", "gzip"],
+    });
+    const body = Buffer.from(await res.arrayBuffer());
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Encoding")).toBe("br");
+    expect(res.headers.get("Content-Type")).toMatch(/^text\/javascript/);
+    expect(res.headers.get("Vary")).toBe("Accept-Encoding");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    expect(Number(res.headers.get("Content-Length"))).toBe(body.length);
+    expect(body.equals(brotliCompressSync(source))).toBe(true);
+  });
+
+  test("falls back to gzip, then identity", async () => {
+    const gz = await staticFileResponse(get({ "Accept-Encoding": "gzip" }), chunk, {
+      immutable: true,
+      encodings: ["br", "gzip"],
+    });
+    expect(gz.headers.get("Content-Encoding")).toBe("gzip");
+    expect(gz.headers.get("ETag")).toMatch(/-gzip$/);
+
+    for (const headers of [
+      {},
+      { "Accept-Encoding": "identity" },
+      { "Accept-Encoding": "br;q=0" },
+    ]) {
+      const res = await staticFileResponse(get(headers), chunk, {
+        immutable: true,
+        encodings: ["br", "gzip"],
+      });
+      expect(res.headers.get("Content-Encoding")).toBeNull();
+      expect(res.headers.get("Vary")).toBe("Accept-Encoding");
+      expect(await res.text()).toBe(source);
+    }
+  });
+
+  test("only offers the encodings the build recorded", async () => {
+    const res = await staticFileResponse(get({ "Accept-Encoding": "br" }), chunk, {
+      immutable: true,
+      encodings: ["gzip"],
+    });
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(await res.text()).toBe(source);
+  });
+
+  test("a range request gets a 206 slice of the identity file", async () => {
+    const res = await staticFileResponse(
+      get({ "Accept-Encoding": "br, gzip", Range: "bytes=0-9" }),
+      chunk,
+      { immutable: true, encodings: ["br", "gzip"] },
+    );
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(res.headers.get("Content-Range")).toBe(`bytes 0-9/${source.length}`);
+    expect(await res.text()).toBe(source.slice(0, 10));
+  });
+
+  test("a missing sibling falls back to identity", async () => {
+    const lonely = join(assets, "lonely-abc.js");
+    await writeFile(lonely, source);
+    const res = await staticFileResponse(get({ "Accept-Encoding": "br" }), lonely, {
+      immutable: true,
+      encodings: ["br"],
+    });
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(await res.text()).toBe(source);
+  });
+
+  test("a file outside the build record keeps the old headers and is never encoded", async () => {
+    const res = await staticFileResponse(get({ "Accept-Encoding": "br" }), chunk);
+
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(res.headers.get("Vary")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, must-revalidate");
+    expect(await res.text()).toBe(source);
   });
 });
