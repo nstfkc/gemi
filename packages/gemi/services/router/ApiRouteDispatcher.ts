@@ -50,6 +50,75 @@ class DebugRouter extends ApiRouter {
 export type InProcessMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
+ * Credentials of the app's own that a `dispatchAs` request carries beside
+ * gemi's access token: a cookie an app middleware reads (an anonymous owner's
+ * id), or a header the app signed for this call (a short-lived grant).
+ *
+ * A `null` or `undefined` value is skipped, so `req.cookies.get("x")` can be
+ * passed as it is. The values are sent as given — a cookie value is not
+ * encoded, the same as `HttpRequest.cookies` reads it.
+ */
+export type DispatchCredentials = {
+  headers?: Record<string, string | null | undefined>;
+  cookies?: Record<string, string | null | undefined>;
+};
+
+export type DispatchAsOptions = {
+  credentials?: DispatchCredentials;
+};
+
+/**
+ * Headers `credentials` may not set. Each one is either gemi's identity, which
+ * stays the initiator's, or something `dispatchAs` writes itself: the body's
+ * framing, the cookie jar it builds, the host the request is routed by, and
+ * the agent a session is bound to. `x-forwarded-*` and `forwarded` are refused
+ * as a prefix and a name: they are how a proxy describes a client, and the
+ * synthetic request has no proxy in front of it.
+ */
+const RESERVED_HEADERS = new Set([
+  ACCESS_TOKEN,
+  "cookie",
+  "content-type",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "host",
+  "user-agent",
+  "forwarded",
+]);
+
+/** RFC 6265's cookie-name: an HTTP token. */
+const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/** RFC 6265's cookie-octets: no control characters, whitespace, `"`, `,`, `;` or a backslash. */
+const COOKIE_VALUE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*$/;
+
+function applyCredentials(headers: Headers, cookies: string[], credentials: DispatchCredentials) {
+  for (const [name, value] of Object.entries(credentials.headers ?? {})) {
+    if (value === undefined || value === null) continue;
+    const lower = name.toLowerCase();
+    if (RESERVED_HEADERS.has(lower) || lower.startsWith("x-forwarded-")) {
+      throw new Error(
+        `dispatchAs: credentials may not set the "${name}" header. The access token stays the initiator's, and the request's framing is dispatchAs's own.`,
+      );
+    }
+    headers.set(name, value);
+  }
+  for (const [name, value] of Object.entries(credentials.cookies ?? {})) {
+    if (value === undefined || value === null) continue;
+    if (name === ACCESS_TOKEN) {
+      throw new Error(
+        `dispatchAs: credentials may not set the "${ACCESS_TOKEN}" cookie. The access token stays the initiator's.`,
+      );
+    }
+    if (!COOKIE_NAME.test(name) || !COOKIE_VALUE.test(value)) {
+      throw new Error(`dispatchAs: "${name}" is not a cookie a Cookie header can carry.`);
+    }
+    cookies.push(`${name}=${value}`);
+  }
+}
+
+/**
  * The same response, with a body that calls `end` once when it is read to the
  * end, errors, or is cancelled — Bun cancels it when the client disconnects.
  * Once, and not once per path: a cancel lands while a read is in flight, and
@@ -547,12 +616,23 @@ export class ApiRouteDispatcher {
    * routes are the framework's, and a tool call that signed out the session
    * that started the run, or signed in to a cookie nobody keeps, is never what
    * a model meant.
+   *
+   * `options.credentials` adds the app's own credentials to the request — a
+   * cookie or a signed header its middleware reads — beside the access token,
+   * never instead of it. Nothing is copied from the initiator on the app's
+   * behalf: the app names each value, so an app that wants a cookie of the
+   * initiator's forwarded reads it and passes it. The names that would swap
+   * the identity or the framing are refused with a throw (see
+   * `RESERVED_HEADERS`). The app's middleware still decides what a credential
+   * is worth, so this grants nothing a direct request carrying the same
+   * values would not get.
    */
   async dispatchAs(
     initiator: HttpRequest<any, any>,
     method: InProcessMethod,
     path: string,
     body?: FormData | Record<string, unknown>,
+    options?: DispatchAsOptions,
   ): Promise<Response> {
     const origin = new URL(initiator.rawRequest.url).origin;
     const url = new URL(`${origin}/api${path}`);
@@ -575,11 +655,20 @@ export class ApiRouteDispatcher {
     // user the initiator's global middleware signed in some other way — an
     // SSO header, an API key — is not: no global middleware runs for this
     // request and nothing from the initiator's context crosses over, so its
-    // `auth` routes refuse such a user, failing closed.
+    // `auth` routes refuse such a user, failing closed — unless the app passes
+    // that credential itself as `options.credentials`, which is the app's
+    // decision to make, value by value.
     const headers = new Headers();
+    const cookies: string[] = [];
     const cookieToken = initiator.cookies.get(ACCESS_TOKEN);
     if (cookieToken) {
-      headers.set("Cookie", `${ACCESS_TOKEN}=${cookieToken}`);
+      cookies.push(`${ACCESS_TOKEN}=${cookieToken}`);
+    }
+    if (options?.credentials) {
+      applyCredentials(headers, cookies, options.credentials);
+    }
+    if (cookies.length > 0) {
+      headers.set("Cookie", cookies.join("; "));
     }
     const headerToken = initiator.headers.get(ACCESS_TOKEN);
     if (headerToken) {

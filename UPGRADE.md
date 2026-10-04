@@ -1,3 +1,30 @@
+# Unreleased
+
+## `gemi/http`: an MCP tool call can carry the app's own credentials (#755)
+
+`McpRouter` has an optional `credentials(call)` hook. It returns `{ headers?, cookies? }` for each tool call, and they are sent beside the run's access token:
+
+```ts
+export default class extends McpRouter {
+  routes = { /* ... */ };
+
+  credentials({ req, ctx }: McpCallContext) {
+    return {
+      cookies: { owner: req.cookies.get("owner") },
+      headers: { "x-run-grant": signGrant(ctx?.runId) },
+    };
+  }
+}
+```
+
+`ApiRouteDispatcher.dispatchAs` takes the same thing as a fifth argument, `{ credentials }`. `McpCallContext`, `McpCredentials`, `DispatchAsOptions` and `DispatchCredentials` are exported from `gemi/services`.
+
+No change is needed to upgrade. Without the hook a tool call carries the access token and nothing else, as before. Things to know:
+
+- Only what the hook returns is sent. An initiator's cookie is not forwarded unless the hook reads it and returns it.
+- `access_token`, `Cookie`, `Host`, `User-Agent`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Forwarded` and `x-forwarded-*` can't be set, and neither can a cookie that a `Cookie` header can't carry. `dispatchAs` throws for those, and a tool call reports `"… failed on the server."` to the model and logs the reason.
+- A hook that throws fails the call the same way, and nothing is dispatched.
+
 # Upgrading from 0.100.0 to 0.101.0
 
 ## `gemi/ai`: recursive schemas that stay strict, `s.recursive` (#745)

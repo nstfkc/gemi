@@ -16,6 +16,7 @@ import { s } from "../ai/Schema";
 import { ApiRouter, type CreateRPC } from "./ApiRouter";
 import { Controller, ResourceController } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
+import type { McpCallContext } from "../services/mcp/McpRegistry";
 import { McpRouteDeclaration, McpRouter } from "./McpRouter";
 
 class CreateProductRequest extends HttpRequest<
@@ -235,5 +236,29 @@ describe("fromApiRoute", () => {
         }),
       };
     }
+  });
+
+  test("credentials answers headers and cookies, and nothing else", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {};
+      credentials({ req, tool, input, ctx }: McpCallContext) {
+        expectTypeOf(tool.name).toBeString();
+        expectTypeOf(input).toEqualTypeOf<Record<string, unknown>>();
+        expectTypeOf(ctx?.runId).toEqualTypeOf<string | undefined>();
+        return { cookies: { owner: req.cookies.get("owner") }, headers: { "x-grant": "g" } };
+      }
+    }
+    class Async extends McpRouter<Routes> {
+      async credentials() {
+        return undefined;
+      }
+    }
+    class Wrong extends McpRouter<Routes> {
+      // @ts-expect-error a header value is a string
+      credentials() {
+        return { headers: { "x-grant": 1 } };
+      }
+    }
+    void [Mcp, Async, Wrong];
   });
 });
