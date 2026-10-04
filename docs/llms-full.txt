@@ -3740,14 +3740,14 @@ preamble, so its hash differs; use a looser dev policy, as Vite itself needs.
 
 ## How much it ships
 
-A sample page (header, four content sections, a footer), built with `gemi build`
-and served by `gemi start`:
+A sample page (a header, four content sections and a footer), built with `gemi build`
+and served by `gemi start`, as sent over the wire:
 
 | Page | HTML (br) | JavaScript |
 |---|---:|---:|
 | Static, no islands | 0.9 KB | **none** |
-| Static, nav menu + contact form islands | 1.6 KB | loader inline (0.4 KB gzip) + 2 files, 0.6 KB gzip |
-| The same views, hydrated | 13 KB | 6 files, 78 KB gzip |
+| Static, with a nav menu and a contact form island | 1.6 KB, loader included | 2 files, 0.8 KB |
+| The same views, hydrated | 13 KB | 6 files, 69 KB (br) |
 
 ## Related
 

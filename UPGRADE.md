@@ -1,4 +1,4 @@
-# Upgrading from 0.107.0 to 0.108.0
+# Unreleased
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)
 
@@ -17,6 +17,8 @@ Behaviour changes to know:
 - **`getStyles(views, { layout })`**, the render callback the servers pass to the view router, takes an optional second argument. This only matters to code that calls the dispatcher's render function itself (tests that stub `getStyles` keep working).
 
 An app that serves public, mostly-static pages (kyte's published sites and previews) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
+
+# Upgrading from 0.107.0 to 0.108.0
 
 ## A view used by several routes renders once (#788)
 
