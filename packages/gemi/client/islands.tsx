@@ -1,10 +1,20 @@
-import { type ComponentType, type Context, createContext, createElement, useContext } from "react";
+import {
+  type ComponentType,
+  type Context,
+  type ReactElement,
+  type ReactNode,
+  createContext,
+  createElement,
+  lazy,
+  use,
+  useContext,
+} from "react";
 
 /**
- * When an island's client module is fetched and mounted, per marker.
+ * When an island's code is fetched and hydrated, per marker.
  *
- * - `"eager"` (default): as soon as the page has parsed. The module (and its
- *   static imports) is `modulepreload`ed from the head, so it is usually in
+ * - `"eager"` (default): as soon as the page has parsed. The island's chunks
+ *   and React are `modulepreload`ed from the head, so they are usually in
  *   cache by then.
  * - `"idle"`: on `requestIdleCallback` (a timeout where unsupported).
  * - `"visible"`: when the island's content first scrolls into view. Suits a
@@ -12,39 +22,64 @@ import { type ComponentType, type Context, createContext, createElement, useCont
  */
 export type IslandLoad = "eager" | "idle" | "visible";
 
-/**
- * The default export of an island's client module (`*.island.ts`). Runs once
- * per marker on the page: `root` is the `<gemi-island>` element wrapping the
- * server-rendered markup, `props` what the island chose to serialise (see
- * `IslandOptions.props`), or `undefined`.
- *
- * Plain DOM code — no React is loaded on a static page.
- */
-export type IslandMount<P = unknown> = (root: HTMLElement, props: P) => void;
-
-/** `() => import("./x.island")`. Never called on the server. */
-export type IslandLoader = () => Promise<{ default: IslandMount<any> }>;
-
-export interface IslandOptions<P> {
-  /** When the client module loads. Defaults to `"eager"`. */
+export interface IslandOptions {
+  /** When the island hydrates on a static page. Defaults to `"eager"`. */
   load?: IslandLoad;
-  /**
-   * What `mount` receives as `props`. Left out (or `false`), nothing is
-   * serialised: most islands read what they need from the markup. `true`
-   * serialises the component's props without `children`; a function picks
-   * what to send.
-   *
-   * Serialised with `JSON.stringify` into an attribute, so the value must be
-   * JSON: functions and `undefined` are dropped, a `Date` becomes a string.
-   * Anything in it is visible in the page source.
-   */
-  props?: boolean | ((props: P) => unknown);
+  /** Which export of the module is the component. Defaults to `"default"`. */
+  export?: string;
 }
 
-/** @internal What a static render records about the islands it used. */
+/**
+ * `() => import("./Counter")`, the argument `island()` takes. gemi's Vite
+ * plugin adds the module's build key and the module itself, so the server can
+ * render it synchronously in a hydrated view and point a static page at its
+ * built chunk.
+ */
+export type IslandLoader<M = any> = (() => Promise<M>) & {
+  /** @internal The module's path from the project root, the client manifest's key. */
+  gemiIsland?: string;
+  /** @internal The module, statically imported by the plugin. */
+  gemiModule?: M;
+};
+
+/** @internal One island module a static page uses: an entry of the page's island table. */
+export interface IslandEntry {
+  /** The module's build key, or `undefined` when the plugin did not run. */
+  module: string | undefined;
+  export: string;
+  load: IslandLoad;
+}
+
+interface IslandInstance {
+  html: Promise<string>;
+  index: number;
+  uid: string;
+  props: string | undefined;
+}
+
+/**
+ * @internal Provided by the view router around a static view's render; `null`
+ * everywhere else, which is how `island()` knows to render a plain component.
+ */
 export interface StaticRenderCollector {
-  /** Island name -> the client module's build key and load strategy. */
-  islands: Map<string, { module: string; load: IslandLoad }>;
+  /** The page's island table: what the loader imports, by marker index. */
+  islands: IslandEntry[];
+  /**
+   * Renders one island as its own React root, settled, to HTML. Supplied by
+   * the server, so this module never imports `react-dom/server`.
+   */
+  render: (element: ReactElement, identifierPrefix: string) => Promise<string>;
+  /** Per-instance render state, keyed by the island's props object. */
+  instances: WeakMap<object, IslandInstance>;
+  /** Instances rendered so far, for each one's `identifierPrefix`. */
+  count: number;
+}
+
+/** @internal */
+export function createStaticRenderCollector(
+  render: StaticRenderCollector["render"],
+): StaticRenderCollector {
+  return { islands: [], render, instances: new WeakMap(), count: 0 };
 }
 
 /** The property gemi's Vite plugin attaches to an island's loader. */
@@ -53,12 +88,9 @@ export const ISLAND_MODULE_KEY = "gemiIsland";
 const CONTEXT_KEY = Symbol.for("gemi.staticRender");
 
 /**
- * @internal Provided by the view router around a static view's render; `null`
- * everywhere else, which is how `island()` knows to render a plain component.
- *
- * On `globalThis` rather than a module-level `createContext`: the published
- * package bundles `gemi/client` and the server side separately, so a plain
- * module singleton would give the provider and the islands two different
+ * @internal On `globalThis` rather than a module-level `createContext`: the
+ * published package bundles `gemi/client` and the server side separately, so a
+ * plain module singleton would give the provider and the islands two different
  * context objects.
  */
 export const StaticRenderContext: Context<StaticRenderCollector | null> = ((
@@ -67,90 +99,211 @@ export const StaticRenderContext: Context<StaticRenderCollector | null> = ((
   StaticRenderCollector | null
 >;
 
-function serialiseProps<P>(props: P, option: IslandOptions<P>["props"]): string | undefined {
-  if (!option) {
-    return undefined;
-  }
-  let value: unknown;
-  if (option === true) {
-    const { children: _children, ...rest } = (props ?? {}) as Record<string, unknown>;
-    value = rest;
-  } else {
-    value = option(props);
-  }
-  // React escapes attribute values (`"`, `&`, `<`, `>`), so the JSON needs no
-  // escaping of its own here — and must not get any, or `mount` would read
-  // the escapes back.
-  return JSON.stringify(value);
-}
+const isProduction = () =>
+  typeof process !== "undefined" && process.env?.NODE_ENV === "production";
 
 /**
- * Declares an interactive part of a page.
+ * Throws when `value` would not survive `JSON.stringify` and `JSON.parse`
+ * unchanged, naming the prop. An island's props cross from the server to the
+ * browser as JSON: a function would vanish and a `Date` would arrive as a
+ * string, so the island would hydrate with other props than it rendered with.
+ */
+export function assertSerialisableProps(value: unknown, island: string): void {
+  const seen = new Set<object>();
+  const fail = (path: string, what: string): never => {
+    throw new Error(
+      `${island}: the prop \`${path}\` is ${what}. An island's props are sent to the browser ` +
+        `as JSON, so they must be plain data: strings, finite numbers, booleans, null, ` +
+        `arrays and plain objects. Pass static markup as children instead.`,
+    );
+  };
+  const walk = (v: unknown, path: string, inArray: boolean): void => {
+    switch (typeof v) {
+      case "string":
+      case "boolean":
+        return;
+      case "number":
+        if (!Number.isFinite(v)) fail(path, String(v));
+        return;
+      case "undefined":
+        // Dropped from an object, which reads back the same; not in an array.
+        if (inArray) fail(path, "undefined (it would arrive as null)");
+        return;
+      case "function":
+        fail(path, "a function");
+        return;
+      case "symbol":
+      case "bigint":
+        fail(path, `a ${typeof v}`);
+        return;
+    }
+    if (v === null) return;
+    const object = v as Record<string, unknown>;
+    if (seen.has(object)) fail(path, "a circular reference");
+    if ("$$typeof" in object) fail(path, "a React element");
+    seen.add(object);
+    if (Array.isArray(object)) {
+      object.forEach((item, i) => walk(item, `${path}[${i}]`, true));
+    } else {
+      const proto = Object.getPrototypeOf(object);
+      if (proto !== Object.prototype && proto !== null) {
+        fail(path, `an instance of ${proto?.constructor?.name || "a class"}`);
+      }
+      for (const [key, item] of Object.entries(object)) {
+        walk(item, path ? `${path}.${key}` : key, false);
+      }
+    }
+    seen.delete(object);
+  };
+  walk(value, "", false);
+}
+
+const hasChildren = (children: unknown) =>
+  children !== undefined && children !== null && typeof children !== "boolean";
+
+type AnyComponent = ComponentType<any>;
+
+/**
+ * Makes a component an island: hydrated on its own on a static page, an
+ * ordinary component everywhere else.
  *
  * ```tsx
- * export const NavMenu = island("nav-menu", NavMenuView, () => import("./navMenu.island"));
+ * // app/views/site/Counter.tsx: a plain React component
+ * export default function Counter({ start }: { start: number }) {
+ *   const [n, setN] = useState(start);
+ *   return <button onClick={() => setN(n + 1)}>{n}</button>;
+ * }
+ *
+ * // where it is used
+ * const Counter = island(() => import("./Counter"), { load: "visible" });
+ * <Counter start={3} />
  * ```
  *
- * - In a **static** view (`this.view(...).static()`), it server-renders
- *   `Component` inside a `<gemi-island name="nav-menu">` marker and records
- *   that the page uses it. The document then carries a tiny loader plus the
- *   island's own module — and only for islands that rendered. The module's
- *   default export (`IslandMount`) is called once per marker.
- * - In a **hydrated** view, it renders `Component` as an ordinary component and
- *   loads nothing: the same component works in both kinds of page.
+ * - In a **static** view (`this.view(...).static()`), it server-renders the
+ *   component as its own React root inside a `<gemi-island>` marker and
+ *   serialises its props. The page gets a tiny loader that, on the island's
+ *   `load` trigger, imports React (one chunk shared by every island) and the
+ *   component's chunk and calls `hydrateRoot` on the marker.
+ * - In a **hydrated** view, it is the component itself: rendered inline, with
+ *   the page's context, and nothing extra to load.
  *
- * The client module must be a file named `*.island.ts` (or `.tsx`/`.js`)
- * under `app/`, imported exactly as `() => import("./path.island")`: gemi's
- * Vite plugin finds that call, builds the file as its own entry, and tells the
- * server which built file it is.
+ * Write the loader exactly as `() => import("./path")` inside the `island(`
+ * call: gemi's Vite plugin finds that call, builds the module as its own
+ * client entry and imports it statically for the server.
  *
- * `name` identifies the island in the markup and must be unique per module.
+ * Props must be plain data (checked in dev). `children` are rendered on the
+ * server as static HTML and passed through untouched. On a static page the
+ * island is a separate React root, so context from the page does not reach it.
  */
-export function island<P extends object>(
-  name: string,
-  Component: ComponentType<P>,
-  loader: IslandLoader,
-  options: IslandOptions<P> = {},
-): ComponentType<P> {
-  if (typeof name !== "string" || name.length === 0) {
-    throw new Error("island(): the name must be a non-empty string.");
-  }
-  const load: IslandLoad = options.load ?? "eager";
-
-  function Island(props: P) {
-    const collector = useContext(StaticRenderContext);
-    if (!collector) {
-      return createElement(Component, props);
-    }
-
-    const module = (loader as unknown as Record<string, unknown>)[ISLAND_MODULE_KEY];
-    if (typeof module !== "string") {
-      throw new Error(
-        `island("${name}"): the client module could not be identified. Pass the loader as ` +
-          `\`() => import("./name.island")\` — a file named *.island.ts(x) under app/ — so ` +
-          `gemi's Vite plugin can map it to its built file.`,
-      );
-    }
-    const known = collector.islands.get(name);
-    if (known && known.module !== module) {
-      throw new Error(
-        `island("${name}") is declared for two modules (${known.module} and ${module}). ` +
-          `Island names must be unique.`,
-      );
-    }
-    collector.islands.set(name, { module, load });
-
-    return createElement(
-      "gemi-island",
-      {
-        name,
-        "data-props": serialiseProps(props, options.props),
-        style: { display: "contents" },
-      },
-      createElement(Component, props),
+export function island<M extends { default: AnyComponent }>(
+  loader: () => Promise<M>,
+  options?: IslandOptions & { export?: "default" },
+): M["default"];
+export function island<M, K extends keyof M & string>(
+  loader: () => Promise<M>,
+  options: IslandOptions & { export: K },
+): M[K];
+export function island(loader: IslandLoader, options: IslandOptions = {}): AnyComponent {
+  if (typeof loader !== "function") {
+    throw new Error(
+      'island() takes `() => import("./Component")` and options since gemi 0.110. ' +
+        'The island("name", Component, () => import("./x.island")) form was removed: see UPGRADE.md.',
     );
   }
+  const exportName = options.export ?? "default";
+  const load: IslandLoad = options.load ?? "eager";
+  const key = loader[ISLAND_MODULE_KEY];
+  const label = `island(${key ?? "() => import(…)"}${exportName === "default" ? "" : `#${exportName}`})`;
 
-  Island.displayName = `Island(${name})`;
+  const pick = (mod: Record<string, unknown>): AnyComponent => {
+    const component = mod?.[exportName];
+    if (typeof component !== "function" && (typeof component !== "object" || component === null)) {
+      throw new Error(`${label}: the module has no component export \`${exportName}\`.`);
+    }
+    return component as AnyComponent;
+  };
+
+  // A hydrated view renders the component in place. The plugin imported the
+  // module statically; without it (a test that doesn't run the plugin) the
+  // component loads lazily and suspends once.
+  let inline: AnyComponent | undefined;
+  const inlineComponent = (): AnyComponent =>
+    (inline ??= loader.gemiModule
+      ? pick(loader.gemiModule)
+      : lazy(() => loader().then((mod) => ({ default: pick(mod) }))));
+
+  const register = (collector: StaticRenderCollector): number => {
+    const known = collector.islands.findIndex(
+      (entry) =>
+        key !== undefined && entry.module === key && entry.export === exportName && entry.load === load,
+    );
+    return known !== -1 ? known : collector.islands.push({ module: key, export: exportName, load }) - 1;
+  };
+
+  const start = (collector: StaticRenderCollector, props: Record<string, unknown>): IslandInstance => {
+    const { children, ...rest } = props;
+    if (!isProduction()) {
+      assertSerialisableProps(rest, label);
+    }
+    const uid = `i${collector.count++}-`;
+    const component = loader.gemiModule
+      ? Promise.resolve(pick(loader.gemiModule))
+      : loader().then(pick);
+    const html = component.then((Component) =>
+      collector.render(
+        // Islands nested in this one's own render are plain components of
+        // its root, as they will be in the browser. Islands in its static
+        // children are islands of their own and hydrate separately.
+        createElement(
+          StaticRenderContext.Provider,
+          { value: null },
+          hasChildren(children)
+            ? createElement(
+                Component,
+                rest,
+                createElement(
+                  StaticRenderContext.Provider,
+                  { value: collector },
+                  createElement("gemi-slot", { style: { display: "contents" } }, children as ReactNode),
+                ),
+              )
+            : createElement(Component, rest),
+        ),
+        uid,
+      ),
+    );
+    // A rejection surfaces through `use`; this keeps it from also being
+    // reported as unhandled.
+    html.catch(() => {});
+    const json = JSON.stringify(rest);
+    return { html, index: register(collector), uid, props: json === "{}" ? undefined : json };
+  };
+
+  function Island(props: Record<string, unknown>): ReactNode {
+    const collector = useContext(StaticRenderContext);
+    if (!collector) {
+      return createElement(inlineComponent(), props);
+    }
+
+    // Suspending on `use` re-renders this component with the same props
+    // object, so the render it started is found again rather than restarted.
+    let instance = collector.instances.get(props);
+    if (!instance) {
+      instance = start(collector, props);
+      collector.instances.set(props, instance);
+    }
+
+    return createElement("gemi-island", {
+      "data-island": instance.index,
+      "data-uid": instance.uid,
+      // React escapes attribute values, so the JSON needs (and must get) no
+      // escaping of its own.
+      "data-props": instance.props,
+      style: { display: "contents" },
+      dangerouslySetInnerHTML: { __html: use(instance.html) },
+    });
+  }
+
+  Island.displayName = label;
   return Island;
 }

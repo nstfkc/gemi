@@ -320,4 +320,4 @@ when its handler supplies one.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, redirects.
 - [Controllers](./controllers.md) — binding controller methods to routes.
 - [i18n](./i18n.md) — locales and translation.
-- [Static Views & Islands](./static-views-and-islands.md) — views sent without React, and islands for their interactive parts.
+- [Static Views & Islands](./static-views-and-islands.md) — views sent without the client runtime, and React islands for their interactive parts.

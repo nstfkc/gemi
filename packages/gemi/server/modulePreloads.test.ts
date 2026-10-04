@@ -4,7 +4,7 @@ import {
   collectCss,
   collectModulePreloads,
   createClientEntry,
-  createIslandAssets,
+  createIslandResolver,
   type ViteManifest,
 } from "./modulePreloads";
 
@@ -147,22 +147,36 @@ describe("collectCss", () => {
   });
 });
 
-describe("createIslandAssets", () => {
-  test("maps each island module to its URL and preload closure", () => {
-    const manifest = {
-      "app/views/site/menu.island.ts": { file: "assets/menu.island-1.js", imports: ["_dom.js"] },
-      "_dom.js": { file: "assets/dom-2.js" },
-      "app/views/Home.tsx": { file: "assets/Home.js" },
-    };
+describe("createIslandResolver", () => {
+  const manifest = {
+    "app/views/site/Counter.tsx": { file: "assets/Counter-0.js", imports: ["_react.js"] },
+    "app/views/site/Counter.tsx?gemi-island": {
+      file: "assets/Counter-1.js",
+      isEntry: true,
+      imports: ["_react.js", "_client.js"],
+    },
+    "_react.js": { file: "assets/react-2.js" },
+    "_client.js": { file: "assets/client-4.js", imports: ["_react.js"] },
+    "app/views/Home.tsx": { file: "assets/Home.js" },
+  } as ViteManifest;
 
-    expect(createIslandAssets(manifest, "https://cdn.example.com/")).toEqual({
-      "app/views/site/menu.island.ts": {
-        src: "https://cdn.example.com/assets/menu.island-1.js",
-        preload: [
-          "https://cdn.example.com/assets/menu.island-1.js",
-          "https://cdn.example.com/assets/dom-2.js",
-        ],
-      },
+  test("maps an island module to its entry and the entry's preload closure", () => {
+    const resolve = createIslandResolver(manifest, "https://cdn.example.com/");
+
+    expect(resolve("app/views/site/Counter.tsx")).toEqual({
+      src: "https://cdn.example.com/assets/Counter-1.js",
+      preload: [
+        "https://cdn.example.com/assets/Counter-1.js",
+        "https://cdn.example.com/assets/react-2.js",
+        "https://cdn.example.com/assets/client-4.js",
+      ],
     });
+  });
+
+  test("has nothing for a module without an island entry", () => {
+    const resolve = createIslandResolver(manifest);
+
+    expect(resolve("app/views/Home.tsx")).toBeUndefined();
+    expect(resolve("app/views/site/Missing.tsx")).toBeUndefined();
   });
 });

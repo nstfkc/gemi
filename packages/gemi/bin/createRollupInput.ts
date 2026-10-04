@@ -28,19 +28,8 @@ export default async function (appDir: string): Promise<string[]> {
     // Test files are not views — keep them out of the build so they never
     // become a Vite entry (and never emit a compiled chunk into `dist`).
     if (/\.(test|spec)\.tsx$/.test(file)) continue; // **/*.{test,spec}.tsx
-    // Island client modules are entries of their own (below), not views.
-    if (/\.island\.tsx$/.test(file)) continue;
 
     entries.add(`/app/views/${file}`);
-  }
-
-  // Island client modules (`island()` in `gemi/client`), anywhere under app/:
-  // each is its own client entry, so a static page loads that file and its
-  // imports and nothing else. The SSR build leaves them out (`gemi/vite`).
-  const islandGlob = new Glob("**/*.island.{ts,tsx,js,jsx,mts,mjs}");
-  for await (const file of islandGlob.scan({ cwd: appDir })) {
-    if (file.split("/").includes("node_modules")) continue;
-    entries.add(`/app/${file}`);
   }
 
   return Array.from(entries);

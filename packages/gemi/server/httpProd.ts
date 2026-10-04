@@ -8,7 +8,7 @@ import {
   collectCss,
   collectModulePreloads,
   createClientEntry,
-  createIslandAssets,
+  createIslandResolver,
 } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
@@ -137,10 +137,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
-  // Island client modules (`*.island.ts`), which a static view's document
-  // loads — see `injectIslands`.
-  const islandAssets = createIslandAssets(manifest, assetBase);
-  const resolveIsland = (moduleKey: string) => islandAssets[moduleKey];
+  // The island runtime and island modules a static view's document loads;
+  // see `injectIslands`.
+  const resolveIsland = createIslandResolver(manifest, assetBase);
 
   // A static view's CSS comes from the whole import closure of its views (and
   // its own layout's, which then replaces the app stylesheet): there is no
