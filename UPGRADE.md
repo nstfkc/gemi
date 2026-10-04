@@ -1,5 +1,26 @@
 # Unreleased
 
+## `gemi/ai`: `toAgentTools` can group MCP tools into namespaces by tag (#758)
+
+`toAgentTools(registry, options)` takes `{ filter?, deferred?, namespaces? }`. With `namespaces` it returns `ToolEntry[]`: one `ToolNamespace` per declared tag, followed by the untagged tools as bare tools. Pass it to `Agent.create({ tools })` as is.
+
+```ts
+const tools = toAgentTools(registry, {
+  namespaces: {
+    pages: { description: "Read and edit the pages of the site" },
+    files: { description: "Upload, list and delete files", deferred: false },
+  },
+  deferred: true,
+});
+```
+
+No change is needed to upgrade. `toAgentTools(registry, filter)` still returns a flat `AgentTool[]`. Things to know:
+
+- A tool with two declared tags goes into the namespace that is declared first.
+- `deferred` is set on the namespace (or on the tool, for bare tools), never on the tools inside a namespace. A provider without tool search gets every schema inline, as for any deferred tool.
+- A namespace that the filter empties is left out. A declared tag that no tool carries, an invalid namespace name and a missing description all throw.
+- The second argument is read as options when it has `filter`, `deferred` or `namespaces`, and as a filter otherwise.
+
 ## `gemi/http`: MCP tools can trim what a route answers, `result` and `output` (#757)
 
 `fromApiRoute`'s meta has two new optional fields:

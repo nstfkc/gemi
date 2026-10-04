@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createElement } from "react";
 
-import { Agent, type AgentRun } from "../../ai/Agent";
-import type { ProviderEvent, ProviderToolSpec } from "../../ai/AgentProvider";
+import { Agent, AgentTool, ToolNamespace, type AgentRun } from "../../ai/Agent";
+import type {
+  ProviderEvent,
+  ProviderToolNamespace,
+  ProviderToolSpec,
+} from "../../ai/AgentProvider";
+import { toResponsesTools } from "../../ai/providers/request";
 import { fakeProvider } from "../../ai/providers/fakeProvider";
 import { s } from "../../ai/Schema";
 import { MemoryAttachmentStore, ScopedAttachments } from "../../ai/store/Attachments";
@@ -1062,6 +1067,164 @@ describe("projecting what the route answers (#757)", () => {
     });
 
     expect(result.output[0]).toMatchObject({ path: "/p0", html: expect.any(String) });
+  });
+});
+
+describe("toAgentTools grouped by tag (#758)", () => {
+  class Tagged extends McpRouter<CreateRPC<Api>> {
+    routes = {
+      whoami: this.fromApiRoute("GET", "/me", { description: "Who the user is", tags: ["account"] }),
+      "list-orders": this.fromApiRoute("GET", "/:orgId/orders", {
+        description: "List the organization's orders",
+        input: s.object({ status: s.string() }),
+        params: { orgId: orgOf },
+        tags: ["orders", "account"],
+      }),
+      "refund-order": this.fromApiRoute("POST", "/orders/:id/refund", {
+        description: "Refund an order",
+        params: { id: "input" },
+        tags: ["orders"],
+      }),
+      boom: this.fromApiRoute("POST", "/boom", { description: "Always fails" }),
+    };
+  }
+  const registry = () => new McpRegistry(new Tagged(), resolve(ApiRouteDispatcher));
+  const namespaces = {
+    orders: { description: "Read and refund orders" },
+    account: { description: "The signed-in user" },
+  };
+  const shape = (entries: readonly unknown[]) =>
+    entries.map((entry) =>
+      entry instanceof ToolNamespace
+        ? {
+            namespace: entry.name,
+            description: entry.description,
+            deferred: entry.deferred,
+            tools: entry.tools.map((tool) => [tool.name, tool.deferred]),
+          }
+        : [(entry as AgentTool).name, (entry as AgentTool).deferred],
+    );
+
+  test("one namespace per declared tag, in declaration order, then the bare tools", () => {
+    expect(shape(toAgentTools(registry(), { namespaces }))).toEqual([
+      {
+        namespace: "orders",
+        description: "Read and refund orders",
+        deferred: false,
+        // "list-orders" is tagged "account" too; the first declared tag wins.
+        tools: [
+          ["list-orders", false],
+          ["refund-order", false],
+        ],
+      },
+      {
+        namespace: "account",
+        description: "The signed-in user",
+        deferred: false,
+        tools: [["whoami", false]],
+      },
+      ["boom", false],
+    ]);
+  });
+
+  test("deferred is the default for every namespace and bare tool, and a namespace can opt out", () => {
+    const entries = toAgentTools(registry(), {
+      namespaces: { ...namespaces, account: { ...namespaces.account, deferred: false } },
+      deferred: true,
+    });
+
+    expect(shape(entries)).toEqual([
+      expect.objectContaining({ namespace: "orders", deferred: true }),
+      expect.objectContaining({ namespace: "account", deferred: false }),
+      ["boom", true],
+    ]);
+    // Members are never deferred on their own: the namespace decides.
+    expect((entries[0] as ToolNamespace).tools.every((tool) => !tool.deferred)).toBe(true);
+  });
+
+  test("without namespaces, deferred defers each tool and the list stays flat", () => {
+    expect(shape(toAgentTools(registry(), { deferred: true }))).toEqual([
+      ["whoami", true],
+      ["list-orders", true],
+      ["refund-order", true],
+      ["boom", true],
+    ]);
+  });
+
+  test("a filter is applied first, and a namespace it empties is left out", () => {
+    const entries = toAgentTools(registry(), {
+      filter: { names: ["whoami", "boom"] },
+      namespaces,
+    });
+
+    expect(shape(entries)).toEqual([
+      expect.objectContaining({ namespace: "account", tools: [["whoami", false]] }),
+      ["boom", false],
+    ]);
+  });
+
+  test("a bare filter is still a filter", () => {
+    expect(toAgentTools(registry(), { tags: ["orders"] }).map((tool) => tool.name)).toEqual([
+      "list-orders",
+      "refund-order",
+    ]);
+  });
+
+  test("a namespaced tool is offered grouped and runs as the user", async () => {
+    const provider = fakeProvider([toolCall("c1", "list-orders", { status: "open" }), finish()], [finish()]);
+    const agent = Agent.create({
+      name: "shop",
+      provider,
+      tools: toAgentTools(registry(), { namespaces, deferred: true }),
+    });
+    let messages: AgentMessage[] = [];
+    inside = async () => {
+      messages = (await agent.stream({ messages: [], turn: { text: "go" } }).result())
+        .messages as AgentMessage[];
+      return {};
+    };
+    await app.fetch(new Request("http://gemi.dev/api/agent", { method: "POST", headers: alice }));
+
+    const result = messages
+      .flatMap((message) => message.content)
+      .find((part: any) => part.type === "tool-result") as any;
+    expect(result).toMatchObject({ status: "ok", output: { orgId: "org_alice", status: "open" } });
+
+    const offered = provider.calls[0].tools!;
+    const orders = offered.find((entry) => entry.name === "orders") as ProviderToolNamespace;
+    expect(orders.description).toBe("Read and refund orders");
+    expect(orders.tools.map((tool) => [tool.name, tool.deferred])).toEqual([
+      ["list-orders", true],
+      ["refund-order", true],
+    ]);
+
+    // A provider without tool search gets the same tools flat, every schema
+    // inline: deferral never changes which tools the model can reach.
+    const flat = toResponsesTools(offered, {
+      reasoning: false,
+      structuredOutput: false,
+      fileInput: false,
+      parallelToolCalls: false,
+      toolSearch: false,
+    }) as any[];
+    expect(flat.map((tool) => tool.name).sort()).toEqual([
+      "boom",
+      "list-orders",
+      "refund-order",
+      "whoami",
+    ]);
+    expect(flat.every((tool) => tool.type === "function" && !tool.defer_loading)).toBe(true);
+    expect(flat.find((tool) => tool.name === "list-orders").parameters.properties).toHaveProperty(
+      "status",
+    );
+  });
+
+  test.each([
+    [{ "orders.v2": { description: "x" } }, /"orders.v2" is not a valid namespace name/],
+    [{ orders: { description: " " } }, /the namespace "orders" needs a description/],
+    [{ ordres: { description: "x" } }, /no tool is tagged "ordres"/],
+  ])("refuses %o", (bad, message) => {
+    expect(() => toAgentTools(registry(), { namespaces: bad as any })).toThrow(message);
   });
 });
 

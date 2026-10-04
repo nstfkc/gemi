@@ -138,7 +138,11 @@ export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate
 //
 // The registry itself is `McpRegistry` in `gemi/services`; this is its one v1
 // projection, here because an agent's tools are declared beside the agent.
-export { toAgentTools } from "../services/mcp/toAgentTools";
+export {
+  toAgentTools,
+  type McpToolNamespaceOptions,
+  type ToAgentToolsOptions,
+} from "../services/mcp/toAgentTools";
 
 // --- images ---------------------------------------------------------------
 //
