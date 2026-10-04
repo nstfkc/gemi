@@ -5,7 +5,16 @@ import { HttpRequest } from "../http/HttpRequest";
 import { mediaType } from "../http/mediaType";
 import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
-import type { AgentContext, AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
+import type {
+  AgentContext,
+  AgentRun,
+  AgentRunResult,
+  AnyAgent,
+  PrepareStepContext,
+  PrepareStepResult,
+  ToolShapesOf,
+} from "./Agent";
+import type { ContextWindowOptions } from "./contextWindow";
 import { injectedMessageIds } from "./Agent";
 import {
   type Attachment,
@@ -668,6 +677,41 @@ export abstract class AgentController<
   protected maxHistoryMessages = DEFAULT_MAX_HISTORY_MESSAGES;
 
   /**
+   * Bounds what each model call of this controller's turns is sent (#473):
+   * the latest turns of the thread that fit, cut at a turn start, the cut
+   * moving `step` turns at a time so the prompt cache keeps hitting. See
+   * `ContextWindowOptions`. `undefined` (the default) uses the agent's own
+   * `contextWindow`, if it has one; `false` sends the whole history.
+   *
+   * The store is untouched: `loadThread` still answers the whole thread, every
+   * message is still appended, and `readThread` shows all of it. Unlike
+   * `maxHistoryMessages`, which refuses a stateless turn, this applies to
+   * threaded and stateless turns alike and refuses nothing.
+   *
+   *   protected contextWindow = { maxTurns: 40, maxTokens: 100_000 };
+   */
+  protected contextWindow: ContextWindowOptions | false | undefined = undefined;
+
+  /**
+   * Called before every model call of a turn's run, after the agent's own
+   * `prepareStep`, with the request it hands over (`step.messages`,
+   * `step.instructions`) and the turn's hook context. Answer `{ messages }`
+   * or `{ instructions }` to send something else for that call alone; nothing
+   * answered is stored. Not called for a sub-agent's model calls.
+   *
+   *   protected prepareStep(step: PrepareStepContext) {
+   *     return { messages: windowMessages(step.history, { maxTurns: 20 }).messages };
+   *   }
+   */
+  protected prepareStep(
+    step: PrepareStepContext,
+    ctx: AgentHookContext,
+  ): PrepareStepResult | void | Promise<PrepareStepResult | void> {
+    void step;
+    void ctx;
+  }
+
+  /**
    * How many runs one caller may have going at once in this process (#444).
    * Default 5. A run outlives the request that started it (so `attach` can
    * find it), which means a client can post a turn and disconnect and the run
@@ -1032,6 +1076,13 @@ export abstract class AgentController<
         // The principal its pending calls are bound to (#447): an answer is
         // only accepted from the same `runOwner` the question was asked of.
         subject: owner,
+        // What each model call is sent (#473). Only the request: the store
+        // still gets every message through `journal` above.
+        ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
+        // Only when overridden, so a controller without one adds no call.
+        ...(this.prepareStep !== AgentController.prototype.prepareStep
+          ? { prepareStep: (step: PrepareStepContext) => this.prepareStep(step, ctx) }
+          : {}),
       }) as AgentRun;
 
       // Registered before the response is built: the run is now owned by the

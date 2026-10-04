@@ -13,6 +13,14 @@ export interface MiddlewareConfig {
    * with `alias:param` arguments as in a route's list. See `docs/middleware.md`.
    */
   global?: (string | MiddlewareClass)[];
+  /**
+   * The request body limit for every api route without a `body-limit` of its
+   * own: bytes, or a size such as `"1mb"`. A route's `body-limit:…` replaces
+   * it, raising it as well as lowering it (`body-limit:none` lifts it). Unset,
+   * only Bun's server-wide `maxRequestBodySize` applies. See
+   * `docs/middleware.md`.
+   */
+  bodyLimit?: string | number | null;
 }
 
 export function defineMiddlewareConfig(
@@ -25,5 +33,6 @@ export function middlewareConfigDefaults(): Required<MiddlewareConfig> {
   return {
     aliases: {},
     global: [],
+    bodyLimit: null,
   };
 }

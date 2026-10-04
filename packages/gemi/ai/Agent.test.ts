@@ -503,6 +503,49 @@ async function askForApproval(subject?: string | null) {
 }
 
 describe("an approval", () => {
+  test("is answered under a context window that leaves earlier turns out (#473)", async () => {
+    const first = await askForApproval();
+    const earlier: AgentMessage[] = Array.from({ length: 4 }, (_, i) => [
+      {
+        id: `u${i}`,
+        role: "user" as const,
+        content: [{ type: "text" as const, text: `q${i}` }],
+        createdAt: "",
+      },
+      {
+        id: `a${i}`,
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: `a${i}` }],
+        createdAt: "",
+      },
+    ]).flat();
+    const provider = fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]);
+    const agent = Agent.create({
+      name: "support",
+      provider,
+      tools: [refundOrder, askUser],
+      contextWindow: { maxTurns: 1, step: 1, note: false },
+    });
+    const result = await agent
+      .stream({
+        messages: [...earlier, ...first.result.messages],
+        turn: {
+          toolResults: [{ toolCallId: "c1", signature: first.pending[0].signature, approve: true }],
+        },
+      })
+      .result();
+
+    expect(refundCalls).toEqual(["ord_1"]);
+    // Only the turn holding the call was sent, with the call and its result.
+    const sent = provider.calls[0].messages;
+    expect(sent.map((message: AgentMessage) => message.id)).toEqual(
+      first.result.messages.map((message) => message.id),
+    );
+    const parts = sent.flatMap((message: AgentMessage) => message.content);
+    expect(parts.filter((part: any) => part.type === "tool-result")).toHaveLength(1);
+    expect(result.finishReason).toBe("stop");
+  });
+
   test("ends the run awaiting-input without running the tool", async () => {
     const { result, pending, events } = await askForApproval();
 

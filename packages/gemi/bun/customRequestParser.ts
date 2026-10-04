@@ -1,6 +1,14 @@
 import { parse, print } from "recast";
 import { builders } from "ast-types";
 
+/**
+ * The files `customRequestParser` is applied to: `/http/controllers/` and
+ * `/http/routes/` (`.ts`/`.tsx`), matched on the resolved absolute path. Shared
+ * by the Bun plugin (`gemi/bun/plugin`) and the Vite plugin for tests
+ * (`gemi/vitest`), so both rewrite exactly the same files.
+ */
+export const CUSTOM_REQUEST_FILTER = /[\\/]http[\\/](controllers|routes)[\\/].+\.tsx?$/;
+
 export async function customRequestParser(original: string) {
   // Every identifier we turn from a type annotation into a `new X()` default
   // value. Their imports have to survive as value imports.
@@ -167,7 +175,7 @@ export async function customRequestParser(original: string) {
   }
 
   const orgFile = await parse(original, {
-    parser: await import("recast/parsers/typescript"),
+    parser: await import("recast/parsers/typescript.js"),
   });
 
   for (const body of orgFile.program.body) {

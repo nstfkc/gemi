@@ -17,6 +17,53 @@ Behaviour changes to know:
 
 An app that re-reads its thread on a change feed (kyte's `useSharedThread`) can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
 
+## `gemi/ai`: `contextWindow`, `prepareStep` and turn helpers (#473)
+
+New, and nothing changes unless an app opts in: without `contextWindow` or `prepareStep`, every model call sends the whole history as before. See [AI Context Window](docs/ai-context-window.md).
+
+- **`contextWindow`** on `Agent.create`, `Agent.stream` and `AgentController` (a `protected contextWindow` property) bounds what each model call is sent: at most `maxTurns` turns and `maxBytes` (or approximate `maxTokens`), cut at a turn start, always keeping the latest turn. The start moves `step` turns at a time (default 10) so the provider's prompt cache keeps hitting, and the first kept turn gets a `note` saying earlier turns are left out. Only the request changes: the store, `onMessage`, `readThread` and `result().messages` keep every message.
+- **`prepareStep`** on `Agent.create`, `Agent.stream` and `AgentController` (a method, also given the hook context) is called before every model call and may answer `{ messages, instructions }` for that call alone.
+- **Exported helpers**: `turnStarts`, `splitTurns`, `windowMessages`, `messageSize` and `injectedMessageIds` (previously internal), with the types `ContextWindowOptions`, `ContextWindowResult`, `PrepareStep`, `PrepareStepContext` and `PrepareStepResult`.
+
+An app that windows its thread in `AgentStore.loadThread` (kyte) can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
+
+## `gemi/http`: per-route request body limits, `body-limit:SIZE` (#752)
+
+New, and opt-in: nothing changes for an app that does not use it.
+
+- **`body-limit:64kb`** on a router's `middlewares` or a route's `.middleware()` bounds that route's request body. A declared `Content-Length` over the limit is refused before the handler runs; a chunked body is counted as it is read and refused once past it, without buffering more. The answer is a `413` `{ error: { kind: "form_error", message: "The request body is too large.", status: 413 } }`. It covers `req.input()` (JSON, urlencoded, multipart), the raw `req.rawRequest` accessors and proxy routes. `body-limit` is built in and needs no `aliases` entry; an app alias named `body-limit` still wins.
+- **`bodyLimit`** in the `middleware` config (`defineMiddlewareConfig({ bodyLimit: "1mb" })`) is a default for every api route without its own `body-limit`, which can raise it (`body-limit:none` lifts it).
+- New exports from `gemi/http`: `BodyLimitMiddleware`, `PayloadTooLargeError`, `parseByteSize`.
+- Bun's `maxRequestBodySize` (10 GB under `gemi start`, Bun's 128 MB default under `gemi dev`) is unchanged and stays the ceiling. See `docs/middleware.md`.
+
+An app that already refuses large bodies by hand (checking `Content-Length` in the handler) can replace that with `body-limit`, which also reads a chunked body up to the limit instead of refusing it.
+
+## `gemi/vitest`: dispatch an app's routes under vitest (#772)
+
+A route handler or controller method written `async (req: HttpRequest<…>) => …` only gets its request because the build rewrites the parameter to `req = new HttpRequest()`. That rewrite only ran in the Bun plugin, and vitest loads modules through Vite (also under `bun --bun vitest`), so a route dispatched with `App.fetch` in a test saw `req === undefined`.
+
+The new `gemi/vitest` entrypoint exports `gemiRequestPlugin()`, the same rewrite as a Vite plugin, on the same files (`http/controllers/` and `http/routes/`). To test routes, add it to `vitest.config.ts`:
+
+```ts
+import { gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin()], /* … */ });
+```
+
+Nothing changes for an app that does not opt in. See [Testing routes](https://nstfkc.github.io/gemi/testing.md#testing-routes) for the setup, including MCP tools. The docs page "Testing Views" is now "Testing".
+
+## `ai`: `s.fromJSONSchema` can report unknown keys (#753)
+
+**New, opt-in.** `s.fromJSONSchema(schema, { unknownKeys })` chooses what `parse`, `safeParse` and `validate` do with a key an object in the schema doesn't declare:
+
+- `"strip"` (the default, unchanged): the key is dropped from the parsed value.
+- `"error"`: the value fails with one issue per key, `{ path: [..., key], code: "additionalProperties", params: { additionalProperty: key }, message: "unknown key" }`. The code and params are Ajv's; unlike Ajv, `path` ends in the key.
+- `"passthrough"`: the key is kept in the parsed value as it came, checked only for being JSON.
+
+It applies to every object of that schema at any depth (inside arrays, `anyOf` members, and when the schema is nested in an `s.object` or an `s.recursive` body), whether or not the object says `additionalProperties: false`. The emitted JSON Schema is unchanged. A key whose value is `undefined` counts as absent. `SchemaIssueCode` gains `"additionalProperties"`; code that switches over it exhaustively needs the new case.
+
+**Action:** none. An app that checks a body's keys itself before `validate` (kyte's form submissions) can pass `unknownKeys: "error"` instead.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
