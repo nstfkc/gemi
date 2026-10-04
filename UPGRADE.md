@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.101.0 to 0.102.0
 
 ## `gemi/ai`: `toAgentTools` can group MCP tools into namespaces by tag (#758)
 
