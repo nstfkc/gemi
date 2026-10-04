@@ -50,6 +50,13 @@ const ContactForm = island(
   { export: "ContactForm", load: "visible" },
 );
 
+/** A page component used as an island's child: it needs the page's context. */
+const ReadsPageContext = () => {
+  const value = useContext(PageContext);
+  if (value !== "page context") throw new Error("rendered outside the page's context");
+  return <em data-context={value}>{value}</em>;
+};
+
 /** The same module twice under one key, the way two `island()` calls for it would be. */
 const Inner = island(viaPlugin("app/views/site/Inner.tsx", { default: () => <i>inner</i> }), {
   load: "idle",
@@ -104,6 +111,7 @@ const views: Record<string, any> = {
         <NavMenu label="Menu again" />
         <ContactForm endpoint="/contact" note={props.note}>
           <strong>Static child</strong>
+          <ReadsPageContext />
           <Inner />
         </ContactForm>
         <Outer />
@@ -299,7 +307,9 @@ describe("islands in a static view", () => {
   test("render as roots of their own: no page context, and their own useId prefix", async () => {
     const html = await (await fetchDocument("/site")).text();
 
-    expect(html).not.toContain('data-context="page context"');
+    // The island's own render; its children are the page's (see the slot test).
+    expect(html).not.toContain('<button type="button" data-context="page context"');
+    expect(html).toContain('<button type="button" data-context="no page context"');
     const form = html.match(/<form [^>]*aria-describedby="([^"]+)"/)!;
     const formIndex = indexOf(islandTable(html), "forms");
     const uid = html.match(new RegExp(`data-island="${formIndex}" data-uid="([^"]+)"`))![1];
@@ -364,6 +374,11 @@ describe("islands in a static view", () => {
     const slot = html.match(/<gemi-slot style="display:contents">(.*?)<\/gemi-slot>/)![1];
 
     expect(slot).toContain("<strong>Static child</strong>");
+    // Rendered in the page tree, so with the page's context (#805).
+    expect(slot).toContain('<em data-context="page context">page context</em>');
+    // Spliced: no placeholder or template left behind.
+    expect(html).not.toContain("<template");
+    expect(html).not.toContain("data-slot");
     // `Inner` in the children: an island of its own, with its own marker.
     const inner = indexOf(islandTable(html), "Inner");
     expect(slot).toMatch(new RegExp(`<gemi-island data-island="${inner}" [^>]*><i>inner</i></gemi-island>`));

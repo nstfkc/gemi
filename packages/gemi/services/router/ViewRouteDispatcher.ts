@@ -42,7 +42,7 @@ import { createRoutePayloadStream } from "./routePayloadStream";
 import { loadSharp } from "../../support/sharp";
 import type { StaticViewOptions } from "../../http/ViewRouter";
 import { StaticRenderContext, createStaticRenderCollector } from "../../client/islands";
-import { injectIslands, type IslandResolver } from "./staticDocument";
+import { injectIslands, spliceIslandSlots, type IslandResolver } from "./staticDocument";
 
 /**
  * `satori`, loaded on the first OG-image request rather than on import, for the
@@ -477,7 +477,7 @@ export class ViewRouteDispatcher {
         },
       );
       await stream.allReady.catch(() => {});
-      const html = await new Response(stream).text();
+      const html = spliceIslandSlots(await new Response(stream).text());
 
       return new Response(
         injectIslands(html, collector, args.resolveIsland, process.env.NODE_ENV !== "production"),

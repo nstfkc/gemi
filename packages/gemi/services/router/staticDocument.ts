@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { StaticRenderCollector } from "../../client/islands";
+import {
+  ISLAND_SLOT_ATTRIBUTE,
+  ISLAND_SLOT_TAG,
+  ISLAND_SLOT_TEMPLATE_ATTRIBUTE,
+  type StaticRenderCollector,
+} from "../../client/islands";
 import { htmlSafeJson } from "./streamQueryInjection";
 
 /**
@@ -121,4 +126,49 @@ export function injectIslands(
     `<script type="module">${dev ? DEV_ISLAND_LOADER_SOURCE : ISLAND_LOADER_SOURCE}</script>`;
 
   return insertBefore(insertBefore(html, "</head>", head, false), "</body>", body, true);
+}
+
+/** The end of the `</template>` matching the `<template` at `from`, or -1. */
+function templateEnd(html: string, from: number): number {
+  const tag = /<(\/?)template\b[^>]*>/gi;
+  tag.lastIndex = from;
+  let depth = 0;
+  for (let match = tag.exec(html); match; match = tag.exec(html)) {
+    depth += match[1] ? -1 : 1;
+    if (depth === 0) return tag.lastIndex;
+  }
+  return -1;
+}
+
+/**
+ * Moves each island's children into its slot.
+ *
+ * An island's own render (a root of its own) leaves an empty
+ * `<gemi-slot data-slot="i0-">`; the page tree renders the children, with the
+ * page's context, right after the marker in `<template data-gemi-slot="i0-">`.
+ * Here the template's content replaces the placeholder (as
+ * `<gemi-slot style="display:contents">…</gemi-slot>`, what the browser
+ * hydrates against) and the template goes away.
+ *
+ * The last template is spliced first: nothing after it can be inside it, so it
+ * holds no other island's children, and an island's children that contain
+ * islands are spliced after theirs are. Children the island didn't render are
+ * dropped, as a component that ignores `children` drops them anywhere.
+ */
+export function spliceIslandSlots(html: string): string {
+  const opening = `<template ${ISLAND_SLOT_TEMPLATE_ATTRIBUTE}="`;
+  for (let at = html.lastIndexOf(opening); at !== -1; at = html.lastIndexOf(opening)) {
+    const end = templateEnd(html, at);
+    if (end === -1) break;
+    const uidStart = at + opening.length;
+    const uid = html.slice(uidStart, html.indexOf('"', uidStart));
+    const contentStart = html.indexOf(">", uidStart) + 1;
+    const content = html.slice(contentStart, end - "</template>".length);
+    html = html.slice(0, at) + html.slice(end);
+    const placeholder = `<${ISLAND_SLOT_TAG} ${ISLAND_SLOT_ATTRIBUTE}="${uid}" style="display:contents"></${ISLAND_SLOT_TAG}>`;
+    html = html
+      .split(placeholder)
+      .join(`<${ISLAND_SLOT_TAG} style="display:contents">${content}</${ISLAND_SLOT_TAG}>`);
+  }
+  return html;
 }

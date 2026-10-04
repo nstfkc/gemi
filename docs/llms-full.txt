@@ -3732,17 +3732,26 @@ that names the prop. Everything in them is visible in the page source.
 </ContactForm>
 ```
 
-The component receives them as a `<gemi-slot style="display:contents">` element
-holding that HTML, on the server and in the browser alike, so hydration leaves
-it alone. Children are static: they don't re-render, and their own event
+They belong to the page: gemi renders them in the page's tree, **with the
+page's context** (router, i18n, your own providers), and moves the HTML into
+the island. The component receives them as a `<gemi-slot style="display:contents">`
+element holding that HTML, on the server and in the browser alike, so hydration
+leaves it alone. Children are static: they don't re-render, and their own event
 handlers don't run. An island inside them is an island of its own and hydrates
-separately. Render `children` at most once.
+separately.
+
+Render `children` at most once. The island may move the slot (say, from a row
+into a `<dialog>` when a menu opens); React recreates it from the same HTML.
+Because the slot is an element of its own, child-combinator CSS such as
+`nav > a` (or Tailwind's `[&>a]`) doesn't reach the children through it:
+target them with a descendant selector or style them directly.
 
 ### Context
 
 On a static page each island is its **own React root**. Context from the page
-(a theme, gemi's router, query and i18n providers) doesn't reach it, on the
-server or in the browser, so pass what it needs as props: translated strings,
+(a theme, gemi's router, query and i18n providers) doesn't reach the island's
+component, on the server or in the browser (its `children` do, see above), so
+pass what it needs as props: translated strings,
 the current locale, URLs. An island that needs a provider of its own renders it
 itself; make a small component that wraps the real one in its providers and
 declare that as the island. In a hydrated view the island is an ordinary

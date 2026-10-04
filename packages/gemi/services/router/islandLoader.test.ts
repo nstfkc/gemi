@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createStaticRenderCollector, island, StaticRenderContext } from "../../client/islands";
 import { ISLAND_HYDRATE_SOURCE } from "../../internal/islandRuntime";
 import * as CounterModule from "./__fixtures__/islands/Counter";
-import { ISLAND_LOADER_SOURCE } from "./staticDocument";
+import { ISLAND_LOADER_SOURCE, spliceIslandSlots } from "./staticDocument";
 
 /**
  * Islands as the browser runs them: markup rendered the way a static view
@@ -56,7 +56,7 @@ async function serve(page: ReactElement) {
     createElement(StaticRenderContext.Provider, { value: collector }, page),
   );
   await stream.allReady;
-  const html = await new Response(stream).text();
+  const html = spliceIslandSlots(await new Response(stream).text());
   const table = {
     i: collector.islands.map((entry) => ({ s: sources[entry.module!], e: entry.export, l: entry.load })),
   };

@@ -3,6 +3,7 @@ import {
   type Context,
   type ReactElement,
   type ReactNode,
+  Fragment,
   createContext,
   createElement,
   lazy,
@@ -81,6 +82,13 @@ export function createStaticRenderCollector(
 ): StaticRenderCollector {
   return { islands: [], render, instances: new WeakMap(), count: 0 };
 }
+
+/** @internal The element an island's static children land in. */
+export const ISLAND_SLOT_TAG = "gemi-slot";
+/** @internal On the empty slot an island's own render leaves for its children. */
+export const ISLAND_SLOT_ATTRIBUTE = "data-slot";
+/** @internal On the template holding the children the page tree rendered. */
+export const ISLAND_SLOT_TEMPLATE_ATTRIBUTE = "data-gemi-slot";
 
 /** The property gemi's Vite plugin attaches to an island's loader. */
 export const ISLAND_MODULE_KEY = "gemiIsland";
@@ -249,11 +257,13 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
     const component = loader.gemiModule
       ? Promise.resolve(pick(loader.gemiModule))
       : loader().then(pick);
+    // The island's own render is a root of its own, as it will be in the
+    // browser: islands nested in it are plain components of that root. Its
+    // children are not rendered here: they belong to the page (and its
+    // context), so the page tree renders them next to the marker and
+    // `spliceIslandSlots` moves their HTML into this empty slot.
     const html = component.then((Component) =>
       collector.render(
-        // Islands nested in this one's own render are plain components of
-        // its root, as they will be in the browser. Islands in its static
-        // children are islands of their own and hydrate separately.
         createElement(
           StaticRenderContext.Provider,
           { value: null },
@@ -261,11 +271,7 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
             ? createElement(
                 Component,
                 rest,
-                createElement(
-                  StaticRenderContext.Provider,
-                  { value: collector },
-                  createElement("gemi-slot", { style: { display: "contents" } }, children as ReactNode),
-                ),
+                createElement(ISLAND_SLOT_TAG, { [ISLAND_SLOT_ATTRIBUTE]: uid, style: { display: "contents" } }),
               )
             : createElement(Component, rest),
         ),
@@ -293,7 +299,7 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
       collector.instances.set(props, instance);
     }
 
-    return createElement("gemi-island", {
+    const marker = createElement("gemi-island", {
       "data-island": instance.index,
       "data-uid": instance.uid,
       // React escapes attribute values, so the JSON needs (and must get) no
@@ -302,6 +308,18 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
       style: { display: "contents" },
       dangerouslySetInnerHTML: { __html: use(instance.html) },
     });
+    if (!hasChildren(props.children)) {
+      return marker;
+    }
+    // The children, rendered here in the page tree with the page's context
+    // (islands among them are islands of their own), in a template the
+    // static document splices into the island's slot before it is sent.
+    return createElement(
+      Fragment,
+      null,
+      marker,
+      createElement("template", { [ISLAND_SLOT_TEMPLATE_ATTRIBUTE]: instance.uid }, props.children as ReactNode),
+    );
   }
 
   Island.displayName = label;
