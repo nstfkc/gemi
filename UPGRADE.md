@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)
 
