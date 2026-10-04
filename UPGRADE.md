@@ -1,3 +1,39 @@
+# Unreleased
+
+## `gemi/http`: an MCP path param the model names in its own terms, `this.param` (#767)
+
+A path param in `fromApiRoute`'s `params` can now be a `this.param({ as?, input, bind })`. The tool's input schema gets a field in the model's own terms, and `bind` turns what the model sent into the route's param before the url is built:
+
+```ts
+export default class extends McpRouter {
+  page = this.param({
+    as: "page",
+    input: s.string().nullable().describe("The page's path, like /about; null for this chat's page."),
+    bind: async (path, req, { ctx }) => {
+      const id = path === null ? ctx?.context.pageId : await pageIdByPath(ctx?.context.siteId, path);
+      if (!id) throw new McpToolError(`There is no page ${path}.`, 404);
+      return id;
+    },
+  });
+
+  routes = {
+    outline: this.fromApiRoute("GET", "/pages/:pageId/outline", {
+      description: "Outline a page",
+      params: { pageId: this.page },
+    }),
+  };
+}
+```
+
+No change is needed to upgrade. Bound and `"input"` params work as before. Things to know:
+
+- The tool's input schema has `page` (named by `as`, or the param's own name when it is left out) with your schema and description, and no `pageId`. The model's value is never sent to the route in the body or the query.
+- `bind(value, req, call)` gets the value parsed and typed by `input`, the run's request, and the same `McpCallContext` binders get. It may be async, and must answer a `string` or a `number`.
+- A `ToolError` (such as `McpToolError`) thrown by `bind` reaches the model with its message. Any other throw, or an empty answer, is a server failure: logged, and the model reads `"… failed on the server."`. Plain binders are unchanged: a `ToolError` they throw is still a server failure.
+- The answer is checked like a segment the model sent: encoded as one segment and dispatched through the route's own middleware.
+- Declare a shared `this.param(...)` as a class field above `routes`, since class fields are set in order.
+- `McpModelParam`, `McpModelParamOptions`, `McpModelParamResolver` and `McpParamDeclaration` are exported from `gemi/http`.
+
 # Upgrading from 0.101.0 to 0.102.0
 
 ## `gemi/ai`: `toAgentTools` can group MCP tools into namespaces by tag (#758)

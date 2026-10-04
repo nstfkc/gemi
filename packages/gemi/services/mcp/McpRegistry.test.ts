@@ -154,6 +154,18 @@ class Api extends ApiRouter {
       handled.push({ route: "pages", user: null });
       return pages();
     }),
+    // Addressed by an id the model never sees; it names the page by its path.
+    "/pages/:pageId/outline": this.get(async () => {
+      const req = new HttpRequest<any, any>();
+      handled.push({ route: "outline", user: userOf(req), params: req.params });
+      return { pageId: req.params.pageId, search: new URL(req.rawRequest.url).search };
+    }).middleware(["auth"]),
+    "/pages/:pageId/title": this.post(async () => {
+      const req = new HttpRequest<any, any>();
+      const body = (await req.input()).toJSON();
+      handled.push({ route: "title", user: userOf(req), params: req.params, body });
+      return { pageId: req.params.pageId, body };
+    }).middleware(["auth"]),
     "/text": this.get(async () => new Response("plain words", { headers: { "Content-Type": "text/plain" } })),
     "/boom": this.post(async () => {
       throw new Error("connection refused at db.internal:5432");
@@ -913,6 +925,189 @@ describe("binders given the call (#756)", () => {
   });
 });
 
+describe("params the model names in its own terms (#767)", () => {
+  /** The site's pages by path, as an app would look them up. */
+  const PAGE_IDS: Record<string, string> = { "/": "pg_home", "/about": "pg_about", "/a/b": "a/b" };
+  const resolved: { value: unknown; req: HttpRequest<any, any>; call: McpCallContext }[] = [];
+
+  class PageMcp extends McpRouter<CreateRPC<Api>> {
+    page = this.param({
+      as: "page",
+      input: s.string().nullable().describe("The page's path, like /about; null for this chat's page."),
+      bind: async (path, req, call) => {
+        resolved.push({ value: path, req, call });
+        if (path === null) return (call.ctx!.context as { pageId: string }).pageId;
+        const id = PAGE_IDS[path];
+        if (!id) throw new McpToolError(`There is no page ${path}.`, 404);
+        return id;
+      },
+    });
+
+    routes = {
+      outline: this.fromApiRoute("GET", "/pages/:pageId/outline", {
+        description: "Outline a page",
+        params: { pageId: this.page },
+      }),
+      retitle: this.fromApiRoute("POST", "/pages/:pageId/title", {
+        description: "Retitle a page",
+        input: s.object({ title: s.string() }),
+        params: { pageId: this.page },
+      }),
+      // `as` left out: the field keeps the param's name, with the app's schema.
+      "outline-by-number": this.fromApiRoute("GET", "/pages/:pageId/outline", {
+        description: "Outline a page by its number",
+        params: {
+          pageId: this.param({
+            input: s.number().describe("The page's number"),
+            bind: (n) => `pg_${n}`,
+          }),
+        },
+      }),
+      "outline-broken": this.fromApiRoute("GET", "/pages/:pageId/outline", {
+        description: "Outline a page",
+        params: {
+          pageId: this.param({
+            as: "page",
+            input: s.string(),
+            bind: () => {
+              throw new Error("connection refused at db.internal:5432");
+            },
+          }),
+        },
+      }),
+      "outline-empty": this.fromApiRoute("GET", "/pages/:pageId/outline", {
+        description: "Outline a page",
+        params: { pageId: this.param({ as: "page", input: s.string(), bind: () => "" }) },
+      }),
+    };
+  }
+  const registry = () => new McpRegistry(new PageMcp(), resolve(ApiRouteDispatcher));
+  const run = (name: string, args: unknown, context: Record<string, unknown> = {}) =>
+    runTool(alice, name, args, { registry: registry(), context });
+
+  beforeEach(() => {
+    resolved.length = 0;
+  });
+
+  test("the tool offers the model's field, described, and not the param", () => {
+    const [outline] = registry().descriptors({ names: ["outline"] });
+
+    expect(outline.inputSchema.toJSONSchema()).toEqual({
+      type: "object",
+      properties: {
+        page: {
+          type: ["string", "null"],
+          description: "The page's path, like /about; null for this chat's page.",
+        },
+      },
+      required: ["page"],
+      additionalProperties: false,
+    });
+    const [byNumber] = registry().descriptors({ names: ["outline-by-number"] });
+    expect(byNumber.inputSchema.toJSONSchema().properties).toEqual({
+      pageId: { type: "number", description: "The page's number" },
+    });
+  });
+
+  test("a path is resolved to the route's id, and never sent to the route", async () => {
+    const { result, offered } = await run("outline", { page: "/about", pageId: "pg_home" });
+
+    expect(result).toMatchObject({ status: "ok", output: { pageId: "pg_about", search: "" } });
+    expect(handled).toEqual([{ route: "outline", user: 1, params: { pageId: "pg_about" } }]);
+    const spec = offered.find((tool) => tool.name === "outline")!;
+    expect(Object.keys(spec.parameters.properties!)).toEqual(["page"]);
+  });
+
+  test("null is the resolver's to read, here as the run's own page", async () => {
+    const { result } = await run("outline", { page: null }, { pageId: "pg_home" });
+
+    expect(result).toMatchObject({ status: "ok", output: { pageId: "pg_home" } });
+  });
+
+  test("a body carries the input and not the model's field", async () => {
+    const { result } = await run("retitle", { page: "/", title: "Home" });
+
+    expect(result).toMatchObject({
+      status: "ok",
+      output: { pageId: "pg_home", body: { title: "Home" } },
+    });
+  });
+
+  test("the resolver is handed the parsed value, the run's request and the call", async () => {
+    await run("retitle", { page: "/about", title: "About" }, { pageId: "pg_home" });
+
+    expect(resolved).toHaveLength(1);
+    const [{ value, req, call }] = resolved;
+    expect(value).toBe("/about");
+    expect(req).toBe(call.req);
+    expect(call.tool.name).toBe("retitle");
+    expect(call.input).toEqual({ page: "/about", title: "About" });
+    expect(call.ctx?.context).toEqual({ pageId: "pg_home" });
+  });
+
+  test("an McpToolError from the resolver reaches the model, and nothing is dispatched", async () => {
+    const { result } = await run("outline", { page: "/abuot" });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: "There is no page /abuot." },
+    });
+    expect(handled).toEqual([]);
+
+    const req = new HttpRequest(new Request("http://gemi.dev/api/agent", { headers: alice }));
+    const error = await registry()
+      .execute({ kind: "local", req }, "outline", { page: "/abuot" })
+      .catch((e: McpToolError) => e);
+    expect(error).toBeInstanceOf(McpToolError);
+    expect((error as McpToolError).status).toBe(404);
+  });
+
+  test("any other throw is a server failure, logged, without its message", async () => {
+    const { result } = await run("outline-broken", { page: "/about" });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"outline-broken" failed on the server.' },
+    });
+    expect(handled).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(
+      '[gemi/mcp] Binding the param "pageId" of "outline-broken" failed:',
+      expect.any(Error),
+    );
+  });
+
+  test("an empty answer is a server failure, as a binder's is", async () => {
+    const { result } = await run("outline-empty", { page: "/about" });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"outline-empty" failed on the server.' },
+    });
+    expect(handled).toEqual([]);
+  });
+
+  test("a value the field's schema refuses never reaches the resolver", async () => {
+    const { result } = await run("outline", { page: 3 });
+
+    expect(result.status).toBe("error");
+    expect(result.error.message).toMatch(/^Invalid arguments for "outline"/);
+    expect(resolved).toEqual([]);
+    expect(handled).toEqual([]);
+  });
+
+  test("the resolved id is encoded into one segment, like a model-supplied one", async () => {
+    const { result } = await run("outline", { page: "/a/b" });
+
+    expect(result).toMatchObject({ status: "ok", output: { pageId: "a%2Fb" } });
+  });
+
+  test("the default key is the param's name", async () => {
+    const { result } = await run("outline-by-number", { pageId: 7 });
+
+    expect(result).toMatchObject({ status: "ok", output: { pageId: "pg_7" } });
+  });
+});
+
 describe("projecting what the route answers (#757)", () => {
   const registry = () => new McpRegistry(new ProjectingMcp(), resolve(ApiRouteDispatcher));
   const run = (name: string, headers: Record<string, string> = {}) =>
@@ -1475,6 +1670,49 @@ describe("McpRegistry", () => {
           }),
         }),
       ).toThrow(/"image" is both an input field and a param or file/);
+    });
+
+    test("a model-facing key that collides with an input field", () => {
+      const router = new McpRouter();
+      expect(() =>
+        build({
+          rename: declare("PUT", "/products/:id", {
+            input: s.object({ name: s.string() }),
+            params: { id: router.param({ as: "name", input: s.string(), bind: (v) => v }) },
+          }),
+        }),
+      ).toThrow(/"name" is both an input field and a param or file/);
+    });
+
+    test("a param and a file the model would send under one key", () => {
+      expect(() =>
+        build({
+          create: declare("POST", "/:orgId/products", {
+            input: s.object({ name: s.string(), price: s.number() }),
+            params: {
+              orgId: new McpRouter().param({ as: "image", input: s.string(), bind: (v) => v }),
+            },
+            files: { image: "input" },
+          }),
+        }),
+      ).toThrow(/"image" is the input key of two params or files/);
+    });
+
+    test("a model-facing param without a schema or a resolver", () => {
+      const param = (options: Record<string, unknown>) =>
+        new McpRouter().param({ input: s.string(), bind: (v: string) => v, ...options } as any);
+      const orders = (orgId: unknown) => ({
+        orders: declare("GET", "/:orgId/orders", { params: { orgId } }),
+      });
+      expect(() => build(orders(param({ input: { type: "string" } })))).toThrow(
+        /params.orgId.input must be a schema, built with s/,
+      );
+      expect(() => build(orders(param({ bind: "pg_1" })))).toThrow(
+        /params.orgId.bind must be a function/,
+      );
+      expect(() => build(orders(param({ as: "" })))).toThrow(
+        /params.orgId.as must be a non-empty string/,
+      );
     });
 
     test("a result that is not a function", () => {

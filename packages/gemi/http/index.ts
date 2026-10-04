@@ -5,7 +5,11 @@ export {
   McpRouteDeclaration,
   type McpFileBinder,
   type McpMethod,
+  McpModelParam,
+  type McpModelParamOptions,
+  type McpModelParamResolver,
   type McpParamBinder,
+  type McpParamDeclaration,
   type McpRouteMeta,
   type McpRoutes,
 } from "./McpRouter";
