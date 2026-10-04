@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.103.0 to 0.104.0
 
 ## `gemi/ai`: `toAgentTools` keeps the MCP tools' types, and an untyped tool no longer erases the others (#771)
 
