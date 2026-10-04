@@ -1,4 +1,5 @@
 import type { ToolContext } from "../ai/Agent";
+import type { McpToolDescriptor } from "../services/mcp/McpRegistry";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
 import type { ApiRouterHandler } from "./ApiRouter";
@@ -57,6 +58,13 @@ type RoutesOf<R> = {
 type IsAny<T> = 0 extends 1 & T ? true : false;
 
 type BodyOf<H> = H extends ApiRouterHandler<infer T, any, any> ? T : never;
+
+/**
+ * What the route answers on success, as `useQuery` reads it. The registry
+ * hands `result` the parsed JSON, so a `Date` in a handler's return arrives as
+ * the string it was serialised to.
+ */
+export type DataOf<H> = H extends ApiRouterHandler<any, infer O, any, any> ? Awaited<O> : unknown;
 
 /**
  * A body there is nothing to check against: a handler that never names its
@@ -198,10 +206,96 @@ type InputProp<B, I> = {
   input: I & NoInfer<InputCheck<I, B>>;
 };
 
-export type McpRouteMeta<H, K, I> = MetaBase &
+/**
+ * What `result` is handed beside the route's answer: the tool, and the
+ * arguments the model called it with, parsed.
+ */
+export type McpResultContext = {
+  tool: McpToolDescriptor;
+  input: Record<string, unknown>;
+};
+
+/**
+ * Turns the route's answer into what the model is shown. See `ResultMeta`.
+ */
+export type McpResultProjection<D = any, P = unknown> = (
+  data: D,
+  call: McpResultContext,
+) => P | Promise<P>;
+
+/**
+ * An `output` without a `result` must describe what the route answers.
+ * Checked one way — the answer must be assignable to the schema's type — so a
+ * schema that names fewer fields than the route answers is fine (parsing
+ * drops the rest), and one naming a field the route does not have, or with a
+ * different type, is not. A route whose answer type is unknown is not checked.
+ */
+type OutputCheck<O, P> =
+  IsAny<P> extends true
+    ? unknown
+    : unknown extends P
+      ? unknown
+      : O extends AnySchema
+        ? [P] extends [Infer<O>]
+          ? unknown
+          : { "output does not describe what the route answers": Infer<O> }
+        : unknown;
+
+/** What `result` must return: anything, or what `output` describes when it is set. */
+type ResultReturn<O> = O extends AnySchema ? Infer<O> | Promise<Infer<O>> : unknown;
+
+/**
+ * Two shapes, told apart by whether `result` is there, because `output`
+ * describes a different thing in each: what `result` returns, or what the
+ * route answers.
+ *
+ * `result`'s return is checked against `output` through its contextual type
+ * rather than by inferring it and comparing afterwards. A type parameter for
+ * it would have to be inferred from a context-sensitive function, and any
+ * check that mentioned it beside `output` fixed it to its default first.
+ */
+type ResultMeta<H, O> =
+  | {
+      /**
+       * Trims or reshapes the route's 2xx JSON before the model sees it.
+       * Routes are written for a UI and answer whole records; a model needs a
+       * few fields of them, and every other one costs context on every call.
+       *
+       * ```ts
+       * result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+       * ```
+       *
+       * A 4xx is not passed through it: a refusal reaches the model as the
+       * route wrote it. A throw is the server's failure, logged, and the model
+       * is told only that the tool failed.
+       */
+      result: (data: DataOf<H>, call: McpResultContext) => ResultReturn<O>;
+      /**
+       * The shape of what `result` returns. The return is parsed with it,
+       * which drops every field it does not declare. It is the descriptor's
+       * `outputSchema`, and the `AgentTool`'s. A value that does not parse is
+       * the server's failure.
+       */
+      output?: O;
+    }
+  | {
+      result?: never;
+      /**
+       * The shape of what the route answers. The answer is parsed with it,
+       * which drops every field it does not declare, so an `output` alone is
+       * a projection too: it may name fewer fields than the route answers,
+       * never one it does not have. It is the descriptor's `outputSchema`, and
+       * the `AgentTool`'s. An answer that does not parse is the server's
+       * failure.
+       */
+      output?: O & NoInfer<OutputCheck<O, DataOf<H>>>;
+    };
+
+export type McpRouteMeta<H, K, I, O = undefined> = MetaBase &
   InputMeta<BodyOf<H>, I> &
   ParamsMeta<K> &
-  FilesMeta<BodyOf<H>>;
+  FilesMeta<BodyOf<H>> &
+  ResultMeta<H, O>;
 
 /** The runtime shape of a meta, generics erased. */
 export type McpRouteMetaRuntime = {
@@ -211,6 +305,8 @@ export type McpRouteMetaRuntime = {
   requiresApproval?: boolean;
   params?: Record<string, McpParamBinder | "input">;
   files?: Record<string, McpFileBinder | "input">;
+  result?: McpResultProjection;
+  output?: AnySchema;
 };
 
 /**
@@ -265,7 +361,12 @@ export class McpRouter<R = McpRoutes> {
     M extends McpMethod,
     K extends keyof RoutesOf<R>[M] & string,
     I extends AnySchema | undefined = undefined,
-  >(method: M, url: K, meta: McpRouteMeta<RoutesOf<R>[M][K], K, I>): McpRouteDeclaration<M, K> {
+    O extends AnySchema | undefined = undefined,
+  >(
+    method: M,
+    url: K,
+    meta: McpRouteMeta<RoutesOf<R>[M][K], K, I, O>,
+  ): McpRouteDeclaration<M, K> {
     return new McpRouteDeclaration(method, url, meta as McpRouteMetaRuntime);
   }
 }

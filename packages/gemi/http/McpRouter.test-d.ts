@@ -236,4 +236,48 @@ describe("fromApiRoute", () => {
       };
     }
   });
+
+  test("result is handed the route's answer, and output must describe what is answered", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {
+        projected: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "List orders",
+          params: { orgId: "input" },
+          result: (orders, call) => {
+            expectTypeOf(orders).toEqualTypeOf<{ id: string }[]>();
+            expectTypeOf(call.tool.name).toBeString();
+            return orders.map((order) => order.id);
+          },
+          output: s.array(s.string()),
+        }),
+        // Without output, result may return anything.
+        free: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "List orders",
+          params: { orgId: "input" },
+          result: async (orders) => ({ count: orders.length }),
+        }),
+        // Fewer fields than the route answers is a projection, and fine.
+        narrowed: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "Create a product",
+          input: s.object({ name: s.string(), price: s.number() }),
+          params: { orgId: "input" },
+          files: { image: "input" },
+          output: s.object({ id: s.number() }),
+        }),
+        wrongAfterResult: this.fromApiRoute("GET", "/org/:orgId/orders", {
+          description: "List orders",
+          params: { orgId: "input" },
+          // @ts-expect-error result returns strings; output says numbers
+          result: (orders) => orders.map((order) => order.id),
+          output: s.array(s.number()),
+        }),
+        // @ts-expect-error the route answers { ok: boolean }, not a `status` field
+        wrongWithoutResult: this.fromApiRoute("GET", "/health", {
+          description: "Health",
+          output: s.object({ status: s.string() }),
+        }),
+      };
+    }
+    void Mcp;
+  });
 });
