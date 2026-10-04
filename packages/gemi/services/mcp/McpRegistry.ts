@@ -268,7 +268,8 @@ export class McpRegistry {
     }
     const input = parsed.value;
 
-    const path = await this.fillPath(plan, input, caller.req);
+    const call: McpCallContext = { caller, req: caller.req, tool: descriptor, input, ctx };
+    const path = await this.fillPath(plan, call);
 
     // The dispatcher routes `path` afresh and takes the first route that
     // matches it, so a model's "archive-all" for `/products/:id` would reach a
@@ -289,14 +290,13 @@ export class McpRegistry {
     let body: FormData | Record<string, unknown> | undefined;
     let query = "";
     if (plan.fileFields.length > 0) {
-      body = await this.formData(plan, input, json, ctx);
+      body = await this.formData(plan, json, call);
     } else if (descriptor.method === "GET") {
       query = toQuery(json);
     } else if (plan.jsonKeys.length > 0) {
       body = json;
     }
 
-    const call: McpCallContext = { caller, req: caller.req, tool: descriptor, input, ctx };
     const credentials = this.router.credentials
       ? await this.bind(plan, "the credentials", () => this.router.credentials!(call))
       : undefined;
@@ -441,17 +441,14 @@ export class McpRegistry {
 
   // --- calling -------------------------------------------------------------
 
-  private async fillPath(
-    plan: Plan,
-    input: Record<string, unknown>,
-    req: HttpRequest<any, any>,
-  ): Promise<string> {
+  private async fillPath(plan: Plan, call: McpCallContext): Promise<string> {
+    const { input, req } = call;
     let path = plan.descriptor.url;
     for (const param of plan.params) {
       const binder = plan.paramBinders.get(param.name);
       let value: unknown;
       if (binder) {
-        value = await this.bind(plan, `the param "${param.name}"`, () => binder(req));
+        value = await this.bind(plan, `the param "${param.name}"`, () => binder(req, call));
         if (value === undefined || value === null || value === "") {
           console.error(
             `[gemi/mcp] The binder for "${param.name}" of "${plan.descriptor.name}" returned ${JSON.stringify(value)}.`,
@@ -477,10 +474,10 @@ export class McpRegistry {
 
   private async formData(
     plan: Plan,
-    input: Record<string, unknown>,
     json: Record<string, unknown>,
-    ctx: ToolContext | undefined,
+    call: McpCallContext,
   ): Promise<FormData> {
+    const { input, ctx } = call;
     const name = plan.descriptor.name;
     if (!ctx) {
       throw new Error(
@@ -496,7 +493,7 @@ export class McpRegistry {
         field.binder === "input"
           ? (input[field.name] as string)
           : await this.bind(plan, `the file "${field.name}"`, () =>
-              (field.binder as McpFileBinder)(ctx),
+              (field.binder as McpFileBinder)(ctx, call),
             );
       if (typeof id !== "string" || id === "") {
         throw new McpToolError(
