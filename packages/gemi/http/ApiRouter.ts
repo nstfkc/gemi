@@ -6,7 +6,6 @@ import type {
   AgentRouteRPC,
 } from "../ai/AgentController";
 import { isConstructor } from "../internal/isConstructor";
-import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
 import type { ResponseData, ResponseError } from "./HttpResponse";
@@ -39,13 +38,55 @@ type CallbackHandler<Input, Output, Params> = (
   req: HttpRequest<Input, Params>,
 ) => Promise<Output> | Output;
 
-type ParseRouteHandler<
-  T extends new () => Controller,
-  K extends ControllerMethods<T>,
-  M extends HttpMethod,
-> = InstanceType<T>[K] extends (req: HttpRequest<infer Input, infer Params>) => infer Output
-  ? RouteHandler<M, Input, Output, Params>
+/**
+ * A controller route, as `this.get(Controller, "method")` types it: the
+ * controller and the method's name, and nothing yet of what the method takes
+ * or answers. `CreateRPC` reads those off the method when a route's value is
+ * asked for, one route at a time (#774).
+ *
+ * Mounting a route therefore never resolves its handler. That is what lets a
+ * route answer something typed by an agent whose tools are other routes of the
+ * same api — a chat's history typed by the agent's messages, beside a typed
+ * `toAgentTools` — without the route table referencing itself: inferring a
+ * router's `routes` needs the controllers and the methods' names, and
+ * `fromApiRoute` checking a url needs the table's keys and that one route's
+ * value, never the history's.
+ *
+ * At runtime it is a plain `RouteHandler`.
+ */
+export interface ControllerRouteHandler<M extends HttpMethod, C, N>
+  extends RouteHandler<M, any, any, any> {
+  /** Types only, never set: what `RouteValue` reads the method off. */
+  readonly __controllerRoute: { controller: C; method: N };
+}
+
+/**
+ * What a controller route's method takes and answers, as the client's RPC map
+ * records it. Only ever evaluated as one property of `CreateRPC`, which is
+ * what keeps it out of the route table's own type.
+ */
+type ControllerRouteValue<C, N> = C extends new () => infer I
+  ? N extends keyof I
+    ? I[N] extends (req: HttpRequest<infer Input, infer Params>) => infer Output
+      ? ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
+      : never
+    : never
   : never;
+
+/**
+ * Whether a controller route's method can be dispatched at all, which decides
+ * whether the route has a key, as it always has. Checked against a
+ * `(req) => any`, which never reads the method's return type: an answer typed
+ * by an agent whose tools are this api's routes is not needed to list the
+ * api's keys.
+ */
+type IsControllerRoutable<C, N> = C extends new () => infer I
+  ? N extends keyof I
+    ? I[N] extends (req: HttpRequest<any, any>) => any
+      ? true
+      : false
+    : false
+  : false;
 
 function isController(
   candidate: CallbackHandler<any, any, any> | (new () => Controller),
@@ -270,13 +311,13 @@ export type ApiRoutes = Record<
 
 export type ResourceRoutes<T extends new () => ResourceController> = {
   first: {
-    get: ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">;
-    post: ParseRouteHandler<T, TestControllerMethod<T, "store">, "POST">;
+    get: ControllerRouteHandler<"GET", T, TestControllerMethod<T, "list">>;
+    post: ControllerRouteHandler<"POST", T, TestControllerMethod<T, "store">>;
   };
   second: {
-    get: ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">;
-    put: ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">;
-    delete: ParseRouteHandler<T, TestControllerMethod<T, "delete">, "DELETE">;
+    get: ControllerRouteHandler<"GET", T, TestControllerMethod<T, "show">>;
+    put: ControllerRouteHandler<"PUT", T, TestControllerMethod<T, "update">>;
+    delete: ControllerRouteHandler<"DELETE", T, TestControllerMethod<T, "delete">>;
   };
 };
 
@@ -331,7 +372,7 @@ export class ApiRouter {
   public get<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
-  ): ParseRouteHandler<T, K, "GET">;
+  ): ControllerRouteHandler<"GET", T, K>;
   public get<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
@@ -345,7 +386,7 @@ export class ApiRouter {
   public post<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
-  ): ParseRouteHandler<T, K, "POST">;
+  ): ControllerRouteHandler<"POST", T, K>;
   public post<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
@@ -359,7 +400,7 @@ export class ApiRouter {
   public put<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
-  ): ParseRouteHandler<T, K, "PUT">;
+  ): ControllerRouteHandler<"PUT", T, K>;
   public put<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
@@ -373,7 +414,7 @@ export class ApiRouter {
   public patch<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
-  ): ParseRouteHandler<T, K, "PATCH">;
+  ): ControllerRouteHandler<"PATCH", T, K>;
   public patch<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
@@ -387,7 +428,7 @@ export class ApiRouter {
   public delete<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
-  ): ParseRouteHandler<T, K, "DELETE">;
+  ): ControllerRouteHandler<"DELETE", T, K>;
   public delete<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
@@ -432,9 +473,23 @@ export class ApiRouter {
    * user, and every attachment id minted by an upload is then unresolvable in
    * the run that follows — as a not-found, indistinguishable from an id the
    * model made up. See `AgentController.attachmentScope`.
+   *
+   * `Controller` is checked to be an `AgentController` class when the route is
+   * mounted, at boot, and not by the type of the parameter (#774). Checking it
+   * at compile time resolves the controller's agent, and so the agent's
+   * tools, while the route table is still being inferred: an agent whose tools
+   * are routes of this same api, or whose controller is typed by it
+   * (`AgentController<ReturnType<typeof makeAgent>>`), then made the table
+   * reference itself. A route mounted with anything else has no tools in the
+   * client's types (`AgentRouteRPC`), and throws here.
    */
-  public agent<T extends new () => AgentController<any, any>>(Controller: T): AgentRoute<T> {
-    return createAgentRouteHandlers(Controller, this) as unknown as AgentRoute<T>;
+  public agent<T extends object>(Controller: T): AgentRoute<T> {
+    if ((Controller as { kind?: unknown }).kind !== "agent-controller") {
+      throw new TypeError(
+        `this.agent() takes an AgentController class, and got ${describeController(Controller)}.`,
+      );
+    }
+    return createAgentRouteHandlers(Controller as any, this) as unknown as AgentRoute<T>;
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
@@ -476,6 +531,11 @@ export class ApiRouter {
   public proxy(url: string, headers: Record<string, string> = {}) {
     return new ProxyHandler(url, headers);
   }
+}
+
+function describeController(candidate: unknown) {
+  if (typeof candidate === "function" && candidate.name) return candidate.name;
+  return typeof candidate;
 }
 
 /**
@@ -550,27 +610,40 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
 type TestControllerMethod<T extends new () => Controller, K extends string> =
   K extends ControllerMethods<T> ? K : never;
 
+/**
+ * One route of the RPC map: its key, and the route its value is read off — not
+ * the value. `CreateRPC` reads it per key (`RouteValue`), so listing the keys,
+ * or reading one route's value, never evaluates another route's handler (#774).
+ */
+type RouteEntry<K, R> = { key: K; route: R };
+
+/**
+ * A route's value in the RPC map. Evaluated only as the template of
+ * `CreateRPC`, which a mapped type resolves one property at a time.
+ */
+type RouteValue<R> =
+  R extends AgentRoute<infer C extends new () => AgentController<any, any>>
+    ? AgentRouteRPC<C>
+    : R extends ControllerRouteHandler<any, infer C, infer N>
+      ? ControllerRouteValue<C, N>
+      : R extends RouteHandler<any, infer Input, infer Output, infer Params>
+        ? ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
+        : never;
+
+/** Whether a route has a key: a controller route only when its method can be called. */
+type IsRoutable<R> =
+  R extends ControllerRouteHandler<any, infer C, infer N> ? IsControllerRoutable<C, N> : true;
+
 type RouteHandlerParser<T, Prefix extends string = ""> =
-  T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
-    ? KeyAndValue<
-        `${Method & string}:${Prefix & string}`,
-        ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
-      >
+  T extends RouteHandler<infer Method, any, any, any>
+    ? IsRoutable<T> extends true
+      ? RouteEntry<`${Method & string}:${Prefix & string}`, T>
+      : never
     : never;
 
 type RouteHandlersParser<T, Prefix extends string = ""> = T extends RouteHandlers
   ? {
-      [K in keyof T]: T[K] extends RouteHandler<
-        infer Method,
-        infer Input,
-        infer Output,
-        infer Params
-      >
-        ? KeyAndValue<
-            `${Method & string}:${Prefix & string}`,
-            ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
-          >
-        : never;
+      [K in keyof T]-?: RouteHandlerParser<T[K], Prefix>;
     }[keyof T]
   : never;
 
@@ -616,8 +689,8 @@ type RouteParser<
   ? // Checked before every other branch: `RouteHandlers` is fully optional, so
     // *every* object type extends it, and an agent route reaching that arm
     // would silently produce nothing.
-    T[K] extends AgentRoute<infer C>
-    ? KeyAndValue<ParsePrefixAndKey<Prefix, K>, AgentRouteRPC<C>>
+    T[K] extends AgentRoute<any>
+    ? RouteEntry<ParsePrefixAndKey<Prefix, K>, T[K]>
     : T[K] extends ResourceRoutes<any>
       ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
       : T[K] extends RouteHandler<any, any, any, any>
@@ -629,6 +702,16 @@ type RouteParser<
             : never
   : never;
 
-export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = KeyAndValueToObject<
-  RouteParser<T["routes"], Prefix>
->;
+/**
+ * The client's RPC map of an api router: `"METHOD:/path"` to the route's
+ * handler type, and an agent route's mounted path to its `AgentRouteRPC`.
+ *
+ * Its keys come from the routers' `routes` alone, and each value is read off
+ * its own route when it is asked for (#774). `keyof CreateRPC<Api>` and
+ * `CreateRPC<Api>["GET:/x"]` therefore never evaluate another route's handler,
+ * which is what lets `McpRouter.fromApiRoute` check a url against the api that
+ * serves the agent using it.
+ */
+export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
+  [E in RouteParser<T["routes"], Prefix> as E["key"]]: RouteValue<E["route"]>;
+};
