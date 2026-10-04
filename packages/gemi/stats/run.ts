@@ -116,9 +116,16 @@ export async function loadRouteTable(
       stderr: "pipe",
     });
     const timeoutMs = options.timeoutMs ?? 60_000;
-    const timer = setTimeout(() => child.kill(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
     const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
     clearTimeout(timer);
+    if (timedOut) {
+      return { ok: false, message: `reading the route table took over ${timeoutMs / 1000}s.` };
+    }
     if (code !== 0 || !existsSync(out)) {
       return {
         ok: false,
