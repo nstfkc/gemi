@@ -268,7 +268,9 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
       let body: FormData;
       try {
         body = await this.rawRequest.formData();
-      } catch {
+      } catch (err) {
+        // A `body-limit` refusal (413) is answered as itself.
+        if (err instanceof RequestBreakerError) throw err;
         throw new RequestBreakerError("The request body could not be read as a form.");
       }
       const _inputMap = new Map<string, any>();
@@ -297,7 +299,8 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     let text: string;
     try {
       text = await this.rawRequest.text();
-    } catch {
+    } catch (err) {
+      if (err instanceof RequestBreakerError) throw err;
       throw new RequestBreakerError("The request body could not be read.");
     }
     if (text.trim() === "") {

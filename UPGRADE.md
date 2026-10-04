@@ -1,3 +1,16 @@
+# Unreleased
+
+## `gemi/http`: per-route request body limits, `body-limit:SIZE` (#752)
+
+New, and opt-in: nothing changes for an app that does not use it.
+
+- **`body-limit:64kb`** on a router's `middlewares` or a route's `.middleware()` bounds that route's request body. A declared `Content-Length` over the limit is refused before the handler runs; a chunked body is counted as it is read and refused once past it, without buffering more. The answer is a `413` `{ error: { kind: "form_error", message: "The request body is too large.", status: 413 } }`. It covers `req.input()` (JSON, urlencoded, multipart), the raw `req.rawRequest` accessors and proxy routes. `body-limit` is built in and needs no `aliases` entry; an app alias named `body-limit` still wins.
+- **`bodyLimit`** in the `middleware` config (`defineMiddlewareConfig({ bodyLimit: "1mb" })`) is a default for every api route without its own `body-limit`, which can raise it (`body-limit:none` lifts it).
+- New exports from `gemi/http`: `BodyLimitMiddleware`, `PayloadTooLargeError`, `parseByteSize`.
+- Bun's `maxRequestBodySize` (10 GB under `gemi start`, Bun's 128 MB default under `gemi dev`) is unchanged and stays the ceiling. See `docs/middleware.md`.
+
+An app that already refuses large bodies by hand (checking `Content-Length` in the handler) can replace that with `body-limit`, which also reads a chunked body up to the limit instead of refusing it.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)

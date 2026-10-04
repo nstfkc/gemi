@@ -176,6 +176,8 @@ async upload(req: HttpRequest<{ file: File | File[] }>) {
 }
 ```
 
+Nothing bounds the body's size but Bun's server-wide `maxRequestBodySize` unless the route sets a limit. On a route anyone can post to, add [`body-limit`](./middleware.md#body-limitsize--bodylimitmiddleware) (`.middleware("body-limit:64kb")`): a body over it is a `413` refusal, whether it declares its length or not, and is never buffered past the limit.
+
 ## ResourceController
 
 `ResourceController` is an abstract base for REST resources. It requires five methods — `list`, `store`, `show`, `update`, `delete` — which [`this.resource(Controller)`](./routing.md) maps to the standard REST routes:
