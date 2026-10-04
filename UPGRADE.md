@@ -1,5 +1,18 @@
 # Unreleased
 
+## `gemi/http`: MCP binders get the whole call (#756)
+
+A `params` binder in `fromApiRoute` is now called as `(req, call)`, and a `files` binder as `(ctx, call)`. `call` is an `McpCallContext`: `{ caller, req, tool, input, ctx? }`, where `ctx` is the run's `ToolContext` (absent when `McpRegistry.execute` is called without one). A param can now be bound from what the server handed the run:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: (_req, { ctx }) => ctx?.context.siteId },
+}),
+```
+
+No change is needed to upgrade: existing one-argument binders work as before. A binder that is typed by hand as `McpParamBinder` or `McpFileBinder` and called directly, for example in a test, now needs the second argument.
+
 ## `gemi/http`: an MCP tool call can carry the app's own credentials (#755)
 
 `McpRouter` has an optional `credentials(call)` hook. It returns `{ headers?, cookies? }` for each tool call, and they are sent beside the run's access token:

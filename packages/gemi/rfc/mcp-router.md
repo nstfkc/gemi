@@ -107,7 +107,9 @@ type Meta<M, K> = {
    *  Typed here to show the shape is reachable — not implemented in v1. */
   output?: Schema<Awaited<DataOf<M, K>>>;
   /** Per-param: bound from the request, or supplied by the model. */
-  params?: { [P in keyof ParseParams<K>]: ((req: HttpRequest) => string) | "input" };
+  params?: {
+    [P in keyof ParseParams<K>]: ((req: HttpRequest, call: McpCallContext) => string) | "input";
+  };
   /** Required for every `Blob`/`File` field of the body, and rejected when
    *  there are none. Same two modes as `params`. See "Files" below. */
   files?: Record<BinaryKeys<BodyOf<M, K>>, ((ctx: ToolContext) => string) | "input">;
@@ -457,10 +459,15 @@ Still open:
    `onRequestStart` — a header on the synthetic request, or a flag on the
    request context. The context flag is harder to spoof, since a header on a
    _real_ inbound request could claim it.
-2. **Whether `params` binding functions receive the caller** or only the
-   request. For the local caller they are the same thing; for v2 they are not,
-   and a binding like `orgId: (req) => req.ctx().user.orgId` has to keep
-   working when the "request" is synthesised from a token.
+2. ~~**Whether `params` binding functions receive the caller** or only the
+   request.~~ Settled in #756: both. A binder is called as `(req, call)`,
+   where `call` is the `McpCallContext` the `credentials` hook also gets —
+   `{ caller, req, tool, input, ctx? }`. `req` stays first, so
+   `orgId: (req) => req.ctx().user.orgId` keeps working, and for v2 a binder
+   that cares can tell the callers apart by `call.caller`. `ctx` is the
+   run's `ToolContext`, so a param can be bound to the resource the run is
+   about (`(_req, { ctx }) => ctx?.context.siteId`) rather than read off the
+   url of the route that started it. File binders get `(ctx, call)`.
 3. **Rate limiting.** `RateLimitMiddleware` keys on the request; a local tool
    call inherits the user's request, so an agent loop could exhaust a human's
    budget. Whether that is correct or surprising is a product call.

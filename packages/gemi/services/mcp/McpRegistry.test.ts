@@ -318,7 +318,12 @@ async function runTool(
   headers: Record<string, string>,
   name: string,
   args: unknown,
-  options: { attachments?: ScopedAttachments; turn?: ClientTurn; registry?: McpRegistry } = {},
+  options: {
+    attachments?: ScopedAttachments;
+    turn?: ClientTurn;
+    registry?: McpRegistry;
+    context?: Record<string, unknown>;
+  } = {},
 ) {
   const provider = fakeProvider([toolCall("c1", name, args), finish()], [finish()]);
   const agent = Agent.create({
@@ -333,6 +338,7 @@ async function runTool(
         messages: [],
         turn: options.turn ?? { text: "go" },
         attachments: options.attachments ?? null,
+        ...(options.context ? { context: options.context as any } : {}),
       })
       .result();
     messages = result.messages as AgentMessage[];
@@ -730,6 +736,123 @@ describe("the app's own credentials", () => {
     const { result } = await runTool(alice, "whoami", {}, { registry: owned() });
 
     expect(result).toMatchObject({ status: "ok", output: { id: 1 } });
+  });
+});
+
+describe("binders given the call (#756)", () => {
+  /** What each binder was handed, per call. */
+  const seen: { req: HttpRequest<any, any>; call: McpCallContext }[] = [];
+  const fileSeen: { ctx: unknown; call: McpCallContext }[] = [];
+
+  class ContextMcp extends McpRouter<CreateRPC<Api>> {
+    routes = {
+      // The resource the run is about, from what the server handed the run —
+      // not from the url of the route that started it.
+      "site-orders": this.fromApiRoute("GET", "/:orgId/orders", {
+        description: "List the orders of the site this run is about",
+        input: s.object({ status: s.string() }),
+        params: {
+          orgId: (req, call) => {
+            seen.push({ req, call });
+            return (call.ctx?.context as { siteId?: string } | undefined)?.siteId ?? "";
+          },
+        },
+      }),
+      "create-product-from-upload": this.fromApiRoute("POST", "/:orgId/products", {
+        description: "Create a product from the image the user attached",
+        input: s.object({ name: s.string(), price: s.number() }),
+        params: { orgId: (_req, { ctx }) => (ctx!.context as { siteId: string }).siteId },
+        files: {
+          image: (ctx, call) => {
+            fileSeen.push({ ctx, call });
+            return ctx.turn.attachments[0];
+          },
+        },
+      }),
+    };
+  }
+  const registry = () => new McpRegistry(new ContextMcp(), resolve(ApiRouteDispatcher));
+
+  beforeEach(() => {
+    seen.length = 0;
+    fileSeen.length = 0;
+  });
+
+  test("a param binder reads the run's context, and the model has no say", async () => {
+    const { result, offered } = await runTool(
+      alice,
+      "site-orders",
+      { status: "open", orgId: "org_bob" },
+      { registry: registry(), context: { siteId: "site_9" } },
+    );
+
+    expect(result).toMatchObject({ status: "ok", output: { orgId: "site_9", status: "open" } });
+    expect(handled).toEqual([{ route: "orders", user: 1, params: { orgId: "site_9" } }]);
+    const spec = offered.find((tool) => tool.name === "site-orders")!;
+    expect(Object.keys(spec.parameters.properties!)).toEqual(["status"]);
+  });
+
+  test("the call carries the caller, the tool, the parsed input and the ToolContext", async () => {
+    await runTool(
+      alice,
+      "site-orders",
+      { status: "open" },
+      { registry: registry(), context: { siteId: "site_9" } },
+    );
+
+    expect(seen).toHaveLength(1);
+    const [{ req, call }] = seen;
+    // The first argument is unchanged: the run's request.
+    expect(req).toBe(call.req);
+    expect(call.caller).toEqual({ kind: "local", req });
+    expect(call.tool.name).toBe("site-orders");
+    expect(call.input).toEqual({ status: "open" });
+    expect(call.ctx?.toolCallId).toBe("c1");
+    expect(call.ctx?.context).toEqual({ siteId: "site_9" });
+  });
+
+  test("a file binder gets the same call as its second argument", async () => {
+    const mine = scopeFor("user:1");
+    const upload = await mine.put(new File(["photo"], "photo.jpg", { type: "image/jpeg" }));
+
+    const { result } = await runTool(
+      alice,
+      "create-product-from-upload",
+      { name: "Photo", price: 3 },
+      {
+        registry: registry(),
+        attachments: mine,
+        context: { siteId: "site_9" },
+        turn: {
+          text: "make a product of this",
+          files: [{ attachmentId: upload.id, name: "photo.jpg", mimeType: "image/jpeg" }],
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "ok",
+      output: { orgId: "site_9", image: { name: "photo.jpg" } },
+    });
+    expect(fileSeen).toHaveLength(1);
+    expect(fileSeen[0].call.ctx).toBe(fileSeen[0].ctx);
+    expect(fileSeen[0].call.tool.name).toBe("create-product-from-upload");
+    expect(fileSeen[0].call.input).toEqual({ name: "Photo", price: 3 });
+  });
+
+  test("called without a tool context, the call has none", async () => {
+    const req = new HttpRequest(new Request("http://gemi.dev/api/agent", { headers: alice }));
+    const error = await registry()
+      .execute({ kind: "local", req }, "site-orders", { status: "open" })
+      .then(
+        () => null,
+        (e: Error) => e,
+      );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].call.ctx).toBeUndefined();
+    // No site, so the binder answered "" — a server failure, not the model's.
+    expect(error?.message).toBe('"site-orders" failed on the server.');
   });
 });
 

@@ -26,16 +26,29 @@ export type McpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  * say in it: the param is absent from the tool's input schema, and anything
  * the model sends under its name is dropped before the url is built.
  *
- * It is handed the run's request, not a tool context, so the same binder
- * keeps meaning something for a caller that is not an agent run. A binder may
- * read the user as `req.ctx().user`: that is the store of the request that
- * started the run, and it stays open until the run settles — through a
- * streamed response, and after the client has disconnected, since leaving does
- * not stop the run. `user` is whatever that route's middleware set, so the
- * route that starts the run must be behind `auth` for it to be there.
+ * It is handed the run's request first, so the same binder keeps meaning
+ * something for a caller that is not an agent run. A binder may read the user
+ * as `req.ctx().user`: that is the store of the request that started the run,
+ * and it stays open until the run settles — through a streamed response, and
+ * after the client has disconnected, since leaving does not stop the run.
+ * `user` is whatever that route's middleware set, so the route that starts the
+ * run must be behind `auth` for it to be there.
+ *
+ * The second argument is the whole call (#756): the caller, the tool, the
+ * model's parsed arguments, and `ctx`, the run's `ToolContext` — absent when
+ * the registry is called without one. A param that names "the resource this
+ * run is about" reads it from there rather than from the chat route's url:
+ *
+ * ```ts
+ * params: { siteId: (_req, { ctx }) => ctx?.context.siteId }
+ * ```
+ *
+ * `ctx.body` is the client's, as untrusted as a request body: bind from it
+ * only what the route's own middleware checks anyway.
  */
 export type McpParamBinder = (
   req: HttpRequest<any, any>,
+  call: McpCallContext,
 ) => string | number | Promise<string | number>;
 
 /**
@@ -43,8 +56,13 @@ export type McpParamBinder = (
  * The id still resolves through `ctx.attachments`, so a binder can narrow which
  * of the caller's files is sent and can never reach anybody else's. `undefined`
  * means there is no file to send, and the model is told so.
+ *
+ * The second argument is the whole call, as a param binder gets it.
  */
-export type McpFileBinder = (ctx: ToolContext) => string | undefined | Promise<string | undefined>;
+export type McpFileBinder = (
+  ctx: ToolContext,
+  call: McpCallContext,
+) => string | undefined | Promise<string | undefined>;
 
 // --- reading the route table -------------------------------------------------
 

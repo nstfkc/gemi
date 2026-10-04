@@ -261,4 +261,36 @@ describe("fromApiRoute", () => {
     }
     void [Mcp, Async, Wrong];
   });
+
+  test("binders are handed the call as their second argument", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {
+        create: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "x",
+          input: s.object({ name: s.string(), price: s.number() }),
+          params: {
+            orgId: (req, call) => {
+              expectTypeOf(call).toEqualTypeOf<McpCallContext>();
+              expectTypeOf(call.ctx?.runId).toEqualTypeOf<string | undefined>();
+              return String(call.input.orgId ?? req.params.orgId);
+            },
+          },
+          files: {
+            image: (ctx, call) => {
+              expectTypeOf(call.tool.name).toBeString();
+              return ctx.turn.attachments[0];
+            },
+          },
+        }),
+        // A one-argument binder still fits.
+        legacy: this.fromApiRoute("POST", "/org/:orgId/products", {
+          description: "x",
+          input: s.object({ name: s.string(), price: s.number() }),
+          params: { orgId: (req) => req.ctx().user.orgId },
+          files: { image: "input" },
+        }),
+      };
+    }
+    void Mcp;
+  });
 });
