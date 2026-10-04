@@ -1,3 +1,42 @@
+# Unreleased
+
+## `gemi/ai`: `toAgentTools` keeps the MCP tools' types, and an untyped tool no longer erases the others (#771)
+
+`toAgentTools` used to answer `AnyAgentTool[]`, tools named only `string`. Spread into an agent's `tools`, that gave `ToolShapesOf` a string index, and every `ToolCallPart` of the chat (the agent's own tools included) became the untyped one.
+
+Two changes:
+
+1. **Typed tools from a typed router.** Give the registry your router's type, and the tools keep their names, inputs and outputs:
+
+   ```ts
+   const registry = app(McpRegistry) as McpRegistry<SiteMcpRouter>;
+   const agent = Agent.create({
+     name: "site",
+     provider,
+     tools: [buildPage, ...toAgentTools(registry, { filter: { tags: ["collections"] } })],
+   });
+
+   // In the browser, from ToolShapesOf<typeof agent.tools>:
+   if (part.name === "deleteItems") part.input.ids; // string[]
+   if (part.name === "buildPage") part.progress;    // still typed
+   ```
+
+   - The input is what the model sends: the `input` schema's fields, a `string` for each `"input"` path param and file field, and each `this.param(...)` field under its `as` (or the param's own name). Bound params and files are not in it.
+   - The output is what `output` describes, else what `result` returns, else what the route answers.
+   - A literal `filter` (`names` or `tags`) narrows the types as it narrows the tools. With `namespaces`, the namespaced tools flatten into the shapes as before.
+   - `toAgentTools<SiteMcpRouter>(app(McpRegistry), …)` works too, but an explicit type argument means the filter is not inferred, so every tool of the router is in the type.
+   - `McpToolShapesOf<SiteMcpRouter, Filter?>` gives the shapes without an agent. `McpAgentTool` (`gemi/ai`) and `McpToolInput`/`McpToolOutput` (`gemi/http`) are exported too.
+
+2. **`ToolShapesOf` skips tools whose name is only `string`.** Such a tool (an untyped `toAgentTools`, for example) no longer erases the other tools' types; its own parts are left out of the client's union instead. An agent whose tools all have non-literal names keeps the untyped index, as before.
+
+Type changes to know:
+
+- `McpRouteDeclaration` has three more type parameters (`Input`, `Output`, `Tags`), and `fromApiRoute` infers them. Code that names `McpRouteDeclaration<M, K>` still compiles.
+- `McpModelParam` has a second type parameter, the literal `as`: `this.param({ as: "page", input: s.string(), … })` is `McpModelParam<string, "page">`. Annotations written as `McpModelParam<string>` still accept it.
+- `McpRegistry` takes an optional router type parameter. It has no effect at runtime.
+
+No runtime behaviour changes.
+
 # Upgrading from 0.102.0 to 0.103.0
 
 ## `gemi/http`: an MCP path param the model names in its own terms, `this.param` (#767)

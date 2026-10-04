@@ -12,6 +12,8 @@ export {
   type McpParamDeclaration,
   type McpRouteMeta,
   type McpRoutes,
+  type McpToolInput,
+  type McpToolOutput,
 } from "./McpRouter";
 export {
   createFileResponse,

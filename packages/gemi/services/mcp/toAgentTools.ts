@@ -1,5 +1,12 @@
-import { AgentTool, ToolNamespace, type AnyAgentTool, type ToolEntry } from "../../ai/Agent";
+import {
+  AgentTool,
+  ToolNamespace,
+  type AnyAgentTool,
+  type ToolEntry,
+  type ToolShapesOf,
+} from "../../ai/Agent";
 import { ToolError } from "../../ai/redact";
+import type { McpRouteDeclaration, McpRouter } from "../../http/McpRouter";
 import { RequestContext } from "../../http/requestContext";
 import type { McpRegistry, McpToolDescriptor, McpToolFilter } from "./McpRegistry";
 
@@ -34,6 +41,73 @@ export type ToAgentToolsOptions = {
    */
   namespaces?: Record<string, McpToolNamespaceOptions>;
 };
+
+// --- types, read off the router (#771) ----------------------------------------
+
+type RoutesOf<R> = R extends { routes: infer T } ? T : never;
+
+/** Whether a filter's field narrows by literals, rather than by `string`s. */
+type LiteralsOf<L> = L extends readonly (infer X)[] ? (string extends X ? never : X) : never;
+
+/** Whether the tool `N`, declared as `D`, passes the filter `F`. */
+type Passes<N, D, F> =
+  // `names`: kept when the filter names it, or names only `string`s.
+  (F extends { names: readonly string[] }
+    ? [LiteralsOf<F["names"]>] extends [never]
+      ? true
+      : N extends LiteralsOf<F["names"]>
+        ? true
+        : false
+    : true) extends true
+    ? // `tags`: kept when one of its tags is filtered for, or either side's
+      // tags are only `string`s. A tool with no tags has none to match.
+      F extends { tags: readonly string[] }
+      ? [LiteralsOf<F["tags"]>] extends [never]
+        ? true
+        : D extends McpRouteDeclaration<any, any, any, any, infer T>
+          ? string extends T[number]
+            ? true
+            : [Extract<T[number], LiteralsOf<F["tags"]>>] extends [never]
+              ? false
+              : true
+          : true
+      : true
+    : false;
+
+/**
+ * The tools of the router `R` that pass the filter `F`, as `toAgentTools`
+ * builds them: named by their `routes` key, with the input the model sends and
+ * the output the tool answers. An untyped router (`McpRouter<any>`, what the
+ * container answers) gives `AnyAgentTool`, as before.
+ */
+export type McpAgentTool<R extends McpRouter<any>, F = {}> =
+  string extends keyof RoutesOf<R>
+    ? AnyAgentTool
+    : {
+        [N in keyof RoutesOf<R> & string]: Passes<N, RoutesOf<R>[N], F> extends true
+          ? RoutesOf<R>[N] extends McpRouteDeclaration<any, any, infer I, infer O, any>
+            ? AgentTool<N, I, O, never>
+            : never
+          : never;
+      }[keyof RoutesOf<R> & string];
+
+/**
+ * The client's shapes of the router's tools, as `ToolShapesOf` gives them for
+ * an agent holding `toAgentTools(registry, { filter: F })`. For a chat built
+ * on its tools alone; an agent mixing them with its own tools gets them from
+ * `ToolShapesOf<typeof agent.tools>`.
+ */
+export type McpToolShapesOf<R extends McpRouter<any>, F = {}> = ToolShapesOf<
+  McpAgentTool<R, F>[]
+>;
+
+/** What the grouped call answers: namespaces of the tools, and the bare ones. */
+type McpToolEntry<R extends McpRouter<any>, F> =
+  string extends keyof RoutesOf<R>
+    ? ToolEntry
+    : ToolNamespace<string, readonly McpAgentTool<R, F>[]> | McpAgentTool<R, F>;
+
+type FilterOf<O> = O extends { filter: infer F } ? F : {};
 
 /** Namespace names are sent to the provider the way tool names are. */
 const NAMESPACE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -80,18 +154,43 @@ const NAMESPACE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
  * The second argument is read as options when it has `filter`, `deferred` or
  * `namespaces`, and as a filter otherwise, so `toAgentTools(registry, filter)`
  * is unchanged.
+ *
+ * Typed (#771): given the app's router type, the tools keep their names,
+ * inputs and outputs, so the client's `ToolShapesOf<typeof agent.tools>` types
+ * their parts. A literal `filter` narrows them as it narrows the tools:
+ *
+ * ```ts
+ * const registry = app(McpRegistry) as McpRegistry<SiteMcpRouter>;
+ * toAgentTools(registry, { filter: { tags: ["collections"] } });
+ * // AgentTool<"listCollections", { page: string | null }, { name: string }[]> | …
+ * ```
+ *
+ * `toAgentTools<SiteMcpRouter>(app(McpRegistry), …)` types them too, but an
+ * explicit type argument leaves the filter uninferred: every tool of the
+ * router is in the type. An untyped registry answers `AnyAgentTool`s, as
+ * before.
  */
-export function toAgentTools(registry: McpRegistry, filter?: McpToolFilter): AnyAgentTool[];
-export function toAgentTools(
-  registry: McpRegistry,
-  options: ToAgentToolsOptions & { namespaces: Record<string, McpToolNamespaceOptions> },
-): ToolEntry[];
-export function toAgentTools(
-  registry: McpRegistry,
-  options: ToAgentToolsOptions & { namespaces?: undefined },
-): AnyAgentTool[];
+export function toAgentTools<
+  R extends McpRouter<any> = McpRouter<any>,
+  const F extends McpToolFilter = {},
+>(registry: McpRegistry<R> | McpRegistry, filter?: F): McpAgentTool<R, F>[];
+export function toAgentTools<
+  R extends McpRouter<any> = McpRouter<any>,
+  const O extends ToAgentToolsOptions & {
+    namespaces: Record<string, McpToolNamespaceOptions>;
+  } = ToAgentToolsOptions & { namespaces: Record<string, McpToolNamespaceOptions> },
+>(registry: McpRegistry<R> | McpRegistry, options: O): McpToolEntry<R, FilterOf<O>>[];
+export function toAgentTools<
+  R extends McpRouter<any> = McpRouter<any>,
+  const O extends ToAgentToolsOptions & { namespaces?: undefined } = ToAgentToolsOptions & {
+    namespaces?: undefined;
+  },
+>(registry: McpRegistry<R> | McpRegistry, options: O): McpAgentTool<R, FilterOf<O>>[];
 /** Options whose `namespaces` is not known statically: either shape. */
-export function toAgentTools(registry: McpRegistry, options: ToAgentToolsOptions): ToolEntry[];
+export function toAgentTools<R extends McpRouter<any> = McpRouter<any>>(
+  registry: McpRegistry<R> | McpRegistry,
+  options: ToAgentToolsOptions,
+): McpToolEntry<R, FilterOf<ToAgentToolsOptions>>[];
 export function toAgentTools(
   registry: McpRegistry,
   arg?: McpToolFilter | ToAgentToolsOptions,

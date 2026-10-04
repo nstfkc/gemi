@@ -176,7 +176,7 @@ type Plan = {
   params: PathParam[];
   paramBinders: Map<string, McpParamBinder>;
   /** Params the model names in its own terms: the input key, and the resolver. */
-  modelParams: Map<string, { key: string; param: McpModelParam<any> }>;
+  modelParams: Map<string, { key: string; param: McpModelParam<any, any> }>;
   fileFields: { name: string; binder: McpFileBinder | "input" }[];
   jsonKeys: string[];
   result?: McpResultProjection;
@@ -197,8 +197,16 @@ type Plan = {
  * `exec`, which is the handler alone — no auth, no policies, no rate limit —
  * and is the shorter path for exactly that reason.
  */
-export class McpRegistry {
+export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   static token = "router.mcp";
+
+  /**
+   * Types only, never set: the app's router, which a typed `toAgentTools`
+   * reads its tools' names, inputs and outputs from (#771). The container
+   * answers an untyped registry; name the router where the tools are built:
+   * `app(McpRegistry) as McpRegistry<SiteMcpRouter>`.
+   */
+  declare readonly __router?: R;
 
   private readonly plans = new Map<string, Plan>();
 
@@ -428,7 +436,7 @@ export class McpRegistry {
       extras[key] = schema;
     };
     const paramBinders = new Map<string, McpParamBinder>();
-    const modelParams = new Map<string, { key: string; param: McpModelParam<any> }>();
+    const modelParams = new Map<string, { key: string; param: McpModelParam<any, any> }>();
     for (const param of params) {
       const binder = declared[param.name];
       if (binder === "input") {
@@ -675,12 +683,12 @@ function assertBinder(where: string, at: string, binder: unknown) {
  * By brand, as a declaration is, rather than `instanceof`: an app that ends up
  * with two copies of gemi would otherwise see its params as broken binders.
  */
-function isModelParam(value: unknown): value is McpModelParam<any> {
+function isModelParam(value: unknown): value is McpModelParam<any, any> {
   return value instanceof Object && (value as McpModelParam).__internal_brand === "McpModelParam";
 }
 
 /** A `this.param(...)`, checked for a router written in JavaScript or behind a cast. */
-function assertModelParam(where: string, at: string, param: McpModelParam<any>) {
+function assertModelParam(where: string, at: string, param: McpModelParam<any, any>) {
   if (param.as !== undefined && (typeof param.as !== "string" || param.as === "")) {
     throw new Error(`${where}: ${at}.as must be a non-empty string.`);
   }

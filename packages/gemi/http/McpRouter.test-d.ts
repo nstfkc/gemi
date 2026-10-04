@@ -109,8 +109,26 @@ describe("fromApiRoute", () => {
         health: this.fromApiRoute("GET", "/health", { description: "Health" }),
       };
     }
+    // The tool's own types ride on the declaration (#771): the model's input
+    // is the schema's fields plus the "input" file, the bound param is not in
+    // it, and the output is what the route answers.
     expectTypeOf(new Mcp().routes["create-product"]).toEqualTypeOf<
-      McpRouteDeclaration<"POST", "/org/:orgId/products">
+      McpRouteDeclaration<
+        "POST",
+        "/org/:orgId/products",
+        { name: string; price: number; image: string },
+        { id: number; orgId: string },
+        readonly []
+      >
+    >();
+    expectTypeOf(new Mcp().routes["rename-product"]).toEqualTypeOf<
+      McpRouteDeclaration<
+        "PUT",
+        "/products/:id/name",
+        { name: string; id: string },
+        { ok: boolean },
+        readonly []
+      >
     >();
   });
 
@@ -373,7 +391,7 @@ describe("fromApiRoute", () => {
         }),
       };
     }
-    expectTypeOf(new Mcp().order).toEqualTypeOf<McpModelParam<string | null>>();
+    expectTypeOf(new Mcp().order).toEqualTypeOf<McpModelParam<string | null, "order">>();
   });
 
   test("a model-facing param must answer a segment, from a schema", () => {

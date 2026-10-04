@@ -140,6 +140,8 @@ export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate
 // projection, here because an agent's tools are declared beside the agent.
 export {
   toAgentTools,
+  type McpAgentTool,
+  type McpToolShapesOf,
   type McpToolNamespaceOptions,
   type ToAgentToolsOptions,
 } from "../services/mcp/toAgentTools";
