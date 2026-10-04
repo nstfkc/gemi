@@ -107,7 +107,13 @@ describe("the user message's server id reaches the client (#466)", () => {
       localId: string;
       messageId: string;
     };
-    expect(event).toEqual({ type: "message-id", localId: "l1", messageId: expect.any(String) });
+    expect(event).toEqual({
+      type: "message-id",
+      localId: "l1",
+      messageId: expect.any(String),
+      // The stored turn, for a client attached from elsewhere (#778).
+      message: expect.objectContaining({ id: event.messageId, role: "user" }),
+    });
     expect(held[0]!.id).toBe(event.messageId);
   });
 
@@ -182,5 +188,83 @@ describe("the user message's server id reaches the client (#466)", () => {
     expect(stored.map((message) => message.role)).toEqual(["user", "assistant"]);
     const live = reduced(frames, [localCopy("l2", "q")]);
     expect(live.map((message) => message.id)).toEqual(stored.map((message) => message.id));
+  });
+});
+
+/**
+ * #778: a client already open on the thread attaches to a run another client
+ * started after it mounted. Its cursor counts within an earlier run, so the
+ * route replays the live run from its start, and what the client builds from
+ * that has to be what the store holds.
+ */
+describe("a run another client started, attached to later (#778)", () => {
+  async function startedElsewhere() {
+    const { controller, store } = chat("hi there");
+    const started = await framesOf(
+      await controller.stream(
+        jsonRequest({ threadId: "t1", turn: { text: "hello", localId: "local_theirs" } }),
+      ),
+    );
+    await settle();
+    const runId = (started[0]!.event as { runId: string }).runId;
+    return { controller, store, runId };
+  }
+
+  test("the attaching client gets the question and the answer, under the stored ids", async () => {
+    const { controller, store } = await startedElsewhere();
+    const earlier: AgentMessage = {
+      id: "msg_earlier",
+      role: "assistant",
+      content: [{ type: "text", text: "Earlier." }],
+      createdAt: new Date().toISOString(),
+      finishReason: "stop",
+    };
+
+    const response = await controller.attach(
+      jsonRequest({ threadId: "t1", cursor: 7, runId: "run_before" }),
+    );
+    expect(response.status).toBe(200);
+    const live = reduced(await framesOf(response), [earlier]);
+
+    const stored = (await store.loadThread("t1"))!;
+    expect(live.map((message) => message.id)).toEqual([
+      "msg_earlier",
+      ...stored.map((message) => message.id),
+    ]);
+    expect(live[1]!.content).toEqual([{ type: "text", text: "hello" }]);
+    expect(live[2]!.content).toEqual(stored[1]!.content);
+  });
+
+  test("a thread read while it ran is rebuilt by the replay, not printed twice", async () => {
+    const { controller, store, runId } = await startedElsewhere();
+    const stored = (await store.loadThread("t1"))!;
+    // What a read mid-run held: the turn, and the answer so far with its run's
+    // id and no finish reason.
+    const { finishReason: _finished, usage: _usage, ...answer } = stored[1]!;
+    const midRun: AgentMessage[] = [
+      stored[0]!,
+      { ...answer, runId, content: [{ type: "text", text: "hi" }] },
+    ];
+
+    const live = reduced(
+      await framesOf(await controller.attach(jsonRequest({ threadId: "t1", cursor: -1 }))),
+      midRun,
+    );
+
+    expect(live.map((message) => message.id)).toEqual(stored.map((message) => message.id));
+    expect(live[1]!.content).toEqual(stored[1]!.content);
+    expect(live[1]!.finishReason).toBe("stop");
+  });
+
+  test("a client that did not start the run stops it by the thread", async () => {
+    const { controller } = chat("hi");
+    const response = await controller.stream(
+      jsonRequest({ threadId: "t2", turn: { text: "hello", localId: "local_theirs" } }),
+    );
+    // Before the first frame is read: the run is live, and this request names
+    // nothing but the thread, as an idle `useChat` on it does.
+    const stopped = await controller.stop(jsonRequest({ threadId: "t2" }));
+    expect(stopped).toEqual({ stopped: true });
+    await framesOf(response);
   });
 });

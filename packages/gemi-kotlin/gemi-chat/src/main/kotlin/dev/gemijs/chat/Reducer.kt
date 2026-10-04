@@ -91,10 +91,21 @@ public data class ChatState(
 
   // --- reduce ------------------------------------------------------------
 
+  /** `resetInProgress`: `runId`'s unfinished stored copies, emptied for a replay. */
+  private fun resetInProgress(runId: String?): List<AgentMessage> {
+    if (runId == null) return messages
+    val mine: (AgentMessage) -> Boolean = { it.json.string("runId") == runId && it.json["finishReason"] == null }
+    if (messages.none(mine)) return messages
+    return messages.map { if (mine(it)) AgentMessage(it.json.with("runId", null).with("content", JsonArray(emptyList()))) else it }
+  }
+
   internal fun reduce(event: JsonObject, now: String): ChatState =
     when (event.string("type")) {
       "run-start" ->
         copy(
+          // A run's stored in-progress copies, emptied so the replay that
+          // starts here rebuilds them rather than appending to them (gemi #778).
+          messages = resetInProgress(event.string("runId")),
           runId = event.string("runId"),
           cursorRunId = event.string("runId"),
           threadId = event.string("threadId") ?: threadId,
@@ -213,7 +224,12 @@ public data class ChatState(
         val localId = event["localId"]
         val messageId = event["messageId"]
         val index = if (localId == null || messageId == null) -1 else messages.indexOfFirst { it.json["id"] == localId }
+        val stored = event["message"].obj()
         when {
+          // Not this client's turn: one attached to a run another client
+          // started gets the stored turn, unless it already has it (gemi #778).
+          index == -1 && localId != null && stored != null && messages.none { it.json["id"] == messageId } ->
+            copy(messages = messages + AgentMessage(stored))
           index == -1 -> this
           messages.any { it.json["id"] == messageId } -> copy(messages = messages.filterIndexed { i, _ -> i != index })
           else -> copy(messages = messages.toMutableList().also { it[index] = AgentMessage(it[index].json.with("id", messageId)) })

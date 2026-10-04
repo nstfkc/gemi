@@ -4412,10 +4412,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // the client watching, so nothing on the stream would ever tell that
       // client it exists (#470). A top-level turn is not echoed: the client
       // sent it and already has it. What it does not have is this id, so it is
-      // told that alone, keyed by the id it gave its own copy (#466).
+      // told that alone, keyed by the id it gave its own copy (#466). The
+      // message rides along for any other client watching the run (#778): a
+      // tab that attached to it never held the copy, and the reducer appends
+      // it only there.
       if (this.depth > 0) this.emit({ type: "message", message });
       else if (turn.localId) {
-        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id });
+        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
       }
       await this.report(message);
     }

@@ -170,6 +170,15 @@ function reduce<T extends ToolShapes, O>(
     case "run-start":
       return {
         ...state,
+        // A run's in-progress copies, emptied so the replay that starts here
+        // rebuilds them (#778). A thread read while a run is going holds what
+        // the controller stored of it so far (`AgentMessage.runId`, no
+        // `finishReason`), and a client that shows that read and then attaches
+        // gets the run from its first frame: appending the replayed deltas to
+        // the stored text printed it twice. `run-start` is frame 0, so
+        // everything the copy held is on its way again. Kept in place rather
+        // than dropped, so the transcript's order does not change under it.
+        messages: resetInProgress(state.messages, event.runId),
         runId: event.runId,
         cursorRunId: event.runId,
         threadId: event.threadId ?? state.threadId,
@@ -373,7 +382,15 @@ function reduce<T extends ToolShapes, O>(
       // duplicate and goes. Not added to `runMessageIds`: a user message is
       // complete when it is sent, and `run-end` has nothing to close on it.
       const index = state.messages.findIndex((message) => message.id === event.localId);
-      if (index === -1) return state;
+      if (index === -1) {
+        // Not this client's turn: a client attached to a run another one
+        // started (#778). The server sends the stored turn along for exactly
+        // this, and it goes where the run put it, before the answer. Already
+        // here under the server's id (a thread read, or a replay) it is left
+        // alone.
+        if (!event.message || state.messages.some((m) => m.id === event.messageId)) return state;
+        return { ...state, messages: [...state.messages, event.message] };
+      }
       const messages = state.messages.some((message) => message.id === event.messageId)
         ? state.messages.filter((_, i) => i !== index)
         : state.messages.map((message, i) =>
@@ -487,6 +504,27 @@ export function markAborted<T extends ToolShapes = ToolShapes, O = unknown>(
 }
 
 // --- helpers -------------------------------------------------------------
+
+/**
+ * The stored in-progress copies of `runId`'s messages, emptied for a replay.
+ *
+ * Only a message that says it is that run's and unfinished: a finished one is
+ * closed to deltas already, and anything without the run's id is not this
+ * run's to touch. The id goes too, since the copy is now the client's own
+ * live message, the shape a streamed message has. Identity when there is
+ * nothing to reset, which is every `run-start` a client streams itself.
+ */
+function resetInProgress<T extends ToolShapes, O>(
+  messages: AgentMessage<T, O>[],
+  runId: string,
+): AgentMessage<T, O>[] {
+  if (!messages.some((m) => m.runId === runId && m.finishReason === undefined)) return messages;
+  return messages.map((message) => {
+    if (message.runId !== runId || message.finishReason !== undefined) return message;
+    const { runId: _runId, ...rest } = message;
+    return { ...rest, content: [] };
+  });
+}
 
 /**
  * The messages this run wrote, finished off with `reason` if they never ended —
