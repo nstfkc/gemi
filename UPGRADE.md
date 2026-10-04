@@ -1,3 +1,11 @@
+# Unreleased
+
+## `gemi/http`: `safeFetch` for URLs that users give (#754)
+
+New, nothing to change. `safeFetch(url, options)` is `fetch` for server code that fetches a URL a user typed: it only reaches http(s) on public addresses, connects to the address it checked (so DNS rebinding can't redirect it), re-checks every redirect, and has timeouts, a size cap, a content-type allowlist, `allow`/`deny` lists and an `allowPrivate` escape hatch for tests. Failures are typed (`SafeFetchError` and its subclasses, with a `code`). See [Outbound HTTP](docs/outbound-http.md).
+
+If your app fetches user-given URLs with `fetch` today, switch those calls; a test that fetches a local server needs `allowPrivate` and `ports: "any"`.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
