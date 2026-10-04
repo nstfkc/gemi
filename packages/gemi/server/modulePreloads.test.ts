@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 
-import { collectModulePreloads, createClientEntry, type ViteManifest } from "./modulePreloads";
+import {
+  collectCss,
+  collectModulePreloads,
+  createClientEntry,
+  createIslandAssets,
+  type ViteManifest,
+} from "./modulePreloads";
 
 /** Shaped like a real `dist/client/.vite/manifest.json`. */
 const manifest: ViteManifest = {
@@ -121,5 +127,42 @@ describe("with an asset base", () => {
     // gets exactly the strings it got before the base existed.
     expect(createClientEntry(manifest, "/")).toEqual(createClientEntry(manifest));
     expect(createClientEntry(manifest, "/")?.module).toBe("/assets/client-DJhrQPW5.js");
+  });
+});
+
+describe("collectCss", () => {
+  test("gathers the CSS of the whole static import graph, once each", () => {
+    const manifest = {
+      "app/views/site/Page.tsx": { file: "assets/Page.js", imports: ["_shared.js"], css: ["assets/Page.css"] },
+      "_shared.js": { file: "assets/shared.js", imports: ["_deeper.js"], css: ["assets/shared.css"] },
+      "_deeper.js": { file: "assets/deeper.js", imports: ["_shared.js"], css: ["assets/shared.css", "assets/deeper.css"] },
+      "_lazy.js": { file: "assets/lazy.js", css: ["assets/lazy.css"] },
+    } as any;
+
+    expect(collectCss(manifest, "app/views/site/Page.tsx")).toEqual([
+      "assets/shared.css",
+      "assets/deeper.css",
+      "assets/Page.css",
+    ]);
+  });
+});
+
+describe("createIslandAssets", () => {
+  test("maps each island module to its URL and preload closure", () => {
+    const manifest = {
+      "app/views/site/menu.island.ts": { file: "assets/menu.island-1.js", imports: ["_dom.js"] },
+      "_dom.js": { file: "assets/dom-2.js" },
+      "app/views/Home.tsx": { file: "assets/Home.js" },
+    };
+
+    expect(createIslandAssets(manifest, "https://cdn.example.com/")).toEqual({
+      "app/views/site/menu.island.ts": {
+        src: "https://cdn.example.com/assets/menu.island-1.js",
+        preload: [
+          "https://cdn.example.com/assets/menu.island-1.js",
+          "https://cdn.example.com/assets/dom-2.js",
+        ],
+      },
+    });
   });
 });

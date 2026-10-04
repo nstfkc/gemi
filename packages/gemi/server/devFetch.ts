@@ -302,7 +302,7 @@ export function createDevFetch(
         const loaders = `{${templates.join(",")}}`;
 
         return await result({
-          getStyles: async (currentViews: string[], options?: { layout?: string }) =>
+          getStyles: async (currentViews: string[], options?: { static?: boolean; layout?: string }) =>
             await createDevStyles(appDir, vite, currentViews, options?.layout),
           // Vite serves app files by their root-relative path.
           resolveIsland: (moduleKey: string) => ({ src: `/${moduleKey}`, preload: [] }),

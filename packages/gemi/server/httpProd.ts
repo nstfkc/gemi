@@ -142,10 +142,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const islandAssets = createIslandAssets(manifest, assetBase);
   const resolveIsland = (moduleKey: string) => islandAssets[moduleKey];
 
-  // A static view with its own layout gets that layout's stylesheet instead of
-  // the app's, from the whole import closure — there is no client router to
-  // fetch a shared chunk's CSS later. Read once per file: the build does not
-  // change under a running server.
+  // A static view's CSS comes from the whole import closure of its views (and
+  // its own layout's, which then replaces the app stylesheet): there is no
+  // client to fetch a shared chunk's CSS later, as a hydrated page's chunk
+  // loader does. Read once per file: the build does not change under a
+  // running server.
   const cssFileCache = new Map<string, Promise<string>>();
   const readCss = (file: string) => {
     let text = cssFileCache.get(file);
@@ -155,14 +156,15 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
     return text;
   };
-  const staticLayoutStyles = async (views: string[]) => {
+  const staticStyles = async (views: string[], layout: string | undefined) => {
     const files = new Set<string>();
-    for (const view of views) {
+    for (const view of layout ? [layout, ...views] : views) {
       for (const file of collectCss(manifest, `app/views/${view}.tsx`)) files.add(file);
     }
-    return createStyles(
-      await Promise.all([...files].map(async (file) => ({ id: file, content: await readCss(file) }))),
+    const styles = await Promise.all(
+      [...files].map(async (file) => ({ id: file, content: await readCss(file) })),
     );
+    return createStyles(layout ? styles : [{ content: appCSSContent }, ...styles]);
   };
 
   // Which requests are answered from `dist/client` rather than the app:
@@ -251,12 +253,15 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           content: appCSSContent,
         });
 
-        const getStyles = async (currentViews: string[], options?: { layout?: string }) => {
+        const getStyles = async (
+          currentViews: string[],
+          options?: { static?: boolean; layout?: string },
+        ) => {
           if (!currentViews) {
             return createStyles([]);
           }
-          if (options?.layout) {
-            return staticLayoutStyles([options.layout, ...currentViews]);
+          if (options?.static) {
+            return staticStyles(currentViews, options.layout);
           }
           for (const view of currentViews) {
             const clientFile = manifest[`app/views/${view}.tsx`];

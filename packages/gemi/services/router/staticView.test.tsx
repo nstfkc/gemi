@@ -126,11 +126,11 @@ const islandAssets: Record<string, { src: string; preload: string[] }> = {
   },
 };
 
-const styleCalls: { views: string[]; layout?: string }[] = [];
+const styleCalls: { views: string[]; options?: { static?: boolean; layout?: string } }[] = [];
 
 const prodParams = {
-  getStyles: async (views: string[], options?: { layout?: string }) => {
-    styleCalls.push({ views, layout: options?.layout });
+  getStyles: async (views: string[], options?: { static?: boolean; layout?: string }) => {
+    styleCalls.push({ views, options });
     return [];
   },
   viewImportMap: views,
@@ -185,7 +185,9 @@ describe("static views", () => {
 
     expect(html).toContain('data-layout="site"');
     expect(html).not.toContain('data-layout="app"');
-    expect(styleCalls).toEqual([{ views: ["site/WithIslands"], layout: "site/Layout" }]);
+    expect(styleCalls).toEqual([
+      { views: ["site/WithIslands"], options: { static: true, layout: "site/Layout" } },
+    ]);
   });
 
   test("are one body for every visitor, so they do not vary on User-Agent", async () => {

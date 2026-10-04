@@ -405,7 +405,7 @@ export class ViewRouteDispatcher {
     data: any;
     serverQueries: ServerQueryStore;
     headers: Headers;
-    getStyles: (p: string[], options?: { layout?: string }) => Promise<any[]>;
+    getStyles: (p: string[], options?: { static?: boolean; layout?: string }) => Promise<any[]>;
     viewImportMap: Record<string, any>;
     viewModules?: Record<string, any>;
     resolveIsland?: IslandResolver;
@@ -423,7 +423,7 @@ export class ViewRouteDispatcher {
       }
     }
 
-    const styles = await args.getStyles(currentViews, { layout: staticView.layout });
+    const styles = await args.getStyles(currentViews, { static: true, layout: staticView.layout });
 
     serverQueries.markRenderStart();
     const collector: StaticRenderCollector = { islands: new Map() };
@@ -577,11 +577,12 @@ export class ViewRouteDispatcher {
     const currentViews = this.routeManifest[currentPathName];
     return async (params: {
       /**
-       * `layout` is set for a static view with its own document layout: the
-       * styles are then that layout's and the route's views', without the
-       * app's stylesheet.
+       * `static` is set for a static view, which has no client to load CSS
+       * later: the styles must cover the views' whole import graph. `layout`
+       * is its own document layout, whose CSS then replaces the app's
+       * stylesheet.
        */
-      getStyles: (p: string[], options?: { layout?: string }) => Promise<any[]>;
+      getStyles: (p: string[], options?: { static?: boolean; layout?: string }) => Promise<any[]>;
       viewImportMap: any;
       bootstrapModules?: string[];
       loaders: string;
