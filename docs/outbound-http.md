@@ -22,7 +22,7 @@ try {
 }
 ```
 
-It is server-only (it uses `node:http`), and returns a standard `Response` (a `SafeResponse`, with `url`, `redirected` and the `address` it connected to).
+It is server-only (it uses `node:http`), and returns a standard `Response` (a `SafeResponse`, with `url`, `redirected` and the `address` it connected to, which is `null` on Bun before 1.4 because its `node:http` doesn't report it).
 
 ## What it checks
 
@@ -30,7 +30,7 @@ It is server-only (it uses `node:http`), and returns a standard `Response` (a `S
 - **The addresses.** The host is resolved first, and refused when any address it resolves to is not public: loopback, private (RFC 1918), shared (CGNAT), link-local, cloud metadata (`169.254.169.254`, `fd00:ec2::254`, `168.63.129.16`), unique-local, multicast, documentation, benchmarking, unspecified and reserved ranges, for IPv4 and IPv6. IPv6 forms that carry an IPv4 address (`::ffff:10.0.0.1`, NAT64, 6to4) are judged by that address, and IPv4 written as `2130706433`, `0x7f.1` or `0177.0.0.1` is the same address as `127.0.0.1`.
 - **The connection.** It connects to the address it checked, not to whatever the name resolves to a moment later, so a DNS answer that changes between the check and the connection (DNS rebinding) can't reach inside. The host name is still sent as `Host` and as TLS SNI, and the certificate is verified against it.
 - **Redirects.** Followed by hand, and each hop goes through every check above. After `maxRedirects` (5) it throws `TooManyRedirectsError`. `Authorization` and `Cookie` are dropped when a redirect leaves the origin.
-- **The response.** `timeout` (30 s) covers the whole request including reading the body; `connectTimeout` (10 s) covers resolving and connecting on each hop. A body over `maxSize` (10 MiB, counted after gzip/deflate/brotli decoding) is cut off with `TooLargeError`: up front when `Content-Length` says so, otherwise from `response.text()` and friends once the limit is passed.
+- **The response.** `timeout` (30 s) covers the whole request including reading the body; `connectTimeout` (10 s) covers resolving and connecting on each hop (on Bun before 1.4 it lasts until the response headers arrive, because the connection isn't reported). A body over `maxSize` (10 MiB, counted after gzip/deflate/brotli decoding) is cut off with `TooLargeError`: up front when `Content-Length` says so, otherwise from `response.text()` and friends once the limit is passed.
 
 ## Options
 
@@ -38,7 +38,7 @@ It is server-only (it uses `node:http`), and returns a standard `Response` (a `S
 |---|---|---|
 | `method`, `headers`, `body`, `signal` | | As for `fetch`. `Host` and the connection headers can't be set. |
 | `timeout` | `30_000` | The whole request, in ms. |
-| `connectTimeout` | `10_000` | Resolving and connecting, per hop, in ms. |
+| `connectTimeout` | `10_000` | Resolving and connecting, per hop, in ms (until the headers arrive on Bun before 1.4). |
 | `maxSize` | 10 MiB | Largest body, in decoded bytes. |
 | `maxRedirects` | `5` | |
 | `redirect` | `"follow"` | `"manual"` returns the redirect response unfollowed. |

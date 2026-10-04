@@ -12,6 +12,7 @@ import {
   parseAddress,
   parseCidr,
   sameAddress,
+  unmap,
   type Cidr,
   type ParsedAddress,
 } from "./addresses";
@@ -37,7 +38,11 @@ export type SafeFetchOptions = {
   signal?: AbortSignal;
   /** The whole request in ms: every redirect hop and reading the body. Default 30 000. */
   timeout?: number;
-  /** Resolving and connecting (TCP and TLS), per hop, in ms. Default 10 000. */
+  /**
+   * Resolving and connecting (TCP and TLS), per hop, in ms. Default 10 000.
+   * On Bun before 1.4, whose node:http doesn't report the connection, it runs
+   * until the response headers arrive instead.
+   */
   connectTimeout?: number;
   /** Largest response body accepted, in bytes after decompression. Default 10 MiB. */
   maxSize?: number;
@@ -83,13 +88,16 @@ export type SafeFetchOptions = {
 export class SafeResponse extends Response {
   readonly #url: string;
   readonly #redirected: boolean;
-  /** The IP address the response came from. */
-  readonly address: string;
+  /**
+   * The IP address the response came from, or `null` when the runtime doesn't
+   * report it (Bun before 1.4).
+   */
+  readonly address: string | null;
 
   constructor(
     body: ReadableStream<Uint8Array> | null,
     init: ResponseInit,
-    meta: { url: string; redirected: boolean; address: string },
+    meta: { url: string; redirected: boolean; address: string | null },
   ) {
     super(body, init);
     this.#url = meta.url;
@@ -451,7 +459,7 @@ async function readBody(
 type Sent = {
   request: http.ClientRequest;
   response: http.IncomingMessage;
-  address: string;
+  address: string | null;
 };
 
 /** One hop: check the URL's host, connect to the checked address, send. */
@@ -527,7 +535,7 @@ async function send(
       if (secure && !isLiteral) options.servername = host;
 
       const request = (secure ? https : http).request(options);
-      let connectedTo = "";
+      let connectedTo: string | null = null;
       const fail = (error: unknown) => {
         connectSignal.removeEventListener("abort", onAbort);
         request.destroy();
@@ -537,29 +545,33 @@ async function send(
         fail(connectSignal.aborted ? connectSignal.reason : signal.reason);
       connectSignal.addEventListener("abort", onAbort, { once: true });
 
+      // Belt and braces: the socket must be at an address that was checked.
+      // The lookup above is what guarantees it; this catches a runtime that
+      // ever connects without it. Bun before 1.4 doesn't report the remote
+      // address (or a connect event) from node:http, so there it can't run.
+      const verify = (socket: Socket | null | undefined) => {
+        const reported = socket?.remoteAddress;
+        if (!reported || connectedTo !== null) return true;
+        const remote = parseAddress(reported);
+        if (
+          !remote ||
+          !addresses.some((address) => sameAddress(address, remote))
+        ) {
+          fail(
+            new BlockedAddressError(url.href, host, reported, "not-allowed"),
+          );
+          return false;
+        }
+        connectedTo = formatAddress(unmap(remote));
+        return true;
+      };
+
       request.once("socket", (socket: Socket) => {
-        socket.once("connect", () => {
-          // Belt and braces: the socket must be at an address that was checked.
-          const remote = socket.remoteAddress
-            ? parseAddress(socket.remoteAddress)
-            : null;
-          if (
-            !remote ||
-            !addresses.some((address) => sameAddress(address, remote))
-          ) {
-            fail(
-              new BlockedAddressError(
-                url.href,
-                host,
-                socket.remoteAddress ?? "unknown",
-                "not-allowed",
-              ),
-            );
-            return;
-          }
-          connectedTo = formatAddress(remote);
-          if (!secure) clearTimeout(connectTimer);
-        });
+        const connected = () => {
+          if (verify(socket) && !secure) clearTimeout(connectTimer);
+        };
+        if (socket.connecting) socket.once("connect", connected);
+        else connected();
         if (secure)
           socket.once("secureConnect", () => clearTimeout(connectTimer));
       });
@@ -567,6 +579,7 @@ async function send(
         clearTimeout(connectTimer);
         // Destroying the request (a redirect, a refusal) can error the response.
         response.on("error", () => {});
+        if (!verify(response.socket)) return;
         connectSignal.removeEventListener("abort", onAbort);
         // The total timeout and the caller's signal still apply to the body.
         resolve({ request, response, address: connectedTo });
@@ -603,7 +616,7 @@ function toResponse({
   method: string;
   request: http.ClientRequest;
   response: http.IncomingMessage;
-  address: string;
+  address: string | null;
   policy: Policy;
   signal: AbortSignal;
   release: () => void;

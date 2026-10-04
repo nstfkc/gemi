@@ -234,7 +234,8 @@ describe("allowed", () => {
     expect(response).toBeInstanceOf(Response);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("ok");
-    expect(response.address).toBe("127.0.0.1");
+    // Bun before 1.4 doesn't report the remote address from node:http.
+    expect([null, "127.0.0.1"]).toContain(response.address);
   });
 
   test("allowPrivate: true lets every private address through", async () => {
