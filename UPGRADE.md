@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.106.0 to 0.107.0
 
 ## `gemi/http`: `safeFetch` for URLs that users give (#754)
 
