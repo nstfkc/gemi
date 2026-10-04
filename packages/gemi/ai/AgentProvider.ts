@@ -139,7 +139,12 @@ export type ProviderEvent =
    * knows the answer, and an optional field would let a future provider forget
    * to fill it in silently. Empty means the search returned bare functions.
    */
-  | { type: "tool-search"; loaded: string[]; namespaces: string[] }
+  /**
+   * `arguments` is the query the model searched with, as the provider sent it
+   * (`{paths: ["crm"]}` on the Responses API), when it said. Kept so the
+   * search can be replayed on later requests (#776); see `ToolSearchRecord`.
+   */
+  | { type: "tool-search"; loaded: string[]; namespaces: string[]; arguments?: unknown }
   | { type: "output-delta"; delta: string }
   /**
    * `model` is the model the vendor says produced the response (`response.model`

@@ -6,7 +6,7 @@ import type {
 } from "../AgentProvider";
 import { ATTACHMENT_ID_PREFIX } from "../store/Attachments";
 import { unreadableNote } from "./fileRejection";
-import type { AgentMessage, FilePart, ToolResultPart } from "../types";
+import type { AgentMessage, FilePart, ToolResultPart, ToolSearchRecord } from "../types";
 
 /**
  * Building the request body is a pure function, on purpose.
@@ -44,7 +44,7 @@ export function buildResponsesRequest(
 
   const body: ResponsesRequest = {
     model: ctx.model,
-    input: toResponsesInput(params.messages, capabilities),
+    input: toResponsesInput(params.messages, capabilities, params.tools),
     stream: true,
   };
 
@@ -111,8 +111,17 @@ export function buildResponsesRequest(
 export function toResponsesInput(
   messages: AgentMessage[],
   capabilities: ProviderCapabilities,
+  tools?: (ProviderToolSpec | ProviderToolNamespace)[],
 ): ResponsesInputItem[] {
   const items: ResponsesInputItem[] = [];
+  // What this request's tools can resolve a namespaced call or a search
+  // against. Empty without tool search: the tools are then sent flat (see
+  // `toResponsesTools`), there is no namespace for a call to name, and a
+  // search item would be one for a tool the request does not have.
+  const namespaces = new Map<string, ProviderToolNamespace>();
+  if (capabilities.toolSearch) {
+    for (const entry of tools ?? []) if (isNamespace(entry)) namespaces.set(entry.name, entry);
+  }
 
   for (const message of messages) {
     const role = message.role;
@@ -211,12 +220,27 @@ export function toResponsesInput(
           // does exactly that), `reconcileToolPairs` drops that half too.
           if (part.partial) break;
           flush();
-          items.push({
+          // `Array.isArray` rather than truthiness: in stateless mode this
+          // field came back from the browser, and a turn must not throw on it.
+          if (capabilities.toolSearch && Array.isArray(part.toolSearches)) {
+            for (const search of part.toolSearches) {
+              items.push(...toolSearchItems(search, tools ?? []));
+            }
+          }
+          const call: ResponsesInputItem = {
             type: "function_call",
             call_id: part.toolCallId,
             name: String(part.name),
             arguments: JSON.stringify(part.input ?? {}),
-          });
+          };
+          // Back the way the model made it (#776). Without the namespace this
+          // is a call to a top-level function the tools do not list, and the
+          // model, reading its own history, stopped making sense after one.
+          // Dropped only when this request has no such namespace — a provider
+          // without tool search, or an agent whose tools changed since — where
+          // naming it would be a call into nothing.
+          if (part.namespace && namespaces.has(part.namespace)) call.namespace = part.namespace;
+          items.push(call);
           break;
         }
         case "tool-result": {
@@ -556,6 +580,83 @@ export function toolResultOutput(part: ToolResultPart): string {
   return `The tool call failed and produced no result. Error (${part.error?.code ?? "unknown"}): ${
     part.error?.message ?? "no message"
   }`;
+}
+
+/**
+ * A tool search the model ran, back onto the wire as the pair the API sent:
+ * a `tool_search_call` with the query, then a `tool_search_output` with what
+ * it loaded (#776).
+ *
+ * Why at all: the API's own guide for tool search without
+ * `previous_response_id` is to pass every earlier item back, the search pair
+ * included, and a deferred tool is loaded for the model by the output item
+ * in its history. Without the pair the model reads calls to tools nothing in
+ * its context ever loaded.
+ *
+ * The shape is the hosted one: `execution: "server"`, `call_id: null`, no
+ * item ids. The ids are left out so the history does not depend on the
+ * vendor's stored items, which a `FallbackProvider` leg on another resource
+ * does not have. Measured on Azure (gpt-5.4): this pair, the pair with the
+ * original ids, and the pair without `call_id` were all accepted.
+ *
+ * The output is rebuilt from this request's tools rather than stored, using
+ * the same `functionTool` the `tools` array uses, so it matches what the API
+ * returned for the same tools (`__fixtures__/openai-tool-search.sse`).
+ * Namespaces and functions the agent no longer has are left out, and a search
+ * that would load nothing is not replayed at all.
+ */
+function toolSearchItems(
+  search: ToolSearchRecord,
+  tools: (ProviderToolSpec | ProviderToolNamespace)[],
+): ResponsesInputItem[] {
+  const loaded = new Set(stringsOf(search?.loaded));
+  const namespaces = stringsOf(search?.namespaces);
+  const wanted = new Set(namespaces);
+  const found: ResponsesTool[] = [];
+
+  for (const entry of tools) {
+    if (isNamespace(entry)) {
+      if (!wanted.has(entry.name)) continue;
+      // A search that named the group but listed no functions loaded all of
+      // it; otherwise only the functions it listed.
+      const inner = entry.tools.filter((tool) => loaded.size === 0 || loaded.has(tool.name));
+      if (inner.length === 0) continue;
+      found.push({
+        type: "namespace",
+        name: entry.name,
+        description: entry.description,
+        tools: inner.map((tool) => functionTool(tool, true)),
+      });
+    } else if (entry.deferred && loaded.has(entry.name)) {
+      found.push(functionTool(entry, true));
+    }
+  }
+
+  if (found.length === 0) return [];
+  const query =
+    search.arguments && typeof search.arguments === "object"
+      ? search.arguments
+      : { paths: namespaces.length > 0 ? namespaces : [...loaded] };
+  return [
+    {
+      type: "tool_search_call",
+      call_id: null,
+      execution: "server",
+      status: "completed",
+      arguments: query,
+    },
+    {
+      type: "tool_search_output",
+      call_id: null,
+      execution: "server",
+      status: "completed",
+      tools: found,
+    },
+  ];
+}
+
+function stringsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 // --- tools ---------------------------------------------------------------

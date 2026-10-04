@@ -135,7 +135,14 @@ describe("tool search, against the recorded stream", () => {
     );
 
     expect(searches).toEqual([
-      { type: "tool-search", loaded: ["listOrders", "getOrder"], namespaces: ["crm"] },
+      {
+        type: "tool-search",
+        loaded: ["listOrders", "getOrder"],
+        namespaces: ["crm"],
+        // The query, off the `tool_search_call` item before the output, so the
+        // search can be replayed on later requests (#776).
+        arguments: { paths: ["crm"] },
+      },
     ]);
   });
 
