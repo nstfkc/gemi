@@ -7,10 +7,11 @@ import type {
   McpFileBinder,
   McpMethod,
   McpParamBinder,
+  McpResultProjection,
   McpRouteDeclaration,
   McpRouter,
 } from "../../http/McpRouter";
-import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
+import type { ApiRouteDispatcher, DispatchCredentials } from "../router/ApiRouteDispatcher";
 
 /**
  * Who a tool call runs as. Always an argument to the registry, never read from
@@ -40,6 +41,29 @@ import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
 export type McpCaller =
   | { kind: "local"; req: HttpRequest<any, any> }
   | { kind: "remote"; token: string };
+
+/**
+ * One tool call, as the app's hooks see it: who is calling, the request their
+ * identity comes from, which tool, its parsed arguments, and — for a call an
+ * agent run makes — the run's tool context.
+ *
+ * `req` is `caller.req`, repeated so a hook that only wants the request does
+ * not have to narrow the caller. `ctx` is absent when `McpRegistry.execute` is
+ * called without one (a test, a script dispatching a tool directly).
+ */
+export type McpCallContext = {
+  caller: Extract<McpCaller, { kind: "local" }>;
+  req: HttpRequest<any, any>;
+  tool: McpToolDescriptor;
+  input: Record<string, unknown>;
+  ctx?: ToolContext;
+};
+
+/**
+ * What `McpRouter.credentials` answers for a call: the app's own headers and
+ * cookies, sent beside gemi's access token. See `DispatchCredentials`.
+ */
+export type McpCredentials = DispatchCredentials;
 
 /**
  * MCP's tool annotations, from the verb. They drive confirmation prompts in
@@ -77,6 +101,12 @@ export interface McpToolDescriptor {
    * bound files are not in it at all.
    */
   readonly inputSchema: Schema<Record<string, unknown>>;
+  /**
+   * The route meta's `output`: the shape of what the tool answers, after
+   * `result`. Absent when the meta declares none. v2's `tools/list` emits it
+   * as `outputSchema`.
+   */
+  readonly outputSchema?: AnySchema;
   readonly annotations: McpToolAnnotations;
   readonly tags: readonly string[];
   readonly requiresApproval: boolean;
@@ -144,6 +174,7 @@ type Plan = {
   paramBinders: Map<string, McpParamBinder>;
   fileFields: { name: string; binder: McpFileBinder | "input" }[];
   jsonKeys: string[];
+  result?: McpResultProjection;
 };
 
 /**
@@ -167,7 +198,7 @@ export class McpRegistry {
   private readonly plans = new Map<string, Plan>();
 
   constructor(
-    router: McpRouter<any>,
+    private readonly router: McpRouter<any>,
     private readonly dispatcher: Pick<
       ApiRouteDispatcher,
       "flatRoutes" | "dispatchAs" | "getRouteHandlerAndParams"
@@ -206,6 +237,11 @@ export class McpRegistry {
   /**
    * Calls the tool `name` as `caller`, and answers the route's JSON.
    *
+   * Before dispatching, the router's `credentials` hook, when it has one, is
+   * asked for the app's own headers and cookies for this call; they ride
+   * beside the access token (see `McpRouter.credentials`). A throw from it is a
+   * server failure, logged for the app, like a binder's.
+   *
    * `ctx` is the tool context of the agent call, and only files need it:
    * `"input"` files resolve through `ctx.attachments`, the handle already
    * scoped to the caller, and bound files are chosen by a binder given `ctx`.
@@ -213,7 +249,9 @@ export class McpRegistry {
    * unscoped lookup, and this must not become one.
    *
    * A 2xx answers its JSON, or its text, cut at `MAX_RESULT_BODY`; a body
-   * that is neither — a file a route serves — is described, not shown.
+   * that is neither — a file a route serves — is described, not shown. A tool
+   * whose meta has a `result` or an `output` answers its JSON put through
+   * them instead, and is cut after that, not before (see `project`).
    * A 4xx throws an `McpToolError` carrying the route's body, so a validation
    * error reaches the model word for word. Anything else, or a route that
    * throws, throws an `McpToolError` that says only that the server failed.
@@ -240,7 +278,8 @@ export class McpRegistry {
     }
     const input = parsed.value;
 
-    const path = await this.fillPath(plan, input, caller.req);
+    const call: McpCallContext = { caller, req: caller.req, tool: descriptor, input, ctx };
+    const path = await this.fillPath(plan, call);
 
     // The dispatcher routes `path` afresh and takes the first route that
     // matches it, so a model's "archive-all" for `/products/:id` would reach a
@@ -261,28 +300,35 @@ export class McpRegistry {
     let body: FormData | Record<string, unknown> | undefined;
     let query = "";
     if (plan.fileFields.length > 0) {
-      body = await this.formData(plan, input, json, ctx);
+      body = await this.formData(plan, json, call);
     } else if (descriptor.method === "GET") {
       query = toQuery(json);
     } else if (plan.jsonKeys.length > 0) {
       body = json;
     }
 
+    const credentials = this.router.credentials
+      ? await this.bind(plan, "the credentials", () => this.router.credentials!(call))
+      : undefined;
+
     let response: Response;
     try {
-      response = await this.dispatcher.dispatchAs(
-        caller.req,
-        descriptor.method,
-        query ? `${path}?${query}` : path,
-        body,
-      );
+      const target = query ? `${path}?${query}` : path;
+      response = credentials
+        ? await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body, {
+            credentials,
+          })
+        : await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body);
     } catch (error) {
       // What a client would get as a 500. A handler's throw is logged by the
       // dispatcher too, but dispatchAs's own refusal of the path is not.
       console.error(`[gemi/mcp] Dispatching "${name}" failed:`, error);
       throw new McpToolError(`"${name}" failed on the server.`, 500);
     }
-    return await readResponse(name, response);
+    if (!plan.result && !descriptor.outputSchema) {
+      return await readResponse(name, response);
+    }
+    return await this.project(plan, call, response);
   }
 
   // --- building ------------------------------------------------------------
@@ -351,6 +397,12 @@ export class McpRegistry {
     for (const file of fileFields) {
       assertBinder(where, `files.${file.name}`, file.binder);
     }
+    if (meta.result !== undefined && typeof meta.result !== "function") {
+      throw new Error(`${where}: result must be a function.`);
+    }
+    if (meta.output !== undefined && typeof meta.output?.safeParse !== "function") {
+      throw new Error(`${where}: output must be a schema, built with s.`);
+    }
     if (fileFields.length > 0 && method === "GET") {
       throw new Error(`${where}: a GET has no body to carry a file.`);
     }
@@ -394,6 +446,7 @@ export class McpRegistry {
         method,
         url,
         inputSchema: combineSchemas(meta.input, base, s.object(extras)),
+        ...(meta.output ? { outputSchema: meta.output } : {}),
         annotations: annotationsFor(method),
         tags: Object.freeze([...(meta.tags ?? [])]),
         requiresApproval: meta.requiresApproval === true,
@@ -403,22 +456,20 @@ export class McpRegistry {
       paramBinders,
       fileFields,
       jsonKeys,
+      ...(meta.result ? { result: meta.result } : {}),
     };
   }
 
   // --- calling -------------------------------------------------------------
 
-  private async fillPath(
-    plan: Plan,
-    input: Record<string, unknown>,
-    req: HttpRequest<any, any>,
-  ): Promise<string> {
+  private async fillPath(plan: Plan, call: McpCallContext): Promise<string> {
+    const { input, req } = call;
     let path = plan.descriptor.url;
     for (const param of plan.params) {
       const binder = plan.paramBinders.get(param.name);
       let value: unknown;
       if (binder) {
-        value = await this.bind(plan, `the param "${param.name}"`, () => binder(req));
+        value = await this.bind(plan, `the param "${param.name}"`, () => binder(req, call));
         if (value === undefined || value === null || value === "") {
           console.error(
             `[gemi/mcp] The binder for "${param.name}" of "${plan.descriptor.name}" returned ${JSON.stringify(value)}.`,
@@ -444,10 +495,10 @@ export class McpRegistry {
 
   private async formData(
     plan: Plan,
-    input: Record<string, unknown>,
     json: Record<string, unknown>,
-    ctx: ToolContext | undefined,
+    call: McpCallContext,
   ): Promise<FormData> {
+    const { input, ctx } = call;
     const name = plan.descriptor.name;
     if (!ctx) {
       throw new Error(
@@ -463,7 +514,7 @@ export class McpRegistry {
         field.binder === "input"
           ? (input[field.name] as string)
           : await this.bind(plan, `the file "${field.name}"`, () =>
-              (field.binder as McpFileBinder)(ctx),
+              (field.binder as McpFileBinder)(ctx, call),
             );
       if (typeof id !== "string" || id === "") {
         throw new McpToolError(
@@ -475,6 +526,69 @@ export class McpRegistry {
       form.append(field.name, await ctx.attachments.file(id));
     }
     return form;
+  }
+
+  /**
+   * A 2xx put through the meta's `result` and `output`, for a tool that has
+   * either.
+   *
+   * The whole body is parsed and projected before anything is cut: trimming a
+   * large answer down is what a projection is for, and cutting first would
+   * hand `result` half a JSON document. The projected value is then held to
+   * `MAX_RESULT_BODY` the way any answer is.
+   *
+   * Every failure here is the app's, not the model's — a route that answered
+   * something other than JSON, a `result` that threw, an answer `output` does
+   * not describe — so each is logged and the model is told only that the
+   * tool failed. Telling it more would invite a retry of a call that already
+   * did what it does.
+   */
+  private async project(plan: Plan, call: McpCallContext, response: Response): Promise<unknown> {
+    const { name, outputSchema } = plan.descriptor;
+    if (response.status < 200 || response.status >= 300) {
+      return await readResponse(name, response);
+    }
+    const failed = (why: string, error?: unknown) => {
+      if (error === undefined) console.error(`[gemi/mcp] "${name}" ${why}`);
+      else console.error(`[gemi/mcp] "${name}" ${why}`, error);
+      return new McpToolError(`"${name}" failed on the server.`, 500);
+    };
+
+    const type = response.headers.get("Content-Type");
+    const text = await response.text();
+    let data: unknown = null;
+    if (text !== "") {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw failed(
+          `answered ${type ?? "a body with no content-type"} that is not JSON, and its result or output needs JSON.`,
+        );
+      }
+    }
+
+    let value = data;
+    if (plan.result) {
+      try {
+        value = await plan.result(data, call);
+      } catch (error) {
+        throw failed("failed in its result projection:", error);
+      }
+    }
+    if (outputSchema) {
+      const parsed = outputSchema.safeParse(value);
+      if (parsed.ok === false) {
+        throw failed(`answered what its output schema refuses: ${parsed.errors.join(", ")}`);
+      }
+      value = parsed.value;
+    }
+
+    if (value === undefined) return null;
+    const serialised = JSON.stringify(value);
+    if (serialised !== undefined && serialised.length > MAX_RESULT_BODY) {
+      return `${serialised.slice(0, MAX_RESULT_BODY)}… [cut at ${MAX_RESULT_BODY} of ${serialised.length} characters]`;
+    }
+    return value;
   }
 
   /**

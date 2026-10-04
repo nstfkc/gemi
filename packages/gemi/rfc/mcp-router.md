@@ -103,11 +103,16 @@ type Meta<M, K> = {
    *  those are declared in `files`, and a `"input"` one is added back to the
    *  tool's schema as a string (an attachment id) when the list is emitted. */
   input?: Schema<Omit<BodyOf<M, K>, BinaryKeys<BodyOf<M, K>>>>;
-  /** v2. Checked against the route's return type; emitted as `outputSchema`.
-   *  Typed here to show the shape is reachable — not implemented in v1. */
-  output?: Schema<Awaited<DataOf<M, K>>>;
+  /** Reshapes the route's 2xx JSON before the model sees it (#757). */
+  result?: (data: DataOf<M, K>, call: McpCallContext) => unknown;
+  /** The shape of what the tool answers — `result`'s return, else the
+   *  route's. Parsed, so undeclared fields are dropped; the descriptor's and
+   *  the `AgentTool`'s `outputSchema` (#757). */
+  output?: Schema<…>;
   /** Per-param: bound from the request, or supplied by the model. */
-  params?: { [P in keyof ParseParams<K>]: ((req: HttpRequest) => string) | "input" };
+  params?: {
+    [P in keyof ParseParams<K>]: ((req: HttpRequest, call: McpCallContext) => string) | "input";
+  };
   /** Required for every `Blob`/`File` field of the body, and rejected when
    *  there are none. Same two modes as `params`. See "Files" below. */
   files?: Record<BinaryKeys<BodyOf<M, K>>, ((ctx: ToolContext) => string) | "input">;
@@ -246,6 +251,40 @@ was written for) and adapter-side URL fetching (an SSRF surface). Neither is
 needed while every caller is local; both are v2 candidates once a remote client
 has bytes of its own.
 
+### Result projection and `output` (#757)
+
+Routes answer what a UI needs: whole records, relations, rendering fields,
+timestamps. A model calling the same route pays for all of it in context on
+every call, and a list route can pass `MAX_RESULT_BODY` and be cut. Two
+optional meta fields trim it without touching the route:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: bindSite },
+  result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+  output: s.array(s.object({ path: s.string(), title: s.string() })),
+}),
+```
+
+- `result(data, call)` gets the route's parsed 2xx JSON, typed as
+  the route's answer. Only successes go through it: a 4xx still reaches the
+  model as the route wrote it, so validation errors stay readable.
+- `output` is a schema of what the tool answers. With `result`, `result`'s
+  return is checked against it at compile time (through its contextual
+  type); without, it must describe the route's answer, and may name fewer
+  fields than the route has. At run time the answer is parsed with it, which
+  drops undeclared fields, so `output` alone is a projection too.
+- Both run on the whole body, and the 100k cut applies to the projected
+  value, after them.
+- Everything that goes wrong here is the app's fault, not the model's: a body
+  that is not JSON, a `result` that throws, an answer `output` refuses. Each
+  is logged, and the model reads `"… failed on the server."`.
+- `output` is carried on the descriptor as `outputSchema`, and on the
+  projected `AgentTool`, where it types the result for the client. v2's
+  `tools/list` emits it; MCP wants an object at the root there, so a
+  non-object output will need wrapping when v2 lands.
+
 ### Two callers, one registry
 
 The MCP surface has two consumers, and they are different enough that the
@@ -336,6 +375,50 @@ type McpCaller =
 v1 implements only `local`. v2 implements `remote` by writing one resolver,
 touching neither discovery, nor schema generation, nor the dispatch adapter.
 
+### The app's own credentials (#755)
+
+gemi's access token is the only identity `dispatchAs` copies from the
+initiator. An app whose routes are guarded by something else — a cookie that
+names a visitor who owns a draft before signing up, a short-lived grant header
+the app signs per run — needs that credential on the synthetic request too, or
+every such route refuses the tool call with a 401/403 the same user would not
+get directly.
+
+The app supplies it, value by value, from its router:
+
+```ts
+export default class extends McpRouter {
+  routes = { /* ... */ };
+
+  credentials({ req, tool, input, ctx }: McpCallContext) {
+    return {
+      cookies: { owner: req.cookies.get("owner") },
+      headers: { "x-run-grant": signGrant({ run: ctx?.runId, tool: tool.name }) },
+    };
+  }
+}
+```
+
+- It is asked once per call, after the arguments are parsed and the path is
+  built, and its answer is passed to `dispatchAs(..., { credentials })`. An app
+  calling `dispatchAs` itself passes the same option.
+- Nothing of the initiator's is forwarded on the app's behalf: what the hook
+  does not return is not sent. `null`/`undefined` values are skipped, so
+  `req.cookies.get(...)` can be returned as it is.
+- It adds credentials, never replaces the identity. `access_token` (cookie or
+  header), `Cookie`, `Host`, `User-Agent`, the body's framing headers,
+  `Forwarded` and `x-forwarded-*` are refused with a throw, and so is a cookie
+  name or value a `Cookie` header cannot carry. A refusal, or a throw from the
+  hook, is a server failure: logged for the app, `"… failed on the server."`
+  to the model, and nothing is dispatched.
+- The invariant still holds. The route's middleware decides what the
+  credential is worth, exactly as for a direct request that carried it; the
+  hook can only make a tool call as capable as that request.
+
+The hook receives an `McpCallContext` — `{ caller, req, tool, input, ctx? }` —
+rather than the request alone, so a grant can be scoped to the run and the
+tool, and so v2's remote caller fits the same signature.
+
 Concretely, five things v1 must **not** do, because each would have to be
 unpicked for v2:
 
@@ -390,8 +473,9 @@ both look like reasonable shortcuts:
    that exposes a route guarded by `auth` and calls it as an anonymous local
    caller expecting a rejection.
 2. **Synthesising credentials.** The synthetic request copies the initiating
-   request's credentials and nothing more. It never mints a session, and never
-   carries a service identity.
+   request's access token and nothing more, plus whatever the app's
+   `credentials` hook returns (#755). It never mints a session, never carries
+   a service identity, and the hook cannot replace the access token.
 
 Because of the invariant, exposing a route through `McpRouter` grants no
 authority by itself. What it grants is _reachability by a model_ — which is a
@@ -430,7 +514,7 @@ Settled:
 | Local caller (in-process agent) | yes                            | —                         |
 | Remote caller over HTTP         | prohibited — not mounted       | bearer token              |
 | Transport                       | none shipped                   | HTTP only — no stdio      |
-| `output` / `outputSchema`       | out of scope                   | candidate                 |
+| `output` / `outputSchema`       | yes, with `result` (#757)      | emitted in `tools/list`   |
 | `fromResource` expander         | not needed                     | not needed                |
 | File arguments                  | by scoped attachment reference | + base64 / URL for remote |
 
@@ -449,10 +533,15 @@ Still open:
    `onRequestStart` — a header on the synthetic request, or a flag on the
    request context. The context flag is harder to spoof, since a header on a
    _real_ inbound request could claim it.
-2. **Whether `params` binding functions receive the caller** or only the
-   request. For the local caller they are the same thing; for v2 they are not,
-   and a binding like `orgId: (req) => req.ctx().user.orgId` has to keep
-   working when the "request" is synthesised from a token.
+2. ~~**Whether `params` binding functions receive the caller** or only the
+   request.~~ Settled in #756: both. A binder is called as `(req, call)`,
+   where `call` is the `McpCallContext` the `credentials` hook also gets —
+   `{ caller, req, tool, input, ctx? }`. `req` stays first, so
+   `orgId: (req) => req.ctx().user.orgId` keeps working, and for v2 a binder
+   that cares can tell the callers apart by `call.caller`. `ctx` is the
+   run's `ToolContext`, so a param can be bound to the resource the run is
+   about (`(_req, { ctx }) => ctx?.context.siteId`) rather than read off the
+   url of the route that started it. File binders get `(ctx, call)`.
 3. **Rate limiting.** `RateLimitMiddleware` keys on the request; a local tool
    call inherits the user's request, so an agent loop could exhaust a human's
    budget. Whether that is correct or surprising is a product call.

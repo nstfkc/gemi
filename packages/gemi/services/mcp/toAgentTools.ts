@@ -172,6 +172,7 @@ function agentTool(
     name: descriptor.name,
     description: descriptor.description,
     inputSchema: descriptor.inputSchema,
+    ...(descriptor.outputSchema ? { outputSchema: descriptor.outputSchema } : {}),
     requiresApproval: descriptor.requiresApproval,
     deferred,
     execute: (input, ctx) => {

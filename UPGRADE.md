@@ -21,6 +21,67 @@ No change is needed to upgrade. `toAgentTools(registry, filter)` still returns a
 - A namespace that the filter empties is left out. A declared tag that no tool carries, an invalid namespace name and a missing description all throw.
 - The second argument is read as options when it has `filter`, `deferred` or `namespaces`, and as a filter otherwise.
 
+## `gemi/http`: MCP tools can trim what a route answers, `result` and `output` (#757)
+
+`fromApiRoute`'s meta has two new optional fields:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: bindSite },
+  result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+  output: s.array(s.object({ path: s.string(), title: s.string() })),
+}),
+```
+
+- `result(data, call)` reshapes the route's 2xx JSON before the model sees it. `data` is typed as the route's answer, and `call` is the same `McpCallContext` binders get.
+- `output` is a schema of what the tool answers (what `result` returns, or what the route answers when there is no `result`). The answer is parsed with it, so fields it does not declare are dropped. It is the descriptor's new `outputSchema` and is passed to the projected `AgentTool`.
+
+No change is needed to upgrade. A tool with neither field answers exactly as before. Things to know:
+
+- A 4xx is not projected. The model still reads the route's refusal as it was written.
+- The 100 000-character cut now applies after the projection, so a large answer that the projection makes small reaches the model whole.
+- A body that is not JSON, a `result` that throws, or an answer that `output` refuses is a server failure: logged, and the model reads `"… failed on the server."`.
+- `McpToolDescriptor` has a new optional field, `outputSchema`.
+
+## `gemi/http`: MCP binders get the whole call (#756)
+
+A `params` binder in `fromApiRoute` is now called as `(req, call)`, and a `files` binder as `(ctx, call)`. `call` is an `McpCallContext`: `{ caller, req, tool, input, ctx? }`, where `ctx` is the run's `ToolContext` (absent when `McpRegistry.execute` is called without one). A param can now be bound from what the server handed the run:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: (_req, { ctx }) => ctx?.context.siteId },
+}),
+```
+
+No change is needed to upgrade: existing one-argument binders work as before. A binder that is typed by hand as `McpParamBinder` or `McpFileBinder` and called directly, for example in a test, now needs the second argument.
+
+## `gemi/http`: an MCP tool call can carry the app's own credentials (#755)
+
+`McpRouter` has an optional `credentials(call)` hook. It returns `{ headers?, cookies? }` for each tool call, and they are sent beside the run's access token:
+
+```ts
+export default class extends McpRouter {
+  routes = { /* ... */ };
+
+  credentials({ req, ctx }: McpCallContext) {
+    return {
+      cookies: { owner: req.cookies.get("owner") },
+      headers: { "x-run-grant": signGrant(ctx?.runId) },
+    };
+  }
+}
+```
+
+`ApiRouteDispatcher.dispatchAs` takes the same thing as a fifth argument, `{ credentials }`. `McpCallContext`, `McpCredentials`, `DispatchAsOptions` and `DispatchCredentials` are exported from `gemi/services`.
+
+No change is needed to upgrade. Without the hook a tool call carries the access token and nothing else, as before. Things to know:
+
+- Only what the hook returns is sent. An initiator's cookie is not forwarded unless the hook reads it and returns it.
+- `access_token`, `Cookie`, `Host`, `User-Agent`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Forwarded` and `x-forwarded-*` can't be set, and neither can a cookie that a `Cookie` header can't carry. `dispatchAs` throws for those, and a tool call reports `"… failed on the server."` to the model and logs the reason.
+- A hook that throws fails the call the same way, and nothing is dispatched.
+
 # Upgrading from 0.100.0 to 0.101.0
 
 ## `gemi/ai`: recursive schemas that stay strict, `s.recursive` (#745)

@@ -1,6 +1,7 @@
 import type { ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
+import type { McpCallContext, McpCredentials } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -25,16 +26,29 @@ export type McpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  * say in it: the param is absent from the tool's input schema, and anything
  * the model sends under its name is dropped before the url is built.
  *
- * It is handed the run's request, not a tool context, so the same binder
- * keeps meaning something for a caller that is not an agent run. A binder may
- * read the user as `req.ctx().user`: that is the store of the request that
- * started the run, and it stays open until the run settles — through a
- * streamed response, and after the client has disconnected, since leaving does
- * not stop the run. `user` is whatever that route's middleware set, so the
- * route that starts the run must be behind `auth` for it to be there.
+ * It is handed the run's request first, so the same binder keeps meaning
+ * something for a caller that is not an agent run. A binder may read the user
+ * as `req.ctx().user`: that is the store of the request that started the run,
+ * and it stays open until the run settles — through a streamed response, and
+ * after the client has disconnected, since leaving does not stop the run.
+ * `user` is whatever that route's middleware set, so the route that starts the
+ * run must be behind `auth` for it to be there.
+ *
+ * The second argument is the whole call (#756): the caller, the tool, the
+ * model's parsed arguments, and `ctx`, the run's `ToolContext` — absent when
+ * the registry is called without one. A param that names "the resource this
+ * run is about" reads it from there rather than from the chat route's url:
+ *
+ * ```ts
+ * params: { siteId: (_req, { ctx }) => ctx?.context.siteId }
+ * ```
+ *
+ * `ctx.body` is the client's, as untrusted as a request body: bind from it
+ * only what the route's own middleware checks anyway.
  */
 export type McpParamBinder = (
   req: HttpRequest<any, any>,
+  call: McpCallContext,
 ) => string | number | Promise<string | number>;
 
 /**
@@ -42,8 +56,13 @@ export type McpParamBinder = (
  * The id still resolves through `ctx.attachments`, so a binder can narrow which
  * of the caller's files is sent and can never reach anybody else's. `undefined`
  * means there is no file to send, and the model is told so.
+ *
+ * The second argument is the whole call, as a param binder gets it.
  */
-export type McpFileBinder = (ctx: ToolContext) => string | undefined | Promise<string | undefined>;
+export type McpFileBinder = (
+  ctx: ToolContext,
+  call: McpCallContext,
+) => string | undefined | Promise<string | undefined>;
 
 // --- reading the route table -------------------------------------------------
 
@@ -57,6 +76,13 @@ type RoutesOf<R> = {
 type IsAny<T> = 0 extends 1 & T ? true : false;
 
 type BodyOf<H> = H extends ApiRouterHandler<infer T, any, any> ? T : never;
+
+/**
+ * What the route answers on success, as `useQuery` reads it. The registry
+ * hands `result` the parsed JSON, so a `Date` in a handler's return arrives as
+ * the string it was serialised to.
+ */
+export type DataOf<H> = H extends ApiRouterHandler<any, infer O, any, any> ? Awaited<O> : unknown;
 
 /**
  * A body there is nothing to check against: a handler that never names its
@@ -198,10 +224,94 @@ type InputProp<B, I> = {
   input: I & NoInfer<InputCheck<I, B>>;
 };
 
-export type McpRouteMeta<H, K, I> = MetaBase &
+/**
+ * What `result` is handed beside the route's answer: the whole call, as the
+ * binders and the `credentials` hook get it — the tool, the model's parsed
+ * arguments, the caller and the run's `ToolContext`.
+ */
+export type McpResultContext = McpCallContext;
+
+/**
+ * Turns the route's answer into what the model is shown. See `ResultMeta`.
+ */
+export type McpResultProjection<D = any, P = unknown> = (
+  data: D,
+  call: McpResultContext,
+) => P | Promise<P>;
+
+/**
+ * An `output` without a `result` must describe what the route answers.
+ * Checked one way — the answer must be assignable to the schema's type — so a
+ * schema that names fewer fields than the route answers is fine (parsing
+ * drops the rest), and one naming a field the route does not have, or with a
+ * different type, is not. A route whose answer type is unknown is not checked.
+ */
+type OutputCheck<O, P> =
+  IsAny<P> extends true
+    ? unknown
+    : unknown extends P
+      ? unknown
+      : O extends AnySchema
+        ? [P] extends [Infer<O>]
+          ? unknown
+          : { "output does not describe what the route answers": Infer<O> }
+        : unknown;
+
+/** What `result` must return: anything, or what `output` describes when it is set. */
+type ResultReturn<O> = O extends AnySchema ? Infer<O> | Promise<Infer<O>> : unknown;
+
+/**
+ * Two shapes, told apart by whether `result` is there, because `output`
+ * describes a different thing in each: what `result` returns, or what the
+ * route answers.
+ *
+ * `result`'s return is checked against `output` through its contextual type
+ * rather than by inferring it and comparing afterwards. A type parameter for
+ * it would have to be inferred from a context-sensitive function, and any
+ * check that mentioned it beside `output` fixed it to its default first.
+ */
+type ResultMeta<H, O> =
+  | {
+      /**
+       * Trims or reshapes the route's 2xx JSON before the model sees it.
+       * Routes are written for a UI and answer whole records; a model needs a
+       * few fields of them, and every other one costs context on every call.
+       *
+       * ```ts
+       * result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+       * ```
+       *
+       * A 4xx is not passed through it: a refusal reaches the model as the
+       * route wrote it. A throw is the server's failure, logged, and the model
+       * is told only that the tool failed.
+       */
+      result: (data: DataOf<H>, call: McpResultContext) => ResultReturn<O>;
+      /**
+       * The shape of what `result` returns. The return is parsed with it,
+       * which drops every field it does not declare. It is the descriptor's
+       * `outputSchema`, and the `AgentTool`'s. A value that does not parse is
+       * the server's failure.
+       */
+      output?: O;
+    }
+  | {
+      result?: never;
+      /**
+       * The shape of what the route answers. The answer is parsed with it,
+       * which drops every field it does not declare, so an `output` alone is
+       * a projection too: it may name fewer fields than the route answers,
+       * never one it does not have. It is the descriptor's `outputSchema`, and
+       * the `AgentTool`'s. An answer that does not parse is the server's
+       * failure.
+       */
+      output?: O & NoInfer<OutputCheck<O, DataOf<H>>>;
+    };
+
+export type McpRouteMeta<H, K, I, O = undefined> = MetaBase &
   InputMeta<BodyOf<H>, I> &
   ParamsMeta<K> &
-  FilesMeta<BodyOf<H>>;
+  FilesMeta<BodyOf<H>> &
+  ResultMeta<H, O>;
 
 /** The runtime shape of a meta, generics erased. */
 export type McpRouteMetaRuntime = {
@@ -211,6 +321,8 @@ export type McpRouteMetaRuntime = {
   requiresApproval?: boolean;
   params?: Record<string, McpParamBinder | "input">;
   files?: Record<string, McpFileBinder | "input">;
+  result?: McpResultProjection;
+  output?: AnySchema;
 };
 
 /**
@@ -261,11 +373,43 @@ export class McpRouter<R = McpRoutes> {
 
   routes: Record<string, McpRouteDeclaration> = {};
 
+  /**
+   * The app's own credentials for one tool call, sent beside the access token
+   * of the user who started the run. Optional; without it a tool call carries
+   * gemi's access token and nothing else.
+   *
+   * For routes whose middleware reads something gemi does not know about: a
+   * cookie naming an anonymous owner, or a header the app signs per run so a
+   * route can check what this run may touch.
+   *
+   * ```ts
+   * credentials({ req, ctx }: McpCallContext) {
+   *   return {
+   *     cookies: { owner: req.cookies.get("owner") },
+   *     headers: { "x-run-grant": signGrant(ctx?.runId) },
+   *   };
+   * }
+   * ```
+   *
+   * Nothing of the initiator's is forwarded unless it is returned here, value
+   * by value. `access_token`, `Cookie`, `Host`, `User-Agent`, the body's
+   * framing headers and `x-forwarded-*` cannot be set: the identity stays the
+   * initiator's, and the call fails on the server, logged, if one is returned.
+   * The route's middleware still decides what a credential is worth, so this
+   * can reach nothing a direct request carrying the same values could not.
+   */
+  credentials?(call: McpCallContext): McpCredentials | undefined | Promise<McpCredentials | undefined>;
+
   fromApiRoute<
     M extends McpMethod,
     K extends keyof RoutesOf<R>[M] & string,
     I extends AnySchema | undefined = undefined,
-  >(method: M, url: K, meta: McpRouteMeta<RoutesOf<R>[M][K], K, I>): McpRouteDeclaration<M, K> {
+    O extends AnySchema | undefined = undefined,
+  >(
+    method: M,
+    url: K,
+    meta: McpRouteMeta<RoutesOf<R>[M][K], K, I, O>,
+  ): McpRouteDeclaration<M, K> {
     return new McpRouteDeclaration(method, url, meta as McpRouteMetaRuntime);
   }
 }
