@@ -9,7 +9,7 @@ import { describe, expectTypeOf, test } from "vitest";
 import { Agent, type AnyAgentTool, type ToolEntry } from "../../ai/Agent";
 import type { AgentProvider } from "../../ai/AgentProvider";
 import type { McpRegistry } from "./McpRegistry";
-import { toAgentTools } from "./toAgentTools";
+import { toAgentTools, type ToAgentToolsOptions } from "./toAgentTools";
 
 declare const registry: McpRegistry;
 declare const provider: AgentProvider;
@@ -28,6 +28,11 @@ describe("toAgentTools", () => {
     });
     expectTypeOf(tools).toEqualTypeOf<ToolEntry[]>();
     Agent.create({ name: "shop", provider, tools });
+  });
+
+  test("options typed loosely answer ToolEntries", () => {
+    const options: ToAgentToolsOptions = { deferred: true };
+    expectTypeOf(toAgentTools(registry, options)).toEqualTypeOf<ToolEntry[]>();
   });
 
   test("a namespace needs a description", () => {

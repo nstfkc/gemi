@@ -90,6 +90,8 @@ export function toAgentTools(
   registry: McpRegistry,
   options: ToAgentToolsOptions & { namespaces?: undefined },
 ): AnyAgentTool[];
+/** Options whose `namespaces` is not known statically: either shape. */
+export function toAgentTools(registry: McpRegistry, options: ToAgentToolsOptions): ToolEntry[];
 export function toAgentTools(
   registry: McpRegistry,
   arg?: McpToolFilter | ToAgentToolsOptions,
