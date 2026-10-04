@@ -47,6 +47,11 @@ import { httpErrorDetail } from "./providers/errors";
 import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 import type { ReceiptClaim, ReceiptStore } from "./store/Receipts";
 import { sseKeepalive } from "./store/sse";
+import {
+  injectedMessageIds,
+  windowMessages,
+  type ContextWindowOptions,
+} from "./contextWindow";
 import type {
   AgentError,
   AgentMessage,
@@ -1147,7 +1152,86 @@ export interface CreateAgentParams<
    * agent sets one explicitly.
    */
   maxRunDurationMs?: number | null;
+  /**
+   * Bounds what each model call of this agent is sent: the latest turns of the
+   * history that fit, cut at a turn start, with the cut moving in steps so the
+   * provider's prompt cache keeps hitting. See `ContextWindowOptions` and
+   * `windowMessages`. Unset (the default) sends the whole history, as before.
+   *
+   * Only the request changes. The run's history, `onMessage`, the store and
+   * `result().messages` hold every message, so a thread stays whole and a
+   * later turn can be sent a different window.
+   */
+  contextWindow?: ContextWindowOptions;
+  /**
+   * Called before every model call of a run of this agent, with the messages
+   * about to be sent (after `contextWindow`), and may answer other ones, or
+   * other instructions, for that call alone. See `PrepareStep`.
+   */
+  prepareStep?: PrepareStep;
 }
+
+/**
+ * What `prepareStep` is told before a model call.
+ */
+export type PrepareStepContext = {
+  /** 1 for the run's first model call, 2 for the one after its tools ran, … */
+  step: number;
+  /**
+   * What this call would send: the run's history (stored and new), with older
+   * tool-produced files already swapped for a line of text, and cut to
+   * `contextWindow` when one is set. Copies where anything was changed; never
+   * mutate a message in it, since the others are the run's own.
+   */
+  messages: AgentMessage[];
+  /** The same history before `contextWindow` cut it. */
+  history: readonly AgentMessage[];
+  /** The system prompt this call would send. */
+  instructions: string | undefined;
+  /** What the run has spent so far, tools' sub-runs included. */
+  usage: Usage;
+  /** The previous model call's own usage, when it reported one. Its
+   *  `inputTokens` is how big the last request actually was. */
+  lastStepUsage?: Usage;
+  /** How the previous model call of this run ended. Absent on step 1. */
+  lastFinishReason?: FinishReason;
+  runId: string;
+  threadId?: string;
+  /** The agent's name. */
+  agent: string;
+  /** 0 for a run started at the top, 1 for a sub-run of one of its tools, … */
+  depth: number;
+  context: AgentContext;
+  signal: AbortSignal;
+};
+
+/**
+ * What `prepareStep` may change for one model call. Anything left out is sent
+ * as it would have been.
+ */
+export type PrepareStepResult = {
+  /**
+   * The messages to send instead. Never stored, and the next step starts from
+   * the run's history again rather than from these. A tool call left without
+   * its result (or a result without its call) is repaired by the provider's
+   * request builder, but cutting at `turnStarts` avoids it altogether.
+   */
+  messages?: AgentMessage[];
+  /** The system prompt to send instead. */
+  instructions?: string;
+};
+
+/**
+ * A hook before every model call: see `CreateAgentParams.prepareStep`. It may
+ * be async, and anything it throws fails the run (`finishReason: "error"`).
+ *
+ * The usual job is the context window: `windowMessages` with options decided
+ * per call, a summary in place of older turns, a note. Keep it deterministic
+ * for the same history and the provider's prompt cache keeps working.
+ */
+export type PrepareStep = (
+  ctx: PrepareStepContext,
+) => PrepareStepResult | void | Promise<PrepareStepResult | void>;
 
 /**
  * How long a run may take when its agent does not say. See
@@ -1195,6 +1279,18 @@ interface AgentStreamParamsBase {
   /** Overrides the agent's `maxRunDurationMs` for this run. `null` turns the
    *  limit off. */
   maxRunDurationMs?: number | null;
+  /**
+   * Overrides the agent's `contextWindow` for this run. `false` sends the whole
+   * history even when the agent sets one. Not handed down to a sub-run, which
+   * uses its own agent's.
+   */
+  contextWindow?: ContextWindowOptions | false;
+  /**
+   * Runs after the agent's own `prepareStep`, on what that answered. Not
+   * handed down to a sub-run. `AgentController` sets this from its
+   * `prepareStep` method.
+   */
+  prepareStep?: PrepareStep;
   /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
@@ -1466,6 +1562,9 @@ type RunConfig = {
    * `DEFAULT_MAX_RUN_DURATION_MS` and a sub-run as no limit of its own.
    */
   maxRunDurationMs: number | null | undefined;
+  contextWindow?: ContextWindowOptions;
+  /** The agent's hook, then the stream's, in that order. */
+  prepareStep: PrepareStep[];
 };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -1524,6 +1623,8 @@ export class Agent<
       temperature: params.temperature,
       logErrors: params.logErrors ?? true,
       maxRunDurationMs: limit,
+      contextWindow: params.contextWindow,
+      prepareStep: params.prepareStep ? [params.prepareStep] : [],
     };
   }
 
@@ -1553,6 +1654,13 @@ export class Agent<
         params.maxRunDurationMs !== undefined
           ? normalizeDuration(params.maxRunDurationMs)
           : this.config.maxRunDurationMs,
+      contextWindow:
+        params.contextWindow === false
+          ? undefined
+          : (params.contextWindow ?? this.config.contextWindow),
+      prepareStep: params.prepareStep
+        ? [...this.config.prepareStep, params.prepareStep]
+        : this.config.prepareStep,
     };
     if (params.maxRunDurationMs != null) {
       assertDuration(
@@ -1827,26 +1935,9 @@ function seedOf(params: RunAgentParams): string | null {
   return first ? `${first.role}:${textOfMessage(first)}` : null;
 }
 
-/**
- * The ids of the messages a tool injected to show a file, read from the
- * `ToolCallPart.attachments` records in `messages`.
- *
- * The record is the test, not `attachmentId` on the part: a user's own upload
- * carries an `attachmentId` too. `historyForProvider` keys its window on this
- * and `toolTurn` steps over these when it looks for the user's turn.
- */
-export function injectedMessageIds(messages: AgentMessage[]): Set<string> {
-  const injected = new Set<string>();
-  for (const message of messages) {
-    for (const part of message.content) {
-      if (part.type !== "tool-call") continue;
-      for (const record of part.attachments ?? []) {
-        if ("shown" in record && record.shown) injected.add(record.shown.messageId);
-      }
-    }
-  }
-  return injected;
-}
+// Moved to `contextWindow.ts`, which splits a thread into turns with it, and
+// re-exported here for the controller and the tests that import it from here.
+export { injectedMessageIds };
 
 /**
  * How many tool-produced files stay attached to the request. See
@@ -2064,6 +2155,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   /** The working history handed to the provider, and what this run produced. */
   private history: AgentMessage[] = [];
+  /** How the previous model call ended, for `prepareStep`. */
+  private lastStep: { reason: FinishReason; usage?: Usage } | undefined;
   private produced: AgentMessage[] = [];
   private current: AgentMessage | null = null;
   /**
@@ -2518,7 +2611,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     for (let step = 1; step <= maxSteps; step++) {
       const message = this.startMessage();
-      const outcome = await this.runStep(message);
+      const outcome = await this.runStep(message, step);
+      this.lastStep = { reason: outcome.reason, usage: message.usage };
 
       if (outcome.error) {
         this.fail(outcome.error, outcome.detail);
@@ -2631,9 +2725,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   // --- one model call ----------------------------------------------------
 
-  private async runStep(message: AgentMessage): Promise<StepOutcome> {
+  private async runStep(message: AgentMessage, step: number): Promise<StepOutcome> {
     const signal = this.controller.signal;
     const provider = this.config.provider;
+
+    const request = await this.prepareRequest(message, step);
+    if ("error" in request) return { reason: "error", error: request.error };
 
     let outcome: StepOutcome = { reason: "stop" };
     const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
@@ -2650,10 +2747,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     const stream = provider.stream({
       // Not `this.history` directly: an image a tool showed is in the history
-      // forever and must not be in every *request* forever. See
-      // `historyForProvider`.
-      messages: this.historyForProvider(message),
-      systemPrompt: await this.systemPrompt(),
+      // forever and must not be in every *request* forever, and a long thread
+      // is cut to the context window. See `prepareRequest`.
+      messages: request.messages,
+      systemPrompt: request.instructions,
       tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
       output: this.config.output ? outputFormat(this.config.output) : undefined,
       reasoning: this.config.reasoning,
@@ -2834,6 +2931,69 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
 
     return outcome;
+  }
+
+  /**
+   * What one model call is sent: the history as `historyForProvider` shapes
+   * it, cut to `contextWindow`, then whatever the `prepareStep` hooks answer.
+   *
+   * Nothing here touches `this.history`. The hooks are handed copies of the
+   * arrays, and what they answer is used for this call only, so the next step
+   * starts from the whole history again and the store is never told about a
+   * window.
+   */
+  private async prepareRequest(
+    current: AgentMessage,
+    step: number,
+  ): Promise<{ messages: AgentMessage[]; instructions: string | undefined } | { error: AgentError }> {
+    const history = this.historyForProvider(current);
+    let messages = this.config.contextWindow
+      ? windowMessages(history, this.config.contextWindow).messages
+      : history;
+    let instructions = await this.systemPrompt();
+
+    for (const hook of this.config.prepareStep) {
+      let answer: PrepareStepResult | void;
+      try {
+        answer = await hook({
+          step,
+          messages: [...messages],
+          history: [...history],
+          instructions,
+          usage: this.usage,
+          ...(this.lastStep?.usage ? { lastStepUsage: this.lastStep.usage } : {}),
+          ...(this.lastStep ? { lastFinishReason: this.lastStep.reason } : {}),
+          runId: this.runId,
+          threadId: this.params.threadId,
+          agent: this.config.name,
+          depth: this.depth,
+          context: this.context,
+          signal: this.controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof RunAborted || this.controller.signal.aborted) throw error;
+        const text = error instanceof Error ? error.message : String(error);
+        return {
+          error: { code: "unknown", message: `prepareStep threw: ${text}`, retryable: false },
+        };
+      }
+      if (!answer) continue;
+      if (answer.messages !== undefined) {
+        if (!Array.isArray(answer.messages)) {
+          return {
+            error: {
+              code: "unknown",
+              message: "prepareStep answered `messages` that is not an array.",
+              retryable: false,
+            },
+          };
+        }
+        messages = answer.messages;
+      }
+      if (answer.instructions !== undefined) instructions = answer.instructions || undefined;
+    }
+
+    return { messages, instructions };
   }
 
   private async systemPrompt(): Promise<string | undefined> {
@@ -4252,10 +4412,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // the client watching, so nothing on the stream would ever tell that
       // client it exists (#470). A top-level turn is not echoed: the client
       // sent it and already has it. What it does not have is this id, so it is
-      // told that alone, keyed by the id it gave its own copy (#466).
+      // told that alone, keyed by the id it gave its own copy (#466). The
+      // message rides along for any other client watching the run (#778): a
+      // tab that attached to it never held the copy, and the reducer appends
+      // it only there.
       if (this.depth > 0) this.emit({ type: "message", message });
       else if (turn.localId) {
-        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id });
+        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
       }
       await this.report(message);
     }

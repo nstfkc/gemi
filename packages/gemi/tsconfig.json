@@ -28,12 +28,15 @@
   // `ide` does not cover it. It is out because including it needs more than a
   // line here:
   //
-  //   bun/customRequestParser.ts  TS2307  no types for 'recast/parsers/typescript'
   //   bun/preload.ts              TS1309  top-level await under the inherited
   //                                       CommonJS `module` setting, which is
   //                                       wrong for files Bun loads as ESM
   //
-  // The second is a config mismatch rather than a code bug, so `bun/` wants a
+  // `bun/customRequestParser.ts` is checked, through `vitest` (which imports
+  // it). It used to fail with TS2307 because it imported
+  // 'recast/parsers/typescript' without the `.js` NodeNext needs.
+  //
+  // The preload error is a config mismatch rather than a code bug, so `bun/` wants a
   // nested tsconfig with its own `module`, not an edit to the file. Recorded
   // here so the next audit of this list does not reach "build glue" and stop.
   "include": [
@@ -60,7 +63,8 @@
     "auth",
     "config",
     "internal",
-    "ai"
+    "ai",
+    "vitest"
   ],
   "exclude": [
     "node_modules",

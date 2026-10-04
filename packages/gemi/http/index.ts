@@ -70,6 +70,8 @@ export {
   type RateLimitMiddlewareConfig,
 } from "./RateLimitMiddleware";
 export { CSRFMiddleware } from "./CSRFMiddleware";
+export { BodyLimitMiddleware, type BodyLimitMiddlewareConfig } from "./BodyLimitMiddleware";
+export { PayloadTooLargeError, parseByteSize } from "./bodyLimit";
 
 export { PoliciesServiceProvider } from "./PoliciesServiceProvider";
 export { Policies } from "./Policy";

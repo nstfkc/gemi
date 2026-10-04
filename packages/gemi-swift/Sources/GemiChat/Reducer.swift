@@ -98,6 +98,19 @@ extension ChatState {
   mutating func reduce(_ event: JSONObject, now: String) {
     switch event.string("type") {
     case "run-start":
+      // A run's stored in-progress copies, emptied so the replay that starts
+      // here rebuilds them rather than appending to them (gemi #778).
+      if let started = event.string("runId") {
+        for index in messages.indices
+        where messages[index].string("runId") == started
+          && messages[index].json["finishReason"] == nil
+        {
+          var json = messages[index].json
+          json["runId"] = nil
+          json["content"] = .array([])
+          messages[index] = AgentMessage(json: json)
+        }
+      }
       runId = event.string("runId")
       cursorRunId = event.string("runId")
       threadId = event.string("threadId") ?? threadId
@@ -225,9 +238,17 @@ extension ChatState {
       // server's id is already there too, the local copy is the duplicate.
       let localId = event["localId"]
       let messageId = event["messageId"]
-      guard let localId, let messageId,
-        let index = messages.firstIndex(where: { $0.json["id"] == localId })
-      else { return }
+      guard let localId, let messageId else { return }
+      guard let index = messages.firstIndex(where: { $0.json["id"] == localId }) else {
+        // Not this client's turn: one attached to a run another client started
+        // gets the stored turn, unless it already has it (gemi #778).
+        if let stored = event["message"]?.objectValue,
+          !messages.contains(where: { $0.json["id"] == messageId })
+        {
+          messages.append(AgentMessage(json: stored))
+        }
+        return
+      }
       if messages.contains(where: { $0.json["id"] == messageId }) {
         messages.remove(at: index)
       } else {

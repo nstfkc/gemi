@@ -1651,3 +1651,82 @@ describe("the server's id for the user's own turn (#466)", () => {
     expect(state.messages).toEqual([typed("msg_1")]);
   });
 });
+
+describe("a run another client started (#778)", () => {
+  const question: AgentMessage = {
+    id: "msg_1",
+    role: "user",
+    content: [{ type: "text", text: "rename the page" }],
+    createdAt: NOW,
+    finishReason: "stop",
+  };
+  const earlier: AgentMessage = {
+    id: "msg_0",
+    role: "assistant",
+    content: [{ type: "text", text: "Hello." }],
+    createdAt: NOW,
+    finishReason: "stop",
+  };
+  const RUN: AgentStreamFrame[] = [
+    { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "t1" } },
+    {
+      seq: 1,
+      event: { type: "message-id", localId: "local_other", messageId: "msg_1", message: question },
+    },
+    { seq: 2, event: { type: "message-start", messageId: "a1", role: "assistant" } },
+    { seq: 3, event: { type: "text-delta", messageId: "a1", delta: "Renaming" } },
+    { seq: 4, event: { type: "text-delta", messageId: "a1", delta: " it now." } },
+    { seq: 5, event: { type: "message-end", messageId: "a1", finishReason: "stop" } },
+    { seq: 6, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+  ];
+
+  test("the question arrives with the run, before the answer", () => {
+    // A tab attached to a run it did not start never held the `localId` copy.
+    const state = fold(initialChatState({ messages: [earlier] }), RUN);
+    expect(state.messages.map((m) => m.id)).toEqual(["msg_0", "msg_1", "a1"]);
+    expect(state.messages[1]).toEqual(question);
+    expect(state.messages[2]!.content).toEqual([{ type: "text", text: "Renaming it now." }]);
+  });
+
+  test("the client that sent the question still renames its copy and gets no second one", () => {
+    const typed: AgentMessage = { ...question, id: "local_other", finishReason: undefined };
+    const state = fold(initialChatState({ messages: [earlier, typed] }), RUN.slice(0, 2));
+    expect(state.messages).toEqual([earlier, { ...typed, id: "msg_1" }]);
+  });
+
+  test("a question already read from the thread is not added again", () => {
+    const state = fold(initialChatState({ messages: [earlier, question] }), RUN);
+    expect(state.messages.map((m) => m.id)).toEqual(["msg_0", "msg_1", "a1"]);
+  });
+
+  test("a stored in-progress copy is rebuilt from the replay, not appended to", () => {
+    // What a thread read mid-run holds: the answer so far, with the run's id
+    // and no finish reason. Replayed from frame 0 on top of it, the text
+    // printed twice.
+    const stored: AgentMessage = {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "text", text: "Renaming" }],
+      createdAt: NOW,
+      runId: "run_2",
+    };
+    const state = fold(initialChatState({ messages: [earlier, question, stored] }), RUN);
+    expect(state.messages.map((m) => m.id)).toEqual(["msg_0", "msg_1", "a1"]);
+    expect(state.messages[2]!.content).toEqual([{ type: "text", text: "Renaming it now." }]);
+    expect(state.messages[2]!.finishReason).toBe("stop");
+    expect(state.messages[2]!.runId).toBeUndefined();
+  });
+
+  test("run-start leaves alone what is finished, and what another run wrote", () => {
+    const otherRun: AgentMessage = {
+      id: "a0",
+      role: "assistant",
+      content: [{ type: "text", text: "cut" }],
+      createdAt: NOW,
+      runId: "run_1",
+    };
+    const messages = [earlier, otherRun];
+    const state = applyFrame(initialChatState({ messages }), RUN[0]!, NOW);
+    expect(state.messages).toEqual(messages);
+  });
+});

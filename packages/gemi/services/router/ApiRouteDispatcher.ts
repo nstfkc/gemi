@@ -510,6 +510,8 @@ export class ApiRouteDispatcher {
         }
 
         ctx.setRequest(httpRequest);
+        // Before the route's middleware, whose own `body-limit` replaces it.
+        app(MiddlewareRegistry).applyDefaultBodyLimit(req);
         const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
         if (middlewareResponse instanceof Response) {

@@ -6,6 +6,58 @@ New, nothing to change. `safeFetch(url, options)` is `fetch` for server code tha
 
 If your app fetches user-given URLs with `fetch` today, switch those calls; a test that fetches a local server needs `allowPrivate` and `ports: "any"`.
 
+## `gemi/ai`: `useChat` can pick up, and stop, a run another client started on its thread (#778)
+
+`useChat` only asked `/attach` on mount. A chat that was already open on a thread learned nothing of a run another tab or device started on it later, and `stop()` sent nothing when this chat had no run of its own, so it could not stop that run either. Apps worked around it by re-reading the thread and guessing "running elsewhere" from an unfinished last message.
+
+New:
+
+- **`reattach(): Promise<boolean>`** on `useChat`'s result. It runs the mount probe on demand: if the thread has a run going, the chat streams it as its own (`status` is `streaming`; `onToolResult`, `onToolProgress` and `onFinish` fire for what is new here; `stop()` stops it) and the promise resolves `true` when the stream ends. With nothing to attach to (no thread yet, the chat already sending or streaming, no run on the thread in this process) it resolves `false` at once without changing `status` and without firing `onAttachMiss`. Call it from whatever tells your app the thread changed, such as a change feed.
+- **`reattachOnFocus: true`**, a `useChat` option (default false). The hook runs the same probe when the page comes back into view (`visibilitychange` to visible, or window `focus`). That is one small request per return to the page and nothing while it stays in view; a miss fires `onAttachMiss`, as the mount probe's does.
+- **`stop()` on a thread with nothing in flight** now posts `{ threadId }` to `/stop`, which stops whatever run is live on the thread (the route already supported this). Before, it returned without a request. A chat with no thread and nothing in flight still sends nothing.
+
+Behaviour changes to know:
+
+- **The `message-id` stream event carries the stored user message** as an optional `message` field. A client that sent the turn renames its copy as before and ignores the field. A client that never held the copy (one attached from elsewhere) appends it, unless a message with that id is already there, so the question shows above the answer without re-reading the thread. The reducers in `useChat`, the Swift `ChatSession` and the Kotlin `ChatSession` all do this; a custom client can ignore the field.
+- **`run-start` empties a stored in-progress copy of its run.** A thread read while a run is going holds the answer so far (`AgentMessage.runId` set, no `finishReason`). A client that showed that read and then attached got the run replayed from its first frame on top of it, and the text was printed twice. The reducers now clear the content of those messages (and their `runId`) when that run's `run-start` arrives, so the replay rebuilds them in place. This also covers the mount-time attach onto a server-rendered mid-run thread.
+
+An app that re-reads its thread on a change feed (kyte's `useSharedThread`) can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
+
+## `gemi/ai`: `contextWindow`, `prepareStep` and turn helpers (#473)
+
+New, and nothing changes unless an app opts in: without `contextWindow` or `prepareStep`, every model call sends the whole history as before. See [AI Context Window](docs/ai-context-window.md).
+
+- **`contextWindow`** on `Agent.create`, `Agent.stream` and `AgentController` (a `protected contextWindow` property) bounds what each model call is sent: at most `maxTurns` turns and `maxBytes` (or approximate `maxTokens`), cut at a turn start, always keeping the latest turn. The start moves `step` turns at a time (default 10) so the provider's prompt cache keeps hitting, and the first kept turn gets a `note` saying earlier turns are left out. Only the request changes: the store, `onMessage`, `readThread` and `result().messages` keep every message.
+- **`prepareStep`** on `Agent.create`, `Agent.stream` and `AgentController` (a method, also given the hook context) is called before every model call and may answer `{ messages, instructions }` for that call alone.
+- **Exported helpers**: `turnStarts`, `splitTurns`, `windowMessages`, `messageSize` and `injectedMessageIds` (previously internal), with the types `ContextWindowOptions`, `ContextWindowResult`, `PrepareStep`, `PrepareStepContext` and `PrepareStepResult`.
+
+An app that windows its thread in `AgentStore.loadThread` (kyte) can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
+
+## `gemi/http`: per-route request body limits, `body-limit:SIZE` (#752)
+
+New, and opt-in: nothing changes for an app that does not use it.
+
+- **`body-limit:64kb`** on a router's `middlewares` or a route's `.middleware()` bounds that route's request body. A declared `Content-Length` over the limit is refused before the handler runs; a chunked body is counted as it is read and refused once past it, without buffering more. The answer is a `413` `{ error: { kind: "form_error", message: "The request body is too large.", status: 413 } }`. It covers `req.input()` (JSON, urlencoded, multipart), the raw `req.rawRequest` accessors and proxy routes. `body-limit` is built in and needs no `aliases` entry; an app alias named `body-limit` still wins.
+- **`bodyLimit`** in the `middleware` config (`defineMiddlewareConfig({ bodyLimit: "1mb" })`) is a default for every api route without its own `body-limit`, which can raise it (`body-limit:none` lifts it).
+- New exports from `gemi/http`: `BodyLimitMiddleware`, `PayloadTooLargeError`, `parseByteSize`.
+- Bun's `maxRequestBodySize` (10 GB under `gemi start`, Bun's 128 MB default under `gemi dev`) is unchanged and stays the ceiling. See `docs/middleware.md`.
+
+An app that already refuses large bodies by hand (checking `Content-Length` in the handler) can replace that with `body-limit`, which also reads a chunked body up to the limit instead of refusing it.
+
+## `gemi/vitest`: dispatch an app's routes under vitest (#772)
+
+A route handler or controller method written `async (req: HttpRequest<…>) => …` only gets its request because the build rewrites the parameter to `req = new HttpRequest()`. That rewrite only ran in the Bun plugin, and vitest loads modules through Vite (also under `bun --bun vitest`), so a route dispatched with `App.fetch` in a test saw `req === undefined`.
+
+The new `gemi/vitest` entrypoint exports `gemiRequestPlugin()`, the same rewrite as a Vite plugin, on the same files (`http/controllers/` and `http/routes/`). To test routes, add it to `vitest.config.ts`:
+
+```ts
+import { gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin()], /* … */ });
+```
+
+Nothing changes for an app that does not opt in. See [Testing routes](https://nstfkc.github.io/gemi/testing.md#testing-routes) for the setup, including MCP tools. The docs page "Testing Views" is now "Testing".
+
 ## `ai`: `s.fromJSONSchema` can report unknown keys (#753)
 
 **New, opt-in.** `s.fromJSONSchema(schema, { unknownKeys })` chooses what `parse`, `safeParse` and `validate` do with a key an object in the schema doesn't declare:

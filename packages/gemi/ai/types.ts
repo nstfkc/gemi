@@ -662,8 +662,16 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    * its `localId` message to `messageId`, and a client that never sent a
    * `localId` gets nothing. A sub-run's user turn is not the client's and comes
    * whole, as `message`.
+   *
+   * `message` is the stored turn itself (#778), for every OTHER client watching
+   * the run: a second tab on the same thread that attached with `reattach()`
+   * never held the `localId` copy, and without it would show the answer under
+   * no question. The reducer appends it only when nothing is under `localId` and
+   * nothing is under `messageId` yet, so the client that sent the turn renames
+   * its copy exactly as before and never shows it twice. Optional, because a
+   * server older than #778 does not send it.
    */
-  | { type: "message-id"; localId: string; messageId: string }
+  | { type: "message-id"; localId: string; messageId: string; message?: AgentMessage<T, O> }
   /**
    * Terminal for this stream: the run is finished, not parked. Everything
    * needed to answer is in the event and in the messages already delivered, so

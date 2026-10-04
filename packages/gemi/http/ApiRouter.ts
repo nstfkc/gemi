@@ -16,6 +16,7 @@ import {
   createUnsatisfiableResponse,
   type StreamOutput,
 } from "./createStreamResponse";
+import { bodyLimitExceeded, bodyLimitOf, PayloadTooLargeError } from "./bodyLimit";
 import { RangeNotSatisfiableError } from "./errors";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
@@ -183,20 +184,29 @@ export class ProxyHandler {
     return this;
   }
 
-  run() {
+  async run() {
     const req = new HttpRequest();
     const forwarded = req.headers.toJSON();
     for (const header of withheldFromUpstream(req.rawRequest)) {
       delete forwarded[header];
     }
-    return fetch(this.url, {
-      method: req.rawRequest.method,
-      headers: {
-        ...forwarded,
-        ...this.headers,
-      },
-      body: req.rawRequest.body,
-    });
+    try {
+      return await fetch(this.url, {
+        method: req.rawRequest.method,
+        headers: {
+          ...forwarded,
+          ...this.headers,
+        },
+        body: req.rawRequest.body,
+      });
+    } catch (err) {
+      // A `body-limit` that stopped the forwarded stream surfaces from
+      // `fetch` as a network error; answer it as the 413 it is.
+      if (bodyLimitExceeded(req.rawRequest)) {
+        throw new PayloadTooLargeError(bodyLimitOf(req.rawRequest)!);
+      }
+      throw err;
+    }
   }
 }
 

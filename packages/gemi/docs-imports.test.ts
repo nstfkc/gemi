@@ -166,6 +166,7 @@ describe("documented gemi imports resolve", () => {
       "gemi/services",
       "gemi/support",
       "gemi/testing",
+      "gemi/vitest",
     ]);
   });
 
