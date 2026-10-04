@@ -276,6 +276,43 @@ policies and validation run identically for both callers.
 A `ValidationError` becomes a tool error the model can see and correct
 (`isError: true` on the remote side), not a protocol error.
 
+### Grouping the local projection (#758)
+
+An app exposing many routes hands the agent many tools, each with its full
+parameter schema in every request. The agent already has the answer —
+`ToolNamespace` and `deferred`, with tool search where the provider has it and
+the schemas inline where it does not — and `tags` are already on the meta, so
+`toAgentTools` groups by them:
+
+```ts
+const tools = toAgentTools(registry, {
+  filter: { tags: ["pages", "files"] },
+  namespaces: {
+    pages: { description: "Read and edit the pages of the site" },
+    files: { description: "Upload, list and delete files", deferred: false },
+  },
+  deferred: true,
+});
+```
+
+- One `ToolNamespace` per declared tag, named by the tag, in the order the
+  keys are written, then the tools that carry none of them, bare.
+- A tool with two declared tags goes into the first: tool names are unique
+  within an agent, so it cannot be listed twice.
+- `deferred` is the default for every namespace and bare tool; a namespace
+  can override it. It is set on the namespace, never on its members, so a
+  namespace with `deferred: false` is not undercut by a deferred member.
+- The filter runs first, and a namespace it empties is left out. A tag no
+  tool carries at all is refused, since it is a typo that would silently
+  leave tools bare; so is a namespace without a description, which is the
+  only thing the model reads before deciding to search inside.
+- `toAgentTools(registry, filter)` is unchanged and still answers a flat
+  `AgentTool[]`.
+
+The grouping lives in the projection, not the registry: it is a statement
+about one agent's prompt. v2's `tools/list` has no namespaces and keeps
+listing descriptors flat.
+
 ### Identity, and the seam v2 needs
 
 **Identity is a parameter of the call, never read from ambient state.** This is
