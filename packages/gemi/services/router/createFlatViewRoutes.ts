@@ -1,5 +1,5 @@
 import type { HttpRequest } from "../../http";
-import type { ViewRoutes } from "../../http/ViewRouter";
+import type { StaticViewOptions, ViewRoutes } from "../../http/ViewRouter";
 
 export type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 
@@ -32,6 +32,12 @@ export type FlatViewRoutes = Record<
      * itself is built once at boot and cannot vary by user.
      */
     features: string[];
+    /**
+     * Set when the route's view was declared `.static()`: the document is sent
+     * settled and without the client runtime. Only a leaf view can be static;
+     * the layouts above it render into the same static document.
+     */
+    static?: StaticViewOptions;
   }
 >;
 
@@ -78,9 +84,10 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
         const children = new route.children();
         const result = createFlatViewRoutes(children.routes);
 
-        for (const [path, { exec, middleware, segments, features }] of Object.entries(
-          result,
-        )) {
+        for (const [
+          path,
+          { exec, middleware, segments, features, static: staticOptions },
+        ] of Object.entries(result)) {
           const _key = joinRoutePath(routePath, path);
 
           const handler = (req: HttpRequest<any, any>) =>
@@ -99,6 +106,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
               },
               ...prefixSegments(routePath, segments),
             ],
+            ...(staticOptions ? { static: staticOptions } : {}),
           };
         }
       } else {
@@ -110,6 +118,9 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           features: route.featureGates,
           viewPath: route.viewPath,
           segments: [{ path: segmentPath(routePath), viewPath: route.viewPath }],
+          ...("staticOptions" in route && route.staticOptions
+            ? { static: route.staticOptions }
+            : {}),
         };
       }
     } else {
@@ -117,7 +128,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
       const result = createFlatViewRoutes(router.routes);
       for (const [
         path,
-        { exec, middleware, viewPath, segments, features },
+        { exec, middleware, viewPath, segments, features, static: staticOptions },
       ] of Object.entries(result)) {
         const _key = joinRoutePath(routePath, path);
         flatRoutes[removeGroupPrefix(_key)] = {
@@ -126,6 +137,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           features: [...router.featureGates, ...features],
           viewPath,
           segments: prefixSegments(routePath, segments),
+          ...(staticOptions ? { static: staticOptions } : {}),
         };
       }
     }

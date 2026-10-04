@@ -20,6 +20,7 @@ import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
+import { ServerDataContext } from "./ServerDataProvider";
 
 export interface PrefetchTarget {
   /** Concrete pathname, without the locale segment. */
@@ -106,6 +107,10 @@ export const ClientRouterProvider = (
   });
 
   const { supportedLocales = [], locale } = useContext(I18nContext);
+  // `.static()` routes: there is no client router on the other side to render
+  // them into, so a navigation there is a full page load.
+  const { staticRoutes } = useContext(ServerDataContext);
+  const staticRoutesRef = useRef(new Set<string>(staticRoutes ?? []));
 
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
   const [prefetchCache] = useState(() => new PrefetchCache());
@@ -213,6 +218,12 @@ export const ClientRouterProvider = (
       }
       _pathname = _pathname === "" ? "/" : _pathname;
       const routePath = getRoutePathnameFromHref(_pathname);
+      if (routePath && staticRoutesRef.current.has(routePath)) {
+        // `replace`, not `assign`: history already holds the entry for this
+        // URL, pushed by the navigation that got us here.
+        window.location.replace(location.pathname + location.search + location.hash);
+        return;
+      }
       routerSubject.next({
         views: getViewPathsFromPathname(_pathname),
         params: getParams(_pathname),
@@ -355,7 +366,7 @@ export const ClientRouterProvider = (
     }
     const { pathname, search = "", localeSegment = "" } = target;
     const routePath = getRoutePathnameFromHref(pathname);
-    if (!routePath) {
+    if (!routePath || staticRoutesRef.current.has(routePath)) {
       return;
     }
 

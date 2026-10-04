@@ -3,6 +3,7 @@ import { loadGemiConfig } from "../config/load";
 import { isGemiExternal } from "../internal/gemiExternals";
 import { gemiDictionaryPlugin } from "./dictionaryPlugin";
 import { gemiAssetBasePlugin } from "./assetBasePlugin";
+import { gemiIslandPlugin } from "./islandPlugin";
 import { resolveAssetBase } from "../config/assetBase";
 
 // Async so it can load `gemi.config.ts` before returning the plugin list. Both
@@ -34,7 +35,11 @@ const gemi = async (): Promise<PluginOption[]> => {
             // browser devtools and server stack traces map back to app source.
             sourcemap: true,
             rollupOptions: {
-              input: Array.from(JSON.parse(process.env.GEMI_INPUT ?? "[]")),
+              // Island client modules are browser-only entries: the server
+              // renders an island's component, never its module.
+              input: Array.from<string>(JSON.parse(process.env.GEMI_INPUT ?? "[]")).filter(
+                (entry) => !(env.isSsrBuild && /\.island\.[cm]?[jt]sx?$/.test(entry)),
+              ),
               // Each view is a build entry, but the app never imports them
               // statically — the client router pulls them in via `import.meta.glob`
               // (a runtime dynamic import). Rolldown's default entry-signature
@@ -84,6 +89,7 @@ const gemi = async (): Promise<PluginOption[]> => {
     // After the app's `vite` config, so an explicit `assetBase` (or
     // `GEMI_ASSET_BASE`) wins over a `vite.base` set there.
     gemiAssetBasePlugin(assetBase),
+    gemiIslandPlugin(),
     {
       name: "gemi-plugin-hot-reload",
       handleHotUpdate({ server, modules }) {

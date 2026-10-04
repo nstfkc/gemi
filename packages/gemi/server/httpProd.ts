@@ -3,7 +3,13 @@ import { compressResponse } from "./compression";
 import { listPublicFiles, staticFileResponse } from "./staticFile";
 import { stat } from "node:fs/promises";
 import { createStyles } from "./styles";
-import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./modulePreloads";
+import {
+  CLIENT_ENTRY_KEY,
+  collectCss,
+  collectModulePreloads,
+  createClientEntry,
+  createIslandAssets,
+} from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
@@ -129,6 +135,34 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
+  // Island client modules (`*.island.ts`), which a static view's document
+  // loads — see `injectIslands`.
+  const islandAssets = createIslandAssets(manifest, assetBase);
+  const resolveIsland = (moduleKey: string) => islandAssets[moduleKey];
+
+  // A static view with its own layout gets that layout's stylesheet instead of
+  // the app's, from the whole import closure — there is no client router to
+  // fetch a shared chunk's CSS later. Read once per file: the build does not
+  // change under a running server.
+  const cssFileCache = new Map<string, Promise<string>>();
+  const readCss = (file: string) => {
+    let text = cssFileCache.get(file);
+    if (!text) {
+      text = Bun.file(`${distDir}/client/${file}`).text();
+      cssFileCache.set(file, text);
+    }
+    return text;
+  };
+  const staticLayoutStyles = async (views: string[]) => {
+    const files = new Set<string>();
+    for (const view of views) {
+      for (const file of collectCss(manifest, `app/views/${view}.tsx`)) files.add(file);
+    }
+    return createStyles(
+      await Promise.all([...files].map(async (file) => ({ id: file, content: await readCss(file) }))),
+    );
+  };
+
   // Which requests are answered from `dist/client` rather than the app:
   //
   // - `/assets` and everything under it, whatever the extension. Vite writes
@@ -200,9 +234,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           content: appCSSContent,
         });
 
-        const getStyles = async (currentViews: string[]) => {
+        const getStyles = async (currentViews: string[], options?: { layout?: string }) => {
           if (!currentViews) {
             return createStyles([]);
+          }
+          if (options?.layout) {
+            return staticLayoutStyles([options.layout, ...currentViews]);
           }
           for (const view of currentViews) {
             const clientFile = manifest[`app/views/${view}.tsx`];
@@ -227,6 +264,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           ogMap,
           cssManifest,
           assetBase,
+          resolveIsland,
         });
       }
     } catch (err) {

@@ -40,6 +40,9 @@ import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQuery
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
 import { loadSharp } from "../../support/sharp";
+import type { StaticViewOptions } from "../../http/ViewRouter";
+import { StaticRenderContext, type StaticRenderCollector } from "../../client/islands";
+import { injectIslands, type IslandResolver } from "./staticDocument";
 
 /**
  * `satori`, loaded on the first OG-image request rather than on import, for the
@@ -214,6 +217,12 @@ export class ViewRouteDispatcher {
   clientRouteManifest: Record<string, string[]> = {};
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
+  /**
+   * Route patterns declared `.static()`. Shipped to the browser so a
+   * client-side navigation to one becomes a full page load: the page has no
+   * client router to render it into.
+   */
+  staticRoutes: string[] = [];
   root: any = null;
   /**
    * The shell-content hint (#294): React defers any boundary over
@@ -274,6 +283,18 @@ export class ViewRouteDispatcher {
     );
     this.componentTree = createComponentTree(routes);
     this.flatComponentTree = flattenComponentTree(this.componentTree);
+    this.staticRoutes = Object.entries(this.flatViewRoutes)
+      .filter(([, route]) => route.static)
+      .map(([path]) => path);
+    // A static view's own document layout is a view module like any other —
+    // the servers load every name in this list up front — but it is in no
+    // route's chain, so it would not be here otherwise.
+    for (const path of this.staticRoutes) {
+      const layout = this.flatViewRoutes[path].static?.layout;
+      if (layout && !this.flatComponentTree.includes(layout)) {
+        this.flatComponentTree.push(layout);
+      }
+    }
     this.root = config.root;
   }
 
@@ -369,6 +390,93 @@ export class ViewRouteDispatcher {
     return links;
   }
 
+  /**
+   * A `.static()` view's document: the same tree a hydrated view renders, but
+   * settled before the first byte and sent with no client runtime — no entry
+   * module, `modulepreload`s, `__GEMI_DATA__`, theme script, query or
+   * dictionary payloads, or React's streaming scripts. Islands that rendered
+   * add their loader (`injectIslands`).
+   */
+  private async renderStatic(args: {
+    req: HttpRequest;
+    runInRequestScope: <T>(fn: () => T) => T;
+    staticView: StaticViewOptions;
+    currentViews: string[];
+    data: any;
+    serverQueries: ServerQueryStore;
+    headers: Headers;
+    getStyles: (p: string[], options?: { layout?: string }) => Promise<any[]>;
+    viewImportMap: Record<string, any>;
+    viewModules?: Record<string, any>;
+    resolveIsland?: IslandResolver;
+  }) {
+    const { req, runInRequestScope, staticView, currentViews, data, serverQueries, headers } =
+      args;
+
+    let rootLayout: unknown;
+    if (staticView.layout) {
+      rootLayout = args.viewImportMap[staticView.layout];
+      if (!rootLayout) {
+        throw new Error(
+          `The static layout "${staticView.layout}" was not found. It is a view path: a file at app/views/${staticView.layout}.tsx whose default export renders the document.`,
+        );
+      }
+    }
+
+    const styles = await args.getStyles(currentViews, { layout: staticView.layout });
+
+    serverQueries.markRenderStart();
+    const collector: StaticRenderCollector = { islands: new Map() };
+    const dictionarySink = createDictionarySink();
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
+
+    try {
+      const stream = await renderToReadableStream(
+        createElement(StaticRenderContext.Provider, {
+          value: collector,
+          children: createElement(Fragment, {
+            children: [
+              ...styles,
+              createElement(this.root, {
+                data,
+                viewImportMap: args.viewImportMap,
+                viewModules: args.viewModules,
+                serverQueries,
+                dictionarySink,
+                rootLayout,
+                key: "root",
+              }),
+            ],
+          }),
+        }),
+        {
+          signal: deadline.signal,
+          // With `allReady` awaited below, this keeps every boundary inline
+          // rather than split out behind a reveal script (see `settled`).
+          progressiveChunkSize: Number.MAX_SAFE_INTEGER,
+          onError(error: unknown) {
+            if (process.env.NODE_ENV !== "production") {
+              console.error(error);
+            }
+          },
+        },
+      );
+      await stream.allReady.catch(() => {});
+      const html = await new Response(stream).text();
+
+      return new Response(
+        injectIslands(html, collector, args.resolveIsland, process.env.NODE_ENV !== "production"),
+        { status: 200, headers },
+      );
+    } finally {
+      clearTimeout(deadlineTimer);
+      runInRequestScope(() =>
+        this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+      );
+    }
+  }
+
   private async render(props: {
     req: HttpRequest;
     /**
@@ -396,6 +504,8 @@ export class ViewRouteDispatcher {
     isOgRequest?: boolean;
     appId: string;
     features: Record<string, boolean>;
+    /** The matched route's `.static()` options; absent for a hydrated view. */
+    staticView?: StaticViewOptions;
   }) {
     const {
       req,
@@ -418,6 +528,7 @@ export class ViewRouteDispatcher {
       isOgRequest,
       appId,
       features,
+      staticView,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -455,6 +566,9 @@ export class ViewRouteDispatcher {
         // unreleased ones.
         features,
         componentTree: [["404", []], ...this.componentTree],
+        // Only when there are any, so an app without static views ships the
+        // payload it always did.
+        ...(this.staticRoutes.length > 0 ? { staticRoutes: this.staticRoutes } : {}),
       },
       head: {},
     };
@@ -462,7 +576,12 @@ export class ViewRouteDispatcher {
     const Root = this.root;
     const currentViews = this.routeManifest[currentPathName];
     return async (params: {
-      getStyles: (p: string[]) => Promise<any[]>;
+      /**
+       * `layout` is set for a static view with its own document layout: the
+       * styles are then that layout's and the route's views', without the
+       * app's stylesheet.
+       */
+      getStyles: (p: string[], options?: { layout?: string }) => Promise<any[]>;
       viewImportMap: any;
       bootstrapModules?: string[];
       loaders: string;
@@ -498,6 +617,8 @@ export class ViewRouteDispatcher {
        * each one is inlined into — so the client needs the base to fetch one.
        */
       assetBase?: string;
+      /** Where island client modules are served from; see `injectIslands`. */
+      resolveIsland?: IslandResolver;
     }) => {
       const {
         bootstrapModules = [],
@@ -510,6 +631,7 @@ export class ViewRouteDispatcher {
         clientEntry,
         modulePreloadManifest,
         assetBase,
+        resolveIsland,
       } = params;
 
       // `clientEntry` and `bootstrapModules` are two spellings of the same job,
@@ -587,6 +709,22 @@ export class ViewRouteDispatcher {
         }
 
         return new Response("data");
+      }
+
+      if (staticView && currentPathName) {
+        return await this.renderStatic({
+          req,
+          runInRequestScope,
+          staticView,
+          currentViews,
+          data: result.data,
+          serverQueries,
+          headers,
+          getStyles,
+          viewImportMap,
+          viewModules,
+          resolveIsland,
+        });
       }
 
       result.data["cssManifest"] = cssManifest;
@@ -872,6 +1010,8 @@ export class ViewRouteDispatcher {
     // Flags gating the matched route, checked once the request scope is open
     // and middleware has run.
     let featureGates: string[] = [];
+    // The matched route's `.static()` options, if it has any.
+    let staticView: StaticViewOptions | undefined;
 
     try {
       const match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -882,6 +1022,7 @@ export class ViewRouteDispatcher {
         middlewares = match.route.middleware;
         featureGates = match.route.features;
         noStream = middlewares.includes("no-stream");
+        staticView = match.route.static;
 
         // Only navigations skip work. A document request renders the whole
         // tree, and the client has nothing to carry forward yet.
@@ -1230,7 +1371,8 @@ export class ViewRouteDispatcher {
         // fallbacks and reveal scripts gets served to a bot. `no-stream`
         // routes serve one settled body to everyone, so they stay cacheable
         // without the (CDN-hostile) Vary.
-        if (!noStream) {
+        // A static view is one settled body for everyone, like `no-stream`.
+        if (!noStream && !staticView) {
           headers.append("Vary", "User-Agent");
         }
 
@@ -1275,6 +1417,9 @@ export class ViewRouteDispatcher {
           appId: pageData.appId,
           features: pageData.features,
           isOgRequest,
+          // Not when the request became a 404 (a gate or a missing record):
+          // that renders the app's `404` view, which hydrates as usual.
+          staticView: currentPathName ? staticView : undefined,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

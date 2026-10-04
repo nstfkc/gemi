@@ -16,10 +16,12 @@ export async function createDevStyles(
   appDir: string,
   vite: ViteDevServer,
   currentViews: string[] = [],
+  /** A static view's own document layout, which replaces `RootLayout`. */
+  layout?: string,
 ) {
   const views = [
     ...currentViews.map((view) => `${appDir}/views/${view}.tsx`),
-    `${appDir}/views/RootLayout.tsx`,
+    layout ? `${appDir}/views/${layout}.tsx` : `${appDir}/views/RootLayout.tsx`,
   ];
 
   const modules = new Set<ModuleNode>();

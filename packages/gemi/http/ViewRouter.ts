@@ -281,9 +281,26 @@ function assertNotHttpResponse<T>(data: T, viewPath: string): T {
   return data;
 }
 
+/** Options for `ViewRoute.static()`. */
+export interface StaticViewOptions {
+  /**
+   * A view path (a file under `app/views`, like any view) whose default export
+   * renders the whole document — `<html>`, `<Head />`, `<body>` — in place of
+   * the app's `RootLayout`. Its stylesheet replaces the app's: the page gets
+   * the CSS this layout and the route's own views import, and none of what the
+   * app's client entry imports.
+   *
+   * Left out, the page renders inside the app's `RootLayout` with the app's
+   * stylesheet, exactly as a hydrated view would.
+   */
+  layout?: string;
+}
+
 export class ViewRoute<Input, Output, Params> {
   middlewares: string[] = [];
   featureGates: string[] = [];
+  /** @internal Set by `static()`. `null` for a hydrated view. */
+  staticOptions: StaticViewOptions | null = null;
   private handler: (req: HttpRequest<Input, Params>) => Output;
   constructor(
     public viewPath: string,
@@ -320,6 +337,32 @@ export class ViewRoute<Input, Output, Params> {
 
   middleware(middlewares: MiddlewareInput) {
     this.middlewares = toMiddlewareList(middlewares);
+    return this;
+  }
+
+  /**
+   * Serves this view as a static document: rendered on the server as usual,
+   * but sent with no React on the client.
+   *
+   * The handler, middleware, redirects, `Query.prefetch`, `useQuery` reads,
+   * `Head` metadata, dictionaries and status codes all work as for any view.
+   * What changes is the document: gemi waits for the whole tree to settle
+   * (no streaming) and sends it without the client entry, `modulepreload`s,
+   * the `__GEMI_DATA__` payload, the theme script or React's streaming
+   * scripts. A page with no islands ships no JavaScript at all.
+   *
+   * Interactive parts are islands — see `island()` in `gemi/client` — which
+   * add one small loader plus each used island's own module.
+   *
+   * Because nothing hydrates, event handlers, effects and state in the view
+   * never run in the browser. Links are plain `<a>`s, and a client-side
+   * navigation from a hydrated page to this route becomes a full page load.
+   *
+   * Returns `this`, so the route's type (and its `ViewPaths` entry) is
+   * unchanged.
+   */
+  static(options: StaticViewOptions = {}): this {
+    this.staticOptions = { ...options };
     return this;
   }
 
