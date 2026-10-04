@@ -60,14 +60,14 @@ type Passes<N, D, F> =
         : false
     : true) extends true
     ? // `tags`: kept when one of its tags is filtered for, or either side's
-      // tags are only `string`s.
+      // tags are only `string`s. A tool with no tags has none to match.
       F extends { tags: readonly string[] }
       ? [LiteralsOf<F["tags"]>] extends [never]
         ? true
         : D extends McpRouteDeclaration<any, any, any, any, infer T>
-          ? [LiteralsOf<T>] extends [never]
+          ? string extends T[number]
             ? true
-            : [Extract<LiteralsOf<T>, LiteralsOf<F["tags"]>>] extends [never]
+            : [Extract<T[number], LiteralsOf<F["tags"]>>] extends [never]
               ? false
               : true
           : true

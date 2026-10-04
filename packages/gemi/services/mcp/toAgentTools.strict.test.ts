@@ -24,9 +24,12 @@ describe("toAgentTools under strict: true", () => {
     "a typed router's tools keep their names and types, beside the agent's own",
     { timeout: 60_000 },
     () => {
-      const result = Bun.spawnSync([TSC, "--noEmit", "-p", `${FIXTURE}/tsconfig.json`], {
-        cwd: PACKAGE,
-      });
+      const result = Bun.spawnSync(
+        [TSC, "--noEmit", "-p", `${FIXTURE}/tsconfig.json`],
+        {
+          cwd: PACKAGE,
+        },
+      );
       const output = `${result.stdout.toString()}${result.stderr.toString()}`;
       const lines = output.split("\n").map((line) => line.trim());
 
@@ -36,7 +39,9 @@ describe("toAgentTools under strict: true", () => {
       expect(output).not.toContain("TS5083");
 
       // Its `@ts-expect-error`s are part of this: an unused one is TS2578.
-      expect(lines.filter((line) => line.startsWith(`${FIXTURE}/`))).toEqual([]);
+      expect(lines.filter((line) => line.startsWith(`${FIXTURE}/`))).toEqual(
+        [],
+      );
     },
   );
 });

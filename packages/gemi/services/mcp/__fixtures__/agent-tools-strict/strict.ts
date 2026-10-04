@@ -20,8 +20,14 @@ import { McpRouter } from "../../../../http/McpRouter";
 import type { McpRegistry } from "../../McpRegistry";
 import { toAgentTools, type McpToolShapesOf } from "../../toAgentTools";
 
-class DeleteItemsRequest extends HttpRequest<{ ids: string[] }, { pageId: string }> {}
-class UploadRequest extends HttpRequest<{ file: File; alt?: string }, { siteId: string }> {}
+class DeleteItemsRequest extends HttpRequest<
+  { ids: string[] },
+  { pageId: string }
+> {}
+class UploadRequest extends HttpRequest<
+  { file: File; alt?: string },
+  { siteId: string }
+> {}
 
 class CollectionController extends Controller {
   async list() {
@@ -41,7 +47,10 @@ class FileController extends Controller {
 class Api extends ApiRouter {
   routes = {
     "/pages/:pageId/collections": this.get(CollectionController, "list"),
-    "/pages/:pageId/items/delete": this.post(CollectionController, "deleteItems"),
+    "/pages/:pageId/items/delete": this.post(
+      CollectionController,
+      "deleteItems",
+    ),
     "/sites/:siteId/files": this.post(FileController, "upload"),
   };
 }
@@ -51,7 +60,10 @@ type Routes = CreateRPC<Api>;
 export class SiteMcpRouter extends McpRouter<Routes> {
   page = this.param({
     as: "page",
-    input: s.string().nullable().describe("A page path, or null for this chat's page"),
+    input: s
+      .string()
+      .nullable()
+      .describe("A page path, or null for this chat's page"),
     bind: (path) => path ?? "home",
   });
 
@@ -103,16 +115,30 @@ const buildPage = AgentTool.create({
 const agent = Agent.create({
   name: "site",
   provider,
-  tools: [buildPage, ...toAgentTools(registry, { filter: { tags: ["collections"] } })],
+  tools: [
+    buildPage,
+    ...toAgentTools(registry, { filter: { tags: ["collections"] } }),
+  ],
 });
 type Shapes = ToolShapesOf<typeof agent.tools>;
 type Part = ToolCallPart<Shapes>;
 
-expectTypeOf<keyof Shapes>().toEqualTypeOf<"buildPage" | "listCollections" | "deleteItems">();
-expectTypeOf<Shapes["listCollections"]["input"]>().toEqualTypeOf<{ page: string | null }>();
-expectTypeOf<Shapes["listCollections"]["output"]>().toEqualTypeOf<{ id: string; name: string }[]>();
-expectTypeOf<Shapes["deleteItems"]["input"]>().toEqualTypeOf<{ ids: string[]; pageId: string }>();
-expectTypeOf<Shapes["deleteItems"]["output"]>().toEqualTypeOf<{ ok: boolean }>();
+expectTypeOf<keyof Shapes>().toEqualTypeOf<
+  "buildPage" | "listCollections" | "deleteItems"
+>();
+expectTypeOf<Shapes["listCollections"]["input"]>().toEqualTypeOf<{
+  page: string | null;
+}>();
+expectTypeOf<Shapes["listCollections"]["output"]>().toEqualTypeOf<
+  { id: string; name: string }[]
+>();
+expectTypeOf<Shapes["deleteItems"]["input"]>().toEqualTypeOf<{
+  ids: string[];
+  pageId: string;
+}>();
+expectTypeOf<Shapes["deleteItems"]["output"]>().toEqualTypeOf<{
+  ok: boolean;
+}>();
 
 export function render(part: Part) {
   if (part.name === "deleteItems") {
@@ -121,7 +147,9 @@ export function render(part: Part) {
   if (part.name === "buildPage") {
     // The native tool beside them is still typed, progress included.
     expectTypeOf(part.input.prompt).toEqualTypeOf<string>();
-    expectTypeOf(part.progress).toEqualTypeOf<{ step: "drafting" }[] | undefined>();
+    expectTypeOf(part.progress).toEqualTypeOf<
+      { step: "drafting" }[] | undefined
+    >();
   }
   // @ts-expect-error uploadFile is tagged "files", which the filter left out
   if (part.name === "uploadFile") return;
@@ -134,13 +162,18 @@ expectTypeOf<BuildPagePart["input"]>().toEqualTypeOf<{ prompt: string }>();
 
 type Files = McpToolShapesOf<SiteMcpRouter, { names: ["uploadFile"] }>;
 expectTypeOf<keyof Files>().toEqualTypeOf<"uploadFile">();
-expectTypeOf<Files["uploadFile"]["input"]>().toEqualTypeOf<{ alt?: string; file: string }>();
-expectTypeOf<Files["uploadFile"]["output"]>().toEqualTypeOf<{ uploaded: true }>();
+expectTypeOf<Files["uploadFile"]["input"]>().toEqualTypeOf<{
+  alt?: string;
+  file: string;
+}>();
+expectTypeOf<Files["uploadFile"]["output"]>().toEqualTypeOf<{
+  uploaded: true;
+}>();
 
 // Every tool when nothing filters, or the type argument is explicit.
-expectTypeOf<keyof ToolShapesOf<ReturnType<typeof toAgentTools<SiteMcpRouter>>>>().toEqualTypeOf<
-  "listCollections" | "deleteItems" | "uploadFile"
->();
+expectTypeOf<
+  keyof ToolShapesOf<ReturnType<typeof toAgentTools<SiteMcpRouter>>>
+>().toEqualTypeOf<"listCollections" | "deleteItems" | "uploadFile">();
 
 // --- namespaces flatten the same way ------------------------------------------
 
@@ -166,10 +199,41 @@ const mixed = Agent.create({
   tools: [buildPage, ...toAgentTools(untyped)],
 });
 type MixedPart = ToolCallPart<ToolShapesOf<typeof mixed.tools>>;
-expectTypeOf<Extract<MixedPart, { name: "buildPage" }>["input"]>().toEqualTypeOf<{
+expectTypeOf<
+  Extract<MixedPart, { name: "buildPage" }>["input"]
+>().toEqualTypeOf<{
   prompt: string;
 }>();
 
 // With no literal name at all, the shapes keep the untyped index, as before.
-const onlyUntyped = Agent.create({ name: "only", provider, tools: toAgentTools(untyped) });
-expectTypeOf<ToolCallPart<ToolShapesOf<typeof onlyUntyped.tools>>["name"]>().toEqualTypeOf<string>();
+const onlyUntyped = Agent.create({
+  name: "only",
+  provider,
+  tools: toAgentTools(untyped),
+});
+expectTypeOf<
+  ToolCallPart<ToolShapesOf<typeof onlyUntyped.tools>>["name"]
+>().toEqualTypeOf<string>();
+
+// A tool with no tags is not in a filter by tag, as at runtime.
+expectTypeOf<
+  keyof McpToolShapesOf<PlainMcpRouter, { tags: ["collections"] }>
+>().toEqualTypeOf<never>();
+
+// --- with neither `output` nor `result`, the route's own answer (#769) --------
+
+class PlainMcpRouter extends McpRouter<Routes> {
+  routes = {
+    collections: this.fromApiRoute("GET", "/pages/:pageId/collections", {
+      description: "List the page's collections, whole",
+      params: { pageId: "input" },
+    }),
+  };
+}
+type Plain = McpToolShapesOf<PlainMcpRouter>;
+expectTypeOf<Plain["collections"]["input"]>().toEqualTypeOf<{
+  pageId: string;
+}>();
+expectTypeOf<Plain["collections"]["output"]>().toEqualTypeOf<{
+  collections: { id: string; name: string; items: number }[];
+}>();

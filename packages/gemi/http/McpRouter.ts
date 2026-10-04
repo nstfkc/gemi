@@ -597,7 +597,7 @@ export class McpRouter<R = McpRoutes> {
     O extends AnySchema | undefined = undefined,
     const P extends Record<string, McpParamDeclaration> = {},
     const F extends Record<string, McpFileBinder | "input"> = {},
-    const T extends readonly string[] = readonly string[],
+    const T extends readonly string[] = readonly [],
     RR = never,
   >(
     method: M,

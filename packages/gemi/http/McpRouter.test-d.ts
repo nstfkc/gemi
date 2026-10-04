@@ -118,11 +118,17 @@ describe("fromApiRoute", () => {
         "/org/:orgId/products",
         { name: string; price: number; image: string },
         { id: number; orgId: string },
-        readonly string[]
+        readonly []
       >
     >();
     expectTypeOf(new Mcp().routes["rename-product"]).toEqualTypeOf<
-      McpRouteDeclaration<"PUT", "/products/:id/name", { name: string; id: string }, { ok: boolean }>
+      McpRouteDeclaration<
+        "PUT",
+        "/products/:id/name",
+        { name: string; id: string },
+        { ok: boolean },
+        readonly []
+      >
     >();
   });
 
