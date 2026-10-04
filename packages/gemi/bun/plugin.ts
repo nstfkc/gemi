@@ -1,5 +1,5 @@
 import type { BunPlugin } from "bun";
-import { customRequestParser } from "./customRequestParser";
+import { CUSTOM_REQUEST_FILTER, customRequestParser } from "./customRequestParser";
 
 // Server-side route/controller files whose typed `Request` params must be
 // rewritten to default-instantiated arguments, e.g.
@@ -9,9 +9,8 @@ import { customRequestParser } from "./customRequestParser";
 // the AsyncLocalStorage context — so without this rewrite `req` is `undefined`
 // at runtime. This used to be done by the gemi Vite plugin, but this code is now
 // compiled by Bun (build: `Bun.build` of `app/server.ts`; dev: `bun --hot`), so
-// the transform runs here instead. Matches both `/http/controllers/` and
-// `/http/routes/` (`.ts`/`.tsx`), on the resolved absolute path.
-const CUSTOM_REQUEST_FILTER = /[\\/]http[\\/](controllers|routes)[\\/].+\.tsx?$/;
+// the transform runs here instead. `gemi/vitest` applies the same transform to
+// the same files for tests, which vitest loads through Vite rather than Bun.
 
 export function gemiPlugin(): BunPlugin {
   return {

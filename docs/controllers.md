@@ -176,6 +176,8 @@ async upload(req: HttpRequest<{ file: File | File[] }>) {
 }
 ```
 
+Nothing bounds the body's size but Bun's server-wide `maxRequestBodySize` unless the route sets a limit. On a route anyone can post to, add [`body-limit`](./middleware.md#body-limitsize--bodylimitmiddleware) (`.middleware("body-limit:64kb")`): a body over it is a `413` refusal, whether it declares its length or not, and is never buffered past the limit.
+
 ## ResourceController
 
 `ResourceController` is an abstract base for REST resources. It requires five methods — `list`, `store`, `show`, `update`, `delete` — which [`this.resource(Controller)`](./routing.md) maps to the standard REST routes:
@@ -311,6 +313,16 @@ class CreateAgentRequest extends HttpRequest<Infer<typeof AgentBody>> {
 ```
 
 `req.input()` runs `AgentBody.validate(body)` and throws the usual `ValidationError` when it fails, with each issue's `message` under `issue.path.join(".")` (`""` for the body itself, e.g. an array where an object was expected). A valid body is replaced by the parsed value, so unknown keys are dropped and an `.optional()` field sent as `null` is left out. `refine()` still runs, on the parsed value. The messages are the schema's own; use rules when you need to word them per field. An `s` schema has no file type, so use rules for multipart uploads. Constraints such as lengths and ranges come from `s.fromJSONSchema` (`minLength`, `maximum`, …).
+
+A schema built at runtime with `s.fromJSONSchema` can refuse unknown keys instead of dropping them, for a body where a stray field means something went wrong (a bot, a stale form):
+
+```typescript
+const FormBody = s.fromJSONSchema(form.jsonSchema, { unknownKeys: "error" });
+// { name: "Ada", nickname: "x" } fails with
+// { path: ["nickname"], code: "additionalProperties", params: { additionalProperty: "nickname" }, message: "unknown key" }
+```
+
+`unknownKeys` is `"strip"` (the default, drop them), `"error"` (one `additionalProperties` issue per key, the path ending in the key, at every depth) or `"passthrough"` (keep them in the parsed value, checked only for being JSON). It applies to every object the JSON Schema describes, whether or not it says `additionalProperties: false`, and not to an `s.object` the schema is nested into.
 
 ### Auth and other errors
 

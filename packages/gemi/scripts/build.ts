@@ -48,6 +48,7 @@ const result = await Bun.build({
     "./i18n/dictionaryRuntime.ts",
     "./bun/plugin.ts",
     "./bun/preload.ts",
+    "./vitest/index.ts",
     "./config/index.ts",
     "./container/index.ts",
     "./foundation/index.ts",

@@ -159,6 +159,10 @@ interface SchemaBuilder<T> extends Schema<T> {
  *   `exclusiveMaximum`, `minItems`, `maxItems`: `params.limit` is the bound.
  * - `format`: `params.format` names the format the string failed.
  * - `anyOf`: no union member matched; `message` names the closest one's problems.
+ * - `additionalProperties`: a key the object doesn't declare, reported only by
+ *   a schema built with `s.fromJSONSchema(schema, { unknownKeys: "error" })`.
+ *   `path` ends in the key (Ajv's `instancePath` stops at the object), and
+ *   `params.additionalProperty` is the key, as in Ajv.
  *
  * `message` is the sentence `safeParse` reports for it, without the path.
  */
@@ -176,7 +180,8 @@ export type SchemaIssueCode =
   | "exclusiveMaximum"
   | "minItems"
   | "maxItems"
-  | "format";
+  | "format"
+  | "additionalProperties";
 
 export type SchemaIssue = {
   /** Keys and array indices from the root, `[]` for the root itself. */
@@ -235,7 +240,13 @@ type SchemaNode =
   | { kind: "boolean" }
   | { kind: "literal"; value: string | number | boolean }
   | { kind: "enum"; values: readonly string[]; checks?: StringChecks }
-  | { kind: "object"; shape: Record<string, Definition> }
+  /**
+   * `unknownKeys` is what parsing does with a key `shape` doesn't declare:
+   * absent is "strip", the default and the only thing the builders make. Only
+   * `s.fromJSONSchema` sets the others. Emission ignores it: every object is
+   * sent with `additionalProperties: false` either way.
+   */
+  | { kind: "object"; shape: Record<string, Definition>; unknownKeys?: "error" | "passthrough" }
   | { kind: "array"; item: Definition; checks?: ArrayChecks }
   | { kind: "union"; members: readonly Definition[] }
   /** Constrains nothing. The node strict mode has no spelling for. */
@@ -709,11 +720,43 @@ function readNode(
         const element = read(child, source[key], [...path, key], issues);
         if (!element.drop) output[key] = element.value;
       }
-      // Unknown keys are DROPPED, not rejected. `additionalProperties: false`
-      // has already told the model not to send them, so one arriving anyway is
-      // a slip rather than an attack, and failing a whole tool call over a
-      // stray field costs a turn to fix nothing. Dropping is also what keeps
-      // `execute` from ever seeing a field its input type says cannot be there.
+      // By default unknown keys are DROPPED, not rejected. `additionalProperties:
+      // false` has already told the model not to send them, so one arriving
+      // anyway is a slip rather than an attack, and failing a whole tool call
+      // over a stray field costs a turn to fix nothing. Dropping is also what
+      // keeps `execute` from ever seeing a field its input type says cannot be
+      // there.
+      //
+      // A schema read from data can ask otherwise (#753): a form submission
+      // with a field the form doesn't have is a bot or a stale page, and
+      // dropping it loses what the visitor typed without telling them.
+      if (node.unknownKeys) {
+        for (const key of Object.keys(source)) {
+          // `undefined` is absent, the same as for `required`: JSON cannot
+          // carry it, and `JSON.stringify` leaves the key out.
+          if (Object.hasOwn(node.shape, key) || source[key] === undefined) continue;
+          if (node.unknownKeys === "error") {
+            issues.push({
+              path: [...path, key],
+              code: "additionalProperties",
+              message: "unknown key",
+              params: { additionalProperty: key },
+            });
+            continue;
+          }
+          // Kept as it came, checked only for being JSON — there is no schema
+          // to read it with. Defined rather than assigned, so that a
+          // `__proto__` key from `JSON.parse` stays a key instead of setting
+          // the output's prototype.
+          checkJson(source[key], [...path, key], issues, new Set());
+          Object.defineProperty(output, key, {
+            value: source[key],
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        }
+      }
       return output;
     }
     case "union": {
@@ -1022,7 +1065,26 @@ export type FromJSONSchemaOptions = {
    * `deprecated`, `readOnly`, `writeOnly`, and every `x-` keyword.
    */
   ignoreKeywords?: readonly string[];
+  /**
+   * What `parse`, `safeParse` and `validate` do with a key an object of the
+   * schema doesn't declare, at every depth:
+   *
+   * - `"strip"` (the default): drop it from the parsed value, silently.
+   * - `"error"`: fail with an `additionalProperties` issue whose `path` ends in
+   *   the key and whose `params.additionalProperty` is the key.
+   * - `"passthrough"`: keep it in the parsed value as it came (it is only
+   *   checked for being JSON).
+   *
+   * Every object is closed in `s`, so this applies whether or not the object
+   * says `additionalProperties: false`, and the emitted schema still says
+   * `additionalProperties: false` (strict mode requires it). It applies to
+   * this schema's objects only: an `s.object` it is nested into keeps
+   * stripping.
+   */
+  unknownKeys?: "strip" | "error" | "passthrough";
 };
+
+const UNKNOWN_KEYS = ["strip", "error", "passthrough"] as const;
 
 /**
  * Thrown by `s.fromJSONSchema` for a schema outside the subset `s` models.
@@ -1305,7 +1367,12 @@ function fromJSON(
         shape[key] = required.includes(key) ? read : { ...read, optional: true };
       }
       if (failed) return undefined;
-      return finish({ kind: "object", shape });
+      const unknownKeys = options.unknownKeys;
+      return finish({
+        kind: "object",
+        shape,
+        ...(unknownKeys === "error" || unknownKeys === "passthrough" ? { unknownKeys } : {}),
+      });
     }
   }
   return undefined;
@@ -1483,8 +1550,10 @@ export const s: {
    * The length, range, item-count and format constraints are enforced by
    * `parse`/`safeParse`/`validate` and told to the model in the field's
    * description, because strict structured output does not accept them as
-   * keywords. Unlike Ajv, an unknown key in an object is dropped from the
-   * parsed value rather than reported.
+   * keywords. By default an unknown key in an object is dropped from the
+   * parsed value rather than reported; pass `unknownKeys: "error"` to report
+   * it as an `additionalProperties` issue (as Ajv does), or `"passthrough"`
+   * to keep it.
    *
    * The output type is `JsonValue` (or the `T` you assert). Validate a value
    * with `.validate(value)` for per-path issues, or `.safeParse(value)`.
@@ -1519,6 +1588,14 @@ export const s: {
   recursive,
   fromJSONSchema: <T>(schema: unknown, options: FromJSONSchemaOptions = {}) => {
     const problems: string[] = [];
+    if (
+      options.unknownKeys !== undefined &&
+      !(UNKNOWN_KEYS as readonly unknown[]).includes(options.unknownKeys)
+    ) {
+      throw new Error(
+        `gemi/ai: s.fromJSONSchema's unknownKeys option must be one of ${UNKNOWN_KEYS.map((v) => JSON.stringify(v)).join(", ")}, got ${JSON.stringify(options.unknownKeys)}`,
+      );
+    }
     const definition = fromJSON(schema, options, "", problems);
     if (!definition || problems.length > 0) {
       throw new JSONSchemaError(problems.length > 0 ? problems : ["unreadable schema"]);

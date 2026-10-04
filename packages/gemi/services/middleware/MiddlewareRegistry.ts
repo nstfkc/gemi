@@ -1,4 +1,6 @@
 import { HttpRequest, Middleware } from "../../http";
+import { BodyLimitMiddleware } from "../../http/BodyLimitMiddleware";
+import { hasBodyLimit, parseByteSize, setBodyLimit } from "../../http/bodyLimit";
 import type { MiddlewareConfig } from "../../http/middleware-config";
 import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
@@ -22,13 +24,42 @@ function transformMiddleware(input: (string | Function)[]) {
   return map;
 }
 
+/**
+ * Aliases that work without an entry in the app's `aliases`, which replace them
+ * when they name the same alias. Only for middleware whose absence would be
+ * silent and unsafe: an unknown alias is skipped, so a `body-limit:64kb` on a
+ * public route that the app forgot to register would bound nothing.
+ */
+const builtinAliases: Record<string, new (req: HttpRequest) => Middleware> = {
+  "body-limit": BodyLimitMiddleware,
+};
+
 export class MiddlewareRegistry {
   static token = "middleware";
 
-  constructor(public config: Required<MiddlewareConfig>) {}
+  /** `config.bodyLimit` in bytes, or `null`. Parsed once, here. */
+  readonly defaultBodyLimit: number | null;
 
-  get aliases() {
-    return this.config.aliases;
+  constructor(public config: Required<MiddlewareConfig>) {
+    this.defaultBodyLimit =
+      config.bodyLimit === null || config.bodyLimit === undefined
+        ? null
+        : parseByteSize(config.bodyLimit);
+  }
+
+  get aliases(): Record<string, new (req: HttpRequest) => Middleware> {
+    return { ...builtinAliases, ...this.config.aliases };
+  }
+
+  /**
+   * Installs the app-wide `bodyLimit` on an api request that has no limit yet.
+   * Its `Content-Length` is checked when the body is read rather than now, so
+   * a route's own `body-limit`, which runs after this, can still raise it.
+   */
+  applyDefaultBodyLimit(request: Request) {
+    if (this.defaultBodyLimit !== null && !hasBodyLimit(request)) {
+      setBodyLimit(request, this.defaultBodyLimit, { checkDeclared: false });
+    }
   }
 
   /**
@@ -70,17 +101,14 @@ export class MiddlewareRegistry {
   }
 
   public runMiddleware(
-    middleware: (
-      | string
-      | RouterMiddleware
-      | (new (req: HttpRequest) => Middleware)
-    )[],
+    middleware: (string | RouterMiddleware | (new (req: HttpRequest) => Middleware))[],
   ) {
     const req = new HttpRequest();
+    const aliases = this.aliases;
     return Array.from(transformMiddleware(middleware).entries())
       .map(([key, params]) => {
         if (typeof key === "string") {
-          const Middleware = this.aliases[key];
+          const Middleware = aliases[key];
           if (Middleware) {
             const middleware = new Middleware(req);
             return () => middleware.run.call(middleware, ...params);

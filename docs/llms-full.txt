@@ -45,7 +45,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
-- **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
+- **[Testing](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user. Route tests: `App.fetch` with a test `Kernel`, and `gemiRequestPlugin()` from `gemi/vitest`.
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
 - **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, and the turn helpers.
@@ -2408,6 +2408,8 @@ async upload(req: HttpRequest<{ file: File | File[] }>) {
 }
 ```
 
+Nothing bounds the body's size but Bun's server-wide `maxRequestBodySize` unless the route sets a limit. On a route anyone can post to, add [`body-limit`](./middleware.md#body-limitsize--bodylimitmiddleware) (`.middleware("body-limit:64kb")`): a body over it is a `413` refusal, whether it declares its length or not, and is never buffered past the limit.
+
 ## ResourceController
 
 `ResourceController` is an abstract base for REST resources. It requires five methods — `list`, `store`, `show`, `update`, `delete` — which [`this.resource(Controller)`](./routing.md) maps to the standard REST routes:
@@ -2543,6 +2545,16 @@ class CreateAgentRequest extends HttpRequest<Infer<typeof AgentBody>> {
 ```
 
 `req.input()` runs `AgentBody.validate(body)` and throws the usual `ValidationError` when it fails, with each issue's `message` under `issue.path.join(".")` (`""` for the body itself, e.g. an array where an object was expected). A valid body is replaced by the parsed value, so unknown keys are dropped and an `.optional()` field sent as `null` is left out. `refine()` still runs, on the parsed value. The messages are the schema's own; use rules when you need to word them per field. An `s` schema has no file type, so use rules for multipart uploads. Constraints such as lengths and ranges come from `s.fromJSONSchema` (`minLength`, `maximum`, …).
+
+A schema built at runtime with `s.fromJSONSchema` can refuse unknown keys instead of dropping them, for a body where a stray field means something went wrong (a bot, a stale form):
+
+```typescript
+const FormBody = s.fromJSONSchema(form.jsonSchema, { unknownKeys: "error" });
+// { name: "Ada", nickname: "x" } fails with
+// { path: ["nickname"], code: "additionalProperties", params: { additionalProperty: "nickname" }, message: "unknown key" }
+```
+
+`unknownKeys` is `"strip"` (the default, drop them), `"error"` (one `additionalProperties` issue per key, the path ending in the key, at every depth) or `"passthrough"` (keep them in the parsed value, checked only for being JSON). It applies to every object the JSON Schema describes, whether or not it says `additionalProperties: false`, and not to an `s.object` the schema is nested into.
 
 ### Auth and other errors
 
@@ -2702,6 +2714,66 @@ The default bucket is the client's IP (the `x-forwarded-for` address the server 
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
+### `body-limit:SIZE` → `BodyLimitMiddleware`
+
+Bounds the request body of a route, for public endpoints anyone can post to: a form submission, an analytics beacon. Over the limit the request is answered with a **413** in the usual refusal shape, `{ "error": { "kind": "form_error", "message": "The request body is too large.", "status": 413 } }`, which `<FormError>` shows like any other form-level message.
+
+`body-limit` is **built in**: it works without an entry in `aliases` (an app alias of the same name replaces it). An unknown alias is skipped silently, and a size limit that was silently skipped would bound nothing.
+
+| DSL | Meaning |
+| --- | --- |
+| `body-limit:64kb` | 413 past 64 KiB |
+| `body-limit:1.5mb` | sizes are `b`, `kb`, `mb`, `gb` (binary: `1kb` is 1024 bytes), case-insensitive |
+| `body-limit:4096` | a plain byte count |
+| `body-limit:none` | no limit: lifts the app-wide [`bodyLimit`](#an-app-wide-default) for this route |
+
+```typescript
+class PublicFormRouter extends ApiRouter {
+  middlewares = ["body-limit:64kb", "rate-limit:30,60"];
+  routes = {
+    "/form/:formId": this.post(FormController, "submit"),
+    "/form/:formId/upload": this.post(FormController, "upload").middleware("body-limit:5mb"),
+  };
+}
+```
+
+A route's `body-limit` replaces its router's, raising it as well as lowering it, as re-adding any alias replaces its parameters.
+
+How it is enforced, without buffering the body:
+
+- **A declared `Content-Length` over the limit** is refused by the middleware, before the handler runs and before a byte of the body is read.
+- **A body without a length** (chunked) is counted as it is read and refused the moment it passes the limit. Nothing past the limit is buffered, so `body-limit:64kb` holds a request to about 64 KiB of memory whatever the client sends.
+- **A `Content-Length` that lies** gets nowhere: Bun never reads past a declared length, and the counter applies to whatever is read, declared or not.
+- **Every way of reading the body** goes through the counter: `req.input()` and `req.safeInput()` for JSON, urlencoded and multipart bodies, the raw accessors on `req.rawRequest` (`text()`, `json()`, `arrayBuffer()`, `bytes()`, `blob()`, `formData()`, the `body` stream, `clone()`), and the stream a `this.proxy(...)` route forwards. The `Request` is not replaced; its body accessors are, on that one instance.
+
+A chunked body is refused when it is read, so a handler that reads it after doing other work has done that work first. Read the body first on a route where that matters.
+
+`configure({ limit })` gives an alias of your own a fixed limit, used when the DSL names none:
+
+```typescript
+aliases: { "beacon-limit": BodyLimitMiddleware.configure({ limit: "8kb" }) },
+```
+
+#### An app-wide default
+
+`bodyLimit` in the `middleware` config applies to every api route that has no `body-limit` of its own:
+
+```typescript
+// app/config/middleware.ts
+export default defineMiddlewareConfig({
+  aliases: { /* ... */ },
+  bodyLimit: "1mb",
+});
+```
+
+Unlike a route's own limit, the default checks `Content-Length` when the body is read rather than before the route's middleware runs, so a route's `body-limit:50mb` (or `body-limit:none`) can still raise it for an upload. An invalid size stops the server at boot. View routes take no default; put `body-limit` on one that accepts a body.
+
+Putting `body-limit` in the `global` list works too, but a global entry refuses a declared length before any route is matched, so no route can raise it. Prefer `bodyLimit` for a default.
+
+#### Bun's `maxRequestBodySize`
+
+Bun has a server-wide limit of its own, `maxRequestBodySize`, applied before a request reaches gemi. `gemi start` sets it to 10 GB, so uploads are not cut off; `gemi dev` leaves Bun's default, 128 MB. It is the ceiling: a body over it is answered by Bun itself, with a bare `413` and no JSON body, and the connection closed, whatever the route says. `body-limit` and `bodyLimit` are what a route actually gets, and they answer in gemi's refusal shape, so set them well below that ceiling.
+
 ### `cors` → `CorsMiddleware`
 
 Sets CORS headers for requests whose `Origin` is in the configured `origins` map. Because it needs configuration, it's registered with `CorsMiddleware.configure({ origins: { ... } })` (see below) rather than as a bare class.
@@ -2732,7 +2804,7 @@ than a middleware class — it has no alias to register.
 
 ## Registering middleware
 
-The `middleware` config slice has two fields: `aliases` — `Record<string, MiddlewareClass>` — and `global`, a list that runs on every request (see [Global middleware](#global-middleware)). `aliases` is where DSL names become classes:
+The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:
 
 ```typescript
 // app/config/middleware.ts
@@ -4843,7 +4915,9 @@ off-site URLs.
 
 ---
 
-## Testing Views
+## Testing
+
+Two kinds of test, two entrypoints: a **view** test mounts a component with `<Page>` from `gemi/testing`, and a **route** test boots the app and sends it a request, with `gemiRequestPlugin()` from `gemi/vitest` in the vitest config. Views come first; routes are [further down](#testing-routes).
 
 A view is a plain React component, so any renderer can mount one — but what it renders comes from inputs the framework normally supplies: route params, the current locale and its dictionaries, data `Query.prefetch` put on the page, the signed-in user. Without those a component test can only assert the empty state.
 
@@ -5050,13 +5124,114 @@ The components need a DOM. Under vitest that is a per-file pragma (or `environme
 
 Under `bun test`, preload `happy-dom` — no gemi-specific configuration is required either way. React 19 lifecycles, `@testing-library/user-event` and MSW's fetch interception all work against `gemi/client` components as they do against any other React tree.
 
-> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to server tests.
+> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to [route tests](#testing-routes).
+
+## Testing routes
+
+A route test needs no server: build the app with a test `Kernel` and call `App.fetch` with a `Request`. That runs everything a real request does — global and route middleware, the handler or controller method, validation, the response — in the test process.
+
+```ts
+// app/http/routes/api.test.ts
+import { createElement } from "react";
+import { App } from "gemi/app";
+import { createRoot } from "gemi/client";
+import { ViewRouter } from "gemi/http";
+import { Kernel } from "gemi/kernel";
+import { expect, test } from "vitest";
+
+import middleware from "@/app/config/middleware";
+import RootApi from "@/app/http/routes/api";
+
+class TestKernel extends Kernel {
+  config = {
+    middleware,
+    route: {
+      api: { rootRouter: RootApi },
+      view: {
+        root: createRoot(() => createElement("div")),
+        rootRouter: class extends ViewRouter {},
+      },
+    },
+  };
+}
+
+const app = new App({ kernel: TestKernel });
+
+test("lists a site's assets", async () => {
+  const res = await app.fetch(new Request("http://app.test/api/sites/7/assets"));
+  expect(res.status).toBe(200);
+});
+```
+
+### Install the request plugin
+
+gemi calls a route handler and a controller method with **no arguments**. A handler written as
+
+```ts
+async index(req: HttpRequest<{}, { siteId: string }>) { … }
+```
+
+gets its request because the build rewrites the parameter to `req = new HttpRequest()`, which reads the current request from the request context. `gemi dev` and `gemi build` do that through Bun. Vitest loads modules through Vite instead (also under `bun --bun vitest`), so without the rewrite a dispatched route sees `req === undefined` and answers 500 with `undefined is not an object (evaluating 'req.params')`.
+
+`gemi/vitest` exports the same rewrite as a Vite plugin. Add it to the app's vitest config:
+
+```ts
+// vitest.config.ts
+import { gemiRequestPlugin } from "gemi/vitest";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [gemiRequestPlugin()],
+  // …
+});
+```
+
+It applies to the same files the build rewrites: `.ts` and `.tsx` under `http/controllers/` and `http/routes/`. Everything else, including `node_modules`, is left alone. A handler that declares its request as a default value (`req = new HttpRequest()`) works with or without it.
+
+Run the suite under Bun, `bun --bun vitest`, since gemi's server modules import from `bun`.
+
+### MCP tools
+
+An `McpRouter` tool is a route, so the same setup covers it: the model's call goes through the route's middleware and handler, and `result` projects the answer. `McpRegistry.execute` takes the request the call is made as, so make the call from inside one. A route the test adds to the app is the simplest way:
+
+```ts
+import { app as resolve } from "gemi/foundation";
+import { ApiRouter, HttpRequest } from "gemi/http";
+import { McpRegistry } from "gemi/services";
+
+import SiteMcpRouter from "@/app/http/routes/mcp";
+
+let inside: () => Promise<unknown> = async () => ({});
+
+class TestApi extends ApiRouter {
+  routes = {
+    ...new RootApi().routes,
+    "/run": this.post(async () => inside()),
+  };
+}
+
+// In the Kernel: `api: { rootRouter: TestApi }` and `mcp: { router: SiteMcpRouter }`.
+
+test("list-assets answers the projected result", async () => {
+  let output: unknown;
+  inside = async () => {
+    const req = new HttpRequest<any, any>();
+    output = await resolve(McpRegistry).execute({ kind: "local", req }, "list-assets", {});
+    return {};
+  };
+  await app.fetch(new Request("http://app.test/api/run", { method: "POST" }));
+  expect(output).toEqual({ count: 1 });
+});
+```
+
+Models and other services are mocked the usual way (`vi.mock`), or bound in a test service provider on the `Kernel`.
 
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
 - [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
 - [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
+- [Routing](./routing.md) and [Controllers](./controllers.md) — the routes and the `HttpRequest` a route test dispatches to.
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
@@ -10578,7 +10753,7 @@ This replaces the _switch_, not the answer: rows still go through the same store
 - [Services](./services.md) — the container and configuration this plugs into
 - [Authorization](./authorization.md) — for the things features are not
 - [ORM](./orm.md) — the model and migration workflow
-- [Testing Views](./testing.md) — `<Page features={{ ... }}>`, for a component test that branches on one
+- [Testing](./testing.md) — `<Page features={{ ... }}>`, for a component test that branches on one
 
 ---
 

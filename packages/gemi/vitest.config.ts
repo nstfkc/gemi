@@ -1,4 +1,5 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import { gemiRequestPlugin } from "./vitest";
 
 /**
  * The package had no vitest config, and this exists to hold back exactly one
@@ -18,6 +19,11 @@ import { configDefaults, defineConfig } from "vitest/config";
  * several paragraphs on.
  */
 export default defineConfig({
+  // What an app installs to dispatch its own routes in tests (#772).
+  // `vitest/index.test.ts` relies on it; the only other files it matches here
+  // are the type stubs under `internal/type-stubs/app/http/routes`, which no
+  // test loads.
+  plugins: [gemiRequestPlugin()],
   test: {
     exclude: [...configDefaults.exclude, "packaging.test.ts"],
   },
