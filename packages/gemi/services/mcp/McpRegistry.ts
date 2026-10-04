@@ -7,6 +7,7 @@ import type {
   McpFileBinder,
   McpMethod,
   McpParamBinder,
+  McpResultProjection,
   McpRouteDeclaration,
   McpRouter,
 } from "../../http/McpRouter";
@@ -100,6 +101,12 @@ export interface McpToolDescriptor {
    * bound files are not in it at all.
    */
   readonly inputSchema: Schema<Record<string, unknown>>;
+  /**
+   * The route meta's `output`: the shape of what the tool answers, after
+   * `result`. Absent when the meta declares none. v2's `tools/list` emits it
+   * as `outputSchema`.
+   */
+  readonly outputSchema?: AnySchema;
   readonly annotations: McpToolAnnotations;
   readonly tags: readonly string[];
   readonly requiresApproval: boolean;
@@ -167,6 +174,7 @@ type Plan = {
   paramBinders: Map<string, McpParamBinder>;
   fileFields: { name: string; binder: McpFileBinder | "input" }[];
   jsonKeys: string[];
+  result?: McpResultProjection;
 };
 
 /**
@@ -241,7 +249,9 @@ export class McpRegistry {
    * unscoped lookup, and this must not become one.
    *
    * A 2xx answers its JSON, or its text, cut at `MAX_RESULT_BODY`; a body
-   * that is neither — a file a route serves — is described, not shown.
+   * that is neither — a file a route serves — is described, not shown. A tool
+   * whose meta has a `result` or an `output` answers its JSON put through
+   * them instead, and is cut after that, not before (see `project`).
    * A 4xx throws an `McpToolError` carrying the route's body, so a validation
    * error reaches the model word for word. Anything else, or a route that
    * throws, throws an `McpToolError` that says only that the server failed.
@@ -315,7 +325,10 @@ export class McpRegistry {
       console.error(`[gemi/mcp] Dispatching "${name}" failed:`, error);
       throw new McpToolError(`"${name}" failed on the server.`, 500);
     }
-    return await readResponse(name, response);
+    if (!plan.result && !descriptor.outputSchema) {
+      return await readResponse(name, response);
+    }
+    return await this.project(plan, call, response);
   }
 
   // --- building ------------------------------------------------------------
@@ -384,6 +397,12 @@ export class McpRegistry {
     for (const file of fileFields) {
       assertBinder(where, `files.${file.name}`, file.binder);
     }
+    if (meta.result !== undefined && typeof meta.result !== "function") {
+      throw new Error(`${where}: result must be a function.`);
+    }
+    if (meta.output !== undefined && typeof meta.output?.safeParse !== "function") {
+      throw new Error(`${where}: output must be a schema, built with s.`);
+    }
     if (fileFields.length > 0 && method === "GET") {
       throw new Error(`${where}: a GET has no body to carry a file.`);
     }
@@ -427,6 +446,7 @@ export class McpRegistry {
         method,
         url,
         inputSchema: combineSchemas(meta.input, base, s.object(extras)),
+        ...(meta.output ? { outputSchema: meta.output } : {}),
         annotations: annotationsFor(method),
         tags: Object.freeze([...(meta.tags ?? [])]),
         requiresApproval: meta.requiresApproval === true,
@@ -436,6 +456,7 @@ export class McpRegistry {
       paramBinders,
       fileFields,
       jsonKeys,
+      ...(meta.result ? { result: meta.result } : {}),
     };
   }
 
@@ -505,6 +526,69 @@ export class McpRegistry {
       form.append(field.name, await ctx.attachments.file(id));
     }
     return form;
+  }
+
+  /**
+   * A 2xx put through the meta's `result` and `output`, for a tool that has
+   * either.
+   *
+   * The whole body is parsed and projected before anything is cut: trimming a
+   * large answer down is what a projection is for, and cutting first would
+   * hand `result` half a JSON document. The projected value is then held to
+   * `MAX_RESULT_BODY` the way any answer is.
+   *
+   * Every failure here is the app's, not the model's — a route that answered
+   * something other than JSON, a `result` that threw, an answer `output` does
+   * not describe — so each is logged and the model is told only that the
+   * tool failed. Telling it more would invite a retry of a call that already
+   * did what it does.
+   */
+  private async project(plan: Plan, call: McpCallContext, response: Response): Promise<unknown> {
+    const { name, outputSchema } = plan.descriptor;
+    if (response.status < 200 || response.status >= 300) {
+      return await readResponse(name, response);
+    }
+    const failed = (why: string, error?: unknown) => {
+      if (error === undefined) console.error(`[gemi/mcp] "${name}" ${why}`);
+      else console.error(`[gemi/mcp] "${name}" ${why}`, error);
+      return new McpToolError(`"${name}" failed on the server.`, 500);
+    };
+
+    const type = response.headers.get("Content-Type");
+    const text = await response.text();
+    let data: unknown = null;
+    if (text !== "") {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw failed(
+          `answered ${type ?? "a body with no content-type"} that is not JSON, and its result or output needs JSON.`,
+        );
+      }
+    }
+
+    let value = data;
+    if (plan.result) {
+      try {
+        value = await plan.result(data, call);
+      } catch (error) {
+        throw failed("failed in its result projection:", error);
+      }
+    }
+    if (outputSchema) {
+      const parsed = outputSchema.safeParse(value);
+      if (parsed.ok === false) {
+        throw failed(`answered what its output schema refuses: ${parsed.errors.join(", ")}`);
+      }
+      value = parsed.value;
+    }
+
+    if (value === undefined) return null;
+    const serialised = JSON.stringify(value);
+    if (serialised !== undefined && serialised.length > MAX_RESULT_BODY) {
+      return `${serialised.slice(0, MAX_RESULT_BODY)}… [cut at ${MAX_RESULT_BODY} of ${serialised.length} characters]`;
+    }
+    return value;
   }
 
   /**

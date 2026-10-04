@@ -144,6 +144,12 @@ class Api extends ApiRouter {
       handled.push({ route: "draft", user: null, params: req.params });
       return { id: req.params.id, cookie: req.rawRequest.headers.get("cookie") };
     }).middleware(["owner"]),
+    // Shaped for a UI: whole records, of which a model needs two fields.
+    "/pages": this.get(async () => {
+      handled.push({ route: "pages", user: null });
+      return pages();
+    }),
+    "/text": this.get(async () => new Response("plain words", { headers: { "Content-Type": "text/plain" } })),
     "/boom": this.post(async () => {
       throw new Error("connection refused at db.internal:5432");
     }),
@@ -247,6 +253,49 @@ class OwnedMcp extends Mcp {
     credentialCalls.push(call);
     return credentialsFor(call) as any;
   }
+}
+
+let pageCount = 2;
+const pages = () =>
+  Array.from({ length: pageCount }, (_, i) => ({
+    path: `/p${i}`,
+    title: `Page ${i}`,
+    html: "<main>…</main>".repeat(20),
+    updatedAt: "2026-10-04T00:00:00.000Z",
+  }));
+
+/** What `result` was handed, per call. */
+const projected: { data: unknown; call: unknown }[] = [];
+let projectPages: (data: any) => unknown = (data) =>
+  data.map(({ path, title }: any) => ({ path, title }));
+
+class ProjectingMcp extends McpRouter<CreateRPC<Api>> {
+  routes = {
+    "list-pages": this.fromApiRoute("GET", "/pages", {
+      description: "List the pages",
+      result: (data, call) => {
+        projected.push({ data, call });
+        return projectPages(data) as { path: string; title: string }[];
+      },
+    }),
+    "list-pages-by-output": this.fromApiRoute("GET", "/pages", {
+      description: "List the pages",
+      output: s.array(s.object({ path: s.string(), title: s.string() })),
+    }),
+    "count-pages": this.fromApiRoute("GET", "/pages", {
+      description: "Count the pages",
+      result: (data) => ({ count: data.length, first: data[0]?.path ?? null }),
+      output: s.object({ count: s.number(), first: s.string().nullable() }),
+    }),
+    "whoami-projected": this.fromApiRoute("GET", "/me", {
+      description: "Who the user is",
+      result: () => ({ projected: true }),
+    }),
+    "read-text": this.fromApiRoute("GET", "/text", {
+      description: "Read the text",
+      result: (data) => data,
+    }),
+  };
 }
 
 class AppKernel extends Kernel {
@@ -403,6 +452,9 @@ const alice = { Cookie: "access_token=v2.tok-alice" };
 
 beforeEach(() => {
   handled.length = 0;
+  projected.length = 0;
+  pageCount = 2;
+  projectPages = (data) => data.map(({ path, title }: any) => ({ path, title }));
   credentialCalls.length = 0;
   credentialsFor = ({ req }) => ({ cookies: { owner: req.cookies.get("owner") } });
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -856,6 +908,163 @@ describe("binders given the call (#756)", () => {
   });
 });
 
+describe("projecting what the route answers (#757)", () => {
+  const registry = () => new McpRegistry(new ProjectingMcp(), resolve(ApiRouteDispatcher));
+  const run = (name: string, headers: Record<string, string> = {}) =>
+    runTool(headers, name, {}, { registry: registry() });
+
+  test("result trims a UI-shaped answer before the model sees it", async () => {
+    const { result } = await run("list-pages");
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: "ok",
+        output: [
+          { path: "/p0", title: "Page 0" },
+          { path: "/p1", title: "Page 1" },
+        ],
+      }),
+    );
+    expect(JSON.stringify(result)).not.toContain("<main>");
+  });
+
+  test("result is handed the parsed answer and the call", async () => {
+    await run("list-pages");
+
+    expect(projected).toHaveLength(1);
+    const { data, call } = projected[0] as { data: any[]; call: any };
+    expect(data[0]).toMatchObject({ path: "/p0", html: expect.any(String) });
+    expect(call.tool.name).toBe("list-pages");
+    expect(call.input).toEqual({});
+    // The whole call, as binders get it.
+    expect(call.ctx?.toolCallId).toBe("c1");
+    expect(call.caller.kind).toBe("local");
+  });
+
+  test("output alone drops every field it does not declare", async () => {
+    const { result } = await run("list-pages-by-output");
+
+    expect(result.output).toEqual([
+      { path: "/p0", title: "Page 0" },
+      { path: "/p1", title: "Page 1" },
+    ]);
+  });
+
+  test("output checks what result returns", async () => {
+    const { result } = await run("count-pages");
+
+    expect(result).toMatchObject({ status: "ok", output: { count: 2, first: "/p0" } });
+  });
+
+  test("a large answer is projected first and cut only if it is still too large", async () => {
+    pageCount = 2_000;
+    const { result } = await run("list-pages");
+
+    // ~3MB from the route; a few dozen KB after the projection, so it is whole.
+    expect(Array.isArray(result.output)).toBe(true);
+    expect(result.output).toHaveLength(2_000);
+
+    pageCount = 20_000;
+    projectPages = (data) => data;
+    const { result: big } = await run("list-pages");
+    expect(big.output).toMatch(/… \[cut at 100000 of \d+ characters\]$/);
+  });
+
+  test("a refusal is not projected: the model reads the route's own words", async () => {
+    const { result } = await run("whoami-projected");
+
+    expect(result.status).toBe("error");
+    expect(result.error.message).toMatch(/^"whoami-projected" was refused with 401/);
+  });
+
+  test("a result that throws is a server failure, logged, without its message", async () => {
+    const failure = new Error("cannot read html of undefined");
+    projectPages = () => {
+      throw failure;
+    };
+
+    const { result } = await run("list-pages");
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"list-pages" failed on the server.' },
+    });
+    expect(JSON.stringify(result)).not.toContain("cannot read");
+    expect(console.error).toHaveBeenCalledWith(
+      '[gemi/mcp] "list-pages" failed in its result projection:',
+      failure,
+    );
+  });
+
+  test("an answer output refuses is a server failure, logged", async () => {
+    projectPages = (data) => data.map(({ path }: any) => ({ path, title: 7 }));
+    class Strict extends McpRouter<CreateRPC<Api>> {
+      routes = {
+        "list-pages": this.fromApiRoute("GET", "/pages", {
+          description: "List the pages",
+          result: (data) => projectPages(data) as { path: string; title: string }[],
+          output: s.array(s.object({ path: s.string(), title: s.string() })),
+        }),
+      };
+    }
+
+    const { result } = await runTool({}, "list-pages", {}, {
+      registry: new McpRegistry(new Strict(), resolve(ApiRouteDispatcher)),
+    });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"list-pages" failed on the server.' },
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringMatching(/^\[gemi\/mcp\] "list-pages" answered what its output schema refuses: /),
+    );
+  });
+
+  test("a body that is not JSON cannot be projected, and says so in the log", async () => {
+    const { result } = await run("read-text");
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"read-text" failed on the server.' },
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      '[gemi/mcp] "read-text" answered text/plain that is not JSON, and its result or output needs JSON.',
+    );
+  });
+
+  test("output is the descriptor's outputSchema and the agent tool's", () => {
+    const projecting = registry();
+    const byName = Object.fromEntries(projecting.descriptors().map((tool) => [tool.name, tool]));
+    expect(byName["count-pages"].outputSchema?.toJSONSchema()).toMatchObject({
+      type: "object",
+      properties: { count: { type: "number" } },
+    });
+    expect(byName["list-pages"].outputSchema).toBeUndefined();
+
+    const tools = Object.fromEntries(toAgentTools(projecting).map((tool) => [tool.name, tool]));
+    expect(tools["count-pages"].outputSchema).toBe(byName["count-pages"].outputSchema);
+    expect(tools["list-pages"].outputSchema).toBeUndefined();
+  });
+
+  test("a tool without result or output answers exactly as before", async () => {
+    const { result } = await runTool({}, "list-pages", {}, {
+      registry: new McpRegistry(
+        Object.assign(new McpRouter(), {
+          routes: {
+            "list-pages": (new McpRouter() as any).fromApiRoute("GET", "/pages", {
+              description: "List the pages",
+            }),
+          },
+        }) as any,
+        resolve(ApiRouteDispatcher),
+      ),
+    });
+
+    expect(result.output[0]).toMatchObject({ path: "/p0", html: expect.any(String) });
+  });
+});
+
 // --- the registry on its own -------------------------------------------------
 
 describe("a streamed run", () => {
@@ -1103,6 +1312,18 @@ describe("McpRegistry", () => {
           }),
         }),
       ).toThrow(/"image" is both an input field and a param or file/);
+    });
+
+    test("a result that is not a function", () => {
+      expect(() => build({ me: declare("GET", "/me", { result: { path: true } }) })).toThrow(
+        /result must be a function/,
+      );
+    });
+
+    test("an output that is not a schema", () => {
+      expect(() => build({ me: declare("GET", "/me", { output: { type: "object" } }) })).toThrow(
+        /output must be a schema, built with s/,
+      );
     });
 
     test("an input that is not an object", () => {

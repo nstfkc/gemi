@@ -103,9 +103,12 @@ type Meta<M, K> = {
    *  those are declared in `files`, and a `"input"` one is added back to the
    *  tool's schema as a string (an attachment id) when the list is emitted. */
   input?: Schema<Omit<BodyOf<M, K>, BinaryKeys<BodyOf<M, K>>>>;
-  /** v2. Checked against the route's return type; emitted as `outputSchema`.
-   *  Typed here to show the shape is reachable — not implemented in v1. */
-  output?: Schema<Awaited<DataOf<M, K>>>;
+  /** Reshapes the route's 2xx JSON before the model sees it (#757). */
+  result?: (data: DataOf<M, K>, call: McpCallContext) => unknown;
+  /** The shape of what the tool answers — `result`'s return, else the
+   *  route's. Parsed, so undeclared fields are dropped; the descriptor's and
+   *  the `AgentTool`'s `outputSchema` (#757). */
+  output?: Schema<…>;
   /** Per-param: bound from the request, or supplied by the model. */
   params?: {
     [P in keyof ParseParams<K>]: ((req: HttpRequest, call: McpCallContext) => string) | "input";
@@ -247,6 +250,40 @@ which would push `ai/Schema.ts` outside the strict-structured-output subset it
 was written for) and adapter-side URL fetching (an SSRF surface). Neither is
 needed while every caller is local; both are v2 candidates once a remote client
 has bytes of its own.
+
+### Result projection and `output` (#757)
+
+Routes answer what a UI needs: whole records, relations, rendering fields,
+timestamps. A model calling the same route pays for all of it in context on
+every call, and a list route can pass `MAX_RESULT_BODY` and be cut. Two
+optional meta fields trim it without touching the route:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: bindSite },
+  result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+  output: s.array(s.object({ path: s.string(), title: s.string() })),
+}),
+```
+
+- `result(data, call)` gets the route's parsed 2xx JSON, typed as
+  the route's answer. Only successes go through it: a 4xx still reaches the
+  model as the route wrote it, so validation errors stay readable.
+- `output` is a schema of what the tool answers. With `result`, `result`'s
+  return is checked against it at compile time (through its contextual
+  type); without, it must describe the route's answer, and may name fewer
+  fields than the route has. At run time the answer is parsed with it, which
+  drops undeclared fields, so `output` alone is a projection too.
+- Both run on the whole body, and the 100k cut applies to the projected
+  value, after them.
+- Everything that goes wrong here is the app's fault, not the model's: a body
+  that is not JSON, a `result` that throws, an answer `output` refuses. Each
+  is logged, and the model reads `"… failed on the server."`.
+- `output` is carried on the descriptor as `outputSchema`, and on the
+  projected `AgentTool`, where it types the result for the client. v2's
+  `tools/list` emits it; MCP wants an object at the root there, so a
+  non-object output will need wrapping when v2 lands.
 
 ### Two callers, one registry
 
@@ -440,7 +477,7 @@ Settled:
 | Local caller (in-process agent) | yes                            | —                         |
 | Remote caller over HTTP         | prohibited — not mounted       | bearer token              |
 | Transport                       | none shipped                   | HTTP only — no stdio      |
-| `output` / `outputSchema`       | out of scope                   | candidate                 |
+| `output` / `outputSchema`       | yes, with `result` (#757)      | emitted in `tools/list`   |
 | `fromResource` expander         | not needed                     | not needed                |
 | File arguments                  | by scoped attachment reference | + base64 / URL for remote |
 

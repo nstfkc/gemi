@@ -1,5 +1,28 @@
 # Unreleased
 
+## `gemi/http`: MCP tools can trim what a route answers, `result` and `output` (#757)
+
+`fromApiRoute`'s meta has two new optional fields:
+
+```ts
+"list-pages": this.fromApiRoute("GET", "/sites/:siteId/pages", {
+  description: "List the pages of the site",
+  params: { siteId: bindSite },
+  result: (pages) => pages.map(({ path, title }) => ({ path, title })),
+  output: s.array(s.object({ path: s.string(), title: s.string() })),
+}),
+```
+
+- `result(data, call)` reshapes the route's 2xx JSON before the model sees it. `data` is typed as the route's answer, and `call` is the same `McpCallContext` binders get.
+- `output` is a schema of what the tool answers (what `result` returns, or what the route answers when there is no `result`). The answer is parsed with it, so fields it does not declare are dropped. It is the descriptor's new `outputSchema` and is passed to the projected `AgentTool`.
+
+No change is needed to upgrade. A tool with neither field answers exactly as before. Things to know:
+
+- A 4xx is not projected. The model still reads the route's refusal as it was written.
+- The 100 000-character cut now applies after the projection, so a large answer that the projection makes small reaches the model whole.
+- A body that is not JSON, a `result` that throws, or an answer that `output` refuses is a server failure: logged, and the model reads `"… failed on the server."`.
+- `McpToolDescriptor` has a new optional field, `outputSchema`.
+
 ## `gemi/http`: MCP binders get the whole call (#756)
 
 A `params` binder in `fromApiRoute` is now called as `(req, call)`, and a `files` binder as `(ctx, call)`. `call` is an `McpCallContext`: `{ caller, req, tool, input, ctx? }`, where `ctx` is the run's `ToolContext` (absent when `McpRegistry.execute` is called without one). A param can now be bound from what the server handed the run:
