@@ -299,6 +299,50 @@ type McpCaller =
 v1 implements only `local`. v2 implements `remote` by writing one resolver,
 touching neither discovery, nor schema generation, nor the dispatch adapter.
 
+### The app's own credentials (#755)
+
+gemi's access token is the only identity `dispatchAs` copies from the
+initiator. An app whose routes are guarded by something else — a cookie that
+names a visitor who owns a draft before signing up, a short-lived grant header
+the app signs per run — needs that credential on the synthetic request too, or
+every such route refuses the tool call with a 401/403 the same user would not
+get directly.
+
+The app supplies it, value by value, from its router:
+
+```ts
+export default class extends McpRouter {
+  routes = { /* ... */ };
+
+  credentials({ req, tool, input, ctx }: McpCallContext) {
+    return {
+      cookies: { owner: req.cookies.get("owner") },
+      headers: { "x-run-grant": signGrant({ run: ctx?.runId, tool: tool.name }) },
+    };
+  }
+}
+```
+
+- It is asked once per call, after the arguments are parsed and the path is
+  built, and its answer is passed to `dispatchAs(..., { credentials })`. An app
+  calling `dispatchAs` itself passes the same option.
+- Nothing of the initiator's is forwarded on the app's behalf: what the hook
+  does not return is not sent. `null`/`undefined` values are skipped, so
+  `req.cookies.get(...)` can be returned as it is.
+- It adds credentials, never replaces the identity. `access_token` (cookie or
+  header), `Cookie`, `Host`, `User-Agent`, the body's framing headers,
+  `Forwarded` and `x-forwarded-*` are refused with a throw, and so is a cookie
+  name or value a `Cookie` header cannot carry. A refusal, or a throw from the
+  hook, is a server failure: logged for the app, `"… failed on the server."`
+  to the model, and nothing is dispatched.
+- The invariant still holds. The route's middleware decides what the
+  credential is worth, exactly as for a direct request that carried it; the
+  hook can only make a tool call as capable as that request.
+
+The hook receives an `McpCallContext` — `{ caller, req, tool, input, ctx? }` —
+rather than the request alone, so a grant can be scoped to the run and the
+tool, and so v2's remote caller fits the same signature.
+
 Concretely, five things v1 must **not** do, because each would have to be
 unpicked for v2:
 
@@ -353,8 +397,9 @@ both look like reasonable shortcuts:
    that exposes a route guarded by `auth` and calls it as an anonymous local
    caller expecting a rejection.
 2. **Synthesising credentials.** The synthetic request copies the initiating
-   request's credentials and nothing more. It never mints a session, and never
-   carries a service identity.
+   request's access token and nothing more, plus whatever the app's
+   `credentials` hook returns (#755). It never mints a session, never carries
+   a service identity, and the hook cannot replace the access token.
 
 Because of the invariant, exposing a route through `McpRouter` grants no
 authority by itself. What it grants is _reachability by a model_ — which is a

@@ -10,7 +10,7 @@ import type {
   McpRouteDeclaration,
   McpRouter,
 } from "../../http/McpRouter";
-import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
+import type { ApiRouteDispatcher, DispatchCredentials } from "../router/ApiRouteDispatcher";
 
 /**
  * Who a tool call runs as. Always an argument to the registry, never read from
@@ -40,6 +40,29 @@ import type { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
 export type McpCaller =
   | { kind: "local"; req: HttpRequest<any, any> }
   | { kind: "remote"; token: string };
+
+/**
+ * One tool call, as the app's hooks see it: who is calling, the request their
+ * identity comes from, which tool, its parsed arguments, and — for a call an
+ * agent run makes — the run's tool context.
+ *
+ * `req` is `caller.req`, repeated so a hook that only wants the request does
+ * not have to narrow the caller. `ctx` is absent when `McpRegistry.execute` is
+ * called without one (a test, a script dispatching a tool directly).
+ */
+export type McpCallContext = {
+  caller: Extract<McpCaller, { kind: "local" }>;
+  req: HttpRequest<any, any>;
+  tool: McpToolDescriptor;
+  input: Record<string, unknown>;
+  ctx?: ToolContext;
+};
+
+/**
+ * What `McpRouter.credentials` answers for a call: the app's own headers and
+ * cookies, sent beside gemi's access token. See `DispatchCredentials`.
+ */
+export type McpCredentials = DispatchCredentials;
 
 /**
  * MCP's tool annotations, from the verb. They drive confirmation prompts in
@@ -167,7 +190,7 @@ export class McpRegistry {
   private readonly plans = new Map<string, Plan>();
 
   constructor(
-    router: McpRouter<any>,
+    private readonly router: McpRouter<any>,
     private readonly dispatcher: Pick<
       ApiRouteDispatcher,
       "flatRoutes" | "dispatchAs" | "getRouteHandlerAndParams"
@@ -205,6 +228,11 @@ export class McpRegistry {
 
   /**
    * Calls the tool `name` as `caller`, and answers the route's JSON.
+   *
+   * Before dispatching, the router's `credentials` hook, when it has one, is
+   * asked for the app's own headers and cookies for this call; they ride
+   * beside the access token (see `McpRouter.credentials`). A throw from it is a
+   * server failure, logged for the app, like a binder's.
    *
    * `ctx` is the tool context of the agent call, and only files need it:
    * `"input"` files resolve through `ctx.attachments`, the handle already
@@ -268,14 +296,19 @@ export class McpRegistry {
       body = json;
     }
 
+    const call: McpCallContext = { caller, req: caller.req, tool: descriptor, input, ctx };
+    const credentials = this.router.credentials
+      ? await this.bind(plan, "the credentials", () => this.router.credentials!(call))
+      : undefined;
+
     let response: Response;
     try {
-      response = await this.dispatcher.dispatchAs(
-        caller.req,
-        descriptor.method,
-        query ? `${path}?${query}` : path,
-        body,
-      );
+      const target = query ? `${path}?${query}` : path;
+      response = credentials
+        ? await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body, {
+            credentials,
+          })
+        : await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body);
     } catch (error) {
       // What a client would get as a 500. A handler's throw is logged by the
       // dispatcher too, but dispatchAs's own refusal of the path is not.

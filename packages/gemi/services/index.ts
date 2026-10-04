@@ -56,7 +56,11 @@ export type {
 
 // Router
 export { RouteServiceProvider } from "./router/RouteServiceProvider";
-export { ApiRouteDispatcher } from "./router/ApiRouteDispatcher";
+export {
+  ApiRouteDispatcher,
+  type DispatchAsOptions,
+  type DispatchCredentials,
+} from "./router/ApiRouteDispatcher";
 export { ViewRouteDispatcher } from "./router/ViewRouteDispatcher";
 // What `onStreamComplete` receives when a response body closes.
 export type {
@@ -70,6 +74,8 @@ export {
   McpRegistry,
   McpToolError,
   type McpCaller,
+  type McpCallContext,
+  type McpCredentials,
   type McpToolAnnotations,
   type McpToolDescriptor,
   type McpToolFilter,

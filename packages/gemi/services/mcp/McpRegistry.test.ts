@@ -16,6 +16,8 @@ import { app as resolve } from "../../foundation/app";
 import { ApiRouter, type CreateRPC } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
+import { RequestBreakerError } from "../../http/Error";
+import { Middleware } from "../../http/Middleware";
 import { HttpRequest } from "../../http/HttpRequest";
 import { McpRouter } from "../../http/McpRouter";
 import { ViewRouter } from "../../http/ViewRouter";
@@ -25,7 +27,7 @@ import type { ReadResult } from "../file-storage/drivers/types";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
 import { createFlatApiRoutes } from "../router/createFlatApiRoutes";
-import { McpRegistry, McpToolError, type McpCaller } from "./McpRegistry";
+import { McpRegistry, McpToolError, type McpCallContext, type McpCaller } from "./McpRegistry";
 import { toAgentTools } from "./toAgentTools";
 
 /**
@@ -67,6 +69,15 @@ const handled: { route: string; user: number | null; body?: unknown; params?: un
 
 function userOf(req: HttpRequest<any, any>) {
   return req.ctx().user?.id ?? null;
+}
+
+/** An app's own credential: a visitor who owns a draft before signing up. */
+class OwnerMiddleware extends Middleware {
+  run() {
+    if (this.req.cookies.get("owner") !== "o1") {
+      throw new RequestBreakerError("Not yours", { status: 403 });
+    }
+  }
 }
 
 class ProductRequest extends HttpRequest<
@@ -128,6 +139,11 @@ class Api extends ApiRouter {
       return { archived: "everything" };
     }),
     "/products/:id": this.put(ProductController, "rename").middleware(["auth"]),
+    "/drafts/:id": this.get(async () => {
+      const req = new HttpRequest<any, any>();
+      handled.push({ route: "draft", user: null, params: req.params });
+      return { id: req.params.id, cookie: req.rawRequest.headers.get("cookie") };
+    }).middleware(["owner"]),
     "/boom": this.post(async () => {
       throw new Error("connection refused at db.internal:5432");
     }),
@@ -212,13 +228,31 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       description: "Refund an order",
       params: { id: "input" },
     }),
+    "read-draft": this.fromApiRoute("GET", "/drafts/:id", {
+      description: "Read a draft",
+      params: { id: "input" },
+    }),
   };
+}
+
+/** What `OwnedMcp.credentials` was asked with, per call. */
+const credentialCalls: McpCallContext[] = [];
+let credentialsFor: (call: McpCallContext) => unknown = ({ req }) => ({
+  cookies: { owner: req.cookies.get("owner") },
+});
+
+/** The same tools, with the app forwarding its own cookie. */
+class OwnedMcp extends Mcp {
+  credentials(call: McpCallContext) {
+    credentialCalls.push(call);
+    return credentialsFor(call) as any;
+  }
 }
 
 class AppKernel extends Kernel {
   protected providers = [StubAuthProvider];
   config = {
-    middleware: { aliases: { auth: AuthenticationMiddleware } },
+    middleware: { aliases: { auth: AuthenticationMiddleware, owner: OwnerMiddleware } },
     route: {
       api: { rootRouter: Api },
       view: {
@@ -284,13 +318,13 @@ async function runTool(
   headers: Record<string, string>,
   name: string,
   args: unknown,
-  options: { attachments?: ScopedAttachments; turn?: ClientTurn } = {},
+  options: { attachments?: ScopedAttachments; turn?: ClientTurn; registry?: McpRegistry } = {},
 ) {
   const provider = fakeProvider([toolCall("c1", name, args), finish()], [finish()]);
   const agent = Agent.create({
     name: "shop",
     provider,
-    tools: toAgentTools(resolve(McpRegistry)),
+    tools: toAgentTools(options.registry ?? resolve(McpRegistry)),
   });
   let messages: AgentMessage[] = [];
   inside = async () => {
@@ -363,6 +397,8 @@ const alice = { Cookie: "access_token=v2.tok-alice" };
 
 beforeEach(() => {
   handled.length = 0;
+  credentialCalls.length = 0;
+  credentialsFor = ({ req }) => ({ cookies: { owner: req.cookies.get("owner") } });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -459,6 +495,7 @@ describe("an agent calling the app's routes", () => {
       "import-layout",
       "list-orders",
       "my-orders",
+      "read-draft",
       "refund-order",
       "rename-product",
       "whoami",
@@ -623,6 +660,79 @@ describe("an agent calling the app's routes", () => {
   });
 });
 
+describe("the app's own credentials", () => {
+  const owned = () => new McpRegistry(new OwnedMcp(), resolve(ApiRouteDispatcher));
+  const visitor = { Cookie: "owner=o1; theme=dark" };
+
+  test("without a credentials hook an app cookie is not forwarded, and the route refuses", async () => {
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" });
+
+    expect(result.status).toBe("error");
+    expect(result.error.message).toMatch(/^"read-draft" was refused with 403/);
+    expect(handled).toEqual([]);
+  });
+
+  test("the hook's cookie reaches the route's middleware, and nothing else does", async () => {
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(result).toMatchObject({ status: "ok", output: { id: "d1", cookie: "owner=o1" } });
+    expect(handled).toEqual([{ route: "draft", user: null, params: { id: "d1" } }]);
+  });
+
+  test("the hook is asked per call, with the tool, its input and the run's context", async () => {
+    await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(credentialCalls).toHaveLength(1);
+    const [call] = credentialCalls;
+    expect(call.caller.kind).toBe("local");
+    expect(call.req).toBe(call.caller.req);
+    expect(call.req.cookies.get("owner")).toBe("o1");
+    expect(call.tool.name).toBe("read-draft");
+    expect(call.input).toEqual({ id: "d1" });
+    expect(call.ctx?.toolCallId).toBe("c1");
+  });
+
+  test("a hook that throws is a server failure, logged, and nothing is dispatched", async () => {
+    const failure = new Error("signing key missing");
+    credentialsFor = () => {
+      throw failure;
+    };
+
+    const { result } = await runTool(visitor, "read-draft", { id: "d1" }, { registry: owned() });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"read-draft" failed on the server.' },
+    });
+    expect(JSON.stringify(result)).not.toContain("signing key");
+    expect(console.error).toHaveBeenCalledWith(
+      '[gemi/mcp] Binding the credentials of "read-draft" failed:',
+      failure,
+    );
+    expect(handled).toEqual([]);
+  });
+
+  test("a hook cannot swap the user: an access_token of its own fails the call", async () => {
+    credentialsFor = () => ({ cookies: { access_token: "v2.tok-bob" } });
+
+    const { result } = await runTool(alice, "whoami", {}, { registry: owned() });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"whoami" failed on the server.' },
+    });
+    expect(handled).toEqual([]);
+  });
+
+  test("a hook answering nothing dispatches with the access token alone", async () => {
+    credentialsFor = () => undefined;
+
+    const { result } = await runTool(alice, "whoami", {}, { registry: owned() });
+
+    expect(result).toMatchObject({ status: "ok", output: { id: 1 } });
+  });
+});
+
 // --- the registry on its own -------------------------------------------------
 
 describe("a streamed run", () => {
@@ -704,7 +814,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(10);
+    expect(registry().list(caller)).toHaveLength(11);
   });
 
   test("a remote caller is typed and refused", async () => {

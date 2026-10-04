@@ -1,6 +1,7 @@
 import type { ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
+import type { McpCallContext, McpCredentials } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -260,6 +261,33 @@ export class McpRouter<R = McpRoutes> {
   static __brand = "McpRouter";
 
   routes: Record<string, McpRouteDeclaration> = {};
+
+  /**
+   * The app's own credentials for one tool call, sent beside the access token
+   * of the user who started the run. Optional; without it a tool call carries
+   * gemi's access token and nothing else.
+   *
+   * For routes whose middleware reads something gemi does not know about: a
+   * cookie naming an anonymous owner, or a header the app signs per run so a
+   * route can check what this run may touch.
+   *
+   * ```ts
+   * credentials({ req, ctx }: McpCallContext) {
+   *   return {
+   *     cookies: { owner: req.cookies.get("owner") },
+   *     headers: { "x-run-grant": signGrant(ctx?.runId) },
+   *   };
+   * }
+   * ```
+   *
+   * Nothing of the initiator's is forwarded unless it is returned here, value
+   * by value. `access_token`, `Cookie`, `Host`, `User-Agent`, the body's
+   * framing headers and `x-forwarded-*` cannot be set: the identity stays the
+   * initiator's, and the call fails on the server, logged, if one is returned.
+   * The route's middleware still decides what a credential is worth, so this
+   * can reach nothing a direct request carrying the same values could not.
+   */
+  credentials?(call: McpCallContext): McpCredentials | undefined | Promise<McpCredentials | undefined>;
 
   fromApiRoute<
     M extends McpMethod,
