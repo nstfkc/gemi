@@ -19,6 +19,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Subdomains & Custom Domains](https://nstfkc.github.io/gemi/domains.md): route.domains — host groups with their own routers, `:param` tenant subdomains, custom domains through a resolver, req.domain and useDomain, cross-host links, sharing the session cookie, and the on-demand TLS ask endpoint.
 - [Controllers](https://nstfkc.github.io/gemi/controllers.md): Controller/ResourceController, the HttpRequest API, request validation, ValidationError.
 - [Middleware](https://nstfkc.github.io/gemi/middleware.md): the string DSL, built-in middleware, negation with -name, and custom middleware.
+- [Outbound HTTP](https://nstfkc.github.io/gemi/outbound-http.md): safeFetch for URLs that users give — only http(s) to public addresses, connecting to the checked address, each redirect re-checked, timeouts, size and content-type limits, allow/deny lists, and typed errors.
 
 ## Views & client
 

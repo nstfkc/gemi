@@ -83,3 +83,23 @@ export {
   InsufficientPermissionsError,
   RangeNotSatisfiableError,
 } from "./errors";
+
+export {
+  safeFetch,
+  SafeResponse,
+  classifyAddress,
+  SafeFetchError,
+  InvalidUrlError,
+  BlockedHostError,
+  BlockedAddressError,
+  DnsError,
+  TimeoutError,
+  TooLargeError,
+  ContentTypeError,
+  TooManyRedirectsError,
+  NetworkError,
+  type SafeFetchOptions,
+  type AddressRange,
+  type Classification,
+  type InvalidUrlReason,
+} from "./safeFetch/index";

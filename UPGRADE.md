@@ -1,5 +1,11 @@
 # Unreleased
 
+## `gemi/http`: `safeFetch` for URLs that users give (#754)
+
+New, nothing to change. `safeFetch(url, options)` is `fetch` for server code that fetches a URL a user typed: it only reaches http(s) on public addresses, connects to the address it checked (so DNS rebinding can't redirect it), re-checks every redirect, and has timeouts, a size cap, a content-type allowlist, `allow`/`deny` lists and an `allowPrivate` escape hatch for tests. Failures are typed (`SafeFetchError` and its subclasses, with a `code`). See [Outbound HTTP](docs/outbound-http.md).
+
+If your app fetches user-given URLs with `fetch` today, switch those calls; a test that fetches a local server needs `allowPrivate` and `ports: "any"`.
+
 ## `gemi/ai`: `useChat` can pick up, and stop, a run another client started on its thread (#778)
 
 `useChat` only asked `/attach` on mount. A chat that was already open on a thread learned nothing of a run another tab or device started on it later, and `stop()` sent nothing when this chat had no run of its own, so it could not stop that run either. Apps worked around it by re-reading the thread and guessing "running elsewhere" from an unfinished last message.
