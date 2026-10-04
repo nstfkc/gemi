@@ -1,4 +1,6 @@
-# Testing Views
+# Testing
+
+Two kinds of test, two entrypoints: a **view** test mounts a component with `<Page>` from `gemi/testing`, and a **route** test boots the app and sends it a request, with `gemiRequestPlugin()` from `gemi/vitest` in the vitest config. Views come first; routes are [further down](#testing-routes).
 
 A view is a plain React component, so any renderer can mount one — but what it renders comes from inputs the framework normally supplies: route params, the current locale and its dictionaries, data `Query.prefetch` put on the page, the signed-in user. Without those a component test can only assert the empty state.
 
@@ -205,13 +207,114 @@ The components need a DOM. Under vitest that is a per-file pragma (or `environme
 
 Under `bun test`, preload `happy-dom` — no gemi-specific configuration is required either way. React 19 lifecycles, `@testing-library/user-event` and MSW's fetch interception all work against `gemi/client` components as they do against any other React tree.
 
-> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to server tests.
+> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to [route tests](#testing-routes).
+
+## Testing routes
+
+A route test needs no server: build the app with a test `Kernel` and call `App.fetch` with a `Request`. That runs everything a real request does — global and route middleware, the handler or controller method, validation, the response — in the test process.
+
+```ts
+// app/http/routes/api.test.ts
+import { createElement } from "react";
+import { App } from "gemi/app";
+import { createRoot } from "gemi/client";
+import { ViewRouter } from "gemi/http";
+import { Kernel } from "gemi/kernel";
+import { expect, test } from "vitest";
+
+import middleware from "@/app/config/middleware";
+import RootApi from "@/app/http/routes/api";
+
+class TestKernel extends Kernel {
+  config = {
+    middleware,
+    route: {
+      api: { rootRouter: RootApi },
+      view: {
+        root: createRoot(() => createElement("div")),
+        rootRouter: class extends ViewRouter {},
+      },
+    },
+  };
+}
+
+const app = new App({ kernel: TestKernel });
+
+test("lists a site's assets", async () => {
+  const res = await app.fetch(new Request("http://app.test/api/sites/7/assets"));
+  expect(res.status).toBe(200);
+});
+```
+
+### Install the request plugin
+
+gemi calls a route handler and a controller method with **no arguments**. A handler written as
+
+```ts
+async index(req: HttpRequest<{}, { siteId: string }>) { … }
+```
+
+gets its request because the build rewrites the parameter to `req = new HttpRequest()`, which reads the current request from the request context. `gemi dev` and `gemi build` do that through Bun. Vitest loads modules through Vite instead (also under `bun --bun vitest`), so without the rewrite a dispatched route sees `req === undefined` and answers 500 with `undefined is not an object (evaluating 'req.params')`.
+
+`gemi/vitest` exports the same rewrite as a Vite plugin. Add it to the app's vitest config:
+
+```ts
+// vitest.config.ts
+import { gemiRequestPlugin } from "gemi/vitest";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [gemiRequestPlugin()],
+  // …
+});
+```
+
+It applies to the same files the build rewrites: `.ts` and `.tsx` under `http/controllers/` and `http/routes/`. Everything else, including `node_modules`, is left alone. A handler that declares its request as a default value (`req = new HttpRequest()`) works with or without it.
+
+Run the suite under Bun, `bun --bun vitest`, since gemi's server modules import from `bun`.
+
+### MCP tools
+
+An `McpRouter` tool is a route, so the same setup covers it: the model's call goes through the route's middleware and handler, and `result` projects the answer. `McpRegistry.execute` takes the request the call is made as, so make the call from inside one. A route the test adds to the app is the simplest way:
+
+```ts
+import { app as resolve } from "gemi/foundation";
+import { ApiRouter, HttpRequest } from "gemi/http";
+import { McpRegistry } from "gemi/services";
+
+import SiteMcpRouter from "@/app/http/routes/mcp";
+
+let inside: () => Promise<unknown> = async () => ({});
+
+class TestApi extends ApiRouter {
+  routes = {
+    ...new RootApi().routes,
+    "/run": this.post(async () => inside()),
+  };
+}
+
+// In the Kernel: `api: { rootRouter: TestApi }` and `mcp: { router: SiteMcpRouter }`.
+
+test("list-assets answers the projected result", async () => {
+  let output: unknown;
+  inside = async () => {
+    const req = new HttpRequest<any, any>();
+    output = await resolve(McpRegistry).execute({ kind: "local", req }, "list-assets", {});
+    return {};
+  };
+  await app.fetch(new Request("http://app.test/api/run", { method: "POST" }));
+  expect(output).toEqual({ count: 1 });
+});
+```
+
+Models and other services are mocked the usual way (`vi.mock`), or bound in a test service provider on the `Kernel`.
 
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
 - [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
 - [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
+- [Routing](./routing.md) and [Controllers](./controllers.md) — the routes and the `HttpRequest` a route test dispatches to.
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.

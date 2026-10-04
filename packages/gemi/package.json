@@ -44,7 +44,8 @@
     "./queue/work": "./services/queue/work.ts",
     "./ide/typescript-plugin": "./ide/typescript-plugin/index.ts",
     "./bun/preload": "./bun/preload.ts",
-    "./bun/plugin": "./bun/plugin.ts"
+    "./bun/plugin": "./bun/plugin.ts",
+    "./vitest": "./vitest/index.ts"
   },
   "scripts": {
     "lint": "oxlint",
