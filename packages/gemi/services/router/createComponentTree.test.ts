@@ -58,7 +58,67 @@ class DeeplyNestedRouter extends ViewRouter {
   };
 }
 
+// #788: the kyte shape — a legacy path that redirects through the same view as
+// its replacement, which takes params.
+class SharedViewRouter extends ViewRouter {
+  routes = {
+    "/": this.view("Home"),
+    "/pages/:pageId/preview": this.view("SharedPreview", async () => {
+      throw new Error("redirects");
+    }),
+    "/previews/:token": this.view("SharedPreview"),
+  };
+}
+
+class SharedLayoutRouter extends ViewRouter {
+  routes = {
+    "/a": this.layout("Layout", {
+      "/": this.view("A"),
+      "/shared": this.view("Shared"),
+    }),
+    "/b": this.layout("Layout", {
+      "/": this.view("B"),
+      "/shared": this.view("Shared"),
+    }),
+  };
+}
+
+class GroupA extends ViewRouter {
+  routes = { "/x": this.view("Shared") };
+}
+
+class GroupB extends ViewRouter {
+  routes = { "/y": this.view("Shared"), "/z": this.view("Z") };
+}
+
 describe("createComponentTree()", () => {
+  test("a view used by two routes appears once (#788)", () => {
+    expect(createComponentTree({ "/": SharedViewRouter })).toEqual([
+      ["Home", []],
+      ["SharedPreview", []],
+    ]);
+  });
+
+  test("a layout used under two prefixes appears once, with merged children", () => {
+    expect(createComponentTree({ "/": SharedLayoutRouter })).toEqual([
+      [
+        "Layout",
+        [
+          ["A", []],
+          ["Shared", []],
+          ["B", []],
+        ],
+      ],
+    ]);
+  });
+
+  test("a view shared across group routers appears once", () => {
+    expect(createComponentTree({ "/a": GroupA, "/b": GroupB })).toEqual([
+      ["Shared", []],
+      ["Z", []],
+    ]);
+  });
+
   test("FlatRouter", () => {
     const result = createComponentTree({ "/": FlatRouter });
     expect(result).toEqual([
