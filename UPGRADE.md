@@ -1,3 +1,17 @@
+# Unreleased
+
+## `gemi dev` honours `SERVER_IDLE_TIMEOUT` (#787)
+
+`gemi dev` always ran at Bun's 10-second idle timeout, so a long-poll that worked under `gemi start` with `SERVER_IDLE_TIMEOUT=60` was cut after 10 seconds in development. Both servers now read the variable the same way. See [Idle connections](docs/configuration.md#idle-connections-server_idle_timeout).
+
+Behaviour changes to know:
+
+- **`gemi dev` uses `SERVER_IDLE_TIMEOUT`** when it is set. Unset, nothing changes (10 seconds).
+- **A blank `SERVER_IDLE_TIMEOUT=` means the default (10)** in both servers. `gemi start` used to read it as `0`, which disables the timeout; write `0` for that.
+- **A value that isn't a whole number from 0 to 255 fails the boot** with a message naming the variable. Before, Bun refused non-integers and values above 255 with its own message, and accepted negatives.
+
+An app that worked around the dev limit (kyte's site change feed falls back to a 10-second wait in development) can use the same wait in both.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)

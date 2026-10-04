@@ -18,6 +18,7 @@ import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
+import { serverIdleTimeout } from "./idleTimeout";
 import { applyForwardedTrust, parseTrustProxy } from "./forwardedFor";
 import { readStaticAssetsRecord } from "../vite/precompressAssets";
 import type { StaticFileOptions } from "./staticFile";
@@ -322,7 +323,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // untouched.
       return compressionEnabled ? compressResponse(req, res) : res;
     },
-    idleTimeout: Number(process.env.SERVER_IDLE_TIMEOUT ?? 10),
+    idleTimeout: serverIdleTimeout(),
     port: process.env.PORT || 5173,
   });
 
