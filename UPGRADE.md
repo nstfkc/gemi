@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
 
