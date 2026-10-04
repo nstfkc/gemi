@@ -7721,6 +7721,41 @@ still compiles to one statement and opens nothing, and inside a transaction you 
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
 you need it to make *several separate calls* whole.
 
+### Running something after the commit
+
+`afterCommit(fn)` from `gemi/orm` runs `fn` once the surrounding transaction commits, and runs it
+right away when no transaction is open. It never runs when the transaction rolls back:
+
+```ts
+import { afterCommit } from "gemi/orm"
+
+async function recordChange(siteId: number) {
+  await SiteChange.create({ data: { siteId } })
+  afterCommit(() => signals.wake(siteId))   // only once the row is durable
+}
+
+await Website.transaction(async () => {
+  await recordChange(site.id)     // queued
+  await Asset.create({ … })       // if this throws, `wake` never runs
+})                                // committed: `wake` runs here, outside the transaction
+
+await recordChange(site.id)       // no transaction open: `wake` runs immediately
+```
+
+- **Nesting.** Inside a nested transaction (a savepoint) the callback waits for the **outermost**
+  commit, since a savepoint makes nothing durable. If the savepoint rolls back, its callbacks are
+  dropped, while the ones registered elsewhere in the transaction still run.
+- **Order and timing.** Callbacks run one at a time, in registration order, after the commit and
+  outside the transaction: a query in one runs on its own connection, and a
+  `Model.transaction` in one opens a new transaction. The outer `Model.transaction(...)` call
+  resolves after they have finished.
+- **Errors.** A callback that throws is logged to stderr; the next one still runs and the commit
+  stands. The promise `afterCommit` returns never rejects, so you don't need to await it. Await it
+  only to wait for an immediate callback (no transaction open) to finish.
+
+It uses the same mechanism as an event's [`static afterCommit`](./events.md#deferring-until-the-transaction-commits).
+Use an event when the side effect has listeners of its own; use `afterCommit` for a single callback.
+
 ### Locking rows
 
 A read inside a transaction can lock the rows it returns until the transaction ends. `findUnique`,
