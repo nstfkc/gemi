@@ -106,6 +106,9 @@ export type {
   CreateAgentParams,
   NestedRunResult,
   OutputOf,
+  PrepareStep,
+  PrepareStepContext,
+  PrepareStepResult,
   ReasoningEffort,
   RunAgentParams,
   SkillDefinition,
@@ -118,6 +121,21 @@ export type {
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";
+
+// --- the context window (#473) --------------------------------------------
+//
+// Turn boundaries and the built-in window policy, for `contextWindow` and for
+// a `prepareStep` that bounds the request itself.
+export {
+  DEFAULT_CONTEXT_WINDOW_NOTE,
+  DEFAULT_CONTEXT_WINDOW_STEP,
+  injectedMessageIds,
+  messageSize,
+  splitTurns,
+  turnStarts,
+  windowMessages,
+} from "./contextWindow";
+export type { ContextWindowOptions, ContextWindowResult } from "./contextWindow";
 
 // --- what a client is told about a failure (#446) --------------------------
 //
