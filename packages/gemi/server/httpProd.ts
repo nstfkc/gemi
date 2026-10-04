@@ -137,8 +137,8 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
-  // The island runtime and island modules a static view's document loads;
-  // see `injectIslands`.
+  // The island entries (`<module>?gemi-island`) a static view's document
+  // loads; see `injectIslands`.
   const resolveIsland = createIslandResolver(manifest, assetBase);
 
   // A static view's CSS comes from the whole import closure of its views (and
