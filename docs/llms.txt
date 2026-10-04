@@ -25,6 +25,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 - [Views & Layouts](https://nstfkc.github.io/gemi/views-and-layouts.md): view components, server data binding, nested layouts, Head, breadcrumbs.
 - [Static Views & Islands](https://nstfkc.github.io/gemi/static-views-and-islands.md): `.static()` views that ship no React, `island()` client modules, their own layout and CSS, the CSP hash.
+- [Bundle Stats](https://nstfkc.github.io/gemi/bundle-stats.md): `gemi stats` and `gemi build --stats`, initial JS per route (raw/gzip/brotli), budgets in `gemi.config.ts`, JSON and Markdown output for CI.
 - [Data Fetching](https://nstfkc.github.io/gemi/data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, the RPC type layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - [Forms](https://nstfkc.github.io/gemi/forms.md): the Form component, surfacing validation errors, form-status hooks.
 - [Navigation](https://nstfkc.github.io/gemi/navigation.md): Link, useNavigate, useParams, useSearchParams, and the Redirect component vs facade.
