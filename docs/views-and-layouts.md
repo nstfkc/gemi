@@ -6,7 +6,9 @@ A **view** is a plain React component that gemi renders for a URL. Views live un
 other layouts) to share chrome like navigation, sidebars, and the HTML shell.
 
 Views render on the server first (SSR) and then hydrate on the client, so a view is
-just React — no special base class, no framework component to extend.
+just React — no special base class, no framework component to extend. A content page
+that needs no React in the browser can be declared `.static()` instead; see
+[Static Views & Islands](./static-views-and-islands.md).
 
 ## Registering a view
 
@@ -318,3 +320,4 @@ when its handler supplies one.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, redirects.
 - [Controllers](./controllers.md) — binding controller methods to routes.
 - [i18n](./i18n.md) — locales and translation.
+- [Static Views & Islands](./static-views-and-islands.md) — views sent without React, and islands for their interactive parts.

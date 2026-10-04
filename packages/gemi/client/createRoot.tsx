@@ -20,12 +20,14 @@ export function createRoot(
 ) {
   // `serverQueries`, `viewModules` and `dictionarySink` exist only when the view
   // router renders this on the server — the browser mounts with all three absent.
+  // So does `rootLayout`: a static view's own document layout
+  // (`.static({ layout })`), which replaces the app's for that render only.
   return (props: any) => (
     <ServerDataProvider value={props.data}>
       <ServerQueryContext.Provider value={props.serverQueries ?? null}>
         <DictionarySinkContext.Provider value={props.dictionarySink ?? null}>
           <ClientRouter
-            RootLayout={RootLayout}
+            RootLayout={props.rootLayout ?? RootLayout}
             viewImportMap={props.viewImportMap}
             viewModules={props.viewModules}
             queryConfig={options.queryConfig}

@@ -54,6 +54,8 @@ export interface ServerDataContextValue {
   assetBase?: string;
   meta: any;
   appId: string;
+  /** Route patterns declared `.static()`; absent when the app has none. */
+  staticRoutes?: string[];
 }
 
 export const ServerDataContext = createContext({} as ServerDataContextValue);

@@ -21,6 +21,7 @@ export {
   type CreateViewRPC,
   type FileOutput,
   type ViewHandler,
+  type StaticViewOptions,
 } from "./ViewRouter";
 export { toMiddlewareList, type MiddlewareInput } from "./middlewareList";
 export {

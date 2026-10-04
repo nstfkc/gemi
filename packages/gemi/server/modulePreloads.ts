@@ -78,3 +78,56 @@ export function collectModulePreloads(
 
   return urls;
 }
+
+/**
+ * Every CSS file the static import closure of `entryKey` carries, in import
+ * order and without repeats. Vite lists a chunk's CSS on that chunk only, not
+ * on the entries that import it, so a page with no client router to load the
+ * rest (a static view) has to walk the graph for it.
+ */
+export function collectCss(manifest: ViteManifest, entryKey: string): string[] {
+  const files: string[] = [];
+  const seen = new Set<string>();
+  const visited = new Set<string>();
+
+  const walk = (key: string) => {
+    if (visited.has(key)) return;
+    visited.add(key);
+    const chunk = manifest[key] as ViteManifestChunk & { css?: string[] };
+    if (!chunk) return;
+    for (const imported of chunk.imports ?? []) {
+      walk(imported);
+    }
+    for (const file of chunk.css ?? []) {
+      if (!seen.has(file)) {
+        seen.add(file);
+        files.push(file);
+      }
+    }
+  };
+
+  walk(entryKey);
+  return files;
+}
+
+/** An island client module's manifest key: `*.island.ts(x)` / `.js(x)`. */
+export const ISLAND_MODULE_PATTERN = /\.island\.[cm]?[jt]sx?$/;
+
+/**
+ * Island client modules in the client build, by manifest key: where each is
+ * served from and the chunks importing it pulls in.
+ */
+export function createIslandAssets(
+  manifest: ViteManifest,
+  assetBase: string = DEFAULT_ASSET_BASE,
+): Record<string, { src: string; preload: string[] }> {
+  const assets: Record<string, { src: string; preload: string[] }> = {};
+  for (const [key, chunk] of Object.entries(manifest)) {
+    if (!ISLAND_MODULE_PATTERN.test(key) || !chunk?.file) continue;
+    assets[key] = {
+      src: assetUrl(chunk.file, assetBase),
+      preload: collectModulePreloads(manifest, key, assetBase),
+    };
+  }
+  return assets;
+}
