@@ -1,6 +1,7 @@
 import type { ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
+import type { Prettify } from "../utils/type";
 import type { McpCallContext, McpCredentials } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
@@ -63,12 +64,16 @@ export type McpParamBinder = (
  * Built with `McpRouter.param`, which is what types `bind`'s `value` from
  * `input`. See `McpModelParamOptions`.
  */
-export class McpModelParam<V = unknown> {
+export class McpModelParam<V = unknown, As extends string | undefined = string | undefined> {
   readonly __internal_brand = "McpModelParam";
 
   constructor(
-    /** The key in the tool's input schema, or `undefined` for the param's own name. */
-    readonly as: string | undefined,
+    /**
+     * The key in the tool's input schema, or `undefined` for the param's own
+     * name. Kept as a literal in the type, which is what names the field in
+     * the tool's typed input (`McpToolInput`, #771).
+     */
+    readonly as: As,
     readonly input: AnySchema,
     readonly bind: McpModelParamResolver<V>,
   ) {}
@@ -93,13 +98,16 @@ export type McpModelParamResolver<V> = (
 ) => string | number | Promise<string | number>;
 
 /** What `McpRouter.param` takes. */
-export type McpModelParamOptions<S extends AnySchema> = {
+export type McpModelParamOptions<
+  S extends AnySchema,
+  As extends string | undefined = string | undefined,
+> = {
   /**
    * The field's name in the tool's input schema. Defaults to the param's own
    * name. It is never sent to the route, in the body or the query: it only
    * reaches `bind`, and `call.input`.
    */
-  as?: string;
+  as?: As;
   /**
    * The field's schema, as the model sees it. Describe it here — it is the
    * only thing the model reads about the field:
@@ -224,7 +232,7 @@ type InputCheck<I, B> =
 type ParamsOf<K> = UrlParser<`${K & string}`>;
 
 /** One path param's declaration: bound, the model's raw segment, or the model's in its own terms. */
-export type McpParamDeclaration = McpParamBinder | "input" | McpModelParam<any>;
+export type McpParamDeclaration = McpParamBinder | "input" | McpModelParam<any, any>;
 
 /**
  * Every path param is bound, `"input"` or a `this.param(...)`, and there is no
@@ -232,28 +240,48 @@ export type McpParamDeclaration = McpParamBinder | "input" | McpModelParam<any>;
  * tenant-isolation bug this field exists to prevent, so omitting one is a
  * compile error.
  */
-type ParamsMeta<K> = string extends keyof ParamsOf<K>
+type ParamsMeta<K, P> = string extends keyof ParamsOf<K>
   ? { params?: never }
   : [keyof ParamsOf<K>] extends [never]
     ? { params?: never }
-    : { params: { [P in keyof ParamsOf<K>]-?: McpParamDeclaration } };
+    : { params: P & NoInfer<ParamsCheck<K, P>> };
+
+/**
+ * `params` is inferred as `P`, so the tool's input type can tell `"input"` and
+ * `this.param(...)` apart from a binder (#771), and checked here: every param
+ * of the url declared, and nothing else.
+ */
+type ParamsCheck<K, P> = { [X in keyof ParamsOf<K>]-?: McpParamDeclaration } & {
+  [X in Exclude<keyof P, keyof ParamsOf<K>>]: never;
+};
 
 /**
  * Required for every binary field, and refused on a route that has none. For
  * a loose body the fields cannot be known, so any are accepted.
  */
-type FilesMeta<B> =
+type FilesMeta<B, F> =
   IsLoose<B> extends true
-    ? { files?: Record<string, McpFileBinder | "input"> }
+    ? { files?: F }
     : [BinaryKeys<B>] extends [never]
       ? { files?: never }
-      : { files: { [F in BinaryKeys<B>]: McpFileBinder | "input" } };
+      : {
+          files: F &
+            NoInfer<
+              { [X in BinaryKeys<B>]: McpFileBinder | "input" } & {
+                [X in Exclude<keyof F, BinaryKeys<B>>]: never;
+              }
+            >;
+        };
 
-type MetaBase = {
+type MetaBase<T> = {
   /** The only prose the model gets about this tool. */
   description: string;
-  /** For `list`'s filter. Nothing in v1 filters, but the descriptor keeps them. */
-  tags?: readonly string[];
+  /**
+   * For `McpRegistry.descriptors`' and `toAgentTools`' filter. Kept as
+   * literals in the type, so a typed `toAgentTools` filtered by tag answers
+   * only the tools carrying it (#771).
+   */
+  tags?: T;
   /**
    * Asks the user before an in-process agent runs this tool, as
    * `AgentTool.requiresApproval` does. Never set from the verb: a DELETE of a
@@ -333,7 +361,7 @@ type ResultReturn<O> = O extends AnySchema ? Infer<O> | Promise<Infer<O>> : unkn
  * it would have to be inferred from a context-sensitive function, and any
  * check that mentioned it beside `output` fixed it to its default first.
  */
-type ResultMeta<H, O> =
+type ResultMeta<H, O, RR> =
   | {
       /**
        * Trims or reshapes the route's 2xx JSON before the model sees it.
@@ -348,7 +376,10 @@ type ResultMeta<H, O> =
        * route wrote it. A throw is the server's failure, logged, and the model
        * is told only that the tool failed.
        */
-      result: (data: DataOf<H>, call: McpResultContext) => ResultReturn<O>;
+      result: (
+        data: DataOf<H>,
+        call: McpResultContext,
+      ) => [O] extends [undefined] ? RR : ResultReturn<O>;
       /**
        * The shape of what `result` returns. The return is parsed with it,
        * which drops every field it does not declare. It is the descriptor's
@@ -370,11 +401,59 @@ type ResultMeta<H, O> =
       output?: O & NoInfer<OutputCheck<O, DataOf<H>>>;
     };
 
-export type McpRouteMeta<H, K, I, O = undefined> = MetaBase &
+export type McpRouteMeta<
+  H,
+  K,
+  I,
+  O = undefined,
+  P = {},
+  F = {},
+  T = readonly string[],
+  RR = never,
+> = MetaBase<T> &
   InputMeta<BodyOf<H>, I> &
-  ParamsMeta<K> &
-  FilesMeta<BodyOf<H>> &
-  ResultMeta<H, O>;
+  ParamsMeta<K, P> &
+  FilesMeta<BodyOf<H>, F> &
+  ResultMeta<H, O, RR>;
+
+// --- the tool's types, for the client (#771) ---------------------------------
+
+/**
+ * What the model sends a tool, as the registry builds its `inputSchema`: the
+ * `input` schema's fields, a string for every `"input"` path param (optional
+ * when the url makes it optional) and every `"input"` file field, and the
+ * model-facing field of every `this.param(...)`, under its `as` or the param's
+ * own name. Bound params and files are not in it.
+ */
+export type McpToolInput<I, K, P, F> = Prettify<
+  ([I] extends [undefined] ? {} : I extends AnySchema ? Infer<I> : {}) & {
+    [X in keyof ParamsOf<K> as X extends keyof P
+      ? P[X] extends "input"
+        ? X
+        : never
+      : never]: string;
+  } & {
+    -readonly [X in keyof P as P[X] extends McpModelParam<any, infer As>
+      ? As extends undefined
+        ? X
+        : As
+      : never]-?: P[X] extends McpModelParam<infer V, any> ? V : never;
+  } & {
+    -readonly [X in keyof F as F[X] extends "input" ? X : never]-?: string;
+  }
+>;
+
+/**
+ * What a tool answers: what `output` describes when it is set, else what
+ * `result` returns when there is one, else the route's own answer.
+ */
+export type McpToolOutput<H, O, RR> = [O] extends [undefined]
+  ? [RR] extends [never]
+    ? DataOf<H>
+    : Awaited<RR>
+  : O extends AnySchema
+    ? Infer<O>
+    : unknown;
 
 /** The runtime shape of a meta, generics erased. */
 export type McpRouteMetaRuntime = {
@@ -393,8 +472,19 @@ export type McpRouteMetaRuntime = {
  * data; the registry turns it into a tool descriptor once it can see the
  * route table.
  */
-export class McpRouteDeclaration<M extends McpMethod = McpMethod, K extends string = string> {
+export class McpRouteDeclaration<
+  M extends McpMethod = McpMethod,
+  K extends string = string,
+  Input = unknown,
+  Output = unknown,
+  Tags extends readonly string[] = readonly string[],
+> {
   readonly __internal_brand = "McpRoute";
+  /**
+   * Types only, never set: the tool's input, output and tags, which
+   * `toAgentTools` reads off a typed router to type its `AgentTool`s (#771).
+   */
+  declare readonly __tool?: { input: Input; output: Output; tags: Tags };
 
   constructor(
     readonly method: M,
@@ -486,7 +576,9 @@ export class McpRouter<R = McpRoutes> {
    * The result is plain data and can be shared by several tools: declare it as
    * a field above `routes` and use it in each.
    */
-  param<S extends AnySchema>(options: McpModelParamOptions<S>): McpModelParam<Infer<S>> {
+  param<S extends AnySchema, const As extends string | undefined = undefined>(
+    options: McpModelParamOptions<S, As>,
+  ): McpModelParam<Infer<S>, As> {
     return new McpModelParam(options.as, options.input, options.bind);
   }
 
@@ -495,11 +587,21 @@ export class McpRouter<R = McpRoutes> {
     K extends keyof RoutesOf<R>[M] & string,
     I extends AnySchema | undefined = undefined,
     O extends AnySchema | undefined = undefined,
+    const P extends Record<string, McpParamDeclaration> = {},
+    const F extends Record<string, McpFileBinder | "input"> = {},
+    const T extends readonly string[] = readonly string[],
+    RR = never,
   >(
     method: M,
     url: K,
-    meta: McpRouteMeta<RoutesOf<R>[M][K], K, I, O>,
-  ): McpRouteDeclaration<M, K> {
+    meta: McpRouteMeta<RoutesOf<R>[M][K], K, I, O, P, F, T, RR>,
+  ): McpRouteDeclaration<
+    M,
+    K,
+    McpToolInput<I, K, P, F>,
+    McpToolOutput<RoutesOf<R>[M][K], O, RR>,
+    T
+  > {
     return new McpRouteDeclaration(method, url, meta as McpRouteMetaRuntime);
   }
 }

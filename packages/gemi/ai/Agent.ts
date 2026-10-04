@@ -842,13 +842,26 @@ type FlattenTools<T extends readonly ToolEntry[]> = T[number] extends infer E
  * under those options and believing the answer (see `OptionalSchema` in
  * `Schema.ts`); an unconditional member has nothing to get wrong.
  */
-export type ToolShapesOf<T extends readonly ToolEntry[]> = {
-  [K in Extract<FlattenTools<T>, AnyAgentTool> as K["name"]]: K extends AgentTool<
-    any,
-    infer I,
-    infer O,
-    infer P
-  >
+export type ToolShapesOf<T extends readonly ToolEntry[]> =
+  ShapesOf<NamedTools<Extract<FlattenTools<T>, AnyAgentTool>>> extends infer Named
+    ? [keyof Named] extends [never]
+      ? ShapesOf<Extract<FlattenTools<T>, AnyAgentTool>>
+      : Named
+    : never;
+
+/**
+ * The tools whose name is a literal (#771). A tool named only `string` — an
+ * untyped `toAgentTools`, or one built from a name read at runtime — would
+ * give the shapes a string index signature, and `ToolCallPart`, which indexes
+ * the shapes by `keyof`, would then answer the index's untyped member for
+ * every tool, the literal ones included. So it is left out, and degrades only
+ * itself: its parts are not in the client's union. An agent with no literal
+ * name at all keeps the index, as before.
+ */
+type NamedTools<K> = K extends AnyAgentTool ? (string extends K["name"] ? never : K) : never;
+
+type ShapesOf<U extends AnyAgentTool> = {
+  [K in U as K["name"]]: K extends AgentTool<any, infer I, infer O, infer P>
     ? { input: I; output: O; progress: P }
     : never;
 };
