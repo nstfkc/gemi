@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.104.0 to 0.105.0
 
 ## `gemi/http`: an agent can be served from the api its typed MCP tools come from (#774)
 
