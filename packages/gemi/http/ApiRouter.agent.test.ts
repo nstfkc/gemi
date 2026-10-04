@@ -10,6 +10,25 @@ class ChatController extends AgentController {
 }
 
 describe("ApiRouter.agent()", () => {
+  // Not refused by its parameter's type, which would resolve the controller's
+  // agent while the route table is inferred (#774).
+  test("refuses a class that is not an AgentController when mounted", () => {
+    class NotAnAgent extends ResourceController {
+      async list() {}
+      async show() {}
+      async store() {}
+      async update() {}
+      async delete() {}
+    }
+
+    expect(
+      () =>
+        new (class extends ApiRouter {
+          routes = { "/chat": this.agent(NotAnAgent) };
+        })(),
+    ).toThrow("this.agent() takes an AgentController class, and got NotAnAgent.");
+  });
+
   test("mounts four POST routes under one path", () => {
     class Api extends ApiRouter {
       routes = {

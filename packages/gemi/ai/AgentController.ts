@@ -2893,7 +2893,14 @@ export type AgentRouteMethod = "stream" | "attach" | "stop" | "upload";
 
 export type AgentMiddlewareConfig = Partial<Record<AgentRouteMethod, MiddlewareInput>>;
 
-export type AgentRoute<T extends new () => AgentController<any, any>> = {
+/**
+ * What `this.agent(Controller)` returns. `T` is unconstrained so that mounting
+ * the route never resolves the controller (#774): an agent whose tools are
+ * routes of the same api would otherwise resolve the api's route table from
+ * inside it. That `T` is an `AgentController` class is checked when the route
+ * is mounted: `this.agent()` throws otherwise.
+ */
+export type AgentRoute<T> = {
   __internal_brand: "AgentRoute";
   controller: T;
   middleware(config: AgentMiddlewareConfig): AgentRoute<T>;

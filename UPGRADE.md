@@ -1,3 +1,21 @@
+# Unreleased
+
+## `gemi/http`: an agent can be served from the api its typed MCP tools come from (#774)
+
+With a typed `toAgentTools` (#771), the usual setup was a type cycle: the api mounts the agent (`this.agent(AssetsAgentController)`) and serves its history typed by the agent's messages, the agent's tools come from an `McpRouter`, and `fromApiRoute` checks its urls against that same api. An app got hundreds of errors (`'routes' implicitly has type 'any'`, `Type alias 'AssetsMessage' circularly references itself`, urls `not assignable to parameter of type 'never'`), and the client's `RPC` collapsed.
+
+None of those types needed itself, so nothing in the app changes: it typechecks as written. What changed is how much gemi resolves, and when:
+
+- **Mounting a controller route no longer resolves its method.** `this.get(Controller, "method")` (and `post`, `put`, `patch`, `delete`, `resource`) is typed as the controller and the method's name. What the method takes and answers is read when the client's table is asked for that route.
+- **`CreateRPC` resolves one route at a time.** Its keys come from the routers' `routes`, and a route's value is read off that route alone. `keyof RPC`, and `RPC["GET:/x"]`, never evaluate another route's handler, so `fromApiRoute` checks a url, and reads that route's answer, without resolving the history route that needs the agent. The keys and values are the same as before.
+- **`this.agent(Controller)` checks its argument when it is mounted, not by its type.** Checking an `AgentController` class at compile time resolves its agent, and so its tools, while the route table is inferred. It now throws at boot instead: `this.agent() takes an AgentController class, and got …`. A route mounted with anything else has no tools in the client's types.
+
+Type changes to know:
+
+- `this.get(Controller, "method")` and its siblings return `ControllerRouteHandler<M, Controller, "method">` (`gemi/http`), a `RouteHandler<M, any, any, any>`, rather than `RouteHandler<M, Input, Output, Params>`. Code that read a route's input or output off the handler type with `infer` reads `any` now: read it off `CreateRPC<Api>["GET:/path"]`, as the client does. Callback routes (`this.get(async (req) => …)`) are unchanged.
+- `AgentRoute<T>` no longer constrains `T`, and `this.agent()` takes any object.
+- `CreateRPC` is a mapped type over the route table rather than `KeyAndValueToObject` of a key and value union.
+
 # Upgrading from 0.103.0 to 0.104.0
 
 ## `gemi/ai`: `toAgentTools` keeps the MCP tools' types, and an untyped tool no longer erases the others (#771)

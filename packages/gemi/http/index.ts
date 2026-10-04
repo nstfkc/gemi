@@ -1,5 +1,5 @@
 export { Controller, ResourceController } from "./Controller";
-export { ApiRouter, type CreateRPC } from "./ApiRouter";
+export { ApiRouter, type ControllerRouteHandler, type CreateRPC } from "./ApiRouter";
 export {
   McpRouter,
   McpRouteDeclaration,
