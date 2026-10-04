@@ -14,6 +14,7 @@ import {
   restorePreviousAssets,
   stagePreviousAssets,
 } from "../vite/previousAssets";
+import { precompressAssets, writeStaticAssetsRecord } from "../vite/precompressAssets";
 
 import { program } from "commander";
 import { CheckModelsError, checkModels, printReport } from "./check-models";
@@ -108,6 +109,14 @@ program.command("build").action(async () => {
     ? await mkdtemp(path.join(tmpdir(), "gemi-previous-assets-"))
     : undefined;
 
+  const clientDir = path.join(rootDir, "dist", "client");
+  // Every file the client build wrote under `assets/` — content-hashed, so
+  // safe to serve as immutable and to precompress once (#789). Taken from the
+  // bundle rather than the directory, which also holds whatever `public/assets/`
+  // copied in under names that are not hashed.
+  const emitted: string[] = [];
+  let carriedPaths: string[] = [];
+
   try {
     const retained =
       previousAssets && stagingDir ? await stagePreviousAssets(previousAssets, stagingDir) : [];
@@ -116,16 +125,24 @@ program.command("build").action(async () => {
 
     await build({
       configFile: false,
-      plugins: [gemiVite()],
+      plugins: [
+        gemiVite(),
+        {
+          name: "gemi:emitted-assets",
+          apply: "build",
+          writeBundle(_options, bundle) {
+            for (const file of Object.keys(bundle)) {
+              if (file.startsWith("assets/")) emitted.push(file);
+            }
+          },
+        },
+      ],
       build: { outDir: "dist/client" },
     });
 
     if (stagingDir) {
-      const carried = await restorePreviousAssets(
-        stagingDir,
-        path.join(rootDir, "dist", "client"),
-        retained,
-      );
+      const carried = await restorePreviousAssets(stagingDir, clientDir, retained);
+      carriedPaths = carried.paths;
       console.log(
         `Kept ${carried.files} asset file(s) from ${carried.releases} earlier release(s).`,
       );
@@ -136,6 +153,23 @@ program.command("build").action(async () => {
       await rm(stagingDir, { recursive: true, force: true });
     }
   }
+
+  // Brotli 11 and gzip 9 siblings for the bundle, so `gemi start` sends
+  // compressed JS/CSS without compressing anything per request (#789).
+  const startedAt = performance.now();
+  const fresh = await precompressAssets(clientDir, emitted);
+  // Carried files usually brought their siblings along; a release built
+  // before precompression did not, and gets them now.
+  const carried = await precompressAssets(clientDir, carriedPaths, { reuseExisting: true });
+  await writeStaticAssetsRecord(clientDir, {
+    files: { ...carried.record.files, ...fresh.record.files },
+  });
+  const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} kB`;
+  console.log(
+    `Precompressed ${fresh.stats.files} asset(s): ${kb(fresh.stats.identityBytes)} → ` +
+      `${kb(fresh.stats.brBytes)} br / ${kb(fresh.stats.gzipBytes)} gzip ` +
+      `(${Math.round(performance.now() - startedAt)} ms).`,
+  );
 
   console.log("Building server...");
 

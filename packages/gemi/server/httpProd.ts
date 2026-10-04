@@ -19,6 +19,8 @@ import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
 import { applyForwardedTrust, parseTrustProxy } from "./forwardedFor";
+import { readStaticAssetsRecord } from "../vite/precompressAssets";
+import type { StaticFileOptions } from "./staticFile";
 
 // The rule this file used to spell out itself. It moved to `projectRoot`
 // because discovery needs the same answer during `waitForBoot()`, which is
@@ -182,6 +184,21 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   //   filesystem lookup.
   const publicFiles = await listPublicFiles(clientDir);
 
+  // The build assets `gemi build` emitted or carried over, with the
+  // precompressed siblings it wrote for each (#789). Read once: the build
+  // output does not change under a running server. Without the record (a
+  // build made before it existed) every file is served as identity with the
+  // old cache policy.
+  const staticAssets = new Map<string, StaticFileOptions>();
+  for (const [file, encodings] of Object.entries(
+    (await readStaticAssetsRecord(clientDir))?.files ?? {},
+  )) {
+    const path = resolve(clientDir, file);
+    if (path.startsWith(clientDir + sep)) {
+      staticAssets.set(path, { immutable: true, encodings });
+    }
+  }
+
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
@@ -210,7 +227,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       }
 
       try {
-        return staticFileResponse(req, distPath);
+        return await staticFileResponse(req, distPath, staticAssets.get(distPath));
       } catch (error) {
         app.onException?.(error);
         return new Response("Not found", { status: 404 });

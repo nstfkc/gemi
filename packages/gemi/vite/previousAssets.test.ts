@@ -94,12 +94,19 @@ describe("carrying the previous release's assets", () => {
     ]);
     expect(await readFile(join(client, "assets/Home-v1.js"), "utf8")).toBe("home v1");
     expect(existsSync(join(client, "index.html"))).toBe(false);
-    expect(result).toEqual({ files: 3, releases: 1 });
+    expect(result).toEqual({
+      files: 3,
+      releases: 1,
+      paths: ["assets/Home-v1.js", "assets/client-v1.js", "assets/nested/font-v1.woff2"],
+    });
   });
 
   test("a file the new build also wrote stays the new build's, and is not recorded as carried", async () => {
     const client = join(dir, "dist/client");
-    await write(client, { "assets/vendor-same.js": "shared", "assets/Home-v1.js": "v1" });
+    await write(client, {
+      "assets/vendor-same.js": "shared",
+      "assets/Home-v1.js": "v1",
+    });
 
     await deploy(
       { from: client },
@@ -125,6 +132,36 @@ describe("carrying the previous release's assets", () => {
       new Date("2026-10-02T00:00:00Z"),
     );
     expect(await listAssets(client)).toEqual(["Home-v2.js", "Home-v3.js", "vendor-same.js"]);
+  });
+
+  test("precompressed siblings travel with their file and are not recorded on their own", async () => {
+    const client = join(dir, "dist/client");
+    await write(client, {
+      "assets/Home-v1.js": "v1",
+      "assets/Home-v1.js.br": "v1 br",
+      "assets/Home-v1.js.gz": "v1 gz",
+    });
+
+    await deploy({ from: client }, client, { "assets/Home-v2.js": "v2" }, new Date("2026-10-01"));
+
+    expect(await listAssets(client)).toEqual([
+      "Home-v1.js",
+      "Home-v1.js.br",
+      "Home-v1.js.gz",
+      "Home-v2.js",
+    ]);
+    const record = JSON.parse(await readFile(join(client, PREVIOUS_ASSETS_RECORD), "utf8"));
+    expect(record.releases[0].files).toEqual(["assets/Home-v1.js"]);
+
+    // A carried file's siblings are carried again with it, and dropped with it.
+    await write(client, { "assets/Home-v2.js.br": "v2 br" });
+    await deploy(
+      { from: client, releases: 1 },
+      client,
+      { "assets/Home-v3.js": "v3" },
+      new Date("2026-10-02"),
+    );
+    expect(await listAssets(client)).toEqual(["Home-v2.js", "Home-v2.js.br", "Home-v3.js"]);
   });
 
   test("keeps `releases` earlier releases, newest first", async () => {
@@ -194,7 +231,7 @@ describe("carrying the previous release's assets", () => {
       new Date(),
     );
 
-    expect(result).toEqual({ files: 0, releases: 0 });
+    expect(result).toEqual({ files: 0, releases: 0, paths: [] });
     expect(await listAssets(client)).toEqual(["a.js"]);
   });
 
@@ -203,7 +240,12 @@ describe("carrying the previous release's assets", () => {
     await write(client, {
       "assets/a-v1.js": "1",
       [PREVIOUS_ASSETS_RECORD]: JSON.stringify({
-        releases: [{ retiredAt: new Date().toISOString(), files: ["../../secret", "index.html"] }],
+        releases: [
+          {
+            retiredAt: new Date().toISOString(),
+            files: ["../../secret", "index.html"],
+          },
+        ],
       }),
       "index.html": "x",
     });
@@ -224,7 +266,12 @@ describe("what is not carried", () => {
       "assets/a-v1.js.map": "{}",
       "assets/.DS_Store": "x",
       [PREVIOUS_ASSETS_RECORD]: JSON.stringify({
-        releases: [{ retiredAt: new Date().toISOString(), files: ["assets/old-v0.js.map"] }],
+        releases: [
+          {
+            retiredAt: new Date().toISOString(),
+            files: ["assets/old-v0.js.map"],
+          },
+        ],
       }),
       "assets/old-v0.js.map": "{}",
     });
