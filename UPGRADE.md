@@ -6,6 +6,18 @@ New, nothing to change. `safeFetch(url, options)` is `fetch` for server code tha
 
 If your app fetches user-given URLs with `fetch` today, switch those calls; a test that fetches a local server needs `allowPrivate` and `ports: "any"`.
 
+## `ai`: `s.fromJSONSchema` can report unknown keys (#753)
+
+**New, opt-in.** `s.fromJSONSchema(schema, { unknownKeys })` chooses what `parse`, `safeParse` and `validate` do with a key an object in the schema doesn't declare:
+
+- `"strip"` (the default, unchanged): the key is dropped from the parsed value.
+- `"error"`: the value fails with one issue per key, `{ path: [..., key], code: "additionalProperties", params: { additionalProperty: key }, message: "unknown key" }`. The code and params are Ajv's; unlike Ajv, `path` ends in the key.
+- `"passthrough"`: the key is kept in the parsed value as it came, checked only for being JSON.
+
+It applies to every object of that schema at any depth (inside arrays, `anyOf` members, and when the schema is nested in an `s.object` or an `s.recursive` body), whether or not the object says `additionalProperties: false`. The emitted JSON Schema is unchanged. A key whose value is `undefined` counts as absent. `SchemaIssueCode` gains `"additionalProperties"`; code that switches over it exhaustively needs the new case.
+
+**Action:** none. An app that checks a body's keys itself before `validate` (kyte's form submissions) can pass `unknownKeys: "error"` instead.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)

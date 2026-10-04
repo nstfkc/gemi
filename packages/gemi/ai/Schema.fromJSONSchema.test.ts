@@ -282,3 +282,180 @@ describe("s.fromJSONSchema", () => {
     expect(() => s.fromJSONSchema({ type: "null" })).toThrow(/type "null" is not supported/);
   });
 });
+
+/**
+ * `unknownKeys` (#753): kyte refuses a form submission carrying a field the
+ * form doesn't have, rather than losing what the visitor typed.
+ */
+describe("s.fromJSONSchema unknownKeys", () => {
+  const order = {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      lines: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { sku: { type: "string" }, qty: { type: "integer" } },
+          required: ["sku", "qty"],
+          additionalProperties: false,
+        },
+      },
+      // No `additionalProperties` here: every object in `s` is closed anyway.
+      address: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      pick: {
+        anyOf: [
+          {
+            type: "object",
+            properties: { kind: { const: "a" }, a: { type: "string" } },
+            required: ["kind", "a"],
+          },
+          {
+            type: "object",
+            properties: { kind: { const: "b" }, b: { type: "number" } },
+            required: ["kind", "b"],
+          },
+        ],
+      },
+    },
+    required: ["name"],
+    additionalProperties: false,
+  };
+  const value = {
+    name: "x",
+    extra: 1,
+    lines: [{ sku: "s", qty: 1, color: "red" }],
+    address: { city: "Berlin", zip: "10115" },
+    pick: { kind: "b", b: 2, c: true },
+  };
+
+  test("strip is the default and drops unknown keys at every depth", () => {
+    const expected = {
+      ok: true,
+      value: {
+        name: "x",
+        lines: [{ sku: "s", qty: 1 }],
+        address: { city: "Berlin" },
+        pick: { kind: "b", b: 2 },
+      },
+    };
+    expect(s.fromJSONSchema(order).validate(value)).toEqual(expected);
+    expect(s.fromJSONSchema(order, { unknownKeys: "strip" }).validate(value)).toEqual(expected);
+  });
+
+  test("error reports each unknown key with its path, Ajv's code and params", () => {
+    const schema = s.fromJSONSchema(order, { unknownKeys: "error" });
+    const result = schema.validate(value);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.issues.map(({ path, code, params }) => ({ path, code, params }))).toEqual([
+      {
+        path: ["lines", 0, "color"],
+        code: "additionalProperties",
+        params: { additionalProperty: "color" },
+      },
+      {
+        path: ["address", "zip"],
+        code: "additionalProperties",
+        params: { additionalProperty: "zip" },
+      },
+      // The union's members are closed too, so no variant matched and the
+      // closest one (the `kind` it named) is blamed.
+      {
+        path: ["pick"],
+        code: "anyOf",
+        params: {
+          closest: [
+            {
+              path: ["pick", "c"],
+              code: "additionalProperties",
+              message: "unknown key",
+              params: { additionalProperty: "c" },
+            },
+          ],
+        },
+      },
+      { path: ["extra"], code: "additionalProperties", params: { additionalProperty: "extra" } },
+    ]);
+    expect(schema.safeParse({ name: "x", extra: 1 })).toEqual({
+      ok: false,
+      errors: ["extra: unknown key"],
+    });
+    expect(() => schema.parse({ name: "x", extra: 1 })).toThrow("extra: unknown key");
+  });
+
+  test("error passes a value with only declared keys, and treats undefined as absent", () => {
+    const schema = s.fromJSONSchema(order, { unknownKeys: "error" });
+    expect(schema.validate({ name: "x", address: { city: "B" }, extra: undefined })).toEqual({
+      ok: true,
+      value: { name: "x", address: { city: "B" } },
+    });
+  });
+
+  test("error is reported beside the other issues of the same object", () => {
+    const schema = s.fromJSONSchema(order, { unknownKeys: "error" });
+    const result = schema.validate({ name: 1, extra: "y" });
+    expect(result.ok === false && result.issues.map((i) => [i.path, i.code])).toEqual([
+      [["name"], "type"],
+      [["extra"], "additionalProperties"],
+    ]);
+  });
+
+  test("passthrough keeps unknown keys, checked only for being JSON", () => {
+    const schema = s.fromJSONSchema(order, { unknownKeys: "passthrough" });
+    expect(schema.validate(value)).toEqual({ ok: true, value });
+    const bad = schema.validate({ name: "x", extra: 1n });
+    expect(bad.ok === false && bad.issues.map((i) => [i.path, i.code])).toEqual([
+      [["extra"], "type"],
+    ]);
+  });
+
+  test("passthrough keeps a __proto__ key as a key, not a prototype", () => {
+    const schema = s.fromJSONSchema(order, { unknownKeys: "passthrough" });
+    const result = schema.parse(JSON.parse('{"name":"x","__proto__":{"polluted":true}}')) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+    expect(Object.hasOwn(result, "__proto__")).toBe(true);
+    expect((result as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  test("the emitted schema and strictness don't change", () => {
+    for (const unknownKeys of ["strip", "error", "passthrough"] as const) {
+      const schema = s.fromJSONSchema(order, { unknownKeys });
+      expect(schema.toJSONSchema()).toEqual(s.fromJSONSchema(order).toJSONSchema());
+      expect(supportsStrict(schema)).toBe(true);
+    }
+  });
+
+  test("the policy belongs to the schema's own objects, through s.object and s.recursive", () => {
+    const item = s.fromJSONSchema<{ label: string }>(
+      { type: "object", properties: { label: { type: "string" } }, required: ["label"] },
+      { unknownKeys: "error" },
+    );
+    type Node = { item: { label: string }; children: Node[] };
+    const tree = s.recursive<Node>("Node", (self) => s.object({ item, children: s.array(self) }));
+    const result = tree.validate({
+      item: { label: "root" },
+      // The s.object around the item strips, as builders always do.
+      stray: 1,
+      children: [
+        { item: { label: "a" }, children: [{ item: { label: "b", x: 1 }, children: [] }] },
+      ],
+    });
+    expect(result.ok === false && result.issues.map((i) => [i.path, i.code])).toEqual([
+      [["children", 0, "children", 0, "item", "x"], "additionalProperties"],
+    ]);
+    expect(tree.validate({ item: { label: "root" }, stray: 1, children: [] })).toEqual({
+      ok: true,
+      value: { item: { label: "root" }, children: [] },
+    });
+  });
+
+  test("refuses an unknown policy", () => {
+    expect(() =>
+      s.fromJSONSchema({ type: "string" }, { unknownKeys: "report" as "error" }),
+    ).toThrow(/unknownKeys option must be one of "strip", "error", "passthrough", got "report"/);
+  });
+});
