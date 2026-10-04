@@ -52,6 +52,12 @@ import {
   windowMessages,
   type ContextWindowOptions,
 } from "./contextWindow";
+import {
+  compactWindow,
+  defaultSummaryStore,
+  type SummaryStore,
+  type ThreadSummary,
+} from "./contextCompaction";
 import type {
   AgentError,
   AgentMessage,
@@ -1292,6 +1298,13 @@ interface AgentStreamParamsBase {
    */
   prepareStep?: PrepareStep;
   /**
+   * Where `contextWindow.compact` keeps this thread's summaries, unless the
+   * window names its own `store`. `AgentController` passes its `AgentStore`
+   * when that implements the summary methods. Default
+   * `defaultSummaryStore`, in memory.
+   */
+  summaryStore?: SummaryStore;
+  /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
    * pending call. It is the controller's persistence point, and it fires
@@ -2155,6 +2168,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   /** The working history handed to the provider, and what this run produced. */
   private history: AgentMessage[] = [];
+  /** `contextWindow.compact`'s summaries for this run, by cut. */
+  private readonly compactMemo = new Map<string, ThreadSummary | null>();
   /** How the previous model call ended, for `prepareStep`. */
   private lastStep: { reason: FinishReason; usage?: Usage } | undefined;
   private produced: AgentMessage[] = [];
@@ -2947,9 +2962,29 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     step: number,
   ): Promise<{ messages: AgentMessage[]; instructions: string | undefined } | { error: AgentError }> {
     const history = this.historyForProvider(current);
-    let messages = this.config.contextWindow
-      ? windowMessages(history, this.config.contextWindow).messages
-      : history;
+    const window = this.config.contextWindow;
+    let messages = !window
+      ? history
+      : window.compact && this.params.threadId && this.depth === 0
+        ? await compactWindow({
+            history,
+            stored: this.history.filter((message) => message !== current),
+            window,
+            compact: window.compact === true ? {} : window.compact,
+            threadId: this.params.threadId,
+            provider: this.config.provider,
+            store:
+              (window.compact !== true && window.compact.store) ||
+              this.params.summaryStore ||
+              defaultSummaryStore,
+            signal: this.controller.signal,
+            // Billed whether or not the summary came out, as `ctx.generate` is.
+            onUsage: (usage) => {
+              this.usage = addUsage(this.usage, usage);
+            },
+            memo: this.compactMemo,
+          })
+        : windowMessages(history, window).messages;
     let instructions = await this.systemPrompt();
 
     for (const hook of this.config.prepareStep) {

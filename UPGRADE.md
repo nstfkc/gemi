@@ -1,3 +1,17 @@
+# Unreleased
+
+## Compaction for the context window (#782)
+
+New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI Context Window](docs/ai-context-window.md#compaction).
+
+- **`contextWindow: { ..., compact: true | ContextCompactOptions }`** (on `Agent.create`, `Agent.stream` and `AgentController`) summarises the turns the window leaves out instead of dropping them. The request becomes `[system messages, summary, ...kept turns]`; the summary is a user message and is never stored in the thread. It applies to threaded runs (`threadId`) at the top level.
+- Summaries are made once per cut (the window moves `step` turns at a time), incrementally (the previous cut's summary plus the turns that just left the window, in chunks of at most `chunkTokens`), and stored per thread. Their usage is added to the run's. A failed summary falls back to the plain window with its note.
+- **`AgentStore` has three new optional methods**, `loadSummaries`, `saveSummary` and `lockSummary`. `MemoryAgentStore` implements the first two, and `AgentController` passes its store to the run as the summary store when it has them. A durable store that implements them keeps summaries across restarts and instances; one that doesn't uses `defaultSummaryStore`, in memory.
+- **`AgentStreamParams.summaryStore`**: where a run keeps its thread's summaries, unless `compact.store` names one.
+- New exports from `gemi/ai`: `MemorySummaryStore`, `defaultSummaryStore`, `keepSummary`, `COMPACT_SUMMARY_HEADER`, `DEFAULT_COMPACT_INSTRUCTIONS`, `DEFAULT_MAX_SUMMARY_TOKENS`, and the types `ContextCompactOptions`, `SummaryStore` and `ThreadSummary`.
+
+kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)

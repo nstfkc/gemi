@@ -136,6 +136,16 @@ export {
   windowMessages,
 } from "./contextWindow";
 export type { ContextWindowOptions, ContextWindowResult } from "./contextWindow";
+// Compaction: summarising the turns the window leaves out (#782).
+export {
+  COMPACT_SUMMARY_HEADER,
+  DEFAULT_COMPACT_INSTRUCTIONS,
+  DEFAULT_MAX_SUMMARY_TOKENS,
+  defaultSummaryStore,
+  keepSummary,
+  MemorySummaryStore,
+} from "./contextCompaction";
+export type { ContextCompactOptions, SummaryStore, ThreadSummary } from "./contextCompaction";
 
 // --- what a client is told about a failure (#446) --------------------------
 //
