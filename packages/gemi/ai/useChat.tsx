@@ -96,6 +96,19 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    */
   attach?: boolean;
   /**
+   * Ask again, the same way, each time the page comes back into view: the tab
+   * is shown again (`visibilitychange`) or the window regains focus (#778).
+   *
+   * For a thread more than one client posts on, two tabs or two devices.
+   * `attach` only asks on mount, so a chat that was already open misses a run
+   * another client starts later; this picks it up when the user looks. One
+   * small request per return to the page, never while this chat is already
+   * sending or streaming, and nothing at all while the page stays in view.
+   * An app with a change feed of its own does better calling `reattach()`
+   * from it. Defaults to false; needs a thread, like `attach`.
+   */
+  reattachOnFocus?: boolean;
+  /**
    * Merged into the request body, and read back on the server in
    * `instructions(req, { body })` and on every tool's `ctx.body`. `uploadFile`
    * sends it too, as a `body` form part, so the controller's
@@ -167,7 +180,8 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
   onError?: (error: AgentError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
-   * The mount probe found no run to attach to.
+   * The mount probe found no run to attach to. So did a `reattachOnFocus`
+   * probe; an explicit `reattach()` answers `false` instead.
    *
    * On one server this means what it says, and there is nothing to do. On more
    * than one it is ambiguous in a way neither end can resolve: a run lives in
@@ -237,12 +251,44 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
   /**
    * Explicit cancel — a closed tab no longer stops a run, so this is what does.
    *
+   * On a thread it stops the thread's run even when this chat did not start it
+   * and is not streaming it: idle, it asks the route to stop whatever is
+   * running on `threadId` (#778). That is a run another tab started, which
+   * this one shows as busy from a re-read thread. Without a thread and with
+   * nothing in flight there is nothing to name, and nothing is sent.
+   *
    * The UI stops immediately; the server call is what actually ends the
    * generation and any tool mid-flight. `messages` keeps the interrupted turn
    * with everything it had produced, marked `aborted`, so the transcript shows
    * where it was cut rather than losing text the user already read.
    */
   stop(): Promise<void>;
+  /**
+   * Ask the thread now whether a run is going, and if one is, stream it into
+   * this chat (#778).
+   *
+   * The probe the mount does (`attach`), on demand. For a thread more than one
+   * client posts on: a chat that is already open learns nothing of a run
+   * another tab or device starts on it later, and this is how it picks that
+   * run up. Once attached it is this chat's run in every way that shows:
+   * `status` is `streaming`, `onToolResult`, `onToolProgress` and `onFinish`
+   * fire for what is new here, and `stop()` stops it.
+   *
+   * Resolves `true` once an attached run's stream has ended, and `false` at
+   * once when there was nothing to attach to: no thread yet, this chat already
+   * sending or streaming, or no run going on the thread in this process (the
+   * same ambiguity `onAttachMiss` describes, which this does not fire, since
+   * the caller has the answer). Cheap when there is nothing: one small request
+   * and no change to `status`.
+   *
+   * Call it from whatever tells the app the thread changed (a change feed, a
+   * push, a "someone is typing" signal), or set `reattachOnFocus` to have the
+   * hook ask whenever the page comes back into view. The question the run
+   * answers comes with it, so the chat does not need to re-read the thread
+   * first; if it does re-read (and `setMessages` what it read), a run caught
+   * halfway is rebuilt from its first frame rather than appended to.
+   */
+  reattach(): Promise<boolean>;
   /**
    * Drops the last assistant turn and re-runs from the user turn before it.
    * On a thread the server replaces its stored answer too (`regenerate: true`
@@ -705,6 +751,7 @@ export function useChat<P extends keyof AgentRoutes>(
     initialMessages,
     cursor: initialCursor,
     attach: attachOnMount = true,
+    reattachOnFocus = false,
     body: extraBody,
     headers,
     onFinish,
@@ -1211,7 +1258,13 @@ export function useChat<P extends keyof AgentRoutes>(
     // the agent searches for deferred tools first — silently posted nothing,
     // leaving a tool loop running that a dropped connection does not touch. The
     // same hole reopened on a correct attach, whose tail carries no `run-start`.
-    if (!inFlight && !runId) return;
+    //
+    // With nothing in flight and no run of its own, the thread is still a
+    // handle (#778): a chat on a thread another tab is running a turn on shows
+    // that run as busy, and its stop button has to reach it. The route stops
+    // whatever is live on the thread, and answers `{ stopped: false }` when
+    // nothing is.
+    if (!inFlight && !runId && !threadId) return;
     // Three handles, any of which the route can resolve by; which ones exist
     // depends on how far the run got. `clientRunId` is the one that is always
     // there for a turn this client started, which is what closes the window.
@@ -1340,25 +1393,35 @@ export function useChat<P extends keyof AgentRoutes>(
     };
   }, []);
 
-  useEffect(() => {
-    // Mount only, deliberately: `threadId` is the handle that survives a
-    // refresh, and re-probing every time it changes would race a stream that is
-    // already running on it.
-    if (attachOnMount === false || !initialThreadId) return;
-    const controller = new AbortController();
-    // No `clientRunId`: this client did not start the run, so the thread is the
-    // only handle it has on it — and `/attach` needs one anyway.
-    abortRef.current = { controller };
-    void (async () => {
+  /**
+   * Ask `/attach` whether the thread has a run going, and stream it if it does.
+   *
+   * Shared by the mount probe, `reattachOnFocus` and `reattach()`. Skipped when
+   * a request of this hook's is already in flight: a send or an attach is
+   * already reading the thread's run, and a second reader would interleave the
+   * same frames. `missed` says whether a miss is reported to `onAttachMiss`,
+   * which only the automatic probes do. The phase is left alone until a frame
+   * arrives, so a probe that finds nothing never shows as busy.
+   */
+  const probe = useCallback(
+    async (missed: boolean): Promise<boolean> => {
+      const { threadId, seq, cursorRunId } = stateRef.current!;
+      if (!threadId || abortRef.current) return false;
+      const controller = new AbortController();
+      // No `clientRunId`: this client did not start the run, so the thread is
+      // the only handle it has on it — and `/attach` needs one anyway.
+      abortRef.current = { controller };
       try {
         const body: AgentAttachBody = {
-          threadId: initialThreadId,
-          // The cursor the caller restored alongside `initialMessages`, so the
-          // route can send the tail. Left at -1 it says "I have seen nothing",
-          // and a run still inside its post-`run-end` TTL replays from the top
-          // onto a transcript that already holds it.
-          cursor: stateRef.current!.seq,
-          ...(stateRef.current!.cursorRunId ? { runId: stateRef.current!.cursorRunId } : {}),
+          threadId,
+          // Where this client left off, so the route can send the tail. Left
+          // at -1 it says "I have seen nothing", and a run still inside its
+          // post-`run-end` TTL replays from the top onto a transcript that
+          // already holds it. A cursor from another run than the live one is
+          // forfeited by the route, which then replays the live run from its
+          // start — the case for a run another client started.
+          cursor: seq,
+          ...(cursorRunId ? { runId: cursorRunId } : {}),
         };
         const response = await post(`${requestRef.current.base}/attach`, body, controller.signal);
         // Nothing running is the ordinary answer, not a failure: the route says
@@ -1368,23 +1431,52 @@ export function useChat<P extends keyof AgentRoutes>(
         // client cannot tell; `onAttachMiss` is how an app that runs more than
         // one process gets to react.
         if (!response.ok || response.status === 204 || !response.body) {
-          handlers.current.onAttachMiss?.({ threadId: initialThreadId });
-          return;
+          if (missed) handlers.current.onAttachMiss?.({ threadId });
+          return false;
         }
         await consume(response, controller.signal);
+        return true;
       } catch {
         // A probe that could not be made leaves the client exactly where a
         // client without `attach` would be — with its own history and no run.
+        return false;
       } finally {
         if (abortRef.current?.controller === controller) {
           abortRef.current = null;
           setPhaseSafe("idle");
         }
       }
-    })();
-    return () => controller.abort();
+    },
+    [consume, post, setPhaseSafe],
+  );
+
+  const reattach = useCallback(() => probe(false), [probe]);
+
+  useEffect(() => {
+    // Mount only, deliberately: `threadId` is the handle that survives a
+    // refresh, and re-probing every time it changes would race a stream that is
+    // already running on it. Asking again later is `reattach()`'s job.
+    if (attachOnMount === false || !initialThreadId) return;
+    void probe(true);
+    // The unmount effect above aborts the probe with everything else in flight.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!reattachOnFocus || typeof window === "undefined") return;
+    // `visibilitychange` and `focus` usually arrive together on a return to
+    // the tab; the second finds the first's probe in flight and is skipped.
+    const onReturn = () => {
+      if (document.visibilityState === "hidden") return;
+      void probe(true);
+    };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, [reattachOnFocus, probe]);
 
   const status: ChatStatus =
     // Ordered so the declared invariant — `pending` non-empty exactly when the
@@ -1407,6 +1499,7 @@ export function useChat<P extends keyof AgentRoutes>(
     cursor: { runId: state.cursorRunId, seq: state.seq },
     sendMessage,
     stop,
+    reattach,
     regenerate,
     setMessages,
     pending: state.pending as PendingToolCall<ToolsOf<P>>[],

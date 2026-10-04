@@ -3941,7 +3941,8 @@ describe("a nested transcript, watched live and loaded later (#470)", () => {
     await done;
     const user = result.messages.find((message) => message.role === "user")!;
     expect(events.filter((event) => event.type === "message-id")).toEqual([
-      { type: "message-id", localId: "local_1", messageId: user.id },
+      // The stored turn rides along for a client attached from elsewhere (#778).
+      { type: "message-id", localId: "local_1", messageId: user.id, message: user },
     ]);
   });
 

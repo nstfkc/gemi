@@ -2562,3 +2562,260 @@ describe("the server's id for the user's own message", () => {
     expect(box.api.messages[0]!.id).toBe("mine_1");
   });
 });
+
+/** #778: a run another client started on the thread after this chat mounted. */
+describe("reattach()", () => {
+  const QUESTION = {
+    id: "msg_q",
+    role: "user" as const,
+    content: [{ type: "text" as const, text: "edit the hero" }],
+    createdAt: "",
+    finishReason: "stop" as const,
+  };
+  const ELSEWHERE: AgentStreamFrame[] = [
+    { seq: 0, event: { type: "run-start", runId: "run_other", threadId: "th_9" } },
+    {
+      seq: 1,
+      event: { type: "message-id", localId: "local_theirs", messageId: "msg_q", message: QUESTION },
+    },
+    { seq: 2, event: { type: "message-start", messageId: "m9", role: "assistant" } },
+    {
+      seq: 3,
+      event: {
+        type: "tool-result",
+        messageId: "m9",
+        part: {
+          type: "tool-result",
+          toolCallId: "tc_9",
+          name: "editComponent",
+          status: "ok",
+          output: { ok: true },
+        },
+      },
+    },
+    { seq: 4, event: { type: "text-delta", messageId: "m9", delta: "Edited." } },
+    { seq: 5, event: { type: "message-end", messageId: "m9", finishReason: "stop" } },
+    { seq: 6, event: { type: "run-end", runId: "run_other", finishReason: "stop" } },
+  ];
+
+  function attachable() {
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    return run;
+  }
+
+  test("an idle chat picks up the run and streams it as its own", async () => {
+    const onToolResult = vi.fn();
+    const onFinish = vi.fn();
+    const { box } = mount({ threadId: "th_9", attach: false, onToolResult, onFinish });
+    const run = attachable();
+
+    let attached: Promise<boolean>;
+    await act(async () => {
+      attached = box.api.reattach();
+    });
+    expect(calls()[0]![0]).toBe("/api/chat/attach");
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1 });
+
+    await act(async () => {
+      run.push(...ELSEWHERE.slice(0, 4));
+      await Promise.resolve();
+    });
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.runId).toBe("run_other");
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      run.push(...ELSEWHERE.slice(4));
+      run.close();
+      expect(await attached!).toBe(true);
+    });
+    // The question came with the run, ahead of its answer.
+    expect(box.api.messages.map((m) => m.id)).toEqual(["msg_q", "m9"]);
+    expect(box.api.messages[1]!.content.at(-1)).toEqual({ type: "text", text: "Edited." });
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a thread re-read halfway is rebuilt by the replay, not appended to", async () => {
+    // What kyte does: its change feed re-reads the thread, the chat shows it,
+    // then attaches. The read holds the answer so far as a stored copy.
+    const { box } = mount({ threadId: "th_9", attach: false });
+    act(() => {
+      box.api.setMessages([
+        QUESTION,
+        {
+          id: "m9",
+          role: "assistant",
+          content: [{ type: "text", text: "Edi" }],
+          createdAt: "",
+          runId: "run_other",
+        },
+      ]);
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ELSEWHERE));
+
+    await act(async () => {
+      expect(await box.api.reattach()).toBe(true);
+    });
+
+    expect(box.api.messages.map((m) => m.id)).toEqual(["msg_q", "m9"]);
+    expect(box.api.messages[1]!.content.filter((p) => p.type === "text")).toEqual([
+      { type: "text", text: "Edited." },
+    ]);
+  });
+
+  test("the cursor of this chat's own last run goes along, so the route can tell", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hello");
+    });
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    await act(async () => {
+      await box.api.reattach();
+    });
+
+    expect(calls()[1]![0]).toBe("/api/chat/attach");
+    expect(bodyOf(1)).toEqual({ threadId: "th_9", cursor: 4, runId: "run_1" });
+  });
+
+  test("nothing running answers false, quietly", async () => {
+    const onAttachMiss = vi.fn();
+    const onError = vi.fn();
+    const { box } = mount({ threadId: "th_9", attach: false, onAttachMiss, onError });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 }),
+    );
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await box.api.reattach();
+    });
+
+    expect(result).toBe(false);
+    // The caller has the answer; the hook's miss callback is for its own probes.
+    expect(onAttachMiss).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(box.api.status).toBe("idle");
+    expect(box.api.error).toBeNull();
+  });
+
+  test("no thread, no request", async () => {
+    const { box } = mount({ attach: false });
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await box.api.reattach();
+    });
+    expect(result).toBe(false);
+    expect(calls()).toHaveLength(0);
+  });
+
+  test("a chat already streaming is not attached a second time", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    const run = attachable();
+    await act(async () => {
+      void box.api.sendMessage("hi");
+    });
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await box.api.reattach();
+    });
+
+    expect(result).toBe(false);
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat"]);
+    run.close();
+  });
+
+  test("a run attached to this way is stopped by its id", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    const run = attachable();
+    await act(async () => {
+      void box.api.reattach();
+    });
+    await act(async () => {
+      run.push(...ELSEWHERE.slice(0, 3));
+      await Promise.resolve();
+    });
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ stopped: true })));
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(calls()[1]![0]).toBe("/api/chat/stop");
+    expect(rawBodyOf(1)).toEqual({ runId: "run_other", threadId: "th_9" });
+    expect(box.api.status).toBe("idle");
+  });
+});
+
+describe("stop() on a thread with nothing of this chat's in flight (#778)", () => {
+  test("asks the route to stop whatever is running on the thread", async () => {
+    // Another tab's run, which this chat shows as busy from a re-read thread.
+    const { box } = mount({ threadId: "th_9", attach: false });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ stopped: true })));
+
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(calls()[0]![0]).toBe("/api/chat/stop");
+    expect(rawBodyOf(0)).toEqual({ threadId: "th_9" });
+    expect(box.api.error).toBeNull();
+  });
+});
+
+describe("reattachOnFocus (#778)", () => {
+  function miss() {
+    return new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 });
+  }
+
+  test("asks again when the page comes back into view", async () => {
+    fetchMock.mockImplementation(async () => miss());
+    const onAttachMiss = vi.fn();
+    mount({ threadId: "th_9", attach: false, reattachOnFocus: true, onAttachMiss });
+    expect(calls()).toHaveLength(0);
+
+    await act(async () => {
+      // Usually both, back to back, on a return to the tab: one probe.
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat/attach"]);
+    // An automatic probe has no caller to answer, so a miss is reported.
+    expect(onAttachMiss).toHaveBeenCalledWith({ threadId: "th_9" });
+  });
+
+  test("streams a run it finds", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    const { box } = mount({ threadId: "th_9", attach: false, reattachOnFocus: true });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(box.api.messages[0]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("off by default, and off once unmounted", async () => {
+    const { unmount } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    unmount();
+    const second = mount({ threadId: "th_9", attach: false, reattachOnFocus: true });
+    second.unmount();
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(calls()).toHaveLength(0);
+  });
+});

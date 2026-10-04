@@ -1,3 +1,22 @@
+# Unreleased
+
+## `gemi/ai`: `useChat` can pick up, and stop, a run another client started on its thread (#778)
+
+`useChat` only asked `/attach` on mount. A chat that was already open on a thread learned nothing of a run another tab or device started on it later, and `stop()` sent nothing when this chat had no run of its own, so it could not stop that run either. Apps worked around it by re-reading the thread and guessing "running elsewhere" from an unfinished last message.
+
+New:
+
+- **`reattach(): Promise<boolean>`** on `useChat`'s result. It runs the mount probe on demand: if the thread has a run going, the chat streams it as its own (`status` is `streaming`; `onToolResult`, `onToolProgress` and `onFinish` fire for what is new here; `stop()` stops it) and the promise resolves `true` when the stream ends. With nothing to attach to (no thread yet, the chat already sending or streaming, no run on the thread in this process) it resolves `false` at once without changing `status` and without firing `onAttachMiss`. Call it from whatever tells your app the thread changed, such as a change feed.
+- **`reattachOnFocus: true`**, a `useChat` option (default false). The hook runs the same probe when the page comes back into view (`visibilitychange` to visible, or window `focus`). That is one small request per return to the page and nothing while it stays in view; a miss fires `onAttachMiss`, as the mount probe's does.
+- **`stop()` on a thread with nothing in flight** now posts `{ threadId }` to `/stop`, which stops whatever run is live on the thread (the route already supported this). Before, it returned without a request. A chat with no thread and nothing in flight still sends nothing.
+
+Behaviour changes to know:
+
+- **The `message-id` stream event carries the stored user message** as an optional `message` field. A client that sent the turn renames its copy as before and ignores the field. A client that never held the copy (one attached from elsewhere) appends it, unless a message with that id is already there, so the question shows above the answer without re-reading the thread. The reducers in `useChat`, the Swift `ChatSession` and the Kotlin `ChatSession` all do this; a custom client can ignore the field.
+- **`run-start` empties a stored in-progress copy of its run.** A thread read while a run is going holds the answer so far (`AgentMessage.runId` set, no `finishReason`). A client that showed that read and then attached got the run replayed from its first frame on top of it, and the text was printed twice. The reducers now clear the content of those messages (and their `runId`) when that run's `run-start` arrives, so the replay rebuilds them in place. This also covers the mount-time attach onto a server-rendered mid-run thread.
+
+An app that re-reads its thread on a change feed (kyte's `useSharedThread`) can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
