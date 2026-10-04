@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { relative, sep } from "node:path";
 import MagicString from "magic-string";
 import type { Plugin } from "vite";
@@ -7,6 +8,19 @@ import type { Plugin } from "vite";
  * must name a `*.island` module; the extension is optional, as in any import.
  */
 const ISLAND_LOADER = /\(\s*\)\s*=>\s*import\(\s*(["'])([^"'\n]+?\.island(?:\.[cm]?[jt]sx?)?)\1\s*\)/g;
+
+/**
+ * Symlinks resolved, so the key is the same path the manifest is keyed on
+ * however the project directory was reached (`/var` vs `/private/var` on
+ * macOS, a linked workspace).
+ */
+function realPath(path: string) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
 
 /**
  * Tells the server which built file an island's loader imports.
@@ -30,7 +44,7 @@ export function gemiIslandPlugin(): Plugin {
     name: "gemi-plugin-islands",
     enforce: "pre",
     configResolved(config) {
-      root = config.root;
+      root = realPath(config.root);
     },
     async transform(code, id, options) {
       if (id.includes("/node_modules/") || id.startsWith("\0")) return null;
@@ -45,7 +59,7 @@ export function gemiIslandPlugin(): Plugin {
         const [whole, quote, specifier] = match;
         const resolved = await this.resolve(specifier, id);
         if (!resolved || resolved.external) continue;
-        const file = resolved.id.split("?")[0];
+        const file = realPath(resolved.id.split("?")[0]);
         const key = relative(root, file).split(sep).join("/");
         if (key.startsWith("..")) continue;
 
