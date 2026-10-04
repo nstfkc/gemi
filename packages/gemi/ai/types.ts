@@ -272,8 +272,50 @@ export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
      * `ToolAttachmentRecord`.
      */
     attachments?: ToolAttachmentRecord[];
+    /**
+     * The `ToolNamespace` the model called this tool through, as the provider
+     * reported it (`{name: "getOrder", namespace: "crm"}`). Absent for a tool
+     * that was listed bare, and on a provider without tool search.
+     *
+     * Provenance, not identity: `name` is still the registry key. It is kept
+     * because the provider needs it back (#776). A namespaced call replayed
+     * without it is a call to a top-level function the model's tools do not
+     * list, and after one of those the model went off the rails on every
+     * later step.
+     */
+    namespace?: string;
+    /**
+     * The tool searches the model ran in this step before making this call,
+     * in order. Only on the first call after a search, absent everywhere else.
+     *
+     * Kept so the next request can replay them (#776): a deferred tool is only
+     * loaded for the model through a search in its history, and a history
+     * holding a call to a deferred tool and no search that loaded it is not
+     * one the model wrote. On the call rather than as a part of its own
+     * because the content part union is a frozen contract that every client
+     * switches on. A search that no call followed is not kept; it changed
+     * nothing the model then did.
+     */
+    toolSearches?: ToolSearchRecord[];
   };
 }[keyof T];
+
+/**
+ * One tool search the model ran, as stored on the `ToolCallPart` after it.
+ *
+ * `namespaces` and `loaded` are what it found (as on the `tool-search`
+ * provider event), and `arguments` is the query it sent, as the provider
+ * reported it (`{paths: ["crm"]}` on the Responses API). The search's output
+ * is not stored: it is the schemas of the tools named here, and the provider
+ * rebuilds it from the agent's current tools when it replays the search. That
+ * keeps a transcript from carrying whole schemas around, and means a history
+ * never tells the model about a tool the agent no longer has.
+ */
+export type ToolSearchRecord = {
+  namespaces: string[];
+  loaded: string[];
+  arguments?: unknown;
+};
 
 /**
  * One value a tool yielded, as `useChat`'s `onToolProgress` hands it over.

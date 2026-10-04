@@ -70,6 +70,7 @@ export type {
   TextPart,
   ToolCallPart,
   ToolResultPart,
+  ToolSearchRecord,
   ToolShape,
   ToolShapes,
   Usage,

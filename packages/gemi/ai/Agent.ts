@@ -59,6 +59,7 @@ import type {
   NestedRun,
   PendingToolCall,
   ToolCallPart,
+  ToolSearchRecord,
   ToolResultPart,
   ToolShapes,
   Usage,
@@ -2635,7 +2636,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const provider = this.config.provider;
 
     let outcome: StepOutcome = { reason: "stop" };
-    const partialArgs = new Map<string, { name: string; args: string }>();
+    const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
+    // Searches the model ran in this step, waiting for the call that follows
+    // them. See `ToolCallPart.toolSearches` for why they are kept at all.
+    let searches: ToolSearchRecord[] = [];
+    const takeSearches = (): { toolSearches?: ToolSearchRecord[] } => {
+      if (searches.length === 0) return {};
+      const taken = searches;
+      searches = [];
+      return { toolSearches: taken };
+    };
     let outputText = "";
 
     const stream = provider.stream({
@@ -2685,13 +2695,21 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "tool-search": {
+          searches.push({
+            namespaces: event.namespaces,
+            loaded: event.loaded,
+            ...(event.arguments !== undefined ? { arguments: event.arguments } : {}),
+          });
           this.emit({ type: "tool-search", loaded: event.loaded });
           break;
         }
         case "tool-call-delta": {
-          const held = partialArgs.get(event.toolCallId) ?? { name: event.name, args: "" };
+          const held: { name: string; args: string; namespace?: string } = partialArgs.get(
+            event.toolCallId,
+          ) ?? { name: event.name, args: "" };
           held.args += event.argsDelta;
           held.name = event.name || held.name;
+          held.namespace = event.namespace || held.namespace;
           partialArgs.set(event.toolCallId, held);
           this.emit({
             type: "tool-call",
@@ -2702,11 +2720,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
               name: held.name,
               input: bestEffortParse(held.args),
               partial: true,
+              ...(held.namespace ? { namespace: held.namespace } : {}),
             },
           });
           break;
         }
         case "tool-call": {
+          const namespace = event.namespace || partialArgs.get(event.toolCallId)?.namespace;
           partialArgs.delete(event.toolCallId);
           const part: ToolCallPart = {
             type: "tool-call",
@@ -2716,6 +2736,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             // Keeping it is what makes the `invalid_tool_input` result below
             // readable instead of an empty object nobody can explain.
             input: parseArgs(event.args),
+            // Both are for the provider, which has to replay the call the way
+            // the model made it (#776).
+            ...(namespace ? { namespace } : {}),
+            ...takeSearches(),
           };
           message.content.push(part);
           this.emit({ type: "tool-call", messageId: message.id, part });
@@ -2763,6 +2787,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         toolCallId,
         name: held.name,
         input: parseArgs(held.args),
+        ...(held.namespace ? { namespace: held.namespace } : {}),
+        ...takeSearches(),
       };
       message.content.push(part);
       this.emit({ type: "tool-call", messageId: message.id, part });

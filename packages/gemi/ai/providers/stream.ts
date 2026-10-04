@@ -101,6 +101,10 @@ export async function* parseResponsesStream(
   // call, and the call id is what the rest of gemi pairs results on.
   const calls = new Map<string, PendingCall>();
   const searchesReported = new Set<string>();
+  // The query of the last `tool_search_call`, held for the output that follows
+  // it: the live API links the two by nothing but order (see below), and the
+  // event is reported off the output, which does not carry the query.
+  let searchArguments: unknown;
   let finished = false;
   // What the vendor says answered (#741): `response.model` on the lifecycle
   // frames. Kept from every frame that has it, so a stream that dies after
@@ -260,12 +264,24 @@ export async function* parseResponsesStream(
           // "nothing in the recording links the search call to its output"
           // plus "reports one event from the real stream, despite that" in
           // `recordings.test.ts` cover (2).
+          if (item.type === "tool_search_call" && item.arguments !== undefined) {
+            searchArguments = item.arguments;
+          }
           const found = toolSearchReport(item);
           if (found.loaded.length === 0 && found.namespaces.length === 0) break;
           const key = String(item.tool_search_call_id ?? item.id ?? "");
           if (searchesReported.has(key)) break;
           searchesReported.add(key);
-          yield { type: "tool-search", ...found };
+          // The query rides along so the search can be replayed (#776). Taken
+          // and cleared, so a second search in the same response does not
+          // report the first one's query.
+          const query = searchArguments;
+          searchArguments = undefined;
+          yield {
+            type: "tool-search",
+            ...found,
+            ...(query !== undefined && query !== null ? { arguments: query } : {}),
+          };
         }
         break;
       }

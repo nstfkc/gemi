@@ -1,3 +1,16 @@
+# Unreleased
+
+## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
+
+With tool search on (a `ToolNamespace`, or a deferred tool, on an OpenAI or Azure model that supports it), a call to a tool inside a namespace was sent back on later steps and turns without its namespace, and the tool search that loaded it was not sent back at all. After the first namespaced call the model read calls to functions its tools did not list, and could loop on a tool until `max-steps`. Both now go back the way the model made them.
+
+Nothing in an app has to change. What to know:
+
+- **`ToolCallPart` has two new optional fields**, written by the server and kept in stored transcripts: `namespace` (the namespace the model called the tool through) and `toolSearches` (the searches the model ran in that step before the call, as `ToolSearchRecord`s, exported from `gemi/ai`). Treat them like `nested` and `attachments`: a store or a stateless client should keep them as they are. `name` is still the tool's own name.
+- **The provider `tool-search` event** has an optional `arguments` (the search query). A custom provider does not need to fill it in.
+- **Transcripts stored before this release** have neither field, so their earlier calls are still replayed the old way. New calls are stored with both.
+- **`toResponsesInput`** takes the request's tools as a third argument. The namespace is only sent back when that request has the namespace; without tool search, or when the agent no longer has it, the call goes back without one, as before.
+
 # Upgrading from 0.104.0 to 0.105.0
 
 ## `gemi/http`: an agent can be served from the api its typed MCP tools come from (#774)

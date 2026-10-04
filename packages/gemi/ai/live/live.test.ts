@@ -57,6 +57,7 @@ import {
   transcriptText,
   withoutDigitGrouping,
   type LiveTarget,
+  type RecordingProvider,
 } from "./harness";
 
 /** A model call can take a while at `reasoning: "high"`, and a nested run is
@@ -367,6 +368,90 @@ function battery(target: LiveTarget) {
 
         expect(result.finishReason).toBe("stop");
         expect(transcriptText(result.messages)).toContain("4200");
+      },
+      TIMEOUT,
+    );
+
+    /**
+     * #776, end to end: two namespaced calls in two turns, the second run
+     * starting from the first one's transcript as a store would hand it back.
+     *
+     * Before the fix the first call was replayed without its `namespace` and
+     * without the tool search that loaded it, and in kyte the model then
+     * looped on an unrelated tool until `max-steps`. What is checked is that
+     * the second turn's first request carries both, and that the model, given
+     * that history, makes its second namespaced call and answers.
+     */
+    test(
+      "namespaced calls across turns replay with their namespace and search",
+      async () => {
+        const totals: Record<string, number> = { ord_1: 4200, ord_2: 5317 };
+        const looked: string[] = [];
+        const getOrder = AgentTool.create({
+          name: "getOrder",
+          description: "Read one order's total, in cents",
+          inputSchema: s.object({ orderId: s.string() }),
+          outputSchema: s.object({ totalCents: s.number() }),
+          execute: async (input) => {
+            looked.push(input.orderId);
+            return { totalCents: totals[input.orderId] ?? 0 };
+          },
+        });
+        const listOrders = AgentTool.create({
+          name: "listOrders",
+          description: "List a customer's recent order ids",
+          inputSchema: s.object({ customerId: s.string() }),
+          outputSchema: s.object({ orderIds: s.array(s.string()) }),
+          execute: async () => ({ orderIds: ["ord_1", "ord_2"] }),
+        });
+        const crm = ToolNamespace.create({
+          name: "crm",
+          description: "Customer records, orders and refunds",
+          deferred: true,
+          tools: [listOrders, getOrder],
+        });
+        const agent = (provider: RecordingProvider) =>
+          Agent.create({
+            name: "support",
+            instructions:
+              "Use the crm tools for every order question, even one you answered before. " +
+              "Answer with the number of cents only.",
+            provider,
+            tools: [crm],
+            maxSteps: 4,
+          });
+
+        const first = target.provider();
+        const one = await agent(first)
+          .stream({ messages: [], turn: { text: "What is the total on order ord_1?" } })
+          .result();
+        expect(one.finishReason).toBe("stop");
+        expect(transcriptText(one.messages)).toContain("4200");
+
+        // What a store keeps is JSON.
+        const stored = JSON.parse(JSON.stringify(one.messages)) as AgentMessage[];
+        const second = target.provider();
+        const two = await agent(second)
+          .stream({ messages: stored, turn: { text: "And the total on order ord_2?" } })
+          .result();
+
+        const sent = toResponsesInput(
+          second.requests[0]!.messages,
+          second.capabilities,
+          second.requests[0]!.tools,
+        );
+        const replayedCall = sent.find((item) => item.type === "function_call");
+        expect(replayedCall?.namespace).toBe("crm");
+        const searchAt = sent.findIndex((item) => item.type === "tool_search_output");
+        expect(searchAt).toBeGreaterThan(-1);
+        expect(searchAt).toBeLessThan(sent.indexOf(replayedCall!));
+
+        const calls = second.events.filter((event) => event.type === "tool-call") as any[];
+        expect(calls.length).toBeGreaterThan(0);
+        expect(calls[0].namespace).toBe("crm");
+        expect(looked).toContain("ord_2");
+        expect(two.finishReason).toBe("stop");
+        expect(withoutDigitGrouping(textOf(lastOf(two.messages)))).toContain("5317");
       },
       TIMEOUT,
     );
