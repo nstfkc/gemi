@@ -1,3 +1,15 @@
+# Unreleased
+
+## `gemi/ai`: `contextWindow`, `prepareStep` and turn helpers (#473)
+
+New, and nothing changes unless an app opts in: without `contextWindow` or `prepareStep`, every model call sends the whole history as before. See [AI Context Window](docs/ai-context-window.md).
+
+- **`contextWindow`** on `Agent.create`, `Agent.stream` and `AgentController` (a `protected contextWindow` property) bounds what each model call is sent: at most `maxTurns` turns and `maxBytes` (or approximate `maxTokens`), cut at a turn start, always keeping the latest turn. The start moves `step` turns at a time (default 10) so the provider's prompt cache keeps hitting, and the first kept turn gets a `note` saying earlier turns are left out. Only the request changes: the store, `onMessage`, `readThread` and `result().messages` keep every message.
+- **`prepareStep`** on `Agent.create`, `Agent.stream` and `AgentController` (a method, also given the hook context) is called before every model call and may answer `{ messages, instructions }` for that call alone.
+- **Exported helpers**: `turnStarts`, `splitTurns`, `windowMessages`, `messageSize` and `injectedMessageIds` (previously internal), with the types `ContextWindowOptions`, `ContextWindowResult`, `PrepareStep`, `PrepareStepContext` and `PrepareStepResult`.
+
+An app that windows its thread in `AgentStore.loadThread` (kyte) can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
+
 # Upgrading from 0.105.0 to 0.106.0
 
 ## `gemi/ai`: namespaced tool calls and tool searches are replayed to the provider (#776)
