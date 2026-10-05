@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.109.0 to 0.110.0
 
 ## Islands hydrate React components, like Astro (breaking)
 
