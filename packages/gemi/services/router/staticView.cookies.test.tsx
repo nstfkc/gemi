@@ -4,12 +4,14 @@ import type { ReactNode } from "react";
 import { App } from "../../app/App";
 import { createRoot } from "../../client/createRoot";
 import { Head } from "../../client/Head";
+import { island } from "../../client/islands";
 import { Cookie } from "../../facades/Cookie";
 import { ApiRouter } from "../../http/ApiRouter";
 import { Middleware } from "../../http/Middleware";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
 import { RecordNotFoundError } from "../../orm/errors";
+import { ISLAND_LOADER_SOURCE } from "./staticDocument";
 
 /**
  * A `.static()` view is one body for every visitor, so gemi sets none of its
@@ -26,6 +28,15 @@ const Layout = (props: { children: ReactNode; locale: string }) => (
   </html>
 );
 
+/** What gemi's Vite plugin turns `island(() => import("./Counter"))`'s loader into. */
+const counterModule = { default: (props: { start: number }) => <button type="button">{props.start}</button> };
+const Counter = island(
+  Object.assign(() => Promise.resolve(counterModule), {
+    gemiIsland: "app/views/Counter.tsx",
+    gemiModule: counterModule,
+  }) as () => Promise<any>,
+);
+
 const views: Record<string, any> = {
   "404": () => <p>not found</p>,
   Page: () => (
@@ -36,6 +47,11 @@ const views: Record<string, any> = {
     </main>
   ),
   Hydrated: () => <main>hydrated</main>,
+  WithIsland: () => (
+    <main>
+      <Counter start={3} />
+    </main>
+  ),
 };
 
 const submitted: unknown[] = [];
@@ -83,6 +99,7 @@ class TestViewRouter extends ViewRouter {
       throw new RecordNotFoundError("Page", "findUniqueOrThrow");
     }).static({ cacheControl: "public, max-age=60" }),
     "/hydrated": this.view("Hydrated"),
+    "/with-island": this.view("WithIsland").static({ cacheControl: "public, max-age=60" }),
   };
 }
 
@@ -113,7 +130,10 @@ const prodParams = {
   ogMap: {},
   clientEntry: { module: "/assets/client.js", preload: ["/assets/client.js"] },
   modulePreloadManifest: {},
-  resolveIsland: () => undefined,
+  resolveIsland: (key: string) =>
+    key === "app/views/Counter.tsx"
+      ? { src: "/assets/Counter.js", preload: ["/assets/Counter.js", "/assets/react-dom.js"] }
+      : undefined,
 };
 
 async function fetchDocument(path: string, headers: Record<string, string> = {}) {
@@ -137,6 +157,20 @@ describe("a static view's cookies", () => {
     expect(res.headers.getSetCookie()).toEqual([]);
     // No cacheControl, no header: the cache in front decides.
     expect(res.headers.get("Cache-Control")).toBeNull();
+  });
+
+  test("a page with an island sets none either, and still gets the island loader", async () => {
+    const res = await fetchDocument("/with-island");
+    const html = await res.text();
+
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(html).toContain("<gemi-island");
+    expect(html).toContain("<button");
+    expect(html).toContain(`${ISLAND_LOADER_SOURCE}</script>`);
+    expect(html).toContain('"s":"/assets/Counter.js"');
+    // Still no client runtime: the island's chunk is the only script it loads.
+    expect(html).not.toContain("/assets/client.js");
   });
 
   test("a hydrated view still sets session_id, csrf_token and i18n-locale", async () => {
