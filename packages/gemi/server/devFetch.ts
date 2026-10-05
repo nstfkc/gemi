@@ -10,6 +10,7 @@ import { isApiPath } from "../services/router/apiPath";
 import { renderErrorPage } from "./renderErrorPage";
 import { createDevStyles } from "./styles";
 import type { Instrumentation } from "./types";
+import { ISLAND_ENTRY_QUERY } from "../internal/islandRuntime";
 
 // Run a Web `Request` through Vite's Connect middleware.
 // Resolves to a `Response` when Vite handles the request (module transforms,
@@ -304,8 +305,12 @@ export function createDevFetch(
         return await result({
           getStyles: async (currentViews: string[], options?: { static?: boolean; layout?: string }) =>
             await createDevStyles(appDir, vite, currentViews, options?.layout),
-          // Vite serves app files by their root-relative path.
-          resolveIsland: (moduleKey: string) => ({ src: `/${moduleKey}`, preload: [] }),
+          // Vite serves app files by their root-relative path; the island
+          // entry is that path plus the plugin's query.
+          resolveIsland: (moduleKey: string) => ({
+            src: `/${moduleKey}${ISLAND_ENTRY_QUERY}`,
+            preload: [],
+          }),
           bootstrapModules: [DEV_ENTRY_PATH],
           viewImportMap,
           viewModules,
