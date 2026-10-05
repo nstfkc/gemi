@@ -60,7 +60,11 @@ export class Lang extends Facade {
     );
   }
 
-  static setLocale(locale = Lang.locale()) {
+  /**
+   * Sets the locale for the rest of this request and, unless `cookie` is
+   * `false`, remembers it in the `i18n-locale` cookie for the next one.
+   */
+  static setLocale(locale = Lang.locale(), options: { cookie?: boolean } = {}) {
     const translator = this.getFacadeRoot();
     let _locale = locale;
     if (!translator.supportedLocales.includes(locale)) {
@@ -69,11 +73,13 @@ export class Lang extends Facade {
 
     const store = RequestContext.getStore();
 
-    store.setCookie("i18n-locale", _locale, {
-      expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-      secure: false,
-      httpOnly: false,
-    });
+    if (options.cookie !== false) {
+      store.setCookie("i18n-locale", _locale, {
+        expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+        secure: false,
+        httpOnly: false,
+      });
+    }
 
     // The cookie is for the *next* request. Without also recording it here,
     // `Lang.locale()` would keep answering with the locale this request arrived

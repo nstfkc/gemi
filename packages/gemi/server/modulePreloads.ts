@@ -1,4 +1,5 @@
 import { DEFAULT_ASSET_BASE, assetUrl } from "../config/assetBase";
+import { ISLAND_ENTRY_QUERY } from "../internal/islandRuntime";
 
 /** The subset of a Vite manifest entry this module reads. */
 export interface ViteManifestChunk {
@@ -110,24 +111,29 @@ export function collectCss(manifest: ViteManifest, entryKey: string): string[] {
   return files;
 }
 
-/** An island client module's manifest key: `*.island.ts(x)` / `.js(x)`. */
-export const ISLAND_MODULE_PATTERN = /\.island\.[cm]?[jt]sx?$/;
-
 /**
- * Island client modules in the client build, by manifest key: where each is
- * served from and the chunks importing it pulls in.
+ * Where a static page's islands load from: each island module's entry
+ * (`<key>?gemi-island`, the module plus the hydrate function), with the
+ * chunks importing it pulls in, itself first. React and `react-dom/client`
+ * are among those. `undefined` for a module the client build has no island
+ * entry for.
  */
-export function createIslandAssets(
+export function createIslandResolver(
   manifest: ViteManifest,
   assetBase: string = DEFAULT_ASSET_BASE,
-): Record<string, { src: string; preload: string[] }> {
-  const assets: Record<string, { src: string; preload: string[] }> = {};
-  for (const [key, chunk] of Object.entries(manifest)) {
-    if (!ISLAND_MODULE_PATTERN.test(key) || !chunk?.file) continue;
-    assets[key] = {
-      src: assetUrl(chunk.file, assetBase),
-      preload: collectModulePreloads(manifest, key, assetBase),
-    };
-  }
-  return assets;
+): (moduleKey: string) => { src: string; preload: string[] } | undefined {
+  const cache = new Map<string, { src: string; preload: string[] } | undefined>();
+  return (moduleKey) => {
+    if (!cache.has(moduleKey)) {
+      const key = `${moduleKey}${ISLAND_ENTRY_QUERY}`;
+      const file = manifest[key]?.file;
+      cache.set(
+        moduleKey,
+        file
+          ? { src: assetUrl(file, assetBase), preload: collectModulePreloads(manifest, key, assetBase) }
+          : undefined,
+      );
+    }
+    return cache.get(moduleKey);
+  };
 }

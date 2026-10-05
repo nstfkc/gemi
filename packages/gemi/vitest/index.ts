@@ -41,3 +41,22 @@ export function gemiRequestPlugin(): Plugin {
     },
   };
 }
+
+/**
+ * gemi's island transform, for an app's `vitest.config.ts`: with it, a test
+ * that renders a static view through `App.fetch` sees each
+ * `island(() => import("./Counter"))` with the same module key as the build,
+ * and a hydrated view renders the component in place instead of lazily.
+ *
+ * Without it islands still render (the component is loaded with the
+ * `import()`), but their keys are unknown.
+ *
+ * ```ts
+ * // vitest.config.ts
+ * import { defineConfig } from "vitest/config";
+ * import { gemiIslandPlugin, gemiRequestPlugin } from "gemi/vitest";
+ *
+ * export default defineConfig({ plugins: [gemiRequestPlugin(), gemiIslandPlugin()] });
+ * ```
+ */
+export { gemiIslandPlugin } from "../vite/islandPlugin";

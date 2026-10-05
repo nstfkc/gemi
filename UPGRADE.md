@@ -1,5 +1,77 @@
 # Unreleased
 
+## Islands hydrate React components, like Astro (breaking)
+
+`island()` (new in 0.109.0) no longer takes a vanilla `mount(root, props)` module. An island is now a React component: on a static page gemi server-renders it as its own root and the browser hydrates it with `hydrateRoot`, so the same component works on static and hydrated pages with one implementation. See [Static Views & Islands](docs/static-views-and-islands.md#islands).
+
+**Before (0.109.0):**
+
+```tsx
+export const NavMenu = island("nav-menu", NavMenuView, () => import("./navMenu.island"), {
+  load: "idle",
+  props: true,
+});
+// navMenu.island.ts: export default (root, props) => { /* DOM code */ };
+```
+
+**After:**
+
+```tsx
+export const NavMenu = island(() => import("./NavMenu"), { load: "idle" });
+// NavMenu.tsx: an ordinary React component (state, effects, handlers), default export.
+// For a named export: island(() => import("./forms"), { export: "ContactForm" }).
+```
+
+To migrate an island:
+
+1. Move the behaviour from the `*.island.ts` mount function into the component (`useState`, `onClick`, …) and delete the `.island.ts` file.
+2. Replace `island(name, Component, () => import("./x.island"), options)` with `island(() => import("./Component"), { load })`. The loader must be written exactly as `() => import("…")` inside the `island(` call. There's no `name` any more.
+3. Drop `props`: all props (except `children`) are now serialised, because hydration needs them. They must be plain data (JSON); in dev a function, class instance, `Date`, `Map`, `NaN`, … fails the render naming the prop.
+4. Pass anything the island's component reads from context (locale, translations, URLs) as props: on a static page an island is a separate React root and the page's context doesn't reach it.
+5. In `vitest.config.ts`, add `gemiIslandPlugin()` from `gemi/vitest` and remove any mock of `island` (#795).
+
+What else changes:
+
+- **A static page with islands loads React.** Per page: the island's chunk, React and `react-dom/client` (shared by all islands, fetched once); on a sample page about 54 KB brotli for the first island and about 1 KB for each further one. A static page without islands still ships no JavaScript.
+- **`children` of an island** are rendered on the server in the page's tree, with the page's context (#805), and passed through as static HTML in a `<gemi-slot style="display:contents">` element. Child-combinator CSS (`[&>a]`) doesn't reach them through the slot.
+- **Markers changed:** `<gemi-island data-island="0" data-uid="i0-" data-props="…" style="display:contents">`; the `name` attribute is gone. The island table in `<script id="gemi-islands">` is `{ i: [{ s, e, l }] }`.
+- **The build:** `*.island.*` files are no longer special. gemi's Vite plugin emits a client entry `<module>?gemi-island` for each module an `island()` call names; the client manifest lists it under that key with React and `react-dom/client` among its imports. The SSR build includes the component (imported statically).
+- **The loader** changed, so `ISLAND_LOADER_CSP_HASH` has a new value. Use the export rather than a copied hash.
+- **Removed types:** `IslandMount` (`gemi/client`). `IslandOptions` is now `{ load?, export? }`, and `IslandLoader` is the `() => import()` loader.
+- **New:** `gemiIslandPlugin` from `gemi/vitest`.
+
+## `gemi stats` and `gemi build --stats`: initial JavaScript per route, with budgets (#794)
+
+New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats](docs/bundle-stats.md).
+
+- **`gemi stats`** reads the last build in `dist/client` and prints, per route, the JavaScript it loads before it can run: raw, gzip and brotli, the number of files, and the budget. A hydrated route counts the client entry plus its view chain's static imports (the `modulepreload` set); a `.static()` route counts only the island entries (`<module>?gemi-island`) its views and layout can render, with their imports; React and other shared chunks count once per route. Each island is also listed on its own.
+- **`gemi build --stats`** does the same after building. Both take `--json <file>` (the stats for CI), `--markdown <file>` and `--base <file>` (a PR table compared with another build's JSON), and `--no-routes`.
+- **`stats.budgets` in `gemi.config.ts`** (`unit`, `default`, `routes` keyed by route path or page view, in KB) makes both commands exit with `1` when a route is over its budget.
+- To report per route without booting the app in the build, the route table is read in a child process (`gemi/stats/route-table`, a new export) that imports the Kernel and runs only its synchronous `boot()`: providers register, nothing boots. If it fails, the stats are reported per view instead, with a message.
+- New: `DomainRouter.viewGroups()`, and the `StatsConfig`/`StatsBudgets` types from `gemi/config`.
+
+An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
+
+## Static views set no cookies of their own, and take `cacheControl`
+
+Behaviour change for `.static()` views (#797). See [Static Views & Islands](docs/static-views-and-islands.md#cookies-and-caching).
+
+- **A static view no longer sets `session_id`, `csrf_token` or `i18n-locale`.** A first-time visitor gets no `Set-Cookie`, so a CDN can cache the page. Cookies the handler or middleware sets are still sent. The `404` a missing record turns a static route into is a hydrated page and keeps all three.
+- **`.static({ cacheControl })`** sets the page's `Cache-Control` (for example `"public, max-age=60, s-maxage=600"`). It applies only to the rendered page; a header the handler set wins; and a page that sets a cookie is sent `private, no-store` instead.
+- **`.static({ session: true })`** and **`.static({ csrf: true })`** opt back into `session_id` (percentage rollouts for anonymous visitors bucket on it) and `csrf_token` (a same-origin form posting to a route behind `CSRFMiddleware`).
+- **`Lang.setLocale(locale, { cookie: false })`** sets the request's locale without writing the `i18n-locale` cookie.
+
+What to check: a static page whose form posts to a same-origin route behind `CSRFMiddleware` needs `csrf: true`, and one whose feature flags roll out by percentage to anonymous visitors needs `session: true`. A form posting to an api route with its own protection needs nothing.
+
+## CORS headers on refusals from earlier middleware
+
+Fixes #800. A refusal from a middleware listed before `cors` (a router's `rate-limit` 429, a `body-limit` 413, a `400` for an unparseable body read by a middleware, an `auth` 401) now carries the CORS headers, so a browser sees the status instead of a network error. See [Middleware](docs/middleware.md#cors--corsmiddleware).
+
+- **`Middleware.runsOnRefusal`** (static, default `false`): when a middleware in the chain throws, the `runsOnRefusal` middleware after it still run before the error goes on. One that throws itself then is logged and ignored. `CorsMiddleware` sets it to `true`.
+- **`CorsMiddleware` accepts a `"*"` origin**: any origin gets `Access-Control-Allow-Origin: *`, without `Access-Control-Allow-Credentials`. An exact origin key wins.
+
+Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configure`) listed after a middleware that refuses now runs for that refusal. If an app relied on an ordering trick to put CORS first (an `any-origin` middleware at the start of the list), it can keep it or switch to `CorsMiddleware` with `"*"`. A custom header-only middleware can opt in with `static runsOnRefusal = true`.
+
 ## `afterCommit(fn)` from `gemi/orm` (#786)
 
 New, nothing to change. `afterCommit(fn)` runs `fn` after the surrounding transaction commits, or immediately when no transaction is open, and never on rollback (including when the savepoint it was registered in rolls back). It is the commit hook `static afterCommit` events already use, so an app no longer needs to push onto `ormContext.getStore()?.afterCommit` itself. See [Running something after the commit](docs/orm.md#running-something-after-the-commit).
