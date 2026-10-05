@@ -1,3 +1,18 @@
+# Unreleased
+
+## Background jobs for agent tools (#461)
+
+A tool can hand work that outlasts a run to a queued job. Declare `async` on the tool and return `ctx.jobs.start(JobClass, args, { summary })`: the call's result is `{ status: "running", job: { id, summary } }`, the turn ends as usual, and the job's output replaces that result once it settles. `ctx.jobs.track()` records a job that a webhook or poller settles with `AgentJobs.settle(id, { output })`. See [AI Background Jobs](docs/ai-background-jobs.md).
+
+New exports from `gemi/ai`: `AgentJob`, `AgentJobs`, `JobHandle`, `JobsRequireThreadError`, `MemoryAgentJobStore`, `DEFAULT_JOB_DEADLINE_MS`, and the types `AgentJobStore`, `AgentJobRecord`, `AgentJobContext`, `ToolJobs`, `StartJobOptions`, `AgentJobRef` and others. `AgentTool.create` takes `async: { deadlineMs }`, and `ToolContext` has `jobs`.
+
+What this changes for an existing app:
+
+- `ToolResultPart` has a fourth `status`, `"running"`, and `ok`/`error` results may carry `job`. Code that switches on `status` exhaustively needs a branch for it; a tool that never starts a job never produces one. The iOS and Android clients read a `running` result as `ok` with no output for now.
+- On a threaded turn, `AgentController` now also reads the job store when it loads a thread (`readThread` and the start of each turn). With the default `MemoryAgentJobStore` this is a map lookup.
+- `ToolContext` has a new required member, `jobs`. Code that builds a `ToolContext` by hand (a test calling a tool's `execute` directly) has to add it.
+- `ScopedAttachments` has a `scopeKey` getter.
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)

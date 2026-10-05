@@ -55,6 +55,7 @@ export type {
 export type {
   AgentContentPart,
   AgentError,
+  AgentJobRef,
   AgentErrorCode,
   AgentMessage,
   AgentStreamEvent,
@@ -121,6 +122,35 @@ export type {
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";
+
+// --- background jobs for tools (#461) --------------------------------------
+//
+// A tool hands long work to a queued `AgentJob` with `ctx.jobs.start`, and its
+// result reads `running` until the job settles. See docs/ai-background-jobs.md.
+export {
+  AgentJob,
+  AgentJobs,
+  DEFAULT_JOB_DEADLINE_MS,
+  JobHandle,
+  JobsRequireThreadError,
+  MemoryAgentJobStore,
+} from "./jobs";
+export type {
+  AgentJobClass,
+  AgentJobContext,
+  AgentJobOutcome,
+  AgentJobRecord,
+  AgentJobState,
+  AgentJobStore,
+  AgentJobUpdate,
+  JobAttachments,
+  JobEditImageParams,
+  JobGenerateImageParams,
+  NewAgentJobRecord,
+  RunJobs,
+  StartJobOptions,
+  ToolJobs,
+} from "./jobs";
 
 // --- the context window (#473) --------------------------------------------
 //

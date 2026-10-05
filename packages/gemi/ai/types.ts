@@ -345,14 +345,38 @@ export type ToolProgress<T extends ToolShapes = ToolShapes> = {
   };
 }[keyof T];
 
+/**
+ * The background job behind a tool result (#461): on a `running` result, and
+ * kept on the `ok` or `error` result it settled into.
+ */
+export type AgentJobRef = {
+  /** `ajob_…`, the job store's id. */
+  id: string;
+  /** What the tool said about the job when it started it. */
+  summary?: unknown;
+  /**
+   * What the job spent on model and image calls, once it has settled. Part of
+   * the cost of the turn that started it, which had already ended.
+   */
+  usage?: Usage;
+};
+
 export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
   [K in keyof T]: {
     type: "tool-result";
     toolCallId: string;
     name: K;
   } & (
-    | { status: "ok"; output: T[K]["output"] }
-    | { status: "error"; error: AgentError }
+    | { status: "ok"; output: T[K]["output"]; job?: AgentJobRef }
+    | { status: "error"; error: AgentError; job?: AgentJobRef }
+    /**
+     * The tool started a background job (it returned a `JobHandle`) and the
+     * job has not settled yet (#461). Not a pause: the turn goes on and ends
+     * as usual, and the thread takes new turns meanwhile. When the job
+     * settles, this result becomes `ok` or `error` in place, the next time the
+     * controller loads the thread. Only on a threaded conversation.
+     */
+    | { status: "running"; job: AgentJobRef }
     /**
      * The call did not run. `refused` is the client declining an approval or
      * answering something else instead; `stopped` is a cancel that landed while
