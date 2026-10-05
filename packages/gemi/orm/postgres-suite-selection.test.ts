@@ -47,7 +47,8 @@ const workflow = readFileSync(WORKFLOW, "utf8");
  * not keep checking a word nobody greps for any more.
  */
 const filter = (() => {
-  const match = workflow.match(/vitest run app\/models[^\n]*-t (\S+)/);
+  // `vitest run …` or the guarded `.github/scripts/vitest.sh …` (#815).
+  const match = workflow.match(/vitest(?: run|\.sh") app\/models[^\n]*-t (\S+)/);
   expect(match, "the Postgres job's -t filter was not found").not.toBeNull();
   return match![1];
 })();

@@ -181,14 +181,25 @@ jobs:
       # The whole package runs now. Keep it that way: an exclusion added here is
       # a failure nobody will look at again, which is the state this comment
       # replaced.
+      #
+      # Every vitest step goes through `.github/scripts/vitest.sh`, which runs
+      # `bun --bun x vitest` and fails unless Vitest printed a summary with at
+      # least `VITEST_MIN_PASSED` passing tests. Plain `bun --bun vitest` from
+      # `packages/gemi` runs the `gemi/vitest` entry directory instead, prints
+      # nothing and exits 0, and every step here passed that way for a day
+      # (#815). The floors sit well under today's counts: they catch a step that
+      # ran nothing or a fraction of the suite, not a deleted test.
       - name: Unit tests
-        run: bun --bun vitest run
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh"
         working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "7000"
 
       - name: Template tests
-        run: bun --bun vitest run app/models
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" app/models
         working-directory: templates/saas-starter
         env:
+          VITEST_MIN_PASSED: "1000"
           TZ: UTC
 
       # `gemi check models`, against the one real project in this repository.
@@ -301,7 +312,7 @@ jobs:
       # `vitest.config.ts` for the same reason, plus not putting a full
       # framework build in parallel with the timing-sensitive ORM suites.
       - name: Packaging test
-        run: bun run test:packaging
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" --config vitest.packaging.config.ts
         working-directory: packages/gemi
 
   # The other half of the differential harness, which is the repository's actual
@@ -457,8 +468,10 @@ jobs:
       # files clobber each other's fixtures. Measured — the parallel run fails
       # with row-count differences that have nothing to do with the code.
       - name: Differential and policy suites
-        run: bun --bun vitest run app/models --no-file-parallelism -t postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" app/models --no-file-parallelism -t postgres
         working-directory: templates/saas-starter
+        env:
+          VITEST_MIN_PASSED: "1000"
 
   # The database queue driver's claim is different SQL per dialect — a locking
   # CTE on Postgres, a `SELECT … FOR UPDATE SKIP LOCKED` transaction on MySQL —
@@ -511,14 +524,18 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Queue driver on Postgres and MySQL
-        run: bun --bun vitest run services/queue/DatabaseQueueDriver.test.ts -t "postgres|mysql"
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/queue/DatabaseQueueDriver.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "60"
 
       # The lock store, unique jobs and cron withoutOverlapping/onOneServer
       # across several clients on one database (#662).
       - name: Locks on Postgres and MySQL
-        run: bun --bun vitest run services/lock/DatabaseLockStore.test.ts -t "postgres|mysql"
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/lock/DatabaseLockStore.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "20"
 
       # The agent job store's compare-and-set, clock and transactional start,
       # and the restart tests on the database queue driver (#461).
@@ -531,9 +548,10 @@ jobs:
       # missing, which would read as a pass, so the suite is told to fail
       # instead of skipping when it cannot reach them.
       - name: Schema introspection on Postgres and MySQL
-        run: bun --bun vitest run database/introspect.test.ts -t "postgres|mysql"
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" database/introspect.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
         env:
+          VITEST_MIN_PASSED: "15"
           CI_DATABASE_SERVERS_REQUIRED: "1"
 
   # The iOS client. `swift test` at the root builds GemiChat and replays the

@@ -71,6 +71,10 @@ What this changes for an existing app:
 - Deadlines: a job still running `deadlineMs` after it started is failed with code `"timeout"`, by `AgentJobs.sweep()` (scheduled every minute by exporting `AgentJobDeadlineSweep` from `app/cron`) and by the controller when it loads the job's thread. A result after that is refused.
 - On a thread with background jobs, the controller adds a `<jobs>` block (at most 20 jobs) after the instructions in the system prompt. `Agent.create({ jobs: { contextBlock: { max } } })` bounds it, and `contextBlock: false` leaves it out. A thread with no jobs gets no block.
 
+## `gemi upgrade` stops looking for gemi's manifest at a workspace root (#815)
+
+`gemi upgrade` walks up from the current directory to the `package.json` that declares `gemi`. It now stops at a workspace root (a manifest with `workspaces`) and refuses there, instead of carrying on into the parent directories, where an unrelated `package.json` that happens to depend on gemi (in `$TMPDIR` or `$HOME`, say) would have been upgraded instead. Nothing changes for a project whose manifest declares gemi.
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)

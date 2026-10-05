@@ -16,7 +16,7 @@ Regenerate after a deliberate change to the reducer, the decoder or their tests:
 
 ```sh
 cd packages/gemi
-GEMI_UPDATE_FIXTURES=1 bun --bun vitest run ai/client
+GEMI_UPDATE_FIXTURES=1 bun --bun x vitest run ai/client
 ```
 
 A normal run fails if the files are stale, so a behaviour change cannot reach
