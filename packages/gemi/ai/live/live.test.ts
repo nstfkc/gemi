@@ -38,6 +38,7 @@ process.env.SECRET ??= "ai-live-test-secret";
 
 import { describe, expect, test } from "vitest";
 import { Agent, AgentTool, ToolNamespace } from "../Agent";
+import { MemorySummaryStore } from "../contextCompaction";
 import { applyFrame, initialChatState } from "../client/reducer";
 import { toResponsesInput } from "../providers/request";
 import { s } from "../Schema";
@@ -1004,6 +1005,64 @@ function battery(target: LiveTarget) {
         expect(transcriptText(assistants(settledSub.messages))).toBe(
           transcriptText(assistants(sub.messages)),
         );
+      },
+      TIMEOUT,
+    );
+
+    test(
+      "compaction: a fact from a summarised turn still reaches the answer (#782)",
+      async () => {
+        const provider = target.provider();
+        const store = new MemorySummaryStore();
+        const say = (i: number, role: "user" | "assistant", text: string): AgentMessage => ({
+          id: `${role[0]}${i}`,
+          role,
+          content: [{ type: "text", text }],
+          createdAt: new Date(0).toISOString(),
+          finishReason: "stop",
+        });
+        // The fact is in turn 0; turns 1-11 are filler. With `maxTurns: 3` the
+        // window keeps only the last turns, so the fact can only arrive through
+        // the summary.
+        const history: AgentMessage[] = [
+          say(
+            0,
+            "user",
+            `Please remember: my dog is called Biscuit and my locker code is ${STOCK}.`,
+          ),
+          say(0, "assistant", "Noted: your dog is Biscuit and your locker code is " + STOCK + "."),
+        ];
+        for (let i = 1; i < 12; i++) {
+          history.push(say(i, "user", `Name a colour, number ${i}.`));
+          history.push(say(i, "assistant", ["Red", "Blue", "Green", "Teal"][i % 4]!));
+        }
+        const agent = Agent.create({
+          name: "memory",
+          instructions: "Answer briefly, from the conversation only.",
+          provider,
+          contextWindow: { maxTurns: 3, step: 1, compact: { store } },
+        });
+        const result = await agent
+          .stream({
+            messages: history,
+            turn: { text: "What is my dog called, and what is my locker code?" },
+            threadId: "live-compaction",
+          })
+          .result();
+
+        expect(result.finishReason).toBe("stop");
+        const answer = withoutDigitGrouping(textOf(lastOf(result.messages)));
+        expect(answer).toMatch(/biscuit/i);
+        expect(answer).toContain(String(STOCK));
+        // One summary call, then the turn's own; both billed to the run.
+        expect(provider.requests).toHaveLength(2);
+        expect(provider.requests[0]!.output).toBeDefined();
+        const sent = provider.requests[1]!.messages;
+        expect(sent[0]!.id).toBe("summary_u10");
+        expect(sent.some((message) => message.id === "u0")).toBe(false);
+        expect(result.usage).toEqual(provider.spent());
+        const [saved] = await store.loadSummaries("live-compaction");
+        expect(saved?.cutMessageId).toBe("u10");
       },
       TIMEOUT,
     );

@@ -50,7 +50,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Testing](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user. Route tests: `App.fetch` with a test `Kernel`, and `gemiRequestPlugin()` from `gemi/vitest`.
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
-- **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, and the turn helpers.
+- **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
 - **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 
 ### Data
@@ -6332,6 +6332,89 @@ How the cut is made:
 - **Tool searches are carried.** A call into a `ToolNamespace` (or to a deferred tool) only makes sense after the tool search that loaded it. When that search was in a turn left out, it is put back on the first kept call that needs it, so the request still replays the search before the call.
 
 Only the request changes. `loadThread` still answers the whole thread, `onMessage` and the store still get every message, `readThread` and attach still show all of it, and stateless turns are windowed the same way (`maxHistoryMessages` still refuses an oversized client history). A sub-agent started with `ctx.runAgent` uses its own agent's `contextWindow`.
+
+## Compaction
+
+With `compact`, the turns the window leaves out are summarised instead of dropped. It is off unless you set it:
+
+```typescript
+export const assistant = Agent.create({
+  name: "assistant",
+  provider,
+  contextWindow: {
+    maxTurns: 40,
+    maxTokens: 100_000,
+    compact: { maxSummaryTokens: 1_000 }, // or `compact: true` for the defaults
+  },
+});
+```
+
+The request then becomes `[system messages, summary, ...kept turns]`. The summary is a user message, `COMPACT_SUMMARY_HEADER` followed by the text, and is never stored in the thread.
+
+How it works:
+
+- **When.** The turns the window's own limits (`maxTurns`, `maxTokens`, `maxBytes`) leave out are summarised. So are older turns once the turns sent would be over `triggerTokens` (approximate tokens), even when `maxTurns` would keep them all, so a few long turns with big tool results are compacted early. `triggerTokens` defaults to 100000 when the window has no `maxTokens`/`maxBytes` (with one, that budget is the trigger). Unlike `maxTokens` it never drops a turn without a summary: if none can be made, the plain window is sent as if it weren't set.
+- **Once per cut.** The window's start moves `step` turns at a time, so a summary is made when it moves and reused by every later turn until it moves again. Between moves, consecutive turns send the same prefix, so the provider's prompt cache keeps hitting.
+- **Incremental.** The new summary is the previous cut's summary plus the turns that just left the window. A first summary of a long thread is folded in chunks of at most `chunkTokens`, each call building on the last, so the summarised part can be bigger than any context.
+- **Stored per thread.** Summaries go to a `SummaryStore`, keyed by thread and cut (the id of the first kept message). An `AgentController` uses its own `AgentStore` when it implements `loadSummaries` and `saveSummary` (`MemoryAgentStore` does, and drops them with the thread). Otherwise they go to `defaultSummaryStore`, in memory. Each record carries a fingerprint of the messages it summarised; if those change (a regenerate, an edit), the record is ignored and a new one is made.
+- **In the background.** When a run on a thread ends, the summary the next turn will need is started right away (the cut is worked out with an empty message standing in for that turn), so the next turn usually finds it stored and doesn't wait. If it isn't ready, the next turn waits for the same call, or makes it inline before its first model call (always, with `background: false`). A next turn whose own message moves the cut further makes that summary inline.
+- **No double work.** Every run and background start on one thread in one process share one summary call per cut. For several processes, implement `lockSummary` on the store (Redis `SET key NX PX ttl`, say): a run that finds a cut locked waits up to `lockWaitMs` for the other process's summary, then sends the plain window.
+- **Detached from the run.** Stopping the run that started a summary stops that run's wait, not the summary: it finishes, is saved, and reaches every run waiting on it.
+- **Billed once.** Each summary call's usage is added to the `usage` of a run waiting on it (the one that started it, while it runs). A call no run was waiting on (a background start, or one whose run was stopped) is added to the next run in the same process that uses the summary. The stored record's `usage` always says what it cost.
+- **Never fatal.** If the summary call fails, the run sends the plain window with `note`, and doesn't try again on its later steps.
+- **Turn boundaries and tool searches** are the window's: the cut is at a turn start, and a tool search a kept namespaced call depends on is carried over (#777). The summary renders tool calls and results as text.
+- **Stored threads only.** It applies to a run with a `threadId` (a thread the server stores), at the top level. Stateless threads are not compacted: the client carries their history and there is no server-side key to keep a summary under, so they get the plain window, as a sub-agent's run does.
+- **Budget.** `maxSummaryTokens` is reserved from `maxTokens`/`maxBytes`, so the summary and the kept turns together stay within the budget.
+
+The options (`ContextCompactOptions`):
+
+- `provider`: the model that writes the summaries. Default: the run's provider. A cheaper model works well here.
+- `triggerTokens` (default 100000 when the window has no `maxTokens`/`maxBytes`, else unset): compact once the turns sent would be over this many approximate tokens. `false` turns it off.
+- `background` (default `true`): start the next turn's summary as soon as a run ends.
+- `instructions`: the summariser's system prompt. Default `DEFAULT_COMPACT_INSTRUCTIONS`; a "keep it under N words" line is appended.
+- `maxSummaryTokens` (default 1000): how long a summary may be, in approximate tokens. A longer answer is cut to it.
+- `chunkTokens` (default 24000): the most transcript one summary call is sent.
+- `reasoning` (default `"low"`): for the summary call.
+- `store`: a `SummaryStore` to use instead of the default.
+- `lockWaitMs` (default 20000): how long to wait for a summary another process is writing.
+
+A durable store adds `loadSummaries` and `saveSummary` (and optionally `lockSummary`) next to its thread methods, or you pass a separate `SummaryStore` as `compact.store`. A table for it:
+
+```sql
+CREATE TABLE agent_thread_summaries (
+  thread_id      TEXT NOT NULL,
+  cut_message_id TEXT NOT NULL,
+  record         JSONB NOT NULL, -- the ThreadSummary
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (thread_id, cut_message_id)
+);
+```
+
+```typescript
+class DbAgentStore implements AgentStore {
+  // ...createThread, loadThread, appendMessages...
+  async loadSummaries(threadId: string) {
+    const rows = await db.query(
+      "SELECT record FROM agent_thread_summaries WHERE thread_id = $1 ORDER BY created_at DESC LIMIT 8",
+      [threadId],
+    );
+    return rows.map((row) => row.record);
+  }
+  async saveSummary(threadId: string, summary: ThreadSummary) {
+    await db.query(
+      `INSERT INTO agent_thread_summaries (thread_id, cut_message_id, record) VALUES ($1, $2, $3)
+       ON CONFLICT (thread_id, cut_message_id) DO UPDATE SET record = EXCLUDED.record, created_at = now()`,
+      [threadId, summary.cutMessageId, summary],
+    );
+  }
+}
+```
+
+Keeping the latest few per thread is enough: the latest is what the next cut builds on.
+
+Without a background summary ready (the first summary of a thread, `background: false`, or a turn whose own message moves the cut), the summary call runs before the first model call of the turn whose window moved, so that turn starts later by one model call (several for a first summary of a long thread).
+
+In tests, or before a process exits, `await settleSummaries()` waits for the summaries still being made in the background.
 
 ## `prepareStep`
 
