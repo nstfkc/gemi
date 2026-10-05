@@ -1219,7 +1219,6 @@ export class ViewRouteDispatcher {
             throw err;
           }
         }
-        const recordMissing = refusedStatus !== null;
 
         // After middleware, not at match time: `auth` is what puts the user on
         // the request context, and a route gated on a flag that targets signed-in
@@ -1234,12 +1233,12 @@ export class ViewRouteDispatcher {
         // included. A `RequestBreakerError` here would instead return a bare
         // text body, which both looks broken and confirms the route exists.
         //
-        // A missing record joins the gate here rather than getting a branch of
+        // A missing record or a refusal joins the gate here rather than getting a branch of
         // its own, because the outcome is the same one and it is spelled in
         // exactly these three assignments. Short-circuited: a request whose
         // middleware already found nothing must not go on to evaluate flags.
         if (
-          recordMissing ||
+          refusedStatus !== null ||
           (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates)))
         ) {
           currentPathName = null;
