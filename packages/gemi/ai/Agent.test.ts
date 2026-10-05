@@ -302,6 +302,67 @@ describe("a provider error", () => {
   });
 });
 
+describe("onTurn (#806)", () => {
+  test("fires once, for the turn's own message, after onMessage and before the model is asked", async () => {
+    const order: string[] = [];
+    const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
+    const stream = provider.stream.bind(provider);
+    provider.stream = (params) => {
+      order.push("model");
+      return stream(params);
+    };
+    const agent = Agent.create({ name: "chat", provider });
+    let reported: AgentMessage | undefined;
+    let turned: AgentMessage | undefined;
+    const run = agent.stream({
+      messages: [],
+      turn: { text: "hello" },
+      onMessage: (message) => {
+        order.push(`message:${message.role}`);
+        if (message.role === "user") reported = message;
+      },
+      onTurn: (message) => {
+        order.push("turn");
+        turned = message;
+      },
+    });
+    const result = await run.result();
+
+    expect(order).toEqual(["message:user", "turn", "model", "message:assistant"]);
+    expect(turned).toBe(reported);
+    expect(turned).toBe(result.messages[0]);
+  });
+
+  test("does not fire for a turn with no text and no files", async () => {
+    const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
+    const agent = Agent.create({ name: "chat", provider });
+    const turned: AgentMessage[] = [];
+    const run = agent.stream({
+      messages: [],
+      turn: {},
+      onTurn: (message) => {
+        turned.push(message);
+      },
+    });
+    await run.result();
+    expect(turned).toEqual([]);
+  });
+
+  test("a throwing onTurn does not take the run with it", async () => {
+    const provider = fakeProvider([{ type: "text-delta", delta: "hi" }, finish()]);
+    const agent = Agent.create({ name: "chat", provider });
+    const run = agent.stream({
+      messages: [],
+      turn: { text: "hello" },
+      onTurn: () => {
+        throw new Error("the app's database is down");
+      },
+    });
+    const result = await run.result();
+    expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+  });
+});
+
 describe("per-message usage (#467)", () => {
   const spent = (inputTokens: number, outputTokens: number): ProviderEvent => ({
     type: "finish",

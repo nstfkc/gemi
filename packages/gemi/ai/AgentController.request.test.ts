@@ -309,8 +309,10 @@ describe("AgentController hooks, inside the request that started the run", () =>
     const res = await send({ text: "hi" });
     await res.body!.cancel();
     await tick();
-    // The body is gone and the run is not: the request is still open.
-    expect(log).toEqual([]);
+    // The body is gone and the run is not: the request is still open. The
+    // turn's own message has already been through `onMessage`, with the user,
+    // while the model has not answered yet (#806).
+    expect(log).toEqual(["message:user:1"]);
 
     open();
     await until(() => ends().length > 0);
