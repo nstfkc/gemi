@@ -57,7 +57,22 @@ export class Account extends AccountModel {
 }
 ```
 
-A policy only applies to a model **registered on `Kernel.models`** via the
+**For one record named by the route or the chat** (`/pages/:pageId`, an agent whose
+`body` carries `pageId`), a resource policy states the rule once and applies it to the
+route, the view and the agent's four routes, refusing "missing" and "not yours" with the
+same 404:
+
+```ts
+export const PagePolicy = defineResourcePolicy({
+  param: "pageId",
+  load: (id) => Page.findUnique({ where: { publicId: id } }),
+  allow: (page, req) => page.ownerId === req.ctx().user?.id,
+});
+// aliases: { "owns-page": PagePolicy.middleware }
+// AgentController: resource = PagePolicy.forAgent({ body: (b: PageBody) => b.pageId, thread: … })
+```
+
+An ORM policy only applies to a model **registered on `Kernel.models`** via the
 `app/models` barrel — that registration is what makes it apply inside nested
 `include`s. Policies concatenate base-first, so a subclass can narrow an inherited
 policy but never widen it.
