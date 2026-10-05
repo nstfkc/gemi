@@ -1,5 +1,6 @@
 import type { Schema } from "../Schema";
 import type { AgentJobRef, AgentMessage, ToolResultPart } from "../types";
+import { clockOf, expire } from "./AgentJob";
 import type { AgentJobRecord, AgentJobState, AgentJobStore } from "./AgentJobStore";
 
 /** How many of a thread's newest jobs are checked for orphans on each load. */
@@ -43,10 +44,33 @@ export async function overlayJobs(
     isRunLive: (runId: string) => boolean | Promise<boolean>;
     /** The tool's output schema, to check a settled output against. */
     outputSchemaFor?: (toolName: string) => Schema<any> | undefined;
+    /** How many of the thread's newest jobs to read. At least 50. */
+    scan?: number;
   },
-): Promise<{ messages: AgentMessage[]; settled: AgentMessage[]; orphans: AgentJobRecord[] }> {
+): Promise<{
+  messages: AgentMessage[];
+  settled: AgentMessage[];
+  orphans: AgentJobRecord[];
+  /** The thread's newest jobs, as they stand after this pass: for the `<jobs>` block. */
+  jobs: AgentJobRecord[];
+}> {
   const { store, threadId } = params;
-  const recent = await store.listForThread(threadId, { limit: ORPHAN_SCAN });
+  const scan = Math.max(ORPHAN_SCAN, params.scan ?? 0);
+  const recent = await store.listForThread(threadId, { limit: scan });
+
+  // The lazy half of the deadline sweep: a running job past its deadline is
+  // failed here, so an app with no cron still sees it fail.
+  let now: number | undefined;
+  const current = async (record: AgentJobRecord): Promise<AgentJobRecord> => {
+    if (record.state !== "running") return record;
+    now ??= await clockOf(store);
+    if (record.deadlineAt > now) return record;
+    await expire(store, record);
+    return (await store.get(record.id)) ?? record;
+  };
+  for (let index = 0; index < recent.length; index++) {
+    recent[index] = await current(recent[index]!);
+  }
   const known = new Map(recent.map((record) => [record.id, record]));
 
   const out = messages.slice();
@@ -64,7 +88,8 @@ export async function overlayJobs(
       const id = part.job?.id;
       let record = id ? known.get(id) : undefined;
       if (id && record === undefined) {
-        record = (await store.get(id)) ?? undefined;
+        const found = await store.get(id);
+        record = found ? await current(found) : undefined;
         if (record) known.set(id, record);
       }
       if (record?.state === "running") continue;
@@ -86,7 +111,7 @@ export async function overlayJobs(
     orphans.push(record);
   }
 
-  return { messages: out, settled, orphans };
+  return { messages: out, settled, orphans, jobs: recent };
 }
 
 /** Marks orphans found by `overlayJobs`. Never throws: it is bookkeeping. */

@@ -13,6 +13,12 @@ What this changes for an existing app:
 - `ToolContext` has a new required member, `jobs`. Code that builds a `ToolContext` by hand (a test calling a tool's `execute` directly) has to add it.
 - `ScopedAttachments` has a `scopeKey` getter.
 
+### Durable jobs, deadlines and the `<jobs>` block
+
+- `DatabaseAgentJobStore` keeps jobs in a `gemi_agent_jobs` table (SQLite, Postgres, MySQL). It is opt-in: `AgentJobs.use(new DatabaseAgentJobStore(connection))` in a service provider. Create the table with the Prisma model in [AI Background Jobs](docs/ai-background-jobs.md#databaseagentjobstore), or `store.createTable()`. Nothing changes for an app that does not opt in.
+- Deadlines: a job still running `deadlineMs` after it started is failed with code `"timeout"`, by `AgentJobs.sweep()` (scheduled every minute by exporting `AgentJobDeadlineSweep` from `app/cron`) and by the controller when it loads the job's thread. A result after that is refused.
+- On a thread with background jobs, the controller adds a `<jobs>` block (at most 20 jobs) after the instructions in the system prompt. `Agent.create({ jobs: { contextBlock: { max } } })` bounds it, and `contextBlock: false` leaves it out. A thread with no jobs gets no block.
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)

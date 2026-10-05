@@ -15,6 +15,7 @@ import { ToolError } from "../redact";
 import type { AgentMessage, ToolResultPart } from "../types";
 import { AgentJob, type AgentJobContext, AgentJobs, JobsRequireThreadError } from "./AgentJob";
 import { type AgentJobStore, MemoryAgentJobStore } from "./AgentJobStore";
+import type { AgentJobsOptions } from "./contextBlock";
 
 /**
  * Background jobs for agent tools (#461), phase 1: a tool hands its work to a
@@ -124,12 +125,16 @@ function holdJobs() {
   });
 }
 
-function setup(scripts: ProviderEvent[][], tools: AgentTool<any, any, any, any>[] = [render]) {
+function setup(
+  scripts: ProviderEvent[][],
+  tools: AgentTool<any, any, any, any>[] = [render],
+  jobs?: AgentJobsOptions,
+) {
   const provider = fakeProvider(...scripts);
   const agentStore = new MemoryAgentStore();
   const reported: unknown[] = [];
   class Chat extends AgentController {
-    agent = Agent.create({ name: "chat", provider, tools }) as any;
+    agent = Agent.create({ name: "chat", provider, tools, ...(jobs ? { jobs } : {}) }) as any;
     store = agentStore;
     liveRuns = new MemoryLiveRuns();
     protected reportHookFailure(err: unknown) {
@@ -563,5 +568,93 @@ describe("MemoryAgentJobStore", () => {
     ]);
     expect(await jobs.listForThread("t", { limit: 1 })).toHaveLength(1);
     expect((await jobs.overdue(Date.now(), 10)).map((r) => r.id)).toEqual(["a"]);
+  });
+});
+
+describe("the <jobs> block", () => {
+  const job = (id: string, threadId: string, extra: { deadlineMs?: number } = {}) =>
+    store.create({
+      id,
+      threadId,
+      runId: "run_gone",
+      toolCallId: `call_${id}`,
+      toolName: "render",
+      owner: null,
+      job: null,
+      summary: { id },
+      attachmentScope: null,
+      deadlineMs: extra.deadlineMs ?? 60_000,
+    });
+
+  test("lists the thread's jobs in the system prompt, running first, and stays the same text until one changes", async () => {
+    const { controller, provider, agentStore } = setup([say("a"), say("b"), say("c")]);
+    const { threadId } = await agentStore.createThread({});
+    await job("ajob_old", threadId);
+    await tick();
+    await job("ajob_done", threadId);
+    await AgentJobs.settle("ajob_done", { output: { made: 1 } });
+    await tick();
+    await job("ajob_new", threadId);
+
+    await turn(controller, threadId, "one");
+    const first = provider.calls[0]!.systemPrompt!;
+    expect(first).toContain("<jobs>");
+    const lines = first.split("\n").filter((line) => line.startsWith("- "));
+    expect(lines.map((line) => line.split(" ")[1])).toEqual(["ajob_new", "ajob_old", "ajob_done"]);
+    expect(lines[0]).toMatch(/running since \d{4}-\d\d-\d\dT/);
+    expect(lines[2]).toMatch(/finished at/);
+    // Never anchored in this thread: an orphan, and said so.
+    expect(lines[0]).toMatch(/tool call was lost/);
+
+    await turn(controller, threadId, "two");
+    expect(provider.calls[1]!.systemPrompt).toBe(first);
+
+    await AgentJobs.fail("ajob_old", "It broke.");
+    await turn(controller, threadId, "three");
+    expect(provider.calls[2]!.systemPrompt).toMatch(
+      /ajob_old \(render\); failed at .* \(tool_error: It broke\.\)/,
+    );
+  });
+
+  test("is bounded by contextBlock.max and can be turned off", async () => {
+    const bounded = setup([say("a")], [render], { contextBlock: { max: 2 } });
+    const { threadId } = await bounded.agentStore.createThread({});
+    for (const id of ["ajob_1", "ajob_2", "ajob_3"]) await job(id, threadId);
+    await turn(bounded.controller, threadId, "hi");
+    const prompt = bounded.provider.calls[0]!.systemPrompt!;
+    expect(prompt.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(2);
+
+    const off = setup([say("a")], [render], { contextBlock: false });
+    const other = await off.agentStore.createThread({});
+    await job("ajob_4", other.threadId);
+    await turn(off.controller, other.threadId, "hi");
+    expect(off.provider.calls[0]!.systemPrompt ?? "").not.toContain("<jobs>");
+  });
+
+  test("is absent on a thread with no jobs, and keeps the app's instructions first", async () => {
+    const { controller, provider, agentStore } = setup([say("a"), say("b")]);
+    const { threadId } = await agentStore.createThread({});
+    await turn(controller, threadId, "hi");
+    expect(provider.calls[0]!.systemPrompt ?? "").not.toContain("<jobs>");
+  });
+
+  test("an overdue job is failed when the thread is loaded, with no sweep running", async () => {
+    const { controller, provider, agentStore } = setup([say("a")]);
+    const { threadId } = await agentStore.createThread({});
+    await job("ajob_late", threadId, { deadlineMs: 1 });
+    await tick();
+    await turn(controller, threadId, "hi");
+    expect(await store.get("ajob_late")).toMatchObject({
+      state: "error",
+      error: { code: "timeout" },
+    });
+    expect(provider.calls[0]!.systemPrompt).toMatch(/ajob_late \(render\); failed at .*\(timeout:/);
+    expect(await AgentJobs.settle("ajob_late", { output: 1 })).toBe(false);
+  });
+
+  test("Agent.create refuses a max that is not a whole number above 0", () => {
+    expect(() =>
+      Agent.create({ name: "x", provider: fakeProvider(), jobs: { contextBlock: { max: 0 } } }),
+    ).toThrow(/jobs.contextBlock.max/);
   });
 });

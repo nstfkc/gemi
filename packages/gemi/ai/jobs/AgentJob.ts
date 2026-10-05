@@ -140,7 +140,47 @@ export const AgentJobs = {
   async fail(id: string, error: string | Error | AgentError): Promise<boolean> {
     return settleOn(currentStore, id, { error });
   },
+
+  /**
+   * The deadline sweep: fails every running job whose deadline has passed
+   * with code `"timeout"`, and answers how many it failed.
+   *
+   * Compare-and-set like every settle, so it is safe to run on every
+   * instance at once, and a result that arrives after it is refused. Run it
+   * every minute with `AgentJobDeadlineSweep`; the controller also checks a
+   * thread's jobs when it loads the thread, so an app without cron still sees
+   * overdue jobs fail, just later. The job's queue worker is not stopped: what
+   * it returns afterwards is dropped.
+   */
+  async sweep(options: { limit?: number } = {}): Promise<number> {
+    const store = currentStore;
+    const limit = options.limit ?? 100;
+    const now = await clockOf(store);
+    let failed = 0;
+    for (const record of await store.overdue(now, limit)) {
+      if (await expire(store, record)) failed++;
+    }
+    return failed;
+  },
 };
+
+/** The store's clock, or this process's for a store without one. */
+export async function clockOf(store: AgentJobStore): Promise<number> {
+  return store.now ? await store.now() : Date.now();
+}
+
+/** Fails a running job for its deadline. Compare-and-set: false when it had settled. */
+export function expire(store: AgentJobStore, record: AgentJobRecord): Promise<boolean> {
+  return store.transition(record.id, ["running"], {
+    state: "error",
+    error: {
+      code: "timeout",
+      message: `The background job for "${record.toolName}" did not finish before its deadline, so it was given up on. Its result, if it ever arrives, is ignored.`,
+      toolCallId: record.toolCallId,
+      retryable: true,
+    },
+  });
+}
 
 async function settleOn(
   store: AgentJobStore,
