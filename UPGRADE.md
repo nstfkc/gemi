@@ -1,3 +1,17 @@
+# Unreleased
+
+## `onMessage` for a turn's user message fires when the run starts (#806)
+
+`AgentController.onMessage` used to be called for every message of a run after the run had ended, the turn's user message included. It is now called for the turn's user message as soon as the run has taken the turn in: on a thread, right after the store has written the message (the journal writes it before the model is asked anything), and without waiting for the model. Every other message is still reported after the run, and the user message is not reported a second time, so each message still reaches `onMessage` once and in the transcript's order.
+
+What this changes for an app:
+
+- Something an app writes beside the stored message from the request (where the turn was sent from, whether the app sent it on the user's behalf) is there for the whole run, so a reload or another tab no longer shows the message without it until the run ends.
+- `onMessage` for the user message now runs while the model is answering, not after it. It still runs inside the request that started the run, with `ctx.req` and the user. A hook that assumed the run was over when it saw the user message (for example, reading the answer from the store) has to wait for `onStreamComplete` instead.
+- A run that fails or is stopped after taking the turn in has its user message reported too. A run whose `result()` rejects used to report no message at all.
+- A turn with no text and no files (answers to pending tool calls only) has no user message, and nothing changes for it.
+- `Agent.stream` has a new `onTurn(message)` param, called once for the message the run made of the client's turn, right after `onMessage` for it and before the first model call. `AgentController` uses it; an app calling `Agent.stream` directly can ignore it.
+
 # Upgrading from 0.109.0 to 0.110.0
 
 ## Islands hydrate React components, like Astro (breaking)
