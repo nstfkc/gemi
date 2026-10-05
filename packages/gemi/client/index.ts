@@ -21,6 +21,13 @@ export type {
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
+export { useSubscription } from "./useSubscription";
+export type {
+  SubscriptionConfig,
+  SubscriptionData,
+  SubscriptionOptions,
+  SubscriptionStatus,
+} from "./useSubscription";
 export {
   isValidationError,
   isFormError,

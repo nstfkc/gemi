@@ -1,4 +1,5 @@
 import type { ServiceProviderConstructor } from "../foundation/Application";
+import { ChangeFeedServiceProvider } from "../services/change-feed/ChangeFeedServiceProvider";
 import { AuthServiceProvider } from "../auth/AuthServiceProvider";
 import { DatabaseServiceProvider } from "../database/DatabaseServiceProvider";
 import { TranslationServiceProvider } from "../i18n/TranslationServiceProvider";
@@ -55,4 +56,5 @@ export const frameworkProviders: ServiceProviderConstructor[] = [
   TranslationServiceProvider,
   RateLimiterServiceProvider,
   ScheduleServiceProvider,
+  ChangeFeedServiceProvider,
 ];

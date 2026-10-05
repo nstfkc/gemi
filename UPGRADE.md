@@ -1,3 +1,14 @@
+# Unreleased
+
+## Change feeds: `ChangeFeed`, `useSubscription` (#761)
+
+New, nothing to migrate. `ChangeFeed.publish("site:42", data)` appends to a channel's log. `ChangeFeed.stream(req, channels)` follows channels over SSE from a route that authorised the read, and `useSubscription(route, { params }, { onChange, onReset })` follows that route in the browser, resuming with `Last-Event-ID` after a drop or a hidden tab. `ChangeFeed.subscribe(channels, { cursor })` is the same feed as an async iterator on the server. Inside an ORM transaction, nobody is told before the commit, and nothing is published on rollback. See [Change Feeds](docs/change-feed.md).
+
+- The default `"memory"` driver is for one process.
+- `driver: "database"` in `app/config/changeFeed.ts` keeps the log in `gemi_change_heads` and `gemi_changes` (add the two Prisma models from the docs), and on Postgres wakes every instance with `LISTEN`/`NOTIFY`.
+- On Bun 1.3 the `LISTEN` connection needs the `postgres` package (`bun add postgres`), now an optional peer dependency. Bun 1.4 and later use their own client.
+- Every app now boots a 17th provider, `ChangeFeedServiceProvider`. It holds nothing until the feed is used.
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)
