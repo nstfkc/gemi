@@ -63,6 +63,15 @@ Behaviour change for `.static()` views (#797). See [Static Views & Islands](docs
 
 What to check: a static page whose form posts to a same-origin route behind `CSRFMiddleware` needs `csrf: true`, and one whose feature flags roll out by percentage to anonymous visitors needs `session: true`. A form posting to an api route with its own protection needs nothing.
 
+## CORS headers on refusals from earlier middleware
+
+Fixes #800. A refusal from a middleware listed before `cors` (a router's `rate-limit` 429, a `body-limit` 413, a `400` for an unparseable body read by a middleware, an `auth` 401) now carries the CORS headers, so a browser sees the status instead of a network error. See [Middleware](docs/middleware.md#cors--corsmiddleware).
+
+- **`Middleware.runsOnRefusal`** (static, default `false`): when a middleware in the chain throws, the `runsOnRefusal` middleware after it still run before the error goes on. One that throws itself then is logged and ignored. `CorsMiddleware` sets it to `true`.
+- **`CorsMiddleware` accepts a `"*"` origin**: any origin gets `Access-Control-Allow-Origin: *`, without `Access-Control-Allow-Credentials`. An exact origin key wins.
+
+Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configure`) listed after a middleware that refuses now runs for that refusal. If an app relied on an ordering trick to put CORS first (an `any-origin` middleware at the start of the list), it can keep it or switch to `CorsMiddleware` with `"*"`. A custom header-only middleware can opt in with `static runsOnRefusal = true`.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)

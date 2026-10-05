@@ -2820,6 +2820,16 @@ Bun has a server-wide limit of its own, `maxRequestBodySize`, applied before a r
 
 Sets CORS headers for requests whose `Origin` is in the configured `origins` map. Because it needs configuration, it's registered with `CorsMiddleware.configure({ origins: { ... } })` (see below) rather than as a bare class.
 
+A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *` and no `Access-Control-Allow-Credentials`, since browsers refuse that pair. Use it for a public endpoint that takes no cookies, such as a form posted from sites on other hosts. An exact origin key wins over `"*"`.
+
+```typescript
+"public-form": CorsMiddleware.configure({
+  origins: { "*": { "Access-Control-Allow-Methods": "POST" } },
+}),
+```
+
+`cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
+
 ### `csrf` → `CSRFMiddleware`
 
 Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.
@@ -3015,6 +3025,21 @@ class AdminRouter extends ViewRouter {
   routes = { /* ... */ };
 }
 ```
+
+### Middleware that runs on refusals
+
+A middleware that only adds response headers, like your own CORS middleware, can set `static runsOnRefusal = true`. When a middleware earlier in the chain refuses the request, the chain still runs every `runsOnRefusal` middleware after it, and the headers they set reach the refusal. `CorsMiddleware` sets it.
+
+```typescript
+class AnyOriginMiddleware extends Middleware {
+  static runsOnRefusal = true;
+  run() {
+    this.req.ctx().setHeaders("Access-Control-Allow-Origin", "*");
+  }
+}
+```
+
+After a refusal, the request never reaches the handler, so such a middleware must not refuse, read the body, or depend on earlier middleware. If it throws then, the error is logged and the original refusal stands.
 
 ### Middleware that needs a service
 
