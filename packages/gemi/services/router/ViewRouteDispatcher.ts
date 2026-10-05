@@ -41,8 +41,8 @@ import { createShellContentObserver, createShellContentReporter } from "./shellC
 import { createRoutePayloadStream } from "./routePayloadStream";
 import { loadSharp } from "../../support/sharp";
 import type { StaticViewOptions } from "../../http/ViewRouter";
-import { StaticRenderContext, type StaticRenderCollector } from "../../client/islands";
-import { injectIslands, type IslandResolver } from "./staticDocument";
+import { StaticRenderContext, createStaticRenderCollector } from "../../client/islands";
+import { injectIslands, spliceIslandSlots, type IslandResolver } from "./staticDocument";
 import { applyStaticCacheControl, staticCookiePolicy } from "./staticCache";
 
 /**
@@ -429,10 +429,28 @@ export class ViewRouteDispatcher {
     const styles = await args.getStyles(currentViews, { static: true, layout: staticView.layout });
 
     serverQueries.markRenderStart();
-    const collector: StaticRenderCollector = { islands: new Map() };
     const dictionarySink = createDictionarySink();
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
+    const onError = (error: unknown) => {
+      if (process.env.NODE_ENV !== "production") {
+        console.error(error);
+      }
+    };
+    // Each island is its own React root in the browser, so it is rendered as
+    // one here too: the HTML `hydrateRoot` sees is exactly what this produced,
+    // `useId` included (hence the prefix), and nothing from the page's context
+    // leaks in on the server that the browser would not have.
+    const collector = createStaticRenderCollector(async (element, identifierPrefix) => {
+      const stream = await renderToReadableStream(element, {
+        signal: deadline.signal,
+        identifierPrefix,
+        progressiveChunkSize: Number.MAX_SAFE_INTEGER,
+        onError,
+      });
+      await stream.allReady.catch(() => {});
+      return await new Response(stream).text();
+    });
 
     try {
       const stream = await renderToReadableStream(
@@ -458,15 +476,11 @@ export class ViewRouteDispatcher {
           // With `allReady` awaited below, this keeps every boundary inline
           // rather than split out behind a reveal script (see `settled`).
           progressiveChunkSize: Number.MAX_SAFE_INTEGER,
-          onError(error: unknown) {
-            if (process.env.NODE_ENV !== "production") {
-              console.error(error);
-            }
-          },
+          onError,
         },
       );
       await stream.allReady.catch(() => {});
-      const html = await new Response(stream).text();
+      const html = spliceIslandSlots(await new Response(stream).text());
 
       return new Response(
         injectIslands(html, collector, args.resolveIsland, process.env.NODE_ENV !== "production"),

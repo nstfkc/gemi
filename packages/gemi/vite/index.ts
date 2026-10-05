@@ -35,11 +35,10 @@ const gemi = async (): Promise<PluginOption[]> => {
             // browser devtools and server stack traces map back to app source.
             sourcemap: true,
             rollupOptions: {
-              // Island client modules are browser-only entries: the server
-              // renders an island's component, never its module.
-              input: Array.from<string>(JSON.parse(process.env.GEMI_INPUT ?? "[]")).filter(
-                (entry) => !(env.isSsrBuild && /\.island\.[cm]?[jt]sx?$/.test(entry)),
-              ),
+              // Island modules are not listed: `gemiIslandPlugin` emits each
+              // one (and the island runtime) as a client entry when it sees
+              // the `island()` call that uses it.
+              input: Array.from<string>(JSON.parse(process.env.GEMI_INPUT ?? "[]")),
               // Each view is a build entry, but the app never imports them
               // statically — the client router pulls them in via `import.meta.glob`
               // (a runtime dynamic import). Rolldown's default entry-signature
