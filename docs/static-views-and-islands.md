@@ -91,6 +91,44 @@ whose pages need a few kilobytes of CSS doesn't inline the application's whole
 Tailwind build. Without `layout`, the page renders inside `RootLayout` with the
 app's stylesheet, as a hydrated view does.
 
+### Cookies and caching
+
+A static page is one body for every visitor, so a CDN can cache it. For that,
+gemi sets none of its own cookies on it: no `session_id`, no `csrf_token` and no
+`i18n-locale` (a static page's locale comes from its url). A first-time visitor
+gets a response with no `Set-Cookie` at all. Cookies the handler or a middleware
+sets (`Cookie.set`, `req.ctx().setCookie`) are still sent.
+
+`cacheControl` sets the page's `Cache-Control`:
+
+```typescript
+"/p/:slug": this.view("site/Page", loadPage).static({
+  layout: "site/SiteLayout",
+  cacheControl: "public, max-age=60, s-maxage=600, stale-while-revalidate=86400",
+}),
+```
+
+Without it gemi sends no `Cache-Control`, and the cache in front decides. Only
+the rendered page gets the header, not a redirect, an error or the 404 a missing
+record turns the request into. A `Cache-Control` the handler sets itself wins.
+A page that sets a cookie is sent `private, no-store` instead, whatever
+`cacheControl` says, so a shared cache never stores one visitor's cookie and
+hands it to the next. A cookie a `global` middleware sets is left off a page
+whose `Cache-Control` is `public` (or has `s-maxage`).
+
+Two options bring a hydrated view's cookies back, for pages that are not meant
+to be cached:
+
+- `session: true` mints `session_id` for a visitor who has none. Feature flags
+  that roll out by percentage to anonymous visitors bucket on it; without it a
+  first-time visitor has no bucketing subject on a static page.
+- `csrf: true` sets `csrf_token`. You need it only when a form on the page posts
+  to a same-origin route behind `CSRFMiddleware`.
+
+A form that posts to an api route with its own protection (a honeypot, a token
+in the body, an `Origin` check), often on another origin, needs neither. For a
+cross-origin form, configure CORS on the api route.
+
 ## Islands
 
 An island is a React component, written like any other, that you mark as an

@@ -52,6 +52,17 @@ New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats]
 
 An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
 
+## Static views set no cookies of their own, and take `cacheControl`
+
+Behaviour change for `.static()` views (#797). See [Static Views & Islands](docs/static-views-and-islands.md#cookies-and-caching).
+
+- **A static view no longer sets `session_id`, `csrf_token` or `i18n-locale`.** A first-time visitor gets no `Set-Cookie`, so a CDN can cache the page. Cookies the handler or middleware sets are still sent. The `404` a missing record turns a static route into is a hydrated page and keeps all three.
+- **`.static({ cacheControl })`** sets the page's `Cache-Control` (for example `"public, max-age=60, s-maxage=600"`). It applies only to the rendered page; a header the handler set wins; and a page that sets a cookie is sent `private, no-store` instead.
+- **`.static({ session: true })`** and **`.static({ csrf: true })`** opt back into `session_id` (percentage rollouts for anonymous visitors bucket on it) and `csrf_token` (a same-origin form posting to a route behind `CSRFMiddleware`).
+- **`Lang.setLocale(locale, { cookie: false })`** sets the request's locale without writing the `i18n-locale` cookie.
+
+What to check: a static page whose form posts to a same-origin route behind `CSRFMiddleware` needs `csrf: true`, and one whose feature flags roll out by percentage to anonymous visitors needs `session: true`. A form posting to an api route with its own protection needs nothing.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)

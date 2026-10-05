@@ -43,6 +43,7 @@ import { loadSharp } from "../../support/sharp";
 import type { StaticViewOptions } from "../../http/ViewRouter";
 import { StaticRenderContext, createStaticRenderCollector } from "../../client/islands";
 import { injectIslands, spliceIslandSlots, type IslandResolver } from "./staticDocument";
+import { applyStaticCacheControl, staticCookiePolicy } from "./staticCache";
 
 /**
  * `satori`, loaded on the first OG-image request rather than on import, for the
@@ -313,12 +314,14 @@ export class ViewRouteDispatcher {
     return true;
   }
 
-  async onRequestEnd(req: HttpRequest) {
+  async onRequestEnd(req: HttpRequest, options: { mintSession?: boolean } = {}) {
     // Idempotent, and normally a no-op by the time it gets here: the request
     // already minted the id up front so that everything which ran in between
     // saw it. Kept as a backstop for any path that reaches the end without
-    // having asked.
-    ensureSessionId();
+    // having asked. A static view skips it unless it asked (`.static({ session })`).
+    if (options.mintSession !== false) {
+      ensureSessionId();
+    }
 
     return await this.hooks.onRequestEnd(req);
   }
@@ -1124,11 +1127,17 @@ export class ViewRouteDispatcher {
         }
       });
 
+      // A static view is one body for every visitor, so it sets no cookie of
+      // its own — no `i18n-locale`, `session_id` or `csrf_token` — unless it
+      // asked for one. A per-visitor `Set-Cookie` is what keeps a CDN from
+      // caching a page. The handler and middleware still set what they set.
+      const staticCookies = staticCookiePolicy(staticView);
+
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
-        Lang.setLocale(locale);
+        Lang.setLocale(locale, { cookie: staticCookies.locale });
       } else {
-        Lang.setLocale();
+        Lang.setLocale(undefined, { cookie: staticCookies.locale });
       }
 
       const httpRequest = ctx.req;
@@ -1138,7 +1147,9 @@ export class ViewRouteDispatcher {
       // about to be given. Both the document and the `.json` navigation path
       // come through here, which is the point: minting only on the document path
       // left a client-side navigation with no subject to bucket on.
-      ensureSessionId();
+      if (staticCookies.session) {
+        ensureSessionId();
+      }
 
       try {
         // A view middleware can resolve the record the route is about — the
@@ -1400,24 +1411,39 @@ export class ViewRouteDispatcher {
           headers.append("Vary", "User-Agent");
         }
 
+        // A missing record turned a static route into the app's hydrated
+        // `404`, which gets the cookies a hydrated page does.
+        const staticDocument = Boolean(staticView && currentPathName);
+        if (!staticDocument || staticCookies.session) {
+          ensureSessionId();
+        }
+
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
         }
 
         // const { csrfToken, csrfTokenHMAC } = this.generateCSRFTokenWithHmac();
 
-        const csrfToken = Bun.CSRF.generate(process.env.SECRET);
-        headers.append(
-          "Set-Cookie",
-          `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Expires=${new Date(Date.now() + 1000 * 60 * 60 * 24).toUTCString()}`,
-        );
+        if (!staticDocument || staticCookies.csrf) {
+          const csrfToken = Bun.CSRF.generate(process.env.SECRET);
+          headers.append(
+            "Set-Cookie",
+            `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Expires=${new Date(Date.now() + 1000 * 60 * 60 * 24).toUTCString()}`,
+          );
+        }
 
         try {
-          await this.onRequestEnd(httpRequest);
+          await this.onRequestEnd(httpRequest, {
+            mintSession: !staticDocument || staticCookies.session,
+          });
         } catch (err) {
           Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
             err: JSON.stringify(err),
           });
+        }
+
+        if (staticDocument) {
+          applyStaticCacheControl(headers, staticView!);
         }
 
         return await this.render({
