@@ -52,6 +52,15 @@ New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI 
 
 kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
 
+## Change feeds: `ChangeFeed`, `useSubscription` (#761)
+
+New, nothing to migrate. `ChangeFeed.publish("site:42", data)` appends to a channel's log. `ChangeFeed.stream(req, channels)` follows channels over SSE from a route that authorised the read, and `useSubscription(route, { params }, { onChange, onReset })` follows that route in the browser, resuming with `Last-Event-ID` after a drop or a hidden tab. `ChangeFeed.subscribe(channels, { cursor })` is the same feed as an async iterator on the server. Inside an ORM transaction, nobody is told before the commit, and nothing is published on rollback. See [Change Feeds](docs/change-feed.md).
+
+- The default `"memory"` driver is for one process.
+- `driver: "database"` in `app/config/changeFeed.ts` keeps the log in `gemi_change_heads` and `gemi_changes` (add the two Prisma models from the docs), and on Postgres wakes every instance with `LISTEN`/`NOTIFY`.
+- On Bun 1.3 the `LISTEN` connection needs the `postgres` package (`bun add postgres`), now an optional peer dependency. Bun 1.4 and later use their own client.
+- Every app now boots a 17th provider, `ChangeFeedServiceProvider`. It holds nothing until the feed is used.
+
 ## Background jobs for agent tools (#461)
 
 A tool can hand work that outlasts a run to a queued job. Declare `async` on the tool and return `ctx.jobs.start(JobClass, args, { summary })`: the call's result is `{ status: "running", job: { id, summary } }`, the turn ends as usual, and the job's output replaces that result once it settles. `ctx.jobs.track()` records a job that a webhook or poller settles with `AgentJobs.settle(id, { output })`. See [AI Background Jobs](docs/ai-background-jobs.md).

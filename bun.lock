@@ -68,6 +68,7 @@
         "eslint": "^8.57.0",
         "jsdom": "^30.0.1",
         "oxlint": "^1.39.0",
+        "postgres": "^3.4.5",
         "react": "19.2.3",
         "react-dom": "19.2.3",
         "typescript": "^5.7.3",
@@ -75,6 +76,7 @@
       },
       "peerDependencies": {
         "@azure/storage-blob": "^12.28.0",
+        "postgres": "^3.4.0",
         "react": ">=19",
         "react-dom": ">=19",
         "sharp": "^0.34.2",
@@ -83,6 +85,7 @@
       },
       "optionalPeers": [
         "@azure/storage-blob",
+        "postgres",
         "typescript",
       ],
     },
@@ -1861,6 +1864,8 @@
     "postcss-value-parser": ["postcss-value-parser@4.2.0", "", {}, "sha512-1NNCs6uurfkVbeXG4S8JFT9t19m45ICnif8zWLd5oPSZ50QnwMfK+H3jv408d4jw/7Bttv5axS5IiHoLaVNHeQ=="],
 
     "postcss-var-replace": ["postcss-var-replace@1.0.0", "", { "dependencies": { "balanced-match": "^2.0.0", "escape-string-regexp": "^4.0.0" }, "peerDependencies": { "postcss": "^8.4.31" } }, "sha512-Aw8t/L0wmuJMNUbYHl7AfJmQ7pUgLrS0zXz+AR+380QxJ85HA8Gxkg3+HvkWK0RoRKpoErpVhakd0k/aHOlNzw=="],
+
+    "postgres": ["postgres@3.4.9", "", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
 
     "prelude-ls": ["prelude-ls@1.2.1", "", {}, "sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g=="],
 

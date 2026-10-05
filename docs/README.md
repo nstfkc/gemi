@@ -68,6 +68,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
+- **[Change Feeds](./change-feed.md)** — `ChangeFeed.publish` on a channel, an SSE route with `ChangeFeed.stream`, and `useSubscription` in the browser: other tabs and instances learn that something changed.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
 ## Core concepts at a glance

@@ -114,6 +114,43 @@ export {
   type LockRunResult,
 } from "./lock/LockManager";
 export { LockLostError, type LockStore } from "./lock/LockStore";
+
+// Change feeds: publish "channel K changed", follow channels from a cursor.
+export { ChangeFeedServiceProvider } from "./change-feed/ChangeFeedServiceProvider";
+export {
+  ChangeFeedManager,
+  ChangeFeedSubscription,
+  ChangeFeedFullError,
+  type SubscribeOptions,
+} from "./change-feed/ChangeFeedManager";
+export type {
+  ChangeFeedDriver,
+  ChangeFeedEntry,
+  ChangeFeedEvent,
+  ChangeFeedRead,
+} from "./change-feed/ChangeFeedDriver";
+export {
+  MemoryChangeFeedDriver,
+  type MemoryChangeFeedDriverOptions,
+} from "./change-feed/MemoryChangeFeedDriver";
+export {
+  DatabaseChangeFeedDriver,
+  type DatabaseChangeFeedDriverOptions,
+} from "./change-feed/DatabaseChangeFeedDriver";
+export type {
+  PostgresListener,
+  PostgresListenerFactory,
+} from "./change-feed/postgresListen";
+export {
+  decodeCursor,
+  encodeCursor,
+  type ChangeFeedCursor,
+} from "./change-feed/cursor";
+export type {
+  ChangeFeedMessage,
+  ChangeFeedResponse,
+  StreamOptions as ChangeFeedStreamOptions,
+} from "./change-feed/stream";
 export { MemoryLockStore } from "./lock/MemoryLockStore";
 export {
   DatabaseLockStore,
@@ -283,6 +320,11 @@ export {
   queueConfigDefaults,
   type QueueConfig,
 } from "./queue/config";
+export {
+  defineChangeFeedConfig,
+  changeFeedConfigDefaults,
+  type ChangeFeedConfig,
+} from "./change-feed/config";
 export {
   defineEventConfig,
   eventConfigDefaults,

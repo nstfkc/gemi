@@ -537,6 +537,16 @@ jobs:
         env:
           VITEST_MIN_PASSED: "20"
 
+      # The change feed's database driver on Postgres: the driver contract,
+      # publishing inside transactions, and LISTEN/NOTIFY between instances
+      # through the `postgres` package (this Bun's SQL cannot LISTEN before
+      # 1.4), a dropped LISTEN connection included (#761).
+      - name: Change feed on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/change-feed/DatabaseChangeFeedDriver.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "8"
+
       # The agent job store's compare-and-set, clock and transactional start,
       # and the restart tests on the database queue driver (#461).
       - name: Agent job store on Postgres and MySQL
