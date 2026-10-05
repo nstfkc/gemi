@@ -1,5 +1,45 @@
 # Unreleased
 
+## Islands hydrate React components, like Astro (breaking)
+
+`island()` (new in 0.109.0) no longer takes a vanilla `mount(root, props)` module. An island is now a React component: on a static page gemi server-renders it as its own root and the browser hydrates it with `hydrateRoot`, so the same component works on static and hydrated pages with one implementation. See [Static Views & Islands](docs/static-views-and-islands.md#islands).
+
+**Before (0.109.0):**
+
+```tsx
+export const NavMenu = island("nav-menu", NavMenuView, () => import("./navMenu.island"), {
+  load: "idle",
+  props: true,
+});
+// navMenu.island.ts: export default (root, props) => { /* DOM code */ };
+```
+
+**After:**
+
+```tsx
+export const NavMenu = island(() => import("./NavMenu"), { load: "idle" });
+// NavMenu.tsx: an ordinary React component (state, effects, handlers), default export.
+// For a named export: island(() => import("./forms"), { export: "ContactForm" }).
+```
+
+To migrate an island:
+
+1. Move the behaviour from the `*.island.ts` mount function into the component (`useState`, `onClick`, …) and delete the `.island.ts` file.
+2. Replace `island(name, Component, () => import("./x.island"), options)` with `island(() => import("./Component"), { load })`. The loader must be written exactly as `() => import("…")` inside the `island(` call. There's no `name` any more.
+3. Drop `props`: all props (except `children`) are now serialised, because hydration needs them. They must be plain data (JSON); in dev a function, class instance, `Date`, `Map`, `NaN`, … fails the render naming the prop.
+4. Pass anything the island's component reads from context (locale, translations, URLs) as props: on a static page an island is a separate React root and the page's context doesn't reach it.
+5. In `vitest.config.ts`, add `gemiIslandPlugin()` from `gemi/vitest` and remove any mock of `island` (#795).
+
+What else changes:
+
+- **A static page with islands loads React.** Per page: the island's chunk, React and `react-dom/client` (shared by all islands, fetched once); on a sample page about 54 KB brotli for the first island and about 1 KB for each further one. A static page without islands still ships no JavaScript.
+- **`children` of an island** are rendered on the server in the page's tree, with the page's context (#805), and passed through as static HTML in a `<gemi-slot style="display:contents">` element. Child-combinator CSS (`[&>a]`) doesn't reach them through the slot.
+- **Markers changed:** `<gemi-island data-island="0" data-uid="i0-" data-props="…" style="display:contents">`; the `name` attribute is gone. The island table in `<script id="gemi-islands">` is `{ i: [{ s, e, l }] }`.
+- **The build:** `*.island.*` files are no longer special. gemi's Vite plugin emits a client entry `<module>?gemi-island` for each module an `island()` call names; the client manifest lists it under that key with React and `react-dom/client` among its imports. The SSR build includes the component (imported statically).
+- **The loader** changed, so `ISLAND_LOADER_CSP_HASH` has a new value. Use the export rather than a copied hash.
+- **Removed types:** `IslandMount` (`gemi/client`). `IslandOptions` is now `{ load?, export? }`, and `IslandLoader` is the `() => import()` loader.
+- **New:** `gemiIslandPlugin` from `gemi/vitest`.
+
 ## `gemi stats` and `gemi build --stats`: initial JavaScript per route, with budgets (#794)
 
 New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats](docs/bundle-stats.md).
