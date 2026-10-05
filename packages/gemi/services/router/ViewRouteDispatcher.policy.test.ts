@@ -5,6 +5,7 @@ import { App } from "../../app/App";
 import { AuthManager } from "../../auth/AuthManager";
 import { UserProvider } from "../../auth/UserProvider";
 import type { FindSessionArgs, SessionWithUser } from "../../auth/types";
+import { createRoot } from "../../client/createRoot";
 import { QueryError } from "../../client/QueryError";
 import { Query } from "../../facades/Prefetch";
 import { ApiRouter } from "../../http/ApiRouter";
@@ -111,7 +112,7 @@ class AppKernel extends Kernel {
     route: {
       api: { rootRouter: RootApiRouter },
       view: {
-        root: () => createElement("div"),
+        root: createRoot(() => createElement("div")),
         rootRouter: RootViewRouter,
         onRequestFail: (req: HttpRequest, error: unknown) => {
           failed.push({ path: new URL(req.rawRequest.url).pathname, error });
@@ -126,15 +127,51 @@ const app = new App({ kernel: AppKernel });
 const bob = { Cookie: "access_token=v2.tok-bob" };
 const alice = { Cookie: "access_token=v2.tok-alice" };
 
-/**
- * `app.fetch` answers a view request with either a Response or the render
- * function the server calls with the build's assets. A refusal must be the
- * former: the render function is the page, rendered with a 200.
- */
+/** A `.json` navigation, which `app.fetch` answers with a Response. */
 async function request(path: string, headers: Record<string, string> = {}) {
   const result: unknown = await app.fetch(new Request(`http://gemi.dev${path}`, { headers }));
   expect(result).toBeInstanceOf(Response);
   return result as Response;
+}
+
+const renderParams = {
+  getStyles: async () => [],
+  viewImportMap: {},
+  bootstrapModules: [],
+  loaders: "{}",
+  cssManifest: {},
+  ogMap: {},
+};
+
+/**
+ * A page load: `app.fetch` hands back the renderer the server invokes. A
+ * refusal renders the app's `404` view (#726), so it is a renderer too.
+ */
+async function page(path: string, headers: Record<string, string> = {}) {
+  const render = await app.fetch(new Request(`http://gemi.dev${path}`, { headers }));
+  expect(typeof render).toBe("function");
+  return (await (render as any)(renderParams)) as Response;
+}
+
+/**
+ * What a refused navigation answers since #726: the `404` view, as `is404` in
+ * a 200 envelope, so the client router shows it instead of leaving the
+ * previous page on screen.
+ */
+async function expectRefusedNavigation(res: Response) {
+  const text = await res.text();
+  expect(res.status).toBe(200);
+  expect(JSON.parse(text.split("\n")[0]).is404).toBe(true);
+  expect(text).not.toMatch(/Order|policy/);
+}
+
+/** And a refused page load: the `404` view under a 403. */
+async function expectRefusedPage(res: Response) {
+  const html = await res.text();
+  expect(res.status).toBe(403);
+  expect(res.headers.get("Cache-Control")).toBe("no-store");
+  expect(html).toContain('"is404":true');
+  expect(html).not.toMatch(/Order\.findMany|policy/);
 }
 
 beforeEach(() => {
@@ -147,27 +184,17 @@ afterEach(() => {
 });
 
 describe("a policy denial in a view loader", () => {
-  test("answers a view-data request 403 with the api's body, and no policy text", async () => {
-    const res = await request("/orders.json", bob);
-    const text = await res.text();
-
-    expect(res.status).toBe(403);
-    expect(res.headers.get("Content-Type")).toBe("application/json");
-    expect(JSON.parse(text)).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
-    expect(text).not.toMatch(/Order|policy/);
+  test("answers a view-data request with the 404 view, and no policy text", async () => {
+    await expectRefusedNavigation(await request("/orders.json", bob));
   });
 
-  test("answers a page request with a 403 page", async () => {
-    const res = await request("/orders", bob);
-    const text = await res.text();
-
-    expect(res.status).toBe(403);
-    expect(text).toBe("Forbidden");
+  test("answers a page request with the 404 view under a 403", async () => {
+    await expectRefusedPage(await page("/orders", bob));
   });
 
   test("hands onRequestFail the original error", async () => {
     await request("/orders.json", bob);
-    await request("/orders", bob);
+    await page("/orders", bob);
 
     expect(failed.map(({ path }) => path)).toEqual(["/orders.json", "/orders"]);
     for (const { error } of failed) {
@@ -195,13 +222,8 @@ describe("a policy denial in a view loader", () => {
 
 describe("a policy denial behind a loader's Query.instant", () => {
   test("answers 403 for a view-data request and a page request alike", async () => {
-    const data = await request("/orders-instant.json", alice);
-    expect(data.status).toBe(403);
-    expect(await data.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
-
-    const page = await request("/orders-instant", alice);
-    expect(page.status).toBe(403);
-    expect(await page.text()).toBe("Forbidden");
+    await expectRefusedNavigation(await request("/orders-instant.json", alice));
+    await expectRefusedPage(await page("/orders-instant", alice));
 
     // The query's rejection is what the view reports, once per request.
     expect(failed.map(({ path }) => path)).toEqual(["/orders-instant.json", "/orders-instant"]);
@@ -214,13 +236,8 @@ describe("a policy denial behind a loader's Query.instant", () => {
 
 describe("a policy denial in a view middleware", () => {
   test("answers 403 for a view-data request and a page request alike", async () => {
-    const data = await request("/orders-by-middleware.json", bob);
-    expect(data.status).toBe(403);
-    expect(await data.json()).toEqual({ error: { kind: "permission", message: "Forbidden", status: 403 } });
-
-    const page = await request("/orders-by-middleware", bob);
-    expect(page.status).toBe(403);
-    expect(await page.text()).toBe("Forbidden");
+    await expectRefusedNavigation(await request("/orders-by-middleware.json", bob));
+    await expectRefusedPage(await page("/orders-by-middleware", bob));
 
     expect(failed.map(({ error }) => error)).toEqual([
       expect.any(PolicyDeniedError),

@@ -10678,7 +10678,8 @@ gives you two complementary tools:
 - **Inline guards** — `Auth.guard(...)` inside a [controller](./controllers.md) for one-off
   checks (see [Authentication](./authentication.md)).
 
-This page covers role-based middleware and the authorization error types.
+This page covers role-based middleware, resource policies (who may use the record a route or a
+chat names) and the authorization error types.
 
 ## Role-based access
 
@@ -10777,8 +10778,9 @@ middleware with `-auth`, and how `:`-parameters are parsed.
 
 ## Shared authorization logic
 
-gemi has no `Gate` facade or policy auto-discovery. When several controllers need the same
-check, put the predicate in a plain module and call it from `Auth.guard(...)`:
+gemi has no `Gate` facade or policy auto-discovery. For "may this caller use the record this
+route names", use a [resource policy](#resource-policies). For any other check that several
+controllers need, put the predicate in a plain module and call it from `Auth.guard(...)`:
 
 ```typescript
 // app/authorization/gates.ts
@@ -10844,6 +10846,139 @@ export default class extends Kernel {
 For a class binding to work as a container token it needs a stable `static token = "..."`
 string, exactly as the framework's own managers (`AuthManager`'s is `"auth"`) declare one.
 
+## Resource policies
+
+A route like `/pages/:pageId`, an agent chat whose `body` names a page, and the page's builder
+view all ask the same question: may this caller use this page? A **resource policy** answers it
+once, and every surface uses that answer.
+
+```typescript
+// app/policies/PagePolicy.ts
+import { defineResourcePolicy } from "gemi/http";
+import { Page } from "@/app/models";
+
+export const PagePolicy = defineResourcePolicy({
+  // The route param the middleware and `fromRoute` read.
+  param: "pageId",
+  // `null` means there is no such page.
+  load: (id) => Page.findUnique({ where: { publicId: id }, select: { ownerId: true, title: true } }),
+  // May this request use it? Sync or async.
+  allow: (page, req) => page.ownerId === req.ctx().user?.id,
+});
+```
+
+`load` gets the id the client sent (always a string; a number becomes its string, and anything
+else is refused before `load` runs). `allow` reads the caller off the request however the app
+knows it: `req.ctx().user` behind `auth`, `Auth.user()` without it, or a cookie of your own for
+work done before signing in. An error either one throws propagates as itself: a failed query is
+a 500, not a refusal.
+
+### One refusal for "missing" and "not yours"
+
+A page that does not exist and a page the caller may not use get **the same answer**, so the
+answer never shows that a page exists. By default that is a 404 through `NotFoundError`:
+
+```json
+{ "error": { "kind": "not_found", "message": "Not found", "status": 404 } }
+```
+
+with `Cache-Control: no-store`. `refuse: "forbidden"` answers with `InsufficientPermissionsError`'s
+403 instead, for both cases. Use it when telling the client "you may not" is worth more than
+hiding the resource.
+
+### On routes
+
+`PagePolicy.middleware` is a middleware class. Register it under an alias (one alias per policy)
+and put it on a router or a route:
+
+```typescript
+// app/config/middleware.ts
+export default defineMiddlewareConfig({
+  aliases: { auth: AuthenticationMiddleware, "owns-page": PagePolicy.middleware },
+});
+
+// app/http/routes/api.ts
+class PagesRouter extends ApiRouter {
+  middlewares = ["owns-page"];
+  routes = {
+    "/": this.get(PageController, "list").middleware(["-owns-page"]), // no :pageId here
+    "/:pageId": this.get(PageController, "show"),
+    "/:pageId/publish": this.post(PageController, "publish"),
+  };
+}
+```
+
+`owns-page:id` reads the param `id` instead of `pageId`. Don't put two policies under one alias
+with parameters (`owns:page`, `owns:site`): a route's middleware list holds one entry per alias,
+so the second one would replace the first.
+
+The handler gets the resource back without a second query, because a policy answers once per
+request and id:
+
+```typescript
+async show(req: HttpRequest) {
+  const page = await PagePolicy.fromRoute(req); // what the middleware loaded
+  return { title: page.title };
+}
+```
+
+`PagePolicy.authorize(req, id)` does the same for an id from anywhere else (a body field, a
+query string). `PagePolicy.allows(req, id)` returns `true` or `false` instead of throwing, for
+deciding what to show. `fromRoute()` with no argument reads the current request, for an inline
+handler that isn't given one.
+
+### On view routes
+
+The same middleware works on a view route, and a loader can call `fromRoute(req)`. A refusal
+there renders **the app's `404` view**, the same way a missing record does: a page load answers
+with the refusal's status (404, or 403 with `refuse: "forbidden"`) and `Cache-Control: no-store`,
+and a client navigation gets `is404`, so the client router shows the `404` view instead of
+leaving the previous page up.
+
+This holds for every refusal thrown by a view route's middleware or loader, not only a policy's:
+a request breaker whose page answer is a 403 or a 404 (`InsufficientPermissionsError`,
+`NotFoundError`, `FileNotFoundError`, an app's own `RequestBreakerError` with that status), an ORM
+policy denial, and a 403 or 404 from the loader's `Query.instant`. Other breakers keep their own
+answer: `AuthenticationError` still redirects to sign-in, and a 409 is still a 409.
+
+Check first in a loader. A query the loader prefetched before the check was refused still goes
+out with the `404` view's payload, as it does for a missing record.
+
+### On agent routes
+
+An `AgentController` names its resource with `forAgent`, and the default `authorizeRequest`
+checks it on all four routes:
+
+```typescript
+type PageBody = { pageId: string };
+
+export class PageChatController extends AgentController<typeof pageAgent, PageBody> {
+  agent = pageAgent;
+  resource = PagePolicy.forAgent({
+    // The page the client's `body` names, on `stream` and `upload`.
+    body: (body: PageBody) => body.pageId,
+    // The page a thread belongs to, or null for a thread you don't know.
+    thread: (threadId) => ChatThread.pageIdOf(threadId),
+  });
+}
+```
+
+- `stream` and `upload` are refused unless the caller may use the page the body names. When the
+  request also names a thread, the thread must be that page's: the caller's own page id doesn't
+  open someone else's thread.
+- `attach` and `stop` carry no body. They are refused unless the caller may use the thread's page.
+  A stop by run id alone names no thread and is left to `runOwner`, which already keeps a live run
+  to the user who started it.
+- A thread `thread` returns `null` for, or any thread when there is no `thread` mapper, is refused
+  like a page the caller may not use.
+
+Both mappers may be async. When the body names one thing and a thread belongs to another (a page
+and its site's thread), map both to the same resource. Define the policy on the site, and have
+`body` return the page's site id. Ids are compared as strings.
+
+An app that overrides `authorizeRequest` for other checks keeps this one by calling
+`await super.authorizeRequest(req, params)`.
+
 ## Authorization errors
 
 Three error types (all from `gemi/http`) drive authorization responses. They are
@@ -10855,7 +10990,13 @@ don't construct them yourself; they are thrown for you by the middleware / facad
 | --- | --- | --- |
 | `AuthenticationError` | `401` `{ kind: "authentication", message: "Authentication error", status: 401 }` | `302` redirect to `/auth/sign-in` |
 | `AuthorizationError` | `401` `{ kind: "authorization", message, status: 401 }` (default message `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `403` `{ kind: "permission", message, status: 403 }` (default message `"Insufficient permissions"`) | `403` |
+| `InsufficientPermissionsError` | `403` `{ kind: "permission", message, status: 403 }` (default message `"Insufficient permissions"`) | the app's `404` view, under `403` |
+| `NotFoundError` | `404` `{ kind: "not_found", message, status: 404 }` (default message `"Not found"`) | the app's `404` view, under `404` |
+
+A view response is what a view route's middleware or loader gets. A client navigation to a view
+that renders the `404` view this way gets `is404` rather than the status (see
+[Resource policies](#on-view-routes)). Before this, a refusal rendered its message, or nothing,
+as a plain-text page.
 
 The message is the one the error was thrown with, so `isPermissionError` on the client
 matches `new AuthorizationError("You cannot edit this post")` and `error.message` is that
@@ -10869,6 +11010,8 @@ text. Before 0.85 these were bare strings; see `RequestBreakerError.legacyString
   message: `new AuthorizationError("You cannot edit this post")`.
 - **`InsufficientPermissionsError`** — "signed in, but lacking the required role/permission."
   Thrown by `Auth.guard(...)` and by role middleware. Also accepts a custom message.
+- **`NotFoundError`** — "nothing here for you." What a [resource policy](#resource-policies)
+  refuses with by default, for a missing resource and a forbidden one alike.
 
 ```typescript
 import { AuthorizationError } from "gemi/http";
@@ -10890,14 +11033,16 @@ async function update() {
 >
 > An app upgrading from 0.62, where it answered `401`, can keep that while its shipped clients
 > catch up: `InsufficientPermissionsError.apiStatus = 401`, set once at module scope in
-> `app/kernel/Kernel.ts`. It sets API routes and `.json` view navigations, which answer from
-> the same payload; a full page load answers `403` either way. See UPGRADE.md.
+> `app/kernel/Kernel.ts`. It sets API routes. A view route renders the `404` view either way:
+> a full page load under `403`, a `.json` navigation as `is404`. See UPGRADE.md.
 
 ## Related
 
 - [Authentication](./authentication.md) — sessions, `Auth.user()`, `Auth.guard()`, the `auth` middleware.
 - [Middleware](./middleware.md) — the `auth` / `admin` / `role:` DSL in full.
 - [Controllers](./controllers.md) — where inline `Auth.guard(...)` checks usually live.
+- [ORM policies](./orm.md#policies) — scoping every query of a model, rather than one resource
+  by id.
 
 ---
 

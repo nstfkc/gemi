@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createElement } from "react";
 
+import { createRoot } from "../../client/createRoot";
+
 import { App } from "../../app/App";
 import { AuthManager } from "../../auth/AuthManager";
 import { UserProvider } from "../../auth/UserProvider";
@@ -17,8 +19,10 @@ import { ServiceProvider } from "../../support/ServiceProvider";
 /**
  * What `Auth.guard()` answers, through a whole `App`, on each of the three
  * shapes of request it can refuse (#542): an api route, a `.json` view
- * navigation and a full page load. The first two answer from `payload.api`, so
- * `apiStatus` moves both; the page answers from `payload.view`.
+ * navigation and a full page load. The api route answers from `payload.api`,
+ * so `apiStatus` moves it. Since #726 a view route renders the app's `404`
+ * view for the refusal: a page load under a 403, a `.json` navigation as
+ * `is404` in a 200 envelope.
  */
 
 process.env.SECRET ??= "insufficient-permissions-status-test-secret";
@@ -81,7 +85,7 @@ class AppKernel extends Kernel {
   config = {
     route: {
       api: { rootRouter: RootApiRouter },
-      view: { root: () => createElement("div"), rootRouter: RootViewRouter },
+      view: { root: createRoot(() => createElement("div")), rootRouter: RootViewRouter },
     },
   };
 }
@@ -91,8 +95,29 @@ const bob = { Cookie: "access_token=v2.tok-bob" };
 
 async function status(path: string) {
   const result: unknown = await app.fetch(new Request(`http://gemi.dev${path}`, { headers: bob }));
+  if (typeof result === "function") {
+    // A page load renders, the `404` view here.
+    const res: Response = await (result as any)({
+      getStyles: async () => [],
+      viewImportMap: {},
+      bootstrapModules: [],
+      loaders: "{}",
+      cssManifest: {},
+      ogMap: {},
+    });
+    expect(await res.text()).toContain('"is404":true');
+    return res.status;
+  }
   expect(result).toBeInstanceOf(Response);
   return (result as Response).status;
+}
+
+async function navigation(path: string) {
+  const res = (await app.fetch(
+    new Request(`http://gemi.dev${path}`, { headers: bob }),
+  )) as Response;
+  expect(res).toBeInstanceOf(Response);
+  return { status: res.status, is404: JSON.parse((await res.text()).split("\n")[0]).is404 };
 }
 
 beforeEach(() => {
@@ -105,18 +130,18 @@ afterEach(() => {
 });
 
 describe("a signed-in user Auth.guard refuses", () => {
-  test("answers 403 on an api route, a view navigation and a page load", async () => {
+  test("answers 403 on an api route and a page load, and the 404 view to a navigation", async () => {
     expect(await status("/api/admin")).toBe(403);
-    expect(await status("/admin.json")).toBe(403);
+    expect(await navigation("/admin.json")).toEqual({ status: 200, is404: true });
     expect(await status("/admin")).toBe(403);
   });
 
-  test("apiStatus = 401 restores 401 on the api route and the view navigation only", async () => {
+  test("apiStatus = 401 restores 401 on the api route only", async () => {
     InsufficientPermissionsError.apiStatus = 401;
 
     expect(await status("/api/admin")).toBe(401);
-    // Answered from `payload.api`, as it was in 0.62.
-    expect(await status("/admin.json")).toBe(401);
+    // A navigation shows the `404` view either way (#726).
+    expect(await navigation("/admin.json")).toEqual({ status: 200, is404: true });
     // Never 401 before: it fell to the view dispatcher's 400 default.
     expect(await status("/admin")).toBe(403);
   });

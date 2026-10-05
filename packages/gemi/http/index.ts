@@ -82,8 +82,18 @@ export {
   AuthorizationError,
   FileNotFoundError,
   InsufficientPermissionsError,
+  NotFoundError,
   RangeNotSatisfiableError,
 } from "./errors";
+export {
+  defineResourcePolicy,
+  ResourcePolicy,
+  type AgentResource,
+  type AgentResourceOptions,
+  type AgentResourceRequest,
+  type ResourcePolicyOptions,
+  type ResourcePolicyRefusal,
+} from "./ResourcePolicy";
 
 export {
   safeFetch,
