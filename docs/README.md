@@ -40,6 +40,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 ### Views & client
 - **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
 - **[Static Views & Islands](./static-views-and-islands.md)** — `.static()` views that are server-rendered and ship no client runtime, `island()` React components for their interactive parts, a static page's own layout and stylesheet.
+- **[Bundle Stats](./bundle-stats.md)** — `gemi stats` / `gemi build --stats`: the initial JavaScript per route, budgets that fail CI, JSON and Markdown for PR diffs.
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
