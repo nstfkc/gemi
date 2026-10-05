@@ -76,7 +76,20 @@ Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfi
 
 `GEMI_PREVIOUS_ASSETS` (or `previousAssets` in `gemi.config.ts`) copies the previous release's `dist/client/assets` files into the new build, so a tab still on that release can load its chunks after the deploy. See [Missing chunks after a deploy](./configuration.md#missing-chunks-after-a-deploy).
 
+`--stats` prints the initial JavaScript per route once the build is done and checks the budgets in `gemi.config.ts`; see [`gemi stats`](#gemi-stats).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
+
+## `gemi stats`
+
+Prints the JavaScript each route loads before it can run (raw, gzip and brotli), from the last `gemi build`, and exits with `1` when a route is over its budget (`stats.budgets` in `gemi.config.ts`).
+
+```bash
+gemi stats [--json <file>] [--base <file>] [--markdown <file>] [--no-routes]
+gemi build --stats         # the same, right after the build
+```
+
+A hydrated route counts the client entry and its views' static imports; a [static route](./static-views-and-islands.md) counts only the islands it can render. The route table is read in a separate process that registers the kernel's providers without booting them. `--json` writes the stats for CI, and `--markdown` a table compared with another build's JSON (`--base`). See [Bundle Stats](./bundle-stats.md).
 
 ## `gemi start`
 

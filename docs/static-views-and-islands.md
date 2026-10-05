@@ -6,10 +6,10 @@ application page needs. A content page (a landing page, a published site, a
 help article) mostly doesn't: everything on it is already in the HTML.
 
 A **static view** is rendered on the server exactly like any other view and sent
-**without React on the client**. Its interactive parts, such as a phone menu or a
-form that submits without a reload, are **islands**: small client modules that
-attach to the server-rendered markup. A static page with no islands ships **no
-JavaScript at all**.
+**without the client runtime**: no router, no view code, no hydration of the page.
+Its interactive parts, such as a phone menu or a form that submits without a
+reload, are **islands**: ordinary React components that hydrate on their own,
+like Astro's. A static page with no islands ships **no JavaScript at all**.
 
 ## Declaring a static view
 
@@ -53,12 +53,13 @@ a handler can return a whole record and the page can show only part of it.
 
 ### What doesn't run
 
-Nothing hydrates, so event handlers, effects, state updates and refs never run
-in the browser. Hooks that only act in the browser (`useNavigate`, mutations)
-do nothing on a static page. `Link` renders a plain `<a>`, and following it is a
-normal page load. Forms work the way HTML forms do: a `<form method="post">`
-posts, and the server answers (for example, a `303` back to the page). An island
-can enhance that.
+The page itself never hydrates, so event handlers, effects, state updates and
+refs in the view never run in the browser (islands are the exception, below).
+Hooks that only act in the browser (`useNavigate`, mutations) do nothing on a
+static page. `Link` renders a plain `<a>`, and following it is a normal page
+load. Forms work the way HTML forms do: a `<form method="post">` posts, and the
+server answers (for example, a `303` back to the page). An island can enhance
+that.
 
 A client-side navigation from a hydrated page to a static route (a `Link` or
 `useNavigate`) becomes a full page load. The client router can't render a page
@@ -90,79 +91,159 @@ whose pages need a few kilobytes of CSS doesn't inline the application's whole
 Tailwind build. Without `layout`, the page renders inside `RootLayout` with the
 app's stylesheet, as a hydrated view does.
 
-## Islands
+### Cookies and caching
 
-An island is a component that renders on the server, plus a client module that
-makes it interactive on a static page:
+A static page is one body for every visitor, so a CDN can cache it. For that,
+gemi sets none of its own cookies on it: no `session_id`, no `csrf_token` and no
+`i18n-locale` (a static page's locale comes from its url). A first-time visitor
+gets a response with no `Set-Cookie` at all. Cookies the handler or a middleware
+sets (`Cookie.set`, `req.ctx().setCookie`) are still sent.
 
-```tsx
-// app/views/site/components/NavMenu.tsx
-import { island } from "gemi/client";
-
-function NavMenuView() {
-  return (
-    <header>
-      <nav className="links">…</nav>
-      <button type="button" data-menu-open>Menu</button>
-      <dialog className="menu">…</dialog>
-    </header>
-  );
-}
-
-export const NavMenu = island("nav-menu", NavMenuView, () => import("../navMenu.island"));
-```
+`cacheControl` sets the page's `Cache-Control`:
 
 ```typescript
-// app/views/site/navMenu.island.ts
-import type { IslandMount } from "gemi/client";
-
-const mount: IslandMount = (root) => {
-  const dialog = root.querySelector("dialog")!;
-  root.querySelector("[data-menu-open]")?.addEventListener("click", () => dialog.showModal());
-};
-
-export default mount;
+"/p/:slug": this.view("site/Page", loadPage).static({
+  layout: "site/SiteLayout",
+  cacheControl: "public, max-age=60, s-maxage=600, stale-while-revalidate=86400",
+}),
 ```
 
-Use `NavMenu` like any component. What it does depends on the page:
+Without it gemi sends no `Cache-Control`, and the cache in front decides. Only
+the rendered page gets the header, not a redirect, an error or the 404 a missing
+record turns the request into. A `Cache-Control` the handler sets itself wins.
+A page that sets a cookie is sent `private, no-store` instead, whatever
+`cacheControl` says, so a shared cache never stores one visitor's cookie and
+hands it to the next. A cookie a `global` middleware sets is left off a page
+whose `Cache-Control` is `public` (or has `s-maxage`).
 
-- **In a static view**, it renders `NavMenuView` inside a marker,
-  `<gemi-island name="nav-menu" style="display:contents">…</gemi-island>`, and
-  records that the page uses it. The document then gets a small inline loader
-  and that island's module. **Only islands that rendered are loaded**, so a
-  page without islands gets no script at all.
-- **In a hydrated view**, it renders `NavMenuView` as an ordinary component and
-  loads nothing. The same component library works in both kinds of page.
+Two options bring a hydrated view's cookies back, for pages that are not meant
+to be cached:
 
-The client module's default export is called once per marker, with the
-`<gemi-island>` element as `root`. It's plain DOM code, because no React is loaded.
-Keep its imports small: they are all the page downloads.
+- `session: true` mints `session_id` for a visitor who has none. Feature flags
+  that roll out by percentage to anonymous visitors bucket on it; without it a
+  first-time visitor has no bucketing subject on a static page.
+- `csrf: true` sets `csrf_token`. You need it only when a form on the page posts
+  to a same-origin route behind `CSRFMiddleware`.
 
-### Rules for the client module
+A form that posts to an api route with its own protection (a honeypot, a token
+in the body, an `Origin` check), often on another origin, needs neither. For a
+cross-origin form, configure CORS on the api route.
 
-- Name it `*.island.ts` (or `.tsx`, `.js`, `.jsx`) and pass it as
-  `() => import("./path.island")`, written exactly like that. gemi's Vite plugin
-  finds that call, builds the file as its own client entry and tells the server
-  which built file it is. Island files under `app/` are always build entries; an
-  island elsewhere (a workspace package) is picked up through the import.
-- The server never calls the loader, and the server build doesn't include the
-  module.
-- `name` identifies the island in the markup. Two islands with the same name and
-  different modules are an error.
+## Islands
 
-### Options
+An island is a React component, written like any other, that you mark as an
+island where you use it:
 
 ```tsx
-export const ContactForm = island("contact-form", ContactFormView, () => import("../form.island"), {
-  load: "idle",
-  props: (p) => ({ success: p.successMessage }),
+// app/views/site/components/NavMenu.tsx: an ordinary component
+import { useState } from "react";
+
+export default function NavMenu(props: { links: { href: string; label: string }[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <nav>
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+        Menu
+      </button>
+      <ul hidden={!open}>
+        {props.links.map((link) => (
+          <li key={link.href}>
+            <a href={link.href}>{link.label}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+```
+
+```tsx
+// app/views/site/components/islands.ts
+import { island } from "gemi/client";
+
+export const NavMenu = island(() => import("./NavMenu"));
+export const ContactForm = island(() => import("./ContactForm"), {
+  export: "ContactForm",
+  load: "visible",
 });
 ```
 
+Use `NavMenu` like the component it wraps (it has the same props). What it does
+depends on the page:
+
+- **In a static view**, gemi server-renders the component inside a marker,
+  `<gemi-island data-island="0" data-props="…" style="display:contents">…</gemi-island>`,
+  with its props serialised into `data-props`. The document then gets a small
+  inline loader that, on the island's `load` trigger, imports the island's chunk
+  (the component, React and `react-dom/client`) and calls `hydrateRoot` on the
+  marker. **Only islands that rendered are loaded**, so a page without islands
+  gets no script at all. React is one chunk that every island on the page
+  shares, fetched once.
+- **In a hydrated view**, it is the component itself, rendered in place with the
+  page's context. Nothing extra is loaded. The same component library works in
+  both kinds of page, with one implementation per component.
+
+### The loader argument
+
+Write it exactly as `() => import("./path")`, as the first argument of an
+`island(` call. gemi's Vite plugin finds that call, imports the module
+statically for the server (and for hydrated views), and builds it as a client
+entry of its own (`path?gemi-island`) for static pages. Any file can be an
+island: there's no naming convention. One module can back several islands, for
+example through `export`.
+
+### Props
+
+Props cross from the server to the browser as JSON, so they must be **plain
+data**: strings, finite numbers, booleans, `null`, arrays and plain objects. In
+dev, a function, a class instance (a `Date`, a `Map`), a `Symbol`, a `BigInt`,
+`NaN` or a React element in an island's props fails the render with an error
+that names the prop. Everything in them is visible in the page source.
+
+### Children
+
+`children` are rendered on the server, as static HTML, and passed through:
+
+```tsx
+<ContactForm endpoint="/contact">
+  <p>We answer within a day.</p>
+</ContactForm>
+```
+
+They belong to the page: gemi renders them in the page's tree, **with the
+page's context** (router, i18n, your own providers), and moves the HTML into
+the island. The component receives them as a `<gemi-slot style="display:contents">`
+element holding that HTML, on the server and in the browser alike, so hydration
+leaves it alone. Children are static: they don't re-render, and their own event
+handlers don't run. An island inside them is an island of its own and hydrates
+separately.
+
+Render `children` at most once. The island may move the slot (say, from a row
+into a `<dialog>` when a menu opens); React recreates it from the same HTML.
+Because the slot is an element of its own, child-combinator CSS such as
+`nav > a` (or Tailwind's `[&>a]`) doesn't reach the children through it:
+target them with a descendant selector or style them directly.
+
+### Context
+
+On a static page each island is its **own React root**. Context from the page
+(a theme, gemi's router, query and i18n providers) doesn't reach the island's
+component, on the server or in the browser (its `children` do, see above), so
+pass what it needs as props: translated strings,
+the current locale, URLs. An island that needs a provider of its own renders it
+itself; make a small component that wraps the real one in its providers and
+declare that as the island. In a hydrated view the island is an ordinary
+component and sees the page's context as usual.
+
+An island rendered inside another island's own render is just a component of
+that root.
+
+### Options
+
 | Option | Default | |
 |---|---|---|
-| `load` | `"eager"` | When the module loads. `"eager"`: as soon as the page has parsed, with `modulepreload`s for the module and its imports in the head. `"idle"`: on `requestIdleCallback`. `"visible"`: when the island's content first scrolls into view (the marker has no box of its own, so its child elements are observed). Lazy islands aren't preloaded. |
-| `props` | none | What `mount` receives as its second argument. By default nothing is sent (`undefined`): most islands read what they need from the markup. `true` sends the component's props without `children`, and a function picks what to send. The value goes through `JSON.stringify` into a `data-props` attribute (escaped like any attribute, so it can't break out of it), so it must be JSON, and anything in it is visible in the page source. |
+| `load` | `"eager"` | When the island hydrates. `"eager"`: as soon as the page has parsed, with `modulepreload`s for its chunks in the head. `"idle"`: on `requestIdleCallback`. `"visible"`: when the island's content first scrolls into view (the marker has no box of its own, so its child elements are observed). Lazy islands aren't preloaded. |
+| `export` | `"default"` | Which export of the module is the component. |
 
 ### Content Security Policy
 
@@ -178,23 +259,48 @@ import { ISLAND_LOADER_CSP_HASH } from "gemi/services";
 headers.set("Content-Security-Policy", `script-src 'self' ${ISLAND_LOADER_CSP_HASH}`);
 ```
 
-Island modules are then ordinary `import()`s of your own assets (`'self'`, or the
+Island chunks are then ordinary `import()`s of your own assets (`'self'`, or the
 asset base's origin). In dev, the loader first installs the React Refresh
-preamble, so its hash differs; use a looser dev policy, as Vite itself needs.
+preamble and Vite's client, so its hash differs; use a looser dev policy, as
+Vite itself needs. In dev, Vite serves islands from source.
+
+### Testing
+
+Add the island transform to `vitest.config.ts`, next to the request plugin, so
+a test that renders a static view through `App.fetch` sees islands as the build
+does:
+
+```typescript
+import { defineConfig } from "vitest/config";
+import { gemiIslandPlugin, gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin(), gemiIslandPlugin()] });
+```
+
+Without it islands still render: the component is loaded through the `import()`.
+The render params a test passes need no `resolveIsland`; without one, the page
+is its markup and no loader is added.
 
 ## How much it ships
 
 A sample page (a header, four content sections and a footer), built with `gemi build`
-and served by `gemi start`, as sent over the wire:
+and served by `gemi start`, as sent over the wire with brotli. The islands are a
+nav menu and a contact form with static children; the app uses the React
+Compiler, whose runtime is one of the files.
 
-| Page | HTML (br) | JavaScript |
+| Page | HTML (br) | JavaScript (br) |
 |---|---:|---:|
-| Static, no islands | 0.9 KB | **none** |
-| Static, with a nav menu and a contact form island | 1.6 KB, loader included | 2 files, 0.8 KB |
-| The same views, hydrated | 13 KB | 6 files, 69 KB (br) |
+| Static, no islands | 0.4 KB | **none** |
+| Static, one island (the menu) | 1.0 KB, loader included | 6 files, 54.0 KB |
+| Static, two islands (menu and form) | 1.1 KB, loader included | 8 files, 55.1 KB |
+| The same views, hydrated | 9.7 KB | 10 files, 83.2 KB |
+
+React DOM is 49 KB of that. Each further island adds its own code, about 1 KB
+here.
 
 ## Related
 
 - [Views & Layouts](./views-and-layouts.md): views, layouts, `Head`.
 - [Navigation](./navigation.md): `Link` and `useNavigate`.
 - [Forms](./forms.md): the `Form` component for hydrated pages.
+- [Testing](./testing.md): `gemi/vitest`.

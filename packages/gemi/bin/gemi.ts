@@ -23,6 +23,7 @@ import { reportUpdate } from "./update-check";
 import { runUpgrade } from "./upgrade";
 import { SKILL_NAME, installSkill } from "./install-skill";
 import { spawnForwardingSignals } from "./forwardSignals";
+import { runStats } from "../stats/run";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
 // gemi's own runtime plugin) before the server entry runs — so it executes
@@ -68,7 +69,47 @@ program.command("dev").action(async () => {
   process.exit(await exited);
 });
 
-program.command("build").action(async () => {
+// `gemi build --stats` and `gemi stats` share these.
+function withStatsOptions<T extends ReturnType<typeof program.command>>(command: T): T {
+  return command
+    .option("--json <file>", "Also write the stats as JSON (for CI diffs)")
+    .option("--base <file>", "Another build's JSON to compare with in --markdown (e.g. main's)")
+    .option("--markdown <file>", "Write the stats as a Markdown table, compared with --base")
+    .option("--no-routes", "Don't read the route table; report per view") as T;
+}
+
+type StatsOptions = { json?: string; base?: string; markdown?: string; routes?: boolean };
+
+async function printStats(rootDir: string, options: StatsOptions): Promise<number> {
+  const config = await loadGemiConfig(rootDir);
+  return runStats({
+    rootDir,
+    config: config.stats,
+    json: options.json && path.resolve(options.json),
+    base: options.base && path.resolve(options.base),
+    markdown: options.markdown && path.resolve(options.markdown),
+    routes: options.routes,
+    preloadArgs: appPreloadArgs(path.join(rootDir, "app")),
+  });
+}
+
+withStatsOptions(
+  program
+    .command("stats")
+    .description(
+      "Print the initial JavaScript each route loads (raw, gzip, brotli) from the " +
+        "last `gemi build`, and fail when a route is over its budget " +
+        "(`stats.budgets` in gemi.config.ts)",
+    ),
+).action(async (options: StatsOptions) => {
+  process.exit(await printStats(path.resolve(process.cwd()), options));
+});
+
+withStatsOptions(
+  program
+    .command("build")
+    .option("--stats", "After building, print the initial JS per route and check the budgets"),
+).action(async (options: StatsOptions & { stats?: boolean }) => {
   // Bun fixes its JSX transform (prod `jsx` vs dev `jsxDEV`) at process startup
   // from NODE_ENV. `bun run build` starts without it, so the in-process
   // `Bun.build` of the server entry would emit dev `jsxDEV` calls that are
@@ -77,7 +118,7 @@ program.command("build").action(async () => {
   // NODE_ENV=production so the transform is correct from the start.
   if (process.env.GEMI_BUILD_PROD !== "1") {
     const proc = Bun.spawn({
-      cmd: ["bun", process.argv[1], "build"],
+      cmd: ["bun", process.argv[1], ...process.argv.slice(2)],
       env: { ...process.env, NODE_ENV: "production", GEMI_BUILD_PROD: "1" },
       stdout: "inherit",
       stderr: "inherit",
@@ -218,6 +259,12 @@ program.command("build").action(async () => {
   if (!serverBuild.success) {
     for (const message of serverBuild.logs) console.error(message);
     process.exit(1);
+  }
+
+  // `--json` or `--markdown` alone asks for the stats too.
+  if (options.stats || options.json || options.markdown) {
+    console.log("");
+    process.exit(await printStats(rootDir, options));
   }
 
   process.exit();

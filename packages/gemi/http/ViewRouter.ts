@@ -294,6 +294,35 @@ export interface StaticViewOptions {
    * stylesheet, exactly as a hydrated view would.
    */
   layout?: string;
+  /**
+   * The `Cache-Control` header the page is sent with, for example
+   * `"public, max-age=60, s-maxage=600, stale-while-revalidate=86400"` to let a
+   * CDN cache it. Left out, gemi sends none and the cache in front decides.
+   *
+   * Only the rendered page gets it — not a redirect, an error or the 404 a
+   * missing record turns the request into — and only when the response sets
+   * no cookie: a page whose handler or middleware set one is sent
+   * `private, no-store` instead, so a shared cache never stores one visitor's
+   * cookie and hands it to the next. A `Cache-Control` the handler set itself
+   * (`req.ctx().headers`) wins over this option.
+   */
+  cacheControl?: string;
+  /**
+   * Mint the `session_id` cookie for a visitor who has none, as a hydrated view
+   * does. Off by default: a static page is one body for everyone, and a
+   * per-visitor `Set-Cookie` keeps a CDN from caching it. Turn it on when the
+   * page's flags roll out by percentage to anonymous visitors (the rollout
+   * subject is that cookie) and the page is not meant to be cached.
+   */
+  session?: boolean;
+  /**
+   * Set the `csrf_token` cookie, as a hydrated view does. Off by default, for
+   * the same reason as `session`. Turn it on only when a form on this page
+   * posts to a same-origin route behind `CSRFMiddleware`; a form that posts to
+   * an api route with its own protection (a honeypot, a token in the body, an
+   * `Origin` check) needs nothing from the page.
+   */
+  csrf?: boolean;
 }
 
 export class ViewRoute<Input, Output, Params> {

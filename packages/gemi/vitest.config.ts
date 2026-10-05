@@ -1,5 +1,5 @@
 import { configDefaults, defineConfig } from "vitest/config";
-import { gemiRequestPlugin } from "./vitest";
+import { gemiIslandPlugin, gemiRequestPlugin } from "./vitest";
 
 /**
  * The package had no vitest config, and this exists to hold back exactly one
@@ -23,7 +23,9 @@ export default defineConfig({
   // `vitest/index.test.ts` relies on it; the only other files it matches here
   // are the type stubs under `internal/type-stubs/app/http/routes`, which no
   // test loads.
-  plugins: [gemiRequestPlugin()],
+  // And the island transform, as an app adds it (#795): `client/islands.vitest.test.tsx`
+  // checks that `island(() => import(…))` gets the build's key under vitest.
+  plugins: [gemiRequestPlugin(), gemiIslandPlugin()],
   test: {
     exclude: [...configDefaults.exclude, "packaging.test.ts"],
   },
