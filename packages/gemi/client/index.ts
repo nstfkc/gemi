@@ -125,4 +125,4 @@ export { OpenGraphImage } from "./OpenGraphImage";
 export { useTheme } from "./ThemeProvider";
 export { useAppIdMissmatch } from "./useAppIdMissmatch";
 export { island } from "./islands";
-export type { IslandLoad, IslandMount, IslandOptions, IslandLoader } from "./islands";
+export type { IslandLoad, IslandOptions, IslandLoader } from "./islands";

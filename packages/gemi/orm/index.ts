@@ -140,7 +140,9 @@ export {
 // The ambient transaction. `Model.transaction` is the surface an application
 // uses; these are for code that has to *observe* the scope rather than open one
 // — a raw query joining it, or a test asserting a statement ran inside it.
+// `afterCommit` is the exception: the commit hook for app code (#786).
 export {
+  afterCommit,
   currentActor,
   currentTransaction,
   isSystemScope,

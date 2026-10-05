@@ -37,6 +37,13 @@ interface GemiConfig {
     plugins?: BunPlugin[];      // applied at build time and at runtime
   };
   assetBase?: string;           // where browsers fetch the client build from
+  stats?: {
+    budgets?: {                 // initial JS per route, in KB; `gemi stats` fails over them
+      unit?: "gzip" | "brotli" | "raw";
+      default?: number;
+      routes?: Record<string, number>; // by route path or page view
+    };
+  };
 }
 ```
 
@@ -44,6 +51,7 @@ interface GemiConfig {
 - **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
 - **`assetBase`** serves the client build from somewhere other than the app's own `/assets/` — see [Asset base](#asset-base).
 - **`previousAssets`** keeps serving earlier releases' chunks after a deploy — see [Missing chunks after a deploy](#missing-chunks-after-a-deploy).
+- **`stats.budgets`** holds each route's initial JavaScript to a size; `gemi stats` and `gemi build --stats` fail when a route is over — see [Bundle Stats](./bundle-stats.md).
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 

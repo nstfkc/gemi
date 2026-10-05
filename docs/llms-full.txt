@@ -42,7 +42,8 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Views & client
 - **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
-- **[Static Views & Islands](./static-views-and-islands.md)** — `.static()` views that are server-rendered and ship no React, `island()` for their interactive parts, a static page's own layout and stylesheet.
+- **[Static Views & Islands](./static-views-and-islands.md)** — `.static()` views that are server-rendered and ship no client runtime, `island()` React components for their interactive parts, a static page's own layout and stylesheet.
+- **[Bundle Stats](./bundle-stats.md)** — `gemi stats` / `gemi build --stats`: the initial JavaScript per route, budgets that fail CI, JSON and Markdown for PR diffs.
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
@@ -833,6 +834,13 @@ interface GemiConfig {
     plugins?: BunPlugin[];      // applied at build time and at runtime
   };
   assetBase?: string;           // where browsers fetch the client build from
+  stats?: {
+    budgets?: {                 // initial JS per route, in KB; `gemi stats` fails over them
+      unit?: "gzip" | "brotli" | "raw";
+      default?: number;
+      routes?: Record<string, number>; // by route path or page view
+    };
+  };
 }
 ```
 
@@ -840,6 +848,7 @@ interface GemiConfig {
 - **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
 - **`assetBase`** serves the client build from somewhere other than the app's own `/assets/` — see [Asset base](#asset-base).
 - **`previousAssets`** keeps serving earlier releases' chunks after a deploy — see [Missing chunks after a deploy](#missing-chunks-after-a-deploy).
+- **`stats.budgets`** holds each route's initial JavaScript to a size; `gemi stats` and `gemi build --stats` fail when a route is over — see [Bundle Stats](./bundle-stats.md).
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
@@ -1362,7 +1371,20 @@ Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfi
 
 `GEMI_PREVIOUS_ASSETS` (or `previousAssets` in `gemi.config.ts`) copies the previous release's `dist/client/assets` files into the new build, so a tab still on that release can load its chunks after the deploy. See [Missing chunks after a deploy](./configuration.md#missing-chunks-after-a-deploy).
 
+`--stats` prints the initial JavaScript per route once the build is done and checks the budgets in `gemi.config.ts`; see [`gemi stats`](#gemi-stats).
+
 > **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
+
+## `gemi stats`
+
+Prints the JavaScript each route loads before it can run (raw, gzip and brotli), from the last `gemi build`, and exits with `1` when a route is over its budget (`stats.budgets` in `gemi.config.ts`).
+
+```bash
+gemi stats [--json <file>] [--base <file>] [--markdown <file>] [--no-routes]
+gemi build --stats         # the same, right after the build
+```
+
+A hydrated route counts the client entry and its views' static imports; a [static route](./static-views-and-islands.md) counts only the islands it can render. The route table is read in a separate process that registers the kernel's providers without booting them. `--json` writes the stats for CI, and `--markdown` a table compared with another build's JSON (`--base`). See [Bundle Stats](./bundle-stats.md).
 
 ## `gemi start`
 
@@ -2820,6 +2842,16 @@ Bun has a server-wide limit of its own, `maxRequestBodySize`, applied before a r
 
 Sets CORS headers for requests whose `Origin` is in the configured `origins` map. Because it needs configuration, it's registered with `CorsMiddleware.configure({ origins: { ... } })` (see below) rather than as a bare class.
 
+A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *` and no `Access-Control-Allow-Credentials`, since browsers refuse that pair. Use it for a public endpoint that takes no cookies, such as a form posted from sites on other hosts. An exact origin key wins over `"*"`.
+
+```typescript
+"public-form": CorsMiddleware.configure({
+  origins: { "*": { "Access-Control-Allow-Methods": "POST" } },
+}),
+```
+
+`cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
+
 ### `csrf` → `CSRFMiddleware`
 
 Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.
@@ -3015,6 +3047,21 @@ class AdminRouter extends ViewRouter {
   routes = { /* ... */ };
 }
 ```
+
+### Middleware that runs on refusals
+
+A middleware that only adds response headers, like your own CORS middleware, can set `static runsOnRefusal = true`. When a middleware earlier in the chain refuses the request, the chain still runs every `runsOnRefusal` middleware after it, and the headers they set reach the refusal. `CorsMiddleware` sets it.
+
+```typescript
+class AnyOriginMiddleware extends Middleware {
+  static runsOnRefusal = true;
+  run() {
+    this.req.ctx().setHeaders("Access-Control-Allow-Origin", "*");
+  }
+}
+```
+
+After a refusal, the request never reaches the handler, so such a middleware must not refuse, read the body, or depend on earlier middleware. If it throws then, the error is logged and the original refusal stands.
 
 ### Middleware that needs a service
 
@@ -3576,7 +3623,7 @@ when its handler supplies one.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, redirects.
 - [Controllers](./controllers.md) — binding controller methods to routes.
 - [i18n](./i18n.md) — locales and translation.
-- [Static Views & Islands](./static-views-and-islands.md) — views sent without React, and islands for their interactive parts.
+- [Static Views & Islands](./static-views-and-islands.md) — views sent without the client runtime, and React islands for their interactive parts.
 
 ---
 
@@ -3588,10 +3635,10 @@ application page needs. A content page (a landing page, a published site, a
 help article) mostly doesn't: everything on it is already in the HTML.
 
 A **static view** is rendered on the server exactly like any other view and sent
-**without React on the client**. Its interactive parts, such as a phone menu or a
-form that submits without a reload, are **islands**: small client modules that
-attach to the server-rendered markup. A static page with no islands ships **no
-JavaScript at all**.
+**without the client runtime**: no router, no view code, no hydration of the page.
+Its interactive parts, such as a phone menu or a form that submits without a
+reload, are **islands**: ordinary React components that hydrate on their own,
+like Astro's. A static page with no islands ships **no JavaScript at all**.
 
 ## Declaring a static view
 
@@ -3635,12 +3682,13 @@ a handler can return a whole record and the page can show only part of it.
 
 ### What doesn't run
 
-Nothing hydrates, so event handlers, effects, state updates and refs never run
-in the browser. Hooks that only act in the browser (`useNavigate`, mutations)
-do nothing on a static page. `Link` renders a plain `<a>`, and following it is a
-normal page load. Forms work the way HTML forms do: a `<form method="post">`
-posts, and the server answers (for example, a `303` back to the page). An island
-can enhance that.
+The page itself never hydrates, so event handlers, effects, state updates and
+refs in the view never run in the browser (islands are the exception, below).
+Hooks that only act in the browser (`useNavigate`, mutations) do nothing on a
+static page. `Link` renders a plain `<a>`, and following it is a normal page
+load. Forms work the way HTML forms do: a `<form method="post">` posts, and the
+server answers (for example, a `303` back to the page). An island can enhance
+that.
 
 A client-side navigation from a hydrated page to a static route (a `Link` or
 `useNavigate`) becomes a full page load. The client router can't render a page
@@ -3672,79 +3720,159 @@ whose pages need a few kilobytes of CSS doesn't inline the application's whole
 Tailwind build. Without `layout`, the page renders inside `RootLayout` with the
 app's stylesheet, as a hydrated view does.
 
-## Islands
+### Cookies and caching
 
-An island is a component that renders on the server, plus a client module that
-makes it interactive on a static page:
+A static page is one body for every visitor, so a CDN can cache it. For that,
+gemi sets none of its own cookies on it: no `session_id`, no `csrf_token` and no
+`i18n-locale` (a static page's locale comes from its url). A first-time visitor
+gets a response with no `Set-Cookie` at all. Cookies the handler or a middleware
+sets (`Cookie.set`, `req.ctx().setCookie`) are still sent.
 
-```tsx
-// app/views/site/components/NavMenu.tsx
-import { island } from "gemi/client";
-
-function NavMenuView() {
-  return (
-    <header>
-      <nav className="links">…</nav>
-      <button type="button" data-menu-open>Menu</button>
-      <dialog className="menu">…</dialog>
-    </header>
-  );
-}
-
-export const NavMenu = island("nav-menu", NavMenuView, () => import("../navMenu.island"));
-```
+`cacheControl` sets the page's `Cache-Control`:
 
 ```typescript
-// app/views/site/navMenu.island.ts
-import type { IslandMount } from "gemi/client";
-
-const mount: IslandMount = (root) => {
-  const dialog = root.querySelector("dialog")!;
-  root.querySelector("[data-menu-open]")?.addEventListener("click", () => dialog.showModal());
-};
-
-export default mount;
+"/p/:slug": this.view("site/Page", loadPage).static({
+  layout: "site/SiteLayout",
+  cacheControl: "public, max-age=60, s-maxage=600, stale-while-revalidate=86400",
+}),
 ```
 
-Use `NavMenu` like any component. What it does depends on the page:
+Without it gemi sends no `Cache-Control`, and the cache in front decides. Only
+the rendered page gets the header, not a redirect, an error or the 404 a missing
+record turns the request into. A `Cache-Control` the handler sets itself wins.
+A page that sets a cookie is sent `private, no-store` instead, whatever
+`cacheControl` says, so a shared cache never stores one visitor's cookie and
+hands it to the next. A cookie a `global` middleware sets is left off a page
+whose `Cache-Control` is `public` (or has `s-maxage`).
 
-- **In a static view**, it renders `NavMenuView` inside a marker,
-  `<gemi-island name="nav-menu" style="display:contents">…</gemi-island>`, and
-  records that the page uses it. The document then gets a small inline loader
-  and that island's module. **Only islands that rendered are loaded**, so a
-  page without islands gets no script at all.
-- **In a hydrated view**, it renders `NavMenuView` as an ordinary component and
-  loads nothing. The same component library works in both kinds of page.
+Two options bring a hydrated view's cookies back, for pages that are not meant
+to be cached:
 
-The client module's default export is called once per marker, with the
-`<gemi-island>` element as `root`. It's plain DOM code, because no React is loaded.
-Keep its imports small: they are all the page downloads.
+- `session: true` mints `session_id` for a visitor who has none. Feature flags
+  that roll out by percentage to anonymous visitors bucket on it; without it a
+  first-time visitor has no bucketing subject on a static page.
+- `csrf: true` sets `csrf_token`. You need it only when a form on the page posts
+  to a same-origin route behind `CSRFMiddleware`.
 
-### Rules for the client module
+A form that posts to an api route with its own protection (a honeypot, a token
+in the body, an `Origin` check), often on another origin, needs neither. For a
+cross-origin form, configure CORS on the api route.
 
-- Name it `*.island.ts` (or `.tsx`, `.js`, `.jsx`) and pass it as
-  `() => import("./path.island")`, written exactly like that. gemi's Vite plugin
-  finds that call, builds the file as its own client entry and tells the server
-  which built file it is. Island files under `app/` are always build entries; an
-  island elsewhere (a workspace package) is picked up through the import.
-- The server never calls the loader, and the server build doesn't include the
-  module.
-- `name` identifies the island in the markup. Two islands with the same name and
-  different modules are an error.
+## Islands
 
-### Options
+An island is a React component, written like any other, that you mark as an
+island where you use it:
 
 ```tsx
-export const ContactForm = island("contact-form", ContactFormView, () => import("../form.island"), {
-  load: "idle",
-  props: (p) => ({ success: p.successMessage }),
+// app/views/site/components/NavMenu.tsx: an ordinary component
+import { useState } from "react";
+
+export default function NavMenu(props: { links: { href: string; label: string }[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <nav>
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+        Menu
+      </button>
+      <ul hidden={!open}>
+        {props.links.map((link) => (
+          <li key={link.href}>
+            <a href={link.href}>{link.label}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+```
+
+```tsx
+// app/views/site/components/islands.ts
+import { island } from "gemi/client";
+
+export const NavMenu = island(() => import("./NavMenu"));
+export const ContactForm = island(() => import("./ContactForm"), {
+  export: "ContactForm",
+  load: "visible",
 });
 ```
 
+Use `NavMenu` like the component it wraps (it has the same props). What it does
+depends on the page:
+
+- **In a static view**, gemi server-renders the component inside a marker,
+  `<gemi-island data-island="0" data-props="…" style="display:contents">…</gemi-island>`,
+  with its props serialised into `data-props`. The document then gets a small
+  inline loader that, on the island's `load` trigger, imports the island's chunk
+  (the component, React and `react-dom/client`) and calls `hydrateRoot` on the
+  marker. **Only islands that rendered are loaded**, so a page without islands
+  gets no script at all. React is one chunk that every island on the page
+  shares, fetched once.
+- **In a hydrated view**, it is the component itself, rendered in place with the
+  page's context. Nothing extra is loaded. The same component library works in
+  both kinds of page, with one implementation per component.
+
+### The loader argument
+
+Write it exactly as `() => import("./path")`, as the first argument of an
+`island(` call. gemi's Vite plugin finds that call, imports the module
+statically for the server (and for hydrated views), and builds it as a client
+entry of its own (`path?gemi-island`) for static pages. Any file can be an
+island: there's no naming convention. One module can back several islands, for
+example through `export`.
+
+### Props
+
+Props cross from the server to the browser as JSON, so they must be **plain
+data**: strings, finite numbers, booleans, `null`, arrays and plain objects. In
+dev, a function, a class instance (a `Date`, a `Map`), a `Symbol`, a `BigInt`,
+`NaN` or a React element in an island's props fails the render with an error
+that names the prop. Everything in them is visible in the page source.
+
+### Children
+
+`children` are rendered on the server, as static HTML, and passed through:
+
+```tsx
+<ContactForm endpoint="/contact">
+  <p>We answer within a day.</p>
+</ContactForm>
+```
+
+They belong to the page: gemi renders them in the page's tree, **with the
+page's context** (router, i18n, your own providers), and moves the HTML into
+the island. The component receives them as a `<gemi-slot style="display:contents">`
+element holding that HTML, on the server and in the browser alike, so hydration
+leaves it alone. Children are static: they don't re-render, and their own event
+handlers don't run. An island inside them is an island of its own and hydrates
+separately.
+
+Render `children` at most once. The island may move the slot (say, from a row
+into a `<dialog>` when a menu opens); React recreates it from the same HTML.
+Because the slot is an element of its own, child-combinator CSS such as
+`nav > a` (or Tailwind's `[&>a]`) doesn't reach the children through it:
+target them with a descendant selector or style them directly.
+
+### Context
+
+On a static page each island is its **own React root**. Context from the page
+(a theme, gemi's router, query and i18n providers) doesn't reach the island's
+component, on the server or in the browser (its `children` do, see above), so
+pass what it needs as props: translated strings,
+the current locale, URLs. An island that needs a provider of its own renders it
+itself; make a small component that wraps the real one in its providers and
+declare that as the island. In a hydrated view the island is an ordinary
+component and sees the page's context as usual.
+
+An island rendered inside another island's own render is just a component of
+that root.
+
+### Options
+
 | Option | Default | |
 |---|---|---|
-| `load` | `"eager"` | When the module loads. `"eager"`: as soon as the page has parsed, with `modulepreload`s for the module and its imports in the head. `"idle"`: on `requestIdleCallback`. `"visible"`: when the island's content first scrolls into view (the marker has no box of its own, so its child elements are observed). Lazy islands aren't preloaded. |
-| `props` | none | What `mount` receives as its second argument. By default nothing is sent (`undefined`): most islands read what they need from the markup. `true` sends the component's props without `children`, and a function picks what to send. The value goes through `JSON.stringify` into a `data-props` attribute (escaped like any attribute, so it can't break out of it), so it must be JSON, and anything in it is visible in the page source. |
+| `load` | `"eager"` | When the island hydrates. `"eager"`: as soon as the page has parsed, with `modulepreload`s for its chunks in the head. `"idle"`: on `requestIdleCallback`. `"visible"`: when the island's content first scrolls into view (the marker has no box of its own, so its child elements are observed). Lazy islands aren't preloaded. |
+| `export` | `"default"` | Which export of the module is the component. |
 
 ### Content Security Policy
 
@@ -3760,26 +3888,184 @@ import { ISLAND_LOADER_CSP_HASH } from "gemi/services";
 headers.set("Content-Security-Policy", `script-src 'self' ${ISLAND_LOADER_CSP_HASH}`);
 ```
 
-Island modules are then ordinary `import()`s of your own assets (`'self'`, or the
+Island chunks are then ordinary `import()`s of your own assets (`'self'`, or the
 asset base's origin). In dev, the loader first installs the React Refresh
-preamble, so its hash differs; use a looser dev policy, as Vite itself needs.
+preamble and Vite's client, so its hash differs; use a looser dev policy, as
+Vite itself needs. In dev, Vite serves islands from source.
+
+### Testing
+
+Add the island transform to `vitest.config.ts`, next to the request plugin, so
+a test that renders a static view through `App.fetch` sees islands as the build
+does:
+
+```typescript
+import { defineConfig } from "vitest/config";
+import { gemiIslandPlugin, gemiRequestPlugin } from "gemi/vitest";
+
+export default defineConfig({ plugins: [gemiRequestPlugin(), gemiIslandPlugin()] });
+```
+
+Without it islands still render: the component is loaded through the `import()`.
+The render params a test passes need no `resolveIsland`; without one, the page
+is its markup and no loader is added.
 
 ## How much it ships
 
 A sample page (a header, four content sections and a footer), built with `gemi build`
-and served by `gemi start`, as sent over the wire:
+and served by `gemi start`, as sent over the wire with brotli. The islands are a
+nav menu and a contact form with static children; the app uses the React
+Compiler, whose runtime is one of the files.
 
-| Page | HTML (br) | JavaScript |
+| Page | HTML (br) | JavaScript (br) |
 |---|---:|---:|
-| Static, no islands | 0.9 KB | **none** |
-| Static, with a nav menu and a contact form island | 1.6 KB, loader included | 2 files, 0.8 KB |
-| The same views, hydrated | 13 KB | 6 files, 69 KB (br) |
+| Static, no islands | 0.4 KB | **none** |
+| Static, one island (the menu) | 1.0 KB, loader included | 6 files, 54.0 KB |
+| Static, two islands (menu and form) | 1.1 KB, loader included | 8 files, 55.1 KB |
+| The same views, hydrated | 9.7 KB | 10 files, 83.2 KB |
+
+React DOM is 49 KB of that. Each further island adds its own code, about 1 KB
+here.
 
 ## Related
 
 - [Views & Layouts](./views-and-layouts.md): views, layouts, `Head`.
 - [Navigation](./navigation.md): `Link` and `useNavigate`.
 - [Forms](./forms.md): the `Form` component for hydrated pages.
+- [Testing](./testing.md): `gemi/vitest`.
+
+---
+
+## Bundle Stats
+
+`gemi stats` prints the JavaScript each route loads before it can run, as raw,
+gzip and brotli sizes, and fails when a route goes over the budget you set for
+it. CI can then hold pages to a size, and a pull request can show what it
+changed.
+
+```bash
+gemi build --stats        # build, then print the stats
+gemi stats                # the stats of the last build
+```
+
+```
+Initial JavaScript per route:
+
+Route           Kind      raw KB  gzip KB  br KB  files  budget (gzip)
+/dashboard      hydrated   398.1    129.8  112.4      8            140
+/auth/sign-in   hydrated   303.7     99.8   86.3      7            125
+/p/:slug        static     183.6     58.9   51.2      5             70
+/legal          static       0.0      0.0    0.0      0            125
+
+Islands (each with its imports):
+  app/views/site/NavMenu.tsx?gemi-island  57.9 KB gzip, 3 file(s)
+  app/views/site/ContactForm.tsx?gemi-island  58.2 KB gzip, 3 file(s)
+
+CSS: 31.6 KB raw, 6.5 KB gzip
+```
+
+## What counts
+
+A **hydrated route** loads the client entry and the code of every view in its
+chain (the layouts and the page), each with its static imports, followed
+transitively. That's the same set gemi announces as `modulepreload` links in the
+page's head. Chunks a view loads lazily (`import()`, `React.lazy`) aren't part of
+the first load and don't count.
+
+A **static route** ([`.static()`](./static-views-and-islands.md)) loads no
+client entry and no view code. It counts the islands its views and its document
+layout can render. Each island has its own client entry, `<module>?gemi-island`
+in the build's manifest, and a route can render it when the chunk holding the
+island's component is reachable from those views through any import. The route
+counts each such entry with its static imports, React and `react-dom/client`
+included. A page loads only the islands it actually shows, so this is the most
+it can load. Chunks the islands share (React, the island runtime, a helper)
+count once per route. The island loader is inline in the HTML and isn't counted.
+A static page without islands is `0`.
+
+Sizes come from the client build's manifest and files in `dist/client`. Gzip
+is level 9 and brotli quality 11, the files `gemi build` writes next to each
+asset, which are what `gemi start` sends.
+
+### The route table
+
+The build itself never boots your app; it finds views on the file system. To
+report per route and to know which routes are static, `gemi stats` reads the
+route table in a separate Bun process that imports `app/kernel/Kernel.ts` and
+runs only the kernel's synchronous registration step. Providers register, but
+no provider or service boots, so nothing connects to a database, claims queue
+jobs or starts the scheduler. Importing your route files (and what they import)
+is the one thing that runs, as for `gemi app:route-manifest`.
+
+If that fails (a route file that throws when imported in CI, say), the command
+says so and reports per **view** instead: each view in `app/views` as a hydrated
+page, with no way to tell static views apart. `--no-routes` asks for that
+directly.
+
+Routes of a [host group](./domains.md) other than the root are keyed
+`<group>:<path>`, e.g. `admin:/users`.
+
+## Budgets
+
+Set budgets in `gemi.config.ts`, in KB (1024 bytes):
+
+```typescript
+import { defineConfig } from "gemi/config";
+
+export default defineConfig({
+  stats: {
+    budgets: {
+      unit: "gzip", // or "brotli" or "raw"; gzip by default
+      default: 125, // every route without its own budget
+      routes: {
+        "/dashboard": 140, // by route path
+        "auth/SignIn": 110, // or by the route's page view
+        "/p/:slug": 70,
+      },
+    },
+  },
+});
+```
+
+A route's budget is its own (by path), else its page view's (the last view in
+its chain), else `default`. Without `default`, only the routes you list are
+checked. `gemi stats` and `gemi build --stats` exit with `1` and list the routes
+over budget. A budget key that matches no route or view is reported as a
+warning, which catches a renamed view.
+
+## In CI
+
+```bash
+gemi build --stats --json bundle-stats.json --base main-stats.json --markdown bundle-stats.md
+```
+
+| Option | |
+|---|---|
+| `--json <file>` | Writes the stats as JSON: every route with its views, sizes and chunk names, every island and chunk, and the CSS total. Keep `main`'s as an artifact to compare with. |
+| `--base <file>` | Another build's JSON to compare with in `--markdown`. A missing file is no comparison, so the first run on a new repo still passes. |
+| `--markdown <file>` | A Markdown table for a PR comment: each route's size and its change from `--base`, the budget, a ❌ for a route over budget and ⚠️ for one that grew by more than 2 KB gzip, then the chunks that are new, removed or changed by more than 0.5 KB. |
+| `--no-routes` | Skip the route table and report per view. |
+
+`--json` or `--markdown` on `gemi build` turns on `--stats`. Chunk names in the
+JSON drop the content hash (`assets/Editor-C4f9a1Xz.js` is `Editor.js`), so the
+same chunk compares across builds.
+
+A GitHub Actions sketch: build on the PR, compare with the stats `main` uploaded,
+and post the table.
+
+```yaml
+- run: bun run build --stats --json bundle-stats.json --base base/bundle-stats.json --markdown bundle-stats.md
+- uses: marocchino/sticky-pull-request-comment@v2
+  if: always()
+  with:
+    path: bundle-stats.md
+```
+
+## Related
+
+- [Static Views & Islands](./static-views-and-islands.md)
+- [CLI](./cli.md#gemi-stats)
+- [Configuration](./configuration.md#static-assets): the precompressed assets.
 
 ---
 
@@ -5526,6 +5812,8 @@ export default defineConfig({
 ```
 
 It applies to the same files the build rewrites: `.ts` and `.tsx` under `http/controllers/` and `http/routes/`. Everything else, including `node_modules`, is left alone. A handler that declares its request as a default value (`req = new HttpRequest()`) works with or without it.
+
+An app with [islands](./static-views-and-islands.md#islands) adds `gemiIslandPlugin()` from `gemi/vitest` as well (`plugins: [gemiRequestPlugin(), gemiIslandPlugin()]`), so a static view dispatched in a test renders its islands with the same module keys as the build.
 
 Run the suite under Bun, `bun --bun vitest`, since gemi's server modules import from `bun`.
 
@@ -7742,6 +8030,41 @@ step that fails, or a child policy that denies, rolls back the parent row too. A
 still compiles to one statement and opens nothing, and inside a transaction you opened the nested
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
 you need it to make *several separate calls* whole.
+
+### Running something after the commit
+
+`afterCommit(fn)` from `gemi/orm` runs `fn` once the surrounding transaction commits, and runs it
+right away when no transaction is open. It never runs when the transaction rolls back:
+
+```ts
+import { afterCommit } from "gemi/orm"
+
+async function recordChange(siteId: number) {
+  await SiteChange.create({ data: { siteId } })
+  afterCommit(() => signals.wake(siteId))   // only once the row is durable
+}
+
+await Website.transaction(async () => {
+  await recordChange(site.id)     // queued
+  await Asset.create({ … })       // if this throws, `wake` never runs
+})                                // committed: `wake` runs here, outside the transaction
+
+await recordChange(site.id)       // no transaction open: `wake` runs immediately
+```
+
+- **Nesting.** Inside a nested transaction (a savepoint) the callback waits for the **outermost**
+  commit, since a savepoint makes nothing durable. If the savepoint rolls back, its callbacks are
+  dropped, while the ones registered elsewhere in the transaction still run.
+- **Order and timing.** Callbacks run one at a time, in registration order, after the commit and
+  outside the transaction: a query in one runs on its own connection, and a
+  `Model.transaction` in one opens a new transaction. The outer `Model.transaction(...)` call
+  resolves after they have finished.
+- **Errors.** A callback that throws is logged to stderr; the next one still runs and the commit
+  stands. The promise `afterCommit` returns never rejects, so you don't need to await it. Await it
+  only to wait for an immediate callback (no transaction open) to finish.
+
+It uses the same mechanism as an event's [`static afterCommit`](./events.md#deferring-until-the-transaction-commits).
+Use an event when the side effect has listeners of its own; use `afterCommit` for a single callback.
 
 ### Locking rows
 

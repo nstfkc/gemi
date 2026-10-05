@@ -271,6 +271,8 @@ export default defineConfig({
 
 It applies to the same files the build rewrites: `.ts` and `.tsx` under `http/controllers/` and `http/routes/`. Everything else, including `node_modules`, is left alone. A handler that declares its request as a default value (`req = new HttpRequest()`) works with or without it.
 
+An app with [islands](./static-views-and-islands.md#islands) adds `gemiIslandPlugin()` from `gemi/vitest` as well (`plugins: [gemiRequestPlugin(), gemiIslandPlugin()]`), so a static view dispatched in a test renders its islands with the same module keys as the build.
+
 Run the suite under Bun, `bun --bun vitest`, since gemi's server modules import from `bun`.
 
 ### MCP tools

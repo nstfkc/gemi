@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
 import { CrossConnectionTransactionError } from "../database/Connection";
 import {
+  afterCommit,
   assertConnectionUsable,
   commitDependsOn,
   currentConnectionName,
@@ -1137,5 +1138,160 @@ describe("writes the commit depends on", () => {
     // is not held against it a second time.
     expect(result).toBe("committed");
     expect(ran).toEqual(["after"]);
+  });
+});
+
+/**
+ * `afterCommit` is the application-facing form of `deferUntilCommit` (#786):
+ * the same list, but the "no transaction" branch runs the callback instead of
+ * handing it back.
+ */
+describe("afterCommit", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("is exported from gemi/orm", async () => {
+    const orm = await import("./index");
+    expect(orm.afterCommit).toBe(afterCommit);
+  });
+
+  test("outside a transaction it runs the callback now, synchronously", () => {
+    const ran: string[] = [];
+    void afterCommit(() => void ran.push("now"));
+    expect(ran).toEqual(["now"]);
+  });
+
+  test("outside a transaction the promise settles once an async callback has", async () => {
+    const ran: string[] = [];
+    await afterCommit(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      ran.push("done");
+    });
+    expect(ran).toEqual(["done"]);
+  });
+
+  test("a hand-built scope with a handle but no list runs it now", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+    await ormContext.run({ tx: pool.handle, depth: 0 }, async () => {
+      await afterCommit(() => void ran.push("now"));
+    });
+    expect(ran).toEqual(["now"]);
+  });
+
+  test("inside a transaction it waits for the commit, outside the transaction", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+    let txAtRun: unknown = "unset";
+
+    await withTransaction(pool, async () => {
+      await afterCommit(() => {
+        ran.push("after commit");
+        txAtRun = currentTransaction();
+      });
+      expect(ran).toEqual([]);
+    });
+
+    expect(ran).toEqual(["after commit"]);
+    expect(txAtRun).toBeUndefined();
+  });
+
+  test("nothing runs when the transaction rolls back", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await expect(
+      withTransaction(pool, async () => {
+        void afterCommit(() => void ran.push("never"));
+        throw new Error("rolled back");
+      }),
+    ).rejects.toThrow("rolled back");
+
+    expect(ran).toEqual([]);
+  });
+
+  test("a nested transaction defers to the outermost commit", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      await withTransaction(pool, async () => {
+        await withTransaction(pool, async () => {
+          void afterCommit(() => void ran.push("depth 2"));
+        });
+        void afterCommit(() => void ran.push("depth 1"));
+        // The savepoints released, but nothing is durable yet.
+        expect(ran).toEqual([]);
+      });
+      void afterCommit(() => void ran.push("depth 0"));
+      expect(ran).toEqual([]);
+    });
+
+    expect(ran).toEqual(["depth 2", "depth 1", "depth 0"]);
+  });
+
+  test("a rolled-back savepoint drops its callbacks; the committed rest run", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      void afterCommit(() => void ran.push("before"));
+      await withTransaction(pool, async () => {
+        void afterCommit(() => void ran.push("committed savepoint"));
+      });
+      await expect(
+        withTransaction(pool, async () => {
+          void afterCommit(() => void ran.push("rolled back savepoint"));
+          throw new Error("inner");
+        }),
+      ).rejects.toThrow("inner");
+      void afterCommit(() => void ran.push("after"));
+    });
+
+    expect(ran).toEqual(["before", "committed savepoint", "after"]);
+  });
+
+  test("a savepoint that commits under a transaction that rolls back runs nothing", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await expect(
+      withTransaction(pool, async () => {
+        await withTransaction(pool, async () => {
+          void afterCommit(() => void ran.push("inside"));
+        });
+        throw new Error("outer");
+      }),
+    ).rejects.toThrow("outer");
+
+    expect(ran).toEqual([]);
+  });
+
+  test("a throwing callback is reported, never rejected, in either branch", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pool = fakePool("a");
+
+    await expect(
+      afterCommit(() => {
+        throw new Error("sync now");
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      afterCommit(async () => {
+        throw new Error("async now");
+      }),
+    ).resolves.toBeUndefined();
+
+    const ran: string[] = [];
+    await withTransaction(pool, async () => {
+      void afterCommit(() => {
+        throw new Error("deferred");
+      });
+      void afterCommit(() => void ran.push("next"));
+    });
+
+    expect(ran).toEqual(["next"]);
+    expect(error).toHaveBeenCalledTimes(3);
   });
 });
