@@ -88,7 +88,7 @@ const ANY_STATE: AgentJobState[] = ["running", "ok", "error"];
 /** What a job settles with. */
 export type AgentJobOutcome =
   | { output: unknown; usage?: Usage }
-  | { error: string | Error | Pick<AgentError, "message"> & Partial<AgentError>; usage?: Usage };
+  | { error: string | Error | (Pick<AgentError, "message"> & Partial<AgentError>); usage?: Usage };
 
 /**
  * Background jobs, from anywhere in the app: settle one, fail one, look one up.
@@ -235,11 +235,7 @@ export interface ToolJobs {
    * crash, so make it idempotent. Only on a threaded run (a turn with a
    * `threadId` through `AgentController`), and only from a top-level tool.
    */
-  start<A, O>(
-    job: AgentJobClass<A, O>,
-    args: A,
-    options?: StartJobOptions,
-  ): Promise<JobHandle<O>>;
+  start<A, O>(job: AgentJobClass<A, O>, args: A, options?: StartJobOptions): Promise<JobHandle<O>>;
   /**
    * Records a background job that something else settles: a provider's
    * webhook, a poller. Pass `handle.id` to it, and call
@@ -272,7 +268,11 @@ export function toolJobs(params: {
   /** One job per tool call: the handle the first `start`/`track` answered. */
   let started: Promise<JobHandle<any>> | null = null;
 
-  const begin = (job: (new () => AgentJob<any, any>) | null, args: unknown, options: StartJobOptions = {}) => {
+  const begin = (
+    job: (new () => AgentJob<any, any>) | null,
+    args: unknown,
+    options: StartJobOptions = {},
+  ) => {
     if (params.async === undefined) {
       throw new ToolError(
         `"${params.toolName}" called ctx.jobs, but the tool does not declare \`async\`. Add \`async: { deadlineMs }\` to its definition.`,
