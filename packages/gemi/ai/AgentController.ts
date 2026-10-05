@@ -5,6 +5,7 @@ import { HttpRequest } from "../http/HttpRequest";
 import { mediaType } from "../http/mediaType";
 import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
+import type { AgentResource } from "../http/ResourcePolicy";
 import type {
   AgentContext,
   AgentRun,
@@ -794,14 +795,38 @@ export abstract class AgentController<
    * may touch it. `attach` and `stop` carry no body, so it is absent on them;
    * narrow on `route` to read it. Like `threadId` it is the client's claim,
    * unchecked.
+   *
+   * THE DEFAULT CHECKS `resource`, when there is one, and lets everything
+   * through otherwise. An override that also wants it calls
+   * `super.authorizeRequest(req, params)`.
    */
   protected authorizeRequest(
     req: HttpRequest<any, any>,
     params: AuthorizeRequestParams<Body>,
   ): void | Promise<void> {
-    void req;
-    void params;
+    return this.resource?.authorize(req, params);
   }
+
+  /**
+   * THE RESOURCE THIS CHAT IS ABOUT, checked on every route by the default
+   * `authorizeRequest` (#726): a resource policy's `forAgent`, which names the
+   * resource's id in the `body` and the resource a thread belongs to.
+   *
+   * ```ts
+   * resource = PagePolicy.forAgent({
+   *   body: (body: PageBody) => body.pageId,
+   *   thread: (threadId) => ChatThread.pageIdOf(threadId),
+   * });
+   * ```
+   *
+   * `stream` and `upload` are refused unless the caller may use the resource
+   * the body names, and, when they name a thread, unless it is that
+   * resource's. `attach` and `stop` are refused unless the caller may use the
+   * thread's resource. A refusal is the policy's (a 404 by default), the same
+   * for a resource or thread that does not exist. A live run still answers
+   * only its `runOwner`.
+   */
+  protected resource?: AgentResource<Body>;
 
   /**
    * WHO OWNS A RUN THIS REQUEST STARTS, and who a request to `attach` or `stop`
