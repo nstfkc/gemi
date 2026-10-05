@@ -1,4 +1,5 @@
 import type { AgentStore } from "../AgentController";
+import { keepSummary, type ThreadSummary } from "../contextCompaction";
 import type { AgentMessage } from "../types";
 
 /** A day. Long enough that a conversation survives a lunch break, short enough
@@ -10,6 +11,8 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 
 type Thread = {
   messages: AgentMessage[];
+  /** `contextWindow.compact`'s summaries of this thread, most recent first. */
+  summaries?: ThreadSummary[];
   /** Bumped by every read and every write: a conversation someone is still
    *  having must not expire out from under them mid-turn. */
   touchedAt: number;
@@ -120,6 +123,18 @@ export class MemoryAgentStore implements AgentStore {
     const drop = new Set(messageIds);
     thread.messages = thread.messages.filter((message) => !drop.has(message.id));
     thread.touchedAt = Date.now();
+  }
+
+  async loadSummaries(threadId: string): Promise<ThreadSummary[]> {
+    const thread = this.threads.get(threadId);
+    return thread?.summaries?.slice() ?? [];
+  }
+
+  async saveSummary(threadId: string, summary: ThreadSummary): Promise<void> {
+    // A thread that is gone has nothing to summarise; the summary goes with it.
+    const thread = this.threads.get(threadId);
+    if (!thread) return;
+    thread.summaries = keepSummary(thread.summaries ?? [], summary);
   }
 
   /** Test seam, and a way for an app to drop a conversation on request. */
