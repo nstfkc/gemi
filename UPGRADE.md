@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.111.0 to 0.112.0
 
 ## Resource policies, and view refusals render the `404` view (#726)
 
