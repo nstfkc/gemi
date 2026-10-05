@@ -544,6 +544,8 @@ jobs:
       - name: Change feed on Postgres
         run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/change-feed/DatabaseChangeFeedDriver.test.ts -t "postgres"
         working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "8"
 
       # `DB.schema()` reads a different catalog per dialect, and the servers
       # are already here. The filter selects nothing at all if the URLs go
