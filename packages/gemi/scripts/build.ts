@@ -70,6 +70,9 @@ const result = await Bun.build({
     // the `gemi/*` the application imports load one copy of gemi's modules,
     // not two side by side.
     "./services/queue/work.ts",
+    // The entry `gemi stats` spawns to read the route table, here for the same
+    // reason: the routers it reads are the application's copy of gemi's.
+    "./stats/route-table.ts",
   ],
   outdir: "./dist",
   external: [

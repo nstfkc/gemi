@@ -40,6 +40,18 @@ What else changes:
 - **Removed types:** `IslandMount` (`gemi/client`). `IslandOptions` is now `{ load?, export? }`, and `IslandLoader` is the `() => import()` loader.
 - **New:** `gemiIslandPlugin` from `gemi/vitest`.
 
+## `gemi stats` and `gemi build --stats`: initial JavaScript per route, with budgets (#794)
+
+New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats](docs/bundle-stats.md).
+
+- **`gemi stats`** reads the last build in `dist/client` and prints, per route, the JavaScript it loads before it can run: raw, gzip and brotli, the number of files, and the budget. A hydrated route counts the client entry plus its view chain's static imports (the `modulepreload` set); a `.static()` route counts only the island entries (`<module>?gemi-island`) its views and layout can render, with their imports; React and other shared chunks count once per route. Each island is also listed on its own.
+- **`gemi build --stats`** does the same after building. Both take `--json <file>` (the stats for CI), `--markdown <file>` and `--base <file>` (a PR table compared with another build's JSON), and `--no-routes`.
+- **`stats.budgets` in `gemi.config.ts`** (`unit`, `default`, `routes` keyed by route path or page view, in KB) makes both commands exit with `1` when a route is over its budget.
+- To report per route without booting the app in the build, the route table is read in a child process (`gemi/stats/route-table`, a new export) that imports the Kernel and runs only its synchronous `boot()`: providers register, nothing boots. If it fails, the stats are reported per view instead, with a message.
+- New: `DomainRouter.viewGroups()`, and the `StatsConfig`/`StatsBudgets` types from `gemi/config`.
+
+An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)

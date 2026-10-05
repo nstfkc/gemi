@@ -123,4 +123,21 @@ export class DomainRouter {
   viewDispatchers(): ViewRouteDispatcher[] {
     return Array.from(new Set(Array.from(this.groups.values(), (group) => group.view)));
   }
+
+  /**
+   * Every distinct view dispatcher with the group key it is first served
+   * under (`""` for the root, a subdomain, `"*"` for the custom fallback), the
+   * root's first. A group that reuses the root's view routes is not repeated.
+   * For tooling that reports per route (`gemi stats`).
+   */
+  viewGroups(): Array<{ group: string; view: ViewRouteDispatcher }> {
+    const seen = new Set<ViewRouteDispatcher>();
+    const groups: Array<{ group: string; view: ViewRouteDispatcher }> = [];
+    for (const [group, dispatchers] of this.groups) {
+      if (seen.has(dispatchers.view)) continue;
+      seen.add(dispatchers.view);
+      groups.push({ group, view: dispatchers.view });
+    }
+    return groups;
+  }
 }
