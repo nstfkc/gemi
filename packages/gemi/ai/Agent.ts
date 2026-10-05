@@ -24,6 +24,7 @@ import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
+import { isJobHandle, type JobHandle, type RunJobs, type ToolJobs, toolJobs } from "./jobs/AgentJob";
 import {
   executionReceiptId,
   spendNestedRun,
@@ -351,6 +352,22 @@ export interface ToolContext {
    * checks; there is no spelling here that reaches an id outside them.
    */
   editImage(model: ImageModel, params: ToolEditImageParams): Promise<GeneratedAttachment>;
+
+  /**
+   * Hands this call's work to a background job (#461).
+   *
+   *     async execute({ images }, ctx) {
+   *       return ctx.jobs.start(RenderImagesJob, { images }, { summary: { count: images.length } });
+   *     }
+   *
+   * Return the handle and the call's result is `running`: the model is told
+   * the job started, the turn goes on and ends, and when the job settles its
+   * output becomes the call's result. The tool has to declare `async`, and
+   * the run has to be a threaded turn through `AgentController`. Anywhere
+   * else `start` and `track` throw a `JobsRequireThreadError`, which the
+   * model reads as the tool's error. See `ToolJobs`.
+   */
+  jobs: ToolJobs;
 }
 
 /** What an image parked by a tool answers. See `ToolContext.generateImage`. */
@@ -579,7 +596,9 @@ export type ToolInputSchema<Input> =
 export type ToolExecute<Input, Output, Progress = unknown> = (
   input: Input,
   ctx: ToolContext,
-) => Promise<Output> | AsyncGenerator<Progress, Output, void>;
+) =>
+  | Promise<Output | JobHandle<Output>>
+  | AsyncGenerator<Progress, Output | JobHandle<Output>, void>;
 
 type ToolDefinitionBase<Name extends string, Input, Output> = {
   name: Name;
@@ -627,6 +646,13 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
    * which the server never runs.
    */
   timeoutMs?: number;
+  /**
+   * Declares that the tool may hand its work to a background job with
+   * `ctx.jobs.start` or `ctx.jobs.track` (#461). `deadlineMs` is how long such
+   * a job may run before it is failed with code `"timeout"`; an hour when
+   * absent. A tool without it cannot start a job.
+   */
+  async?: { deadlineMs?: number };
 };
 
 /**
@@ -689,6 +715,8 @@ export class AgentTool<
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
   readonly timeoutMs?: number;
+  /** See `ToolDefinition.async`. `undefined` for a tool that cannot start a job. */
+  readonly async?: { deadlineMs?: number };
   /**
    * There is deliberately no `namespace` here. A tool is a module-scope
    * singleton, so a field naming its group would hold whichever agent
@@ -709,6 +737,7 @@ export class AgentTool<
     this.answeredBy = params.answeredBy === "client" ? "client" : "server";
     this.execute = params.execute ?? undefined;
     this.timeoutMs = params.timeoutMs;
+    this.async = params.async;
   }
 
   /**
@@ -727,6 +756,14 @@ export class AgentTool<
     }
     if (params.timeoutMs !== undefined) {
       assertDuration(params.timeoutMs, `The tool "${params.name}"`, "timeoutMs");
+    }
+    if (params.async?.deadlineMs !== undefined) {
+      assertDuration(params.async.deadlineMs, `The tool "${params.name}"`, "async.deadlineMs");
+    }
+    if (params.async && params.answeredBy === "client") {
+      throw new Error(
+        `The tool "${params.name}" is answered by the client and cannot be \`async\`: background jobs are for tools the server runs.`,
+      );
     }
     return new AgentTool(params);
   }
@@ -1391,6 +1428,13 @@ interface AgentStreamParamsBase {
    * would be the confused-deputy hole in reverse.
    */
   attachments?: ScopedAttachments | null;
+  /**
+   * Lets this run's tools start background jobs with `ctx.jobs` (#461).
+   * `AgentController` passes it on a threaded turn: a job settles into the
+   * thread, so a run with no thread has nowhere to put the result. Without it
+   * `ctx.jobs.start` throws `JobsRequireThreadError`. Not handed to sub-runs.
+   */
+  jobs?: RunJobs;
   /**
    * Set by `ctx.runAgent` and by nothing else.
    *
@@ -3364,6 +3408,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       runAgent: this.nestedRunner(messageId, call, signal, resume),
       generate: ((params: GenerateParams) =>
         this.generateForTool(params, signal, call.toolCallId)) as ToolContext["generate"],
+      jobs: toolJobs({
+        jobs: this.depth === 0 ? this.params.jobs : undefined,
+        threadId: this.params.threadId,
+        runId: this.runId,
+        toolCallId: call.toolCallId,
+        toolName: String(call.name),
+        depth: this.depth,
+        async: resolved.tool.async,
+        attachments: this.params.attachments ?? null,
+      }),
     };
 
     try {
@@ -3385,6 +3439,26 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         output = next.value;
       } else {
         output = await started;
+      }
+      if (isJobHandle(output)) {
+        // The call went to the background (#461). Its result is `running`,
+        // and the job's own outcome replaces it once it settles.
+        if (output.toolCallId !== call.toolCallId) {
+          throw new ToolError(
+            `"${String(call.name)}" returned the handle of a job another tool call started. Return the handle from this call's own ctx.jobs.`,
+            { retryable: false },
+          );
+        }
+        return {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          name: call.name,
+          status: "running",
+          job: {
+            id: output.id,
+            ...(output.summary !== undefined ? { summary: output.summary } : {}),
+          },
+        };
       }
       return {
         type: "tool-result",

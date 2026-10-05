@@ -805,7 +805,9 @@ function renderPart(part: AgentContentPart, limit: number): string {
           ? json(part.output)
           : part.status === "error"
             ? `error: ${part.error?.message ?? ""}`
-            : `${part.status}${part.reason ? `: ${part.reason}` : ""}`;
+            : part.status === "running"
+              ? `a background job (${part.job?.id ?? "unknown"}) that was still running`
+              : `${part.status}${part.reason ? `: ${part.reason}` : ""}`;
       return `[${String(part.name)} returned: ${truncate(body, Math.min(limit, 2_000))}]`;
     }
     case "output":

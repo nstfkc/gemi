@@ -37,6 +37,7 @@ export type {
 export type {
   AgentContentPart,
   AgentError,
+  AgentJobRef,
   AgentErrorCode,
   AgentMessage,
   AgentStreamEvent,

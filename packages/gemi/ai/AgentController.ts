@@ -64,6 +64,9 @@ import { redactError, unredactedError } from "./redact";
 import type { ErrorRedactionInfo } from "./redact";
 import { sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
+import { AgentJobs } from "./jobs/AgentJob";
+import { markOrphans, overlayJobs } from "./jobs/overlay";
+import type { Schema } from "./Schema";
 import type {
   AgentError,
   AgentMessage,
@@ -1132,6 +1135,9 @@ export abstract class AgentController<
         // The principal its pending calls are bound to (#447): an answer is
         // only accepted from the same `runOwner` the question was asked of.
         subject: owner,
+        // Background jobs (#461) settle into the thread, so only a threaded
+        // turn can start one. The job records who started it.
+        ...(threadId ? { jobs: { owner } } : {}),
         // What each model call is sent (#473). Only the request: the store
         // still gets every message through `journal` above.
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
@@ -2082,12 +2088,36 @@ export abstract class AgentController<
     history: AgentMessage[],
     { write }: { write: boolean },
   ): Promise<AgentMessage[]> {
-    const { messages, settled } = await settleInterrupted(history, (runId) =>
-      this.isRunLive(runId, threadId),
-    );
-    if (write && settled.length > 0) {
+    const isLive = (runId: string) => this.isRunLive(runId, threadId);
+    const interrupted = await settleInterrupted(history, isLive);
+    let messages = interrupted.messages;
+    const settled = new Map(interrupted.settled.map((message) => [message.id, message]));
+
+    // Background jobs (#461): each `running` tool result gets its job's
+    // current state, and the ones that settled are written back with the
+    // rest. A job store that cannot be read leaves the results `running`,
+    // which is what the model saw last time, rather than failing the turn.
+    if (hasRunningResult(messages) || write) {
       try {
-        await this.store.appendMessages(threadId, settled);
+        const jobs = await overlayJobs(messages, {
+          threadId,
+          store: AgentJobs.store,
+          isRunLive: isLive,
+          outputSchemaFor: (name) => this.toolOutputSchema(name),
+        });
+        messages = jobs.messages;
+        for (const message of jobs.settled) settled.set(message.id, message);
+        if (write) {
+          await markOrphans(AgentJobs.store, jobs.orphans, (err) => this.reportHookFailure(err));
+        }
+      } catch (err) {
+        this.reportHookFailure(err);
+      }
+    }
+
+    if (write && settled.size > 0) {
+      try {
+        await this.store.appendMessages(threadId, [...settled.values()]);
       } catch (err) {
         // The run still gets the settled history. The store keeps the
         // unfinished copy, and the next turn settles it the same way again.
@@ -2095,6 +2125,23 @@ export abstract class AgentController<
       }
     }
     return messages;
+  }
+
+  /** A tool's output schema, by name, for checking a background job's output. */
+  private toolOutputSchema(name: string): Schema<any> | undefined {
+    const visit = (entries: readonly unknown[]): Schema<any> | undefined => {
+      for (const entry of entries) {
+        const tool = entry as { name?: string; outputSchema?: Schema<any>; tools?: unknown[] };
+        if (Array.isArray(tool.tools)) {
+          const found = visit(tool.tools);
+          if (found) return found;
+        } else if (tool.name === name) {
+          return tool.outputSchema;
+        }
+      }
+      return undefined;
+    };
+    return visit((this.agent as { tools?: readonly unknown[] }).tools ?? []);
   }
 
   /**
@@ -3117,5 +3164,12 @@ function warnInMemoryNonces(nonces: NonceStore): void {
     "[gemi/ai] A stateless agent chat is spending approval nonces in process memory. " +
       "With more than one instance a replayed approval is accepted once per instance. " +
       "Set `nonces = new RedisNonceStore()` (or your own NonceStore) on the AgentController.",
+  );
+}
+
+/** Whether any message holds a tool result still waiting on a background job. */
+function hasRunningResult(messages: AgentMessage[]): boolean {
+  return messages.some((message) =>
+    message.content.some((part) => part.type === "tool-result" && part.status === "running"),
   );
 }

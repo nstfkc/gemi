@@ -48,6 +48,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
 - **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
+- **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 
 ### Data
 - **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.

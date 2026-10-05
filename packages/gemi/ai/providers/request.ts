@@ -562,6 +562,16 @@ export function toolResultOutput(part: ToolResultPart): string {
     return typeof part.output === "string" ? part.output : JSON.stringify(part.output ?? null);
   }
 
+  if (part.status === "running") {
+    // The same text on every request until the job settles, so the prompt
+    // cache holds: no age, no progress. The `<jobs>` block says how it is
+    // going. "Do not start it again" is the line that matters; without a
+    // result to read, a model repeats the call.
+    const summary =
+      part.job?.summary === undefined ? "" : ` Started with: ${JSON.stringify(part.job.summary)}.`;
+    return `Started background job ${part.job?.id ?? "(unknown)"}. It is still running, so there is no result yet: this message will be replaced by the result when it finishes. Do not start it again.${summary}`;
+  }
+
   if (part.status === "denied") {
     const reason = part.reason ? ` Reason given: ${part.reason}` : "";
     if (part.cause === "stopped") {

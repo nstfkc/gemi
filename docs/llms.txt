@@ -33,6 +33,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Mobile Clients](https://nstfkc.github.io/gemi/mobile-clients.md): useChat for iOS (GemiChat, Swift) and Android (dev.gemijs.chat, Kotlin), talking to the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - [AI Providers](https://nstfkc.github.io/gemi/ai-providers.md): the providers an Agent calls models through — OpenAIProvider, AzureOpenAIProvider, and FallbackProvider chains with per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
 - [AI Context Window](https://nstfkc.github.io/gemi/ai-context-window.md): bounding what a long thread sends to the model — `contextWindow` (max turns, bytes or tokens, cut at turn starts in cache-friendly steps), compaction (`compact`: incremental, per-thread summaries of the turns left out), the `prepareStep` hook, and the turn helpers `turnStarts`, `splitTurns` and `windowMessages`.
+- [AI Background Jobs](https://nstfkc.github.io/gemi/ai-background-jobs.md): tools that hand long work to a queued `AgentJob` with `ctx.jobs.start` (or `ctx.jobs.track` for a webhook), the `running` tool result that the job's output replaces when it settles, compare-and-set `AgentJobs.settle`/`fail`, and the `AgentJobStore`.
 
 ## Data
 
