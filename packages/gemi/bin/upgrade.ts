@@ -81,7 +81,8 @@ export function dependencyKind(dir: string): "dependencies" | "devDependencies" 
  * manifest that never had one, leaves the real range untouched, and changes
  * nothing about the installed version — a no-op that edits the wrong file.
  *
- * `null` when no manifest above `rootDir` declares gemi at all. That is a
+ * `null` when no manifest above `rootDir` declares gemi at all, searching no
+ * higher than a workspace root (a manifest with `workspaces`). That is a
  * refusal rather than a default, because the only thing left to do would be to
  * add it somewhere it was never declared.
  */
@@ -92,9 +93,22 @@ export function findDeclaringDir(
   while (true) {
     const kind = dependencyKind(dir);
     if (kind) return { dir, kind };
+    // A workspace root is the top of the project. A manifest above it belongs
+    // to something else — a stray `package.json` in the temp directory or in
+    // `$HOME` — and upgrading gemi there would edit an unrelated project.
+    if (isWorkspaceRoot(dir)) return null;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
+  }
+}
+
+function isWorkspaceRoot(dir: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
+    return manifest?.workspaces !== undefined;
+  } catch {
+    return false;
   }
 }
 

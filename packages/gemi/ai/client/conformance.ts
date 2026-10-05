@@ -20,7 +20,7 @@ import { SSEFrameDecoder } from "./sse";
  * change that forgets to update them fails here, in the TypeScript suite,
  * before any native client has been built.
  *
- * `GEMI_UPDATE_FIXTURES=1 bun --bun vitest run ai/client` rewrites the files.
+ * `GEMI_UPDATE_FIXTURES=1 bun --bun x vitest run ai/client` rewrites the files.
  */
 
 const UPDATE = process.env.GEMI_UPDATE_FIXTURES === "1";

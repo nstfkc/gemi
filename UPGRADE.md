@@ -1,5 +1,41 @@
 # Unreleased
 
+## Resource policies, and view refusals render the `404` view (#726)
+
+**New:** `defineResourcePolicy` (from `gemi/http`) states once who may use a resource named by an id, and applies it on routes, in handlers and on agent routes. See [Resource policies](docs/authorization.md#resource-policies).
+
+```ts
+export const PagePolicy = defineResourcePolicy({
+  param: "pageId",
+  load: (id) => Page.findUnique({ where: { publicId: id } }),
+  allow: (page, req) => page.ownerId === req.ctx().user?.id,
+});
+
+// app/config/middleware.ts
+aliases: { "owns-page": PagePolicy.middleware }
+
+// a handler: the resource the middleware loaded, without a second query
+const page = await PagePolicy.fromRoute(req);
+
+// an AgentController: checked by the default authorizeRequest on stream, upload, attach and stop
+resource = PagePolicy.forAgent({
+  body: (body: PageBody) => body.pageId,
+  thread: (threadId) => ChatThread.pageIdOf(threadId),
+});
+```
+
+A missing resource and one the caller may not use get the same answer: a 404 `{ error: { kind: "not_found", message: "Not found", status: 404 } }` by default (the new `NotFoundError`), or `InsufficientPermissionsError`'s 403 with `refuse: "forbidden"`.
+
+`AgentController.authorizeRequest`'s default now runs `resource` when it is set. It still lets everything through when it isn't, so nothing changes for a controller that doesn't set it. An override that wants both calls `super.authorizeRequest(req, params)`.
+
+**Behaviour change: a refusal on a view route renders the app's `404` view.** A request breaker whose page answer is a 403 or a 404 (`InsufficientPermissionsError`, `NotFoundError`, `FileNotFoundError`, an app's own breaker with that status), an ORM policy denial, or a 403/404 from a loader's `Query.instant`, thrown by a view route's middleware or loader, used to answer with a plain-text body (`"Forbidden"`, or empty). It now renders the `404` view, the same way a missing record already did:
+
+- A page load answers with the refusal's status (403 or 404) and `Cache-Control: no-store`. `FileNotFoundError` answers 404; it used to be a 400.
+- A `.json` navigation answers 200 with `is404: true`, so the client router shows the `404` view. It used to answer the refusal's status, and the client router then left the previous page on screen. `InsufficientPermissionsError.apiStatus` no longer affects view navigations, only api routes.
+- Other breakers are unchanged: `AuthenticationError` still redirects to sign-in, and any other status (a 409, say) keeps its plain-text answer.
+
+If a `404` view should say something else to a signed-in user who was refused, it can read the user as usual. Policy denials are still reported through `onRequestFail`.
+
 ## Compaction for the context window (#782)
 
 New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI Context Window](docs/ai-context-window.md#compaction).
@@ -24,6 +60,10 @@ New, nothing to migrate. `ChangeFeed.publish("site:42", data)` appends to a chan
 - `driver: "database"` in `app/config/changeFeed.ts` keeps the log in `gemi_change_heads` and `gemi_changes` (add the two Prisma models from the docs), and on Postgres wakes every instance with `LISTEN`/`NOTIFY`.
 - On Bun 1.3 the `LISTEN` connection needs the `postgres` package (`bun add postgres`), now an optional peer dependency. Bun 1.4 and later use their own client.
 - Every app now boots a 17th provider, `ChangeFeedServiceProvider`. It holds nothing until the feed is used.
+
+## `gemi upgrade` stops looking for gemi's manifest at a workspace root (#815)
+
+`gemi upgrade` walks up from the current directory to the `package.json` that declares `gemi`. It now stops at a workspace root (a manifest with `workspaces`) and refuses there, instead of carrying on into the parent directories, where an unrelated `package.json` that happens to depend on gemi (in `$TMPDIR` or `$HOME`, say) would have been upgraded instead. Nothing changes for a project whose manifest declares gemi.
 
 # Upgrading from 0.110.0 to 0.111.0
 

@@ -523,6 +523,11 @@ export class ViewRouteDispatcher {
     features: Record<string, boolean>;
     /** The matched route's `.static()` options; absent for a hydrated view. */
     staticView?: StaticViewOptions;
+    /**
+     * The status of a refusal that turned this request into the `404` view
+     * (403 or 404). Absent, an unmatched request answers 404.
+     */
+    refusedStatus?: number;
   }) {
     const {
       req,
@@ -896,7 +901,7 @@ export class ViewRouteDispatcher {
           },
           dictionarySink),
           {
-            status: !currentPathName ? 404 : 200,
+            status: !currentPathName ? (props.refusedStatus ?? 404) : 200,
             headers,
           },
         );
@@ -934,12 +939,52 @@ export class ViewRouteDispatcher {
               ),
           }),
           {
-            status: !currentPathName ? 404 : 200,
+            status: !currentPathName ? (props.refusedStatus ?? 404) : 200,
             headers,
           },
         );
       }
     };
+  }
+
+  /**
+   * The status a view route's middleware or loader error answers with as the
+   * app's `404` view, or `null` for an error that is not a refusal and goes
+   * on as before (#726):
+   *
+   * - a missing record (`RecordNotFoundError`): 404;
+   * - a request breaker whose page answer is a 403 or a 404
+   *   (`InsufficientPermissionsError`, `NotFoundError`, `FileNotFoundError`,
+   *   or an app's own breaker with that status): its status;
+   * - a policy denial: 403, reported through `onRequestFail` as before;
+   * - a 403 or 404 from a loader's `Query.instant` (already reported): its
+   *   status.
+   *
+   * Any other breaker (a redirect, a 409) keeps its own answer.
+   */
+  private viewRefusalStatus(
+    httpRequest: HttpRequest,
+    err: unknown,
+    reportedQueryErrors: Set<unknown>,
+  ): number | null {
+    if (isRecordNotFoundError(err)) {
+      return 404;
+    }
+    if ((err as any)?.kind === GEMI_REQUEST_BREAKER_ERROR) {
+      const status = (err as any).payload?.view?.status;
+      return status === 403 || status === 404 ? status : null;
+    }
+    if (isPolicyDeniedError(err)) {
+      if (!reportedQueryErrors.has(err)) {
+        this.hooks.onRequestFail(httpRequest, err);
+      }
+      console.error(err);
+      return 403;
+    }
+    if (err instanceof QueryError && (err.status === 403 || err.status === 404)) {
+      return err.status;
+    }
+    return null;
   }
 
   async handleViewRequest(req: Request, carried?: CarriedContext | null) {
@@ -1158,14 +1203,21 @@ export class ViewRouteDispatcher {
         // loader, so it is caught rather than left to the break path below:
         // the answer is not a refusal, it is this request becoming an
         // unmatched one.
-        let recordMissing = false;
+        //
+        // A refusal is caught the same way (#726): a 403 or 404 request
+        // breaker (`InsufficientPermissionsError`, a resource policy's
+        // `NotFoundError`), or a policy denial. It used to be answered with
+        // the breaker's message as a plain-text body, which a browser shows
+        // as a blank page. It renders the app's `404` view instead, under the
+        // refusal's own status.
+        let refusedStatus: number | null = null;
         try {
           await app(MiddlewareRegistry).runMiddleware(middlewares);
         } catch (err) {
-          if (!isRecordNotFoundError(err)) {
+          refusedStatus = this.viewRefusalStatus(httpRequest, err, reportedQueryErrors);
+          if (refusedStatus === null) {
             throw err;
           }
-          recordMissing = true;
         }
 
         // After middleware, not at match time: `auth` is what puts the user on
@@ -1181,12 +1233,12 @@ export class ViewRouteDispatcher {
         // included. A `RequestBreakerError` here would instead return a bare
         // text body, which both looks broken and confirms the route exists.
         //
-        // A missing record joins the gate here rather than getting a branch of
+        // A missing record or a refusal joins the gate here rather than getting a branch of
         // its own, because the outcome is the same one and it is spelled in
         // exactly these three assignments. Short-circuited: a request whose
         // middleware already found nothing must not go on to evaluate flags.
         if (
-          recordMissing ||
+          refusedStatus !== null ||
           (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates)))
         ) {
           currentPathName = null;
@@ -1286,7 +1338,9 @@ export class ViewRouteDispatcher {
         try {
           data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
         } catch (err) {
-          if (!isRecordNotFoundError(err)) {
+          // A refusal too, as for middleware above (#726).
+          refusedStatus = this.viewRefusalStatus(httpRequest, err, reportedQueryErrors);
+          if (refusedStatus === null) {
             throw err;
           }
           currentPathName = null;
@@ -1297,6 +1351,11 @@ export class ViewRouteDispatcher {
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
+        // A refusal depends on who asked, and turns into the page itself
+        // when they may see it, at the same url: nothing may replay it.
+        if (refusedStatus !== null) {
+          headers.set("Cache-Control", "no-store");
+        }
 
         pageData = {
           data,
@@ -1470,6 +1529,7 @@ export class ViewRouteDispatcher {
           // Not when the request became a 404 (a gate or a missing record):
           // that renders the app's `404` view, which hydrates as usual.
           staticView: currentPathName ? staticView : undefined,
+          refusedStatus: refusedStatus ?? undefined,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

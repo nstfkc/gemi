@@ -91,6 +91,33 @@ export class RangeNotSatisfiableError extends RequestBreakerError {
   }
 }
 
+/**
+ * Nothing here for this caller: a 404
+ * `{ error: { kind: "not_found", message: "Not found", status: 404 } }`, the
+ * same body a path that matches no route gets. A view route renders the app's
+ * `404` view.
+ *
+ * What a resource policy refuses with (`defineResourcePolicy`), for a
+ * resource that does not exist and for one the caller may not use alike, so
+ * the answer does not say which. Throw it yourself for the same reason.
+ */
+export class NotFoundError extends RequestBreakerError {
+  constructor(message: string = "Not found") {
+    super(message);
+    this.name = "NotFoundError";
+    this.payload = {
+      api: {
+        status: 404,
+        data: { error: refusal("not_found", message, 404) },
+        // It turns into a 200 when the resource is created or shared, at
+        // the same url, so nothing may replay it.
+        headers: { "Cache-Control": "no-store" },
+      },
+      view: { status: 404 },
+    };
+  }
+}
+
 export class FileNotFoundError extends RequestBreakerError {
   constructor(public fileName: string) {
     super("File not found");
@@ -101,7 +128,9 @@ export class FileNotFoundError extends RequestBreakerError {
         data: { error: refusal("not_found", "Not found", 404) },
         headers: { "Cache-Control": "no-store" },
       },
-      view: {},
+      // A view route renders the app's `404` view. It used to fall through
+      // to the view dispatcher's 400 default, with an empty body.
+      view: { status: 404 },
     };
   }
 }

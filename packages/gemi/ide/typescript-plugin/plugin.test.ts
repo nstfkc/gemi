@@ -1,5 +1,5 @@
 import type ts from "typescript";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createFixture } from "./fixture";
 import { decorateLanguageService } from "./plugin";
@@ -13,6 +13,13 @@ import type { TestProject } from "./testProject";
  * underlined, the right definitions returned, and everything that is not a route
  * handed straight back to TypeScript.
  */
+// Each test that builds a fresh language service type-checks a program that
+// includes the framework's own source: about a second alone, and well past
+// vitest's 5 s default when the whole package suite runs beside it on a loaded
+// machine. That was a timeout, not a slow plugin, so the budget is raised for
+// this file rather than the work being made smaller than what an editor does.
+vi.setConfig({ testTimeout: 30_000 });
+
 const PAGE_FILE = "app/views/Page.tsx";
 
 const PAGE = `
