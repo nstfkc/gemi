@@ -239,7 +239,14 @@ async function readRecord(clientDir: string): Promise<RetainedRelease[]> {
 
 async function listFiles(root: string, dir: string): Promise<string[]> {
   const files: string[] = [];
-  for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
+  // Sorted, because `readdir`'s order is the filesystem's: alphabetical on
+  // APFS, hash order on ext4. Unsorted, the record written into the build and
+  // the paths reported for it differed between a Mac and the Linux box that
+  // deploys.
+  const entries = (await readdir(join(root, dir), { withFileTypes: true })).sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
+  for (const entry of entries) {
     const path = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
       files.push(...(await listFiles(root, path)));

@@ -1,9 +1,13 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createFixture, GEMI_PATHS, LEGACY_GEMI_ENV, tableFor } from "./fixture";
 import { lookupRoute } from "./lookup";
 import type { RouteQuery } from "./callSite";
 import { createTestProject, type TestProject } from "./testProject";
+
+// A fresh TypeScript program over the framework source per fixture: see the
+// note in `plugin.test.ts` on why this file gets more than the 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
 
 /**
  * How the plugin finds an application's routers, and what it says when it cannot.

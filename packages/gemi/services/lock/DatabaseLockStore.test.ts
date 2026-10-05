@@ -230,9 +230,13 @@ describe.each(backends)("locks across instances on $name", (backend) => {
 
   test("a unique key whose job vanished frees itself after uniqueFor", async () => {
     const database = await open();
+    // 1s rather than 200ms: the two pushes below are two database round trips
+    // each, and on a loaded machine running the whole suite those took longer
+    // than 200ms, so the key lapsed between them and the test failed on
+    // timing rather than on the lock.
     class Short extends Job {
       static name = "Short";
-      uniqueFor = 200;
+      uniqueFor = 1_000;
       uniqueId() {
         return "k";
       }
@@ -241,7 +245,7 @@ describe.each(backends)("locks across instances on $name", (backend) => {
     a.stop();
     const first = await a.push(Short, "[]");
     expect(await a.push(Short, "[]")).toBe(first);
-    await sleep(350);
+    await sleep(1_200);
     const second = await instance(database, [Short]).push(Short, "[]");
     expect(second).not.toBe(first);
   });
