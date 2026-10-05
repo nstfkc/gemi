@@ -6496,7 +6496,7 @@ export const generateImages = AgentTool.create({
   name: "generateImages",
   description: "Render images for the page.",
   inputSchema: s.object({ prompts: s.array(s.string()) }),
-  // The tool may go to the background, for at most deadlineMs.
+  // The tool may go to the background. A job still running after deadlineMs fails with code "timeout".
   async: { deadlineMs: 15 * 60_000 },
   async execute({ prompts }, ctx) {
     return ctx.jobs.start(RenderImagesJob, { prompts }, {
@@ -6580,7 +6580,7 @@ export async function videoFinished(jobId: string, url: string) {
 
 ## Settling: `AgentJobs.settle` and `AgentJobs.fail`
 
-`AgentJobs.settle(id, { output })`, `AgentJobs.settle(id, { error })` and `AgentJobs.fail(id, error)` are compare-and-set from `running`: the first one wins and answers `true`, and every later one answers `false` and changes nothing. A webhook, a poller and a deadline check can all race on one job. A job that has already failed stays failed: a late result is refused, so the model never sees a job turn from failed to done.
+`AgentJobs.settle(id, { output })`, `AgentJobs.settle(id, { error })` and `AgentJobs.fail(id, error)` are compare-and-set from `running`: the first one wins and answers `true`, and every later one answers `false` and changes nothing. A webhook, a poller and the deadline sweep can all race on one job. A job that has already failed (for example by its deadline) stays failed: a late result is refused, so the model never sees a job turn from failed to done.
 
 An error given as a string, a `ToolError` or an `AgentError`-like `{ code, message }` is shown to the model as it is. Any other `Error` is logged and replaced with a generic message.
 
@@ -6588,7 +6588,7 @@ An error given as a string, a `ToolError` or an `AgentError`-like `{ code, messa
 
 ## Where jobs are kept: `AgentJobs.use`
 
-Job records live in an `AgentJobStore`. The store is process-wide, because the code that settles a job (a queue worker, a webhook) has no controller to read one from. Set it once at boot, in every process that starts or runs jobs:
+Job records live in an `AgentJobStore`. The store is process-wide, because the code that settles a job (a queue worker, a webhook, the deadline sweep) has no controller to read one from. Set it once at boot, in every process that starts or runs jobs:
 
 ```typescript
 import { AgentJobs, MemoryAgentJobStore } from "gemi/ai";
@@ -6596,7 +6596,106 @@ import { AgentJobs, MemoryAgentJobStore } from "gemi/ai";
 AgentJobs.use(new MemoryAgentJobStore());
 ```
 
-The default is a `MemoryAgentJobStore`. It is not durable: a restart loses every record, and it only works when the queue runs the jobs in the same process. A `running` result whose job the store no longer has becomes an `error` saying the result was lost and the work may have happened. An app with a jobs table of its own can implement `AgentJobStore` over it (`create`, `get`, `listForThread`, a compare-and-set `transition`, and `overdue`).
+The default is a `MemoryAgentJobStore`. It is not durable: a restart loses every record, and it only works when the queue runs the jobs in the same process. A `running` result whose job the store no longer has becomes an `error` saying the result was lost and the work may have happened. An app with a jobs table of its own can implement `AgentJobStore` over it (`create`, `get`, `listForThread`, a compare-and-set `transition`, `overdue`, and optionally `now` and `transaction`).
+
+### `DatabaseAgentJobStore`
+
+For production, keep jobs in your database. It is opt-in, like the agent store. Set it in a service provider, which every process (servers and `gemi queue:work` workers) boots:
+
+```typescript
+// app/providers/AgentJobsServiceProvider.ts
+import { AgentJobs, DatabaseAgentJobStore } from "gemi/ai";
+import { DatabaseManager } from "gemi/database";
+import { ServiceProvider } from "gemi/support";
+
+export default class AgentJobsServiceProvider extends ServiceProvider {
+  boot() {
+    AgentJobs.use(new DatabaseAgentJobStore(this.app.make(DatabaseManager).connection()));
+  }
+}
+```
+
+It keeps jobs in a `gemi_agent_jobs` table and is written for SQLite, Postgres, and MySQL 8 or MariaDB 10.6+, in raw SQL like the [database queue driver](./jobs-and-queues.md#the-database-driver). The table is yours to create. With Prisma, add this model to `schema.prisma` and run `prisma migrate dev`:
+
+```prisma
+model GemiAgentJob {
+  id              String  @id
+  threadId        String  @map("thread_id")
+  runId           String  @map("run_id")
+  toolCallId      String  @map("tool_call_id")
+  toolName        String  @map("tool_name")
+  owner           String?
+  job             String?
+  summary         String?
+  state           String
+  output          String?
+  error           String?
+  usage           String?
+  orphaned        Int     @default(0)
+  attachmentScope String? @map("attachment_scope")
+  createdAt       BigInt  @map("created_at")
+  updatedAt       BigInt  @map("updated_at")
+  deadlineAt      BigInt  @map("deadline_at")
+  settledAt       BigInt? @map("settled_at")
+
+  @@index([threadId, createdAt])
+  @@index([state, deadlineAt])
+  @@map("gemi_agent_jobs")
+}
+```
+
+On MySQL, add `@db.LongText` to `summary`, `output`, `error` and `usage`. Without Prisma, `await store.createTable()` creates the same table and indexes if they do not exist. `new DatabaseAgentJobStore(connection, { table })` picks another table name.
+
+How it behaves:
+
+- **Compare-and-set.** A settle is `UPDATE … WHERE id = ? AND state IN (…)`, so two instances settling one job cannot both win.
+- **Time.** Times are epoch milliseconds from the database's clock, so the deadline sweep on any instance agrees on when a job is overdue.
+- **Start in one transaction.** `ctx.jobs.start` writes the record and queues the job inside a transaction on the store's connection. On Postgres and MySQL, with the database queue driver on the same connection, both rows commit together or neither does. With another queue, the dispatch waits for the commit (see [Dispatching inside a transaction](./jobs-and-queues.md#dispatching-inside-a-transaction)).
+- **Pruning.** Settled records stay until you remove them: `store.prune(olderThanMs)` deletes jobs settled longer ago than that, never running ones. Call it from a cron job. A settled result is written into the thread on the next turn, so an old record is only history.
+
+## Deadlines
+
+Every job has a deadline, `deadlineMs` after it started (from `ctx.jobs.start`'s options, else the tool's `async.deadlineMs`, else an hour). A job still running then is failed with code `"timeout"`, and a result that arrives later is refused. The queue worker is not stopped; what it returns afterwards is dropped.
+
+Two things enforce it:
+
+- **The sweep.** `AgentJobs.sweep()` fails every overdue job, and `AgentJobDeadlineSweep` runs it every minute. Schedule it by exporting it from a file under `app/cron`:
+
+  ```typescript
+  // app/cron/agentJobs.ts
+  export { AgentJobDeadlineSweep } from "gemi/ai";
+  ```
+
+  It is safe on every instance at once, since each job is failed by compare-and-set.
+- **A lazy pass.** When the controller loads a thread (each turn, and `readThread`), it fails that thread's overdue jobs first. An app without cron still sees a job time out, the next time someone opens the conversation.
+
+## The `<jobs>` block
+
+On a thread with background jobs, the controller adds a `<jobs>` block to the system prompt each turn. It lists the thread's jobs (at most 20 by default), running ones first and then the newest settled, each with its id, tool, state, time and summary:
+
+```text
+<jobs>
+Background jobs that tools started in this conversation, running ones first. ...
+- ajob_1b2… (generateImages); running since 2026-10-05T12:00:03Z; summary: {"count":3}
+- ajob_9f0… (generateImages); finished at 2026-10-05T11:52:40Z; summary: {"count":2}
+</jobs>
+```
+
+The history already shows each job's call and its result. The block puts them in one place, so a model asked again for the same work sees that a job for it is running rather than starting another, and it shows a job whose tool result never reached the thread (an orphan). Times are absolute rather than ages, so the block is the same text from one turn to the next until a job starts or settles, and the prompt cache holds in between.
+
+Bound it, or turn it off, on the agent:
+
+```typescript
+import { Agent, type AgentProvider } from "gemi/ai";
+
+declare const provider: AgentProvider;
+
+export const builder = Agent.create({
+  name: "builder",
+  provider,
+  jobs: { contextBlock: { max: 8 } }, // or contextBlock: false
+});
+```
 
 ## Where a job cannot start
 
@@ -6611,11 +6710,11 @@ A tool re-entered after an escalation (`ctx.resumed`) gets the job it started th
 
 ## Restarts and orphans
 
-The work recovers through the queue: a job whose process died is claimed again once its lease runs out. If the run dies after `ctx.jobs.start` and before the `running` result reached the store, the job still runs and settles, but nothing in the thread points at it. The next turn on the thread marks it `orphaned` on its record (`AgentJobRecord.orphaned`).
+The work recovers through the queue: a job whose process died is claimed again once its lease runs out, and with `DatabaseAgentJobStore` its record survives the restart too. If the run dies after `ctx.jobs.start` and before the `running` result reached the store, the job still runs and settles, but nothing in the thread points at it. The next turn on the thread marks it `orphaned` on its record (`AgentJobRecord.orphaned`).
 
 ## What does not change
 
-`maxRunDurationMs`, a tool's `timeoutMs` and `maxSteps` still bound the run. A tool that returns a handle finishes its part of the run at once. The job's deadline (`deadlineAt` on its record, from `deadlineMs`) is recorded when it starts. Stopping a run does not stop the jobs it started.
+`maxRunDurationMs`, a tool's `timeoutMs` and `maxSteps` still bound the run. A tool that returns a handle finishes its part of the run at once, and the job's deadline bounds the job. Stopping a run does not stop the jobs it started.
 
 ---
 

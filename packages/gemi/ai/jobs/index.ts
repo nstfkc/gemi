@@ -22,3 +22,6 @@ export {
   MemoryAgentJobStore,
   type NewAgentJobRecord,
 } from "./AgentJobStore";
+export { AgentJobDeadlineSweep } from "./AgentJobDeadlineSweep";
+export { type AgentJobsOptions, DEFAULT_JOBS_CONTEXT_MAX } from "./contextBlock";
+export { DatabaseAgentJobStore, type DatabaseAgentJobStoreOptions } from "./DatabaseAgentJobStore";

@@ -25,6 +25,7 @@ import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import { isJobHandle, type JobHandle, type RunJobs, type ToolJobs, toolJobs } from "./jobs/AgentJob";
+import type { AgentJobsOptions } from "./jobs/contextBlock";
 import {
   executionReceiptId,
   spendNestedRun,
@@ -1214,6 +1215,12 @@ export interface CreateAgentParams<
    * other instructions, for that call alone. See `PrepareStep`.
    */
   prepareStep?: PrepareStep;
+  /**
+   * Background jobs (#461). `contextBlock` bounds the `<jobs>` block the
+   * controller adds to the system prompt on a thread with jobs: 20 by
+   * default, `false` for none. See `AgentJobsOptions`.
+   */
+  jobs?: AgentJobsOptions;
 }
 
 /**
@@ -1662,6 +1669,8 @@ export class Agent<
    * `Agent.create` said otherwise, and `null` for no limit.
    */
   readonly maxRunDurationMs: number | null;
+  /** See `CreateAgentParams.jobs`. */
+  readonly jobs: AgentJobsOptions;
 
   private readonly config: RunConfig;
 
@@ -1675,6 +1684,7 @@ export class Agent<
     this.maxSteps = params.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxDepth = params.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.reasoning = params.reasoning;
+    this.jobs = params.jobs ?? {};
     const limit = normalizeDuration(params.maxRunDurationMs);
     this.maxRunDurationMs = limit === undefined ? DEFAULT_MAX_RUN_DURATION_MS : limit;
 
@@ -1708,6 +1718,12 @@ export class Agent<
     }
     if (params.maxRunDurationMs != null) {
       assertDuration(params.maxRunDurationMs, `The agent "${params.name}"`, "maxRunDurationMs");
+    }
+    const block = params.jobs?.contextBlock;
+    if (block && block.max !== undefined && !(Number.isInteger(block.max) && block.max > 0)) {
+      throw new Error(
+        `The agent "${params.name}" sets \`jobs.contextBlock.max\` to ${String(block.max)}, but it has to be a whole number above 0. Use \`contextBlock: false\` for no block.`,
+      );
     }
     return new Agent(params);
   }

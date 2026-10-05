@@ -112,6 +112,12 @@ export interface AgentJobStore {
    * store without one is compared against `Date.now()`.
    */
   now?(): Promise<number>;
+  /**
+   * Runs `fn` in a transaction, so `ctx.jobs.start` writes the record and
+   * queues the job together: both or neither. Optional: without it the record
+   * is written first, and a dispatch that fails then fails the record.
+   */
+  transaction?<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 /** How many settled jobs the memory store keeps per thread before dropping the oldest. */

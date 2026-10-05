@@ -66,6 +66,8 @@ import { sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import { AgentJobs } from "./jobs/AgentJob";
 import { markOrphans, overlayJobs } from "./jobs/overlay";
+import { DEFAULT_JOBS_CONTEXT_MAX, renderJobsBlock } from "./jobs/contextBlock";
+import type { AgentJobRecord } from "./jobs/AgentJobStore";
 import type { Schema } from "./Schema";
 import type {
   AgentError,
@@ -989,6 +991,9 @@ export abstract class AgentController<
     };
     const startRun = async (): Promise<Response> => {
       let messages: AgentMessage[];
+      // The `<jobs>` block for this turn's system prompt (#461), on a thread
+      // that has background jobs.
+      let jobsBlock: string | null = null;
       if (threadId) {
         const history = await this.store.loadThread(threadId);
         if (!history) {
@@ -1015,7 +1020,9 @@ export abstract class AgentController<
         // as interrupted, and its open calls have results. Under the thread's
         // lock and after the previous run's transcript is stored, so the only
         // unfinished message left is one no run in this process owns.
-        messages = await this.settleThread(threadId, history, { write: true });
+        const thread = await this.settleThread(threadId, history, { write: true });
+        messages = thread.messages;
+        jobsBlock = this.jobsBlock(thread.jobs);
         if (regenerate) {
           const cut = regenerationCut(messages);
           if (!cut) {
@@ -1046,7 +1053,10 @@ export abstract class AgentController<
         warnInMemoryNonces(this.nonces);
       }
 
-      const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
+      const instructions =
+        [(await this.instructions(req, { body: extraBody })) || undefined, jobsBlock ?? undefined]
+          .filter(Boolean)
+          .join("\n\n") || undefined;
       const context = await this.context(req, { body: extraBody });
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
@@ -2061,7 +2071,7 @@ export abstract class AgentController<
    */
   async readThread(threadId: string): Promise<AgentMessage[] | null> {
     const history = await this.store.loadThread(threadId);
-    return history ? await this.settleThread(threadId, history, { write: false }) : null;
+    return history ? (await this.settleThread(threadId, history, { write: false })).messages : null;
   }
 
   /**
@@ -2087,10 +2097,11 @@ export abstract class AgentController<
     threadId: string,
     history: AgentMessage[],
     { write }: { write: boolean },
-  ): Promise<AgentMessage[]> {
+  ): Promise<{ messages: AgentMessage[]; jobs: AgentJobRecord[] }> {
     const isLive = (runId: string) => this.isRunLive(runId, threadId);
     const interrupted = await settleInterrupted(history, isLive);
     let messages = interrupted.messages;
+    let jobs: AgentJobRecord[] = [];
     const settled = new Map(interrupted.settled.map((message) => [message.id, message]));
 
     // Background jobs (#461): each `running` tool result gets its job's
@@ -2099,16 +2110,24 @@ export abstract class AgentController<
     // which is what the model saw last time, rather than failing the turn.
     if (hasRunningResult(messages) || write) {
       try {
-        const jobs = await overlayJobs(messages, {
+        const overlaid = await overlayJobs(messages, {
           threadId,
           store: AgentJobs.store,
           isRunLive: isLive,
           outputSchemaFor: (name) => this.toolOutputSchema(name),
+          scan: this.jobsBlockMax(),
         });
-        messages = jobs.messages;
-        for (const message of jobs.settled) settled.set(message.id, message);
-        if (write) {
-          await markOrphans(AgentJobs.store, jobs.orphans, (err) => this.reportHookFailure(err));
+        messages = overlaid.messages;
+        jobs = overlaid.jobs;
+        for (const message of overlaid.settled) settled.set(message.id, message);
+        if (write && overlaid.orphans.length > 0) {
+          await markOrphans(AgentJobs.store, overlaid.orphans, (err) =>
+            this.reportHookFailure(err),
+          );
+          const orphans = new Set(overlaid.orphans.map((record) => record.id));
+          jobs = jobs.map((record) =>
+            orphans.has(record.id) ? { ...record, orphaned: true as const } : record,
+          );
         }
       } catch (err) {
         this.reportHookFailure(err);
@@ -2124,7 +2143,19 @@ export abstract class AgentController<
         this.reportHookFailure(err);
       }
     }
-    return messages;
+    return { messages, jobs };
+  }
+
+  /** The agent's `jobs.contextBlock.max`, or 0 for no block. */
+  private jobsBlockMax(): number {
+    const block = (this.agent as { jobs?: { contextBlock?: { max?: number } | false } }).jobs
+      ?.contextBlock;
+    if (block === false) return 0;
+    return block?.max ?? DEFAULT_JOBS_CONTEXT_MAX;
+  }
+
+  private jobsBlock(jobs: AgentJobRecord[]): string | null {
+    return renderJobsBlock(jobs, this.jobsBlockMax());
   }
 
   /** A tool's output schema, by name, for checking a background job's output. */

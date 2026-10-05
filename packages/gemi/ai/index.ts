@@ -129,8 +129,11 @@ export type {
 // result reads `running` until the job settles. See docs/ai-background-jobs.md.
 export {
   AgentJob,
+  AgentJobDeadlineSweep,
   AgentJobs,
+  DatabaseAgentJobStore,
   DEFAULT_JOB_DEADLINE_MS,
+  DEFAULT_JOBS_CONTEXT_MAX,
   JobHandle,
   JobsRequireThreadError,
   MemoryAgentJobStore,
@@ -140,9 +143,11 @@ export type {
   AgentJobContext,
   AgentJobOutcome,
   AgentJobRecord,
+  AgentJobsOptions,
   AgentJobState,
   AgentJobStore,
   AgentJobUpdate,
+  DatabaseAgentJobStoreOptions,
   JobAttachments,
   JobEditImageParams,
   JobGenerateImageParams,
