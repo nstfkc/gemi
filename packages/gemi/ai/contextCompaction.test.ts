@@ -1,15 +1,20 @@
 process.env.SECRET ??= "context-compaction-test-secret";
 
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
 import { Agent } from "./Agent";
-import { AgentController, MemoryAgentStore, MemoryLiveRuns } from "./AgentController";
+import {
+  AgentController,
+  MemoryAgentStore,
+  MemoryLiveRuns,
+} from "./AgentController";
 import type { ProviderEvent, ProviderStreamParams } from "./AgentProvider";
 import {
   chunkTurns,
   COMPACT_SUMMARY_HEADER,
   MemorySummaryStore,
+  settleSummaries,
   type SummaryStore,
   type ThreadSummary,
 } from "./contextCompaction";
@@ -18,6 +23,10 @@ import { fakeProvider } from "./providers/fakeProvider";
 import type { AgentMessage } from "./types";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// Background summaries outlive the run that started them; none may leak into
+// the next test, which reuses the thread id.
+afterEach(() => settleSummaries());
 
 const finish = (tokens = 10): ProviderEvent => ({
   type: "finish",
@@ -31,9 +40,16 @@ const summaryAnswer = (text: string, tokens = 100): ProviderEvent[] => [
   finish(tokens),
 ];
 
-const answer = (): ProviderEvent[] => [{ type: "text-delta", delta: "ok" }, finish()];
+const answer = (): ProviderEvent[] => [
+  { type: "text-delta", delta: "ok" },
+  finish(),
+];
 
-const msg = (id: string, role: AgentMessage["role"], text: string): AgentMessage => ({
+const msg = (
+  id: string,
+  role: AgentMessage["role"],
+  text: string,
+): AgentMessage => ({
   id,
   role,
   content: [{ type: "text", text }],
@@ -44,7 +60,10 @@ const msg = (id: string, role: AgentMessage["role"], text: string): AgentMessage
 const thread = (n: number, from = 0): AgentMessage[] =>
   Array.from({ length: n }, (_, k) => {
     const i = k + from;
-    return [msg(`u${i}`, "user", `question ${i}`), msg(`a${i}`, "assistant", `answer ${i}`)];
+    return [
+      msg(`u${i}`, "user", `question ${i}`),
+      msg(`a${i}`, "assistant", `answer ${i}`),
+    ];
   }).flat();
 
 const ids = (messages: readonly AgentMessage[]) => messages.map((m) => m.id);
@@ -80,7 +99,9 @@ describe("contextWindow.compact", () => {
   test("off unless asked: the plain window is sent and nothing is summarised", async () => {
     const provider = fakeProvider(answer());
     const agent = Agent.create({ name: "a", provider, contextWindow: window });
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
     expect(provider.calls).toHaveLength(1);
     const sent = provider.calls[0]!.messages as AgentMessage[];
     expect(sent[0]!.id).toBe("u20");
@@ -124,12 +145,18 @@ describe("contextWindow.compact", () => {
 
   test("a later turn on the same cut reuses the summary and sends the same prefix", async () => {
     const { agent, provider, summarizer } = setup();
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
-    await agent.stream({ messages: thread(26), turn: { text: "again" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
+    await agent
+      .stream({ messages: thread(26), turn: { text: "again" }, threadId: "t" })
+      .result();
     expect(summarizer.calls).toHaveLength(1);
     const first = provider.calls[0]!.messages as AgentMessage[];
     const second = provider.calls[1]!.messages as AgentMessage[];
-    expect(JSON.stringify(second.slice(0, 11))).toBe(JSON.stringify(first.slice(0, 11)));
+    expect(JSON.stringify(second.slice(0, 11))).toBe(
+      JSON.stringify(first.slice(0, 11)),
+    );
   });
 
   test("every step of a run reuses it", async () => {
@@ -164,17 +191,25 @@ describe("contextWindow.compact", () => {
         compact: { provider: summarizer, store: new MemorySummaryStore() },
       },
     });
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
     expect(provider.calls).toHaveLength(2);
     expect(summarizer.calls).toHaveLength(1);
-    expect((provider.calls[1]!.messages as AgentMessage[])[0]!.id).toBe("summary_u20");
+    expect((provider.calls[1]!.messages as AgentMessage[])[0]!.id).toBe(
+      "summary_u20",
+    );
   });
 
   test("when the window moves, the new summary builds on the previous one", async () => {
     const { agent, summarizer, provider } = setup();
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
     // 36 turns sent: the cut moves to turn 30.
-    await agent.stream({ messages: thread(35), turn: { text: "later" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(35), turn: { text: "later" }, threadId: "t" })
+      .result();
 
     expect(summarizer.calls).toHaveLength(2);
     const prompt = promptOf(summarizer.calls[1]!);
@@ -190,10 +225,14 @@ describe("contextWindow.compact", () => {
 
   test("a thread whose summarised messages changed is summarised again", async () => {
     const { agent, summarizer } = setup();
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
     const edited = thread(25);
     edited[6] = msg("u3", "user", "a different question");
-    await agent.stream({ messages: edited, turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: edited, turn: { text: "now" }, threadId: "t" })
+      .result();
     expect(summarizer.calls).toHaveLength(2);
     const prompt = promptOf(summarizer.calls[1]!);
     expect(prompt).toContain("(none yet");
@@ -202,7 +241,9 @@ describe("contextWindow.compact", () => {
 
   test("a long left-out part is folded in chunks, each building on the last", async () => {
     const { agent, summarizer, provider } = setup({ chunkTokens: 100 });
-    await agent.stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
     expect(summarizer.calls.length).toBeGreaterThan(1);
     expect(promptOf(summarizer.calls[1]!)).toContain("Summary so far:\nS1");
     const last = summarizer.calls.length;
@@ -238,11 +279,22 @@ describe("contextWindow.compact", () => {
 
   test("a summary that failed is not tried again on the run's next step", async () => {
     const failing: ProviderEvent[] = [
-      { type: "error", error: { code: "provider_error", message: "down", retryable: true } } as any,
+      {
+        type: "error",
+        error: { code: "provider_error", message: "down", retryable: true },
+      } as any,
     ];
     const summarizer = fakeProvider(failing, failing);
     const provider = fakeProvider(
-      [{ type: "tool-call", toolCallId: "c1", name: "noop", args: "{}" } as any, finish()],
+      [
+        {
+          type: "tool-call",
+          toolCallId: "c1",
+          name: "noop",
+          args: "{}",
+        } as any,
+        finish(),
+      ],
       answer(),
     );
     const { AgentTool } = await import("./Agent");
@@ -274,7 +326,9 @@ describe("contextWindow.compact", () => {
 
   test("without a threadId, or in a sub-run, the plain window is sent", async () => {
     const { agent, summarizer, provider } = setup();
-    await agent.stream({ messages: thread(25), turn: { text: "now" } }).result();
+    await agent
+      .stream({ messages: thread(25), turn: { text: "now" } })
+      .result();
     expect(summarizer.calls).toHaveLength(0);
     expect((provider.calls[0]!.messages as AgentMessage[])[0]!.id).toBe("u20");
   });
@@ -440,9 +494,15 @@ describe("contextWindow.compact", () => {
       ...thread(4, 21),
     ];
     const { agent, provider, summarizer } = setup();
-    await agent.stream({ messages: history, turn: { text: "now" }, threadId: "t" }).result();
-    expect(promptOf(summarizer.calls[0]!)).toContain('[called crm.getOrder({"id":0})]');
-    expect(promptOf(summarizer.calls[0]!)).toContain('[getOrder returned: {"total":0}]');
+    await agent
+      .stream({ messages: history, turn: { text: "now" }, threadId: "t" })
+      .result();
+    expect(promptOf(summarizer.calls[0]!)).toContain(
+      '[called crm.getOrder({"id":0})]',
+    );
+    expect(promptOf(summarizer.calls[0]!)).toContain(
+      '[getOrder returned: {"total":0}]',
+    );
     const sent = provider.calls[0]!.messages as AgentMessage[];
     expect(sent[1]!.id).toBe("u20");
     const call = sent[2]!.content[0] as any;
@@ -486,12 +546,16 @@ describe("AgentController: compaction", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ threadId, turn: { text: "now" } }),
     });
-    const response = await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
+    const response = await new Chat().stream(
+      new HttpRequest(raw, {}, "api", "/chat"),
+    );
     await response.text();
     await settle();
 
     expect(summarizer.calls).toHaveLength(1);
-    expect((provider.calls[0]!.messages as AgentMessage[])[0]!.id).toBe("summary_u20");
+    expect((provider.calls[0]!.messages as AgentMessage[])[0]!.id).toBe(
+      "summary_u20",
+    );
     const summaries = await store.loadSummaries(threadId);
     expect(summaries.map((s) => s.cutMessageId)).toEqual(["u20"]);
     // The thread itself holds no summary message.
@@ -499,5 +563,373 @@ describe("AgentController: compaction", () => {
     expect(held.some((m) => m.id.startsWith("summary_"))).toBe(false);
     store.delete(threadId);
     expect(await store.loadSummaries(threadId)).toEqual([]);
+  });
+});
+
+/**
+ * A summariser whose calls from index `gateFrom` on wait for `release()`.
+ * Answers "S1", "S2", … in call order.
+ */
+function slowSummarizer(gateFrom = 0) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const calls: ProviderStreamParams[] = [];
+  const provider = {
+    model: "slow",
+    capabilities: { structuredOutput: true, reasoning: true },
+    calls,
+    stream(params: ProviderStreamParams) {
+      const index = calls.length;
+      calls.push(params);
+      return (async function* () {
+        if (index >= gateFrom) await gate;
+        yield* summaryAnswer(`S${index + 1}`);
+      })();
+    },
+    normalizeError: (e: unknown) => ({
+      code: "provider_error",
+      message: String(e),
+      retryable: false,
+    }),
+  } as any;
+  return { provider, calls, release };
+}
+
+/** A turn whose answer is `chars` characters long. */
+const longTurn = (i: number, chars: number): AgentMessage[] => [
+  msg(`u${i}`, "user", `question ${i}`),
+  msg(`a${i}`, "assistant", `answer ${i} ${"x".repeat(chars)}`),
+];
+
+describe("contextWindow.compact: triggerTokens", () => {
+  const longThread = (turns: number, chars: number) =>
+    Array.from({ length: turns }, (_, i) => longTurn(i, chars)).flat();
+
+  test("a few long turns are compacted before maxTurns would cut them", async () => {
+    const summarizer = fakeProvider(summaryAnswer("S1"));
+    const provider = fakeProvider(answer());
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      contextWindow: {
+        maxTurns: 40,
+        step: 1,
+        compact: {
+          provider: summarizer,
+          store: new MemorySummaryStore(),
+          triggerTokens: 1_500,
+          maxSummaryTokens: 100,
+          background: false,
+        },
+      },
+    });
+    // 7 turns of ~2 KB each: far under maxTurns, over 1500 tokens.
+    await agent
+      .stream({
+        messages: longThread(6, 2_000),
+        turn: { text: "now" },
+        threadId: "t",
+      })
+      .result();
+    expect(summarizer.calls).toHaveLength(1);
+    expect(promptOf(summarizer.calls[0]!)).toContain("question 0");
+    const sent = provider.calls[0]!.messages as AgentMessage[];
+    expect(sent[0]!.id).toMatch(/^summary_u\d$/);
+    // What is kept, with the summary, fits the trigger.
+    expect(JSON.stringify(sent.slice(1)).length).toBeLessThanOrEqual(
+      (1_500 - 100) * 4,
+    );
+  });
+
+  test("without a summary, the trigger drops nothing: the plain window is sent", async () => {
+    const failing: ProviderEvent[] = [
+      {
+        type: "error",
+        error: { code: "provider_error", message: "down", retryable: true },
+      } as any,
+    ];
+    const summarizer = fakeProvider(failing);
+    const provider = fakeProvider(answer());
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      logErrors: false,
+      contextWindow: {
+        maxTurns: 40,
+        step: 1,
+        compact: {
+          provider: summarizer,
+          store: new MemorySummaryStore(),
+          triggerTokens: 1_500,
+          background: false,
+        },
+      },
+    });
+    await agent
+      .stream({
+        messages: longThread(6, 2_000),
+        turn: { text: "now" },
+        threadId: "t",
+      })
+      .result();
+    expect(summarizer.calls).toHaveLength(1);
+    const sent = provider.calls[0]!.messages as AgentMessage[];
+    expect(sent[0]!.id).toBe("u0");
+    expect(firstText(sent[0]!)).toBe("question 0");
+    expect(sent).toHaveLength(13);
+  });
+
+  test("defaults to 100000 tokens when the window has no token budget; false turns it off", async () => {
+    // 3 turns of 150k characters: ~112k tokens, under maxTurns.
+    const history = longThread(3, 150_000);
+    const run = async (triggerTokens?: false) => {
+      const summarizer = fakeProvider(summaryAnswer("S1"));
+      const provider = fakeProvider(answer());
+      const agent = Agent.create({
+        name: "a",
+        provider,
+        contextWindow: {
+          maxTurns: 40,
+          step: 1,
+          compact: {
+            provider: summarizer,
+            store: new MemorySummaryStore(),
+            background: false,
+            ...(triggerTokens === false ? { triggerTokens } : {}),
+          },
+        },
+      });
+      await agent
+        .stream({ messages: history, turn: { text: "now" }, threadId: "t" })
+        .result();
+      return {
+        summarizer,
+        sent: provider.calls[0]!.messages as AgentMessage[],
+      };
+    };
+
+    const on = await run();
+    expect(on.summarizer.calls).toHaveLength(1);
+    expect(on.sent[0]!.id).toMatch(/^summary_/);
+
+    const off = await run(false);
+    expect(off.summarizer.calls).toHaveLength(0);
+    expect(off.sent[0]!.id).toBe("u0");
+  });
+
+  test("a window with its own maxTokens is not given the default trigger", async () => {
+    const summarizer = fakeProvider(summaryAnswer("S1"));
+    const provider = fakeProvider(answer());
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      contextWindow: {
+        maxTokens: 1_000_000,
+        step: 1,
+        compact: {
+          provider: summarizer,
+          store: new MemorySummaryStore(),
+          background: false,
+        },
+      },
+    });
+    await agent
+      .stream({
+        messages: longThread(3, 150_000),
+        turn: { text: "now" },
+        threadId: "t",
+      })
+      .result();
+    expect(summarizer.calls).toHaveLength(0);
+  });
+});
+
+describe("contextWindow.compact: in the background", () => {
+  /** 30 turns sent, at most 10, step 5: the cut is at turn 20, and the next
+   *  turn's at 25. */
+  const moving = { maxTurns: 10, step: 5 };
+
+  function agentWith(summarizer: any, compact: Record<string, unknown> = {}) {
+    const provider = fakeProvider(answer(), answer(), answer());
+    const store = new MemorySummaryStore();
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      contextWindow: {
+        ...moving,
+        compact: { provider: summarizer, store, ...compact },
+      },
+    });
+    return { agent, provider, store };
+  }
+
+  test("when a run ends, the next turn's summary is made, and that turn uses it and pays for it", async () => {
+    const summarizer = fakeProvider(summaryAnswer("S1"), summaryAnswer("S2"));
+    const { agent, provider, store } = agentWith(summarizer);
+
+    const first = await agent
+      .stream({ messages: thread(29), turn: { text: "now" }, threadId: "t" })
+      .result();
+    // Only its own summary is the first run's.
+    expect(first.usage.inputTokens).toBe(110);
+
+    await settleSummaries();
+    expect(summarizer.calls).toHaveLength(2);
+    expect(promptOf(summarizer.calls[1]!)).toContain("Summary so far:\nS1");
+    expect((await store.loadSummaries("t")).map((s) => s.cutMessageId)).toEqual(
+      ["u25", "u20"],
+    );
+
+    const second = await agent
+      .stream({ messages: thread(30), turn: { text: "next" }, threadId: "t" })
+      .result();
+    expect(summarizer.calls).toHaveLength(2);
+    const sent = provider.calls[1]!.messages as AgentMessage[];
+    expect(firstText(sent[0]!)).toBe(`${COMPACT_SUMMARY_HEADER}\nS2`);
+    expect(sent[1]!.id).toBe("u25");
+    // The background call is billed to the turn that used it, once.
+    expect(second.usage.inputTokens).toBe(110);
+    await settleSummaries();
+    const third = await agent
+      .stream({ messages: thread(30), turn: { text: "next" }, threadId: "t" })
+      .result();
+    expect(third.usage.inputTokens).toBe(10);
+  });
+
+  test("a turn that starts while it is still being made waits for the same call", async () => {
+    const slow = slowSummarizer(1);
+    const { agent, provider } = agentWith(slow.provider);
+
+    await agent
+      .stream({ messages: thread(29), turn: { text: "now" }, threadId: "t" })
+      .result();
+    await settle();
+    expect(slow.calls).toHaveLength(2);
+
+    const second = agent
+      .stream({ messages: thread(30), turn: { text: "next" }, threadId: "t" })
+      .result();
+    await settle();
+    slow.release();
+    const result = await second;
+    expect(slow.calls).toHaveLength(2);
+    expect(firstText((provider.calls[1]!.messages as AgentMessage[])[0]!)).toBe(
+      `${COMPACT_SUMMARY_HEADER}\nS2`,
+    );
+    expect(result.usage.inputTokens).toBe(110);
+  });
+
+  test("background: false makes it inline, before the next turn's first model call", async () => {
+    const summarizer = fakeProvider(summaryAnswer("S1"), summaryAnswer("S2"));
+    const { agent, provider } = agentWith(summarizer, { background: false });
+
+    await agent
+      .stream({ messages: thread(29), turn: { text: "now" }, threadId: "t" })
+      .result();
+    await settleSummaries();
+    expect(summarizer.calls).toHaveLength(1);
+
+    await agent
+      .stream({ messages: thread(30), turn: { text: "next" }, threadId: "t" })
+      .result();
+    expect(summarizer.calls).toHaveLength(2);
+    expect(firstText((provider.calls[1]!.messages as AgentMessage[])[0]!)).toBe(
+      `${COMPACT_SUMMARY_HEADER}\nS2`,
+    );
+  });
+
+  test("a stateless run is not compacted, now or in the background", async () => {
+    const summarizer = fakeProvider(summaryAnswer("S1"));
+    const { agent, provider } = agentWith(summarizer);
+    await agent
+      .stream({ messages: thread(29), turn: { text: "now" } })
+      .result();
+    await settleSummaries();
+    expect(summarizer.calls).toHaveLength(0);
+    expect(firstText((provider.calls[0]!.messages as AgentMessage[])[0]!)).toBe(
+      DEFAULT_CONTEXT_WINDOW_NOTE,
+    );
+  });
+});
+
+describe("contextWindow.compact: a stopped run", () => {
+  test("stopping the run that started a summary doesn't cancel it: a waiting run gets it", async () => {
+    const slow = slowSummarizer();
+    const store = new MemorySummaryStore();
+    const provider = fakeProvider(answer(), answer());
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      contextWindow: {
+        ...window,
+        compact: { provider: slow.provider, store, background: false },
+      },
+    });
+
+    const starter = agent.stream({
+      messages: thread(25),
+      turn: { text: "now" },
+      threadId: "t",
+    });
+    await settle();
+    const waiter = agent
+      .stream({ messages: thread(25), turn: { text: "now" }, threadId: "t" })
+      .result();
+    await settle();
+    expect(slow.calls).toHaveLength(1);
+
+    starter.stop();
+    const stopped = await starter.result();
+    expect(stopped.finishReason).toBe("aborted");
+
+    slow.release();
+    const result = await waiter;
+    expect(result.finishReason).toBe("stop");
+    expect(slow.calls).toHaveLength(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(firstText((provider.calls[0]!.messages as AgentMessage[])[0]!)).toBe(
+      `${COMPACT_SUMMARY_HEADER}\nS1`,
+    );
+    // Billed once, to the run that was still there.
+    expect(stopped.usage.inputTokens).toBe(0);
+    expect(result.usage.inputTokens).toBe(110);
+    expect((await store.loadSummaries("t")).map((s) => s.cutMessageId)).toEqual(
+      ["u20"],
+    );
+  });
+
+  test("with nobody waiting, it is still saved, and the next turn uses it and pays for it", async () => {
+    const slow = slowSummarizer();
+    const store = new MemorySummaryStore();
+    const provider = fakeProvider(answer());
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      contextWindow: {
+        ...window,
+        compact: { provider: slow.provider, store, background: false },
+      },
+    });
+
+    const starter = agent.stream({
+      messages: thread(25),
+      turn: { text: "now" },
+      threadId: "t",
+    });
+    await settle();
+    starter.stop();
+    await starter.result();
+    slow.release();
+    await settleSummaries();
+    expect((await store.loadSummaries("t")).map((s) => s.text)).toEqual(["S1"]);
+
+    const next = await agent
+      .stream({ messages: thread(26), turn: { text: "again" }, threadId: "t" })
+      .result();
+    expect(slow.calls).toHaveLength(1);
+    expect(firstText((provider.calls[0]!.messages as AgentMessage[])[0]!)).toBe(
+      `${COMPACT_SUMMARY_HEADER}\nS1`,
+    );
+    expect(next.usage.inputTokens).toBe(110);
   });
 });

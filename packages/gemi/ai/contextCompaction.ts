@@ -13,15 +13,30 @@
  *   by the cut (the id of the first kept message). `AgentController` uses its
  *   own `AgentStore` when that implements the summary methods, which
  *   `MemoryAgentStore` does; otherwise a process-wide memory store.
+ * - **Two triggers.** The window's own limits (`maxTurns`, `maxTokens`,
+ *   `maxBytes`) and `triggerTokens`, a token budget for the turns sent: a
+ *   thread whose turns are few but long (big tool results) is compacted
+ *   before `maxTurns` would cut it. `triggerTokens` only moves the cut when a
+ *   summary can take the turns' place; without one the plain window is sent.
  * - **Computed once per cut.** The cut moves `step` turns at a time, so a
  *   summary is made when the window moves and reused, from the store, by every
  *   later turn until it moves again. The request's prefix stays the same from
  *   turn to turn in between, so the provider's prompt cache keeps hitting.
- * - **Never twice at once.** In one process, concurrent runs on a thread share
- *   one summary call per cut. Across processes, a store may implement
- *   `lockSummary`; a run that finds the cut locked waits for the summary to
- *   appear, and sends the plain window if it doesn't in time.
- * - **Billed to the run.** Each summary call's usage is added to the run's.
+ * - **In the background.** When a run on a thread ends, the summary the next
+ *   turn will need is started right away (`precompactWindow`), so the next
+ *   turn usually finds it stored. If it isn't ready, the next turn waits for
+ *   the same call, or makes it before its first model call.
+ * - **Never twice at once.** In one process, every run and background start
+ *   on a thread share one summary job per cut. Across processes, a store may
+ *   implement `lockSummary`; a run that finds the cut locked waits for the
+ *   summary to appear, and sends the plain window if it doesn't in time.
+ * - **Detached from the run.** A summary job is not cancelled by the run that
+ *   started it: stopping that run stops its wait, not the job, which finishes,
+ *   is saved, and reaches every run waiting on it.
+ * - **Billed once.** Each summary call's usage is added to the usage of a run
+ *   waiting on the job (the one that started it, while it runs). A call no run
+ *   was waiting on (a background start, or a job whose run was stopped) is
+ *   billed to the next run in this process that uses the summary.
  * - **Never fatal.** A failed summary call sends the plain window with its
  *   note, as `contextWindow` without `compact` would, and the run goes on.
  *
@@ -45,6 +60,16 @@ export const DEFAULT_MAX_SUMMARY_TOKENS = 1_000;
 export const DEFAULT_COMPACT_CHUNK_TOKENS = 24_000;
 /** `ContextCompactOptions.lockWaitMs`'s default. */
 export const DEFAULT_COMPACT_LOCK_WAIT_MS = 20_000;
+/**
+ * `ContextCompactOptions.triggerTokens`'s default, for a window with no
+ * `maxTokens`/`maxBytes` of its own.
+ */
+export const DEFAULT_COMPACT_TRIGGER_TOKENS = 100_000;
+/**
+ * How long one summary call may take. A job is detached from the runs
+ * waiting on it, so nothing else would stop a provider that never answers.
+ */
+const SUMMARY_CALL_TIMEOUT_MS = 120_000;
 
 /** `ContextCompactOptions.instructions`'s default. */
 export const DEFAULT_COMPACT_INSTRUCTIONS = [
@@ -67,6 +92,26 @@ export const COMPACT_SUMMARY_HEADER =
 export type ContextCompactOptions = {
   /** The model that writes the summaries. Default: the run's provider. */
   provider?: AgentProvider;
+  /**
+   * Compact once the turns sent would be over this many approximate tokens
+   * (four characters each, as `maxTokens` counts them), even when `maxTurns`
+   * would keep them all: older turns are summarised until the rest, with the
+   * summary, fit. So a few long turns (big tool results) are compacted early.
+   *
+   * Unlike the window's `maxTokens`, it never drops a turn without a summary:
+   * when no summary can be had, the plain window is sent as if it weren't set.
+   *
+   * Default `DEFAULT_COMPACT_TRIGGER_TOKENS` (100000) when the window has no
+   * `maxTokens`/`maxBytes`; when it has one, that budget is the trigger and
+   * this is unset. `false` turns it off.
+   */
+  triggerTokens?: number | false;
+  /**
+   * Start the summary the next turn will need as soon as a run on the thread
+   * ends, rather than when that turn asks for it. Default `true`. The next
+   * turn makes it inline (before its first model call) when it isn't ready.
+   */
+  background?: boolean;
   /** The summariser's system prompt. Default `DEFAULT_COMPACT_INSTRUCTIONS`. */
   instructions?: string;
   /**
@@ -154,7 +199,10 @@ const SUMMARIES_PER_THREAD = 8;
  * forgotten after `ttlMs` without a read or a write.
  */
 export class MemorySummaryStore implements SummaryStore {
-  private threads = new Map<string, { summaries: ThreadSummary[]; touchedAt: number }>();
+  private threads = new Map<
+    string,
+    { summaries: ThreadSummary[]; touchedAt: number }
+  >();
   private lastSweep = 0;
 
   constructor(readonly ttlMs = 24 * 60 * 60 * 1000) {}
@@ -197,11 +245,14 @@ export class MemorySummaryStore implements SummaryStore {
  * replaced, and at most `SUMMARIES_PER_THREAD` kept. For stores that hold a
  * thread's summaries as a list.
  */
-export function keepSummary(summaries: readonly ThreadSummary[], summary: ThreadSummary) {
-  return [summary, ...summaries.filter((held) => held.cutMessageId !== summary.cutMessageId)].slice(
-    0,
-    SUMMARIES_PER_THREAD,
-  );
+export function keepSummary(
+  summaries: readonly ThreadSummary[],
+  summary: ThreadSummary,
+) {
+  return [
+    summary,
+    ...summaries.filter((held) => held.cutMessageId !== summary.cutMessageId),
+  ].slice(0, SUMMARIES_PER_THREAD);
 }
 
 /** The process-wide summary store a run uses when nothing else is given. */
@@ -211,13 +262,15 @@ export const defaultSummaryStore = new MemorySummaryStore();
 export function isSummaryStore(store: unknown): store is SummaryStore {
   const candidate = store as Partial<SummaryStore> | null | undefined;
   return (
-    typeof candidate?.loadSummaries === "function" && typeof candidate?.saveSummary === "function"
+    typeof candidate?.loadSummaries === "function" &&
+    typeof candidate?.saveSummary === "function"
   );
 }
 
 // --- the request -----------------------------------------------------------
 
-export type CompactParams = {
+/** What a summary job needs, whoever started it. Nothing here is a run's. */
+export type CompactJobParams = {
   /** What the request would send before windowing (`historyForProvider`). */
   history: AgentMessage[];
   /** The same messages as stored, index for index, for the fingerprint. */
@@ -228,8 +281,15 @@ export type CompactParams = {
   /** The run's provider, used when `compact.provider` is not set. */
   provider: AgentProvider;
   store: SummaryStore;
+};
+
+export type CompactParams = CompactJobParams & {
+  /** The run's signal: stops this run's wait, never the summary job. */
   signal: AbortSignal;
-  /** Told the usage of every summary call, failed ones included. */
+  /**
+   * Told the usage of the summary calls this run is billed for, failed ones
+   * included. See "Billed once" above.
+   */
   onUsage: (usage: Usage) => void;
   /**
    * The run's own memo, by cut: the messages before the cut don't change
@@ -239,30 +299,66 @@ export type CompactParams = {
   memo?: Map<string, ThreadSummary | null>;
 };
 
+/** The two windows over one history: the one compaction cuts at, and the
+ *  plain one sent when there is no summary. */
+function plan(
+  history: readonly AgentMessage[],
+  window: ContextWindowOptions,
+  compact: ContextCompactOptions,
+) {
+  const maxSummaryTokens =
+    positiveInt(compact.maxSummaryTokens) ?? DEFAULT_MAX_SUMMARY_TOKENS;
+  // The summary is sent too, so it comes out of the budget. Never down to 0,
+  // which `windowMessages` would read as "no limit".
+  const reserve = (tokens: number) => Math.max(1, tokens - maxSummaryTokens);
+  const plain: ContextWindowOptions = {
+    ...window,
+    ...(positiveInt(window.maxTokens)
+      ? { maxTokens: reserve(window.maxTokens!) }
+      : {}),
+    ...(positiveInt(window.maxBytes)
+      ? {
+          maxBytes: Math.max(
+            1,
+            window.maxBytes! - maxSummaryTokens * CHARS_PER_TOKEN,
+          ),
+        }
+      : {}),
+  };
+  const trigger = triggerTokens(window, compact);
+  const compacting: ContextWindowOptions = {
+    ...plain,
+    note: false,
+    ...(trigger
+      ? { maxTokens: Math.min(plain.maxTokens ?? Infinity, reserve(trigger)) }
+      : {}),
+  };
+  return { plain, cut: windowMessages(history, compacting), maxSummaryTokens };
+}
+
+/** `ContextCompactOptions.triggerTokens` as it applies to `window`. */
+function triggerTokens(
+  window: ContextWindowOptions,
+  compact: ContextCompactOptions,
+): number | undefined {
+  if (compact.triggerTokens === false) return undefined;
+  const set = positiveInt(compact.triggerTokens || undefined);
+  if (set) return set;
+  if (positiveInt(window.maxTokens) || positiveInt(window.maxBytes))
+    return undefined;
+  return DEFAULT_COMPACT_TRIGGER_TOKENS;
+}
+
 /**
  * The messages a compacted window sends: the window with the summary of what
  * it left out in front, or the plain window (with its note) when there is
  * nothing to summarise or the summary could not be made.
  */
-export async function compactWindow(params: CompactParams): Promise<AgentMessage[]> {
+export async function compactWindow(
+  params: CompactParams,
+): Promise<AgentMessage[]> {
   const { history, window, compact } = params;
-  const maxSummaryTokens = positiveInt(compact.maxSummaryTokens) ?? DEFAULT_MAX_SUMMARY_TOKENS;
-  // The summary is sent too, so it comes out of the budget. Never down to 0,
-  // which `windowMessages` would read as "no limit".
-  const reserved: ContextWindowOptions = {
-    ...window,
-    ...(positiveInt(window.maxTokens)
-      ? { maxTokens: Math.max(1, window.maxTokens! - maxSummaryTokens) }
-      : {}),
-    ...(positiveInt(window.maxBytes)
-      ? {
-          maxBytes: Math.max(1, window.maxBytes! - maxSummaryTokens * CHARS_PER_TOKEN),
-        }
-      : {}),
-  };
-  const plain = () => windowMessages(history, reserved).messages;
-
-  const cut = windowMessages(history, { ...reserved, note: false });
+  const { plain, cut, maxSummaryTokens } = plan(history, window, compact);
   if (cut.omittedTurns === 0) return cut.messages;
 
   const memoKey = `${history[cut.start]!.id}:${cut.start}`;
@@ -277,7 +373,7 @@ export async function compactWindow(params: CompactParams): Promise<AgentMessage
     // Not when the run was stopped: that is no verdict on the summary.
     if (!params.signal.aborted) params.memo?.set(memoKey, summary);
   }
-  if (!summary) return plain();
+  if (!summary) return windowMessages(history, plain).messages;
 
   const keptCount = history.length - cut.start;
   const pinned = cut.messages.slice(0, cut.messages.length - keptCount);
@@ -290,65 +386,235 @@ export async function compactWindow(params: CompactParams): Promise<AgentMessage
       // prompt cache keys on the bytes.
       id: `summary_${head.id}`,
       role: "user",
-      content: [{ type: "text", text: `${COMPACT_SUMMARY_HEADER}\n${summary.text}` }],
+      content: [
+        { type: "text", text: `${COMPACT_SUMMARY_HEADER}\n${summary.text}` },
+      ],
       createdAt: head.createdAt,
     },
     ...kept,
   ];
 }
 
-/** Summary calls in flight in this process, by thread and cut. */
-const inFlight = new Map<string, Promise<ThreadSummary | null>>();
+/** The id of the stand-in for the next turn's user message. */
+const NEXT_TURN_ID = "\u0000next-turn";
+
+/**
+ * Starts, in the background, the summary the thread's next turn will need,
+ * when it isn't stored yet: the cut is worked out with an empty user message
+ * standing in for that turn. A next turn whose message moves the cut further
+ * (a long one, against a token budget) makes its own summary, as without this.
+ *
+ * Never rejects and nobody has to wait on it; the promise is for tests and
+ * shutdown, as `settleSummaries` is.
+ */
+export function precompactWindow(params: CompactJobParams): Promise<void> {
+  const started = precompact(params).finally(() => starting.delete(started));
+  starting.add(started);
+  return started;
+}
+
+/** `precompactWindow`s still deciding whether to start a job. */
+const starting = new Set<Promise<void>>();
+
+async function precompact(params: CompactJobParams): Promise<void> {
+  try {
+    const next: AgentMessage = {
+      id: NEXT_TURN_ID,
+      role: "user",
+      content: [{ type: "text", text: "" }],
+      createdAt: new Date().toISOString(),
+    };
+    const history = [...params.history, next];
+    const stored = [...params.stored, next];
+    const { cut, maxSummaryTokens } = plan(
+      history,
+      params.window,
+      params.compact,
+    );
+    if (cut.omittedTurns === 0 || history[cut.start]!.id === NEXT_TURN_ID)
+      return;
+    const target = cutTarget({ ...params, history, stored }, cut.start);
+    if ((await load(params.store, params.threadId)).some(target.matches))
+      return;
+    await job(
+      target,
+      { ...params, history, stored },
+      cut.start,
+      maxSummaryTokens,
+    ).promise;
+  } catch {
+    // Best effort: the next turn makes it inline.
+  }
+}
+
+/** Resolves once every summary job in flight in this process has ended. */
+export async function settleSummaries(): Promise<void> {
+  while (jobs.size > 0 || starting.size > 0) {
+    await Promise.allSettled([
+      ...starting,
+      ...[...jobs.values()].map((running) => running.promise),
+    ]);
+  }
+}
+
+/** One summary being made, shared by every run that needs it. */
+type Job = {
+  promise: Promise<ThreadSummary | null>;
+  /** The runs waiting on it, in the order they came. The first is billed. */
+  payers: Array<(usage: Usage) => void>;
+  /** Usage of calls made while no run was waiting. */
+  owed: Usage | undefined;
+};
+
+/** Summary jobs in flight in this process, by thread, cut and fingerprint. */
+const jobs = new Map<string, Job>();
+
+/**
+ * Usage of finished jobs no run was billed for, by job key, for the next run
+ * that uses the summary. Bounded: a thread nobody comes back to leaves its
+ * entry until it is pushed out.
+ */
+const owed = new Map<string, Usage>();
+const MAX_OWED = 1_000;
+
+function owe(key: string, usage: Usage): void {
+  owed.set(key, addUsage(owed.get(key) ?? emptyUsage(), usage));
+  while (owed.size > MAX_OWED) owed.delete(owed.keys().next().value!);
+}
+
+function claimOwed(key: string, onUsage: (usage: Usage) => void): void {
+  const usage = owed.get(key);
+  if (!usage) return;
+  owed.delete(key);
+  onUsage(usage);
+}
+
+/** What identifies the summary for the cut at `start`. */
+function cutTarget(params: CompactJobParams, start: number) {
+  const cutMessageId = params.history[start]!.id;
+  const fingerprints = prefixFingerprints(params.stored, start);
+  const fingerprint = fingerprints[start]!;
+  return {
+    key: `${params.threadId}\u0000${cutMessageId}\u0000${fingerprint}`,
+    fingerprints,
+    matches: (summary: ThreadSummary | undefined) =>
+      summary?.cutMessageId === cutMessageId &&
+      summary.fingerprint === fingerprint,
+  };
+}
 
 async function summaryFor(
   params: CompactParams,
   start: number,
   maxSummaryTokens: number,
 ): Promise<ThreadSummary | null> {
-  const { history, stored, threadId, store } = params;
-  const cutMessageId = history[start]!.id;
-  const fingerprints = prefixFingerprints(stored, start);
-  const fingerprint = fingerprints[start]!;
-  const matches = (summary: ThreadSummary | undefined) =>
-    summary?.cutMessageId === cutMessageId && summary.fingerprint === fingerprint;
+  const target = cutTarget(params, start);
+  const found = (await load(params.store, params.threadId)).find(
+    target.matches,
+  );
+  if (found) {
+    claimOwed(target.key, params.onUsage);
+    return found;
+  }
 
-  const found = (await load(store, threadId)).find(matches);
-  if (found) return found;
+  const running = job(target, params, start, maxSummaryTokens);
+  // Billed from here on, and for whatever ran while nobody waited.
+  if (running.owed) {
+    params.onUsage(running.owed);
+    running.owed = undefined;
+  }
+  running.payers.push(params.onUsage);
+  try {
+    return await untilAborted(running.promise, params.signal);
+  } finally {
+    running.payers.splice(running.payers.indexOf(params.onUsage), 1);
+    claimOwed(target.key, params.onUsage);
+  }
+}
 
-  const key = `${threadId}\u0000${cutMessageId}\u0000${fingerprint}`;
-  const running = inFlight.get(key);
+/** The job for `target`, started if none is running. */
+function job(
+  target: ReturnType<typeof cutTarget>,
+  params: CompactJobParams,
+  start: number,
+  maxSummaryTokens: number,
+): Job {
+  const running = jobs.get(target.key);
   if (running) return running;
 
-  const work = (async () => {
-    const lockWaitMs = positiveInt(params.compact.lockWaitMs) ?? DEFAULT_COMPACT_LOCK_WAIT_MS;
+  const created: Job = { promise: undefined!, payers: [], owed: undefined };
+  const bill = (usage: Usage) => {
+    const payer = created.payers[0];
+    if (payer) payer(usage);
+    else created.owed = addUsage(created.owed ?? emptyUsage(), usage);
+  };
+  created.promise = (async () => {
+    const { store, threadId } = params;
+    const lockWaitMs =
+      positiveInt(params.compact.lockWaitMs) ?? DEFAULT_COMPACT_LOCK_WAIT_MS;
     let release: (() => Promise<void>) | null = null;
     if (store.lockSummary) {
       try {
-        release = await store.lockSummary(threadId, cutMessageId, lockWaitMs + 60_000);
+        release = await store.lockSummary(
+          threadId,
+          params.history[start]!.id,
+          lockWaitMs + 60_000,
+        );
       } catch {
         release = null;
       }
-      if (!release) return waitFor(params, matches, lockWaitMs);
+      if (!release) return waitFor(params, target.matches, lockWaitMs);
     }
     try {
       // Again under the lock: whoever held it may have just written it.
       const summaries = await load(store, threadId);
-      const again = summaries.find(matches);
+      const again = summaries.find(target.matches);
       if (again) return again;
-      return await build(params, summaries, fingerprints, start, maxSummaryTokens);
+      return await build(
+        params,
+        summaries,
+        target.fingerprints,
+        start,
+        maxSummaryTokens,
+        bill,
+      );
     } finally {
       if (release) await release().catch(() => {});
     }
-  })();
-  inFlight.set(key, work);
-  try {
-    return await work;
-  } finally {
-    inFlight.delete(key);
-  }
+  })()
+    .catch(() => null)
+    .finally(() => {
+      jobs.delete(target.key);
+      if (created.owed) owe(target.key, created.owed);
+      created.owed = undefined;
+    });
+  jobs.set(target.key, created);
+  return created;
 }
 
-async function load(store: SummaryStore, threadId: string): Promise<ThreadSummary[]> {
+/** `promise`, or a rejection as soon as `signal` fires. The promise goes on. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function load(
+  store: SummaryStore,
+  threadId: string,
+): Promise<ThreadSummary[]> {
   try {
     const summaries = await store.loadSummaries(threadId);
     return Array.isArray(summaries) ? summaries.filter(isRecord) : [];
@@ -369,12 +635,12 @@ function isRecord(value: unknown): value is ThreadSummary {
 
 /** Another process holds the cut's lock: wait for its summary to land. */
 async function waitFor(
-  params: CompactParams,
+  params: CompactJobParams,
   matches: (summary: ThreadSummary | undefined) => boolean,
   waitMs: number,
 ): Promise<ThreadSummary | null> {
   const until = Date.now() + waitMs;
-  while (Date.now() < until && !params.signal.aborted) {
+  while (Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const found = (await load(params.store, params.threadId)).find(matches);
     if (found) return found;
@@ -387,11 +653,12 @@ async function waitFor(
  * summary at an earlier cut (or from nothing), and saves it.
  */
 async function build(
-  params: CompactParams,
+  params: CompactJobParams,
   summaries: ThreadSummary[],
   fingerprints: string[],
   start: number,
   maxSummaryTokens: number,
+  bill: (usage: Usage) => void,
 ): Promise<ThreadSummary | null> {
   const { history, compact } = params;
   const starts = turnStarts(history);
@@ -411,7 +678,8 @@ async function build(
   }
 
   const chunkChars =
-    (positiveInt(compact.chunkTokens) ?? DEFAULT_COMPACT_CHUNK_TOKENS) * CHARS_PER_TOKEN;
+    (positiveInt(compact.chunkTokens) ?? DEFAULT_COMPACT_CHUNK_TOKENS) *
+    CHARS_PER_TOKEN;
   const chunks = chunkTurns(history, starts, from, start, chunkChars);
   const maxChars = maxSummaryTokens * CHARS_PER_TOKEN;
   const instructions = `${compact.instructions ?? DEFAULT_COMPACT_INSTRUCTIONS} Keep the summary under about ${Math.round(maxSummaryTokens * 0.75)} words.`;
@@ -425,10 +693,10 @@ async function build(
       prompt: `Summary so far:\n${text || "(none yet: these are the first turns of the conversation)"}\n\nThe turns that came after it:\n${chunk}`,
       output: s.object({ summary: s.string() }),
       reasoning: compact.reasoning ?? "low",
-      signal: params.signal,
+      signal: AbortSignal.timeout(SUMMARY_CALL_TIMEOUT_MS),
     });
     usage = addUsage(usage, result.usage);
-    params.onUsage(result.usage);
+    bill(result.usage);
     if (!result.ok) return null;
     text = truncate(result.output.summary.trim(), maxChars);
   }
@@ -470,7 +738,8 @@ export function chunkTurns(
   const injected = new Set<string>();
   const startSet = new Set(starts);
   for (let i = 0; i < history.length; i++) {
-    if (history[i]!.role === "user" && !startSet.has(i) && i !== 0) injected.add(history[i]!.id);
+    if (history[i]!.role === "user" && !startSet.has(i) && i !== 0)
+      injected.add(history[i]!.id);
   }
   const partLimit = Math.max(500, Math.min(20_000, Math.floor(chunkChars / 2)));
 
@@ -481,7 +750,11 @@ export function chunkTurns(
     const turnEnd = bounds[t + 1] ?? to;
     const lines: string[] = [];
     for (let i = turnStart; i < turnEnd; i++) {
-      const line = renderMessage(history[i]!, injected.has(history[i]!.id), partLimit);
+      const line = renderMessage(
+        history[i]!,
+        injected.has(history[i]!.id),
+        partLimit,
+      );
       if (line) lines.push(line);
     }
     const turn = lines.join("\n");
@@ -496,11 +769,21 @@ export function chunkTurns(
   return chunks;
 }
 
-function renderMessage(message: AgentMessage, injected: boolean, limit: number): string {
+function renderMessage(
+  message: AgentMessage,
+  injected: boolean,
+  limit: number,
+): string {
   // System messages before the cut are still sent, at the front.
   if (message.role === "system") return "";
-  const who = injected ? "Tool (file shown)" : message.role === "user" ? "User" : "Assistant";
-  const parts = (message.content ?? []).map((part) => renderPart(part, limit)).filter(Boolean);
+  const who = injected
+    ? "Tool (file shown)"
+    : message.role === "user"
+      ? "User"
+      : "Assistant";
+  const parts = (message.content ?? [])
+    .map((part) => renderPart(part, limit))
+    .filter(Boolean);
   return parts.length > 0 ? `${who}: ${parts.join("\n")}` : "";
 }
 
@@ -511,7 +794,9 @@ function renderPart(part: AgentContentPart, limit: number): string {
     case "file":
       return `[file: ${part.name ?? part.mimeType ?? part.fileId ?? "attachment"}]`;
     case "tool-call": {
-      const name = part.namespace ? `${part.namespace}.${String(part.name)}` : String(part.name);
+      const name = part.namespace
+        ? `${part.namespace}.${String(part.name)}`
+        : String(part.name);
       return `[called ${name}(${truncate(json(part.input), Math.min(limit, 1_000))})]`;
     }
     case "tool-result": {
@@ -555,7 +840,10 @@ function positiveInt(value: number | undefined): number | undefined {
  * `out[i]` is a fingerprint of `messages[0..i)`, for every `i` up to `end`.
  * A chain over each message's JSON, so one pass gives every prefix.
  */
-export function prefixFingerprints(messages: readonly AgentMessage[], end: number): string[] {
+export function prefixFingerprints(
+  messages: readonly AgentMessage[],
+  end: number,
+): string[] {
   const out = ["0"];
   let chain = "";
   for (let i = 0; i < end; i++) {
@@ -581,7 +869,11 @@ function hash(text: string): string {
     h1 = Math.imul(h1 ^ ch, 2654435761);
     h2 = Math.imul(h2 ^ ch, 1597334677);
   }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }

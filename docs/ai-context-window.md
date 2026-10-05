@@ -63,19 +63,24 @@ The request then becomes `[system messages, summary, ...kept turns]`. The summar
 
 How it works:
 
+- **When.** The turns the window's own limits (`maxTurns`, `maxTokens`, `maxBytes`) leave out are summarised. So are older turns once the turns sent would be over `triggerTokens` (approximate tokens), even when `maxTurns` would keep them all, so a few long turns with big tool results are compacted early. `triggerTokens` defaults to 100000 when the window has no `maxTokens`/`maxBytes` (with one, that budget is the trigger). Unlike `maxTokens` it never drops a turn without a summary: if none can be made, the plain window is sent as if it weren't set.
 - **Once per cut.** The window's start moves `step` turns at a time, so a summary is made when it moves and reused by every later turn until it moves again. Between moves, consecutive turns send the same prefix, so the provider's prompt cache keeps hitting.
 - **Incremental.** The new summary is the previous cut's summary plus the turns that just left the window. A first summary of a long thread is folded in chunks of at most `chunkTokens`, each call building on the last, so the summarised part can be bigger than any context.
 - **Stored per thread.** Summaries go to a `SummaryStore`, keyed by thread and cut (the id of the first kept message). An `AgentController` uses its own `AgentStore` when it implements `loadSummaries` and `saveSummary` (`MemoryAgentStore` does, and drops them with the thread). Otherwise they go to `defaultSummaryStore`, in memory. Each record carries a fingerprint of the messages it summarised; if those change (a regenerate, an edit), the record is ignored and a new one is made.
-- **No double work.** Concurrent runs on one thread in one process share one summary call per cut. For several processes, implement `lockSummary` on the store (Redis `SET key NX PX ttl`, say): a run that finds a cut locked waits up to `lockWaitMs` for the other process's summary, then sends the plain window.
-- **Billed to the run.** Each summary call's usage is added to the run's `usage`.
+- **In the background.** When a run on a thread ends, the summary the next turn will need is started right away (the cut is worked out with an empty message standing in for that turn), so the next turn usually finds it stored and doesn't wait. If it isn't ready, the next turn waits for the same call, or makes it inline before its first model call (always, with `background: false`). A next turn whose own message moves the cut further makes that summary inline.
+- **No double work.** Every run and background start on one thread in one process share one summary call per cut. For several processes, implement `lockSummary` on the store (Redis `SET key NX PX ttl`, say): a run that finds a cut locked waits up to `lockWaitMs` for the other process's summary, then sends the plain window.
+- **Detached from the run.** Stopping the run that started a summary stops that run's wait, not the summary: it finishes, is saved, and reaches every run waiting on it.
+- **Billed once.** Each summary call's usage is added to the `usage` of a run waiting on it (the one that started it, while it runs). A call no run was waiting on (a background start, or one whose run was stopped) is added to the next run in the same process that uses the summary. The stored record's `usage` always says what it cost.
 - **Never fatal.** If the summary call fails, the run sends the plain window with `note`, and doesn't try again on its later steps.
 - **Turn boundaries and tool searches** are the window's: the cut is at a turn start, and a tool search a kept namespaced call depends on is carried over (#777). The summary renders tool calls and results as text.
-- **Threads only.** It applies to a run with a `threadId`, at the top level. A stateless run or a sub-agent's run gets the plain window.
+- **Stored threads only.** It applies to a run with a `threadId` (a thread the server stores), at the top level. Stateless threads are not compacted: the client carries their history and there is no server-side key to keep a summary under, so they get the plain window, as a sub-agent's run does.
 - **Budget.** `maxSummaryTokens` is reserved from `maxTokens`/`maxBytes`, so the summary and the kept turns together stay within the budget.
 
 The options (`ContextCompactOptions`):
 
 - `provider`: the model that writes the summaries. Default: the run's provider. A cheaper model works well here.
+- `triggerTokens` (default 100000 when the window has no `maxTokens`/`maxBytes`, else unset): compact once the turns sent would be over this many approximate tokens. `false` turns it off.
+- `background` (default `true`): start the next turn's summary as soon as a run ends.
 - `instructions`: the summariser's system prompt. Default `DEFAULT_COMPACT_INSTRUCTIONS`; a "keep it under N words" line is appended.
 - `maxSummaryTokens` (default 1000): how long a summary may be, in approximate tokens. A longer answer is cut to it.
 - `chunkTokens` (default 24000): the most transcript one summary call is sent.
@@ -117,7 +122,9 @@ class DbAgentStore implements AgentStore {
 
 Keeping the latest few per thread is enough: the latest is what the next cut builds on.
 
-The summary call runs before the first model call of the turn whose window moved, so that turn starts later by one model call (several for a first summary of a long thread).
+Without a background summary ready (the first summary of a thread, `background: false`, or a turn whose own message moves the cut), the summary call runs before the first model call of the turn whose window moved, so that turn starts later by one model call (several for a first summary of a long thread).
+
+In tests, or before a process exits, `await settleSummaries()` waits for the summaries still being made in the background.
 
 ## `prepareStep`
 

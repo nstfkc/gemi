@@ -128,14 +128,18 @@ export type ContextWindowOptions = {
   /**
    * Summarise the turns left out instead of dropping them (#782). Off unless
    * set; `true` uses the defaults. Applies to a run with a `threadId` (a
-   * stored thread), at the top level; anything else gets the plain window.
-   * `windowMessages` itself ignores it. See `ContextCompactOptions`.
+   * stored thread), at the top level; anything else, stateless threads
+   * included, gets the plain window. `windowMessages` itself ignores it. See
+   * `ContextCompactOptions`.
    *
-   * The summary is made with one or more provider calls when the window's
-   * start moves (every `step` turns), kept per thread in a `SummaryStore`,
-   * and sent as a user message in front of the kept turns, in place of
-   * `note`. Its usage is added to the run's. If it fails, the run sends the
-   * plain window with `note`.
+   * Turns are summarised when the window leaves them out and, with
+   * `compact.triggerTokens`, once the turns sent would be over that many
+   * tokens. The summary is made with one or more provider calls when the
+   * window's start moves (every `step` turns), usually in the background
+   * after the turn before; kept per thread in a `SummaryStore`; and sent as a
+   * user message in front of the kept turns, in place of `note`. Its usage is
+   * billed once, to a run that waits on it or uses it. If it fails, the run
+   * sends the plain window with `note`.
    */
   compact?: boolean | ContextCompactOptions;
 };

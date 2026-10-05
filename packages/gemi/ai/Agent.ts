@@ -55,6 +55,8 @@ import {
 import {
   compactWindow,
   defaultSummaryStore,
+  precompactWindow,
+  type CompactJobParams,
   type SummaryStore,
   type ThreadSummary,
 } from "./contextCompaction";
@@ -2476,6 +2478,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.emit({ type: "run-end", runId: this.runId, finishReason: this.finishReason });
     this.ended = true;
     this.wake();
+    // After the turn, not in it: the run's usage is final, and the summary
+    // is billed to the next run that uses it.
+    this.precompact();
 
     const failure = this.finishReason === "error" ? this.failure : undefined;
     if (failure && this.config.logErrors) this.logFailure(failure);
@@ -2960,6 +2965,46 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
+   * What `contextWindow.compact` works from on this run, or `undefined` when
+   * the run isn't compacted: compaction needs a stored thread (`threadId`) to
+   * key summaries on, so stateless runs and sub-runs get the plain window.
+   */
+  private compactJobParams(
+    history: AgentMessage[],
+    current: AgentMessage | undefined,
+  ): CompactJobParams | undefined {
+    const window = this.config.contextWindow;
+    if (!window?.compact || !this.params.threadId || this.depth !== 0) return undefined;
+    const compact = window.compact === true ? {} : window.compact;
+    return {
+      history,
+      stored: this.history.filter((message) => message !== current),
+      window,
+      compact,
+      threadId: this.params.threadId,
+      provider: this.config.provider,
+      store: compact.store || this.params.summaryStore || defaultSummaryStore,
+    };
+  }
+
+  /**
+   * Starts the summary the thread's next turn will need, without waiting on
+   * it (`ContextCompactOptions.background`). Never fails the run.
+   */
+  private precompact(): void {
+    const window = this.config.contextWindow;
+    if (!window?.compact || (window.compact !== true && window.compact.background === false)) {
+      return;
+    }
+    try {
+      const params = this.compactJobParams(this.historyForProvider(undefined), undefined);
+      if (params) void precompactWindow(params);
+    } catch {
+      // Best effort: the next turn makes it inline.
+    }
+  }
+
+  /**
    * What one model call is sent: the history as `historyForProvider` shapes
    * it, cut to `contextWindow`, then whatever the `prepareStep` hooks answer.
    *
@@ -2974,20 +3019,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   ): Promise<{ messages: AgentMessage[]; instructions: string | undefined } | { error: AgentError }> {
     const history = this.historyForProvider(current);
     const window = this.config.contextWindow;
+    const compact = this.compactJobParams(history, current);
     let messages = !window
       ? history
-      : window.compact && this.params.threadId && this.depth === 0
+      : compact
         ? await compactWindow({
-            history,
-            stored: this.history.filter((message) => message !== current),
-            window,
-            compact: window.compact === true ? {} : window.compact,
-            threadId: this.params.threadId,
-            provider: this.config.provider,
-            store:
-              (window.compact !== true && window.compact.store) ||
-              this.params.summaryStore ||
-              defaultSummaryStore,
+            ...compact,
             signal: this.controller.signal,
             // Billed whether or not the summary came out, as `ctx.generate` is.
             onUsage: (usage) => {
@@ -4216,7 +4253,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * a file the *user* attached is one they expect to stay attached, and
    * dropping it would be the agent losing the thing it was asked about.
    */
-  private historyForProvider(current: AgentMessage): AgentMessage[] {
+  private historyForProvider(current: AgentMessage | undefined): AgentMessage[] {
     const messages = this.history.filter((message) => message !== current);
 
     // Injected messages are named by the tool call that made them, and that

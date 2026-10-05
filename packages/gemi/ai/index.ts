@@ -140,10 +140,12 @@ export type { ContextWindowOptions, ContextWindowResult } from "./contextWindow"
 export {
   COMPACT_SUMMARY_HEADER,
   DEFAULT_COMPACT_INSTRUCTIONS,
+  DEFAULT_COMPACT_TRIGGER_TOKENS,
   DEFAULT_MAX_SUMMARY_TOKENS,
   defaultSummaryStore,
   keepSummary,
   MemorySummaryStore,
+  settleSummaries,
 } from "./contextCompaction";
 export type { ContextCompactOptions, SummaryStore, ThreadSummary } from "./contextCompaction";
 
