@@ -15,6 +15,7 @@ import type {
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
+import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
 import { injectedMessageIds } from "./Agent";
 import {
   type Attachment,
@@ -142,6 +143,20 @@ export interface AgentStore {
    * with `regenerate: true` on a thread is a 501 `regenerate_unsupported`.
    */
   removeMessages?(threadId: string, messageIds: string[]): Promise<void>;
+  /**
+   * Optional: where `contextWindow.compact` keeps the thread's summaries
+   * (#782), so they live, and are deleted, with the thread. Implement both to
+   * opt in; without them summaries go to `defaultSummaryStore`, in memory.
+   * Same contract as `SummaryStore`.
+   */
+  loadSummaries?(threadId: string): Promise<ThreadSummary[]>;
+  saveSummary?(threadId: string, summary: ThreadSummary): Promise<void>;
+  /** Optional cross-process lock for one cut. See `SummaryStore.lockSummary`. */
+  lockSummary?(
+    threadId: string,
+    cutMessageId: string,
+    ttlMs: number,
+  ): Promise<(() => Promise<void>) | null>;
 }
 
 /** The default: conversations last as long as the process. */
@@ -1101,6 +1116,9 @@ export abstract class AgentController<
         // What each model call is sent (#473). Only the request: the store
         // still gets every message through `journal` above.
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
+        // Where `contextWindow.compact` keeps this thread's summaries, when
+        // the store holds them (#782).
+        ...(threadId && isSummaryStore(this.store) ? { summaryStore: this.store } : {}),
         // Only when overridden, so a controller without one adds no call.
         ...(this.prepareStep !== AgentController.prototype.prepareStep
           ? { prepareStep: (step: PrepareStepContext) => this.prepareStep(step, ctx) }

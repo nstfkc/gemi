@@ -47,7 +47,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Testing](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user. Route tests: `App.fetch` with a test `Kernel`, and `gemiRequestPlugin()` from `gemi/vitest`.
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
-- **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, and the turn helpers.
+- **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
 - **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 
 ### Data
