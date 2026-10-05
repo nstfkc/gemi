@@ -524,8 +524,10 @@ jobs:
       # publishing inside transactions, and LISTEN/NOTIFY between instances
       # through the `postgres` package (this Bun's SQL cannot LISTEN before
       # 1.4), a dropped LISTEN connection included (#761).
+      # `bun --bun x vitest`, not `bun --bun vitest`: from packages/gemi the
+      # latter runs the local `vitest/` directory and tests nothing (#815).
       - name: Change feed on Postgres
-        run: bun --bun vitest run services/change-feed/DatabaseChangeFeedDriver.test.ts -t "postgres"
+        run: bun --bun x vitest run services/change-feed/DatabaseChangeFeedDriver.test.ts -t "postgres"
         working-directory: packages/gemi
 
       # `DB.schema()` reads a different catalog per dialect, and the servers
