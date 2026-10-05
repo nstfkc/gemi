@@ -9,6 +9,7 @@ import { printStartupBanner } from "./banner";
 import { GEMI_EXTERNAL_SPECIFIERS } from "../internal/gemiExternals";
 import { createDevFetch, sendErrorToClient, ssrRunner } from "./devFetch";
 import { resolveHmrPort } from "./hmrPort";
+import { serverIdleTimeout } from "./idleTimeout";
 import {
   type HmrRelayData,
   hmrRelayHandler,
@@ -46,6 +47,11 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   // Same override the prod server honors (`httpProd.ts`). Read here rather than
   // inline at `Bun.serve` because the HMR port is derived from it.
   const httpPort = Number(process.env.PORT) || 5173;
+  // The same `SERVER_IDLE_TIMEOUT` `gemi start` honours (#787), so a long-poll
+  // that works in production is not cut at Bun's 10s here. Read before Vite
+  // starts so a bad value fails the boot first. Upgraded sockets, the HMR relay
+  // among them, are not subject to it.
+  const idleTimeout = serverIdleTimeout();
 
   // `bun --hot` re-runs this module on every server-code change, so keep a
   // single Vite server on `globalThis` instead of spawning a new one (and a new
@@ -131,6 +137,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   const relayPort = hmrRelayPort(vite.config?.server?.ws);
   const server = Bun.serve<HmrRelayData>({
     port: httpPort,
+    idleTimeout,
     fetch: (req, server) => {
       if (relayPort !== null && isHmrUpgrade(req)) {
         return upgradeHmr(req, server, relayPort);

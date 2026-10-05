@@ -338,6 +338,28 @@ GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
 
 Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
 
+## Idle connections: `SERVER_IDLE_TIMEOUT`
+
+Bun closes a connection that has been silent for `SERVER_IDLE_TIMEOUT` seconds, and a request whose
+response hasn't started yet counts as silent. Both `gemi dev` and `gemi start` read it:
+
+| `SERVER_IDLE_TIMEOUT` | Idle timeout |
+| --- | --- |
+| unset or blank (default) | 10 seconds (Bun's default) |
+| `1` … `255` | That many seconds |
+| `0` | No timeout |
+
+Any other value fails the boot. A route that holds a request open without writing (a long-poll that
+waits up to 50 seconds for a change, say) needs a value above its longest wait:
+
+```bash
+SERVER_IDLE_TIMEOUT=60
+```
+
+A streaming response that writes something more often than that stays open regardless (gemi's own
+SSE streams send a keepalive every 5 seconds). WebSockets, including the HMR socket in development,
+are not affected: an upgraded connection has its own idle timeout.
+
 ## Graceful shutdown
 
 In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills the server mid-request. `gemi start` relays the signal to the server process, and the server:
