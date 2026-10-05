@@ -1,3 +1,21 @@
+# Unreleased
+
+## Compaction for the context window (#782)
+
+New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI Context Window](docs/ai-context-window.md#compaction).
+
+- **`contextWindow: { ..., compact: true | ContextCompactOptions }`** (on `Agent.create`, `Agent.stream` and `AgentController`) summarises the turns the window leaves out instead of dropping them. The request becomes `[system messages, summary, ...kept turns]`; the summary is a user message and is never stored in the thread. It applies to threaded runs (`threadId`) at the top level.
+- Summaries are made once per cut (the window moves `step` turns at a time), incrementally (the previous cut's summary plus the turns that just left the window, in chunks of at most `chunkTokens`), and stored per thread. Their usage is added to the usage of a run (see "Detached" below). A failed summary falls back to the plain window with its note.
+- **`AgentStore` has three new optional methods**, `loadSummaries`, `saveSummary` and `lockSummary`. `MemoryAgentStore` implements the first two, and `AgentController` passes its store to the run as the summary store when it has them. A durable store that implements them keeps summaries across restarts and instances; one that doesn't uses `defaultSummaryStore`, in memory.
+- **When:** the turns the window's limits leave out are summarised, and so are older turns once the turns sent would be over **`compact.triggerTokens`** approximate tokens (default `DEFAULT_COMPACT_TRIGGER_TOKENS`, 100000, when the window has no `maxTokens`/`maxBytes`; with one, that budget is the trigger; `false` turns it off). The trigger never drops a turn without a summary.
+- **In the background:** when a run on a thread ends, the summary the next turn will need is started right away (**`compact.background`**, default `true`). The next turn uses it from the store, waits on the same call, or makes it inline when it isn't ready. `settleSummaries()` waits for the ones in flight (tests, shutdown).
+- **Detached:** stopping the run that started a summary doesn't cancel it; it finishes, is saved, and reaches the runs waiting on it. A summary call no run was waiting on is billed to the next run in the process that uses the summary.
+- **Stored threads only:** stateless threads (no `threadId`) and sub-agent runs are never compacted; they get the plain window.
+- **`AgentStreamParams.summaryStore`**: where a run keeps its thread's summaries, unless `compact.store` names one.
+- New exports from `gemi/ai`: `MemorySummaryStore`, `defaultSummaryStore`, `keepSummary`, `COMPACT_SUMMARY_HEADER`, `DEFAULT_COMPACT_INSTRUCTIONS`, `DEFAULT_COMPACT_TRIGGER_TOKENS`, `DEFAULT_MAX_SUMMARY_TOKENS`, `settleSummaries`, and the types `ContextCompactOptions`, `SummaryStore` and `ThreadSummary`.
+
+kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)
