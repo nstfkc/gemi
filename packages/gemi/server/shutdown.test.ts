@@ -50,10 +50,16 @@ const SLOW_MS = 100;
 const CHUNK_MS = 80;
 
 function serve() {
+  // Paths the server has started handling, so a test waits for its requests
+  // to be in flight rather than sleeping and hoping they got there: under a
+  // loaded parallel run a fixed 30ms was sometimes not enough for `fetch` to
+  // connect, and the drain then closed the listener in its face.
+  const arrived: string[] = [];
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const { pathname } = new URL(req.url);
+      arrived.push(pathname);
       if (pathname === "/slow") {
         await Bun.sleep(SLOW_MS);
         events.push("slow finished");
@@ -91,7 +97,10 @@ function serve() {
       return server.pendingRequests;
     },
   };
-  return { url: `http://localhost:${server.port}`, stoppable };
+  const inFlight = async (...paths: string[]) => {
+    while (!paths.every((path) => arrived.includes(path))) await Bun.sleep(5);
+  };
+  return { url: `http://localhost:${server.port}`, stoppable, inFlight };
 }
 
 const providers = (report = { failed: [] as string[], timedOut: [] as string[] }) =>
@@ -111,12 +120,12 @@ describe("drain", () => {
   });
 
   test("lets an in-flight request and a streamed response finish, then shuts providers down", async () => {
-    const { url, stoppable } = serve();
+    const { url, stoppable, inFlight } = serve();
     const shutdownProviders = providers();
 
     const slow = fetch(`${url}/slow`).then((res) => res.text());
     const stream = fetch(`${url}/stream`).then((res) => res.text());
-    await Bun.sleep(30);
+    await inFlight("/slow", "/stream");
 
     const code = await drain({ server: stoppable, shutdownProviders, settings: settings() });
 
@@ -133,10 +142,10 @@ describe("drain", () => {
   });
 
   test("refuses a new connection once the listener has closed", async () => {
-    const { url, stoppable } = serve();
+    const { url, stoppable, inFlight } = serve();
 
     const slow = fetch(`${url}/slow`);
-    await Bun.sleep(30);
+    await inFlight("/slow");
     const draining = drain({
       server: stoppable,
       shutdownProviders: providers(),
@@ -152,11 +161,11 @@ describe("drain", () => {
   });
 
   test("gives up on requests still in flight when the grace period runs out", async () => {
-    const { url, stoppable } = serve();
+    const { url, stoppable, inFlight } = serve();
     const shutdownProviders = providers();
 
     void fetch(`${url}/forever`).catch(() => {});
-    await Bun.sleep(30);
+    await inFlight("/forever");
 
     const started = Date.now();
     const code = await drain({
@@ -257,10 +266,10 @@ describe("drain", () => {
   });
 
   test("a zero timeout still reports a request it abandoned", async () => {
-    const { url, stoppable } = serve();
+    const { url, stoppable, inFlight } = serve();
 
     void fetch(`${url}/forever`).catch(() => {});
-    await Bun.sleep(30);
+    await inFlight("/forever");
 
     const code = await drain({
       server: stoppable,
@@ -336,8 +345,38 @@ async function keptAliveConnection(port: number) {
         await Bun.sleep(10);
       }
     },
+    /** `get`, or `"closed"` when the server hangs up before answering. */
+    async getOrClosed(path: string): Promise<{ head: string; body: string } | "closed"> {
+      try {
+        return await this.get(path);
+      } catch (error) {
+        if (socket.destroyed && buffer === "") return "closed";
+        throw error;
+      }
+    },
     close: () => socket.destroy(),
   };
+}
+
+/**
+ * Bun 1.4.0 started closing idle kept-alive connections in `server.stop()`;
+ * 1.3 leaves them open (checked on 1.3.14, 1.4.0, 1.4.1 and 1.4.2, Linux and
+ * macOS). On 1.4 a request down such a connection after the drain never
+ * arrives, which is the same guarantee `serveForShutdown` gives on 1.3 — so the
+ * tests below hold either way and say which one they saw.
+ */
+const BUN_CLOSES_IDLE_CONNECTIONS_ON_STOP = Bun.semver.satisfies(Bun.version, ">=1.4.0");
+
+/** A request after the drain: refused with a 503 on Bun 1.3, hung up on by Bun 1.4. */
+function expectRefused(response: { head: string; body: string } | "closed") {
+  if (BUN_CLOSES_IDLE_CONNECTIONS_ON_STOP) {
+    expect(response).toBe("closed");
+    return;
+  }
+  expect(response).not.toBe("closed");
+  const { head } = response as { head: string };
+  expect(head).toMatch(/^HTTP\/1\.1 503/);
+  expect(head).toMatch(/^connection: close$/im);
 }
 
 // Item 3 of #566. `server.stop()` closes the listener but not a kept-alive
@@ -379,19 +418,26 @@ describe("serveForShutdown", () => {
     while (!events.includes("providers")) await Bun.sleep(10);
   }
 
-  // The premise, so this file notices a Bun that starts closing them: then the
-  // refusal below is never reached, and can go.
-  test("a kept-alive connection outlives the drain, and a request down it is served", async () => {
+  // The premise, pinned per Bun version so this file notices when it moves.
+  // On 1.3 the refusal below is what stands between such a request and the
+  // app; from 1.4.0 Bun closes the connection itself. Once gemi requires
+  // Bun 1.4, `serveForShutdown` and the refusal tests can go.
+  test("a kept-alive connection outlives the drain on Bun 1.3, and is closed by it on 1.4", async () => {
     const server = Bun.serve({ port: 0, fetch: () => new Response("served") });
     servers.push(server);
     const connection = await keptAliveConnection(server.port);
     await connection.get("/");
 
     await server.stop();
-    const after = await connection.get("/");
+    const after = await connection.getOrClosed("/");
 
-    expect(after.head).toMatch(/^HTTP\/1\.1 200/);
-    expect(after.body).toBe("served");
+    if (BUN_CLOSES_IDLE_CONNECTIONS_ON_STOP) {
+      expect(after).toBe("closed");
+    } else {
+      expect(after).not.toBe("closed");
+      expect((after as { head: string }).head).toMatch(/^HTTP\/1\.1 200/);
+      expect((after as { body: string }).body).toBe("served");
+    }
     connection.close();
   });
 
@@ -404,13 +450,13 @@ describe("serveForShutdown", () => {
     await untilProvidersRun();
     // Twice: Bun does not close the socket after a `Connection: close`
     // response, so a client that ignores it can keep sending.
-    const refused = [await connection.get("/after"), await connection.get("/again")];
+    const refused = [
+      await connection.getOrClosed("/after"),
+      await connection.getOrClosed("/again"),
+    ];
     release();
 
-    for (const { head } of refused) {
-      expect(head).toMatch(/^HTTP\/1\.1 503/);
-      expect(head).toMatch(/^connection: close$/im);
-    }
+    for (const response of refused) expectRefused(response);
     expect(reached).toEqual(["instrumentation /before", "app /before"]);
     expect(await draining).toBe(0);
     connection.close();
@@ -429,10 +475,10 @@ describe("serveForShutdown", () => {
 
     const draining = drain({ server, shutdownProviders, settings: settings({ timeoutMs: 100 }) });
     await untilProvidersRun();
-    const refused = await idle.get("/after");
+    const refused = await idle.getOrClosed("/after");
     release();
 
-    expect(refused.head).toMatch(/^HTTP\/1\.1 503/);
+    expectRefused(refused);
     expect(reached).not.toContain("instrumentation /after");
     expect(reached).not.toContain("app /after");
     // 1: the drain gave up on `/slow`.

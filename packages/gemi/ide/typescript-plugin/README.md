@@ -129,7 +129,7 @@ files, in about 2ms.
 ## Tests
 
 ```
-bun --bun vitest run ide/typescript-plugin
+bun --bun x vitest run ide/typescript-plugin
 ```
 
 Five files, in rough order of how much they would catch:

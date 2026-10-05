@@ -52,6 +52,10 @@ New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI 
 
 kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
 
+## `gemi upgrade` stops looking for gemi's manifest at a workspace root (#815)
+
+`gemi upgrade` walks up from the current directory to the `package.json` that declares `gemi`. It now stops at a workspace root (a manifest with `workspaces`) and refuses there, instead of carrying on into the parent directories, where an unrelated `package.json` that happens to depend on gemi (in `$TMPDIR` or `$HOME`, say) would have been upgraded instead. Nothing changes for a project whose manifest declares gemi.
+
 # Upgrading from 0.110.0 to 0.111.0
 
 ## `onMessage` for a turn's user message fires when the run starts (#806)

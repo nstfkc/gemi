@@ -215,6 +215,29 @@ describe("the workspace case", () => {
     expect(h.errors()).toContain("declares `gemi`");
     expect(h.spawn).not.toHaveBeenCalled();
   });
+
+  test("does not look past the workspace root for a manifest that declares gemi", async () => {
+    // A `package.json` above the workspace that does declare gemi — the shape of
+    // a stray manifest in the temp directory, which is what made the test above
+    // depend on the machine it ran on.
+    const outer = mkdtempSync(join(tmpdir(), "gemi-outer-"));
+    dirs.push(outer);
+    writeFileSync(
+      join(outer, "package.json"),
+      JSON.stringify({ dependencies: { gemi: "^0.58.0" } }),
+    );
+    const root = join(outer, "repo");
+    const pkg = join(root, "node_modules", "gemi");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "gemi", version: "0.58.0" }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["apps/*"] }));
+
+    const h = harness();
+    expect(
+      await runUpgrade({ rootDir: root, fetchImpl: respond({ version: "0.59.0" }), ...h.options }),
+    ).toBe(1);
+    expect(h.spawn).not.toHaveBeenCalled();
+  });
 });
 
 describe("runUpgrade", () => {
