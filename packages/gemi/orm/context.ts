@@ -269,6 +269,49 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
 }
 
 /**
+ * Run `callback` once the open transaction commits, or now when none is open.
+ * Never when the transaction rolls back, nor when a savepoint it was
+ * registered inside rolls back.
+ *
+ * The application-facing form of `deferUntilCommit`, exported from `gemi/orm`
+ * (#786). The difference is the `false` branch: `deferUntilCommit` hands the
+ * "no transaction" case back to the caller, who must remember to run the work
+ * itself, and this runs it. A caller that wants a side effect only once its
+ * writes are durable — waking a long-poll, notifying another process — has
+ * nothing left to get wrong.
+ *
+ * Inside a transaction the callback joins the same list `static afterCommit`
+ * events use, so it is drained after `begin` resolves, outside the
+ * transaction, in registration order with them.
+ *
+ * The returned promise resolves once the callback has run (no transaction) or
+ * been queued (inside one). It never rejects: a callback that throws is
+ * reported on stderr, as a deferred one is at the drain, so a caller that does
+ * not await — the usual case — cannot leave an unhandled rejection behind, and
+ * the two branches fail the same way. A sync callback outside a transaction
+ * runs before this returns.
+ */
+export function afterCommit(
+  callback: () => void | Promise<void>,
+): Promise<void> {
+  if (deferUntilCommit(callback)) return Promise.resolve();
+
+  const report = (error: unknown) => {
+    console.error(
+      `An after-commit callback threw. No transaction was open, so it ran ` +
+        `immediately.`,
+      error,
+    );
+  };
+  try {
+    return Promise.resolve(callback()).catch(report);
+  } catch (error) {
+    report(error);
+    return Promise.resolve();
+  }
+}
+
+/**
  * Make the open transaction's commit depend on `write`, a statement issued on
  * its handle: the transaction does not commit until `write` settles, and
  * rolls back — rejecting with `TransactionDependencyError` — if it rejected.

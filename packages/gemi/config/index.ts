@@ -1,8 +1,9 @@
 import type { PluginOption } from "vite";
 import type { BunPlugin } from "bun";
 import type { PreviousAssetsConfig } from "../vite/previousAssets";
+import type { StatsBudgets, StatsConfig } from "../stats/bundleStats";
 
-export type { PreviousAssetsConfig };
+export type { PreviousAssetsConfig, StatsBudgets, StatsConfig };
 
 // Vite configuration contributed by the app. `plugins` are appended to gemi's
 // own Vite plugins; every other key is a standard Vite `UserConfig` field and is
@@ -42,6 +43,12 @@ export interface GemiConfig {
    * previous image's. Off by default.
    */
   previousAssets?: PreviousAssetsConfig | boolean;
+  /**
+   * `gemi stats` and `gemi build --stats`: initial-JS budgets per route, in KB.
+   * A route over its budget fails the command, so CI can hold pages to a size.
+   * See the docs' "Bundle stats" page.
+   */
+  stats?: StatsConfig;
 }
 
 // Identity helper that gives `gemi.config.ts` full type-checking and editor

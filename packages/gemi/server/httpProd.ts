@@ -8,7 +8,7 @@ import {
   collectCss,
   collectModulePreloads,
   createClientEntry,
-  createIslandAssets,
+  createIslandResolver,
 } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
@@ -18,6 +18,7 @@ import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
+import { serverIdleTimeout } from "./idleTimeout";
 import { applyForwardedTrust, parseTrustProxy } from "./forwardedFor";
 import { readStaticAssetsRecord } from "../vite/precompressAssets";
 import type { StaticFileOptions } from "./staticFile";
@@ -137,10 +138,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
 
-  // Island client modules (`*.island.ts`), which a static view's document
-  // loads — see `injectIslands`.
-  const islandAssets = createIslandAssets(manifest, assetBase);
-  const resolveIsland = (moduleKey: string) => islandAssets[moduleKey];
+  // The island entries (`<module>?gemi-island`) a static view's document
+  // loads; see `injectIslands`.
+  const resolveIsland = createIslandResolver(manifest, assetBase);
 
   // A static view's CSS comes from the whole import closure of its views (and
   // its own layout's, which then replaces the app stylesheet): there is no
@@ -322,7 +322,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // untouched.
       return compressionEnabled ? compressResponse(req, res) : res;
     },
-    idleTimeout: Number(process.env.SERVER_IDLE_TIMEOUT ?? 10),
+    idleTimeout: serverIdleTimeout(),
     port: process.env.PORT || 5173,
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.109.0",
+  "version": "0.111.0",
   "private": false,
   "license": "MIT",
   "author": "Enes Tufekci <enes@gemijs.dev>",
@@ -42,6 +42,7 @@
     "./support": "./support/index.ts",
     "./console/run": "./console/run.ts",
     "./queue/work": "./services/queue/work.ts",
+    "./stats/route-table": "./stats/route-table.ts",
     "./ide/typescript-plugin": "./ide/typescript-plugin/index.ts",
     "./bun/preload": "./bun/preload.ts",
     "./bun/plugin": "./bun/plugin.ts",

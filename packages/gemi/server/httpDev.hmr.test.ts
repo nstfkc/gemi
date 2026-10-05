@@ -66,9 +66,11 @@ async function startDev() {
 }
 
 let originalPort: string | undefined;
+let originalIdleTimeout: string | undefined;
 
 beforeEach(() => {
   originalPort = process.env.PORT;
+  originalIdleTimeout = process.env.SERVER_IDLE_TIMEOUT;
   createdConfigs.length = 0;
   servedOptions.length = 0;
   resolveHmrPort.mockClear();
@@ -88,6 +90,46 @@ afterEach(() => {
   delete (globalThis as any).__gemiVite;
   if (originalPort === undefined) delete process.env.PORT;
   else process.env.PORT = originalPort;
+  if (originalIdleTimeout === undefined) delete process.env.SERVER_IDLE_TIMEOUT;
+  else process.env.SERVER_IDLE_TIMEOUT = originalIdleTimeout;
+});
+
+/**
+ * #787: the dev server ignored `SERVER_IDLE_TIMEOUT` and ran at Bun's 10s, so a
+ * long-poll that worked under `gemi start` was cut under `gemi dev`.
+ */
+describe("httpDev's idle timeout", () => {
+  test("is 10 seconds when SERVER_IDLE_TIMEOUT is unset, as in production", async () => {
+    delete process.env.SERVER_IDLE_TIMEOUT;
+    await startDev();
+
+    expect(servedOptions[0].idleTimeout).toBe(10);
+  });
+
+  test("follows SERVER_IDLE_TIMEOUT", async () => {
+    process.env.SERVER_IDLE_TIMEOUT = "60";
+    await startDev();
+
+    expect(servedOptions[0].idleTimeout).toBe(60);
+  });
+
+  test("keeps the HMR relay on the same server", async () => {
+    // The relay's websocket is not subject to `idleTimeout` (see
+    // `idleTimeout.test.ts`); this guards that the option was added next to it,
+    // not instead of it.
+    process.env.SERVER_IDLE_TIMEOUT = "60";
+    await startDev();
+
+    expect(servedOptions[0].websocket).toBeDefined();
+  });
+
+  test("an invalid value fails the start with the variable's name", async () => {
+    process.env.SERVER_IDLE_TIMEOUT = "sixty";
+
+    await expect(startDev()).rejects.toThrow(/SERVER_IDLE_TIMEOUT/);
+    // Before Vite was started, so a typo doesn't leave a dev server half up.
+    expect(createdConfigs).toHaveLength(0);
+  });
 });
 
 describe("httpDev's HMR websocket port", () => {

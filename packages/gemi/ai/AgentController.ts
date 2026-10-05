@@ -1048,6 +1048,10 @@ export abstract class AgentController<
       const runId = `run_${crypto.randomUUID()}`;
       const ctx: AgentHookContext = { req, runId, threadId };
 
+      // The app's `onMessage` for the turn's user message, called while the
+      // run goes rather than after it (#806). See `EarlyTurn`.
+      const early: EarlyTurn = { id: null, notified: Promise.resolve() };
+
       const run = this.agent.stream({
         runId,
         messages,
@@ -1055,9 +1059,21 @@ export abstract class AgentController<
         threadId,
         // The run reports each message as it finishes it, the user's turn
         // first and before the model is asked anything. Only the store hears
-        // about it here: the app's `onMessage` still runs after the run, in
-        // `notifyRun`, as it always has.
+        // about most of them here: the app's `onMessage` runs after the run,
+        // in `notifyRun`, except for the turn's own message (below).
         ...(journal ? { onMessage: (message: AgentMessage) => journal.finish(message) } : {}),
+        // The turn's user message, once the journal has written it: the app's
+        // `onMessage` for it is called now, so whatever the app keeps beside
+        // a stored message (where it was sent from, say) is there for a read
+        // of the thread while the run is still going (#806). Off the run's
+        // path, as the journal is: neither the store nor the hook holds up
+        // the model. `notifyRun` waits for it and does not call it again.
+        onTurn: (message: AgentMessage) => {
+          if (early.id !== null) return;
+          early.id = message.id;
+          const written = journal ? journal.settled() : Promise.resolve();
+          early.notified = written.then(() => this.safely(() => this.onMessage(message, ctx)));
+        },
         instructions,
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
@@ -1129,7 +1145,7 @@ export abstract class AgentController<
       // waits for more than the thread does — the hooks as well — so that
       // `onMessage` still finds the user who sent the message; the thread
       // waits only for the store, so a slow hook is not a slow next turn.
-      const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal);
+      const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal, early);
       persisted.set(run, stored);
       // Registered now, while the request is certainly open: `waitUntil` is
       // ignored once it has ended, and the run settling can end it before a
@@ -1862,6 +1878,13 @@ export abstract class AgentController<
    * every completed message, user and assistant alike, and is the intended
    * persistence point for an app that is not using `store`.
    *
+   * Once per message, in the transcript's order. The turn's own user message
+   * is handed over while the run is still going: on a thread once the store
+   * has it, and before the model's answer, so whatever the app keeps beside it
+   * is there for a read of the thread during a long run (#806). Every other
+   * message is handed over after the run, as before. A run that fails or is
+   * stopped after taking the turn in has still reported it.
+   *
    * Every hook runs inside the request that started the run, which is held
    * open for them — after the run, and after a client that left — so
    * `ctx.req.ctx().user` is the user who sent the turn. See `hookHoldMs` for
@@ -2099,6 +2122,7 @@ export abstract class AgentController<
     ctx: AgentHookContext,
     eventHooks: Promise<void>,
     journal: TurnJournal | null = null,
+    early: EarlyTurn = { id: null, notified: Promise.resolve() },
   ): { stored: Promise<void>; hooks: Promise<void> } {
     // Assigned before `stored` settles, on every path, so `hooks` below reads
     // the chain this run actually started.
@@ -2114,14 +2138,18 @@ export abstract class AgentController<
         // interrupted once the run is gone.
         journal?.close();
         await journal?.settled();
-        notified = this.safely(() =>
-          this.onError(
-            {
-              code: "unknown",
-              message: err instanceof Error ? err.message : String(err),
-              retryable: false,
-            },
-            ctx,
+        // After the turn's own `onMessage`, if the run got that far: the hooks
+        // keep their order on every path.
+        notified = early.notified.then(() =>
+          this.safely(() =>
+            this.onError(
+              {
+                code: "unknown",
+                message: err instanceof Error ? err.message : String(err),
+                retryable: false,
+              },
+              ctx,
+            ),
           ),
         );
         return;
@@ -2143,7 +2171,7 @@ export abstract class AgentController<
         }
       }
 
-      notified = this.notifyRun(result, messages, ctx);
+      notified = this.notifyRun(result, messages, ctx, early);
     })();
 
     // The bound starts once the run has settled, not with the run: a long run
@@ -2165,8 +2193,14 @@ export abstract class AgentController<
     result: AgentRunResult<ToolShapes, unknown>,
     messages: AgentMessage[],
     ctx: AgentHookContext,
+    early: EarlyTurn,
   ): Promise<void> {
+    // The turn's message was handed to `onMessage` while the run went. It
+    // comes before every message the run made after it, so waiting for it
+    // here keeps the hook's order the transcript's.
+    await early.notified;
     for (const message of messages) {
+      if (message.id === early.id) continue;
       await this.safely(() => this.onMessage(message, ctx));
     }
 
@@ -2181,6 +2215,25 @@ export abstract class AgentController<
     }
   }
 }
+
+/**
+ * The turn's user message, as far as the app's `onMessage` has heard of it
+ * (#806).
+ *
+ * The turn's message is the one thing a run stores that the app usually wants
+ * to tag from the request: where it was sent from, whether the app sent it on
+ * the user's behalf. Called after the run with everything else, those tags
+ * were missing for the whole of a long run, to a reload or a second tab, while
+ * the store already held the message. So it is called as soon as the journal
+ * has written it, and `notifyRun` skips it by `id`: once per message, as
+ * before, and in the same order.
+ */
+type EarlyTurn = {
+  /** The turn message's id, once the run has reported it. */
+  id: string | null;
+  /** Settles once its `onMessage` has. Never rejects. */
+  notified: Promise<void>;
+};
 
 // --- request plumbing ----------------------------------------------------
 

@@ -1316,6 +1316,17 @@ interface AgentStreamParamsBase {
    */
   onMessage?: (message: AgentMessage) => void | Promise<void>;
   /**
+   * Fires once for the message this run made of the client's `turn` (its text
+   * and files), right after `onMessage` has been called for it and before the
+   * model is asked anything (#806). Not for an earlier message the turn
+   * amended, nor for a file a tool showed, both of which are user messages
+   * too: this is how a caller tells the turn itself apart from them. Not
+   * called for a turn with no text and no files, or one the run failed before
+   * taking in. `AgentController` uses it to call the app's `onMessage` for the
+   * turn while the run is still going.
+   */
+  onTurn?: (message: AgentMessage) => void | Promise<void>;
+  /**
    * What a client is told about a failure: the run's `error` frame, and the
    * result of a tool that threw (which the model reads too). Default
    * `redactError`, which keeps the code and replaces any message gemi did not
@@ -4456,6 +4467,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
       }
       await this.report(message);
+      // After `report`, so a caller that persists from `onMessage` has queued
+      // the message before it hears that this is the turn (#806).
+      if (this.params.onTurn) {
+        try {
+          await this.params.onTurn(message);
+        } catch {
+          // As `report`: the turn is still on the stream and in `result()`.
+        }
+      }
     }
 
     return escalated;

@@ -12,6 +12,112 @@ New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI 
 
 kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
 
+# Upgrading from 0.110.0 to 0.111.0
+
+## `onMessage` for a turn's user message fires when the run starts (#806)
+
+`AgentController.onMessage` used to be called for every message of a run after the run had ended, the turn's user message included. It is now called for the turn's user message as soon as the run has taken the turn in: on a thread, right after the store has written the message (the journal writes it before the model is asked anything), and without waiting for the model. Every other message is still reported after the run, and the user message is not reported a second time, so each message still reaches `onMessage` once and in the transcript's order.
+
+What this changes for an app:
+
+- Something an app writes beside the stored message from the request (where the turn was sent from, whether the app sent it on the user's behalf) is there for the whole run, so a reload or another tab no longer shows the message without it until the run ends.
+- `onMessage` for the user message now runs while the model is answering, not after it. It still runs inside the request that started the run, with `ctx.req` and the user. A hook that assumed the run was over when it saw the user message (for example, reading the answer from the store) has to wait for `onStreamComplete` instead.
+- A run that fails or is stopped after taking the turn in has its user message reported too. A run whose `result()` rejects used to report no message at all.
+- A turn with no text and no files (answers to pending tool calls only) has no user message, and nothing changes for it.
+- `Agent.stream` has a new `onTurn(message)` param, called once for the message the run made of the client's turn, right after `onMessage` for it and before the first model call. `AgentController` uses it; an app calling `Agent.stream` directly can ignore it.
+
+# Upgrading from 0.109.0 to 0.110.0
+
+## Islands hydrate React components, like Astro (breaking)
+
+`island()` (new in 0.109.0) no longer takes a vanilla `mount(root, props)` module. An island is now a React component: on a static page gemi server-renders it as its own root and the browser hydrates it with `hydrateRoot`, so the same component works on static and hydrated pages with one implementation. See [Static Views & Islands](docs/static-views-and-islands.md#islands).
+
+**Before (0.109.0):**
+
+```tsx
+export const NavMenu = island("nav-menu", NavMenuView, () => import("./navMenu.island"), {
+  load: "idle",
+  props: true,
+});
+// navMenu.island.ts: export default (root, props) => { /* DOM code */ };
+```
+
+**After:**
+
+```tsx
+export const NavMenu = island(() => import("./NavMenu"), { load: "idle" });
+// NavMenu.tsx: an ordinary React component (state, effects, handlers), default export.
+// For a named export: island(() => import("./forms"), { export: "ContactForm" }).
+```
+
+To migrate an island:
+
+1. Move the behaviour from the `*.island.ts` mount function into the component (`useState`, `onClick`, …) and delete the `.island.ts` file.
+2. Replace `island(name, Component, () => import("./x.island"), options)` with `island(() => import("./Component"), { load })`. The loader must be written exactly as `() => import("…")` inside the `island(` call. There's no `name` any more.
+3. Drop `props`: all props (except `children`) are now serialised, because hydration needs them. They must be plain data (JSON); in dev a function, class instance, `Date`, `Map`, `NaN`, … fails the render naming the prop.
+4. Pass anything the island's component reads from context (locale, translations, URLs) as props: on a static page an island is a separate React root and the page's context doesn't reach it.
+5. In `vitest.config.ts`, add `gemiIslandPlugin()` from `gemi/vitest` and remove any mock of `island` (#795).
+
+What else changes:
+
+- **A static page with islands loads React.** Per page: the island's chunk, React and `react-dom/client` (shared by all islands, fetched once); on a sample page about 54 KB brotli for the first island and about 1 KB for each further one. A static page without islands still ships no JavaScript.
+- **`children` of an island** are rendered on the server in the page's tree, with the page's context (#805), and passed through as static HTML in a `<gemi-slot style="display:contents">` element. Child-combinator CSS (`[&>a]`) doesn't reach them through the slot.
+- **Markers changed:** `<gemi-island data-island="0" data-uid="i0-" data-props="…" style="display:contents">`; the `name` attribute is gone. The island table in `<script id="gemi-islands">` is `{ i: [{ s, e, l }] }`.
+- **The build:** `*.island.*` files are no longer special. gemi's Vite plugin emits a client entry `<module>?gemi-island` for each module an `island()` call names; the client manifest lists it under that key with React and `react-dom/client` among its imports. The SSR build includes the component (imported statically).
+- **The loader** changed, so `ISLAND_LOADER_CSP_HASH` has a new value. Use the export rather than a copied hash.
+- **Removed types:** `IslandMount` (`gemi/client`). `IslandOptions` is now `{ load?, export? }`, and `IslandLoader` is the `() => import()` loader.
+- **New:** `gemiIslandPlugin` from `gemi/vitest`.
+
+## `gemi stats` and `gemi build --stats`: initial JavaScript per route, with budgets (#794)
+
+New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats](docs/bundle-stats.md).
+
+- **`gemi stats`** reads the last build in `dist/client` and prints, per route, the JavaScript it loads before it can run: raw, gzip and brotli, the number of files, and the budget. A hydrated route counts the client entry plus its view chain's static imports (the `modulepreload` set); a `.static()` route counts only the island entries (`<module>?gemi-island`) its views and layout can render, with their imports; React and other shared chunks count once per route. Each island is also listed on its own.
+- **`gemi build --stats`** does the same after building. Both take `--json <file>` (the stats for CI), `--markdown <file>` and `--base <file>` (a PR table compared with another build's JSON), and `--no-routes`.
+- **`stats.budgets` in `gemi.config.ts`** (`unit`, `default`, `routes` keyed by route path or page view, in KB) makes both commands exit with `1` when a route is over its budget.
+- To report per route without booting the app in the build, the route table is read in a child process (`gemi/stats/route-table`, a new export) that imports the Kernel and runs only its synchronous `boot()`: providers register, nothing boots. If it fails, the stats are reported per view instead, with a message.
+- New: `DomainRouter.viewGroups()`, and the `StatsConfig`/`StatsBudgets` types from `gemi/config`.
+
+An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
+
+## Static views set no cookies of their own, and take `cacheControl`
+
+Behaviour change for `.static()` views (#797). See [Static Views & Islands](docs/static-views-and-islands.md#cookies-and-caching).
+
+- **A static view no longer sets `session_id`, `csrf_token` or `i18n-locale`.** A first-time visitor gets no `Set-Cookie`, so a CDN can cache the page. Cookies the handler or middleware sets are still sent. The `404` a missing record turns a static route into is a hydrated page and keeps all three.
+- **`.static({ cacheControl })`** sets the page's `Cache-Control` (for example `"public, max-age=60, s-maxage=600"`). It applies only to the rendered page; a header the handler set wins; and a page that sets a cookie is sent `private, no-store` instead.
+- **`.static({ session: true })`** and **`.static({ csrf: true })`** opt back into `session_id` (percentage rollouts for anonymous visitors bucket on it) and `csrf_token` (a same-origin form posting to a route behind `CSRFMiddleware`).
+- **`Lang.setLocale(locale, { cookie: false })`** sets the request's locale without writing the `i18n-locale` cookie.
+
+What to check: a static page whose form posts to a same-origin route behind `CSRFMiddleware` needs `csrf: true`, and one whose feature flags roll out by percentage to anonymous visitors needs `session: true`. A form posting to an api route with its own protection needs nothing.
+
+## CORS headers on refusals from earlier middleware
+
+Fixes #800. A refusal from a middleware listed before `cors` (a router's `rate-limit` 429, a `body-limit` 413, a `400` for an unparseable body read by a middleware, an `auth` 401) now carries the CORS headers, so a browser sees the status instead of a network error. See [Middleware](docs/middleware.md#cors--corsmiddleware).
+
+- **`Middleware.runsOnRefusal`** (static, default `false`): when a middleware in the chain throws, the `runsOnRefusal` middleware after it still run before the error goes on. One that throws itself then is logged and ignored. `CorsMiddleware` sets it to `true`.
+- **`CorsMiddleware` accepts a `"*"` origin**: any origin gets `Access-Control-Allow-Origin: *`, without `Access-Control-Allow-Credentials`. An exact origin key wins.
+
+Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configure`) listed after a middleware that refuses now runs for that refusal. If an app relied on an ordering trick to put CORS first (an `any-origin` middleware at the start of the list), it can keep it or switch to `CorsMiddleware` with `"*"`. A custom header-only middleware can opt in with `static runsOnRefusal = true`.
+
+## `afterCommit(fn)` from `gemi/orm` (#786)
+
+New, nothing to change. `afterCommit(fn)` runs `fn` after the surrounding transaction commits, or immediately when no transaction is open, and never on rollback (including when the savepoint it was registered in rolls back). It is the commit hook `static afterCommit` events already use, so an app no longer needs to push onto `ormContext.getStore()?.afterCommit` itself. See [Running something after the commit](docs/orm.md#running-something-after-the-commit).
+
+An app doing that today (kyte's `SiteChangeSignals.signalAfterCommit`) can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
+
+## `gemi dev` honours `SERVER_IDLE_TIMEOUT` (#787)
+
+`gemi dev` always ran at Bun's 10-second idle timeout, so a long-poll that worked under `gemi start` with `SERVER_IDLE_TIMEOUT=60` was cut after 10 seconds in development. Both servers now read the variable the same way. See [Idle connections](docs/configuration.md#idle-connections-server_idle_timeout).
+
+Behaviour changes to know:
+
+- **`gemi dev` uses `SERVER_IDLE_TIMEOUT`** when it is set. Unset, nothing changes (10 seconds).
+- **A blank `SERVER_IDLE_TIMEOUT=` means the default (10)** in both servers. `gemi start` used to read it as `0`, which disables the timeout; write `0` for that.
+- **A value that isn't a whole number from 0 to 255 fails the boot** with a message naming the variable. Before, Bun refused non-integers and values above 255 with its own message, and accepted negatives.
+
+An app that worked around the dev limit (kyte's site change feed falls back to a 10-second wait in development) can use the same wait in both.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)
