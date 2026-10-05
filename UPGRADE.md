@@ -72,6 +72,12 @@ Fixes #800. A refusal from a middleware listed before `cors` (a router's `rate-l
 
 Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configure`) listed after a middleware that refuses now runs for that refusal. If an app relied on an ordering trick to put CORS first (an `any-origin` middleware at the start of the list), it can keep it or switch to `CorsMiddleware` with `"*"`. A custom header-only middleware can opt in with `static runsOnRefusal = true`.
 
+## `afterCommit(fn)` from `gemi/orm` (#786)
+
+New, nothing to change. `afterCommit(fn)` runs `fn` after the surrounding transaction commits, or immediately when no transaction is open, and never on rollback (including when the savepoint it was registered in rolls back). It is the commit hook `static afterCommit` events already use, so an app no longer needs to push onto `ormContext.getStore()?.afterCommit` itself. See [Running something after the commit](docs/orm.md#running-something-after-the-commit).
+
+An app doing that today (kyte's `SiteChangeSignals.signalAfterCommit`) can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
+
 # Upgrading from 0.108.0 to 0.109.0
 
 ## Static views and islands: server-rendered pages with no React on the client (#790)
