@@ -64,6 +64,11 @@ import { redactError, unredactedError } from "./redact";
 import type { ErrorRedactionInfo } from "./redact";
 import { sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
+import { AgentJobs } from "./jobs/AgentJob";
+import { markOrphans, overlayJobs } from "./jobs/overlay";
+import { DEFAULT_JOBS_CONTEXT_MAX, renderJobsBlock } from "./jobs/contextBlock";
+import type { AgentJobRecord } from "./jobs/AgentJobStore";
+import type { Schema } from "./Schema";
 import type {
   AgentError,
   AgentMessage,
@@ -986,6 +991,9 @@ export abstract class AgentController<
     };
     const startRun = async (): Promise<Response> => {
       let messages: AgentMessage[];
+      // The `<jobs>` block for this turn's system prompt (#461), on a thread
+      // that has background jobs.
+      let jobsBlock: string | null = null;
       if (threadId) {
         const history = await this.store.loadThread(threadId);
         if (!history) {
@@ -1012,7 +1020,9 @@ export abstract class AgentController<
         // as interrupted, and its open calls have results. Under the thread's
         // lock and after the previous run's transcript is stored, so the only
         // unfinished message left is one no run in this process owns.
-        messages = await this.settleThread(threadId, history, { write: true });
+        const thread = await this.settleThread(threadId, history, { write: true });
+        messages = thread.messages;
+        jobsBlock = this.jobsBlock(thread.jobs);
         if (regenerate) {
           const cut = regenerationCut(messages);
           if (!cut) {
@@ -1043,7 +1053,10 @@ export abstract class AgentController<
         warnInMemoryNonces(this.nonces);
       }
 
-      const instructions = (await this.instructions(req, { body: extraBody })) || undefined;
+      const instructions =
+        [(await this.instructions(req, { body: extraBody })) || undefined, jobsBlock ?? undefined]
+          .filter(Boolean)
+          .join("\n\n") || undefined;
       const context = await this.context(req, { body: extraBody });
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
@@ -1132,6 +1145,9 @@ export abstract class AgentController<
         // The principal its pending calls are bound to (#447): an answer is
         // only accepted from the same `runOwner` the question was asked of.
         subject: owner,
+        // Background jobs (#461) settle into the thread, so only a threaded
+        // turn can start one. The job records who started it.
+        ...(threadId ? { jobs: { owner } } : {}),
         // What each model call is sent (#473). Only the request: the store
         // still gets every message through `journal` above.
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
@@ -2055,7 +2071,7 @@ export abstract class AgentController<
    */
   async readThread(threadId: string): Promise<AgentMessage[] | null> {
     const history = await this.store.loadThread(threadId);
-    return history ? await this.settleThread(threadId, history, { write: false }) : null;
+    return history ? (await this.settleThread(threadId, history, { write: false })).messages : null;
   }
 
   /**
@@ -2081,20 +2097,82 @@ export abstract class AgentController<
     threadId: string,
     history: AgentMessage[],
     { write }: { write: boolean },
-  ): Promise<AgentMessage[]> {
-    const { messages, settled } = await settleInterrupted(history, (runId) =>
-      this.isRunLive(runId, threadId),
-    );
-    if (write && settled.length > 0) {
+  ): Promise<{ messages: AgentMessage[]; jobs: AgentJobRecord[] }> {
+    const isLive = (runId: string) => this.isRunLive(runId, threadId);
+    const interrupted = await settleInterrupted(history, isLive);
+    let messages = interrupted.messages;
+    let jobs: AgentJobRecord[] = [];
+    const settled = new Map(interrupted.settled.map((message) => [message.id, message]));
+
+    // Background jobs (#461): each `running` tool result gets its job's
+    // current state, and the ones that settled are written back with the
+    // rest. A job store that cannot be read leaves the results `running`,
+    // which is what the model saw last time, rather than failing the turn.
+    if (hasRunningResult(messages) || write) {
       try {
-        await this.store.appendMessages(threadId, settled);
+        const overlaid = await overlayJobs(messages, {
+          threadId,
+          store: AgentJobs.store,
+          isRunLive: isLive,
+          outputSchemaFor: (name) => this.toolOutputSchema(name),
+          scan: this.jobsBlockMax(),
+        });
+        messages = overlaid.messages;
+        jobs = overlaid.jobs;
+        for (const message of overlaid.settled) settled.set(message.id, message);
+        if (write && overlaid.orphans.length > 0) {
+          await markOrphans(AgentJobs.store, overlaid.orphans, (err) =>
+            this.reportHookFailure(err),
+          );
+          const orphans = new Set(overlaid.orphans.map((record) => record.id));
+          jobs = jobs.map((record) =>
+            orphans.has(record.id) ? { ...record, orphaned: true as const } : record,
+          );
+        }
+      } catch (err) {
+        this.reportHookFailure(err);
+      }
+    }
+
+    if (write && settled.size > 0) {
+      try {
+        await this.store.appendMessages(threadId, [...settled.values()]);
       } catch (err) {
         // The run still gets the settled history. The store keeps the
         // unfinished copy, and the next turn settles it the same way again.
         this.reportHookFailure(err);
       }
     }
-    return messages;
+    return { messages, jobs };
+  }
+
+  /** The agent's `jobs.contextBlock.max`, or 0 for no block. */
+  private jobsBlockMax(): number {
+    const block = (this.agent as { jobs?: { contextBlock?: { max?: number } | false } }).jobs
+      ?.contextBlock;
+    if (block === false) return 0;
+    return block?.max ?? DEFAULT_JOBS_CONTEXT_MAX;
+  }
+
+  private jobsBlock(jobs: AgentJobRecord[]): string | null {
+    return renderJobsBlock(jobs, this.jobsBlockMax());
+  }
+
+  /** A tool's output schema, by name, for checking a background job's output. */
+  private toolOutputSchema(name: string): Schema<any> | undefined {
+    const visit = (entries: readonly unknown[]): Schema<any> | undefined => {
+      for (const entry of entries) {
+        const tool = entry as { name?: string; outputSchema?: Schema<any>; tools?: unknown[] };
+        if (Array.isArray(tool.tools)) {
+          const found = visit(tool.tools);
+          if (found) return found;
+        } else if (tool.name === name) {
+          return tool.outputSchema;
+        }
+      }
+      return undefined;
+    };
+    return visit((this.agent as { tools?: readonly unknown[] }).tools ?? []);
   }
 
   /**
@@ -3117,5 +3195,12 @@ function warnInMemoryNonces(nonces: NonceStore): void {
     "[gemi/ai] A stateless agent chat is spending approval nonces in process memory. " +
       "With more than one instance a replayed approval is accepted once per instance. " +
       "Set `nonces = new RedisNonceStore()` (or your own NonceStore) on the AgentController.",
+  );
+}
+
+/** Whether any message holds a tool result still waiting on a background job. */
+function hasRunningResult(messages: AgentMessage[]): boolean {
+  return messages.some((message) =>
+    message.content.some((part) => part.type === "tool-result" && part.status === "running"),
   );
 }

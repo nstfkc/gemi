@@ -61,6 +61,25 @@ New, nothing to migrate. `ChangeFeed.publish("site:42", data)` appends to a chan
 - On Bun 1.3 the `LISTEN` connection needs the `postgres` package (`bun add postgres`), now an optional peer dependency. Bun 1.4 and later use their own client.
 - Every app now boots a 17th provider, `ChangeFeedServiceProvider`. It holds nothing until the feed is used.
 
+## Background jobs for agent tools (#461)
+
+A tool can hand work that outlasts a run to a queued job. Declare `async` on the tool and return `ctx.jobs.start(JobClass, args, { summary })`: the call's result is `{ status: "running", job: { id, summary } }`, the turn ends as usual, and the job's output replaces that result once it settles. `ctx.jobs.track()` records a job that a webhook or poller settles with `AgentJobs.settle(id, { output })`. See [AI Background Jobs](docs/ai-background-jobs.md).
+
+New exports from `gemi/ai`: `AgentJob`, `AgentJobs`, `JobHandle`, `JobsRequireThreadError`, `MemoryAgentJobStore`, `DEFAULT_JOB_DEADLINE_MS`, and the types `AgentJobStore`, `AgentJobRecord`, `AgentJobContext`, `ToolJobs`, `StartJobOptions`, `AgentJobRef` and others. `AgentTool.create` takes `async: { deadlineMs }`, and `ToolContext` has `jobs`.
+
+What this changes for an existing app:
+
+- `ToolResultPart` has a fourth `status`, `"running"`, and `ok`/`error` results may carry `job`. Code that switches on `status` exhaustively needs a branch for it; a tool that never starts a job never produces one. The iOS and Android clients read a `running` result as `ok` with no output for now.
+- On a threaded turn, `AgentController` now also reads the job store when it loads a thread (`readThread` and the start of each turn). With the default `MemoryAgentJobStore` this is a map lookup.
+- `ToolContext` has a new required member, `jobs`. Code that builds a `ToolContext` by hand (a test calling a tool's `execute` directly) has to add it.
+- `ScopedAttachments` has a `scopeKey` getter.
+
+### Durable jobs, deadlines and the `<jobs>` block
+
+- `DatabaseAgentJobStore` keeps jobs in a `gemi_agent_jobs` table (SQLite, Postgres, MySQL). It is opt-in: `AgentJobs.use(new DatabaseAgentJobStore(connection))` in a service provider. Create the table with the Prisma model in [AI Background Jobs](docs/ai-background-jobs.md#databaseagentjobstore), or `store.createTable()`. Nothing changes for an app that does not opt in.
+- Deadlines: a job still running `deadlineMs` after it started is failed with code `"timeout"`, by `AgentJobs.sweep()` (scheduled every minute by exporting `AgentJobDeadlineSweep` from `app/cron`) and by the controller when it loads the job's thread. A result after that is refused.
+- On a thread with background jobs, the controller adds a `<jobs>` block (at most 20 jobs) after the instructions in the system prompt. `Agent.create({ jobs: { contextBlock: { max } } })` bounds it, and `contextBlock: false` leaves it out. A thread with no jobs gets no block.
+
 ## `gemi upgrade` stops looking for gemi's manifest at a workspace root (#815)
 
 `gemi upgrade` walks up from the current directory to the `package.json` that declares `gemi`. It now stops at a workspace root (a manifest with `workspaces`) and refuses there, instead of carrying on into the parent directories, where an unrelated `package.json` that happens to depend on gemi (in `$TMPDIR` or `$HOME`, say) would have been upgraded instead. Nothing changes for a project whose manifest declares gemi.

@@ -547,6 +547,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "8"
 
+      # The agent job store's compare-and-set, clock and transactional start,
+      # and the restart tests on the database queue driver (#461).
+      - name: Agent job store on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" ai/jobs/DatabaseAgentJobStore.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "12"
+
       # `DB.schema()` reads a different catalog per dialect, and the servers
       # are already here. The filter selects nothing at all if the URLs go
       # missing, which would read as a pass, so the suite is told to fail

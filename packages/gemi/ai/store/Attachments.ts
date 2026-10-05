@@ -239,6 +239,15 @@ export class ScopedAttachments {
   }
 
   /**
+   * The scope's key. Read by `ctx.jobs.start` (#461), which records it on the
+   * job so a background job gets the same attachments its tool had. Only the
+   * key leaves: it is the server's answer, not something a tool can set.
+   */
+  get scopeKey(): string {
+    return this.scope.key;
+  }
+
+  /**
    * The record for `id`, or `AttachmentNotFoundError`.
    *
    * THE SCOPE IS CHECKED TWICE HERE, and the second check is the one that
