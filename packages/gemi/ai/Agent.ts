@@ -52,6 +52,14 @@ import {
   windowMessages,
   type ContextWindowOptions,
 } from "./contextWindow";
+import {
+  compactWindow,
+  defaultSummaryStore,
+  precompactWindow,
+  type CompactJobParams,
+  type SummaryStore,
+  type ThreadSummary,
+} from "./contextCompaction";
 import type {
   AgentError,
   AgentMessage,
@@ -1292,6 +1300,13 @@ interface AgentStreamParamsBase {
    */
   prepareStep?: PrepareStep;
   /**
+   * Where `contextWindow.compact` keeps this thread's summaries, unless the
+   * window names its own `store`. `AgentController` passes its `AgentStore`
+   * when that implements the summary methods. Default
+   * `defaultSummaryStore`, in memory.
+   */
+  summaryStore?: SummaryStore;
+  /**
    * Fires once for every message this run completes — the user's turn, each
    * assistant turn, and any earlier message this turn amended by resolving a
    * pending call. It is the controller's persistence point, and it fires
@@ -2166,6 +2181,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   /** The working history handed to the provider, and what this run produced. */
   private history: AgentMessage[] = [];
+  /** `contextWindow.compact`'s summaries for this run, by cut. */
+  private readonly compactMemo = new Map<string, ThreadSummary | null>();
   /** How the previous model call ended, for `prepareStep`. */
   private lastStep: { reason: FinishReason; usage?: Usage } | undefined;
   private produced: AgentMessage[] = [];
@@ -2461,6 +2478,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.emit({ type: "run-end", runId: this.runId, finishReason: this.finishReason });
     this.ended = true;
     this.wake();
+    // After the turn, not in it: the run's usage is final, and the summary
+    // is billed to the next run that uses it.
+    this.precompact();
 
     const failure = this.finishReason === "error" ? this.failure : undefined;
     if (failure && this.config.logErrors) this.logFailure(failure);
@@ -2945,6 +2965,46 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
+   * What `contextWindow.compact` works from on this run, or `undefined` when
+   * the run isn't compacted: compaction needs a stored thread (`threadId`) to
+   * key summaries on, so stateless runs and sub-runs get the plain window.
+   */
+  private compactJobParams(
+    history: AgentMessage[],
+    current: AgentMessage | undefined,
+  ): CompactJobParams | undefined {
+    const window = this.config.contextWindow;
+    if (!window?.compact || !this.params.threadId || this.depth !== 0) return undefined;
+    const compact = window.compact === true ? {} : window.compact;
+    return {
+      history,
+      stored: this.history.filter((message) => message !== current),
+      window,
+      compact,
+      threadId: this.params.threadId,
+      provider: this.config.provider,
+      store: compact.store || this.params.summaryStore || defaultSummaryStore,
+    };
+  }
+
+  /**
+   * Starts the summary the thread's next turn will need, without waiting on
+   * it (`ContextCompactOptions.background`). Never fails the run.
+   */
+  private precompact(): void {
+    const window = this.config.contextWindow;
+    if (!window?.compact || (window.compact !== true && window.compact.background === false)) {
+      return;
+    }
+    try {
+      const params = this.compactJobParams(this.historyForProvider(undefined), undefined);
+      if (params) void precompactWindow(params);
+    } catch {
+      // Best effort: the next turn makes it inline.
+    }
+  }
+
+  /**
    * What one model call is sent: the history as `historyForProvider` shapes
    * it, cut to `contextWindow`, then whatever the `prepareStep` hooks answer.
    *
@@ -2958,9 +3018,21 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     step: number,
   ): Promise<{ messages: AgentMessage[]; instructions: string | undefined } | { error: AgentError }> {
     const history = this.historyForProvider(current);
-    let messages = this.config.contextWindow
-      ? windowMessages(history, this.config.contextWindow).messages
-      : history;
+    const window = this.config.contextWindow;
+    const compact = this.compactJobParams(history, current);
+    let messages = !window
+      ? history
+      : compact
+        ? await compactWindow({
+            ...compact,
+            signal: this.controller.signal,
+            // Billed whether or not the summary came out, as `ctx.generate` is.
+            onUsage: (usage) => {
+              this.usage = addUsage(this.usage, usage);
+            },
+            memo: this.compactMemo,
+          })
+        : windowMessages(history, window).messages;
     let instructions = await this.systemPrompt();
 
     for (const hook of this.config.prepareStep) {
@@ -4181,7 +4253,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * a file the *user* attached is one they expect to stay attached, and
    * dropping it would be the agent losing the thing it was asked about.
    */
-  private historyForProvider(current: AgentMessage): AgentMessage[] {
+  private historyForProvider(current: AgentMessage | undefined): AgentMessage[] {
     const messages = this.history.filter((message) => message !== current);
 
     // Injected messages are named by the tool call that made them, and that
