@@ -271,7 +271,10 @@ describe("a tool that returns a job handle", () => {
     body = async () => {
       throw new ToolError("The page has no image slots.", { retryable: false });
     };
-    const { controller, agentStore } = setup([callTool("call_1", "render", { count: 1 }), say("x")]);
+    const { controller, agentStore } = setup([
+      callTool("call_1", "render", { count: 1 }),
+      say("x"),
+    ]);
     const { threadId } = await agentStore.createThread({});
     await turn(controller, threadId, "go");
     const [record] = await store.listForThread(threadId);
@@ -555,7 +558,9 @@ describe("MemoryAgentJobStore", () => {
     await make("b", 60_000);
     await jobs.transition("b", ["running"], { state: "ok" });
     expect((await jobs.listForThread("t")).map((r) => r.id)).toEqual(["b", "a"]);
-    expect((await jobs.listForThread("t", { states: ["running"] })).map((r) => r.id)).toEqual(["a"]);
+    expect((await jobs.listForThread("t", { states: ["running"] })).map((r) => r.id)).toEqual([
+      "a",
+    ]);
     expect(await jobs.listForThread("t", { limit: 1 })).toHaveLength(1);
     expect((await jobs.overdue(Date.now(), 10)).map((r) => r.id)).toEqual(["a"]);
   });
