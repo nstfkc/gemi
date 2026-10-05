@@ -32,11 +32,15 @@ const files: Record<string, number> = {
   "assets/Editor-FFFFFFFF.js": 9000,
   "assets/SitePage-GGGGGGGG.js": 100,
   "assets/SiteLayout-HHHHHHHH.js": 50,
-  "assets/navMenu.island-IIIIIIII.js": 40,
-  "assets/form.island-JJJJJJJJ.js": 60,
+  "assets/navMenu-IIIIIIII.js": 40,
+  "assets/form-JJJJJJJJ.js": 60,
   "assets/dom-KKKKKKKK.js": 20,
-  "assets/counter.island-LLLLLLLL.js": 30,
+  "assets/counter-LLLLLLLL.js": 30,
   "assets/Plain-MMMMMMMM.js": 10,
+  "assets/_virtual_gemi-island-runtime-OOOOOOOO.js": 15,
+  "assets/NavMenu-PPPPPPPP.js": 5,
+  "assets/Form-QQQQQQQQ.js": 6,
+  "assets/Counter-RRRRRRRR.js": 7,
   "assets/main-NNNNNNNN.css": 700,
 };
 for (const [file, size] of Object.entries(files)) {
@@ -67,35 +71,50 @@ const manifest = {
     dynamicImports: ["app/views/app/Editor.tsx"],
   },
   "app/views/app/Editor.tsx": { file: "assets/Editor-FFFFFFFF.js", isDynamicEntry: true },
+  // A static view imports its islands' modules (`island()` imports them
+  // statically); the manifest shows the chunks holding them, not the modules.
   "app/views/site/Page.tsx": {
     file: "assets/SitePage-GGGGGGGG.js",
     isEntry: true,
-    imports: ["_react.js"],
-    dynamicImports: ["app/views/site/navMenu.island.ts", "app/views/site/form.island.tsx"],
+    imports: ["_react.js", "_form.js"],
+    dynamicImports: ["app/views/site/Lazy.tsx"],
   },
+  // Lazily imported: an island it can render still counts.
+  "app/views/site/Lazy.tsx": { file: "assets/SitePage-GGGGGGGG.js", imports: ["_navMenu.js"] },
   "app/views/site/SiteLayout.tsx": {
     file: "assets/SiteLayout-HHHHHHHH.js",
     isEntry: true,
-    dynamicImports: ["app/views/site/navMenu.island.ts"],
+    imports: ["_navMenu.js"],
   },
-  "app/views/site/navMenu.island.ts": {
-    file: "assets/navMenu.island-IIIIIIII.js",
-    isEntry: true,
-    imports: ["_dom.js"],
-  },
-  // An island that hydrates React: React is a chunk it shares with the others.
-  "app/views/site/form.island.tsx": {
-    file: "assets/form.island-JJJJJJJJ.js",
-    isEntry: true,
-    imports: ["_dom.js", "_react.js"],
+  "_navMenu.js": { file: "assets/navMenu-IIIIIIII.js" },
+  "_form.js": { file: "assets/form-JJJJJJJJ.js", imports: ["_react.js"] },
+  "_counter.js": { file: "assets/counter-LLLLLLLL.js", imports: ["_react.js"] },
+  // The island runtime: React and `react-dom/client`, shared by every island.
+  "__virtual_gemi-island-runtime.js": {
+    file: "assets/_virtual_gemi-island-runtime-OOOOOOOO.js",
+    name: "_virtual_gemi-island-runtime",
+    imports: ["_react.js", "_dom.js"],
   },
   "_dom.js": { file: "assets/dom-KKKKKKKK.js" },
-  "app/views/Plain.tsx": { file: "assets/Plain-MMMMMMMM.js", isEntry: true },
-  "app/views/widgets/counter.island.ts": {
-    file: "assets/counter.island-LLLLLLLL.js",
+  // Each island's entry: its module's chunk plus the runtime.
+  "app/views/site/NavMenu.tsx?gemi-island": {
+    file: "assets/NavMenu-PPPPPPPP.js",
     isEntry: true,
-    imports: ["_react.js"],
+    imports: ["_navMenu.js", "__virtual_gemi-island-runtime.js"],
   },
+  "app/views/site/Form.tsx?gemi-island": {
+    file: "assets/Form-QQQQQQQQ.js",
+    isEntry: true,
+    imports: ["_form.js", "__virtual_gemi-island-runtime.js"],
+  },
+  // React imported directly too (a runtime Rollup merged into the entry): a
+  // view that imports React doesn't render this island because of it.
+  "app/views/widgets/Counter.tsx?gemi-island": {
+    file: "assets/Counter-RRRRRRRR.js",
+    isEntry: true,
+    imports: ["_counter.js", "_react.js", "_dom.js"],
+  },
+  "app/views/Plain.tsx": { file: "assets/Plain-MMMMMMMM.js", isEntry: true, imports: ["_react.js"] },
 };
 
 const routes: RouteTableEntry[] = [
@@ -135,22 +154,33 @@ describe("bundleStats", () => {
     const route = stats.routes["/p/:slug"]!;
     expect(route.static).toBe(true);
     expect(route.islands).toEqual([
-      "app/views/site/form.island.tsx",
-      "app/views/site/navMenu.island.ts",
+      "app/views/site/Form.tsx?gemi-island",
+      "app/views/site/NavMenu.tsx?gemi-island",
     ]);
-    // No client entry, no view code; the shared chunks count once.
-    expect(route.chunks).toEqual(["dom.js", "form.island.js", "navMenu.island.js", "react.js"]);
+    // No client entry, no view code; the runtime and React count once.
+    expect(route.chunks).toEqual([
+      "Form.js",
+      "NavMenu.js",
+      "_virtual_gemi-island-runtime.js",
+      "dom.js",
+      "form.js",
+      "navMenu.js",
+      "react.js",
+    ]);
     expect(route.raw).toBe(
       raw(
-        "assets/navMenu.island-IIIIIIII.js",
-        "assets/form.island-JJJJJJJJ.js",
+        "assets/Form-QQQQQQQQ.js",
+        "assets/NavMenu-PPPPPPPP.js",
+        "assets/_virtual_gemi-island-runtime-OOOOOOOO.js",
         "assets/dom-KKKKKKKK.js",
+        "assets/form-JJJJJJJJ.js",
+        "assets/navMenu-IIIIIIII.js",
         "assets/react-BBBBBBBB.js",
       ),
     );
   });
 
-  test("a static route without islands ships nothing", () => {
+  test("a static route without islands ships nothing, though its view imports React", () => {
     expect(stats.routes["/plain"]).toMatchObject({ raw: 0, gzip: 0, brotli: 0, chunks: [] });
   });
 
@@ -165,12 +195,14 @@ describe("bundleStats", () => {
 
   test("lists every island with its imports, and the CSS", () => {
     expect(Object.keys(stats.islands)).toEqual([
-      "app/views/site/form.island.tsx",
-      "app/views/site/navMenu.island.ts",
-      "app/views/widgets/counter.island.ts",
+      "app/views/site/Form.tsx?gemi-island",
+      "app/views/site/NavMenu.tsx?gemi-island",
+      "app/views/widgets/Counter.tsx?gemi-island",
     ]);
-    expect(stats.islands["app/views/widgets/counter.island.ts"]!.chunks).toEqual([
-      "counter.island.js",
+    expect(stats.islands["app/views/widgets/Counter.tsx?gemi-island"]!.chunks).toEqual([
+      "Counter.js",
+      "counter.js",
+      "dom.js",
       "react.js",
     ]);
     expect(stats.css.raw).toBe(700);
@@ -201,6 +233,9 @@ describe("chunkName", () => {
   test("drops the directory and the content hash", () => {
     expect(chunkName("assets/PageBuilder-C4f9a1Xz.js")).toBe("PageBuilder.js");
     expect(chunkName("assets/navMenu.island-a_b-1234.js")).toBe("navMenu.island.js");
+    expect(chunkName("assets/_virtual_gemi-island-runtime-Dc8BWT3n.js")).toBe(
+      "_virtual_gemi-island-runtime.js",
+    );
   });
 });
 
@@ -238,7 +273,7 @@ describe("reports", () => {
     expect(text).toContain("Initial JavaScript per route:");
     expect(text).toMatch(/\/p\/:slug\s+static/);
     expect(text).toMatch(/^\/\s+hydrated.*1 OVER$/m);
-    expect(text).toContain("app/views/site/navMenu.island.ts");
+    expect(text).toContain("app/views/site/NavMenu.tsx?gemi-island");
   });
 
   test("the Markdown compares with a base build", () => {

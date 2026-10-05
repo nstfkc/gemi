@@ -3869,12 +3869,12 @@ Initial JavaScript per route:
 Route           Kind      raw KB  gzip KB  br KB  files  budget (gzip)
 /dashboard      hydrated   398.1    129.8  112.4      8            140
 /auth/sign-in   hydrated   303.7     99.8   86.3      7            125
-/p/:slug        static       1.4      0.8    0.7      2              5
-/legal          static       0.0      0.0    0.0      0              5
+/p/:slug        static     183.6     58.9   51.2      5             70
+/legal          static       0.0      0.0    0.0      0            125
 
 Islands (each with its imports):
-  app/views/site/navMenu.island.ts  0.3 KB gzip, 1 file(s)
-  app/views/site/form.island.ts  0.5 KB gzip, 1 file(s)
+  app/views/site/NavMenu.tsx?gemi-island  57.9 KB gzip, 3 file(s)
+  app/views/site/ContactForm.tsx?gemi-island  58.2 KB gzip, 3 file(s)
 
 CSS: 31.6 KB raw, 6.5 KB gzip
 ```
@@ -3888,12 +3888,15 @@ page's head. Chunks a view loads lazily (`import()`, `React.lazy`) aren't part o
 the first load and don't count.
 
 A **static route** ([`.static()`](./static-views-and-islands.md)) loads no
-client entry and no view code. It counts the island modules its views and its
-document layout can render, with their static imports: every `*.island` module
-reachable from those views through any import. A page loads only the islands it
-actually shows, so this is the most it can load. A chunk two islands share (a
-helper, or React if your islands use it) counts once. The island loader is
-inline in the HTML and isn't counted. A static page without islands is `0`.
+client entry and no view code. It counts the islands its views and its document
+layout can render. Each island has its own client entry, `<module>?gemi-island`
+in the build's manifest, and a route can render it when the chunk holding the
+island's component is reachable from those views through any import. The route
+counts each such entry with its static imports, React and `react-dom/client`
+included. A page loads only the islands it actually shows, so this is the most
+it can load. Chunks the islands share (React, the island runtime, a helper)
+count once per route. The island loader is inline in the HTML and isn't counted.
+A static page without islands is `0`.
 
 Sizes come from the client build's manifest and files in `dist/client`. Gzip
 is level 9 and brotli quality 11, the files `gemi build` writes next to each
@@ -3932,7 +3935,7 @@ export default defineConfig({
       routes: {
         "/dashboard": 140, // by route path
         "auth/SignIn": 110, // or by the route's page view
-        "/p/:slug": 5,
+        "/p/:slug": 70,
       },
     },
   },

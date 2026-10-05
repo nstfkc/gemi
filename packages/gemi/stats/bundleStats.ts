@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
+import { ISLAND_ENTRY_QUERY } from "../internal/islandRuntime";
 import {
   CLIENT_ENTRY_KEY,
-  ISLAND_MODULE_PATTERN,
   type ViteManifest,
   type ViteManifestChunk,
 } from "../server/modulePreloads";
@@ -19,11 +19,15 @@ import type { RouteTableEntry } from "./routeTable";
  * (`import()`) aren't initial and don't count.
  *
  * A **static** route (`.static()`) loads no client entry and no view code, only
- * the islands its views can render: every `*.island` module reachable from the
- * views (and the document layout) through static or lazy imports, with the
- * island modules' own static imports. A page loads only the islands it shows,
- * so this is its most. Chunks the islands share (a runtime, React) count once.
- * The island loader is inline in the HTML and not counted.
+ * the islands its views can render. Each island has a client entry of its own,
+ * keyed `<module>?gemi-island` in the manifest, that imports the chunk holding
+ * the island's module and the island runtime (React, `react-dom/client`). A
+ * route can render an island when the chunk holding its module is reachable
+ * from the route's views (and the document layout) through static or lazy
+ * imports; the route then counts that island entry with its static imports. A
+ * page loads only the islands it shows, so this is its most. Chunks the islands
+ * share (the runtime, React) count once per route. The island loader is inline
+ * in the HTML and not counted.
  *
  * Sizes are raw, gzip -9 and brotli q11, the encodings `gemi build` writes
  * next to each asset; those files are read when present.
@@ -37,7 +41,7 @@ export interface RouteStats extends Size {
   views: string[];
   /** Set for a `.static()` route. */
   static?: true;
-  /** A static route's island modules (manifest keys). */
+  /** A static route's island entries (manifest keys, `<module>?gemi-island`). */
   islands?: string[];
   /** The JS chunks counted, by name without the content hash. */
   chunks: string[];
@@ -53,7 +57,7 @@ export interface BuildStats {
    */
   by: "routes" | "views";
   routes: Record<string, RouteStats>;
-  /** Each island module with its static imports. */
+  /** Each island entry (`<module>?gemi-island`) with its static imports. */
   islands: Record<string, Size & { chunks: string[] }>;
   /** Every JS chunk in the build, by name without the content hash. */
   chunks: Record<string, Size>;
@@ -110,7 +114,7 @@ export interface BundleStatsOptions {
   manifest?: ViteManifest;
 }
 
-type Chunk = ViteManifestChunk & { isEntry?: boolean; css?: string[] };
+type Chunk = ViteManifestChunk & { isEntry?: boolean; css?: string[]; name?: string };
 
 export function bundleStats(options: BundleStatsOptions): BuildStats {
   const { clientDir } = options;
@@ -138,23 +142,38 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
   const jsFiles = (keys: Iterable<string>) =>
     [...new Set([...keys].map((key) => manifest[key]!.file))].filter(isJs).sort();
 
-  // The islands reachable from `key` through any import, static or lazy. An
-  // island is where the walk stops: what it imports is its closure.
+  // Each island entry (`<module>?gemi-island`) imports the chunk holding the
+  // island's module and the island runtime. The runtime's chunks, and what the
+  // client entry loads (React), are shared by every island and every view, so
+  // they can't tell which island a view renders: the rest of the entry's direct
+  // imports are its module chunks.
+  const islandEntries = Object.keys(manifest).filter(isIslandEntry).sort();
+  const shared = closure(CLIENT_ENTRY_KEY);
+  for (const [key, chunk] of Object.entries(manifest)) {
+    if (key.includes(ISLAND_RUNTIME_NAME) || chunk.name?.includes(ISLAND_RUNTIME_NAME))
+      closure(key, shared);
+  }
+  const islandModules = new Map(
+    islandEntries.map((entry) => [
+      entry,
+      (manifest[entry]!.imports ?? []).filter((imported) => !shared.has(imported)),
+    ]),
+  );
+
+  // The islands whose module chunk is reachable from `keys` through any
+  // import, static or lazy.
   const islandsBelow = (keys: string[]) => {
     const seen = new Set<string>();
-    const found = new Set<string>();
     const walk = (at: string) => {
-      if (seen.has(at) || !manifest[at]) return;
+      if (seen.has(at) || !manifest[at] || isIslandEntry(at)) return;
       seen.add(at);
-      if (ISLAND_MODULE_PATTERN.test(at)) {
-        found.add(at);
-        return;
-      }
       for (const next of [...(manifest[at].imports ?? []), ...(manifest[at].dynamicImports ?? [])])
         walk(next);
     };
     for (const key of keys) walk(key);
-    return [...found].sort();
+    return islandEntries.filter((entry) =>
+      islandModules.get(entry)!.some((module) => seen.has(module)),
+    );
   };
 
   const viewKey = (view: string) =>
@@ -190,7 +209,7 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
     }
   } else {
     for (const [key, chunk] of Object.entries(manifest)) {
-      if (!chunk.isEntry || !key.startsWith(VIEW_PREFIX) || ISLAND_MODULE_PATTERN.test(key))
+      if (!chunk.isEntry || !key.startsWith(VIEW_PREFIX) || isIslandEntry(key))
         continue;
       const view = key.slice(VIEW_PREFIX.length).replace(/\.[jt]sx?$/, "");
       routes[view] = hydrated([view]);
@@ -198,8 +217,7 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
   }
 
   const islands: BuildStats["islands"] = {};
-  for (const key of Object.keys(manifest).sort()) {
-    if (!ISLAND_MODULE_PATTERN.test(key)) continue;
+  for (const key of islandEntries) {
     const files = jsFiles(closure(key));
     islands[key] = { ...sum(files), chunks: files.map(chunkName) };
   }
@@ -224,6 +242,13 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
     chunks,
     css: sum(css),
   };
+}
+
+/** The island runtime's chunk: `virtual:gemi-island-runtime`, shared by every island. */
+const ISLAND_RUNTIME_NAME = "gemi-island-runtime";
+
+function isIslandEntry(key: string) {
+  return key.endsWith(ISLAND_ENTRY_QUERY);
 }
 
 function isJs(file: string) {
