@@ -1,3 +1,11 @@
+# Unreleased
+
+## Uploads that fail with status 0: regression tests (#825)
+
+**Patch, no behaviour change.** On gemi 0.84.0, `useUpload` wrapped the answer in a `Response` on `readyState` 4. A network error, timeout or abort leaves status 0 there, so the `Response` constructor threw a `RangeError` from an async callback, which surfaced as an unhandled rejection. This was fixed in 0.84.1 (#671): `useUpload` and `useChat`'s `attach()` settle on `load`/`error`/`timeout`/`abort` and never build a `Response` from status 0. This release only adds regression tests (500, network error, timeout and abort, with no unhandled rejection) for both upload paths.
+
+What to do: apps on 0.84.0 or older that see `RangeError: Status must be between 200 and 599` from an upload should upgrade to 0.84.1 or later. Nothing else changes.
+
 # Upgrading from 0.112.1 to 0.113.0
 
 ## OAuth callbacks check `state` and use PKCE; unverified emails no longer link (#822)

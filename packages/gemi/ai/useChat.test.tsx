@@ -2244,6 +2244,11 @@ class FakeXHR extends EventTarget {
     this.dispatchEvent(new ProgressEvent("loadend"));
   }
 
+  timeOut() {
+    this.dispatchEvent(new ProgressEvent("timeout"));
+    this.dispatchEvent(new ProgressEvent("loadend"));
+  }
+
   abort() {
     this.aborted = true;
     this.status = 0;
@@ -2489,6 +2494,58 @@ describe("attach()", () => {
         FakeXHR.last!.fail();
       });
       expect(await pending).toMatchObject({ code: "network_error" });
+    });
+
+    test("a 500 rejects with status 500", async () => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const { box } = mount({ attach: false });
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = box.api.attach(pdf(), { onProgress: () => {} }).catch((err) => err);
+      });
+      await act(async () => {
+        FakeXHR.last!.respond(500, "<html>oops</html>", "Internal Server Error");
+      });
+      expect(await pending).toMatchObject({
+        code: "upload_failed",
+        message: "Internal Server Error",
+        status: 500,
+      });
+    });
+
+    // #825: status 0 (network error, timeout, abort) never becomes a
+    // `Response`, and the upload's promise is the only thing that rejects.
+    test.each([
+      ["a network error", (xhr: FakeXHR) => xhr.fail(), "network_error"],
+      ["a timeout", (xhr: FakeXHR) => xhr.timeOut(), "network_error"],
+      ["an abort", (xhr: FakeXHR) => xhr.abort(), "AbortError"],
+    ])("%s settles once, with nothing unhandled", async (_, end, expected) => {
+      vi.stubGlobal("XMLHttpRequest", FakeXHR);
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const { box } = mount({ attach: false });
+        let pending!: Promise<unknown>;
+        await act(async () => {
+          pending = box.api.attach(pdf(), { onProgress: () => {} }).catch((err) => err);
+        });
+        await act(async () => {
+          end(FakeXHR.last!);
+          // A later event must not settle it again or throw.
+          FakeXHR.last!.respond(200, JSON.stringify({ fileId: "f_late" }));
+        });
+        const error: any = await pending;
+        if (expected === "AbortError") {
+          expect(error).toBeInstanceOf(DOMException);
+          expect(error.name).toBe("AbortError");
+        } else {
+          expect(error).toMatchObject({ code: expected });
+        }
+        await new Promise((r) => setTimeout(r, 0));
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
     });
 
     test("a progress callback that throws does not fail the upload", async () => {

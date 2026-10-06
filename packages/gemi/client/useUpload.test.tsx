@@ -58,6 +58,14 @@ class FakeXHR extends EventTarget {
     this.finish("error");
   }
 
+  timeOut() {
+    this.readyState = 4;
+    this.status = 0;
+    this.upload.dispatchEvent(new ProgressEvent("timeout"));
+    this.upload.dispatchEvent(new ProgressEvent("loadend"));
+    this.finish("timeout");
+  }
+
   abort() {
     this.readyState = 4;
     this.status = 0;
@@ -181,6 +189,61 @@ describe("useUpload", () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  test("a 500 with a JSON body goes to error with status 500", async () => {
+    const { result, onError, onSuccess } = setup();
+    let settled!: Promise<unknown>;
+    act(() => {
+      settled = result.current.trigger(file());
+    });
+    await act(async () => {
+      FakeXHR.last!.respond(
+        500,
+        JSON.stringify({ error: { kind: "server_error", message: "Boom" } }),
+        "Internal Server Error",
+      );
+      await settled;
+    });
+    await expect(settled).resolves.toBeUndefined();
+    expect(result.current.state).toBe("error");
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toMatchObject({ status: 500 });
+  });
+
+  // #825: status 0 is not an HTTP status. A `Response` built from it throws a
+  // RangeError, which escaped as an unhandled rejection in 0.84.0.
+  test.each([
+    ["a network error", (xhr: FakeXHR) => xhr.fail()],
+    ["a timeout", (xhr: FakeXHR) => xhr.timeOut()],
+  ])("%s (status 0) reports one TypeError and nothing unhandled", async (_, end) => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const responseCtor = vi.spyOn(globalThis, "Response");
+    try {
+      const { result, onError, onSuccess } = setup();
+      let settled!: Promise<unknown>;
+      act(() => {
+        settled = result.current.trigger(file());
+      });
+      await act(async () => {
+        end(FakeXHR.last!);
+        await settled;
+      });
+      await expect(settled).resolves.toBeUndefined();
+      expect(result.current.state).toBe("error");
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0][0]).toBeInstanceOf(TypeError);
+      expect(onError.mock.calls[0][0].message).toBe("Failed to fetch");
+      expect(responseCtor).not.toHaveBeenCalled();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      responseCtor.mockRestore();
       process.off("unhandledRejection", unhandled);
     }
   });
