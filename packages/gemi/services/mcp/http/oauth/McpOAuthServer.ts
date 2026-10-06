@@ -634,10 +634,12 @@ export class McpOAuthServer implements McpCallerResolver {
       const decoded = Buffer.from(basic[1], "base64").toString("utf8");
       const colon = decoded.indexOf(":");
       if (colon < 0) throw invalidClient(true);
-      const id = decodeURIComponent(decoded.slice(0, colon));
+      const id = decodeComponent(decoded.slice(0, colon));
+      if (id === null) throw invalidClient(true);
       if (clientId !== null && clientId !== id) throw invalidClient(true);
       clientId = id;
-      secret = decodeURIComponent(decoded.slice(colon + 1));
+      secret = decodeComponent(decoded.slice(colon + 1));
+      if (secret === null) throw invalidClient(true);
     }
     const client = clientId ? await this.store.findClient(clientId) : null;
     if (!client) throw invalidClient(Boolean(basic));
@@ -741,9 +743,23 @@ function invalidClient(basic: boolean): OAuthError {
 async function readLimited(req: Request, max: number): Promise<string> {
   const declared = Number(req.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > max) throw new Error("too large");
-  const text = await req.text();
-  if (Buffer.byteLength(text) > max) throw new Error("too large");
-  return text;
+  if (!req.body) return "";
+  // Read as it arrives, and stop at the limit: these endpoints take requests
+  // from anyone, and a chunked body declares no length.
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      throw new Error("too large");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function readForm(req: Request): Promise<URLSearchParams> {
@@ -835,4 +851,13 @@ function hasControlCharacter(value: string): boolean {
     if (code < 0x20 || code === 0x7f) return true;
   }
   return false;
+}
+
+/** RFC 6749 §2.3.1 form-encodes Basic credentials; a malformed escape is a failed authentication, not a 500. */
+function decodeComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    return null;
+  }
 }

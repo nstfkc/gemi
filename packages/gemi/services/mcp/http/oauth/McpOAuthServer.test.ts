@@ -679,6 +679,29 @@ describe("token", () => {
     expect(res.status).toBe(401);
   });
 
+  test("a malformed Basic header is a failed authentication, and a large body is refused as it streams", async () => {
+    const bad = await tokenRequest({ grant_type: "refresh_token" }, { Authorization: `Basic ${Buffer.from("%E0%A4%A:x").toString("base64")}` });
+    expect(bad.status).toBe(401);
+    const chunk = new TextEncoder().encode("a".repeat(8 * 1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        if (sent > 64) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const res = await call("/mcp/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      duplex: "half",
+    } as any);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_request");
+    expect(sent).toBeLessThan(64);
+  });
+
   test("the token endpoint takes a form, once per parameter, and known grant types", async () => {
     const { body: client } = await register();
     const json = await call("/mcp/oauth/token", {
