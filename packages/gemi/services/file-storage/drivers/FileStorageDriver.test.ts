@@ -88,3 +88,15 @@ describe("FileStorageDriver's default delete()", () => {
     );
   });
 });
+
+describe("FileStorageDriver.objects() default", () => {
+  test("a driver that predates objects() throws a clear error, naming itself", async () => {
+    const driver = new LegacyDriver();
+    const iterate = async () => {
+      for await (const _ of driver.objects("a/")) {
+        // never reached
+      }
+    };
+    await expect(iterate()).rejects.toThrow(/LegacyDriver does not implement objects\(\)/);
+  });
+});

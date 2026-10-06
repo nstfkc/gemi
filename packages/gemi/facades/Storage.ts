@@ -9,11 +9,14 @@ import { RequestContext } from "../http/requestContext";
 import type { ByteRange } from "../http/range";
 import type {
   DeleteFileParams,
+  DeletePrefixOptions,
   FetchFileOptions,
+  ListObjectsOptions,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
+  StoredObject,
 } from "../services/file-storage/drivers/types";
 import { FilesystemManager } from "../services/file-storage/FilesystemManager";
 import { Facade } from "./Facade";
@@ -90,8 +93,44 @@ export class Storage extends Facade {
       range,
     });
   }
+  /**
+   * @deprecated The result's shape depends on the driver. Use `objects()`.
+   */
   static list(folder: string) {
     return this.getFacadeRoot().driver.list(folder);
+  }
+
+  /**
+   * Every object whose name starts with `prefix`, at any depth, as
+   * `{ name, size, lastModified }`, on every driver. Pagination happens under
+   * the hood, so iterate with `for await`:
+   *
+   * ```ts
+   * for await (const object of Storage.objects("logs/")) {
+   *   if (object.lastModified < cutoff) await Storage.delete(object.name);
+   * }
+   * ```
+   *
+   * Plain string-prefix matching, as in S3: `pages/1` also matches
+   * `pages/10/…`. End the prefix with `/` to stay inside one folder.
+   */
+  static objects(
+    prefix: string,
+    options: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    return this.getFacadeRoot().driver.objects(prefix, options);
+  }
+
+  /**
+   * Deletes every object under `prefix` and resolves with how many were
+   * deleted. Refuses an empty or root prefix (`""`, `"/"`, `"."`), so a
+   * purge built from a missing id cannot empty the store.
+   */
+  static async deletePrefix(
+    prefix: string,
+    options: DeletePrefixOptions = {},
+  ): Promise<number> {
+    return this.getFacadeRoot().driver.deletePrefix(prefix, options);
   }
 
   /**

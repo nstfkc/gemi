@@ -1,13 +1,33 @@
 import { FileNotFoundError } from "../../../http/errors";
 import type {
   DeleteFileParams,
+  DeletePrefixOptions,
   FetchFileOptions,
   IFileStorageDriver,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
+  ListObjectsOptions,
+  StoredObject,
 } from "./types";
+
+/**
+ * Throws unless `prefix` names something narrower than the whole store.
+ *
+ * `deletePrefix("")` would match every object, and so would `"/"`, `"."` or
+ * `"./"` on the filesystem driver once the path is resolved. A purge built
+ * from an unset id (`` `pages/${undefined ?? ""}` `` is fine, but
+ * `` `${site.folder}` `` with an empty folder is not) must fail loudly rather
+ * than empty the bucket.
+ */
+export function assertDeletablePrefix(prefix: string): void {
+  if (typeof prefix !== "string" || /^[\s/.]*$/.test(prefix)) {
+    throw new Error(
+      `Refusing to delete by prefix ${JSON.stringify(prefix)}: it would match the whole store`,
+    );
+  }
+}
 
 export abstract class FileStorageDriver implements IFileStorageDriver {
   abstract fetch(
@@ -18,7 +38,53 @@ export abstract class FileStorageDriver implements IFileStorageDriver {
     params: PutFileParams | Blob,
     options?: PutFileOptions,
   ): Promise<string>;
+  /**
+   * @deprecated The result's shape differs per driver (the S3 driver returns
+   * the raw, unpaginated `ListObjectsV2` output). Use `objects(prefix)`.
+   */
   abstract list(folder: string): Promise<any>;
+
+  /**
+   * Every object whose name starts with `prefix`, at any depth, as
+   * `{ name, size, lastModified }`. Paginates under the hood.
+   *
+   * Not abstract, so custom drivers written before it existed keep compiling;
+   * the default throws and names the driver, the same way `delete()` does.
+   */
+  // oxlint-disable-next-line require-yield
+  async *objects(
+    _prefix: string,
+    _options: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    throw new Error(
+      `${this.constructor.name} does not implement objects(). Override it to list objects in this backend.`,
+    );
+  }
+
+  /**
+   * Deletes every object under `prefix` and resolves with the count. Refuses
+   * an empty or root prefix.
+   *
+   * The default lists with `objects()` and removes one object at a time with
+   * `delete()`, so it works on any driver that implements both. Drivers whose
+   * backend can delete in batches override it.
+   */
+  async deletePrefix(
+    prefix: string,
+    options: DeletePrefixOptions = {},
+  ): Promise<number> {
+    assertDeletablePrefix(prefix);
+    // Collected first: deleting while a backend paginates can make it skip.
+    const names: string[] = [];
+    for await (const object of this.objects(prefix, options)) {
+      names.push(object.name);
+    }
+    for (const name of names) {
+      options.signal?.throwIfAborted();
+      await this.delete({ name, bucket: options.bucket });
+    }
+    return names.length;
+  }
 
   /**
    * Removes an object. A missing object is not an error: the promise resolves,

@@ -10,14 +10,20 @@ export {
 export type {
   ByteRange,
   DeleteFileParams,
+  DeletePrefixOptions,
   FetchFileOptions,
   FileMetadata,
+  ListObjectsOptions,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
+  StoredObject,
 } from "./file-storage/drivers/types";
-export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
+export {
+  FileStorageDriver,
+  assertDeletablePrefix,
+} from "./file-storage/drivers/FileStorageDriver";
 // The toolkit a custom driver needs to resolve a range against its backend.
 export {
   resolveRange,
