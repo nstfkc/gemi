@@ -612,6 +612,9 @@ export class McpRouter<R = McpRoutes> {
    * by value. `access_token`, `Cookie`, `Host`, `User-Agent`, the body's
    * framing headers and `x-forwarded-*` cannot be set: the identity stays the
    * initiator's, and the call fails on the server, logged, if one is returned.
+   * For a remote caller (`call.caller.kind === "remote"`) `Authorization` is
+   * refused too: the client's token is for the MCP endpoint, and is never
+   * passed on.
    * The route's middleware still decides what a credential is worth, so this
    * can reach nothing a direct request carrying the same values could not.
    */

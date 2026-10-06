@@ -348,6 +348,22 @@ describe("calling as a remote caller", () => {
     });
   });
 
+  test("the credentials hook cannot pass the caller's token on", async () => {
+    const forwarding = Object.assign(new Mcp(), {
+      credentials: ({ req }: any) => ({ headers: { Authorization: req.headers.get("authorization") } }),
+    });
+    const registry = new McpRegistry(forwarding as any, resolve(ApiRouteDispatcher));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = await asRemote(async (caller) => registry.execute(caller, "whoami", {}), {
+      headers: { Authorization: "Bearer mcp-token" },
+      principal: principal({ scopes: [DEFAULT_MCP_SCOPE] }),
+    }).catch((error) => error);
+    // It fails closed, and the reason is in the server's log.
+    expect(error).toBeInstanceOf(McpToolError);
+    expect(String(logged.mock.calls.flat().join(" "))).toMatch(/may not set "Authorization"/);
+    logged.mockRestore();
+  });
+
   test("a binder reads the principal's user off the endpoint's request", async () => {
     await asRemote(async (caller, registry) => registry.execute(caller, "list-pages", {}));
     expect(handled).toEqual([{ route: "pages", user: BOB.id, detail: { orgId: BOB.orgId } }]);

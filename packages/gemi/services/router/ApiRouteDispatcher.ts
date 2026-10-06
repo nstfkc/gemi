@@ -116,13 +116,27 @@ const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /** RFC 6265's cookie-octets: no control characters, whitespace, `"`, `,`, `;` or a backslash. */
 const COOKIE_VALUE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*$/;
 
-function applyCredentials(headers: Headers, cookies: string[], credentials: DispatchCredentials) {
+function applyCredentials(
+  headers: Headers,
+  cookies: string[],
+  credentials: DispatchCredentials,
+  asIdentity: boolean,
+) {
   for (const [name, value] of Object.entries(credentials.headers ?? {})) {
     if (value === undefined || value === null) continue;
     const lower = name.toLowerCase();
     if (RESERVED_HEADERS.has(lower) || lower.startsWith("x-forwarded-")) {
       throw new Error(
         `dispatchAs: credentials may not set the "${name}" header. The access token stays the initiator's, and the request's framing is dispatchAs's own.`,
+      );
+    }
+    // Dispatched as a verified identity, the initiator is a remote MCP
+    // client's request, and its Authorization is a token for the MCP
+    // endpoint: handing it on to a route is the token passthrough the MCP
+    // authorization spec forbids, whichever hook returns it.
+    if (asIdentity && lower === "authorization") {
+      throw new Error(
+        'dispatchAs: credentials may not set "Authorization" on a call dispatched as an identity. The caller\'s token is for the MCP endpoint and is never passed on.',
       );
     }
     headers.set(name, value);
@@ -694,7 +708,7 @@ export class ApiRouteDispatcher {
       cookies.push(`${ACCESS_TOKEN}=${cookieToken}`);
     }
     if (options?.credentials) {
-      applyCredentials(headers, cookies, options.credentials);
+      applyCredentials(headers, cookies, options.credentials, identity !== undefined);
     }
     if (cookies.length > 0) {
       headers.set("Cookie", cookies.join("; "));

@@ -8,7 +8,7 @@
 - `McpRouter.scopes` maps OAuth scopes to tools by tag or name; a router without it has one scope, `"mcp"`, reaching every tool. `list(remoteCaller)` answers only the tools the principal's scopes reach, and `execute` refuses any other with `McpCallRefusedError`.
 - `execute(caller, name, args, ctx, { approved })`: a remote call to a `requiresApproval` tool is refused without `approved: true`.
 - Remote file arguments are `{ name, mimeType, data }` (base64), or a fetched `https` `url` when `route.mcp.remote.files.fetchUrls` allows it. Tools with a bound file are not offered remotely.
-- `dispatchAs(..., { identity: { user, grant } })` dispatches as a verified user without copying the initiator's access token. `req.mcpGrant()` answers the grant on such a request, `null` otherwise.
+- `dispatchAs(..., { identity: { user, grant } })` dispatches as a verified user without copying the initiator's access token, and refuses an `Authorization` header from the `credentials` hook (no token passthrough). `req.mcpGrant()` answers the grant on such a request, `null` otherwise.
 - `RateLimitMiddleware`'s default key for a remote MCP caller's tool call is `mcp:<via>:<id>:<route>` (its credential), not its address.
 - `McpCallContext.caller` is `McpCaller` (was the local arm only); hooks and binders that only read `call.req` are unaffected.
 
