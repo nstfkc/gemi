@@ -5,7 +5,7 @@ Author: Enes Tufekci
 Date: 2026-09-06
 Updated: 2026-09-21 — "Files" rewritten against the attachment store that landed in #491–#493
 Updated: 2026-10-04 — "Params the model names in its own terms" (#767)
-Updated: 2026-10-06 — annotation overrides in the meta (#760)
+Updated: 2026-10-06 — annotation overrides in the meta (#760); remote callers in the registry (#762)
 
 ## Summary
 
@@ -518,6 +518,41 @@ default back. `title` names the tool for a client to show. A tool left
 read-only that is also marked destructive or idempotent is refused at boot,
 since only a tool that writes can be either. Hints are not enforced; a tool
 that must be confirmed sets `requiresApproval`.
+
+### The remote caller (#762)
+
+The `remote` arm is now `{ kind: "remote", req, principal }`. `req` is the
+client's request to the MCP endpoint; `principal` is what a caller resolver
+made of the credential it carried, after verifying it:
+`{ user, via, id, scopes, clientId? }`.
+
+- **Identity.** The registry dispatches with `dispatchAs(..., { identity })`:
+  the principal's user is put on the dispatched request's context before its
+  middleware runs, the way a global middleware's user is, and nothing of
+  `req`'s own credentials is copied — no `access_token` cookie or header, and
+  never the bearer token (token passthrough). `auth`, policies and the
+  route's own checks decide exactly as for that user's direct request.
+- **Visibility.** `McpRouter.scopes` maps OAuth scopes to tools by tag and by
+  name. A remote caller sees, and can call, only the tools a scope it carries
+  reaches; a router without `scopes` has one, `"mcp"`, reaching every tool.
+  `execute` checks again and refuses an unreachable tool exactly as an
+  unknown one (`McpCallRefusedError`, `unknown-tool`), so a client cannot
+  probe for tools it was not shown.
+- **Approval.** A remote call to a `requiresApproval` tool is refused unless
+  the transport passes `{ approved: true }`, which it does only after the
+  user accepted an elicitation. A transport that forgot to ask fails closed.
+- **Files.** A remote client has no attachment store, so an `"input"` file is
+  `{ name, mimeType, data }` with base64 `data`, at most `files.maxBytes`
+  (10 MiB). An `https` `url` instead is opt-in (`files.fetchUrls`) and is
+  fetched only through `safeFetch`: public addresses, no credentials,
+  bounded size and time. A tool with a bound file needs a run's turn, which a
+  remote caller has none of, so it is not offered remotely.
+- **Rate limiting** (open question 3). A remote caller's tool call spends a
+  budget keyed on its credential (`mcp:<via>:<id>:<route>`), not on its
+  address — every user of a hosted client shares that client's egress
+  addresses — and not on the user's own budget, so an agent loop cannot lock
+  the human out. `req.mcpGrant()` exposes the grant to a route that wants a
+  scope check of its own.
 
 ### No remote surface in v1
 

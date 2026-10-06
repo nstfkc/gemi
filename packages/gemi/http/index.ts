@@ -15,6 +15,7 @@ export {
   type McpToolInput,
   type McpToolOutput,
 } from "./McpRouter";
+export type { McpGrant } from "./modelOriginated";
 export {
   createFileResponse,
   ViewRouter,

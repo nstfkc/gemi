@@ -63,7 +63,9 @@ export class RouteServiceProvider extends ServiceProvider {
           'No MCP router is configured. Declare one as `mcp: { router }` in "app/config/route.ts".',
         );
       }
-      return new McpRegistry(new config.router(), this.app.make(ApiRouteDispatcher));
+      return new McpRegistry(new config.router(), this.app.make(ApiRouteDispatcher), {
+        files: config.remote?.files,
+      });
     });
   }
 

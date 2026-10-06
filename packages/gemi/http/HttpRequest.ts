@@ -1,7 +1,7 @@
 import { RequestBreakerError } from "./Error";
 import { parseCookieHeader } from "./getCookies";
 import { isJsonMediaType, mediaType } from "./mediaType";
-import { isModelOriginated } from "./modelOriginated";
+import { dispatchedGrant, isModelOriginated, type McpGrant } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { requestDomain } from "./requestDomain";
@@ -214,6 +214,21 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
    */
   isModelOriginated(): boolean {
     return isModelOriginated(this.rawRequest);
+  }
+
+  /**
+   * The credential a remote MCP client's tool call runs under (#762): which
+   * resolver verified it (`"oauth"`, `"api-key"`), its id, its scopes and its
+   * OAuth client. `null` for every other request — a direct one, and a local
+   * agent's tool call. Like `isModelOriginated`, nothing a client sends can
+   * set it.
+   *
+   * The user is the credential's user, on `req.ctx().user` as for any signed
+   * in request; this is for a route that also wants to hold a remote client
+   * to a scope of its own.
+   */
+  mcpGrant(): McpGrant | null {
+    return dispatchedGrant(this.rawRequest) ?? null;
   }
 
   /**

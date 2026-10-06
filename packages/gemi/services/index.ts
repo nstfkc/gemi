@@ -69,13 +69,21 @@ export type {
   StreamQuerySummary,
 } from "./router/ServerQueryStore";
 
-// MCP: an app's exposed routes as tools. v1 is in-process only; the
-// `AgentTool` projection, `toAgentTools`, is exported from `gemi/ai`.
+// MCP: an app's exposed routes as tools, for an in-process agent and for
+// remote MCP clients (#762). The `AgentTool` projection, `toAgentTools`, is
+// exported from `gemi/ai`.
 export {
+  DEFAULT_MCP_SCOPE,
+  McpCallRefusedError,
   McpRegistry,
   McpToolError,
   type McpCaller,
   type McpCallContext,
+  type McpExecuteOptions,
+  type McpRegistryOptions,
+  type McpRemoteFileOptions,
+  type McpRemotePrincipal,
+  type McpScope,
   type McpCredentials,
   type McpToolAnnotations,
   type McpToolDescriptor,

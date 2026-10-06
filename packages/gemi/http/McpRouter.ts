@@ -5,6 +5,7 @@ import type { Prettify } from "../utils/type";
 import type {
   McpCallContext,
   McpCredentials,
+  McpScope,
   McpToolAnnotations,
 } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
@@ -563,6 +564,31 @@ export class McpRouter<R = McpRoutes> {
   static __brand = "McpRouter";
 
   routes: Record<string, McpRouteDeclaration> = {};
+
+  /**
+   * The scopes a remote caller's credential can carry, and the tools each one
+   * reaches (#762). A remote caller sees, and can call, only the tools a scope
+   * it carries reaches; a local caller — an agent in this server — sees every
+   * tool, as before.
+   *
+   * ```ts
+   * scopes = {
+   *   "pages:read": { description: "Read your site's pages", tags: ["read"] },
+   *   "pages:write": { description: "Edit your site's pages", tags: ["write"] },
+   *   "site:publish": { description: "Publish your site", names: ["publish-site"] },
+   * };
+   * ```
+   *
+   * Each key is an OAuth scope; `description` is what the consent screen
+   * shows. Left undeclared, the router has one scope, `"mcp"`, that reaches
+   * every tool. A tag or name no tool has, or a scope that reaches nothing,
+   * fails the boot.
+   *
+   * A scope narrows what a credential can reach; it never widens it. Every
+   * call still runs as the credential's user, through the route's own
+   * middleware.
+   */
+  scopes?: Record<string, McpScope>;
 
   /**
    * The app's own credentials for one tool call, sent beside the access token

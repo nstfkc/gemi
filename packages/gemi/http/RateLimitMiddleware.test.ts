@@ -8,6 +8,7 @@ import { Repository } from "../support/Repository";
 import type { RateLimiterConfig } from "../services/rate-limiter/config";
 import { HttpRequest } from "./HttpRequest";
 import { RateLimitMiddleware } from "./RateLimitMiddleware";
+import { markModelOriginated } from "./modelOriginated";
 import { RequestContext } from "./requestContext";
 
 /**
@@ -32,6 +33,8 @@ function runMiddleware(options: {
   headers?: Record<string, string>;
   routePath?: string;
   args?: (string | number)[];
+  /** Marks the request as a remote MCP caller's tool call under this grant. */
+  grant?: { via: string; id: string; scopes: string[] };
 }) {
   const application = options.app ?? makeApp();
 
@@ -43,6 +46,10 @@ function runMiddleware(options: {
     "api",
     options.routePath ?? "/search",
   );
+
+  if (options.grant) {
+    markModelOriginated(request.rawRequest, "203.0.113.9", options.grant);
+  }
 
   const MiddlewareClass = options.Middleware ?? RateLimitMiddleware;
 
@@ -274,5 +281,37 @@ describe("without a limiter", () => {
     const application = new Application(new Repository());
 
     expect(await runWithout(application)).toEqual({});
+  });
+});
+
+describe("a remote MCP caller's tool call (#762)", () => {
+  test("spends its credential's budget, not its address's", async () => {
+    const app = makeApp();
+    const grant = (id: string) => ({ via: "oauth", id, scopes: ["mcp"] });
+
+    // Two users of one hosted client, calling from the same address.
+    expect((await runMiddleware({ app, args: [1], grant: grant("g1") })).rejected).toBe(false);
+    expect((await runMiddleware({ app, args: [1], grant: grant("g2") })).rejected).toBe(false);
+    // The same credential again is over its budget.
+    expect((await runMiddleware({ app, args: [1], grant: grant("g1") })).rejected).toBe(true);
+    // And neither touched the address's own budget.
+    expect(
+      (await runMiddleware({ app, args: [1], headers: { "x-forwarded-for": "203.0.113.9" } }))
+        .rejected,
+    ).toBe(false);
+  });
+
+  test("an app's own key still wins", async () => {
+    const app = makeApp();
+    class Keyed extends RateLimitMiddleware {
+      config = { key: () => "everyone" };
+    }
+    const grant = (id: string) => ({ via: "oauth", id, scopes: [] });
+    expect(
+      (await runMiddleware({ app, args: [1], grant: grant("g1"), Middleware: Keyed })).rejected,
+    ).toBe(false);
+    expect(
+      (await runMiddleware({ app, args: [1], grant: grant("g2"), Middleware: Keyed })).rejected,
+    ).toBe(true);
   });
 });

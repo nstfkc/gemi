@@ -2,6 +2,7 @@ import type { JSX } from "react";
 import type { HttpRequest } from "../../http/HttpRequest";
 import type { ApiRouter } from "../../http/ApiRouter";
 import type { McpRouter } from "../../http/McpRouter";
+import type { McpRemoteFileOptions } from "../mcp/McpRegistry";
 import type { ViewRouter } from "../../http/ViewRouter";
 import type { StreamSummary } from "./ServerQueryStore";
 
@@ -63,6 +64,17 @@ export interface McpRouteConfig {
   // The app's `McpRouter`, normally `app/http/routes/mcp.ts`. Resolved against
   // the api routes at boot, so a stale reference fails the boot.
   router: new () => McpRouter<any>;
+  /** Remote MCP callers (#762). */
+  remote?: McpRemoteConfig;
+}
+
+export interface McpRemoteConfig {
+  /**
+   * How a remote caller's file arguments are read: the largest file, and
+   * whether an `https` URL may be fetched instead of base64 bytes (off by
+   * default). See `McpRemoteFileOptions`.
+   */
+  files?: McpRemoteFileOptions;
 }
 
 // The routers one host group serves. Either may be left out, in which case the
