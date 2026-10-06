@@ -419,7 +419,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       <RouteStateProvider state={routeState}>
         <Tree
           action={routeState.action}
-          pathname={applyParams(routeState.pathname ?? "/", routeState.params)}
+          // `applyParams` strips the trailing slash, so the root comes back as
+          // `""` while the server keys its data under `/` (#819).
+          pathname={applyParams(routeState.pathname ?? "/", routeState.params) || "/"}
           tree={componentTree}
           entries={routeState.pathname ? routeState.views : ["404"]}
         />
