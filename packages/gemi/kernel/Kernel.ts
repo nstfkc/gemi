@@ -1,3 +1,4 @@
+import { McpHttpServer } from "../services/mcp/http/McpHttpServer";
 import { Application } from "../foundation/Application";
 import type { ServiceProviderConstructor, ShutdownReport } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
@@ -228,6 +229,13 @@ export class Kernel {
 
   queue(): QueueManager {
     return this.app.make(QueueManager);
+  }
+
+  /** The MCP endpoint, or `null` when `route.mcp.remote` is not enabled. */
+  mcpHttp(): McpHttpServer | null {
+    return this.app.config.get("route.mcp.remote.enabled") === true
+      ? this.app.make(McpHttpServer)
+      : null;
   }
 
   /** The `global` middleware list for one request. Call it inside `run`. */

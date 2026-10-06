@@ -1,7 +1,7 @@
 import { AuthApiRouter } from "../../auth/routes";
 import { ACCESS_TOKEN } from "../../auth/accessToken";
 import type { User } from "../../auth/types";
-import type { McpGrant } from "../../http/modelOriginated";
+import type { McpGrant, ProgressSink } from "../../http/modelOriginated";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR, refusal } from "../../http/Error";
 import { HttpResponse, isHttpResponse } from "../../http/HttpResponse";
@@ -83,6 +83,13 @@ export type DispatchAsOptions = {
    * `grant` is what `req.mcpGrant()` answers on the dispatched request.
    */
   identity?: DispatchIdentity;
+  /** Aborts the dispatched request: its `req.signal`, for a route that honours it. */
+  signal?: AbortSignal;
+  /**
+   * Receives what the route reports with `req.reportProgress` — a remote MCP
+   * client's `notifications/progress`.
+   */
+  progress?: ProgressSink;
 };
 
 export type DispatchIdentity = {
@@ -720,8 +727,13 @@ export class ApiRouteDispatcher {
       requestBody = JSON.stringify(body);
     }
 
-    const req = new Request(url, { method, headers, body: requestBody });
-    markModelOriginated(req, clientIp(initiator), identity?.grant);
+    const req = new Request(url, {
+      method,
+      headers,
+      body: requestBody,
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+    markModelOriginated(req, clientIp(initiator), identity?.grant, options?.progress);
     // The tool call acts for the same tenant as the request that started it.
     if (initiator.domain) {
       setRequestDomain(req, initiator.domain);

@@ -1,7 +1,13 @@
 import { RequestBreakerError } from "./Error";
 import { parseCookieHeader } from "./getCookies";
 import { isJsonMediaType, mediaType } from "./mediaType";
-import { dispatchedGrant, isModelOriginated, type McpGrant } from "./modelOriginated";
+import {
+  dispatchedGrant,
+  dispatchedProgress,
+  isModelOriginated,
+  type McpGrant,
+  type ProgressUpdate,
+} from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { requestDomain } from "./requestDomain";
@@ -229,6 +235,30 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
    */
   mcpGrant(): McpGrant | null {
     return dispatchedGrant(this.rawRequest) ?? null;
+  }
+
+  /**
+   * Reports how far a long route has got, to a remote MCP client that asked
+   * to be told (#762): it reaches the client as `notifications/progress` on
+   * the tool call's stream. Answers whether anyone was listening — `false`
+   * for a direct request, a local agent's tool call, and a remote call that
+   * sent no `progressToken` — so a route can call it unconditionally.
+   *
+   * ```ts
+   * for (const [i, page] of pages.entries()) {
+   *   await render(page);
+   *   req.reportProgress({ progress: i + 1, total: pages.length, message: `Rendered ${page.path}` });
+   * }
+   * ```
+   *
+   * `progress` must grow with each report; one that does not is dropped, as
+   * the protocol requires.
+   */
+  reportProgress(update: ProgressUpdate): boolean {
+    const sink = dispatchedProgress(this.rawRequest);
+    if (!sink) return false;
+    sink(update);
+    return true;
   }
 
   /**

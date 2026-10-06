@@ -1,5 +1,6 @@
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { McpRegistry } from "../mcp/McpRegistry";
+import { McpHttpServer } from "../mcp/http/McpHttpServer";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
 import { DomainRouter } from "./DomainRouter";
 import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
@@ -67,6 +68,22 @@ export class RouteServiceProvider extends ServiceProvider {
         files: config.remote?.files,
       });
     });
+    this.registerMcpHttp();
+  }
+
+  /**
+   * Bound here and built at boot when `route.mcp.remote.enabled`, so a
+   * misconfigured endpoint — no resolver, no url, no SECRET — fails the boot,
+   * not the first client that connects.
+   */
+  private registerMcpHttp() {
+    this.app.singleton(McpHttpServer, () => {
+      const config = this.app.config.get<McpRouteConfig | undefined>("route.mcp");
+      if (!config?.remote?.enabled) {
+        throw new Error("The MCP endpoint is not enabled: set route.mcp.remote.enabled.");
+      }
+      return new McpHttpServer(this.app.make(McpRegistry), config.remote);
+    });
   }
 
   /**
@@ -85,6 +102,12 @@ export class RouteServiceProvider extends ServiceProvider {
     this.app.make(DomainRouter);
     if (this.app.config.get("route.mcp")) {
       this.app.make(McpRegistry);
+    }
+    const remote = this.app.config.get<McpRouteConfig["remote"]>("route.mcp.remote");
+    if (remote?.enabled === true) {
+      this.app.make(McpHttpServer);
+    } else if (remote?.enabled !== undefined && remote.enabled !== false) {
+      throw new Error("route.mcp.remote.enabled must be true or false.");
     }
   }
 }

@@ -1,5 +1,6 @@
 import type { ToolContext } from "../../ai/Agent";
 import type { User } from "../../auth/types";
+import type { ProgressSink } from "../../http/modelOriginated";
 import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
 import { ToolError } from "../../ai/redact";
 import { s, type AnySchema, type JSONSchema, type Schema } from "../../ai/Schema";
@@ -129,6 +130,10 @@ export type McpExecuteOptions = {
    * before `execute` is reached, and ignore it.
    */
   approved?: boolean;
+  /** Aborts the dispatched route: its `req.signal`. The client went away, or cancelled. */
+  signal?: AbortSignal;
+  /** Receives the route's `req.reportProgress` reports. */
+  progress?: ProgressSink;
 };
 
 /**
@@ -386,6 +391,11 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     return out;
   }
 
+  /** The largest file a remote caller may send, in bytes. */
+  get maxFileBytes(): number {
+    return this.files.maxBytes;
+  }
+
   /**
    * The scopes a remote credential can carry, with what each one is for —
    * what a consent screen lists and the authorization server advertises. The
@@ -511,6 +521,8 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     // passthrough the MCP authorization spec forbids.
     const dispatchOptions: DispatchAsOptions = {
       ...(credentials ? { credentials } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.progress ? { progress: options.progress } : {}),
       ...(caller.kind === "remote"
         ? {
             identity: {

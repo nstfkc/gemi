@@ -21,7 +21,22 @@
  * A `WeakMap`, so a dispatched request is forgotten with the request. The
  * value is the initiator's client address; see `dispatchedClientAddress`.
  */
-const dispatched = new WeakMap<Request, { clientAddress: string; grant?: McpGrant }>();
+const dispatched = new WeakMap<
+  Request,
+  { clientAddress: string; grant?: McpGrant; progress?: ProgressSink }
+>();
+
+/** One progress report a route makes during a remote tool call. */
+export type ProgressUpdate = {
+  /** How far along, in any unit; must grow with each report. */
+  progress: number;
+  /** The `progress` that means done, when it is known. */
+  total?: number;
+  /** A short line for the user: "Rendering page 3 of 8". */
+  message?: string;
+};
+
+export type ProgressSink = (update: ProgressUpdate) => void;
 
 /**
  * The credential a remote MCP caller's tool call was made under (#762): which
@@ -45,8 +60,25 @@ export type McpGrant = {
  * caller's call, and only by `dispatchAs`, from a principal a resolver
  * verified.
  */
-export function markModelOriginated(req: Request, clientAddress: string, grant?: McpGrant) {
-  dispatched.set(req, grant ? { clientAddress, grant: Object.freeze({ ...grant, scopes: Object.freeze([...grant.scopes]) }) } : { clientAddress });
+export function markModelOriginated(
+  req: Request,
+  clientAddress: string,
+  grant?: McpGrant,
+  progress?: ProgressSink,
+) {
+  dispatched.set(req, {
+    clientAddress,
+    ...(grant ? { grant: Object.freeze({ ...grant, scopes: Object.freeze([...grant.scopes]) }) } : {}),
+    ...(progress ? { progress } : {}),
+  });
+}
+
+/**
+ * Where a dispatched request's progress reports go, when its caller listens
+ * for them: a remote MCP client that sent a `progressToken`.
+ */
+export function dispatchedProgress(req: Request): ProgressSink | undefined {
+  return dispatched.get(req)?.progress;
 }
 
 /** The grant a remote MCP caller's tool call carries; `undefined` for any other request. */

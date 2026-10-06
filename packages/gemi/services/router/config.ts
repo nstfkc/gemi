@@ -3,6 +3,7 @@ import type { HttpRequest } from "../../http/HttpRequest";
 import type { ApiRouter } from "../../http/ApiRouter";
 import type { McpRouter } from "../../http/McpRouter";
 import type { McpRemoteFileOptions } from "../mcp/McpRegistry";
+import type { McpRemoteHttpConfig } from "../mcp/http/McpHttpServer";
 import type { ViewRouter } from "../../http/ViewRouter";
 import type { StreamSummary } from "./ServerQueryStore";
 
@@ -68,7 +69,11 @@ export interface McpRouteConfig {
   remote?: McpRemoteConfig;
 }
 
-export interface McpRemoteConfig {
+/**
+ * The MCP endpoint remote clients connect to (#762). Off unless `enabled`.
+ * See `McpRemoteHttpConfig`.
+ */
+export interface McpRemoteConfig extends McpRemoteHttpConfig {
   /**
    * How a remote caller's file arguments are read: the largest file, and
    * whether an `https` URL may be fetched instead of base64 bytes (off by
