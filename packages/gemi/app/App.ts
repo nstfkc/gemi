@@ -112,6 +112,16 @@ export class App {
       if (outcome?.refusal) {
         return outcome.refusal;
       }
+      // The MCP endpoint, and its OAuth endpoints, on the host it is
+      // configured for. Ahead of routing, so no route can shadow it, and after
+      // the global middleware, which covers it as it covers everything.
+      const mcp = this.kernel.mcpHttp();
+      if (mcp) {
+        const answered = await mcp.handle(req);
+        if (answered) {
+          return outcome ? outcome.apply(answered) : answered;
+        }
+      }
       const domains = this.kernel.domains();
       const dispatchers = (await domains.ask(req)) ?? (await domains.route(req));
       if (dispatchers instanceof Response) {

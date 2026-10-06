@@ -567,6 +567,52 @@ that defaults off, and the boot should refuse to enable it without a token
 resolver configured — a half-built MCP endpoint reachable in production is
 precisely the thing this section exists to prevent.
 
+### The transport (#762)
+
+`route.mcp.remote` mounts Streamable HTTP at one URL (`McpHttpServer`, user
+docs in `docs/mcp.md`). It is off unless `enabled: true`, and the boot is
+refused without a `url`, without at least one caller resolver, and without
+`SECRET`. Decisions:
+
+- **Both eras on one URL.** 2026-07-28 is stateless: version and client
+  capabilities ride in every request's `_meta`, `server/discover` replaces
+  `initialize`, and the `Mcp-Method`/`Mcp-Name` headers must agree with the
+  body. 2025-03-26 to 2025-11-25 get `initialize` and an `Mcp-Session-Id` —
+  but the id is a signed value (`gms1.`) carrying the negotiated version and
+  a hash of the credential, so there is no session table, a session cannot be
+  used under another credential (404, which the spec reads as "start over"),
+  and `DELETE` has nothing to delete (405).
+- **Authentication before anything.** Every POST resolves its bearer token
+  first; 401 carries the resolvers' `WWW-Authenticate` challenge. Credentials
+  come from the `Authorization` header only, never the query string or the
+  session cookie (a cookie would let any page the user visits drive the
+  endpoint as them).
+- **Host and Origin.** The endpoint, and resolvers' own endpoints, answer only
+  on the configured URL's host (DNS rebinding). A browser `Origin` other than
+  the endpoint's own or `allowedOrigins` is 403.
+- **`requiresApproval` is elicitation** (#760's other half). Modern: the call
+  answers `input_required` with a form elicitation and a signed `requestState`
+  bound to the credential, the tool, a digest of the exact arguments, a nonce
+  and ten minutes; the retry with an accepting answer runs the tool once (the
+  nonce is spent in a `NonceStore`). Legacy: `elicitation/create` goes out on
+  the call's own SSE stream and the client POSTs the answer, which is matched
+  to the pending call only under the same session. Arguments are validated
+  before asking, so a user is never asked to approve a call that cannot run.
+  A client without form elicitation cannot run such a tool.
+- **Results.** `McpToolError` is `isError: true` with its message; anything else
+  is a generic `isError` (no internals). `structuredContent` goes out when the
+  tool has an `output` schema (for legacy clients only when it is an object).
+- **Progress and cancellation.** `req.reportProgress()` from a route becomes
+  `notifications/progress` on the call's stream when the client sent a
+  `progressToken`; closing the stream, or `notifications/cancelled`, aborts the
+  dispatched request's `signal`.
+- **Rate limit** (open question 3, answered): each credential has an endpoint
+  budget (600 requests per minute by default) on top of the routes' own
+  `rate-limit`, both keyed on the credential.
+- **Multi-instance.** Modern traffic is fully stateless given a shared
+  `NonceStore`. Legacy approvals wait in the process that asked; without sticky
+  routing the answer lands elsewhere and the call fails closed (times out).
+
 ### The invariant
 
 **A tool call must never be able to do something the same caller could not do

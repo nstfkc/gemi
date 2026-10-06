@@ -89,6 +89,19 @@ export {
   type McpToolDescriptor,
   type McpToolFilter,
 } from "./mcp/McpRegistry";
+export {
+  McpHttpServer,
+  type McpRemoteHttpConfig,
+} from "./mcp/http/McpHttpServer";
+export {
+  bearerToken,
+  McpApiKeyResolver,
+  type McpApiKey,
+  type McpApiKeyResolverOptions,
+  type McpCallerResolver,
+  type McpResolution,
+  type McpResolveContext,
+} from "./mcp/http/callers";
 
 // Logging
 export { LogServiceProvider } from "./logging/LogServiceProvider";
