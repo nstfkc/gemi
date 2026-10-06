@@ -171,8 +171,4 @@ export class McpApiKeyResolver implements McpCallerResolver {
       principal: { user: key.user, via: this.name, id: key.id, scopes: [...key.scopes] },
     };
   }
-
-  challenge(): string {
-    return 'Bearer realm="mcp"';
-  }
 }

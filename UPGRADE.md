@@ -1,5 +1,15 @@
 # Unreleased
 
+## MCP: an OAuth authorization server for remote clients (#762)
+
+**New.** `McpOAuthServer` lets hosted MCP clients (Claude.ai and Claude Desktop connectors) connect to `route.mcp.remote` with OAuth 2.1: discovery (RFC 9728, RFC 8414), dynamic client registration, authorization code with PKCE, a consent page (gemi's own, or your view at `consentPath`), rotating refresh tokens, revocation, and audience-bound opaque tokens. See [OAuth](docs/mcp.md#oauth-connecting-claude-and-other-hosted-clients).
+
+- New from `gemi/services`: `McpOAuthServer`, `MemoryMcpOAuthStore`, `CONSENT_PAGE_HEADERS`, and the types `McpOAuthServerOptions`, `McpConsent`, `McpOAuthStore`, `McpOAuthClient`, `McpOAuthCode`, `McpOAuthToken`.
+- The MCP endpoint answers 429 after 30 refused credentials a minute from one address.
+- `McpApiKeyResolver` no longer has a `challenge()`; the endpoint's default (`Bearer realm="mcp"`) is the same value, so an OAuth resolver's challenge is used whatever the order.
+
+What to do: to accept OAuth, add an `McpOAuthServer` with a store on your database to `remote.resolvers`, and (recommended) a consent view.
+
 ## MCP: a Streamable HTTP endpoint for remote clients (#762, #760)
 
 **New, off by default.** `route.mcp.remote` serves the app's `McpRouter` to external MCP clients (Claude connectors, Claude Code, the MCP Inspector) over Streamable HTTP, in both the 2026-07-28 revision and 2025-03-26 to 2025-11-25. See [MCP Server](docs/mcp.md).

@@ -102,6 +102,20 @@ export {
   type McpResolution,
   type McpResolveContext,
 } from "./mcp/http/callers";
+export {
+  McpOAuthServer,
+  type McpConsent,
+  type McpOAuthServerOptions,
+} from "./mcp/http/oauth/McpOAuthServer";
+export {
+  MemoryMcpOAuthStore,
+  type McpOAuthClient,
+  type McpOAuthCode,
+  type McpOAuthStore,
+  type McpOAuthToken,
+  type McpOAuthTokenEndpointAuthMethod,
+} from "./mcp/http/oauth/store";
+export { CONSENT_PAGE_HEADERS } from "./mcp/http/oauth/consentPage";
 
 // Logging
 export { LogServiceProvider } from "./logging/LogServiceProvider";

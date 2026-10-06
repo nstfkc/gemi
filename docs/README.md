@@ -36,7 +36,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Routing](./routing.md)** — `ApiRouter` / `ViewRouter`, path params, groups, nesting, `resource()`.
 - **[Controllers](./controllers.md)** — `Controller` / `ResourceController`, the `HttpRequest` API, request validation, `ValidationError`.
 - **[Middleware](./middleware.md)** — the string DSL, built-in middleware, negation, and writing custom middleware.
-- **[MCP Server](./mcp.md)** — `McpRouter` tools for external MCP clients over Streamable HTTP: caller resolvers and API keys, scopes, approval by elicitation, progress, files.
+- **[MCP Server](./mcp.md)** — `McpRouter` tools for external MCP clients over Streamable HTTP: OAuth for hosted clients (`McpOAuthServer`) and API keys, scopes, consent, approval by elicitation, progress, files.
 
 ### Views & client
 - **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
