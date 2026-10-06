@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.113.0 to 0.114.0
 
 ## MCP: an OAuth authorization server for remote clients (#762)
 
