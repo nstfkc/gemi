@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.112.1 to 0.113.0
 
 ## OAuth callbacks check `state` and use PKCE; unverified emails no longer link (#822)
 
