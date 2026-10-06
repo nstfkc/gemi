@@ -234,6 +234,15 @@ Streaming stays the right default for the authenticated app, where JS is a
 given and time-to-shell matters. `no-stream` is a routing directive rather
 than a middleware class — it has no alias to register.
 
+### `no-locale` (view routes only)
+
+Takes the route out of [locale routing](./i18n.md#opting-out-of-locale-routing):
+its URL never carries a locale, a visitor is not redirected to their own, and
+it renders in `defaultLocale` (`/tr-TR/embed` is not the page `/embed`). Use it
+for a page outside the app's locale scheme, such as an embed or a landing page
+for a link sent by another service. Like `no-stream`, it is a routing
+directive with no alias to register.
+
 ## Registering middleware
 
 The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:

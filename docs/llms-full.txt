@@ -2879,6 +2879,15 @@ Streaming stays the right default for the authenticated app, where JS is a
 given and time-to-shell matters. `no-stream` is a routing directive rather
 than a middleware class — it has no alias to register.
 
+### `no-locale` (view routes only)
+
+Takes the route out of [locale routing](./i18n.md#opting-out-of-locale-routing):
+its URL never carries a locale, a visitor is not redirected to their own, and
+it renders in `defaultLocale` (`/tr-TR/embed` is not the page `/embed`). Use it
+for a page outside the app's locale scheme, such as an embed or a landing page
+for a link sent by another service. Like `no-stream`, it is a routing
+directive with no alias to register.
+
 ## Registering middleware
 
 The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:
@@ -3796,8 +3805,9 @@ import RootLayout from "./views/RootLayout";
 init(RootLayout);
 ```
 
-> **Gotcha:** `RootLayout` receives `locale` (the active locale, see [i18n](./i18n.md))
-> and `children`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
+> **Gotcha:** `RootLayout` receives `locale` (the active locale, see [i18n](./i18n.md)),
+> `htmlAttributes` (`{ lang, dir }`, see [below](#html-lang-dir-canonical-and-alternates))
+> and `children`; type it with `RootLayoutProps` from `gemi/client`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
 > browser translator that rewrites text before hydration causes a React hydration
 > mismatch that drops the server-injected styles.
 
@@ -3833,6 +3843,42 @@ page needs custom tags.
 > **Note:** `Meta` is a server-side facade (like `Auth`, `Cookie`, `Redirect`). Call
 > it from route/controller handlers, not from React components. See the facades
 > reference for the full list.
+
+### `<html lang>`, `dir`, canonical and alternates
+
+A layout (the root one, or a static view's `layout`) receives `htmlAttributes`:
+by default the request's locale as `lang`, and the direction that language is
+written in as `dir`. Spread it onto `<html>`:
+
+```tsx
+import { Head, type RootLayoutProps } from "gemi/client";
+
+export default function RootLayout(props: RootLayoutProps) {
+  return (
+    <html {...props.htmlAttributes} translate="no" suppressHydrationWarning>
+      <Head />
+      <body>{props.children}</body>
+    </html>
+  );
+}
+```
+
+When a page's language is its content's rather than the visitor's (a user's
+published site, an article in another language), set it from the handler.
+`Meta.canonical` and `Meta.alternates` add the matching `<link>`s, which
+`<Head />` renders:
+
+```typescript
+Meta.htmlAttributes({ lang: site.language }); // dir follows lang unless given
+Meta.canonical("https://acme.example.com/about");
+Meta.alternates([
+  { hrefLang: "tr", href: "https://acme.example.com/tr/hakkinda" },
+  { hrefLang: "x-default", href: "https://acme.example.com/about" },
+]);
+```
+
+On a client-side navigation the `<html>` attributes and these links follow the
+new page.
 
 ## Breadcrumbs: `useBreadcrumbs`
 
@@ -12473,6 +12519,9 @@ Log.error("Payment failed", { orderId, reason });
 - `Meta.title(title)` — set the page title.
 - `Meta.description(description)` — set the meta description.
 - `Meta.openGraph(params)` — set Open Graph tags.
+- `Meta.htmlAttributes({ lang, dir })` — the `<html>` attributes the layout receives as `htmlAttributes` (default: the request's locale and its direction).
+- `Meta.canonical(url)` — a `<link rel="canonical">`.
+- `Meta.alternates([{ hrefLang, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in.
 
 ```typescript
 import { Meta } from "gemi/facades";
@@ -15541,6 +15590,42 @@ Configuration fields:
 - **`timeZone`** — the IANA time zone [formatting](#formatting-dates-and-numbers) uses (default `"UTC"`). An unknown zone fails at boot.
 - **`detectTimeZone(req)`** — resolve the zone for one request, e.g. from a cookie or the signed-in user's profile. Return `null` to use `timeZone`; a zone `Intl` does not know is ignored the same way, so a forged cookie cannot break the page.
 - **`prefetch`**, **`components`** — deprecated; see [Legacy dictionaries](#legacy-dictionaries).
+
+### Opting out of locale routing
+
+With `supportedLocales` set, every view route takes part in locale routing:
+URLs carry the locale, and a visitor whose `i18n-locale` cookie or
+`Accept-Language` names another locale is redirected to it. Some pages are not
+the app's own UI. A `route.domains` group that serves users' published sites is
+one example. There, the redirect points at a path the site does not have, and
+`<html lang>` should be the site's language, not the visitor's.
+
+Set `localeRouting: "off"` on that group's `view` (or on `route.view` for the
+whole app), or put the [`no-locale`](./middleware.md#no-locale-view-routes-only)
+directive on one router or route:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: ":site", view: { rootRouter: SiteViewRouter, localeRouting: "off" } },
+  ],
+},
+```
+
+Out of locale routing, a request:
+
+- is never redirected, and a first segment like `/tr-TR` is an ordinary path;
+- renders in `defaultLocale`, whatever the cookie or `Accept-Language` say, so
+  a `.static()` page is still one body for everyone; middleware may pick
+  another with `Lang.setLocale(locale, { cookie: false })`;
+- sets no `i18n-locale` cookie, and client-side links get no locale prefix.
+
+Set the document's language with
+[`Meta.htmlAttributes`](./views-and-layouts.md#html-lang-dir-canonical-and-alternates).
+To negotiate a locale yourself with gemi's matching rules, use `resolveLocale`
+from `gemi/i18n`: `resolveLocale("de-AT", ["en-US", "de-DE"])` → `"de-DE"`.
 
 > **Note:** `detectLocale` and `onLocaleChange` are **config callbacks**, not provider methods. This is a deliberate divergence from Laravel, where such hooks are often wired inside a provider's `boot()`. In gemi every subsystem hook (`detectLocale`, `onLocaleChange`, `filterRecipients`, `onLogCreated`, …) is a plain function on its config slice, so the whole behaviour of a subsystem is readable in one file and a provider is only ever needed to bind a *new* service.
 

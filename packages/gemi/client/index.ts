@@ -106,6 +106,11 @@ export type { CreateI18nDictionary } from "./I18nContext";
 
 export { Image } from "./Image";
 export { Head } from "./Head";
+export {
+  textDirection,
+  type HtmlAttributes,
+  type RootLayoutProps,
+} from "./htmlAttributes";
 
 export { useForgotPassword } from "./auth/useForgotPassword";
 export { useSignIn } from "./auth/useSignIn";

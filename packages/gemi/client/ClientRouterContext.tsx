@@ -82,6 +82,9 @@ interface ClientRouterProviderProps {
   breadcrumbs: Record<string, Breadcrumb>;
 }
 
+/** One instance, so effects keyed on the locale list do not re-run each render. */
+const NO_LOCALES: string[] = [];
+
 export const ClientRouterProvider = (
   props: PropsWithChildren<ClientRouterProviderProps>,
 ) => {
@@ -106,10 +109,15 @@ export const ClientRouterProvider = (
     return new Subject<boolean>(false);
   });
 
-  const { supportedLocales = [], locale } = useContext(I18nContext);
+  const i18nContext = useContext(I18nContext);
   // `.static()` routes: there is no client router on the other side to render
   // them into, so a navigation there is a full page load.
-  const { staticRoutes } = useContext(ServerDataContext);
+  const { staticRoutes, i18n } = useContext(ServerDataContext);
+  // Views out of locale routing (`localeRouting: "off"`) have no locale in
+  // their URLs: none is read off a path, and links get none prepended.
+  const localeRouted = i18n?.localeRouting !== "off";
+  const supportedLocales = localeRouted ? (i18nContext.supportedLocales ?? NO_LOCALES) : NO_LOCALES;
+  const locale = localeRouted ? i18nContext.locale : null;
   const staticRoutesRef = useRef(new Set<string>(staticRoutes ?? []));
 
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));

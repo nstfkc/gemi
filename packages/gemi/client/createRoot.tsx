@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { ClientRouter } from "./ClientRouter";
 import { DictionarySinkContext } from "./DictionarySinkContext";
+import type { RootLayoutProps } from "./htmlAttributes";
 import type { QueryConfig } from "./QueryManagerContext";
 import { ServerDataProvider } from "./ServerDataProvider";
 import { ServerQueryContext } from "./ServerQueryContext";
@@ -15,7 +16,7 @@ export interface CreateRootOptions {
 }
 
 export function createRoot(
-  RootLayout: ComponentType<{ children: React.ReactNode; locale: string }>,
+  RootLayout: ComponentType<RootLayoutProps>,
   options: CreateRootOptions = {},
 ) {
   // `serverQueries`, `viewModules` and `dictionarySink` exist only when the view

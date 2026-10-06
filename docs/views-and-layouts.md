@@ -241,8 +241,9 @@ import RootLayout from "./views/RootLayout";
 init(RootLayout);
 ```
 
-> **Gotcha:** `RootLayout` receives `locale` (the active locale, see [i18n](./i18n.md))
-> and `children`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
+> **Gotcha:** `RootLayout` receives `locale` (the active locale, see [i18n](./i18n.md)),
+> `htmlAttributes` (`{ lang, dir }`, see [below](#html-lang-dir-canonical-and-alternates))
+> and `children`; type it with `RootLayoutProps` from `gemi/client`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
 > browser translator that rewrites text before hydration causes a React hydration
 > mismatch that drops the server-injected styles.
 
@@ -278,6 +279,42 @@ page needs custom tags.
 > **Note:** `Meta` is a server-side facade (like `Auth`, `Cookie`, `Redirect`). Call
 > it from route/controller handlers, not from React components. See the facades
 > reference for the full list.
+
+### `<html lang>`, `dir`, canonical and alternates
+
+A layout (the root one, or a static view's `layout`) receives `htmlAttributes`:
+by default the request's locale as `lang`, and the direction that language is
+written in as `dir`. Spread it onto `<html>`:
+
+```tsx
+import { Head, type RootLayoutProps } from "gemi/client";
+
+export default function RootLayout(props: RootLayoutProps) {
+  return (
+    <html {...props.htmlAttributes} translate="no" suppressHydrationWarning>
+      <Head />
+      <body>{props.children}</body>
+    </html>
+  );
+}
+```
+
+When a page's language is its content's rather than the visitor's (a user's
+published site, an article in another language), set it from the handler.
+`Meta.canonical` and `Meta.alternates` add the matching `<link>`s, which
+`<Head />` renders:
+
+```typescript
+Meta.htmlAttributes({ lang: site.language }); // dir follows lang unless given
+Meta.canonical("https://acme.example.com/about");
+Meta.alternates([
+  { hrefLang: "tr", href: "https://acme.example.com/tr/hakkinda" },
+  { hrefLang: "x-default", href: "https://acme.example.com/about" },
+]);
+```
+
+On a client-side navigation the `<html>` attributes and these links follow the
+new page.
 
 ## Breadcrumbs: `useBreadcrumbs`
 
