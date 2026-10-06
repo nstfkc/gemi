@@ -132,6 +132,30 @@ describe("fromApiRoute", () => {
     >();
   });
 
+  test("annotations override the verb's hints, and only hints (#760)", () => {
+    class Mcp extends McpRouter<Routes> {
+      routes = {
+        "cancel-order": this.fromApiRoute("DELETE", "/org/:orgId/orders/:orderId", {
+          description: "Cancel an order",
+          title: "Cancel order",
+          params: { orgId: () => "org_1", orderId: "input" },
+          annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+          requiresApproval: true,
+        }),
+        a: this.fromApiRoute("GET", "/health", {
+          description: "x",
+          // @ts-expect-error a hint is a boolean
+          annotations: { readOnlyHint: "yes" },
+        }),
+        b: this.fromApiRoute("GET", "/health", {
+          description: "x",
+          // @ts-expect-error not a hint
+          annotations: { readonlyHint: true },
+        }),
+      };
+    }
+  });
+
   test("an unknown or unmounted url is an error", () => {
     class Mcp extends McpRouter<Routes> {
       routes = {

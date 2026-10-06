@@ -5,6 +5,7 @@ Author: Enes Tufekci
 Date: 2026-09-06
 Updated: 2026-09-21 — "Files" rewritten against the attachment store that landed in #491–#493
 Updated: 2026-10-04 — "Params the model names in its own terms" (#767)
+Updated: 2026-10-06 — annotation overrides in the meta (#760)
 
 ## Summary
 
@@ -508,6 +509,15 @@ One more that is nearly free now and expensive later: MCP tool **annotations**
 prompts in remote clients. The HTTP verb already implies sensible defaults —
 GET is read-only, DELETE is destructive — so populate them from the verb in v1
 rather than making every app revisit its MCP file when v2 lands.
+
+Routes do not always follow their verb, so the meta can override the verb's
+hints one by one (#760): a POST that cancels an order is
+`annotations: { destructiveHint: true, idempotentHint: true }`, a search that
+takes a body is `annotations: { readOnlyHint: true }`, and `false` takes a verb
+default back. `title` names the tool for a client to show. A tool left
+read-only that is also marked destructive or idempotent is refused at boot,
+since only a tool that writes can be either. Hints are not enforced; a tool
+that must be confirmed sets `requiresApproval`.
 
 ### No remote surface in v1
 

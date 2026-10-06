@@ -67,18 +67,26 @@ export type McpCallContext = {
 export type McpCredentials = DispatchCredentials;
 
 /**
- * MCP's tool annotations, from the verb. They drive confirmation prompts in
- * remote clients, which is why they are set now rather than when v2 lands:
- * every app would otherwise have to revisit its MCP file to get them.
+ * MCP's tool annotations. They drive confirmation prompts in remote clients,
+ * which is why they are set from v1 on rather than when the remote caller
+ * lands: every app would otherwise have to revisit its MCP file to get them.
  *
- * Only what the verb says is set. POST and PATCH carry nothing, and MCP's
+ * The verb sets the defaults, and only what it says: GET is read-only, DELETE
+ * destructive, PUT idempotent. POST and PATCH carry nothing, and MCP's
  * defaults for an unannotated tool — not read-only, possibly destructive — are
- * the honest answer for them.
+ * the honest answer for them. A route meta's `annotations` overrides them hint
+ * by hint (#760), `false` included.
+ *
+ * `destructiveHint` and `idempotentHint` only mean something for a tool that
+ * is not read-only, so a tool left read-only with either set is refused at
+ * boot: one of the two is a mistake, and a client would read the wrong one.
  */
 export type McpToolAnnotations = {
-  readOnlyHint?: true;
-  destructiveHint?: true;
-  idempotentHint?: true;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  /** Whether the tool reaches beyond the app's own data — a third-party API, the web. */
+  openWorldHint?: boolean;
 };
 
 /**
@@ -110,7 +118,9 @@ export interface McpToolDescriptor {
    * as `outputSchema`.
    */
   readonly outputSchema?: AnySchema;
-  readonly annotations: McpToolAnnotations;
+  /** The meta's `title`: a name for a client to show. Absent when it declares none. */
+  readonly title?: string;
+  readonly annotations: Readonly<McpToolAnnotations>;
   readonly tags: readonly string[];
   readonly requiresApproval: boolean;
   /** The controller method mounted at the route, when there is one (#502). */
@@ -420,6 +430,10 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     if (meta.output !== undefined && typeof meta.output?.safeParse !== "function") {
       throw new Error(`${where}: output must be a schema, built with s.`);
     }
+    if (meta.title !== undefined && (typeof meta.title !== "string" || meta.title === "")) {
+      throw new Error(`${where}: title must be a non-empty string.`);
+    }
+    const annotations = annotationsFor(where, method, meta.annotations);
     if (fileFields.length > 0 && method === "GET") {
       throw new Error(`${where}: a GET has no body to carry a file.`);
     }
@@ -484,7 +498,8 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
         url,
         inputSchema: combineSchemas(meta.input, base, s.object(extras)),
         ...(meta.output ? { outputSchema: meta.output } : {}),
-        annotations: annotationsFor(method),
+        ...(meta.title ? { title: meta.title } : {}),
+        annotations,
         tags: Object.freeze([...(meta.tags ?? [])]),
         requiresApproval: meta.requiresApproval === true,
         ...(entry.source ? { source: entry.source } : {}),
@@ -701,17 +716,60 @@ function assertModelParam(where: string, at: string, param: McpModelParam<any, a
   }
 }
 
-function annotationsFor(method: McpMethod): McpToolAnnotations {
+const ANNOTATION_KEYS = new Set<string>([
+  "readOnlyHint",
+  "destructiveHint",
+  "idempotentHint",
+  "openWorldHint",
+]);
+
+/** What the verb says, before the meta's overrides. */
+function verbAnnotations(method: McpMethod): McpToolAnnotations {
   switch (method) {
     case "GET":
-      return Object.freeze({ readOnlyHint: true as const });
+      return { readOnlyHint: true };
     case "DELETE":
-      return Object.freeze({ destructiveHint: true as const });
+      return { destructiveHint: true };
     case "PUT":
-      return Object.freeze({ idempotentHint: true as const });
+      return { idempotentHint: true };
     default:
-      return Object.freeze({});
+      return {};
   }
+}
+
+/**
+ * The verb's hints with the meta's laid over them, hint by hint. Checked for a
+ * router written in JavaScript or behind a cast: an unknown key is a typo that
+ * would silently leave the verb's default standing, and a non-boolean is not a
+ * hint a client can read.
+ */
+function annotationsFor(
+  where: string,
+  method: McpMethod,
+  overrides: McpToolAnnotations | undefined,
+): Readonly<McpToolAnnotations> {
+  if (overrides !== undefined && (typeof overrides !== "object" || overrides === null)) {
+    throw new Error(`${where}: annotations must be an object of hints.`);
+  }
+  const merged: McpToolAnnotations = verbAnnotations(method);
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (!ANNOTATION_KEYS.has(key)) {
+      throw new Error(
+        `${where}: "${key}" is not a tool annotation. Use readOnlyHint, destructiveHint, idempotentHint or openWorldHint.`,
+      );
+    }
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") {
+      throw new Error(`${where}: annotations.${key} must be true or false.`);
+    }
+    (merged as Record<string, boolean>)[key] = value;
+  }
+  if (merged.readOnlyHint === true && (merged.destructiveHint || merged.idempotentHint)) {
+    throw new Error(
+      `${where} is read-only${overrides?.readOnlyHint ? "" : ` (a ${method})`} and also ${merged.destructiveHint ? "destructive" : "idempotent"}, which only a tool that is not read-only can be. Set readOnlyHint: false if it changes something.`,
+    );
+  }
+  return Object.freeze(merged);
 }
 
 /**
