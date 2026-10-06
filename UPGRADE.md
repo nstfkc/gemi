@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.114.0 to 0.115.0
 
 ## Storage: portable `objects(prefix)` and `deletePrefix(prefix)` (#833)
 
