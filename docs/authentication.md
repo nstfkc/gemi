@@ -72,6 +72,7 @@ a binding into the container, and a facade resolves it.**
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
+| `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -766,17 +767,21 @@ export default defineAuthConfig({
 ```
 
 `GoogleOAuthProvider` config: `clientId`, `clientSecret`, `scope`, `redirectPath`
-(default `/auth/oauth/google/callback`). It reads `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
-and `HOST_NAME` from the environment by default. `XOAuthProvider` reads `X_CLIENT_ID` /
-`X_SECRET` and takes a `scope` array.
+(default `/auth/oauth/google/callback`) and `authorizationParams` (extra parameters for
+Google's consent URL, e.g. `{ prompt: "select_account" }`). `HOST_NAME` + `redirectPath` is the
+`redirect_uri` of both the consent URL and the token exchange, so a custom `redirectPath` must
+be registered with Google and routed to the callback. It reads `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, and `HOST_NAME` from the environment by default. `XOAuthProvider` reads
+`X_CLIENT_ID` / `X_SECRET` and takes a `scope` array.
 
 The framework mounts two view routes per provider automatically:
 
 - `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
-- `/auth/oauth/:provider/callback` — exchanges the code, resolves the provider account to a
-  user (see [below](#oauth-account-identity)), signs them in (or creates the account + a
-  `SocialAccount` on first login, in one transaction with [`onUserCreated`](#onusercreated)),
-  sets the session cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
+- `/auth/oauth/:provider/callback` — checks the round trip's `state` (see
+  [below](#state-and-pkce)), exchanges the code, resolves the provider account to a user (see
+  [below](#oauth-account-identity)), signs them in (or creates the account + a `SocialAccount`
+  on first login, in one transaction with [`onUserCreated`](#onusercreated)), sets the session
+  cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
 
 > **Note:** `onSignUp`'s `verificationToken` is `""` on this path. A user arriving through
 > OAuth has `emailVerifiedAt` already set, so there is nothing to verify. To mail them a
@@ -793,9 +798,101 @@ A "Sign in with Google" button is just a link:
 ```
 
 To add your own provider, extend the abstract `OAuthProvider` (from `gemi/services`) and
-implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
-`{ email, name, username?, providerId? }`. Return the provider's stable account id as
-`providerId` whenever it has one, and never build one from a name or an email.
+implement `getRedirectUrl(req, ctx)` and `onCallback(req, ctx)`:
+
+- `getRedirectUrl` builds the provider's authorization URL. Put **`ctx.state` on it as is** —
+  the callback is refused unless the provider echoes it back — and, when the provider supports
+  PKCE, `ctx.codeChallenge` with `code_challenge_method=S256`.
+- `onCallback` exchanges `?code=` (sending `ctx.codeVerifier` when the URL carried a challenge)
+  and returns `{ email?, emailVerified?, name?, username?, providerId? }`. Return the
+  provider's stable account id as `providerId` whenever it has one, and never build one from a
+  name or an email. Return `emailVerified` whenever the provider says whether it verified the
+  address. Throw `OAuthCallbackError(code)` for a failure with a known reason (the code reaches
+  the app); any other error is reported as `provider_error`.
+
+```typescript
+import { OAuthCallbackError, OAuthProvider } from "gemi/services";
+
+class AcmeOAuthProvider extends OAuthProvider {
+  getRedirectUrl(req, ctx) {
+    const url = new URL("https://acme.example/oauth/authorize");
+    url.searchParams.set("client_id", process.env.ACME_CLIENT_ID!);
+    url.searchParams.set("redirect_uri", `${process.env.HOST_NAME}/auth/oauth/acme/callback`);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("state", ctx.state);
+    url.searchParams.set("code_challenge", ctx.codeChallenge);
+    url.searchParams.set("code_challenge_method", ctx.codeChallengeMethod);
+    return url.toString();
+  }
+
+  async onCallback(req, ctx) {
+    const token = await exchange(req.search.get("code"), ctx.codeVerifier);
+    if (!token.ok) throw new OAuthCallbackError("invalid_grant");
+    const me = await profile(token);
+    return { providerId: me.id, email: me.email, emailVerified: me.email_verified, name: me.name };
+  }
+}
+```
+
+### State and PKCE
+
+Every round trip is tied to the browser that started it. `/auth/oauth/:provider` mints a random
+`state` and a PKCE `code_verifier`, passes the provider the `state` and the verifier's S256
+challenge, and keeps both in a cookie:
+
+- signed with the app's `SECRET` (so it must be set, as for any sign-in), `HttpOnly`,
+  `SameSite=Lax`, ten minutes;
+- named `__Host-gemi_oauth` on https (only this exact host can set it), `gemi_oauth` on http.
+
+The callback reads the cookie, **deletes it**, and refuses unless the returned `state` matches it
+(compared in constant time) and was minted for this provider within the last ten minutes. A
+state is good for one callback. The verifier then goes to the token exchange, so a code is
+redeemable only together with the cookie of the round trip it was issued for. Because the
+state lives in the browser and not in process memory, any process can finish a round trip any
+other process started.
+
+### Verified email only
+
+When the provider identity is not linked yet and the callback falls back to the email (step 2
+[below](#oauth-account-identity)), an address the provider reports as unverified
+(`emailVerified: false`) is refused with `email_not_verified`: it neither signs into the user
+who has that address nor creates one. `GoogleOAuthProvider` reports Google's `email_verified`,
+and treats a missing one as unverified. A custom provider that returns no `emailVerified` keeps
+matching by email.
+
+The email is trimmed and lower-cased before it is looked up and stored, the way the email-code
+flow does it, so `Maria@Example.com` from the provider is the `maria@example.com` who signed up
+with a code. A user stored with the provider's exact spelling by an earlier version is still
+found by it.
+
+### When a callback fails
+
+A refused callback creates no session and writes nothing. The callback view gets
+`{ session: null, error, redirectTo }`: `error` is the reason and `redirectTo` the page the
+sign-in was meant to return to (the forwarded `?redirect=`), or `null`. With `oauthFailurePath`
+set, the browser is redirected there instead, as `<oauthFailurePath>?error=<reason>&redirect=<page>`:
+
+```typescript
+export default defineAuthConfig({
+  oauthFailurePath: "/auth/sign-in", // a same-origin path
+});
+```
+
+| `error` | Meaning |
+| --- | --- |
+| `access_denied` (or the provider's own code) | The provider returned `?error=`, e.g. the user cancelled. |
+| `missing_state` | No state cookie, or no `?state=`. |
+| `invalid_state` | The state does not match, the cookie is not one this app signed, it was minted for another provider, or it was already used. |
+| `expired_state` | The round trip took longer than ten minutes. |
+| `missing_code` | No `?code=`. |
+| `invalid_grant`, `exchange_failed` | The token exchange failed. |
+| `provider_error` | The provider's `onCallback` threw something other than `OAuthCallbackError`. |
+| `no_identity`, `missing_email`, `invalid_email` | The provider returned no usable identity. |
+| `email_not_verified` | See [Verified email only](#verified-email-only). |
+| `account_conflict` | The email belongs to a user already linked to a different account at this provider. |
+| `unknown_provider` | No provider is registered under this name. |
+
+The `intended_url` cookie is cleared whether the callback succeeds or fails.
 
 ### OAuth account identity
 

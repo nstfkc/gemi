@@ -167,6 +167,15 @@ export interface AuthConfig {
 
   signUpRequest?: new () => HttpRequest<any, any>;
   oauthProviders?: Record<string, OAuthProvider>;
+  /**
+   * Where a failed OAuth callback sends the browser, with the reason as
+   * `?error=` (`access_denied`, `invalid_state`, `email_not_verified`, …) and
+   * the page the sign-in was meant to return to as `?redirect=`, when there was
+   * one. A same-origin path, typically the sign-in page. `null`, the default,
+   * renders the callback view with `{ session: null, error, redirectTo }`
+   * instead.
+   */
+  oauthFailurePath?: string | null;
 
   verifyPassword?: (password: string, hash: string) => Promise<boolean>;
   hashPassword?: (password: string) => Promise<string>;
@@ -378,6 +387,7 @@ export function authConfigDefaults(
 
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},
+    oauthFailurePath: null,
 
     verifyPassword: verifyPasswordHash,
     hashPassword: async (password) => await Bun.password.hash(password),

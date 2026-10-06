@@ -1,18 +1,18 @@
 import { type TOAuth2Scope, TwitterApi } from "twitter-api-v2";
-import { Redirect } from "../../facades/Redirect";
 import { HttpRequest } from "../../http/HttpRequest";
-import { OAuthProvider } from "./OAuthProvider";
+import {
+  type OAuthAuthorizationContext,
+  type OAuthCallbackContext,
+  OAuthCallbackError,
+  OAuthProvider,
+  type OAuthProfile,
+} from "./OAuthProvider";
 
 type Config = {
   clientId: string;
   scope: TOAuth2Scope[];
   clientSecret: string;
   redirectPath: string;
-};
-
-type OAuthState = {
-  state: string;
-  codeVerifier: string;
 };
 
 const defaultConfig: Config = {
@@ -25,8 +25,6 @@ const defaultConfig: Config = {
 export class XOAuthProvider extends OAuthProvider {
   config: Config;
   client: TwitterApi;
-  // Using a Map to store state and codeVerifier for different OAuth flows
-  private oauthStates: Map<string, OAuthState> = new Map();
 
   constructor(config: Partial<Config> = {}) {
     super();
@@ -37,38 +35,52 @@ export class XOAuthProvider extends OAuthProvider {
     });
   }
 
-  getRedirectUrl() {
-    const { url, codeVerifier, state } = this.client.generateOAuth2AuthLink(
-      `${process.env.HOST_NAME}${this.config.redirectPath}`,
-      { scope: this.config.scope },
-    );
-
-    // Store state and codeVerifier in a map with state as the key
-    this.oauthStates.set(state, { state, codeVerifier });
-
-    Redirect.to(url as never);
-    return url;
+  redirectUri() {
+    return `${process.env.HOST_NAME ?? ""}${this.config.redirectPath}`;
   }
 
-  async onCallback(req: HttpRequest) {
-    const code = req.search.get("code")!;
-    const state = req.search.get("state")!;
-
-    // Retrieve the stored codeVerifier using the state from the callback
-    const oauthState = this.oauthStates.get(state);
-
-    if (!oauthState) {
-      throw new Error("Invalid or expired OAuth state");
+  /**
+   * Built here rather than with `generateOAuth2AuthLink`, which mints its own
+   * state and verifier: the round trip's are gemi's, kept in a cookie so that
+   * any process can finish it. They used to be kept in a `Map` on this
+   * instance, which a callback reaching another process could not find.
+   */
+  getRedirectUrl(_req?: HttpRequest, ctx?: OAuthAuthorizationContext) {
+    if (!ctx) {
+      throw new Error("XOAuthProvider needs the state and PKCE challenge gemi passes.");
     }
+    const url = new URL("https://x.com/i/oauth2/authorize");
+    const params = {
+      response_type: "code",
+      client_id: this.config.clientId,
+      redirect_uri: this.redirectUri(),
+      state: ctx.state,
+      code_challenge: ctx.codeChallenge,
+      code_challenge_method: ctx.codeChallengeMethod,
+      scope: this.config.scope.join(" "),
+    };
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    return url.toString();
+  }
 
-    const result = await this.client.loginWithOAuth2({
-      code,
-      codeVerifier: oauthState.codeVerifier,
-      redirectUri: `${process.env.HOST_NAME}${this.config.redirectPath}`,
-    });
+  async onCallback(req: HttpRequest, ctx?: OAuthCallbackContext): Promise<OAuthProfile> {
+    const code = req.search.get("code");
+    if (!code) throw new OAuthCallbackError("missing_code");
+    if (!ctx?.codeVerifier) throw new OAuthCallbackError("invalid_state");
 
-    // Clean up the stored state after use
-    this.oauthStates.delete(state);
+    let result: Awaited<ReturnType<TwitterApi["loginWithOAuth2"]>>;
+    try {
+      result = await this.client.loginWithOAuth2({
+        code,
+        codeVerifier: ctx.codeVerifier,
+        redirectUri: this.redirectUri(),
+      });
+    } catch (error) {
+      console.error("X OAuth error: token exchange failed", error);
+      throw new OAuthCallbackError("exchange_failed");
+    }
 
     const { data } = await result.client.v2.me({
       "user.fields": ["name", "username", "entities"],

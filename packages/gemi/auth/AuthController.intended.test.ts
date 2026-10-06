@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
 
@@ -7,7 +7,8 @@ const auth = {
     redirectPath: "/dashboard",
     oauthProviders: {
       google: {
-        getRedirectUrl: async () => "https://provider.example/authorize",
+        getRedirectUrl: async (_req: unknown, ctx: { state: string }) =>
+          `https://provider.example/authorize?state=${ctx.state}`,
         onCallback: async () => ({ email: "a@example.com", providerId: "p1" }),
       },
     },
@@ -31,6 +32,32 @@ const auth = {
 vi.mock("../foundation/app", () => ({ app: () => auth }));
 
 const { AuthController } = await import("./AuthController");
+
+// The redirect step signs the round trip's state cookie with it (#822).
+const previousSecret = process.env.SECRET;
+beforeAll(() => {
+  process.env.SECRET = "test-secret";
+});
+afterAll(() => {
+  process.env.SECRET = previousSecret;
+});
+
+/**
+ * A callback that completes a round trip: the state cookie and `?state=` from
+ * a redirect step, plus `cookie`. The callback refuses anything else (#822).
+ */
+async function callback(cookie: string) {
+  const { result, cookies } = await inRequest("http://localhost/auth/oauth/google", "", () =>
+    new AuthController().oauthRedirect(),
+  );
+  const state = new URL(result.destination).searchParams.get("state");
+  const stateCookie = cookies.find((c) => c.startsWith("gemi_oauth="))!.split(";")[0];
+  return inRequest(
+    `http://localhost/auth/oauth/google/callback?code=c&state=${state}`,
+    [stateCookie, cookie].filter(Boolean).join("; "),
+    () => new AuthController().oauthCallback(),
+  );
+}
 
 /** Runs `fn` in a request for `url`, returning its result and Set-Cookie lines. */
 async function inRequest<T>(url: string, cookie: string, fn: () => Promise<T>) {
@@ -108,10 +135,8 @@ describe("the intended URL across the OAuth round trip", () => {
   });
 
   test("the callback returns the kept page and clears the cookie", async () => {
-    const { result, cookies } = await inRequest(
-      "http://localhost/auth/oauth/google/callback?code=c",
+    const { result, cookies } = await callback(
       `intended_url=${encodeURIComponent("/invoices?page=2")}`,
-      () => new AuthController().oauthCallback(),
     );
 
     expect(result.redirectTo).toBe("/invoices?page=2");
@@ -119,14 +144,8 @@ describe("the intended URL across the OAuth round trip", () => {
   });
 
   test("the callback falls back to redirectPath, and refuses a forged cookie", async () => {
-    const plain = await inRequest("http://localhost/auth/oauth/google/callback?code=c", "", () =>
-      new AuthController().oauthCallback(),
-    );
-    const forged = await inRequest(
-      "http://localhost/auth/oauth/google/callback?code=c",
-      `intended_url=${encodeURIComponent("//evil.example")}`,
-      () => new AuthController().oauthCallback(),
-    );
+    const plain = await callback("");
+    const forged = await callback(`intended_url=${encodeURIComponent("//evil.example")}`);
 
     expect(plain.result.redirectTo).toBe("/dashboard");
     expect(forged.result.redirectTo).toBe("/dashboard");

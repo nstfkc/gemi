@@ -15,6 +15,14 @@ import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
 import { readAccessToken } from "./accessToken";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
+import { Redirect } from "../facades/Redirect";
+import { OAuthCallbackError } from "./oauth/OAuthProvider";
+import {
+  OAUTH_STATE_TTL_SECONDS,
+  createOAuthState,
+  oauthStateCookieName,
+  verifyOAuthState,
+} from "./oauth/oauthState";
 
 /**
  * A hash of a random password, for `passwordMatches` to verify against when
@@ -115,6 +123,28 @@ export function pinValue(value: unknown): string | null {
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
 const INTENDED_URL_COOKIE = "intended_url";
+
+function clearIntendedUrlCookie(req: HttpRequest<any, any>) {
+  if (req.cookies.get(INTENDED_URL_COOKIE)) {
+    req.ctx().setCookie(INTENDED_URL_COOKIE, "", { maxAge: -1 });
+  }
+}
+
+/**
+ * The page `oauthRedirect` was asked to return to, if any, and the cookie that
+ * held it cleared. Checked again on the way out: a cookie is client-writable
+ * too.
+ */
+function takeIntendedUrl(req: HttpRequest<any, any>): string | null {
+  const stashed = req.cookies.get(INTENDED_URL_COOKIE);
+  if (!stashed) return null;
+  clearIntendedUrlCookie(req);
+  try {
+    return safeRedirectPath(decodeURIComponent(stashed), "") || null;
+  } catch {
+    return null;
+  }
+}
 
 class SignInRequest extends HttpRequest<
   {
@@ -693,6 +723,8 @@ export class AuthController extends Controller {
       throw new Error(`Invalid provider: ${provider}`);
     }
 
+    const secure = isSecureRequest(req.rawRequest);
+
     // The provider round trip drops our query string, so a `?redirect=` the
     // sign-in page forwarded onto this link waits in a cookie for the callback.
     // `Lax`, not the default `Strict`: the callback is a cross-site navigation
@@ -705,13 +737,31 @@ export class AuthController extends Controller {
         // By the scheme the client addressed, not by whether the host reads
         // as local: `localhost.evil.example` is not local, and a browser
         // drops a `Secure` cookie from a plain-http origin anyway.
-        secure: isSecureRequest(req.rawRequest),
+        secure,
         maxAge: 60 * 10,
       });
+    } else {
+      // A `?redirect=` left from an earlier round trip in this browser must
+      // not be taken for this one's.
+      clearIntendedUrlCookie(req);
     }
 
+    // The round trip's `state` and PKCE verifier, kept in this browser for
+    // the callback to check (#822). See `oauth/oauthState.ts`.
+    const { state, codeChallenge, cookieValue } = createOAuthState(provider as string);
+    req.ctx().setCookie(oauthStateCookieName(secure), cookieValue, {
+      httpOnly: true,
+      sameSite: "Lax",
+      secure,
+      maxAge: OAUTH_STATE_TTL_SECONDS,
+    });
+
     return {
-      destination: await oauthProvider.getRedirectUrl(req),
+      destination: await oauthProvider.getRedirectUrl(req, {
+        state,
+        codeChallenge,
+        codeChallengeMethod: "S256",
+      }),
     };
   }
 
@@ -721,8 +771,68 @@ export class AuthController extends Controller {
     const { userProvider, config } = auth;
     const oauthProvider = config.oauthProviders[provider as string];
 
-    const { email, name, username, providerId } =
-      await oauthProvider.onCallback(req);
+    // Read and delete the round trip's cookie first, whatever happens next:
+    // a state is good for one callback.
+    const secure = isSecureRequest(req.rawRequest);
+    const stateCookie = oauthStateCookieName(secure);
+    const storedState = req.cookies.get(stateCookie);
+    if (storedState !== undefined && storedState !== null) {
+      req.ctx().setCookie(stateCookie, "", {
+        httpOnly: true,
+        sameSite: "Lax",
+        secure,
+        maxAge: -1,
+      });
+    }
+
+    if (!oauthProvider) {
+      return this.oauthFailure(req, "unknown_provider");
+    }
+
+    // The provider says the user did not finish (`access_denied` when they
+    // cancelled). There is no code to exchange.
+    const providerError = req.search.get("error");
+    if (providerError) {
+      return this.oauthFailure(
+        req,
+        /^[a-z0-9_]{1,64}$/.test(providerError) ? providerError : "provider_error",
+      );
+    }
+
+    // Accepted only for a round trip this browser started.
+    const check = verifyOAuthState({
+      provider: provider as string,
+      cookieValue: storedState,
+      returnedState: req.search.get("state"),
+    });
+    if ("reason" in check) {
+      console.error(`Authentication error: OAuth callback refused (${check.reason})`);
+      return this.oauthFailure(req, check.reason);
+    }
+
+    if (!req.search.get("code")) {
+      return this.oauthFailure(req, "missing_code");
+    }
+
+    let profile: Awaited<ReturnType<typeof oauthProvider.onCallback>>;
+    try {
+      profile = await oauthProvider.onCallback(req, {
+        state: check.payload.state,
+        codeVerifier: check.payload.codeVerifier,
+      });
+    } catch (error) {
+      if (error instanceof OAuthCallbackError) {
+        return this.oauthFailure(req, error.code);
+      }
+      console.error("Authentication error: OAuth provider callback failed", error);
+      return this.oauthFailure(req, "provider_error");
+    }
+
+    const { name, username, providerId, emailVerified } = profile ?? {};
+    // Folded as the email-code flow folds it, so `Maria@Example.com` from the
+    // provider is the `maria@example.com` who signed up with a code.
+    const rawEmail = typeof profile?.email === "string" ? profile.email : undefined;
+    const email = rawEmail ? normalizeEmail(rawEmail) : null;
 
     // Who this is, in order of how much each answer can be trusted:
     //
@@ -730,9 +840,9 @@ export class AuthController extends Controller {
     //    resolves here whatever has happened to its email or display name at
     //    the provider since — and the local user's email is not touched, so a
     //    provider-side change never moves the account to a different user.
-    // 2. Otherwise the email, exactly as before: an existing user is signed in,
-    //    and a new one is created. Either way the identity is linked, so the
-    //    next callback takes step 1.
+    // 2. Otherwise the email, provided the provider has not said it is
+    //    unverified: an existing user is signed in, and a new one is created.
+    //    Either way the identity is linked, so the next callback takes step 1.
     //
     // A provider that returns no `providerId` only ever takes step 2, and has
     // no `SocialAccount` written — a row with no identity in it can never be
@@ -746,11 +856,23 @@ export class AuthController extends Controller {
     if (!user) {
       if (!email) {
         console.error(
-          "Authentication error: No email returned from OAuth provider callback",
+          "Authentication error: No usable email returned from OAuth provider callback",
         );
-        return {
-          session: null,
-        };
+        return this.oauthFailure(
+          req,
+          rawEmail ? "invalid_email" : providerId ? "missing_email" : "no_identity",
+        );
+      }
+
+      // An address the provider has not verified proves nothing about who is
+      // signing in, so it neither signs into the user who owns it nor creates
+      // one. Google's guidance is to trust the email for account matching only
+      // when `email_verified` is true.
+      if (emailVerified === false) {
+        console.error(
+          "Authentication error: OAuth provider returned an unverified email",
+        );
+        return this.oauthFailure(req, "email_not_verified");
       }
 
       const locale = app(Translator).detectLocale(req);
@@ -760,6 +882,7 @@ export class AuthController extends Controller {
           provider,
           providerId,
           email,
+          rawEmail,
           name,
           username,
           locale,
@@ -783,9 +906,7 @@ export class AuthController extends Controller {
       }
 
       if (!user) {
-        return {
-          session: null,
-        };
+        return this.oauthFailure(req, "account_conflict");
       }
     }
 
@@ -834,17 +955,43 @@ export class AuthController extends Controller {
     });
 
     // Where `oauthRedirect` was asked to return to, else `redirectPath`.
-    // Checked again on the way out: a cookie is client-writable too.
-    const stashed = req.cookies.get(INTENDED_URL_COOKIE);
-    let redirectTo = config.redirectPath;
-    if (stashed) {
-      try {
-        redirectTo = safeRedirectPath(decodeURIComponent(stashed), redirectTo);
-      } catch {}
-      req.ctx().setCookie(INTENDED_URL_COOKIE, "", { maxAge: -1 });
-    }
+    const redirectTo = takeIntendedUrl(req) ?? config.redirectPath;
 
     return { session, redirectTo };
+  }
+
+  /**
+   * A refused OAuth callback: the reason code and the page the sign-in was
+   * meant to return to. With `auth.oauthFailurePath` set, the browser is
+   * redirected there as `?error=<code>&redirect=<page>`; otherwise the
+   * callback view renders with `{ session: null, error, redirectTo }`.
+   *
+   * Not a route — `protected` keeps it off the controller's public surface.
+   */
+  protected oauthFailure(
+    req: HttpRequest<any, any>,
+    error: string,
+  ): { session: null; error: string; redirectTo: string | null } {
+    const intended = takeIntendedUrl(req);
+    const failurePath = app(AuthManager).config.oauthFailurePath;
+
+    if (failurePath) {
+      const target = safeRedirectPath(failurePath, "");
+      if (target) {
+        const url = new URL(target, "http://gemi.invalid");
+        url.searchParams.set("error", error);
+        if (intended) url.searchParams.set(INTENDED_URL_PARAM, intended);
+        // A same-origin path, so `external` only skips `applyParams`, which
+        // would read a `:` in the query as a route parameter.
+        Redirect.external(`${url.pathname}${url.search}${url.hash}`);
+      } else {
+        console.error(
+          `auth.oauthFailurePath must be a same-origin path, got ${JSON.stringify(failurePath)}`,
+        );
+      }
+    }
+
+    return { session: null, error, redirectTo: intended };
   }
 
   /**
@@ -856,12 +1003,15 @@ export class AuthController extends Controller {
   protected async linkOAuthAccount(args: {
     provider: string;
     providerId?: string;
+    /** Normalised: trimmed and lower-cased. */
     email: string;
+    /** As the provider returned it, for users stored before emails were normalised. */
+    rawEmail?: string;
     name?: string;
     username?: string;
     locale: string;
   }): Promise<{ user: User; action: "signin" | "signup" } | null> {
-    const { provider, providerId, email, name, username, locale } = args;
+    const { provider, providerId, email, rawEmail, name, username, locale } = args;
     const { userProvider, config } = app(AuthManager);
 
     const socialAccount = (userId: number) => ({
@@ -878,7 +1028,14 @@ export class AuthController extends Controller {
       refreshToken: "",
     });
 
-    const existing = await userProvider.findUserByEmailAddress(email, false);
+    // The normalised address first. An account an earlier OAuth sign-up
+    // stored exactly as the provider spelled it is still found by that
+    // spelling, rather than duplicated.
+    let existing = await userProvider.findUserByEmailAddress(email, false);
+    const asReturned = rawEmail?.trim();
+    if (!existing && asReturned && asReturned !== email) {
+      existing = await userProvider.findUserByEmailAddress(asReturned, false);
+    }
 
     if (existing) {
       if (!providerId) return { user: existing, action: "signin" };
