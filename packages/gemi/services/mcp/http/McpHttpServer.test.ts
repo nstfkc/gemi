@@ -12,6 +12,7 @@ import { HttpRequest } from "../../../http/HttpRequest";
 import { McpRouter } from "../../../http/McpRouter";
 import { ViewRouter } from "../../../http/ViewRouter";
 import { Kernel } from "../../../kernel";
+import { MemoryNonceStore } from "../../../ai/store/Nonces";
 import { McpToolError } from "../McpRegistry";
 import { McpApiKeyResolver } from "./callers";
 import { sign } from "./signedState";
@@ -109,8 +110,16 @@ function kernelWith(remote: Record<string, unknown> | undefined) {
   };
 }
 
+const memoryNonces = new MemoryNonceStore();
+let noncesDown = false;
+const nonces = {
+  consume: (nonce: string, expiresAt: number) =>
+    noncesDown ? Promise.reject(new Error("store down")) : memoryNonces.consume(nonce, expiresAt),
+};
+
 const REMOTE = {
   enabled: true,
+  nonces,
   url: "https://shop.test/mcp",
   resolvers: [resolver],
   allowedOrigins: ["https://inspector.test"],
@@ -178,6 +187,7 @@ async function events(res: Response): Promise<any[]> {
 beforeEach(() => {
   handled.length = 0;
   slow = async () => ({});
+  noncesDown = false;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -603,6 +613,14 @@ describe("a modern client (2026-07-28)", () => {
       const replay = await (await answer(first.requestState, "accept", { approve: true })).json();
       expect(replay.error.message).toMatch(/already been used/);
       expect(handled).toHaveLength(1);
+    });
+
+    test("an approval is refused when its single use cannot be recorded", async () => {
+      const { requestState } = (await (await ask()).json()).result;
+      noncesDown = true;
+      const refused = await (await answer(requestState, "accept", { approve: true })).json();
+      expect(refused.error).toMatchObject({ code: -32602 });
+      expect(handled).toEqual([]);
     });
 
     test("arguments too long to show are cut, and the prompt says so", async () => {
