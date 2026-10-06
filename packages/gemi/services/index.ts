@@ -193,7 +193,12 @@ export {
 } from "../auth/sessionToken";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
-export { OAuthProvider } from "../auth/oauth/OAuthProvider";
+export { OAuthCallbackError, OAuthProvider } from "../auth/oauth/OAuthProvider";
+export type {
+  OAuthAuthorizationContext,
+  OAuthCallbackContext,
+  OAuthProfile,
+} from "../auth/oauth/OAuthProvider";
 
 // Middleware
 export { MiddlewareServiceProvider } from "./middleware/MiddlewareServiceProvider";

@@ -54,7 +54,9 @@ function fakeGoogle() {
         return Response.json({ access_token: "google-access-token" });
       }
       if (url.host === "www.googleapis.com") {
-        return Response.json(userinfo);
+        // Verified unless the test says otherwise: an unverified address
+        // never links or creates by email (#822).
+        return Response.json({ email_verified: true, ...userinfo });
       }
       throw new Error(`unexpected fetch: ${url}`);
     }),
@@ -64,8 +66,8 @@ function fakeGoogle() {
 /** A provider that returns whatever the test says, for the non-Google paths. */
 class ScriptedProvider extends OAuthProvider {
   next: Awaited<ReturnType<OAuthProvider["onCallback"]>> = {};
-  getRedirectUrl() {
-    return "https://provider.test/authorize";
+  getRedirectUrl(_req: unknown, ctx?: { state: string }) {
+    return `https://provider.test/authorize?state=${ctx?.state}`;
   }
   async onCallback() {
     return this.next;
@@ -189,9 +191,25 @@ function suite(label: string, url?: string) {
      * which is the session path's concern and not this suite's.
      */
     async function callback(provider = "google", agent = "test-agent") {
+      // The redirect step first: the callback is refused unless it completes
+      // a round trip this browser started (#822).
+      const start = new HttpRequest(
+        new Request(`http://localhost/auth/oauth/${provider}`),
+        { provider },
+        "view",
+      );
+      const { destination, stateCookie } = await RequestContext.run(start as never, async () => {
+        const { destination } = await new AuthController().oauthRedirect(start as never);
+        const line = [...RequestContext.getStore().cookies].find((c) =>
+          c.startsWith("gemi_oauth="),
+        )!;
+        return { destination, stateCookie: line.split(";")[0] };
+      });
+      const state = new URL(destination).searchParams.get("state");
+
       const req = new HttpRequest(
-        new Request(`http://localhost/auth/oauth/${provider}/callback?code=c`, {
-          headers: { "User-Agent": agent },
+        new Request(`http://localhost/auth/oauth/${provider}/callback?code=c&state=${state}`, {
+          headers: { "User-Agent": agent, Cookie: stateCookie },
         }),
         { provider },
         "view",
@@ -243,6 +261,7 @@ function suite(label: string, url?: string) {
         providerId: "g-1",
         name: "Ada",
         email: "ada@x.test",
+        emailVerified: true,
       });
     });
 
@@ -390,6 +409,41 @@ function suite(label: string, url?: string) {
       const sessions: any = await raw.unsafe(`SELECT COUNT(*) AS n FROM "Session"`);
       expect(Number([...sessions][0].n)).toBe(1);
       error.mockRestore();
+    });
+
+    test("an unverified email neither links to its user nor creates one", async () => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      await seedUser("ada@x.test");
+      userinfo = { sub: "g-1", name: "Ada", email: "ada@x.test", email_verified: false };
+
+      const result = await callback();
+
+      expect(result).toMatchObject({ session: null, error: "email_not_verified" });
+      expect(await users()).toHaveLength(1);
+      expect(await socialAccounts()).toEqual([]);
+      expect(hooks).toEqual([]);
+
+      // Nor does an unknown one become a user.
+      userinfo = { sub: "g-2", name: "Grace", email: "grace@x.test", email_verified: false };
+      expect((await callback()).session).toBeNull();
+      expect(await users()).toHaveLength(1);
+      error.mockRestore();
+    });
+
+    test("the provider's email is lower-cased before it is matched and stored", async () => {
+      const id = await seedUser("ada@x.test");
+      userinfo = { sub: "g-1", name: "Ada", email: " Ada@X.Test " };
+
+      const { session } = await callback();
+
+      expect(session!.user.id).toBe(id);
+      expect(await socialAccounts()).toMatchObject([
+        { userId: id, providerId: "g-1", email: "ada@x.test" },
+      ]);
+
+      userinfo = { sub: "g-2", name: "Grace", email: "Grace@X.Test" };
+      await callback();
+      expect((await users()).map((user) => user.email)).toEqual(["ada@x.test", "grace@x.test"]);
     });
 
     // --- missing identity --------------------------------------------------

@@ -1,3 +1,23 @@
+# Unreleased
+
+## OAuth callbacks check `state` and use PKCE; unverified emails no longer link (#822)
+
+**Behaviour change (minor version).** The OAuth callback now only completes a round trip started in the same browser, and only signs in or creates a user by email when the provider has verified the address. See [State and PKCE](docs/authentication.md#state-and-pkce).
+
+- **`state` and PKCE.** `/auth/oauth/:provider` mints a random `state` and a PKCE verifier and keeps them in a signed, `HttpOnly`, `SameSite=Lax`, ten-minute cookie (`__Host-gemi_oauth` on https, `gemi_oauth` on http). The callback deletes the cookie and refuses a missing, mismatched, expired or already used state. The redirect step now needs `SECRET`, as signing in already did. Sign-ins that are in progress during the deploy fail once with `missing_state`; the user starts again.
+- **Custom providers must send the state.** `getRedirectUrl(req, ctx)` and `onCallback(req, ctx)` now get a second argument. A provider that extends `OAuthProvider` has to put `ctx.state` on its authorization URL unchanged, or every callback is refused. Add `ctx.codeChallenge` (with `code_challenge_method=S256`) and send `ctx.codeVerifier` with the token exchange when the provider supports PKCE. `GoogleOAuthProvider` and `XOAuthProvider` do both. `XOAuthProvider` no longer keeps state in an in-process `Map`, so a callback reaching another process works.
+- **Verified email only.** `onCallback` can return `emailVerified`. When it is `false`, a provider identity that is not linked yet is refused (`email_not_verified`) instead of signing into the user with that email or creating one. `GoogleOAuthProvider` returns Google's `email_verified`; a missing value counts as unverified. Identities already linked sign in as before.
+- **Email normalised.** The provider's email is trimmed and lower-cased before lookup and storage. A user stored with the provider's exact spelling is still found by it.
+- **`redirectPath` honoured.** `GoogleOAuthProvider` uses `HOST_NAME` + `redirectPath` for the consent URL as well as the token exchange; it used to hard-code `/auth/oauth/google/callback` for the first. The token exchange sends its parameters in the request body and the access token in an `Authorization` header instead of the URL.
+- **Failures have a reason.** A refused callback returns `{ session: null, error, redirectTo }` to the callback view (`redirectTo` is the forwarded `?redirect=`, or `null`) and clears `intended_url`. `?error=` from the provider (a cancelled consent) is short-circuited instead of exchanged. The new `auth.oauthFailurePath` redirects there as `?error=<reason>&redirect=<page>` instead. Reason codes are listed in [When a callback fails](docs/authentication.md#when-a-callback-fails).
+- **New exports** from `gemi/services`: `OAuthCallbackError`, and the types `OAuthAuthorizationContext`, `OAuthCallbackContext` and `OAuthProfile`. `GoogleOAuthProvider` takes `authorizationParams` (e.g. `{ prompt: "select_account" }`).
+
+What to do:
+
+- Apps using `GoogleOAuthProvider` or `XOAuthProvider`: nothing, beyond having `SECRET` set. Update the `auth/OauthCallback` view to handle `{ session: null, error }` (or set `oauthFailurePath`), since it used to get `{ session: null }` and often rendered nothing. If you set `redirectPath` on `GoogleOAuthProvider`, check that exactly `HOST_NAME` + `redirectPath` is registered as a redirect URI with Google.
+- Apps with their own `OAuthProvider`: pass `ctx.state` (and the PKCE values) as above, and return `emailVerified` if the provider reports it.
+- Tests that call `oauthCallback` directly have to run `oauthRedirect` first and send its cookie and `?state=` (see `templates/saas-starter/app/models/oauth-callback.test.ts`).
+
 # Upgrading from 0.112.0 to 0.112.1
 
 ## The root route's view and layout get their data again (#819)
