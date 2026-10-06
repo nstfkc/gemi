@@ -1,5 +1,27 @@
 # Unreleased
 
+## MCP: a Streamable HTTP endpoint for remote clients (#762, #760)
+
+**New, off by default.** `route.mcp.remote` serves the app's `McpRouter` to external MCP clients (Claude connectors, Claude Code, the MCP Inspector) over Streamable HTTP, in both the 2026-07-28 revision and 2025-03-26 to 2025-11-25. See [MCP Server](docs/mcp.md).
+
+```ts
+mcp: {
+  router: AppMcpRouter,
+  remote: {
+    enabled: true,
+    url: "https://example.com/mcp",
+    resolvers: [new McpApiKeyResolver({ prefix: "ex_mcp_", verify: async (key) => /* { user, id, scopes } | null */ })],
+  },
+},
+```
+
+- The boot is refused when `enabled` is not a boolean, and when it is `true` without a valid `url`, without a resolver, or without `SECRET`.
+- New from `gemi/services`: `McpHttpServer`, `McpApiKeyResolver`, `bearerToken`, and the types `McpRemoteHttpConfig`, `McpCallerResolver`, `McpResolution`, `McpResolveContext`, `McpApiKey`.
+- `requiresApproval` tools ask the remote user through elicitation before they run (#760). Local callers are unchanged.
+- `req.reportProgress({ progress, total?, message? })` sends progress to a remote client that asked for it; it answers `false` (and does nothing) otherwise. `dispatchAs` takes `signal` and `progress`, and `McpRegistry.execute` forwards them.
+
+What to do: nothing, unless you want remote access. With several instances, pass `nonces: new RedisNonceStore(...)` and route legacy MCP sessions stickily.
+
 ## MCP: remote callers in the registry (#762)
 
 **New; one type change.** `McpRegistry` can now serve a remote MCP caller, the half of MCP v2 the transport (next) builds on. Nothing is mounted by this change.

@@ -139,7 +139,7 @@ function modern(
       _meta: {
         "io.modelcontextprotocol/protocolVersion": MODERN,
         "io.modelcontextprotocol/clientCapabilities": options.capabilities ?? {},
-        ...((params._meta as object) ?? {}),
+        ...(params._meta as object),
       },
     },
   };

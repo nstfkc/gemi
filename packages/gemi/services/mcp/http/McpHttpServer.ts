@@ -57,7 +57,7 @@ export type McpRemoteHttpConfig = {
    * Who may call: tried in order, and at least one is required — the boot is
    * refused without one, since an endpoint that resolves nobody would be
    * either useless or, worse, open. See `McpCallerResolver`,
-   * `McpApiKeyResolver` and `McpOAuthServer`.
+   * and `McpApiKeyResolver`.
    */
   resolvers?: McpCallerResolver[];
   /**
