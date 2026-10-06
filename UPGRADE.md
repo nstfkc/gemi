@@ -1,3 +1,9 @@
+# Unreleased
+
+## The root route's view and layout get their data again (#819)
+
+**Fixed:** a view or layout on `/` rendered with empty props, in the server render and on the client, because the router looked its data up under `""` instead of `/`. Nothing to change in apps; remove any workaround that read the root page's data some other way.
+
 # Upgrading from 0.111.0 to 0.112.0
 
 ## Resource policies, and view refusals render the `404` view (#726)
