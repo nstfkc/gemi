@@ -21,14 +21,37 @@
  * A `WeakMap`, so a dispatched request is forgotten with the request. The
  * value is the initiator's client address; see `dispatchedClientAddress`.
  */
-const dispatched = new WeakMap<Request, { clientAddress: string }>();
+const dispatched = new WeakMap<Request, { clientAddress: string; grant?: McpGrant }>();
+
+/**
+ * The credential a remote MCP caller's tool call was made under (#762): which
+ * resolver verified it, its id, the scopes it carries and the OAuth client it
+ * was issued to. Never the secret.
+ *
+ * Read by a route as `req.mcpGrant()`, to hold a tool call to a scope of its
+ * own — `req.mcpGrant()?.scopes.includes("billing")` — on top of the user's
+ * own permissions, which the route's middleware checks either way.
+ */
+export type McpGrant = {
+  readonly via: string;
+  readonly id: string;
+  readonly scopes: readonly string[];
+  readonly clientId?: string;
+};
 
 /**
  * `clientAddress` is required so the one writer cannot mark a request without
- * saying whose rate-limit budget it spends.
+ * saying whose rate-limit budget it spends. `grant` is set for a remote MCP
+ * caller's call, and only by `dispatchAs`, from a principal a resolver
+ * verified.
  */
-export function markModelOriginated(req: Request, clientAddress: string) {
-  dispatched.set(req, { clientAddress });
+export function markModelOriginated(req: Request, clientAddress: string, grant?: McpGrant) {
+  dispatched.set(req, grant ? { clientAddress, grant: Object.freeze({ ...grant, scopes: Object.freeze([...grant.scopes]) }) } : { clientAddress });
+}
+
+/** The grant a remote MCP caller's tool call carries; `undefined` for any other request. */
+export function dispatchedGrant(req: Request): McpGrant | undefined {
+  return dispatched.get(req)?.grant;
 }
 
 export function isModelOriginated(req: Request): boolean {

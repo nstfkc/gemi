@@ -1,4 +1,6 @@
 import type { ToolContext } from "../../ai/Agent";
+import type { User } from "../../auth/types";
+import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
 import { ToolError } from "../../ai/redact";
 import { s, type AnySchema, type JSONSchema, type Schema } from "../../ai/Schema";
 import type { RouteSource } from "../../http/ApiRouter";
@@ -12,7 +14,11 @@ import type {
   McpRouteDeclaration,
   McpRouter,
 } from "../../http/McpRouter";
-import type { ApiRouteDispatcher, DispatchCredentials } from "../router/ApiRouteDispatcher";
+import type {
+  ApiRouteDispatcher,
+  DispatchAsOptions,
+  DispatchCredentials,
+} from "../router/ApiRouteDispatcher";
 
 /**
  * Who a tool call runs as. Always an argument to the registry, never read from
@@ -26,22 +32,104 @@ import type { ApiRouteDispatcher, DispatchCredentials } from "../router/ApiRoute
  * That producer *does* read ambient state, since a run no longer carries a
  * request (see `AgentContext`), and the boundary is what keeps that from
  * mattering here: the registry is handed a caller and dispatches as that
- * caller, so a second producer — a job, a test, v2's remote client — supplies
- * one however it likes, and a run with no ambient request is refused by
- * `toAgentTools` before the registry is reached rather than dispatching as
+ * caller, so a second producer — a job, a test, the remote transport —
+ * supplies one however it likes, and a run with no ambient request is refused
+ * by `toAgentTools` before the registry is reached rather than dispatching as
  * nobody.
  * The call is dispatched with that request's credentials, so it runs as that
  * user, through that route's middleware.
  *
- * `remote` is v2's MCP client with a bearer token. It is typed so the seam
- * exists and every entry point already takes it; each of them refuses it,
- * because a token resolver is what makes it safe and there is none yet.
- * Reading the caller from `RequestContext` instead would have been shorter,
- * and would have left v2 a registry that only works inside a gemi request.
+ * `remote` is an MCP client over HTTP (#762). `req` is its request to the MCP
+ * endpoint, and `principal` is what a caller resolver made of the credential
+ * it carried — an OAuth access token or an app API key — after verifying it.
+ * Nothing of the request's own credentials is forwarded: the call is
+ * dispatched as `principal.user`, set on the route's request context before
+ * its middleware runs, so `auth`, policies and the route's own checks decide
+ * exactly as they would for that user's direct request. See
+ * `ApiRouteDispatcher.dispatchAs`'s `identity`.
  */
 export type McpCaller =
   | { kind: "local"; req: HttpRequest<any, any> }
-  | { kind: "remote"; token: string };
+  | { kind: "remote"; req: HttpRequest<any, any>; principal: McpRemotePrincipal };
+
+/**
+ * A remote caller, as a resolver verified it.
+ *
+ * Built only by a resolver, from a credential it checked — never from what a
+ * client says about itself.
+ */
+export type McpRemotePrincipal = {
+  /** The user every call runs as. */
+  user: User;
+  /** Which resolver vouched for the credential: `"oauth"`, `"api-key"`, or an app's own. */
+  via: string;
+  /**
+   * A stable id for the credential: the OAuth grant, the API key. Not the
+   * secret itself. Keys the rate-limit budget the caller's tool calls spend,
+   * and is what a log line names.
+   */
+  id: string;
+  /** The scopes the credential carries. Decides which tools the caller sees. */
+  scopes: readonly string[];
+  /** The OAuth client the token was issued to, when there is one. */
+  clientId?: string;
+};
+
+/**
+ * One scope a remote credential can carry, as an `McpRouter` declares it: the
+ * tools it reaches, by tag and by name, and the sentence a consent screen
+ * shows for it.
+ */
+export type McpScope = {
+  /** What a user is agreeing to, in their words: "Read and edit your site's pages". */
+  description: string;
+  /** Every tool carrying one of these tags. */
+  tags?: readonly string[];
+  /** These tools, by name. */
+  names?: readonly string[];
+};
+
+/**
+ * The scope a router without `scopes` gets: every tool it declares. A router
+ * that wants a credential to reach only some of them declares its own.
+ */
+export const DEFAULT_MCP_SCOPE = "mcp";
+
+/** RFC 6749's scope-token: printable ASCII, no space, `"` or `\`. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
+
+/** How a remote caller's file arguments are read. */
+export type McpRemoteFileOptions = {
+  /** The largest file accepted, in bytes, decoded. Default 10 MiB. */
+  maxBytes?: number;
+  /**
+   * Lets a remote caller name a file by an `https` URL, fetched through
+   * `safeFetch` — public addresses only, no credentials sent, bounded in size
+   * and time. Off by default: a URL argument makes the server fetch whatever
+   * the model was steered to name. `true` takes `safeFetch`'s defaults; an
+   * object is passed to it (`allow` a list of hosts, say), with `maxSize`
+   * capped at `maxBytes`.
+   */
+  fetchUrls?: boolean | SafeFetchOptions;
+};
+
+/** What `McpRegistry` takes beside the router and the dispatcher. */
+export type McpRegistryOptions = {
+  /** Remote callers' file arguments. See `McpRemoteFileOptions`. */
+  files?: McpRemoteFileOptions;
+};
+
+/** What `execute` takes beside the call itself. */
+export type McpExecuteOptions = {
+  /**
+   * That the user approved this call, for a tool with `requiresApproval`.
+   * The remote transport sets it after an elicitation the user accepted; a
+   * remote call to such a tool without it is refused, so a transport that
+   * forgot to ask fails closed. Local calls are approved by the agent loop
+   * before `execute` is reached, and ignore it.
+   */
+  approved?: boolean;
+};
 
 /**
  * One tool call, as the app's hooks see it: who is calling, the request their
@@ -49,11 +137,14 @@ export type McpCaller =
  * agent run makes — the run's tool context.
  *
  * `req` is `caller.req`, repeated so a hook that only wants the request does
- * not have to narrow the caller. `ctx` is absent when `McpRegistry.execute` is
- * called without one (a test, a script dispatching a tool directly).
+ * not have to narrow the caller. For a remote caller it is the request to the
+ * MCP endpoint, run inside a request context whose user is
+ * `caller.principal.user`, so `req.ctx().user` names the same user for both
+ * callers. `ctx` is absent for a remote caller, and when `McpRegistry.execute`
+ * is called without one (a test, a script dispatching a tool directly).
  */
 export type McpCallContext = {
-  caller: Extract<McpCaller, { kind: "local" }>;
+  caller: McpCaller;
   req: HttpRequest<any, any>;
   tool: McpToolDescriptor;
   input: Record<string, unknown>;
@@ -154,6 +245,21 @@ export class McpToolError extends ToolError {
   }
 }
 
+/**
+ * A remote call the transport must not run as asked: a tool the caller cannot
+ * see, or one that needs the user's approval and does not have it. Not a
+ * `ToolError` — it is the transport's to handle, not the model's to read.
+ */
+export class McpCallRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "unknown-tool" | "approval-required",
+  ) {
+    super(message);
+    this.name = "McpCallRefusedError";
+  }
+}
+
 /** Tool names as OpenAI's function tools and MCP clients both accept them. */
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -183,6 +289,14 @@ type PathParam = { name: string; modifier: string };
 
 type Plan = {
   descriptor: McpToolDescriptor;
+  /**
+   * The same tool as a remote caller sees it: its `"input"` files are a file
+   * object (`name`, `mimeType`, and base64 `data` or a `url`) rather than an
+   * attachment id, since a remote client has no attachment store. `null` when
+   * the tool cannot be called remotely at all — it has a bound file, whose
+   * binder needs the run's tool context.
+   */
+  remote: McpToolDescriptor | null;
   params: PathParam[];
   paramBinders: Map<string, McpParamBinder>;
   /** Params the model names in its own terms: the input key, and the resolver. */
@@ -219,6 +333,9 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   declare readonly __router?: R;
 
   private readonly plans = new Map<string, Plan>();
+  /** Each scope, resolved to the names of the tools it reaches. */
+  private readonly scopeTools = new Map<string, { description: string; tools: Set<string> }>();
+  private readonly files: { maxBytes: number; fetch: SafeFetchOptions | null };
 
   constructor(
     private readonly router: McpRouter<any>,
@@ -226,35 +343,65 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       ApiRouteDispatcher,
       "flatRoutes" | "dispatchAs" | "getRouteHandlerAndParams"
     >,
+    options: McpRegistryOptions = {},
   ) {
+    this.files = remoteFileOptions(options.files);
     for (const [name, declaration] of Object.entries(router.routes ?? {})) {
       this.plans.set(name, this.plan(name, declaration));
     }
+    this.resolveScopes();
   }
 
   /**
-   * The tools `caller` may see. v1 has only local callers, and every declared
-   * tool is visible to every one of them; `filter` is taken now so the shape
-   * v2's per-token visibility needs is the shape callers already use.
+   * The tools `caller` may see, narrowed by `filter`.
+   *
+   * A local caller sees every declared tool. A remote one sees the tools a
+   * scope it carries reaches, as it can call them (see `Plan.remote`): a
+   * credential that carries no scope sees nothing, and a tool no scope reaches
+   * is never listed remotely. Visibility is checked again by `execute`, so a
+   * client naming a tool it was not shown gets what it would for a tool that
+   * does not exist.
    */
   list(caller: McpCaller, filter?: McpToolFilter): McpToolDescriptor[] {
-    assertLocal(caller);
-    return this.descriptors(filter);
+    assertCaller(caller);
+    if (caller.kind === "local") return this.descriptors(filter);
+    const out: McpToolDescriptor[] = [];
+    for (const [name, plan] of this.plans) {
+      if (!plan.remote || !this.grants(caller.principal, name)) continue;
+      if (passes(plan.remote, filter)) out.push(plan.remote);
+    }
+    return out;
   }
 
   /**
    * The same listing without a caller, for a projection built once before any
-   * caller exists — `toAgentTools`. It is not per-caller visibility, and a v2
+   * caller exists — `toAgentTools`. It is not per-caller visibility, and a
    * remote listing must go through `list`.
    */
   descriptors(filter?: McpToolFilter): McpToolDescriptor[] {
     const out: McpToolDescriptor[] = [];
     for (const { descriptor } of this.plans.values()) {
-      if (filter?.names && !filter.names.includes(descriptor.name)) continue;
-      if (filter?.tags && !descriptor.tags.some((tag) => filter.tags.includes(tag))) continue;
-      out.push(descriptor);
+      if (passes(descriptor, filter)) out.push(descriptor);
     }
     return out;
+  }
+
+  /**
+   * The scopes a remote credential can carry, with what each one is for —
+   * what a consent screen lists and the authorization server advertises. The
+   * router's `scopes`, or `DEFAULT_MCP_SCOPE` reaching every tool when it
+   * declares none.
+   */
+  scopes(): { name: string; description: string }[] {
+    return [...this.scopeTools].map(([name, { description }]) => ({ name, description }));
+  }
+
+  /**
+   * The scopes that reach the tool `name`: what a client missing all of them
+   * has to ask for. Empty for a tool no scope reaches, or none by that name.
+   */
+  scopesFor(name: string): string[] {
+    return [...this.scopeTools].filter(([, { tools }]) => tools.has(name)).map(([scope]) => scope);
   }
 
   /**
@@ -270,6 +417,12 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
    * scoped to the caller, and bound files are chosen by a binder given `ctx`.
    * Nothing here reads an attachment any other way — the store has no
    * unscoped lookup, and this must not become one.
+   *
+   * A remote caller has neither a tool context nor attachments. It is held to
+   * the tools its scopes reach, and to `requiresApproval` (see
+   * `McpExecuteOptions.approved`): either refusal is an
+   * `McpCallRefusedError`, for the transport. Its files arrive in the
+   * arguments, as base64 or — when the app allows it — an `https` URL.
    *
    * A 2xx answers its JSON, or its text, cut at `MAX_RESULT_BODY`; a body
    * that is neither — a file a route serves — is described, not shown. A tool
@@ -287,13 +440,31 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     name: string,
     args: unknown,
     ctx?: ToolContext,
+    options: McpExecuteOptions = {},
   ): Promise<unknown> {
-    assertLocal(caller);
-    const plan = this.plans.get(name);
-    if (!plan) {
+    assertCaller(caller);
+    const found = this.plans.get(name);
+    if (caller.kind === "remote") {
+      // Worded like a tool that does not exist, so a client cannot tell a
+      // tool it may not see from one there is none of.
+      if (!found?.remote || !this.grants(caller.principal, name)) {
+        throw new McpCallRefusedError(`There is no tool named "${name}".`, "unknown-tool");
+      }
+      if (found.descriptor.requiresApproval && options.approved !== true) {
+        throw new McpCallRefusedError(
+          `"${name}" needs the user's approval, and this call does not have it.`,
+          "approval-required",
+        );
+      }
+      // Never handed to a remote call, even if a transport passed one: its
+      // attachments are scoped to somebody's run, not to this caller.
+      ctx = undefined;
+    }
+    if (!found) {
       throw new Error(`McpRegistry: there is no tool named "${name}".`);
     }
-    const { descriptor } = plan;
+    const plan = found;
+    const descriptor = caller.kind === "remote" ? plan.remote! : plan.descriptor;
 
     const parsed = descriptor.inputSchema.safeParse(args);
     if (parsed.ok === false) {
@@ -334,14 +505,40 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       ? await this.bind(plan, "the credentials", () => this.router.credentials!(call))
       : undefined;
 
+    // A remote caller is dispatched as the user its resolver verified, and
+    // nothing of its own request's credentials crosses over: its bearer token
+    // is for this server's MCP endpoint, and passing it on would be the token
+    // passthrough the MCP authorization spec forbids.
+    const dispatchOptions: DispatchAsOptions = {
+      ...(credentials ? { credentials } : {}),
+      ...(caller.kind === "remote"
+        ? {
+            identity: {
+              user: caller.principal.user,
+              grant: {
+                via: caller.principal.via,
+                id: caller.principal.id,
+                scopes: caller.principal.scopes,
+                ...(caller.principal.clientId ? { clientId: caller.principal.clientId } : {}),
+              },
+            },
+          }
+        : {}),
+    };
+
     let response: Response;
     try {
       const target = query ? `${path}?${query}` : path;
-      response = credentials
-        ? await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body, {
-            credentials,
-          })
-        : await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body);
+      response =
+        Object.keys(dispatchOptions).length > 0
+          ? await this.dispatcher.dispatchAs(
+              caller.req,
+              descriptor.method,
+              target,
+              body,
+              dispatchOptions,
+            )
+          : await this.dispatcher.dispatchAs(caller.req, descriptor.method, target, body);
     } catch (error) {
       // What a client would get as a 500. A handler's throw is logged by the
       // dispatcher too, but dispatchAs's own refusal of the path is not.
@@ -467,6 +664,9 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
         paramBinders.set(param.name, binder);
       }
     }
+    // A remote caller sends what a local one sends, except for its files: it
+    // has no attachments to name, so it sends the file itself.
+    const remoteFiles: Record<string, AnySchema> = {};
     for (const file of fileFields) {
       if (file.binder === "input") {
         addExtra(
@@ -477,6 +677,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
               "The id of an attachment the user uploaded or a tool produced (gemi_att_…), whose file is sent as this field.",
             ),
         );
+        remoteFiles[file.name] = this.remoteFileSchema();
       }
     }
     // A bound file is not the model's, but it shares the form with the input,
@@ -490,20 +691,37 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       }
     }
 
+    const descriptor: McpToolDescriptor = Object.freeze({
+      name,
+      description: meta.description,
+      method,
+      url,
+      inputSchema: combineSchemas(meta.input, base, s.object(extras)),
+      ...(meta.output ? { outputSchema: meta.output } : {}),
+      ...(meta.title ? { title: meta.title } : {}),
+      annotations,
+      tags: Object.freeze([...(meta.tags ?? [])]),
+      requiresApproval: meta.requiresApproval === true,
+      ...(entry.source ? { source: entry.source } : {}),
+    });
+    const remotelyCallable = fileFields.every((file) => file.binder === "input");
+    const remote = !remotelyCallable
+      ? null
+      : fileFields.length === 0
+        ? descriptor
+        : Object.freeze({
+            ...descriptor,
+            inputSchema: combineSchemas(
+              meta.input,
+              base,
+              s.object(withoutKeys(extras, Object.keys(remoteFiles))),
+              remoteFiles,
+            ),
+          });
+
     return {
-      descriptor: Object.freeze({
-        name,
-        description: meta.description,
-        method,
-        url,
-        inputSchema: combineSchemas(meta.input, base, s.object(extras)),
-        ...(meta.output ? { outputSchema: meta.output } : {}),
-        ...(meta.title ? { title: meta.title } : {}),
-        annotations,
-        tags: Object.freeze([...(meta.tags ?? [])]),
-        requiresApproval: meta.requiresApproval === true,
-        ...(entry.source ? { source: entry.source } : {}),
-      }),
+      descriptor,
+      remote,
       params,
       paramBinders,
       modelParams,
@@ -511,6 +729,78 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       jsonKeys,
       ...(meta.result ? { result: meta.result } : {}),
     };
+  }
+
+  /**
+   * What a remote caller sends for a file field: `{ name, mimeType, data }`,
+   * or `{ name, mimeType, url }` when the app fetches URLs.
+   *
+   * Built by hand, as `combineSchemas` is, rather than with `s`: `s` writes
+   * the strict structured-output form, where an optional field is a required
+   * one that may be `null`, and an MCP client validating its arguments
+   * against that would demand `data` and `url` both. Exactly one of the two is
+   * checked when the file is read (`remoteFile`), where the refusal can say
+   * so.
+   */
+  private remoteFileSchema(): AnySchema {
+    const { maxBytes, fetch } = this.files;
+    // `contentEncoding` and `format` are JSON Schema 2020-12 keywords the
+    // builder's own type does not name; they are hints for the client.
+    const properties: Record<string, JSONSchema & Record<string, unknown>> = {
+      name: { type: "string", description: "The file's name, like report.pdf." },
+      mimeType: { type: "string", description: "The file's media type, like application/pdf." },
+      data: {
+        type: "string",
+        contentEncoding: "base64",
+        description: `The file's bytes, base64-encoded (RFC 4648, standard alphabet). At most ${maxBytes} bytes decoded.`,
+      },
+    };
+    if (fetch) {
+      properties.url = {
+        type: "string",
+        format: "uri",
+        description: "An https URL the server downloads the file from, instead of data.",
+      };
+    }
+    const json: JSONSchema = {
+      type: "object",
+      description: fetch
+        ? "A file, sent as base64 in data or fetched from url: exactly one of the two."
+        : "A file, sent as base64 in data.",
+      properties,
+      required: ["name", "mimeType"],
+      additionalProperties: false,
+    };
+    const keys = Object.keys(properties);
+    const safeParse = (value: unknown) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return { ok: false as const, errors: ["a file must be an object"] };
+      }
+      const errors: string[] = [];
+      const out: Record<string, string> = {};
+      for (const key of Object.keys(value)) {
+        if (!keys.includes(key)) errors.push(`a file has no field "${key}"`);
+      }
+      for (const key of keys) {
+        const field = (value as Record<string, unknown>)[key];
+        if (field === undefined || field === null) {
+          if (key === "name" || key === "mimeType") errors.push(`a file needs "${key}"`);
+          continue;
+        }
+        if (typeof field !== "string") errors.push(`a file's "${key}" must be a string`);
+        else out[key] = field;
+      }
+      return errors.length > 0 ? { ok: false as const, errors } : { ok: true as const, value: out };
+    };
+    return {
+      toJSONSchema: () => json,
+      safeParse,
+      parse(value: unknown) {
+        const result = safeParse(value);
+        if (result.ok === false) throw new Error(result.errors.join(", "));
+        return result.value;
+      },
+    } as unknown as AnySchema;
   }
 
   // --- calling -------------------------------------------------------------
@@ -561,6 +851,16 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   ): Promise<FormData> {
     const { input, ctx } = call;
     const name = plan.descriptor.name;
+    if (call.caller.kind === "remote") {
+      const form = new FormData();
+      for (const [key, value] of Object.entries(json)) {
+        appendField(form, key, value);
+      }
+      for (const field of plan.fileFields) {
+        form.append(field.name, await this.remoteFile(name, field.name, input[field.name]));
+      }
+      return form;
+    }
     if (!ctx) {
       throw new Error(
         `McpRegistry: "${name}" sends a file, which is resolved through the tool context's attachments, and none was passed to execute().`,
@@ -587,6 +887,130 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       form.append(field.name, await ctx.attachments.file(id));
     }
     return form;
+  }
+
+  /**
+   * A remote caller's file argument, as a `File`: its base64 `data` decoded,
+   * or its `url` fetched through `safeFetch` when the app allows that. Every
+   * refusal is the model's to read and correct — a file too large, data that
+   * is not base64, a URL that is not `https` or not reachable — since it is
+   * about what the model sent, not about the server.
+   */
+  private async remoteFile(tool: string, field: string, value: unknown): Promise<File> {
+    const refuse = (why: string) =>
+      new McpToolError(`"${field}" of "${tool}" ${why}`, 400);
+    const file = value as { name: string; mimeType: string; data?: string; url?: string };
+    const { maxBytes, fetch: fetchOptions } = this.files;
+    if (!isSafeFileName(file.name)) {
+      throw refuse("needs a name of 1 to 255 characters, without control characters or slashes.");
+    }
+    if (!MEDIA_TYPE.test(file.mimeType)) {
+      throw refuse(`has a mimeType that is not a media type: "${file.mimeType.slice(0, 100)}".`);
+    }
+    const hasData = typeof file.data === "string";
+    const hasUrl = typeof file.url === "string";
+    if (hasData === hasUrl) {
+      throw refuse(
+        fetchOptions ? "needs exactly one of data or url." : "needs its bytes, base64, in data.",
+      );
+    }
+    if (hasData) {
+      const data = file.data!.replace(/\s+/g, "");
+      // Checked before decoding, so an oversized argument is never turned
+      // into a buffer. `Buffer.from(…, "base64")` skips what it cannot read
+      // rather than failing, so the alphabet is checked first too.
+      if (Math.floor((data.length * 3) / 4) - padding(data) > maxBytes) {
+        throw refuse(`is larger than the ${maxBytes} bytes a file may be.`);
+      }
+      if (data.length % 4 !== 0 || !BASE64.test(data)) {
+        throw refuse("has data that is not base64 (RFC 4648, standard alphabet, padded).");
+      }
+      return new File([Buffer.from(data, "base64")], file.name, { type: file.mimeType });
+    }
+    if (!fetchOptions) {
+      throw refuse("cannot be fetched from a URL here. Send its bytes, base64, in data.");
+    }
+    let url: URL;
+    try {
+      url = new URL(file.url!);
+    } catch {
+      throw refuse("has a url that is not a URL.");
+    }
+    if (url.protocol !== "https:") {
+      throw refuse("can only be fetched from an https URL.");
+    }
+    try {
+      const response = await safeFetch(url.href, {
+        ...fetchOptions,
+        maxSize: Math.min(fetchOptions.maxSize ?? maxBytes, maxBytes),
+        redirect: "follow",
+      });
+      if (!response.ok) {
+        throw refuse(`could not be fetched: ${url.host} answered ${response.status}.`);
+      }
+      const bytes = await response.arrayBuffer();
+      return new File([bytes], file.name, { type: file.mimeType });
+    } catch (error) {
+      if (error instanceof McpToolError) throw error;
+      // safeFetch's errors say what was refused (a private address, too large,
+      // a timeout) without anything the model should not see.
+      throw refuse(
+        `could not be fetched from ${url.host}: ${error instanceof Error ? error.message : "failed"}.`,
+      );
+    }
+  }
+
+  /** Whether a remote principal carries a scope that reaches the tool `name`. */
+  private grants(principal: McpRemotePrincipal, name: string): boolean {
+    for (const scope of principal.scopes ?? []) {
+      if (this.scopeTools.get(scope)?.tools.has(name)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The router's `scopes`, each resolved to tool names once, at boot. A tag or
+   * name no tool has is refused, since it is a typo that would leave a scope
+   * reaching less than its description promises; so is a scope that reaches
+   * nothing, and a name a scope token cannot be.
+   */
+  private resolveScopes() {
+    const declared = this.router.scopes;
+    if (declared === undefined) {
+      this.scopeTools.set(DEFAULT_MCP_SCOPE, {
+        description: "Use this app's tools as you",
+        tools: new Set(this.plans.keys()),
+      });
+      return;
+    }
+    if (typeof declared !== "object" || declared === null) {
+      throw new Error("McpRouter: scopes must be an object of scope names.");
+    }
+    const tags = new Set([...this.plans.values()].flatMap(({ descriptor }) => descriptor.tags));
+    for (const [scope, spec] of Object.entries(declared as Record<string, McpScope>)) {
+      const where = `McpRouter: scope "${scope}"`;
+      if (!SCOPE_TOKEN.test(scope)) {
+        throw new Error(`${where} is not a valid OAuth scope: printable ASCII, no spaces or quotes.`);
+      }
+      if (typeof spec?.description !== "string" || spec.description === "") {
+        throw new Error(`${where} needs a description: it is what a consent screen shows.`);
+      }
+      const tools = new Set<string>();
+      for (const tag of spec.tags ?? []) {
+        if (!tags.has(tag)) throw new Error(`${where} names the tag "${tag}", which no tool has.`);
+        for (const [name, { descriptor }] of this.plans) {
+          if (descriptor.tags.includes(tag)) tools.add(name);
+        }
+      }
+      for (const name of spec.names ?? []) {
+        if (!this.plans.has(name)) throw new Error(`${where} names "${name}", which is no tool.`);
+        tools.add(name);
+      }
+      if (tools.size === 0) {
+        throw new Error(`${where} reaches no tool. Give it tags or names.`);
+      }
+      this.scopeTools.set(scope, { description: spec.description, tools });
+    }
   }
 
   /**
@@ -679,12 +1103,66 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   }
 }
 
-function assertLocal(caller: McpCaller): asserts caller is Extract<McpCaller, { kind: "local" }> {
-  if (caller?.kind !== "local") {
-    throw new Error(
-      "McpRegistry: only local callers are implemented. A remote caller needs a bearer-token resolver, which v1 does not have — and until it does there is no remote surface to call from.",
-    );
+/**
+ * A caller is one of the two shapes, and a remote one carries a principal a
+ * resolver built. Checked because the registry is reachable from app code and
+ * JavaScript: a remote caller without a user would be dispatched as nobody.
+ */
+function assertCaller(caller: McpCaller) {
+  if (caller?.kind === "local" && caller.req) return;
+  if (
+    caller?.kind === "remote" &&
+    caller.req &&
+    caller.principal?.user &&
+    typeof caller.principal.id === "string" &&
+    Array.isArray(caller.principal.scopes)
+  ) {
+    return;
   }
+  throw new Error(
+    'McpRegistry: a caller is { kind: "local", req } or { kind: "remote", req, principal }, with the principal a caller resolver verified.',
+  );
+}
+
+function passes(descriptor: McpToolDescriptor, filter?: McpToolFilter): boolean {
+  if (filter?.names && !filter.names.includes(descriptor.name)) return false;
+  if (filter?.tags && !descriptor.tags.some((tag) => filter.tags!.includes(tag))) return false;
+  return true;
+}
+
+const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+function remoteFileOptions(options: McpRemoteFileOptions | undefined) {
+  const maxBytes = options?.maxBytes ?? DEFAULT_MAX_FILE_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("McpRegistry: files.maxBytes must be a positive whole number of bytes.");
+  }
+  const fetch =
+    options?.fetchUrls === true
+      ? {}
+      : typeof options?.fetchUrls === "object" && options.fetchUrls !== null
+        ? options.fetchUrls
+        : null;
+  return { maxBytes, fetch };
+}
+
+/** 1 to 255 characters, no control characters and no path separators. */
+function isSafeFileName(name: string): boolean {
+  if (name.length === 0 || name.length > 255) return false;
+  for (const char of name) {
+    const code = char.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f || char === "/" || char === "\\") return false;
+  }
+  return true;
+}
+
+/** `type/subtype`, with parameters, as RFC 6838 restricts the names. */
+const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}(\s*;.{0,200})?$/;
+
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function padding(data: string): number {
+  return data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
 }
 
 /** A binder is a function or `"input"`; anything else would leave the value to nobody. */
@@ -787,13 +1265,21 @@ function combineSchemas(
   input: AnySchema | undefined,
   base: JSONSchema | undefined,
   extras: AnySchema,
+  /**
+   * Required fields whose schemas are not `s`'s — a remote caller's files —
+   * each parsing its own value. `s.object` refuses a schema it did not build.
+   */
+  handBuilt: Record<string, AnySchema> = {},
 ): Schema<Record<string, unknown>> {
   const extra = extras.toJSONSchema();
+  const handBuiltJson = Object.fromEntries(
+    Object.entries(handBuilt).map(([key, schema]) => [key, schema.toJSONSchema()]),
+  );
   const json: JSONSchema = {
     ...(base ?? {}),
     type: "object",
-    properties: { ...(base?.properties ?? {}), ...extra.properties },
-    required: [...(base?.required ?? []), ...(extra.required ?? [])],
+    properties: { ...(base?.properties ?? {}), ...extra.properties, ...handBuiltJson },
+    required: [...(base?.required ?? []), ...(extra.required ?? []), ...Object.keys(handBuilt)],
     additionalProperties: false,
   };
 
@@ -811,6 +1297,16 @@ function combineSchemas(
     const more = extras.safeParse(value);
     if (more.ok === false) errors.push(...more.errors);
     else out = { ...out, ...more.value };
+    for (const [key, schema] of Object.entries(handBuilt)) {
+      const field = (value as Record<string, unknown>)[key];
+      if (field === undefined) {
+        errors.push(`"${key}" is required`);
+        continue;
+      }
+      const own = schema.safeParse(field);
+      if (own.ok === false) errors.push(...own.errors.map((error) => `${key}: ${error}`));
+      else out[key] = own.value;
+    }
     return errors.length > 0 ? { ok: false as const, errors } : { ok: true as const, value: out };
   };
 
@@ -823,6 +1319,10 @@ function combineSchemas(
       return result.value;
     },
   } as unknown as Schema<Record<string, unknown>>;
+}
+
+function withoutKeys<T>(record: Record<string, T>, keys: string[]): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
 }
 
 /**

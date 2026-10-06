@@ -1,5 +1,19 @@
 # Unreleased
 
+## MCP: remote callers in the registry (#762)
+
+**New; one type change.** `McpRegistry` can now serve a remote MCP caller, the half of MCP v2 the transport (next) builds on. Nothing is mounted by this change.
+
+- `McpCaller`'s `remote` arm is `{ kind: "remote", req, principal }` (was `{ kind: "remote", token }`, which every entry point refused). `principal` is `{ user, via, id, scopes, clientId? }`, built by a caller resolver from a credential it verified.
+- `McpRouter.scopes` maps OAuth scopes to tools by tag or name; a router without it has one scope, `"mcp"`, reaching every tool. `list(remoteCaller)` answers only the tools the principal's scopes reach, and `execute` refuses any other with `McpCallRefusedError`.
+- `execute(caller, name, args, ctx, { approved })`: a remote call to a `requiresApproval` tool is refused without `approved: true`.
+- Remote file arguments are `{ name, mimeType, data }` (base64), or a fetched `https` `url` when `route.mcp.remote.files.fetchUrls` allows it. Tools with a bound file are not offered remotely.
+- `dispatchAs(..., { identity: { user, grant } })` dispatches as a verified user without copying the initiator's access token, and refuses an `Authorization` header from the `credentials` hook (no token passthrough). `req.mcpGrant()` answers the grant on such a request, `null` otherwise.
+- `RateLimitMiddleware`'s default key for a remote MCP caller's tool call is `mcp:<via>:<id>:<route>` (its credential), not its address.
+- `McpCallContext.caller` is `McpCaller` (was the local arm only); hooks and binders that only read `call.req` are unaffected.
+
+What to do: nothing, unless code constructs `{ kind: "remote", token }` (it never worked) or narrows `call.caller` assuming it is local.
+
 ## MCP: annotation overrides and a title in `fromApiRoute`'s meta (#760)
 
 **New, no behaviour change for existing routers.** A tool's annotations came from its verb only (GET read-only, DELETE destructive, PUT idempotent). The meta can now override them hint by hint, and name the tool for a client to show:

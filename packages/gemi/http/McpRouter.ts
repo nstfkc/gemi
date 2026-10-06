@@ -5,6 +5,7 @@ import type { Prettify } from "../utils/type";
 import type {
   McpCallContext,
   McpCredentials,
+  McpScope,
   McpToolAnnotations,
 } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
@@ -565,6 +566,31 @@ export class McpRouter<R = McpRoutes> {
   routes: Record<string, McpRouteDeclaration> = {};
 
   /**
+   * The scopes a remote caller's credential can carry, and the tools each one
+   * reaches (#762). A remote caller sees, and can call, only the tools a scope
+   * it carries reaches; a local caller — an agent in this server — sees every
+   * tool, as before.
+   *
+   * ```ts
+   * scopes = {
+   *   "pages:read": { description: "Read your site's pages", tags: ["read"] },
+   *   "pages:write": { description: "Edit your site's pages", tags: ["write"] },
+   *   "site:publish": { description: "Publish your site", names: ["publish-site"] },
+   * };
+   * ```
+   *
+   * Each key is an OAuth scope; `description` is what the consent screen
+   * shows. Left undeclared, the router has one scope, `"mcp"`, that reaches
+   * every tool. A tag or name no tool has, or a scope that reaches nothing,
+   * fails the boot.
+   *
+   * A scope narrows what a credential can reach; it never widens it. Every
+   * call still runs as the credential's user, through the route's own
+   * middleware.
+   */
+  scopes?: Record<string, McpScope>;
+
+  /**
    * The app's own credentials for one tool call, sent beside the access token
    * of the user who started the run. Optional; without it a tool call carries
    * gemi's access token and nothing else.
@@ -586,6 +612,9 @@ export class McpRouter<R = McpRoutes> {
    * by value. `access_token`, `Cookie`, `Host`, `User-Agent`, the body's
    * framing headers and `x-forwarded-*` cannot be set: the identity stays the
    * initiator's, and the call fails on the server, logged, if one is returned.
+   * For a remote caller (`call.caller.kind === "remote"`) `Authorization` is
+   * refused too: the client's token is for the MCP endpoint, and is never
+   * passed on.
    * The route's middleware still decides what a credential is worth, so this
    * can reach nothing a direct request carrying the same values could not.
    */

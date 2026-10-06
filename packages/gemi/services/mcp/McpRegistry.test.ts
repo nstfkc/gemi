@@ -1584,12 +1584,12 @@ describe("McpRegistry", () => {
     expect(registry().list(caller)).toHaveLength(11);
   });
 
-  test("a remote caller is typed and refused", async () => {
-    const remote: McpCaller = { kind: "remote", token: "t" };
+  test("a caller that is neither shape is refused", async () => {
+    const remote = { kind: "remote", token: "t" } as unknown as McpCaller;
 
-    expect(() => registry().list(remote)).toThrow(/only local callers are implemented/);
+    expect(() => registry().list(remote)).toThrow(/the principal a caller resolver verified/);
     await expect(registry().execute(remote, "whoami", {})).rejects.toThrow(
-      /only local callers are implemented/,
+      /the principal a caller resolver verified/,
     );
   });
 

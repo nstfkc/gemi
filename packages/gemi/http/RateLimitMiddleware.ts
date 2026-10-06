@@ -4,7 +4,7 @@ import type { RateLimitResult } from "../services/rate-limiter/types";
 import { refusal, RequestBreakerError } from "./Error";
 import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
-import { dispatchedClientAddress } from "./modelOriginated";
+import { dispatchedClientAddress, dispatchedGrant } from "./modelOriginated";
 
 export class RateLimitExceededError extends RequestBreakerError {
   constructor(result?: RateLimitResult) {
@@ -55,7 +55,10 @@ export interface RateLimitMiddlewareConfig {
    *
    * A model's tool call (`ApiRouteDispatcher.dispatchAs`) spends the same
    * budget as the user's own requests by default: `clientIp` answers the
-   * address of the request that started the run. To give model traffic a
+   * address of the request that started the run. A remote MCP client's tool
+   * call is the exception: by default it spends a budget keyed on its
+   * credential (`mcp:<via>:<id>:<route>`, see `req.mcpGrant()`), since
+   * a hosted client calls from addresses every one of its users shares. To give model traffic a
    * budget of its own, key on `req.isModelOriginated()`, which no client can
    * set:
    *
@@ -119,6 +122,14 @@ export class RateLimitMiddleware extends Middleware<RateLimitMiddlewareConfig> {
   private key() {
     if (this.config.key) {
       return this.config.key(this.req);
+    }
+    // A remote MCP client's tool call spends a budget of its own credential's
+    // (#762), not its address's: every user of a hosted client such as
+    // Claude.ai calls from the same few egress addresses, and keyed on those
+    // one user's agent would spend everybody's budget.
+    const grant = dispatchedGrant(this.req.rawRequest);
+    if (grant) {
+      return `mcp:${grant.via}:${grant.id}:${this.req.routePath ?? "*"}`;
     }
     return `${clientIp(this.req)}:${this.req.routePath ?? "*"}`;
   }

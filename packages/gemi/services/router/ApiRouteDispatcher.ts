@@ -1,5 +1,7 @@
 import { AuthApiRouter } from "../../auth/routes";
 import { ACCESS_TOKEN } from "../../auth/accessToken";
+import type { User } from "../../auth/types";
+import type { McpGrant } from "../../http/modelOriginated";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR, refusal } from "../../http/Error";
 import { HttpResponse, isHttpResponse } from "../../http/HttpResponse";
@@ -65,6 +67,27 @@ export type DispatchCredentials = {
 
 export type DispatchAsOptions = {
   credentials?: DispatchCredentials;
+  /**
+   * Dispatches as this user instead of copying the initiator's access token
+   * (#762): the user is on the request context before the route's middleware
+   * runs, as a global middleware's would be, so `auth` passes and policies
+   * see them. For a caller whose identity was verified some other way than a
+   * gemi session — a remote MCP client's OAuth token or API key — which has
+   * no session token to copy, and whose own credential must not be passed on.
+   *
+   * Only trusted code builds one: it is exactly as powerful as an app
+   * middleware calling `setUser`, and gemi's only writer is the MCP registry,
+   * from a principal a caller resolver verified. With it, nothing of the
+   * initiator's credentials is copied — not its `access_token` cookie or
+   * header — so a request that carried both cannot run as the session's user.
+   * `grant` is what `req.mcpGrant()` answers on the dispatched request.
+   */
+  identity?: DispatchIdentity;
+};
+
+export type DispatchIdentity = {
+  user: User;
+  grant?: McpGrant;
 };
 
 /**
@@ -93,13 +116,27 @@ const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /** RFC 6265's cookie-octets: no control characters, whitespace, `"`, `,`, `;` or a backslash. */
 const COOKIE_VALUE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*$/;
 
-function applyCredentials(headers: Headers, cookies: string[], credentials: DispatchCredentials) {
+function applyCredentials(
+  headers: Headers,
+  cookies: string[],
+  credentials: DispatchCredentials,
+  asIdentity: boolean,
+) {
   for (const [name, value] of Object.entries(credentials.headers ?? {})) {
     if (value === undefined || value === null) continue;
     const lower = name.toLowerCase();
     if (RESERVED_HEADERS.has(lower) || lower.startsWith("x-forwarded-")) {
       throw new Error(
         `dispatchAs: credentials may not set the "${name}" header. The access token stays the initiator's, and the request's framing is dispatchAs's own.`,
+      );
+    }
+    // Dispatched as a verified identity, the initiator is a remote MCP
+    // client's request, and its Authorization is a token for the MCP
+    // endpoint: handing it on to a route is the token passthrough the MCP
+    // authorization spec forbids, whichever hook returns it.
+    if (asIdentity && lower === "authorization") {
+      throw new Error(
+        'dispatchAs: credentials may not set "Authorization" on a call dispatched as an identity. The caller\'s token is for the MCP endpoint and is never passed on.',
       );
     }
     headers.set(name, value);
@@ -660,19 +697,23 @@ export class ApiRouteDispatcher {
     // `auth` routes refuse such a user, failing closed — unless the app passes
     // that credential itself as `options.credentials`, which is the app's
     // decision to make, value by value.
+    const identity = options?.identity;
+    if (identity !== undefined && (typeof identity !== "object" || !identity?.user)) {
+      throw new Error("dispatchAs: identity needs the user to dispatch as.");
+    }
     const headers = new Headers();
     const cookies: string[] = [];
-    const cookieToken = initiator.cookies.get(ACCESS_TOKEN);
+    const cookieToken = identity ? null : initiator.cookies.get(ACCESS_TOKEN);
     if (cookieToken) {
       cookies.push(`${ACCESS_TOKEN}=${cookieToken}`);
     }
     if (options?.credentials) {
-      applyCredentials(headers, cookies, options.credentials);
+      applyCredentials(headers, cookies, options.credentials, identity !== undefined);
     }
     if (cookies.length > 0) {
       headers.set("Cookie", cookies.join("; "));
     }
-    const headerToken = initiator.headers.get(ACCESS_TOKEN);
+    const headerToken = identity ? null : initiator.headers.get(ACCESS_TOKEN);
     if (headerToken) {
       headers.set(ACCESS_TOKEN, headerToken);
     }
@@ -694,7 +735,7 @@ export class ApiRouteDispatcher {
     }
 
     const req = new Request(url, { method, headers, body: requestBody });
-    markModelOriginated(req, clientIp(initiator));
+    markModelOriginated(req, clientIp(initiator), identity?.grant);
     // The tool call acts for the same tenant as the request that started it.
     if (initiator.domain) {
       setRequestDomain(req, initiator.domain);
@@ -707,8 +748,11 @@ export class ApiRouteDispatcher {
     // `asSystem` block, or an `asUser` for someone else, the route's queries
     // would skip or swap the policies a client's request would meet. The
     // kernel scope is kept — it is the Application, not a caller.
+    // An identity rides in as a global middleware's user does: on the new
+    // request's store, before its middleware runs.
+    const carried = identity ? { user: identity.user } : undefined;
     return RequestContext.exit(() =>
-      ormContext.exit(() => this.handleApiRequest(req)),
+      ormContext.exit(() => this.handleApiRequest(req, carried)),
     );
   }
 }
