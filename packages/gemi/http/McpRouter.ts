@@ -2,7 +2,11 @@ import type { ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
 import type { Prettify } from "../utils/type";
-import type { McpCallContext, McpCredentials } from "../services/mcp/McpRegistry";
+import type {
+  McpCallContext,
+  McpCredentials,
+  McpToolAnnotations,
+} from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -297,6 +301,30 @@ type MetaBase<T> = {
    * a default that guessed would be a default somebody relies on.
    */
   requiresApproval?: boolean;
+  /**
+   * A human-readable name for the tool, for a client to show instead of the
+   * `routes` key. The model is still given the key.
+   */
+  title?: string;
+  /**
+   * Overrides the hints the verb implies (#760). The verb's are a default:
+   * GET is read-only, DELETE destructive, PUT idempotent, and POST and PATCH
+   * say nothing. A route that does not follow its verb says so here, and each
+   * hint given replaces the verb's — `false` included, which is how a default
+   * is taken back:
+   *
+   * ```ts
+   * // A POST that cancels: destructive, and safe to repeat.
+   * annotations: { destructiveHint: true, idempotentHint: true },
+   * // A search that takes a body: read-only.
+   * annotations: { readOnlyHint: true },
+   * ```
+   *
+   * Hints are what a remote client uses to decide when to ask the user; they
+   * are not enforced, and a wrong one is a wrong prompt, not a guard. A tool
+   * that must be confirmed sets `requiresApproval` instead.
+   */
+  annotations?: McpToolAnnotations;
 };
 
 /**
@@ -469,6 +497,8 @@ export type McpRouteMetaRuntime = {
   input?: AnySchema;
   tags?: readonly string[];
   requiresApproval?: boolean;
+  title?: string;
+  annotations?: McpToolAnnotations;
   params?: Record<string, McpParamDeclaration>;
   files?: Record<string, McpFileBinder | "input">;
   result?: McpResultProjection;

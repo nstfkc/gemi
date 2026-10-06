@@ -1,5 +1,24 @@
 # Unreleased
 
+## MCP: annotation overrides and a title in `fromApiRoute`'s meta (#760)
+
+**New, no behaviour change for existing routers.** A tool's annotations came from its verb only (GET read-only, DELETE destructive, PUT idempotent). The meta can now override them hint by hint, and name the tool for a client to show:
+
+```ts
+"cancel-order": this.fromApiRoute("POST", "/orders/:id/cancel", {
+  description: "Cancel an order",
+  title: "Cancel order",
+  params: { id: "input" },
+  annotations: { destructiveHint: true, idempotentHint: true },
+}),
+```
+
+- Each hint given replaces the verb's; `false` takes a default back (`readOnlyHint: false` on a GET with side effects). `openWorldHint` is accepted too.
+- `McpToolDescriptor.annotations` is now typed `boolean` per hint (it was the literal `true`), and the descriptor carries `title` when the meta sets one.
+- Refused at boot: an unknown hint, a non-boolean one, an empty `title`, and a tool left read-only that is also destructive or idempotent.
+
+What to do: nothing. Routes whose verb misdescribes them can add `annotations`.
+
 ## Uploads that fail with status 0: regression tests (#825)
 
 **Patch, no behaviour change.** On gemi 0.84.0, `useUpload` wrapped the answer in a `Response` on `readyState` 4. A network error, timeout or abort leaves status 0 there, so the `Response` constructor threw a `RangeError` from an async callback, which surfaced as an unhandled rejection. This was fixed in 0.84.1 (#671): `useUpload` and `useChat`'s `attach()` settle on `load`/`error`/`timeout`/`abort` and never build a `Response` from status 0. This release only adds regression tests (500, network error, timeout and abort, with no unhandled rejection) for both upload paths.

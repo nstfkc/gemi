@@ -1477,6 +1477,83 @@ describe("McpRegistry", () => {
     expect(wipe.descriptors()[0].annotations).toEqual({ destructiveHint: true });
   });
 
+  describe("annotation overrides (#760)", () => {
+    const build = (meta: Record<string, unknown>, method = "POST", url = "/boom") =>
+      new McpRegistry(
+        Object.assign(new McpRouter(), {
+          routes: {
+            tool: (new McpRouter() as any).fromApiRoute(method, url, { description: "x", ...meta }),
+          },
+        }) as any,
+        resolve(ApiRouteDispatcher),
+      ).descriptors()[0];
+
+    test("a POST that cancels is destructive and idempotent", () => {
+      expect(
+        build({ annotations: { destructiveHint: true, idempotentHint: true } }).annotations,
+      ).toEqual({ destructiveHint: true, idempotentHint: true });
+    });
+
+    test("a POST search is read-only", () => {
+      expect(build({ annotations: { readOnlyHint: true } }).annotations).toEqual({
+        readOnlyHint: true,
+      });
+    });
+
+    test("false takes a verb default back, and the rest of the verb's stand", () => {
+      expect(
+        build({ annotations: { destructiveHint: false } }, "DELETE", "/admin/wipe").annotations,
+      ).toEqual({ destructiveHint: false });
+      expect(
+        build({ annotations: { openWorldHint: true } }, "DELETE", "/admin/wipe").annotations,
+      ).toEqual({ destructiveHint: true, openWorldHint: true });
+    });
+
+    test("a GET with side effects says so by taking read-only back", () => {
+      expect(
+        build({ annotations: { readOnlyHint: false, destructiveHint: true } }, "GET", "/me")
+          .annotations,
+      ).toEqual({ readOnlyHint: false, destructiveHint: true });
+    });
+
+    test("an undefined hint leaves the verb's", () => {
+      expect(build({ annotations: { readOnlyHint: undefined } }, "GET", "/me").annotations).toEqual(
+        { readOnlyHint: true },
+      );
+    });
+
+    test("a title is carried, and absent without one", () => {
+      expect(build({ title: "Cancel the order" }).title).toBe("Cancel the order");
+      expect(build({})).not.toHaveProperty("title");
+    });
+
+    test("the annotations are frozen", () => {
+      expect(Object.isFrozen(build({ annotations: { readOnlyHint: true } }).annotations)).toBe(
+        true,
+      );
+    });
+
+    test("refuses a read-only tool that is also destructive or idempotent", () => {
+      expect(() => build({ annotations: { destructiveHint: true } }, "GET", "/me")).toThrow(
+        /is read-only \(a GET\) and also destructive.*readOnlyHint: false/,
+      );
+      expect(() =>
+        build({ annotations: { readOnlyHint: true } }, "PUT", "/products/archive-all"),
+      ).toThrow(/is read-only and also idempotent/);
+    });
+
+    test("refuses an unknown hint, a non-boolean one, and a bad title", () => {
+      expect(() => build({ annotations: { readonlyHint: true } })).toThrow(
+        /"readonlyHint" is not a tool annotation/,
+      );
+      expect(() => build({ annotations: { readOnlyHint: "yes" } })).toThrow(
+        /annotations.readOnlyHint must be true or false/,
+      );
+      expect(() => build({ annotations: true })).toThrow(/annotations must be an object/);
+      expect(() => build({ title: "" })).toThrow(/title must be a non-empty string/);
+    });
+  });
+
   test("the tool schema is the input plus the input params, in strict form", () => {
     const tool = registry().descriptors({ names: ["rename-product"] })[0];
 
