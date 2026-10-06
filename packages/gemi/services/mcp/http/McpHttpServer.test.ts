@@ -605,6 +605,13 @@ describe("a modern client (2026-07-28)", () => {
       expect(handled).toHaveLength(1);
     });
 
+    test("arguments too long to show are cut, and the prompt says so", async () => {
+      const id = `pg_${"x".repeat(3000)}_tail`;
+      const { message } = (await (await ask({ id })).json()).result.inputRequests.gemi_approval.params;
+      expect(message).toMatch(/more characters not shown\)$/);
+      expect(message).not.toMatch(/_tail/);
+    });
+
     test("a decline, a cancel, or an accept without approve does not run it", async () => {
       for (const [action, content] of [["decline"], ["cancel"], ["accept", { approve: false }], ["accept", {}]] as const) {
         const { requestState } = (await (await ask()).json()).result;

@@ -3431,7 +3431,7 @@ The endpoint speaks both MCP eras on one URL: the stateless 2026-07-28 revision 
 
 ### Security notes
 
-- The endpoint answers only on the configured host, which defeats DNS rebinding, and refuses foreign `Origin`s.
+- The endpoint answers only on the configured host, which defeats DNS rebinding, and refuses foreign `Origin`s. Behind a proxy, the request must reach the app with the public `Host` (most proxies keep it); one that rewrites it to an internal name makes the endpoint answer nothing.
 - Credentials are read from the `Authorization` header only: never the query string, never the session cookie, so a page the user visits cannot ride their browser session into the endpoint.
 - Rate limits are keyed on the credential, at the endpoint and for routes' own `rate-limit` middleware, not on the address: every user of a hosted client shares its addresses.
 - Tool annotations and descriptions are shown to models; do not put secrets in them.

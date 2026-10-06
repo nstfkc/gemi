@@ -94,6 +94,8 @@ const SESSION = "gemi.mcp.session.v1";
 const SESSION_TTL = 24 * 60 * 60 * 1000;
 const APPROVAL_TTL = 10 * 60 * 1000;
 const APPROVAL_KEY = "gemi_approval";
+/** How much of a call's arguments an approval prompt shows. */
+const APPROVAL_SHOWN = 2000;
 const DEFAULT_RATE_LIMIT = { limit: 600, window: 60 };
 
 /** What a legacy session carries: no authority, only what was negotiated. */
@@ -946,8 +948,14 @@ function progressSink(call: Call): ((update: ProgressUpdate) => void) | undefine
 
 /** The form a user answers to let a tool run. */
 function approvalRequest(tool: McpToolDescriptor, args: unknown) {
-  const shown = JSON.stringify(args ?? {});
-  const summary = shown.length > 600 ? `${shown.slice(0, 600)}…` : shown;
+  // The user approves what they are shown, so a cut is said out loud: a
+  // model that pads its arguments cannot push the part that matters out of
+  // sight unnoticed.
+  const shown = JSON.stringify(args ?? {}, null, 1);
+  const summary =
+    shown.length > APPROVAL_SHOWN
+      ? `${shown.slice(0, APPROVAL_SHOWN)}… (${shown.length - APPROVAL_SHOWN} more characters not shown)`
+      : shown;
   return {
     message: `Allow "${tool.title ?? tool.name}" to run? ${tool.description}\n\nArguments: ${summary}`,
     requestedSchema: {
