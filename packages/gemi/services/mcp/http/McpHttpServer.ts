@@ -2,11 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { canonicalize, purposeKey } from "../../../ai/signing";
 import { MemoryNonceStore, type NonceStore } from "../../../ai/store/Nonces";
-import { app } from "../../../foundation/app";
 import { HttpRequest } from "../../../http/HttpRequest";
+import { clientIp } from "../../../http/RateLimitMiddleware";
 import type { ProgressUpdate } from "../../../http/modelOriginated";
 import { RequestContext } from "../../../http/requestContext";
-import { RateLimiter } from "../../rate-limiter/RateLimiter";
 import {
   McpCallRefusedError,
   McpToolError,
@@ -15,7 +14,8 @@ import {
   type McpRemotePrincipal,
   type McpToolDescriptor,
 } from "../McpRegistry";
-import type { McpCallerResolver, McpResolveContext } from "./callers";
+import { bearerToken, type McpCallerResolver, type McpResolveContext } from "./callers";
+import { overBudget } from "./limits";
 import {
   classify,
   decodeHeaderValue,
@@ -57,7 +57,7 @@ export type McpRemoteHttpConfig = {
    * Who may call: tried in order, and at least one is required — the boot is
    * refused without one, since an endpoint that resolves nobody would be
    * either useless or, worse, open. See `McpCallerResolver`,
-   * and `McpApiKeyResolver`.
+   * `McpOAuthServer` and `McpApiKeyResolver`.
    */
   resolvers?: McpCallerResolver[];
   /**
@@ -97,6 +97,7 @@ const APPROVAL_KEY = "gemi_approval";
 /** How much of a call's arguments an approval prompt shows. */
 const APPROVAL_SHOWN = 2000;
 const DEFAULT_RATE_LIMIT = { limit: 600, window: 60 };
+const FAILED_AUTH_BUDGET = { limit: 30, window: 60 };
 
 /** What a legacy session carries: no authority, only what was negotiated. */
 type SessionState = {
@@ -275,12 +276,17 @@ export class McpHttpServer {
       const resolution = await resolver.resolve(req, this.context);
       if (resolution === null) continue;
       if (resolution.ok === false) {
-        return this.unauthorized(resolution.description);
+        return (await this.failedAttempt(req)) ?? this.unauthorized(resolution.description);
       }
       principal = { ...resolution.principal, via: resolver.name };
       break;
     }
-    if (!principal) return this.unauthorized();
+    if (!principal) {
+      // No credential at all is how every client starts (it is told where to
+      // get one); a credential nobody accepts is a guess, and is counted.
+      const presented = bearerToken(req) !== null;
+      return (presented ? await this.failedAttempt(req) : null) ?? this.unauthorized();
+    }
 
     const limited = await this.spend(principal);
     if (limited) return limited;
@@ -791,17 +797,21 @@ export class McpHttpServer {
     );
   }
 
+  /**
+   * Counts a credential that was refused, per client address: 30 a minute,
+   * then 429. Keys are not guessable, but every guess is a store lookup, and
+   * the budget keeps a flood of them from becoming one.
+   */
+  private async failedAttempt(req: Request): Promise<Response | null> {
+    const address = clientIp(new HttpRequest(req, {}, "api", this.endpoint.pathname));
+    const retryAfter = await overBudget(`mcp-auth-failed:${address}`, FAILED_AUTH_BUDGET);
+    return retryAfter === null ? null : tooManyRequests(retryAfter);
+  }
+
   private async spend(principal: McpRemotePrincipal): Promise<Response | null> {
     if (!this.rateLimit) return null;
-    const limiter = resolveLimiter();
-    if (!limiter) return null;
-    const result = await limiter.consume(`mcp-endpoint:${principal.via}:${principal.id}`, this.rateLimit);
-    if (result.allowed) return null;
-    return jsonResponse(
-      errorResponse(null, new JsonRpcError(ErrorCode.InvalidRequest, "Rate limit exceeded.")),
-      429,
-      { "Retry-After": String(Math.max(1, Math.ceil(result.retryAfter / 1000))) },
-    );
+    const retryAfter = await overBudget(`mcp-endpoint:${principal.via}:${principal.id}`, this.rateLimit);
+    return retryAfter === null ? null : tooManyRequests(retryAfter);
   }
 }
 
@@ -977,11 +987,10 @@ function accepted(result: unknown): boolean {
   return isObject(result) && result.action === "accept" && isObject(result.content) && result.content.approve === true;
 }
 
-function resolveLimiter(): RateLimiter | null {
-  try {
-    const container = app();
-    return container.bound(RateLimiter) ? container.make(RateLimiter) : null;
-  } catch {
-    return null;
-  }
+function tooManyRequests(retryAfter: number): Response {
+  return jsonResponse(
+    errorResponse(null, new JsonRpcError(ErrorCode.InvalidRequest, "Rate limit exceeded.")),
+    429,
+    { "Retry-After": String(retryAfter) },
+  );
 }

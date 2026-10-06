@@ -613,6 +613,34 @@ refused without a `url`, without at least one caller resolver, and without
   `NonceStore`. Legacy approvals wait in the process that asked; without sticky
   routing the answer lands elsewhere and the call fails closed (times out).
 
+### OAuth (#762)
+
+`McpOAuthServer` is the authorization server the transport's 401 points at,
+and the resolver for its own tokens. gemi is both the resource server and the
+authorization server, on one origin, which keeps the audience check trivial
+(the token's `resource` is compared to the configured URL) and the consent
+next to the session it needs.
+
+- **Discovery** per the MCP authorization spec: RFC 9728 at the path-inserted
+  and root locations, RFC 8414 at the origin, `WWW-Authenticate` with
+  `resource_metadata` and `scope`.
+- **Clients** register dynamically (RFC 7591), the path every current MCP
+  client supports. Client ID metadata documents (the spec's preferred path)
+  are deferred: they need a fetch of a client-named URL at authorize time,
+  which `safeFetch` makes possible, but no client needs it yet.
+- **Authorization** is code + PKCE S256. No redirect is made to a URI before
+  the client and the URI are verified (no open redirect); loopback ports may
+  vary (RFC 8252). The request travels to the consent page as a signed ticket
+  (ten minutes), and the decision needs a CSRF token bound to the ticket and to
+  the session user, a same-origin `Origin`, and spends the ticket's nonce.
+- **Tokens** are opaque random values stored as SHA-256: revocation is a row,
+  not a deny-list, and a leaked store is not a set of working tokens. Refresh
+  tokens rotate; any reuse of a code or refresh token revokes the family (the
+  user's grant to that client), as OAuth 2.1 recommends for public clients.
+- **Identity** is `findUser(token.userId)` on every request, so the user is
+  current and a deleted user is locked out; the principal's `id` is the
+  family, which keys rate limits and survives refreshes.
+
 ### The invariant
 
 **A tool call must never be able to do something the same caller could not do

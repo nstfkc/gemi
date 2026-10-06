@@ -20,7 +20,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Controllers](https://nstfkc.github.io/gemi/controllers.md): Controller/ResourceController, the HttpRequest API, request validation, ValidationError.
 - [Middleware](https://nstfkc.github.io/gemi/middleware.md): the string DSL, built-in middleware, negation with -name, and custom middleware.
 - [Outbound HTTP](https://nstfkc.github.io/gemi/outbound-http.md): safeFetch for URLs that users give — only http(s) to public addresses, connecting to the checked address, each redirect re-checked, timeouts, size and content-type limits, allow/deny lists, and typed errors.
-- [MCP Server](https://nstfkc.github.io/gemi/mcp.md): McpRouter tools served to external MCP clients over Streamable HTTP (both protocol eras) — `route.mcp.remote`, caller resolvers and `McpApiKeyResolver`, scopes per credential, `requiresApproval` through elicitation, progress and cancellation, base64 and safeFetch'd files, rate limits per credential, and the endpoint's defences.
+- [MCP Server](https://nstfkc.github.io/gemi/mcp.md): McpRouter tools served to external MCP clients over Streamable HTTP (both protocol eras) — `route.mcp.remote`, caller resolvers, `McpOAuthServer` (OAuth 2.1 authorization server: discovery, dynamic registration, PKCE, consent page or your own consent view, rotating refresh tokens, revocation, the store interface) and `McpApiKeyResolver`, scopes per credential, `requiresApproval` through elicitation, progress and cancellation, base64 and safeFetch'd files, rate limits per credential, and the endpoint's defences.
 
 ## Views & client
 

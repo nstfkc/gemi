@@ -91,6 +91,113 @@ A resolver verifies the credential and answers a principal: `{ user, via, id, sc
 
 `McpApiKeyResolver` handles keys the app issued: a user creates one in the app's settings and pastes it into a client as a bearer token. `McpApiKeyResolver.generate(prefix)` makes a key (show it once), `McpApiKeyResolver.hash(key)` is what to store and look up by. The prefix is required, so a token that is not one of your keys is never looked up, and it makes a leaked key recognisable to secret scanners. A custom resolver implements `McpCallerResolver`; it must build the principal only from a credential it verified.
 
+### OAuth: connecting Claude and other hosted clients
+
+Hosted clients (Claude.ai and Claude Desktop connectors, ChatGPT) connect with OAuth: the user pastes the endpoint URL, signs in to your app in their browser, agrees, and the client gets a token. `McpOAuthServer` is the authorization server for that, and the resolver for its tokens:
+
+```ts
+// app/mcp/oauth.ts
+import { McpOAuthServer } from "gemi/services";
+
+export const mcpOAuth = new McpOAuthServer({
+  store: new PrismaMcpOAuthStore(), // yours; see "The store" below
+  findUser: (id) => User.findUnique({ where: { id: Number(id) } }),
+  consentPath: "/oauth/consent", // optional: your own consent view
+});
+
+// app/config/route.ts
+mcp: {
+  router: AppMcpRouter,
+  remote: { enabled: true, url: "https://example.com/mcp", resolvers: [mcpOAuth, apiKeys] },
+},
+```
+
+What it serves, on the endpoint's host only:
+
+| Path | What |
+|---|---|
+| `/.well-known/oauth-protected-resource/mcp` (and without `/mcp`) | Protected resource metadata (RFC 9728). A 401 from the endpoint points here. |
+| `/.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414). The issuer is the endpoint's origin. |
+| `/mcp/oauth/register` | Dynamic client registration (RFC 7591). |
+| `/mcp/oauth/authorize` | Authorization code + PKCE (S256 only). |
+| `/mcp/oauth/consent` | gemi's own consent page (GET), and where the decision is posted (POST). |
+| `/mcp/oauth/token` | Code and refresh token exchange. |
+| `/mcp/oauth/revoke` | Revocation (RFC 7009). |
+
+The endpoints sit under the MCP endpoint's path (`<path>/oauth/...`), so they cannot collide with your routes, and are answered before routing.
+
+- **Tokens** are opaque (`gmcp_at_…`, `gmcp_rt_…`), stored as their SHA-256, and bound to the endpoint's URL as their audience (RFC 8707): a token issued for another resource is refused. Access tokens live an hour (`accessTokenTtl`), refresh tokens 30 days (`refreshTokenTtl`) and rotate on every use. A refresh token or a code used twice revokes the whole grant, since one of the two users is a thief.
+- **`findUser(id)`** loads the token's user on every request, by `String(user.id)`, so a deleted user's tokens stop working and routes see current data. Return the same shape `req.ctx().user` has.
+- **Scopes** are the router's `scopes`. A client that asks for none gets all of them; scopes the server does not know (`openid`, say) are dropped; a refresh can narrow the scopes but never widen them.
+- **Registration** is open, as MCP clients expect, and limited to 20 per address per hour. Redirect URIs must be `https`, or `http` on a loopback address (whose port may vary, RFC 8252). `registration.allowRedirectUri(url)` narrows them further, for example to the clients you support; `registration: false` turns registration off. Client ID metadata documents are not supported yet (`client_id_metadata_document_supported: false`); every current client falls back to registration.
+- **Refused credentials** are counted per address at the endpoint: 30 a minute, then 429.
+
+#### Consent
+
+The user agrees on a page served by your app, while signed in to it. Without `consentPath`, gemi serves a plain page: it sends a signed-out user to `auth.signInPath` (or `signInPath`) with `?redirect=` back to the consent page, which your sign-in must follow with a full page load. It names the user, the scopes with their descriptions, and the host the user will be sent to. That host is the one verified fact about the client. Its name is whatever it registered with, and the page says so.
+
+With `consentPath`, the browser is sent to your view (put it behind `auth`, so sign-in comes back to it) as `/oauth/consent?request=…`. Ask the server what to show:
+
+```ts
+// in the view's data (behind "auth")
+const consent = await mcpOAuth.consent(req.search.get("request"), req.ctx().user);
+// null: expired or not valid; show an error and no form.
+// Otherwise render consent.client.name (unverified), consent.client.redirectHost,
+// consent.scopes and consent.user.label, and a form:
+//   <form method="POST" action={consent.form.action}>
+//     <input type="hidden" name="request" value={consent.form.fields.request} />
+//     <input type="hidden" name="csrf" value={consent.form.fields.csrf} />
+//     <button name="decision" value="deny">Deny</button>
+//     <button name="decision" value="allow">Allow</button>
+//   </form>
+```
+
+Serve the page with the headers in `CONSENT_PAGE_HEADERS` (from `gemi/services`), or at least `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`. A consent page that can be framed can be clicked through an overlay.
+
+The decision is accepted only from your own origin (`Origin`, or `Sec-Fetch-Site: same-origin`), only from the user the page was rendered for (the CSRF token is bound to them and to the request), only once, and within ten minutes. The code that comes back expires in two minutes and carries `iss` (RFC 9207).
+
+#### The store
+
+`McpOAuthStore` keeps clients, codes and tokens. `MemoryMcpOAuthStore` is for development and tests: it forgets everything on restart and is not shared between instances. In production, implement the interface on your database:
+
+```prisma
+model McpOAuthClient {
+  clientId                String   @id
+  clientSecretHash        String?
+  tokenEndpointAuthMethod String
+  redirectUris            String[]
+  clientName              String?
+  clientUri               String?
+  createdAt               DateTime @default(now())
+}
+
+model McpOAuthCredential {
+  hash        String   @id // SHA-256 of a code or token; never the value
+  kind        String   // "code" | "access" | "refresh"
+  clientId    String
+  userId      String
+  scopes      String[]
+  resource    String
+  familyId    String
+  redirectUri String?
+  codeChallenge String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  @@index([familyId])
+  @@index([userId])
+}
+
+model McpOAuthUse {
+  key       String   @id // a code's or refresh token's hash, or a consent decision's nonce
+  expiresAt DateTime
+}
+```
+
+- `use(key, expiresAt)` must be atomic across instances: insert `{ key, expiresAt }` into `McpOAuthUse` and answer `true` if the insert went in, `false` on a unique-key conflict. Delete rows past `expiresAt` from time to time.
+- `findCode` and `findToken` answer `null` for a revoked family.
+- `revokeFamily(familyId)` marks every row of the family revoked. A family is one user's grant to one client, which is what a "Connected apps" screen in your settings lists (by `userId`) and revokes.
+
 ### Scopes: which tools a caller sees
 
 `McpRouter.scopes` maps scope names to tools by `tags` and by `names`. A remote caller lists and calls only the tools its scopes reach; any other tool answers as if it did not exist. A router without `scopes` has a single scope, `"mcp"`, that reaches every tool.
@@ -136,4 +243,4 @@ The endpoint speaks both MCP eras on one URL: the stateless 2026-07-28 revision 
 npx @modelcontextprotocol/inspector
 ```
 
-Choose "Streamable HTTP", enter the endpoint URL, and add an `Authorization: Bearer <key>` header. In Claude Code: `claude mcp add --transport http example https://example.com/mcp --header "Authorization: Bearer <key>"`.
+Choose "Streamable HTTP" and enter the endpoint URL. With an API key, add an `Authorization: Bearer <key>` header; with `McpOAuthServer`, use the Inspector's OAuth flow, which registers, sends you to the consent page and exchanges the code. In Claude Code: `claude mcp add --transport http example https://example.com/mcp --header "Authorization: Bearer <key>"`.
