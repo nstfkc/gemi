@@ -450,3 +450,134 @@ describe("S3Driver.fetch() with a signal", () => {
     expect(await res.text()).toBe("abc");
   });
 });
+
+describe("S3Driver.objects()", () => {
+  beforeEach(() => {
+    process.env.BUCKET_NAME = "test-bucket";
+  });
+
+  /** A fake bucket answering ListObjectsV2 two keys per page, and DeleteObjects. */
+  function bucket(keys: string[], pageSize = 2) {
+    const commands: any[] = [];
+    const store = new Set(keys);
+    const driver = driverWith(async (command) => {
+      commands.push(command);
+      const input = command.input;
+      if (command.constructor.name === "ListObjectsV2Command") {
+        const matching = [...store].sort().filter((k) => k.startsWith(input.Prefix ?? ""));
+        const start = input.ContinuationToken ? Number(input.ContinuationToken) : 0;
+        const page = matching.slice(start, start + pageSize);
+        const next = start + pageSize;
+        return {
+          Contents: page.map((Key) => ({
+            Key,
+            Size: Key.length,
+            LastModified: new Date("2026-01-01T00:00:00Z"),
+          })),
+          IsTruncated: next < matching.length,
+          NextContinuationToken: next < matching.length ? String(next) : undefined,
+        };
+      }
+      if (command.constructor.name === "DeleteObjectsCommand") {
+        for (const { Key } of input.Delete.Objects) store.delete(Key);
+        return {};
+      }
+      throw new Error(`unexpected ${command.constructor.name}`);
+    });
+    return { driver, commands, store };
+  }
+
+  async function collect(iterable: AsyncIterable<any>) {
+    const out = [];
+    for await (const item of iterable) out.push(item);
+    return out;
+  }
+
+  test("follows continuation tokens across pages", async () => {
+    const { driver, commands } = bucket(["logs/1", "logs/2", "logs/3", "logs/4", "logs/5", "other"]);
+
+    const objects = await collect(driver.objects("logs/"));
+
+    expect(objects.map((o) => o.name)).toEqual(["logs/1", "logs/2", "logs/3", "logs/4", "logs/5"]);
+    expect(objects[0]).toEqual({
+      name: "logs/1",
+      size: 6,
+      lastModified: new Date("2026-01-01T00:00:00Z"),
+    });
+    expect(commands).toHaveLength(3);
+    expect(commands[0].input).toMatchObject({ Bucket: "test-bucket", Prefix: "logs/" });
+    expect(commands[1].input.ContinuationToken).toBe("2");
+  });
+
+  test("an empty prefix lists nothing gracefully and a custom bucket is used", async () => {
+    const { driver, commands } = bucket([]);
+    expect(await collect(driver.objects("x/", { bucket: "other" }))).toEqual([]);
+    expect(commands[0].input.Bucket).toBe("other");
+  });
+
+  test("stops when a truncated page carries no token", async () => {
+    let calls = 0;
+    const driver = driverWith(async () => {
+      calls += 1;
+      return { Contents: [{ Key: "a", Size: 1 }], IsTruncated: true };
+    });
+    expect((await collect(driver.objects("a"))).map((o) => o.name)).toEqual(["a"]);
+    expect(calls).toBe(1);
+  });
+});
+
+describe("S3Driver.deletePrefix()", () => {
+  beforeEach(() => {
+    process.env.BUCKET_NAME = "test-bucket";
+  });
+
+  test("batches DeleteObjects per listed page and returns the count", async () => {
+    const commands: any[] = [];
+    const keys = Array.from({ length: 1500 }, (_, i) => `pages/42/${String(i).padStart(4, "0")}.png`);
+    const driver = driverWith(async (command) => {
+      commands.push(command);
+      if (command.constructor.name === "ListObjectsV2Command") {
+        const start = command.input.ContinuationToken ? 1000 : 0;
+        const page = keys.slice(start, start + 1000);
+        return {
+          Contents: page.map((Key) => ({ Key, Size: 1 })),
+          IsTruncated: start === 0,
+          NextContinuationToken: start === 0 ? "t" : undefined,
+        };
+      }
+      return {};
+    });
+
+    expect(await driver.deletePrefix("pages/42/")).toBe(1500);
+
+    const deletes = commands.filter((c) => c.constructor.name === "DeleteObjectsCommand");
+    expect(deletes).toHaveLength(2);
+    expect(deletes[0].input.Delete.Objects).toHaveLength(1000);
+    expect(deletes[1].input.Delete.Objects).toHaveLength(500);
+    expect(deletes[0].input.Bucket).toBe("test-bucket");
+    expect(deletes[0].input.Delete.Quiet).toBe(true);
+  });
+
+  test("rejects when S3 reports keys it could not delete", async () => {
+    const driver = driverWith(async (command) => {
+      if (command.constructor.name === "ListObjectsV2Command") {
+        return { Contents: [{ Key: "a/1" }, { Key: "a/2" }], IsTruncated: false };
+      }
+      return { Errors: [{ Key: "a/2", Code: "AccessDenied", Message: "nope" }] };
+    });
+
+    await expect(driver.deletePrefix("a/")).rejects.toThrow(/could not delete 1 object.*a\/2.*AccessDenied/);
+  });
+
+  test("refuses an empty or root prefix without sending anything", async () => {
+    let sent = 0;
+    const driver = driverWith(async () => {
+      sent += 1;
+      return {};
+    });
+    for (const prefix of ["", "/", ".", "./", "  "]) {
+      await expect(driver.deletePrefix(prefix)).rejects.toThrow(/whole store/);
+    }
+    expect(sent).toBe(0);
+  });
+});

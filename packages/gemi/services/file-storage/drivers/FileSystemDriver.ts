@@ -1,14 +1,17 @@
 import type {
   DeleteFileParams,
+  DeletePrefixOptions,
   FetchFileOptions,
+  ListObjectsOptions,
+  StoredObject,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
 } from "./types";
-import { FileStorageDriver } from "./FileStorageDriver";
+import { FileStorageDriver, assertDeletablePrefix } from "./FileStorageDriver";
 import { abortableBody } from "./abortableBody";
-import { readdir, unlink } from "fs/promises";
+import { readdir, rmdir, stat, unlink } from "fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
@@ -193,6 +196,133 @@ export class FileSystemDriver extends FileStorageDriver {
     }
   }
 
+  /**
+   * Resolves `prefix` against the storage folder and returns the directory to
+   * walk plus the normalized prefix every match must start with. A prefix
+   * that climbs out of the folder (`../x`, `a/../../b`) is refused, as in
+   * `delete()`.
+   */
+  private resolvePrefix(prefix: string) {
+    const root = resolve(this.folderPath);
+    const slash = prefix.lastIndexOf("/");
+    const dirPart = slash === -1 ? "" : prefix.slice(0, slash);
+    const namePart = slash === -1 ? prefix : prefix.slice(slash + 1);
+    const dir = resolve(root, dirPart);
+    const rel = relative(root, dir);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(`Refusing to list "${prefix}": it is outside the storage folder`);
+    }
+    const dirRel = rel.split(sep).join("/");
+    return { root, dir, match: dirRel ? `${dirRel}/${namePart}` : namePart };
+  }
+
+  /**
+   * Walks the storage folder recursively and yields regular files whose path
+   * (relative to the folder, `/`-separated) starts with `prefix`, sorted by
+   * name like an S3 listing. Symlinks are not followed, so a link cannot lead
+   * the walk out of the folder. A missing directory lists nothing.
+   */
+  async *objects(
+    prefix: string,
+    { signal }: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    signal?.throwIfAborted();
+    const { root, dir, match } = this.resolvePrefix(prefix);
+
+    const files: string[] = [];
+    const walk = async (current: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch (err: any) {
+        if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return;
+        throw err;
+      }
+      for (const entry of entries) {
+        const full = `${current}${sep}${entry.name}`;
+        const name = relative(root, full).split(sep).join("/");
+        if (entry.isDirectory()) {
+          // Descend only where a match is still possible: into `pages/1` for
+          // the prefix `pages/10`, not into `pages/2`.
+          if (`${name}/`.startsWith(match) || match.startsWith(`${name}/`)) {
+            await walk(full);
+          }
+        } else if (entry.isFile() && name.startsWith(match)) {
+          files.push(name);
+        }
+      }
+    };
+    await walk(dir);
+    files.sort();
+
+    for (const name of files) {
+      signal?.throwIfAborted();
+      let info;
+      try {
+        info = await stat(`${root}/${name}`);
+      } catch (err: any) {
+        // Removed between the walk and now: not there to list.
+        if (err?.code === "ENOENT") continue;
+        throw err;
+      }
+      yield { name, size: info.size, lastModified: info.mtime };
+    }
+  }
+
+  /**
+   * Unlinks every file under `prefix`, then removes the directories that
+   * leaves empty (never the storage folder itself).
+   */
+  async deletePrefix(
+    prefix: string,
+    options: DeletePrefixOptions = {},
+  ): Promise<number> {
+    assertDeletablePrefix(prefix);
+    const { root, match } = this.resolvePrefix(prefix);
+    // `a/..` passes the generic check but resolves to the folder itself.
+    assertDeletablePrefix(match);
+
+    const deleted = await super.deletePrefix(prefix, options);
+
+    if (deleted > 0) {
+      await this.pruneEmptyDirs(root, match);
+    }
+    return deleted;
+  }
+
+  private async pruneEmptyDirs(root: string, match: string) {
+    // Every directory inside the prefix, deepest first. The prefix's parents
+    // (`pages/` for `pages/42/`) are left alone, as is the storage folder.
+    const dirs: string[] = [];
+    const collect = async (current: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const full = `${current}${sep}${entry.name}`;
+        const name = relative(root, full).split(sep).join("/");
+        if (`${name}/`.startsWith(match) || match.startsWith(`${name}/`)) {
+          await collect(full);
+          if (`${name}/`.startsWith(match)) dirs.push(full);
+        }
+      }
+    };
+    await collect(root);
+
+    for (const dir of dirs) {
+      try {
+        await rmdir(dir);
+      } catch {
+        // Not empty (something unrelated lives there) or already gone.
+      }
+    }
+  }
+
+  /** @deprecated Lists only the top level of the storage folder. Use `objects(prefix)`. */
   async list() {
     const files = await readdir(this.folderPath);
 

@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -200,5 +201,89 @@ describe("FileSystemDriver.fetch() with a signal", () => {
     const res = await driver.fetch("big.bin", { signal: controller.signal });
 
     expect((await res.arrayBuffer()).byteLength).toBe(SIZE);
+  });
+});
+
+describe("FileSystemDriver.objects() and deletePrefix()", () => {
+  let root: string;
+  let driver: FileSystemDriver;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "gemi-fs-objects-"));
+    driver = new FileSystemDriver(root);
+    for (const name of [
+      "pages/1/a.png",
+      "pages/1/nested/b.png",
+      "pages/10/c.png",
+      "pages/2/d.png",
+      "logs/2026-01-01.log",
+      "top.txt",
+    ]) {
+      await mkdir(join(root, name, ".."), { recursive: true });
+      await writeFile(join(root, name), name);
+    }
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function names(prefix: string) {
+    const out: string[] = [];
+    for await (const object of driver.objects(prefix)) out.push(object.name);
+    return out;
+  }
+
+  test("lists recursively under a folder prefix, sorted", async () => {
+    expect(await names("pages/1/")).toEqual(["pages/1/a.png", "pages/1/nested/b.png"]);
+  });
+
+  test("uses string-prefix semantics like S3", async () => {
+    expect(await names("pages/1")).toEqual([
+      "pages/1/a.png",
+      "pages/1/nested/b.png",
+      "pages/10/c.png",
+    ]);
+  });
+
+  test("an empty prefix lists the whole folder; a missing folder lists nothing", async () => {
+    expect(await names("")).toEqual([
+      "logs/2026-01-01.log",
+      "pages/1/a.png",
+      "pages/1/nested/b.png",
+      "pages/10/c.png",
+      "pages/2/d.png",
+      "top.txt",
+    ]);
+    expect(await names("nope/")).toEqual([]);
+  });
+
+  test("reports size and lastModified", async () => {
+    const found = [];
+    for await (const object of driver.objects("logs/")) found.push(object);
+    expect(found).toHaveLength(1);
+    expect(found[0].size).toBe("logs/2026-01-01.log".length);
+    expect(found[0].lastModified).toBeInstanceOf(Date);
+    expect(found[0].lastModified.getTime()).toBeGreaterThan(0);
+  });
+
+  test("refuses a prefix outside the storage folder", async () => {
+    await expect(names("../")).rejects.toThrow(/outside the storage folder/);
+    await expect(names("pages/../../x")).rejects.toThrow(/outside the storage folder/);
+  });
+
+  test("deletePrefix removes the files and the folders it empties", async () => {
+    expect(await driver.deletePrefix("pages/1/")).toBe(2);
+
+    expect(await names("pages/")).toEqual(["pages/10/c.png", "pages/2/d.png"]);
+    expect(existsSync(join(root, "pages/1"))).toBe(false);
+    expect(existsSync(join(root, "pages"))).toBe(true);
+  });
+
+  test("deletePrefix refuses the root, however it is spelled", async () => {
+    for (const prefix of ["", "/", ".", "./", "pages/../", "pages/../."]) {
+      await expect(driver.deletePrefix(prefix)).rejects.toThrow(/whole store|outside/);
+    }
+    expect((await names("")).length).toBe(6);
   });
 });

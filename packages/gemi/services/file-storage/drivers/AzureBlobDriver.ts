@@ -15,6 +15,8 @@ import type {
   PutFileParams,
   ReadFileParams,
   ReadResult,
+  ListObjectsOptions,
+  StoredObject,
 } from "./types";
 
 /**
@@ -53,7 +55,10 @@ interface BlobClientLike {
 
 interface ContainerClientLike {
   getBlockBlobClient(name: string): BlobClientLike;
-  listBlobsFlat(options?: { prefix?: string }): AsyncIterable<{ name: string }>;
+  listBlobsFlat(options?: { prefix?: string }): AsyncIterable<{
+    name: string;
+    properties?: { contentLength?: number; lastModified?: Date };
+  }>;
 }
 
 interface BlobServiceClientLike {
@@ -194,6 +199,35 @@ export class AzureBlobDriver extends FileStorageDriver {
     return name;
   }
 
+  /**
+   * `listBlobsFlat` pages under the hood (5000 blobs per request) and is
+   * already recursive, so this only reshapes each blob. `deletePrefix()` uses
+   * the base default: one `delete()` per blob.
+   */
+  async *objects(
+    prefix: string,
+    { bucket, signal }: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    signal?.throwIfAborted();
+    const containerName = bucket ?? this.config.container ?? process.env.BUCKET_NAME;
+    if (!containerName) {
+      throw new Error(
+        "AzureBlobDriver needs a container name, from `bucket`, the `container` config, or BUCKET_NAME.",
+      );
+    }
+    const service = await this.serviceClient();
+    const container = service.getContainerClient(containerName);
+    for await (const blob of container.listBlobsFlat({ prefix })) {
+      signal?.throwIfAborted();
+      yield {
+        name: blob.name,
+        size: blob.properties?.contentLength ?? 0,
+        lastModified: blob.properties?.lastModified ?? new Date(0),
+      };
+    }
+  }
+
+  /** @deprecated Returns names only. Use `objects(prefix)`. */
   async list(folder: string) {
     const containerName = this.config.container ?? process.env.BUCKET_NAME;
     const service = await this.serviceClient();

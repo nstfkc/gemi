@@ -136,13 +136,47 @@ An unsatisfiable range throws `RangeNotSatisfiableError`, and a missing object t
 
 See [Writing a custom driver](#writing-a-custom-driver) for how a driver implements `read()`.
 
-### `list(folder)`
+### `objects(prefix, options?)`
 
-Lists the objects under a folder/prefix. The shape of the result depends on the driver (the filesystem driver returns a `string[]` of file names; the S3 driver returns the raw `ListObjectsV2` result).
+Every object whose name starts with `prefix`, at any depth, as `{ name, size, lastModified }`. It returns an async iterable and paginates under the hood, so a prefix with a million objects never sits in memory at once. Iterate with `for await`:
 
 ```typescript
-const files = await Storage.list("avatars/");
+const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+for await (const object of Storage.objects("logs/")) {
+  if (object.lastModified < cutoff) {
+    await Storage.delete(object.name);
+  }
+}
 ```
+
+It behaves the same on every built-in driver:
+
+- **Prefix, not folder.** Matching is plain string-prefix, as in S3: `pages/1` also matches `pages/10/…`. End the prefix with `/` to stay inside one folder. `""` lists everything.
+- **Recursive.** Objects in nested "folders" are included.
+- `S3Driver` follows `ListObjectsV2` continuation tokens (1000 keys a page). Zero-byte "folder marker" objects some tools create are listed like any other object.
+- `FileSystemDriver` walks its storage folder recursively, yields regular files only (symlinks are not followed), sorts by name, and refuses a prefix that resolves outside the folder (`../x`).
+- `AzureBlobDriver` uses `listBlobsFlat({ prefix })`.
+
+`options` takes `bucket` (ignored by the filesystem driver) and `signal`, which stops the listing between objects.
+
+### `deletePrefix(prefix, options?)`
+
+Deletes every object under `prefix` (same matching as `objects()`) and resolves with how many it deleted:
+
+```typescript
+const removed = await Storage.deletePrefix(`pages/${page.publicId}/`);
+```
+
+It refuses a prefix that would match the whole store: `""`, `"/"`, `"."`, `"./"`, whitespace, and on the filesystem driver anything that resolves to the storage folder itself (`"pages/../"`). Build prefixes from ids you have checked, and end them with `/`: `pages/${id}` with `id = "1"` also deletes `pages/10/…`.
+
+- `S3Driver` sends one `DeleteObjects` per listed page (up to 1000 keys), and rejects if S3 reports any key it could not delete. Objects already removed stay removed, and running it again finishes the job.
+- `FileSystemDriver` unlinks the files and then removes the directories that left empty inside the prefix.
+- `AzureBlobDriver` (and any custom driver, by default) deletes one object at a time with `delete()`.
+
+### `list(folder)` (deprecated)
+
+Use `objects()`. The shape of `list()`'s result depends on the driver: the filesystem driver returns the top-level names of its storage folder and ignores `folder`, the S3 driver returns the raw first `ListObjectsV2` page (at most 1000 keys), and the Azure driver returns a `string[]` of blob names. It is kept unchanged for existing callers.
 
 ### `delete(params | string)`
 
@@ -288,7 +322,7 @@ new AzureBlobDriver({
 });
 ```
 
-The container comes from `params.bucket`, then the `container` config, then `process.env.BUCKET_NAME`. `list(folder)` returns a `string[]` of blob names under the prefix.
+The container comes from `params.bucket`, then the `container` config, then `process.env.BUCKET_NAME`. `objects(prefix)` reads each blob's size and last-modified time from the listing; the deprecated `list(folder)` returns a `string[]` of blob names.
 
 **On range requests:** Azure's `download(offset, count)` takes an absolute offset and has no suffix form, so the driver handles the two cases differently. `bytes=S-E` and `bytes=S-` — everything a media player actually sends — go straight to the download and read the authoritative total back off Azure's own `Content-Range`, costing no extra round trip. A suffix range (`bytes=-N`) needs one `getProperties()` first to resolve it into absolute offsets.
 
@@ -301,9 +335,11 @@ import {
   FileStorageDriver,
   type DeleteFileParams,
   type FetchFileOptions,
+  type ListObjectsOptions,
   type PutFileOptions,
   type PutFileParams,
   type ReadFileParams,
+  type StoredObject,
 } from "gemi/services";
 
 class MyDriver extends FileStorageDriver {
@@ -320,13 +356,21 @@ class MyDriver extends FileStorageDriver {
     /* ...return a Response streaming the object, honouring `signal`... */
   }
   async list(folder: string): Promise<any> {
-    /* ... */
+    /* deprecated, but still abstract: return anything */
   }
   async delete(params: DeleteFileParams | string): Promise<void> {
     /* ...remove the object; resolve, don't throw, if it is already gone... */
   }
+  async *objects(
+    prefix: string,
+    { bucket, signal }: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    /* ...yield { name, size, lastModified } for every object under prefix... */
+  }
 }
 ```
+
+`objects()` is not abstract either; its default throws `<Driver> does not implement objects()`. Once it and `delete()` are implemented, `deletePrefix()` works through the default (list, then delete one by one); override it if the backend can delete in batches, and call `assertDeletablePrefix(prefix)` first.
 
 `delete()` is not abstract, so a driver written before it existed still compiles, but its default throws `<Driver> does not implement delete()` rather than pretending the object is gone. Override it.
 

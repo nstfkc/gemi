@@ -1,3 +1,15 @@
+# Unreleased
+
+## Storage: portable `objects(prefix)` and `deletePrefix(prefix)` (#833)
+
+**New; `list()` deprecated, unchanged.** `Storage.objects(prefix)` iterates every object under a prefix as `{ name, size, lastModified }` on every built-in driver: paginated on S3 (continuation tokens), recursive on the filesystem driver, `listBlobsFlat` on Azure. `Storage.deletePrefix(prefix)` deletes them and returns the count (S3 batches with `DeleteObjects`); it refuses an empty or root prefix. See [File Storage](docs/file-storage.md#objectsprefix-options).
+
+- New from `gemi/services`: `assertDeletablePrefix`, and the types `StoredObject`, `ListObjectsOptions`, `DeletePrefixOptions`.
+- `FileStorageDriver` gains `objects()` (default throws `<Driver> does not implement objects()`) and `deletePrefix()` (default: `objects()` then `delete()` per object). Custom drivers keep compiling.
+- `Storage.list()` and the drivers' `list()` are marked `@deprecated`; their results are unchanged.
+
+What to do: nothing. To purge a folder or prune old files, move from `Storage.list()` to `Storage.objects()` / `Storage.deletePrefix()`, and end prefixes with `/` (`pages/1` also matches `pages/10/…`).
+
 # Upgrading from 0.113.0 to 0.114.0
 
 ## MCP: an OAuth authorization server for remote clients (#762)

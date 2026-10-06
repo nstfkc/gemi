@@ -1,6 +1,9 @@
 import type {
   DeleteFileParams,
+  DeletePrefixOptions,
   FetchFileOptions,
+  ListObjectsOptions,
+  StoredObject,
   PutFileOptions,
   PutFileParams,
   ReadFileParams,
@@ -12,7 +15,7 @@ import type {
 import type { S3Client } from "@aws-sdk/client-s3";
 
 import { Buffer } from "node:buffer";
-import { FileStorageDriver } from "./FileStorageDriver";
+import { FileStorageDriver, assertDeletablePrefix } from "./FileStorageDriver";
 import { abortableBody } from "./abortableBody";
 import { parseContentRange, toRangeHeaderValue } from "../../../http/range";
 import {
@@ -135,6 +138,86 @@ export class S3Driver extends FileStorageDriver {
     }
   }
 
+  /**
+   * One `ListObjectsV2` page at a time (up to 1000 keys each), following the
+   * continuation token until S3 reports the listing complete.
+   */
+  private async *pages(
+    prefix: string,
+    { bucket, signal }: ListObjectsOptions,
+  ): AsyncGenerator<StoredObject[]> {
+    const { sdk, client } = await this.connect();
+    let token: string | undefined;
+    do {
+      signal?.throwIfAborted();
+      const result: any = await client.send(
+        new sdk.ListObjectsV2Command({
+          Bucket: bucket ?? process.env.BUCKET_NAME,
+          Prefix: prefix,
+          ContinuationToken: token,
+        }),
+        { abortSignal: signal },
+      );
+      yield (result.Contents ?? []).map((item: any) => ({
+        name: item.Key,
+        size: item.Size ?? 0,
+        lastModified: item.LastModified ?? new Date(0),
+      }));
+      // Guard on the token too: an S3-compatible service that says "truncated"
+      // without one would otherwise restart from the first page forever.
+      token = result.IsTruncated ? result.NextContinuationToken : undefined;
+    } while (token);
+  }
+
+  async *objects(
+    prefix: string,
+    options: ListObjectsOptions = {},
+  ): AsyncIterable<StoredObject> {
+    for await (const page of this.pages(prefix, options)) {
+      yield* page;
+    }
+  }
+
+  /**
+   * `DeleteObjects` per listed page, so a purge costs two requests per 1000
+   * objects. A key S3 reports as not deleted rejects the whole call; the
+   * objects already removed stay removed, and running it again finishes the job.
+   */
+  async deletePrefix(
+    prefix: string,
+    options: DeletePrefixOptions = {},
+  ): Promise<number> {
+    assertDeletablePrefix(prefix);
+    const bucket = options.bucket ?? process.env.BUCKET_NAME;
+    const { sdk, client } = await this.connect();
+
+    let deleted = 0;
+    for await (const page of this.pages(prefix, { ...options, bucket })) {
+      if (page.length === 0) continue;
+      options.signal?.throwIfAborted();
+      const result: any = await client.send(
+        new sdk.DeleteObjectsCommand({
+          Bucket: bucket,
+          Delete: {
+            Objects: page.map((object) => ({ Key: object.name })),
+            Quiet: true,
+          },
+        }),
+        { abortSignal: options.signal },
+      );
+      const errors: any[] = result?.Errors ?? [];
+      if (errors.length > 0) {
+        const first = errors[0];
+        throw new Error(
+          `S3 could not delete ${errors.length} object(s) under "${prefix}", e.g. "${first.Key}": ${first.Code ?? "unknown"} ${first.Message ?? ""}`.trim(),
+        );
+      }
+      deleted += page.length;
+    }
+    return deleted;
+  }
+
+  /** @deprecated Returns the raw first `ListObjectsV2` page. Use `objects(prefix)`. */
   async list(folder: string) {
     const { sdk, client } = await this.connect();
     const result = await client.send(

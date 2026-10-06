@@ -82,7 +82,15 @@ function fakeAzure(
         },
         async *listBlobsFlat({ prefix }: { prefix?: string } = {}) {
           for (const name of options.blobs ?? []) {
-            if (!prefix || name.startsWith(prefix)) yield { name };
+            if (!prefix || name.startsWith(prefix)) {
+              yield {
+                name,
+                properties: {
+                  contentLength: name.length,
+                  lastModified: new Date("2026-01-02T00:00:00Z"),
+                },
+              };
+            }
           }
         },
       };
@@ -421,6 +429,40 @@ describe("AzureBlobDriver.list()", () => {
       "photos/a.png",
       "photos/b.png",
     ]);
+  });
+});
+
+describe("AzureBlobDriver.objects() and deletePrefix()", () => {
+  test("yields name, size and lastModified for every blob under the prefix", async () => {
+    const { driver } = driverWith({
+      blobs: ["photos/a.png", "photos/2024/b.png", "videos/c.mp4"],
+    });
+
+    const found = [];
+    for await (const object of driver.objects("photos/")) found.push(object);
+
+    expect(found).toEqual([
+      { name: "photos/a.png", size: 12, lastModified: new Date("2026-01-02T00:00:00Z") },
+      { name: "photos/2024/b.png", size: 17, lastModified: new Date("2026-01-02T00:00:00Z") },
+    ]);
+  });
+
+  test("deletePrefix deletes each listed blob and returns the count", async () => {
+    const { driver, calls } = driverWith({
+      blobs: ["photos/a.png", "photos/b.png", "videos/c.mp4"],
+    });
+
+    expect(await driver.deletePrefix("photos/")).toBe(2);
+    expect(calls.deletes).toBe(2);
+  });
+
+  test("deletePrefix refuses an empty or root prefix", async () => {
+    const { driver, calls } = driverWith({ blobs: ["a.png"] });
+
+    for (const prefix of ["", "/", ".", "./"]) {
+      await expect(driver.deletePrefix(prefix)).rejects.toThrow(/whole store/);
+    }
+    expect(calls.deletes).toBe(0);
   });
 });
 

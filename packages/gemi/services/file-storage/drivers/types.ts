@@ -77,6 +77,24 @@ export interface DeleteFileParams {
   bucket?: string;
 }
 
+/** One object found by `objects()`. */
+export interface StoredObject {
+  /** The full object name (key), e.g. `pages/42/cover.png`. */
+  name: string;
+  /** Size in bytes. */
+  size: number;
+  lastModified: Date;
+}
+
+export interface ListObjectsOptions {
+  /** Bucket or container. Defaults as in `put()`; ignored by the filesystem driver. */
+  bucket?: string;
+  /** Stops the listing between pages; the iterator then throws the signal's reason. */
+  signal?: AbortSignal;
+}
+
+export type DeletePrefixOptions = ListObjectsOptions;
+
 export interface FileMetadata {
   width: number;
   height: number;
@@ -95,4 +113,15 @@ export interface IFileStorageDriver {
    * throwing, so a cleanup path can retry safely.
    */
   delete?(params: DeleteFileParams | string): Promise<void>;
+  /**
+   * Every object whose name starts with `prefix`, at any depth, paginated
+   * under the hood. Plain string-prefix semantics, as in S3: `pages/1`
+   * matches `pages/1/a.png` and `pages/10/b.png`.
+   */
+  objects?(prefix: string, options?: ListObjectsOptions): AsyncIterable<StoredObject>;
+  /**
+   * Deletes every object under `prefix` and resolves with how many were
+   * deleted. Refuses an empty or root prefix.
+   */
+  deletePrefix?(prefix: string, options?: DeletePrefixOptions): Promise<number>;
 }
