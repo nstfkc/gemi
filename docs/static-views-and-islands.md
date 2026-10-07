@@ -33,7 +33,8 @@ Everything on the server works as it does for any view:
 
 - the handler, middleware, redirects, feature gates and status codes;
 - `Query.prefetch`, `useQuery` reads, `useDictionary` and `useRouteData`;
-- `Head` and the `Meta` facade (title, description, Open Graph);
+- `Head` and the `Meta` facade (title, description, Open Graph, canonical and
+  alternates, [fonts](#fonts));
 - the app's `404` view: a missing record (`findUniqueOrThrow`) or a closed
   feature gate renders the normal, hydrated 404 page.
 
@@ -90,6 +91,50 @@ With a `layout`, the page's CSS is what that layout and the route's views import
 whose pages need a few kilobytes of CSS doesn't inline the application's whole
 Tailwind build. Without `layout`, the page renders inside `RootLayout` with the
 app's stylesheet, as a hydrated view does.
+
+### Fonts
+
+A page that uses its own fonts (self-hosted, or files uploaded to storage)
+declares them from the handler with `Meta.fonts`. `<Head />` renders an
+`@font-face` rule for each, and a `<link rel="preload" as="font" crossorigin>`
+for each one marked `preload`, so every page preloads only the files it uses:
+
+```typescript
+import { Meta } from "gemi/facades";
+
+"/p/:slug": this.view("site/Page", async (req) => {
+  const page = await Page.findUniqueOrThrow({ where: { slug: req.params.slug } });
+  Meta.fonts([
+    // A variable font: one file for every weight. Used above the fold, so preloaded.
+    { family: "Acme Sans", src: "/storage/fonts/acme.woff2", weight: "100 900", preload: true },
+    { family: "Acme Sans", src: "/storage/fonts/acme-italic.woff2", weight: "100 900", style: "italic" },
+    // Fallback formats, the preferred one first.
+    { family: "Acme Serif", src: [{ url: "/storage/fonts/serif.woff2" }, { url: "/storage/fonts/serif.ttf" }] },
+  ]);
+  return { page };
+}).static({ layout: "site/SiteLayout" }),
+```
+
+Then use the family in CSS (`font-family: "Acme Sans", sans-serif`).
+
+- `src` is a url, or a list of `{ url, format? }` with the preferred file first.
+  The format comes from the extension (`.woff2`, `.woff`, `.ttf`, `.otf`) when
+  left out; a url without one (a signed storage url) can name it.
+- `weight`, `style`, `stretch`, `unicodeRange` and `display` are the
+  `@font-face` descriptors. `display` defaults to `"swap"`.
+- `preload` preloads the first file, with the matching `type` (`font/woff2`)
+  and `crossorigin`, which fonts always need. Preload only what the page shows
+  before scrolling: a preloaded file nobody uses is a wasted download.
+- Family names and urls are CSS-escaped, so a user-supplied name can't break
+  out of the rule or the `<style>`. The descriptors only accept CSS keywords,
+  numbers and percentages; anything else throws a `TypeError` from
+  `Meta.fonts`, so validate user-supplied values first.
+- Calls add up: a layout's handler and the page's can both declare fonts. The
+  same font declared twice is rendered once, and each file preloaded once.
+
+`Meta.fonts` works the same on hydrated views. On a client-side navigation the
+new page's `@font-face` rules are added (without preloads) and the earlier
+ones are kept.
 
 ### Cookies and caching
 

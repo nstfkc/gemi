@@ -287,3 +287,52 @@ describe("FileSystemDriver.objects() and deletePrefix()", () => {
     expect((await names("")).length).toBe(6);
   });
 });
+
+describe("FileSystemDriver.putStream()", () => {
+  let root: string;
+  let driver: FileSystemDriver;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "gemi-fs-put-stream-"));
+    driver = new FileSystemDriver(root);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const streamOf = (...chunks: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      },
+    });
+
+  test("writes the stream into nested folders", async () => {
+    expect(await driver.putStream({ name: "a/b/c.txt", body: streamOf("he", "llo") })).toBe("a/b/c.txt");
+    expect(await Bun.file(join(root, "a/b/c.txt")).text()).toBe("hello");
+  });
+
+  test("an error halfway leaves neither the file nor a temporary one", async () => {
+    await writeFile(join(root, "keep.txt"), "old");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("cut off"));
+      },
+    });
+
+    await expect(driver.putStream({ name: "keep.txt", body })).rejects.toThrow("cut off");
+    // The previous version is untouched, and nothing else was left behind.
+    expect(await Bun.file(join(root, "keep.txt")).text()).toBe("old");
+    const { readdir } = await import("node:fs/promises");
+    expect(await readdir(root)).toEqual(["keep.txt"]);
+  });
+
+  test("refuses a name outside the storage folder", async () => {
+    await expect(driver.putStream({ name: "../x.txt", body: streamOf("x") })).rejects.toThrow(
+      /outside the storage folder/,
+    );
+  });
+});

@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import { FileNotFoundError } from "../../../http/errors";
 import type {
   DeleteFileParams,
@@ -6,6 +8,7 @@ import type {
   IFileStorageDriver,
   PutFileOptions,
   PutFileParams,
+  PutStreamParams,
   ReadFileParams,
   ReadResult,
   ListObjectsOptions,
@@ -38,6 +41,37 @@ export abstract class FileStorageDriver implements IFileStorageDriver {
     params: PutFileParams | Blob,
     options?: PutFileOptions,
   ): Promise<string>;
+  /**
+   * Stores a stream and returns the object name.
+   *
+   * The default reads the whole stream into memory, then hands it to `put()`,
+   * so it works on every driver and an error from the stream (a size limit,
+   * a dropped connection) rejects before anything is written. Bound the
+   * stream's size before calling it. A driver whose backend can take a stream
+   * without leaving a partial object behind overrides it, as
+   * `FileSystemDriver` does.
+   */
+  async putStream(
+    { body, ...params }: PutStreamParams,
+    options: PutFileOptions = {},
+  ): Promise<string> {
+    options.signal?.throwIfAborted();
+    const chunks: Uint8Array[] = [];
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        options.signal?.throwIfAborted();
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+    } catch (error) {
+      await reader.cancel(error).catch(() => {});
+      throw error;
+    }
+    return this.put({ ...params, body: Buffer.concat(chunks) }, options);
+  }
+
   /**
    * @deprecated The result's shape differs per driver (the S3 driver returns
    * the raw, unpaginated `ListObjectsV2` output). Use `objects(prefix)`.

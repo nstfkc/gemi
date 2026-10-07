@@ -225,6 +225,7 @@ Log.error("Payment failed", { orderId, reason });
 - `Meta.htmlAttributes({ lang, dir })` — the `<html>` attributes the layout receives as `htmlAttributes` (default: the request's locale and its direction).
 - `Meta.canonical(url)` — a `<link rel="canonical">`.
 - `Meta.alternates([{ hrefLang, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in.
+- `Meta.fonts([{ family, src, weight?, style?, stretch?, display?, unicodeRange?, preload? }])` — `@font-face` rules, and `<link rel="preload" as="font">` for the fonts marked `preload` (see [Fonts](./static-views-and-islands.md#fonts)).
 
 ```typescript
 import { Meta } from "gemi/facades";

@@ -36,6 +36,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Routing](./routing.md)** — `ApiRouter` / `ViewRouter`, path params, groups, nesting, `resource()`.
 - **[Controllers](./controllers.md)** — `Controller` / `ResourceController`, the `HttpRequest` API, request validation, `ValidationError`.
 - **[Middleware](./middleware.md)** — the string DSL, built-in middleware, negation, and writing custom middleware.
+- **[Sitemaps & robots.txt](./sitemaps-and-robots.md)** — `Sitemap` and `Robots` from `gemi/http`: serve `/sitemap.xml` (hreflang alternates, an index for large sites) and `/robots.txt`, and read another site's through `safeFetch`.
 - **[MCP Server](./mcp.md)** — `McpRouter` tools for external MCP clients over Streamable HTTP: OAuth for hosted clients (`McpOAuthServer`) and API keys, scopes, consent, approval by elicitation, progress, files.
 
 ### Views & client
