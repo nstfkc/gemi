@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.119.1 to 0.119.2
 
 ## OAuth connections: the callback works when the provider redirects back
 
