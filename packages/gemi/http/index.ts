@@ -63,6 +63,7 @@ export {
 } from "./middleware-config";
 
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
+export { SameSiteBounceMiddleware, SAME_SITE_BOUNCE_PARAM } from "./SameSiteBounceMiddleware";
 export { CacheMiddleware } from "./CacheMiddleware";
 export { CorsMiddleware } from "./CorsMiddleware";
 export {
