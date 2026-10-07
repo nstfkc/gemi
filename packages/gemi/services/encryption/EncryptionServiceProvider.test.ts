@@ -14,9 +14,9 @@ import { EncryptionServiceProvider } from "./EncryptionServiceProvider";
 
 const key = randomBytes(32).toString("base64");
 
-async function makeApp(encryption?: Record<string, unknown>) {
+async function makeApp(encryption?: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   const application = new Application(
-    new Repository(encryption === undefined ? {} : { encryption }),
+    new Repository(encryption === undefined ? { ...extra } : { encryption, ...extra }),
   );
   application.registerMany([EncryptionServiceProvider]);
   await application.boot();
@@ -50,6 +50,18 @@ class Secret extends Model {
 afterEach(() => clearRegistry());
 
 describe("EncryptionServiceProvider", () => {
+  test("an app with OAuth connections and no key fails to boot", async () => {
+    await expect(makeApp(undefined, { auth: { connections: { figma: {} } } })).rejects.toThrow(
+      /auth\.connections \(figma\)/,
+    );
+    await expect(makeApp({ keys: { k1: key } }, { auth: { connections: { figma: {} } } })).resolves.toBeDefined();
+    // Its own store keeps the tokens however it likes.
+    await expect(
+      makeApp(undefined, { auth: { connections: { figma: {} }, connectionStore: {} } }),
+    ).resolves.toBeDefined();
+    await expect(makeApp(undefined, { auth: { connections: {} } })).resolves.toBeDefined();
+  });
+
   test("is one of the providers every app boots with", () => {
     expect(frameworkProviders).toContain(EncryptionServiceProvider);
   });

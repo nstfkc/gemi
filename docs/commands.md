@@ -295,7 +295,7 @@ export default class extends Kernel {
 
 | Command | What it does |
 | --- | --- |
-| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
+| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key, and, without a model, the [OAuth connection](./authentication.md#oauth-connections) tokens. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
 
 A command of your own with the same name takes its place, and the built-in one is no longer listed.
 

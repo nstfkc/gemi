@@ -2,6 +2,9 @@ import { randomBytes } from "node:crypto";
 import type { HttpRequest } from "../http/HttpRequest";
 import type { SessionWithUser, User } from "./types";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
+import type { ConnectionStore } from "./connections/ConnectionStore";
+import type { ProviderConnection } from "./connections/ConnectionManager";
+import type { OAuthConnectionProvider } from "./connections/OAuthConnectionProvider";
 import { SignUpRequest } from "./requests";
 import type { CodeRateLimits } from "./oneTimeCode";
 
@@ -79,6 +82,15 @@ export interface EmailCodeConfig {
    * Unset, the code is logged outside production and dropped in it.
    */
   send?: (args: EmailCodeSendArgs) => Promise<void> | void;
+}
+
+/** What `onConnected` is handed. */
+export interface ConnectedArgs {
+  user: User;
+  /** The key under `auth.connections`. */
+  provider: string;
+  connection: ProviderConnection;
+  req: HttpRequest<any, any>;
 }
 
 /** What `onAuthenticated` is handed. */
@@ -176,6 +188,23 @@ export interface AuthConfig {
    * instead.
    */
   oauthFailurePath?: string | null;
+
+  /**
+   * Providers a user can connect their account to, to call the provider's API
+   * on their behalf (as opposed to `oauthProviders`, which sign in). The key
+   * is the provider's name in `/auth/connections/<name>` and in
+   * `Connections.for(user, name)`. See "OAuth connections" in
+   * docs/authentication.md.
+   */
+  connections?: Record<string, OAuthConnectionProvider>;
+  /**
+   * Where connections are kept. Default: the `gemi_oauth_connections` table on
+   * the default database connection, tokens encrypted with the app's
+   * encryption keys.
+   */
+  connectionStore?: ConnectionStore | (() => ConnectionStore) | null;
+  /** After a connection is stored by the connect callback. */
+  onConnected?: (args: ConnectedArgs) => Promise<void> | void;
 
   verifyPassword?: (password: string, hash: string) => Promise<boolean>;
   hashPassword?: (password: string) => Promise<string>;
@@ -388,6 +417,9 @@ export function authConfigDefaults(
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},
     oauthFailurePath: null,
+    connections: {},
+    connectionStore: null,
+    onConnected: () => {},
 
     verifyPassword: verifyPasswordHash,
     hashPassword: async (password) => await Bun.password.hash(password),
