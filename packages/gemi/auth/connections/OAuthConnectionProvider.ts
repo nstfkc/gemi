@@ -39,12 +39,12 @@ export interface OAuthConnectionProviderConfig {
    */
   redirectUri?: string;
   /**
-   * Where the provider's API lives: `https://api.figma.com`. When set,
+   * Where the provider's API lives: `https://api.figma.com`. Required:
    * `connection.fetch` takes paths relative to it and **refuses any other
-   * origin**, so a URL that came from user input cannot carry the user's
-   * token somewhere else. Strongly recommended.
+   * origin**, so the user's token only ever goes to the provider's API host,
+   * even for a URL that came from user input.
    */
-  apiBaseUrl?: string;
+  apiBaseUrl: string;
   /** Refresh this many seconds before the access token expires. Default 60. */
   refreshLeewaySeconds?: number;
 }
@@ -82,16 +82,26 @@ export interface OAuthTokenSet {
  */
 export class OAuthConnectionProvider {
   readonly config: Required<
-    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "apiBaseUrl">
+    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri">
   > &
-    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "apiBaseUrl">;
+    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri">;
 
   constructor(config: OAuthConnectionProviderConfig) {
     for (const key of ["authorizeUrl", "tokenUrl"] as const) {
       assertHttpUrl(key, config[key]);
     }
     if (config.revokeUrl !== undefined) assertHttpUrl("revokeUrl", config.revokeUrl);
-    if (config.apiBaseUrl !== undefined) assertHttpUrl("apiBaseUrl", config.apiBaseUrl);
+    // Required (not just recommended): it is what keeps `connection.fetch`
+    // from sending the user's token anywhere but the provider's API host. A
+    // missing one (`process.env.X` unset, or plain JS) fails the boot, when
+    // the auth config is loaded, rather than the first `fetch`.
+    if (config.apiBaseUrl === undefined || config.apiBaseUrl === null || config.apiBaseUrl === "") {
+      throw new Error(
+        "OAuthConnectionProvider: apiBaseUrl is required. Set it to the provider's API origin " +
+          '(e.g. apiBaseUrl: "https://api.figma.com"); connection.fetch only sends the token there.',
+      );
+    }
+    assertHttpUrl("apiBaseUrl", config.apiBaseUrl);
     this.config = {
       scopeSeparator: " ",
       clientAuth: "body",

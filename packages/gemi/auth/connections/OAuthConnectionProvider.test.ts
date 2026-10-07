@@ -42,6 +42,7 @@ function provider(overrides: Partial<ConstructorParameters<typeof OAuthConnectio
     clientId: "client id",
     clientSecret: "s3cret:",
     scopes: ["files:read", "files:write"],
+    apiBaseUrl: "https://api.provider.example",
     ...overrides,
   });
 }
@@ -52,6 +53,15 @@ describe("OAuthConnectionProvider", () => {
     expect(() => provider({ apiBaseUrl: "ftp://provider.example" })).toThrow(/https/);
     expect(() => provider({ revokeUrl: "nope" })).toThrow(/https/);
     expect(() => provider({ tokenUrl: "http://localhost:9/token" })).not.toThrow();
+  });
+
+  test("requires apiBaseUrl, so the token only ever goes to the provider's API host", () => {
+    for (const apiBaseUrl of [undefined, null, ""]) {
+      expect(() => provider({ apiBaseUrl: apiBaseUrl as any })).toThrow(/apiBaseUrl is required/);
+    }
+    const { apiBaseUrl: _omitted, ...rest } = provider().config;
+    // @ts-expect-error apiBaseUrl is required by the type too.
+    expect(() => new OAuthConnectionProvider({ ...rest })).toThrow(/apiBaseUrl is required/);
   });
 
   test("builds the authorization URL with state, PKCE and the scopes", () => {

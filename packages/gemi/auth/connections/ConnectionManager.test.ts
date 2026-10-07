@@ -87,7 +87,7 @@ beforeEach(() => {
   Application.setInstance(application);
   store = new MemoryConnectionStore();
   manager = new ConnectionManager({
-    providers: { figma: provider(), open: provider({ apiBaseUrl: undefined, revokeUrl: undefined }) },
+    providers: { figma: provider(), open: provider({ revokeUrl: undefined }) },
     store,
   });
 });
@@ -255,10 +255,8 @@ describe("ConnectionManager", () => {
     await expect(connection.fetch(`http://localhost:${server.port}/api/me`)).rejects.toMatchObject({ code: "forbidden_url" });
     expect(hits).toHaveLength(0);
 
-    const open = await connect({ provider: "open" });
-    await expect(open.fetch("/api/me")).rejects.toMatchObject({ code: "forbidden_url" });
-    await expect(open.fetch("http://provider.example/api")).rejects.toMatchObject({ code: "forbidden_url" });
-    expect((await open.fetch(`${base}/api/me`)).status).toBe(200);
+    // An absolute URL on apiBaseUrl's origin is fine.
+    expect((await connection.fetch(`${base}/api/me`)).status).toBe(200);
   });
 
   test("drops the token on a redirect to another origin, keeps it on the same one", async () => {

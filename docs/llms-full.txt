@@ -11424,7 +11424,7 @@ export default defineAuthConfig({
 | `pkce` | `true` | Send an S256 PKCE challenge. Turn it off only for a provider that rejects one. |
 | `authorizationParams` | `{}` | Extra parameters for the authorization URL, e.g. `{ access_type: "offline", prompt: "consent" }` for Google. They cannot replace `state`, the PKCE challenge, `redirect_uri`, `client_id` or `scope`. |
 | `redirectUri` | `${HOST_NAME}/auth/connections/<name>/callback` | The callback URL registered with the provider. |
-| `apiBaseUrl` | none | Where the provider's API lives. `connection.fetch` then takes paths relative to it and **refuses every other origin**. Set it. |
+| `apiBaseUrl` | (required) | Where the provider's API lives, e.g. `https://api.figma.com`. `connection.fetch` takes paths relative to it and **refuses every other origin**, so the token only ever goes to the provider's API host. A provider without one fails the boot. |
 | `refreshLeewaySeconds` | `60` | Refresh this long before the access token expires. |
 
 ### Connecting
@@ -11482,8 +11482,8 @@ const file = await res.json();
 - When the token expires within `refreshLeewaySeconds`, it refreshes first.
 - After a `401` it refreshes and retries once. A request with a streamed body is not retried.
 - A path is resolved against `apiBaseUrl`, and a URL on another origin throws
-  `OAuthConnectionError` (`forbidden_url`) without sending anything. Without `apiBaseUrl`,
-  `fetch` takes any https URL, so never pass it a URL that came from user input.
+  `OAuthConnectionError` (`forbidden_url`) without sending anything. `apiBaseUrl` is required,
+  so the token never leaves the provider's API host, even for a URL that came from user input.
 - Redirects are followed by hand. The token is dropped on a redirect to another origin.
 
 A refresh the token endpoint refuses (`400`/`401`, e.g. `invalid_grant` after the user revoked

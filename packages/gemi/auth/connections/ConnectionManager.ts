@@ -266,8 +266,8 @@ export class ProviderConnection {
    * retries once. A refresh the provider refuses marks the connection and
    * throws `OAuthReconnectRequiredError`.
    *
-   * With the provider's `apiBaseUrl` set, a path is resolved against it and a
-   * URL on any other origin is refused (`OAuthConnectionError`,
+   * A path is resolved against the provider's `apiBaseUrl`, and a URL on any
+   * other origin is refused (`OAuthConnectionError`,
    * `forbidden_url`), so the token only ever goes to the provider. Redirects
    * are followed by hand: the token is dropped on one that leaves the origin.
    * A streamed request body cannot be sent twice, so a 401 for one is
@@ -371,11 +371,10 @@ export class ProviderConnection {
     } catch {
       throw new OAuthConnectionError(
         "forbidden_url",
-        `connection.fetch was given ${JSON.stringify(String(input))}, which is not a URL` +
-          (base ? "." : " (relative paths need the provider's apiBaseUrl)."),
+        `connection.fetch was given ${JSON.stringify(String(input))}, which is not a URL.`,
       );
     }
-    if (base !== undefined && url.origin !== new URL(base).origin) {
+    if (url.origin !== new URL(base).origin) {
       throw new OAuthConnectionError(
         "forbidden_url",
         `connection.fetch only sends the ${this.record.provider} token to ${new URL(base).origin} ` +
