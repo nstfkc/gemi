@@ -186,6 +186,7 @@ Thirteen framework providers bind fourteen services. You rarely resolve these di
 | `Scheduler` | `scheduler` | `schedule` | — |
 | `MiddlewareRegistry` | `middleware` | `middleware` | — |
 | `KernelId` | `kernel.id` | — | — |
+| `Encrypter` | `encrypter` | `encryption` | `Crypt` |
 | `Repository` (config) | `config` | — | — |
 
 The service classes are exported from `gemi/services` (except `Translator`, from `gemi/i18n`, and `Repository`, from `gemi/support`), so you can pass them to `app()` as tokens. `AuthManager` is intentionally not exported — reach auth through the `Auth` facade.
@@ -275,6 +276,7 @@ export default defineMiddlewareConfig({
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
 | `events` | `defineEventConfig` | `gemi/services` |
 | `command` | `defineCommandConfig` | `gemi/services` |
+| `encryption` | `defineEncryptionConfig` | `gemi/services` |
 | `route` | `defineRouteConfig` | `gemi/services` |
 | `translation` | `defineTranslationConfig` | `gemi/i18n` (also re-exported from `gemi/services`) |
 | `middleware` | `defineMiddlewareConfig` | `gemi/http` |

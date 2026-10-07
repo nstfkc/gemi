@@ -166,6 +166,19 @@ export {
   UnknownConnectionError,
 } from "../database/Connection";
 
+// Encrypted columns (`/// @gemi.encrypted`, #844). The two errors come out of
+// model operations — a value that does not decrypt, or no key to decrypt it
+// with — so they are exported where they are caught, like the two above.
+export {
+  DecryptionError,
+  EncryptionKeyError,
+} from "../services/encryption/Encrypter";
+export {
+  rotateEncryptedColumns,
+  type RotateEncryptionOptions,
+  type RotateEncryptionReport,
+} from "./encryption-rotate";
+
 // Composable raw SQL. `DB.query` / `DB.execute` run what these build — the
 // place every shape the ORM declines is supposed to land.
 export {

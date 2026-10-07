@@ -27,6 +27,13 @@ import { resolveStrategy } from "./compile/strategy";
 import { matchUniqueKey } from "./compile/unique";
 import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
+import {
+  assertNoEncryptedFilters,
+  decryptFolded,
+  decryptRows,
+  encryptWriteArgs,
+  isEncryptionRaw,
+} from "./encryption";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
   LockOutsideTransactionError,
@@ -90,6 +97,22 @@ import type { ModelSchema } from "./schema";
  * Framework internals take a `$` prefix so they cannot collide with anything an
  * application author adds to a model.
  */
+
+/**
+ * Operations whose result is rows of this model (as opposed to a count or an
+ * aggregate), and so the ones whose encrypted columns are decrypted.
+ */
+const RETURNS_ROWS = new Set<Operation>([
+  "findUnique",
+  "findUniqueOrThrow",
+  "findFirst",
+  "findFirstOrThrow",
+  "findMany",
+  "create",
+  "update",
+  "upsert",
+  "delete",
+]);
 
 /** Operations Prisma raises on when nothing matched, rather than returning null. */
 const ORTHROW = new Set([
@@ -1034,6 +1057,12 @@ export abstract class Model {
       }
     }
 
+    // Encrypted columns (#844), refused as a filter, sort or grouping anywhere
+    // in the argument tree — after policies, so a scope cannot slip one in
+    // either. The raw mode is `encryption:rotate`'s, comparing envelopes.
+    const raw = isEncryptionRaw(options);
+    if (!raw) assertNoEncryptedFilters(schema, op, effective);
+
     // Which strategy plans the include tree. Named per call or chosen by
     // `defaultStrategy`, and either way it reaches the plan key — two strategies
     // emit different SQL for the same arguments, so sharing a plan between them
@@ -1092,6 +1121,13 @@ export abstract class Model {
     ) {
       effective = { ...effective, skipIfUnchanged: true };
     }
+
+    // This model's encrypted columns, encrypted. After the `createMany` split
+    // above — each chunk re-enters `$exec` and is encrypted there, so doing it
+    // first would encrypt twice — and before the plan, though only the bound
+    // values change, never the plan's shape. Nested writes into other models
+    // are encrypted by those models' own `$exec`.
+    if (!raw) effective = encryptWriteArgs(schema, op, effective);
 
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
@@ -1312,6 +1348,11 @@ export abstract class Model {
 
       const result = this.$shape(plan, rows as unknown[]);
 
+      // This model's encrypted columns, decrypted — before anything else reads
+      // the rows, so a policy's `redact`, `track`'s snapshot and the caller all
+      // see the plaintext. A value that does not decrypt throws.
+      if (!raw && RETURNS_ROWS.has(op)) decryptRows(schema, rowsOf(result));
+
       // `skipIfUnchanged` (#664): an `update` that matched its row but changed
       // nothing wrote nothing, so `returning` came back empty. The caller still
       // gets the row, read the way the `delete` pre-read reads one — the same
@@ -1436,6 +1477,19 @@ export abstract class Model {
       // planned it: `findMany` batched, `findFirst` folded. A policy written as
       // `context.operation === "findMany"` therefore protected a child on SQLite
       // and leaked it on Postgres, for identical application code.
+      // The same for decryption, and unconditionally: a folded child's rows
+      // never entered its own `$exec`, so nothing has decrypted them.
+      if (plan.relations !== undefined && !raw) {
+        const parents = rowsOf(result);
+        for (const relation of plan.relations) {
+          if (relation.root === undefined) continue;
+          decryptFolded(
+            { as: relation.as, model: relation.model, folded: relation.root.folded },
+            parents,
+          );
+        }
+      }
+
       if (plan.relations !== undefined && !system) {
         for (const relation of plan.relations) {
           if (relation.root === undefined) continue;

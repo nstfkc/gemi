@@ -38,6 +38,18 @@ export {
 } from "../http/range";
 export { FileNotFoundError, RangeNotSatisfiableError } from "../http/errors";
 
+// Encryption: encrypted columns and the `Crypt` facade (#844)
+export { EncryptionServiceProvider } from "./encryption/EncryptionServiceProvider";
+export {
+  DecryptionError,
+  Encrypter,
+  EncryptionKeyError,
+} from "./encryption/Encrypter";
+export {
+  defineEncryptionConfig,
+  type EncryptionConfig,
+} from "./encryption/config";
+
 // Ratelimiter
 export { RateLimiterServiceProvider } from "./rate-limiter/RateLimiterServiceProvider";
 export { RateLimiter } from "./rate-limiter/RateLimiter";

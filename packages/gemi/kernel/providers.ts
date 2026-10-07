@@ -6,6 +6,7 @@ import { TranslationServiceProvider } from "../i18n/TranslationServiceProvider";
 import { ScheduleServiceProvider } from "../services/cron/ScheduleServiceProvider";
 import { FeaturesServiceProvider } from "../services/features/FeaturesServiceProvider";
 import { MailServiceProvider } from "../services/email/MailServiceProvider";
+import { EncryptionServiceProvider } from "../services/encryption/EncryptionServiceProvider";
 import { EventServiceProvider } from "../services/events/EventServiceProvider";
 import { FilesystemServiceProvider } from "../services/file-storage/FilesystemServiceProvider";
 import { ImageServiceProvider } from "../services/image-optimization/ImageServiceProvider";
@@ -18,8 +19,8 @@ import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
 import { RouteServiceProvider } from "../services/router/RouteServiceProvider";
 
 /**
- * The providers every gemi app boots with, in registration order. Seventeen
- * providers for eighteen services — `RouteServiceProvider` owns both the api
+ * The providers every gemi app boots with, in registration order. Eighteen
+ * providers for nineteen services — `RouteServiceProvider` owns both the api
  * and the view dispatcher, the way Laravel's does.
  *
  * Order only matters for `boot()`; `register()` binds factories and resolves
@@ -41,6 +42,10 @@ export const frameworkProviders: ServiceProviderConstructor[] = [
   KernelIdServiceProvider,
   MiddlewareServiceProvider,
   DatabaseServiceProvider,
+  // Before anything that reads a model at boot (the features cache warm-up),
+  // so a missing key for an encrypted column fails the boot with its own
+  // message rather than inside someone else's query.
+  EncryptionServiceProvider,
   // After the database, whose `boot()` its cache warm-up depends on, and before
   // the route dispatchers, which evaluate flags on every view request.
   FeaturesServiceProvider,

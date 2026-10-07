@@ -2,7 +2,7 @@ import type { DMMF } from "@prisma/generator-helper";
 
 import {
   NANOID_DEFAULT_LENGTH,
-  SCHEMA_ARTIFACT_VERSION,
+  artifactVersionFor,
   type DefaultSpec,
   type FieldSchema,
   type ModelSchema,
@@ -314,7 +314,57 @@ function fieldSchema(
   const def = defaultSpec(model, field, warnings);
   if (def) schema.default = def;
 
+  // Last, so an artifact without encrypted columns keeps its key order and is
+  // byte-identical to one generated before this existed.
+  if (isEncryptedField(field)) {
+    assertEncryptable(model, field);
+    schema.encrypted = true;
+  }
+
   return schema;
+}
+
+/**
+ * `/// @gemi.encrypted` in the field's doc comment. A Prisma schema cannot
+ * carry custom attributes, and a triple-slash comment is the one thing the
+ * DMMF hands a generator per field — the same channel Prisma's own ecosystem
+ * uses for annotations.
+ */
+const ENCRYPTED_ANNOTATION = /(^|\s)@gemi\.encrypted(?![\w.])/;
+
+function isEncryptedField(field: DMMF.Field): boolean {
+  return typeof field.documentation === "string" && ENCRYPTED_ANNOTATION.test(field.documentation);
+}
+
+/**
+ * Refused at generation time rather than at the first query: every one of
+ * these is a schema that cannot work, and the schema is where it is fixed.
+ *
+ * - **Only `String`.** The envelope is text, and the ORM hands back the string
+ *   that was written. A non-string would need a serialisation the type does
+ *   not record.
+ * - **Not a key, not unique, not a foreign key.** Each write stores a
+ *   different random ciphertext, so equality on the column means nothing: a
+ *   unique index would never collide and a join would never match.
+ * - **No `@default`.** A default is filled in after encryption runs (or by the
+ *   database), so it would be stored in plaintext and then fail to decrypt.
+ */
+function assertEncryptable(model: string, field: DMMF.Field): void {
+  const name = `${model}.${field.name}`;
+  const refuse = (why: string) => {
+    throw new UnsupportedSchemaError(`gemi ORM: ${name} is marked @gemi.encrypted, but ${why}`);
+  };
+  if (field.kind !== "scalar" || field.type !== "String") {
+    refuse(`only String columns can be encrypted (it is ${field.type}).`);
+  }
+  if (field.isList) refuse("a list column cannot be encrypted.");
+  if (field.isId) refuse("an @id cannot be encrypted: it could never be looked up.");
+  if (field.isUnique) {
+    refuse("an @unique column cannot be encrypted: each write stores a different ciphertext, so the index would never collide.");
+  }
+  if (field.hasDefaultValue) {
+    refuse("a column with @default cannot be encrypted: the default would be stored in plaintext.");
+  }
 }
 
 function relationSchema(
@@ -427,14 +477,46 @@ export function buildModelSchema(
     ? [...model.primaryKey.fields]
     : model.fields.filter((field) => field.isId).map((field) => field.name);
 
+  const keys = uniques(model);
+  assertEncryptedNotKeys(model.name, fields, primaryKey, keys, relations);
+
   return {
     name: model.name,
     table: model.dbName ?? model.name,
     fields,
     primaryKey,
-    uniques: uniques(model),
+    uniques: keys,
     relations,
   };
+}
+
+/** The model-level half of `assertEncryptable`: compound keys and foreign keys. */
+function assertEncryptedNotKeys(
+  model: string,
+  fields: Record<string, FieldSchema>,
+  primaryKey: string[],
+  keys: string[][],
+  relations: Record<string, RelationSchema>,
+): void {
+  for (const field of Object.values(fields)) {
+    if (field.encrypted !== true) continue;
+    const name = `${model}.${field.name}`;
+    if (primaryKey.includes(field.name) || keys.some((key) => key.includes(field.name))) {
+      throw new UnsupportedSchemaError(
+        `gemi ORM: ${name} is marked @gemi.encrypted, but it is part of a ` +
+          `primary or unique key: each write stores a different ciphertext, ` +
+          `so the key could never match.`,
+      );
+    }
+    for (const relation of Object.values(relations)) {
+      if (relation.from.includes(field.name)) {
+        throw new UnsupportedSchemaError(
+          `gemi ORM: ${name} is marked @gemi.encrypted, but it is the foreign ` +
+            `key of ${model}.${relation.name}: a relation cannot join on a ciphertext.`,
+        );
+      }
+    }
+  }
 }
 
 export function buildModelSchemas(
@@ -476,7 +558,7 @@ export function emitSchemaFile(schemas: ModelSchema[]): string {
     `\n// Compared against the runtime's own constant when this artifact is\n`,
     `// registered, so a stale directory fails with "re-run prisma generate"\n`,
     `// rather than with a TypeError inside the compiler.\n`,
-    `export const ARTIFACT_VERSION = ${SCHEMA_ARTIFACT_VERSION};\n`,
+    `export const ARTIFACT_VERSION = ${artifactVersionFor(schemas)};\n`,
   ];
 
   // `satisfies` rather than a `: ModelSchema` annotation, which is the whole of

@@ -26,6 +26,7 @@ import {
   Cookie,
   Redis,
   RateLimiter,
+  Crypt,
 } from "gemi/facades";
 ```
 
@@ -405,6 +406,23 @@ if (!result.allowed) {
 The result carries `allowed`, `limit`, `remaining`, `resetAt` (epoch ms) and `retryAfter` (ms) — enough to build `X-RateLimit-*` headers or a user-facing message. Counting happens in whichever driver the provider is configured with (in-memory by default, Redis when you run more than one instance), so the same call is process-local in development and shared in production.
 
 See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration.
+
+## Crypt
+
+`Crypt` encrypts and decrypts strings with the app's encryption keys (`app/config/encryption.ts`) — the same keys and envelope as [encrypted columns](./orm.md#encrypted-columns), for a secret that is not a column.
+
+- `Crypt.encrypt(plaintext)` — encrypts under the current key and returns a `v1:<keyId>:…` string.
+- `Crypt.decrypt(value)` — decrypts under whichever configured key the value names. Throws `DecryptionError` for anything it cannot authenticate; it never returns its input.
+- `Crypt.needsReencryption(value)` — whether a value is under an older key (or not encrypted at all).
+
+```typescript
+import { Crypt } from "gemi/facades";
+
+const sealed = Crypt.encrypt(webhookSecret);
+const webhookSecret = Crypt.decrypt(sealed);
+```
+
+Without a configured key, both throw `EncryptionKeyError`.
 
 ## Related
 

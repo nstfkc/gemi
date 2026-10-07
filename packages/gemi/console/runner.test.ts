@@ -681,3 +681,45 @@ describe("teardown", () => {
     expect(() => new Scheduler({ jobs: [] } as any)).not.toThrow();
   });
 });
+
+/**
+ * gemi's own commands (#844): reachable from every app, listed under the app's
+ * own, and shadowed by an app command with the same name.
+ */
+describe("framework commands", () => {
+  test("are listed under their own heading, after the app's", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Seed.ts": command("db:seed"),
+    });
+
+    const { code, stdout } = await run(root);
+
+    expect(code).toBe(0);
+    expect(stdout.indexOf("db:seed")).toBeLessThan(stdout.indexOf("Provided by gemi:"));
+    expect(stdout).toContain("encryption:rotate");
+  });
+
+  test("run by name in an app that has none of its own", async () => {
+    const root = project({ "app/kernel/Kernel.ts": kernel() });
+
+    const { code, stdout } = await run(root, "encryption:rotate");
+
+    expect(code).toBe(0);
+    expect(stdout).toContain("No model has encrypted columns.");
+  });
+
+  test("an app command of the same name wins", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Rotate.ts": command("encryption:rotate", `ctx.line("the app's own");`),
+    });
+
+    const listed = await run(root);
+    expect(listed.stdout).not.toContain("Provided by gemi:");
+
+    const { code, stdout } = await run(root, "encryption:rotate");
+    expect(code).toBe(0);
+    expect(stdout).toContain("the app's own");
+  });
+});

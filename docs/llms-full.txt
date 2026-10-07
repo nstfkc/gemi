@@ -440,6 +440,7 @@ Thirteen framework providers bind fourteen services. You rarely resolve these di
 | `Scheduler` | `scheduler` | `schedule` | — |
 | `MiddlewareRegistry` | `middleware` | `middleware` | — |
 | `KernelId` | `kernel.id` | — | — |
+| `Encrypter` | `encrypter` | `encryption` | `Crypt` |
 | `Repository` (config) | `config` | — | — |
 
 The service classes are exported from `gemi/services` (except `Translator`, from `gemi/i18n`, and `Repository`, from `gemi/support`), so you can pass them to `app()` as tokens. `AuthManager` is intentionally not exported — reach auth through the `Auth` facade.
@@ -529,6 +530,7 @@ export default defineMiddlewareConfig({
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
 | `events` | `defineEventConfig` | `gemi/services` |
 | `command` | `defineCommandConfig` | `gemi/services` |
+| `encryption` | `defineEncryptionConfig` | `gemi/services` |
 | `route` | `defineRouteConfig` | `gemi/services` |
 | `translation` | `defineTranslationConfig` | `gemi/i18n` (also re-exported from `gemi/services`) |
 | `middleware` | `defineMiddlewareConfig` | `gemi/http` |
@@ -9506,6 +9508,8 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `ParameterLimitError` | A statement exceeding the dialect's parameter ceiling. |
 | `MissingRequiredValueError` | A write leaving a required column with no value and no default. |
 | `DecodeError` | A column the driver returned that cannot be read as its declared type. |
+| `DecryptionError` | An [encrypted column](#encrypted-columns) holds a value that does not decrypt: not an envelope, a key no longer configured, or tampered. Never answered with the ciphertext. |
+| `EncryptionKeyError` | No usable encryption key: none configured while a model has an encrypted column (at boot), or a key that is empty or not 32 bytes. See [Encrypted columns](#encrypted-columns). |
 | `UnsupportedByDesignError` | A subclass of `UnsupportedQueryError` for the arguments under [Not in scope](#not-in-scope) — it says *decision*, where the parent says *not yet*. Catch this one to tell them apart. |
 | `InvalidArgumentError` | The other subclass: the argument exists and the *value* cannot mean anything — `take: "-2"`. Says what a good value looks like, rather than that the argument is unsupported. |
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
@@ -9803,6 +9807,162 @@ const post = tables.find((t) => t.name === "Post")
 - **It works on MySQL and MariaDB**, where `DB.query` does not yet.
 - **The code loads on first call.** An app that never calls it never loads it.
 - **It joins the ambient transaction.** A table created earlier in the same transaction is included.
+
+## Encrypted columns
+
+Mark a `String` field `/// @gemi.encrypted` and the ORM stores it encrypted and hands it back as plaintext. Use it for
+secrets you have to be able to read again — a provider's OAuth tokens, an API key a user gave you, a webhook signing
+secret. (Passwords are not that: hash them.)
+
+```prisma
+model FigmaConnection {
+  id     Int  @id @default(autoincrement())
+  userId Int
+
+  /// @gemi.encrypted
+  accessToken  String
+  /// @gemi.encrypted
+  refreshToken String?
+}
+```
+
+The annotation is a triple-slash comment because a Prisma schema has no custom attributes; it can sit on its own line or
+at the end of a longer doc comment. Re-run `prisma generate` after adding it. The column stays a plain `TEXT` in the
+migration and a `string` in the types.
+
+It needs a key. Add `app/config/encryption.ts` and list it in your Kernel's `config` as `encryption`:
+
+```ts
+// app/config/encryption.ts
+import { defineEncryptionConfig } from "gemi/services";
+
+export default defineEncryptionConfig({
+  keys: { k1: process.env.APP_ENCRYPTION_KEY },
+  current: "k1",
+});
+```
+
+A key is 32 random bytes, base64 encoded: `openssl rand -base64 32`. Keep it out of the repository, and keep it
+separate from `SECRET`: rotating one must not be the same event as rotating the other. An app whose models have an
+encrypted column and no key **fails to boot** with `EncryptionKeyError`, as does a key that is empty (an unset
+environment variable) or not 32 bytes.
+
+### What it does
+
+Every write encrypts and every read decrypts, through every path the ORM has:
+
+- `create`, `update` (including `{ set }`), `upsert`, `createMany`, `updateMany`, `save` on a tracked row, and a nested
+  `create` / `connectOrCreate` / `update` reaching the model through a relation of another one.
+- `findMany`, `findFirst`, `findUnique` and their `OrThrow` forms, with or without `select`, the rows a write returns,
+  and the model's rows inside an `include` — under both relation strategies.
+- `null` is stored as `NULL`, not as an encrypted empty value.
+
+What is stored is an envelope, `v1:<keyId>:<iv>:<ciphertext>`: AES-256-GCM with a random IV, so the same value written
+twice is two different strings, and an envelope that was altered or copied under the wrong key id fails to decrypt
+instead of decrypting to something else. It is about 4/3 the length of the plaintext plus 50 characters, so a column
+with a length limit (a Postgres `VARCHAR(n)`) needs room for that.
+
+A value that cannot be decrypted raises `DecryptionError`, never a ciphertext dressed as the value. Its `reason` is
+`"malformed"` (not an envelope — usually a row written before the column was encrypted), `"unknown_key"` (its key was
+removed from `encryption.keys`) or `"invalid"` (it failed authentication), and `column` names the model and field.
+
+### What it cannot do
+
+The database only ever sees the ciphertext, and the ciphertext is different on every write, so it cannot compare, sort
+or group by the column. These are refused with `UnsupportedByDesignError`, wherever they appear — a `where`, a relation
+filter from another model, an `include`'s `where` or `orderBy`, `orderBy`, `groupBy`'s `by` and `having`, `_min` and
+`_max`:
+
+```ts
+await FigmaConnection.findFirst({ where: { accessToken: token } })
+// UnsupportedByDesignError: FigmaConnection.accessToken is an encrypted column ...
+```
+
+Null checks are the exception, because `NULL` is stored as `NULL`:
+
+```ts
+await FigmaConnection.findMany({ where: { refreshToken: { not: null } } })
+```
+
+To find a row by a secret — an API key presented on a request, say — store a keyed hash of it beside the encrypted
+value, mark that column `@unique`, and look the row up by the hash:
+
+```ts
+const lookup = createHmac("sha256", process.env.API_KEY_PEPPER!).update(key).digest("hex")
+await ApiKey.findUnique({ where: { lookup } })
+```
+
+The generator refuses an encrypted column that could not work: anything but a non-list `String`, an `@id`, an `@unique`
+or a column in an `@@id` / `@@unique`, a relation's foreign key (a join would never match), and a column with a
+`@default` (the default would be stored in plaintext).
+
+Two more consequences:
+
+- **Raw SQL sees the envelope.** `DB.query` does not know which columns are encrypted. Decrypt a value you read that way
+  with `Crypt.decrypt` from `gemi/facades`.
+- **`skipIfUnchanged` always writes an encrypted column you pass**, because the new ciphertext is never equal to the
+  stored one. Leave the column out of `data` when it did not change, or use `track` + `save`, which compares the
+  plaintext.
+
+### Rotating the key
+
+Every envelope names the key that wrote it, so rotation is three steps and no downtime:
+
+1. Add the new key and make it current. Old rows keep decrypting with the old one:
+
+   ```ts
+   keys: { k1: process.env.APP_ENCRYPTION_KEY_OLD, k2: process.env.APP_ENCRYPTION_KEY },
+   current: "k2",
+   ```
+
+2. Deploy, then re-encrypt what the old key wrote:
+
+   ```bash
+   gemi run encryption:rotate                  # every model with an encrypted column
+   gemi run encryption:rotate FigmaConnection  # one model
+   gemi run encryption:rotate --dry-run        # count, write nothing
+   ```
+
+   It walks the table in primary-key order in batches (`--batch-size`, default 500) and rewrites each row with a
+   compare-and-swap on the value it read, so it is safe against live traffic and safe to re-run. It runs as the system
+   (no policies) and includes soft-deleted rows. `rotateEncryptedColumns(model, options)` from `gemi/orm` is the same
+   thing as a function.
+
+3. When it reports nothing left to re-encrypt, remove the old key.
+
+`encryption:rotate` is built into `gemi run`; an app command with the same name takes its place.
+
+### Encrypting a column that already has data
+
+Marking an existing column `@gemi.encrypted` leaves its rows in plaintext, and reading one raises `DecryptionError`
+(`"malformed"`) until it is encrypted. Run the rotation with `--encrypt-plaintext` straight after the deploy — as a
+release step before traffic moves, if you can:
+
+```bash
+gemi run encryption:rotate FigmaConnection --encrypt-plaintext
+```
+
+Without the flag, values that are not envelopes are counted and left alone, and the command exits non-zero, so a
+corrupted value is never quietly re-encrypted as if it were plaintext.
+
+### Values that are not columns
+
+`Crypt` from `gemi/facades` uses the same keys and envelope for anything else — a secret inside a `Json` column, a
+token in a queued job's payload:
+
+```ts
+import { Crypt } from "gemi/facades"
+
+const sealed = Crypt.encrypt(apiKey)  // "v1:k2:…"
+const apiKey = Crypt.decrypt(sealed)  // under any configured key
+```
+
+`Crypt.needsReencryption(value)` says whether a value is under an older key, for rotating values you store yourself.
+The class behind it is `Encrypter` from `gemi/services`; a test that builds its own `Application` can bind one with
+`application.instance(Encrypter, new Encrypter({ keys: { k1: key } }))`.
+
+An artifact with an encrypted column is stamped version 3, which a gemi older than this feature refuses to load rather
+than writing the column in plaintext. An artifact without one is unchanged.
 
 ## Enums
 
@@ -12531,6 +12691,7 @@ import {
   Cookie,
   Redis,
   RateLimiter,
+  Crypt,
 } from "gemi/facades";
 ```
 
@@ -12910,6 +13071,23 @@ if (!result.allowed) {
 The result carries `allowed`, `limit`, `remaining`, `resetAt` (epoch ms) and `retryAfter` (ms) — enough to build `X-RateLimit-*` headers or a user-facing message. Counting happens in whichever driver the provider is configured with (in-memory by default, Redis when you run more than one instance), so the same call is process-local in development and shared in production.
 
 See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration.
+
+## Crypt
+
+`Crypt` encrypts and decrypts strings with the app's encryption keys (`app/config/encryption.ts`) — the same keys and envelope as [encrypted columns](./orm.md#encrypted-columns), for a secret that is not a column.
+
+- `Crypt.encrypt(plaintext)` — encrypts under the current key and returns a `v1:<keyId>:…` string.
+- `Crypt.decrypt(value)` — decrypts under whichever configured key the value names. Throws `DecryptionError` for anything it cannot authenticate; it never returns its input.
+- `Crypt.needsReencryption(value)` — whether a value is under an older key (or not encrypted at all).
+
+```typescript
+import { Crypt } from "gemi/facades";
+
+const sealed = Crypt.encrypt(webhookSecret);
+const webhookSecret = Crypt.decrypt(sealed);
+```
+
+Without a configured key, both throw `EncryptionKeyError`.
 
 ## Related
 
@@ -14975,6 +15153,16 @@ export default class extends Kernel {
 | `command`  | `commandsDir` | `string`         | `"app/commands"` | Where to discover them. Relative to the project root, or absolute. |
 
 > The slice is called `command`, not `console`, for a small and annoying reason: a file named `app/config/console.ts` arrives in your kernel as `import console from "../config/console"`, which shadows the global `console` for the rest of that module.
+
+### Commands gemi provides
+
+`gemi run` also reaches a few commands that ship with gemi, listed under **Provided by gemi** after your own:
+
+| Command | What it does |
+| --- | --- |
+| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
+
+A command of your own with the same name takes its place, and the built-in one is no longer listed.
 
 ### Asking what an application has
 

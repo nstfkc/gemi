@@ -38,6 +38,19 @@ What to do: nothing. To replace a hand-written sitemap or robots.txt, return the
 
 What to do: nothing. Where an app combines `safeFetch` (or `fetch`) with `Storage.put` by hand, switch to `Storage.putFromUrl` and pass `contentTypes` for URLs that come from users.
 
+## ORM: encrypted columns, key rotation and the `Crypt` facade (#844)
+
+**New.** A `String` field marked `/// @gemi.encrypted` in the Prisma schema is stored encrypted (AES-256-GCM, a versioned `v1:<keyId>:…` envelope) and read back as plaintext through every ORM read and write path, including includes and nested writes. See [Encrypted columns](docs/orm.md#encrypted-columns).
+
+- Keys live in a new `encryption` config slice: `defineEncryptionConfig({ keys: { k1: process.env.APP_ENCRYPTION_KEY }, current: "k1" })` from `gemi/services`. A key is 32 random bytes, base64 (`openssl rand -base64 32`).
+- An app whose models have an encrypted column fails to boot without a usable key (`EncryptionKeyError`). A value that does not decrypt raises `DecryptionError`; neither ever returns a ciphertext as data.
+- A `where`, `orderBy`, `groupBy`/`having`, `distinct` or `_min`/`_max` on an encrypted column is refused with `UnsupportedByDesignError`; null checks still work.
+- `gemi run encryption:rotate [Model]` (`--dry-run`, `--batch-size`, `--encrypt-plaintext`) re-encrypts values under an older key; `rotateEncryptedColumns()` from `gemi/orm` is the same as a function. It is gemi's first built-in `gemi run` command, listed under "Provided by gemi"; an app command with the same name wins.
+- `Crypt.encrypt` / `Crypt.decrypt` / `Crypt.needsReencryption` from `gemi/facades` for values that are not columns. New from `gemi/services`: `Encrypter`, `EncryptionServiceProvider`, `defineEncryptionConfig`, `DecryptionError`, `EncryptionKeyError`, type `EncryptionConfig`. New from `gemi/orm`: `DecryptionError`, `EncryptionKeyError`, `rotateEncryptedColumns`, types `RotateEncryptionOptions`, `RotateEncryptionReport`.
+- The generated artifact is version 3 when the schema has an encrypted column (an older gemi refuses it rather than writing plaintext) and stays version 2 otherwise. This runtime reads both, so upgrading does not require `prisma generate`.
+
+What to do: nothing, unless you want encrypted columns. To encrypt a column that already holds data, mark it, deploy, and run `gemi run encryption:rotate <Model> --encrypt-plaintext` straight away: its rows raise `DecryptionError` until then.
+
 # Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)

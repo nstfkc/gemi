@@ -120,6 +120,19 @@ export function renderUsage(command: CommandClass): string {
   return lines.join("\n");
 }
 
+/** The framework's own commands, listed under the app's. */
+export function renderBuiltins(commands: CommandClass[]): string {
+  return [
+    "Provided by gemi:",
+    "",
+    ...pad(
+      commands.map(
+        (command) => [command.commandName, command.description] as [string, string],
+      ),
+    ),
+  ].join("\n");
+}
+
 export function renderList(
   commands: CommandClass[],
   source: { declared: boolean; dir: string },
