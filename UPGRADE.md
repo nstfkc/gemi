@@ -16,6 +16,18 @@ What to do: nothing. An app that matches `Accept-Language` itself (for runtime, 
 
 What to do: nothing. To replace hand-written `@font-face` rules and preloads in a layout, declare the fonts with `Meta.fonts` from the handlers instead.
 
+## http: sitemap.xml and robots.txt helpers (#847)
+
+**New.** `Sitemap` and `Robots` from `gemi/http` write `/sitemap.xml` and `/robots.txt`, and read another site's. See [Sitemaps & robots.txt](docs/sitemaps-and-robots.md).
+
+- `Sitemap.response(entries, { page, pageUrl, maxUrls?, maxBytes?, headers? })` answers a `<urlset>` with escaped, percent-encoded URLs and `xhtml:link` hreflang alternates (`AlternateLink`, as `Meta.alternates` takes). Past 50 000 URLs or 50 MB it answers a `<sitemapindex>` of `pageUrl(n)`, and `page` picks the file. `Sitemap.chunk` and `Sitemap.index` return the documents as strings.
+- `Robots.response({ rules, sitemaps })` / `Robots.text(...)` write robots.txt; a value with a line break throws.
+- `Robots.fetch(site, options?)` reads `/robots.txt` through `safeFetch` (500 KiB cap), with RFC 9309 status handling (4xx allows all, 5xx/429 disallows all) and matching: `isAllowed(path, userAgent)`, `crawlDelay(userAgent)`, `sitemaps`. `Robots.parse(text)` for text you have.
+- `Sitemap.read(url, options?)` is an async iterator over a sitemap's pages through `safeFetch`, following indexes and gzip, capped by `maxUrls` (50 000), `maxSitemaps` (50), `maxDepth` (3) and `maxSize` (50 MB, after decompression). `Sitemap.parse(text)` for text you have.
+- Also new from `gemi/http`: `SitemapError`, `RobotsTxt`, and the types `SitemapEntry`, `SitemapIndexEntry`, `SitemapUrl`, `SitemapChangeFreq`, `SitemapLimits`, `SitemapResponseOptions`, `SitemapReadOptions`, `ParsedSitemap`, `RobotsConfig`, `RobotsRule`, `RobotsGroup`, `RobotsStatus`, `RobotsFetchOptions` and `AlternateLink`.
+
+What to do: nothing. To replace a hand-written sitemap or robots.txt, return these from a `this.file(...)` view route marked `no-locale`, and delete any `public/sitemap.xml` or `public/robots.txt`, which would be served first.
+
 # Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)
