@@ -85,7 +85,8 @@ What it guarantees:
 
 - **It goes through [`safeFetch`](./outbound-http.md).** Loopback, private, link-local and cloud-metadata addresses are refused (the address is checked after DNS resolution and again on every redirect), only ports 80 and 443 are allowed, and at most 5 redirects are followed. Other `safeFetch` options go under `fetch`: `{ headers, allow, deny, ports, maxRedirects, connectTimeout }`. Never build `fetch.allowPrivate` from user input.
 - **The type comes from the bytes.** The stored content type is sniffed from the first 4 KiB (PNG, JPEG, GIF, WebP, AVIF, HEIC, SVG, PDF, MP4, WebM, MP3, fonts, archives, HTML, …), never taken from the server's `Content-Type` header. Bytes that are UTF-8 text come out as `text/plain` (that includes JSON and CSV), and anything unrecognized as `application/octet-stream`. The sniffer is exported as `sniffContentType(bytes)` from `gemi/services`.
-- **`contentTypes` is checked before anything is stored.** Entries are exact types or wildcards (`"image/*"`). A wildcard never covers `image/svg+xml`, `text/html` or XML, which can carry script; list them by name to accept them. Without `contentTypes` any type is stored, so pass it whenever the URL comes from a user.
+- **`contentTypes` is checked before anything is stored.** Entries are exact types or wildcards (`"image/*"`). Pass it whenever you know what you expect, for example `["image/*"]` for a pasted image link.
+- **Active content is refused unless named.** HTML, XHTML, SVG and XML (`text/html`, `application/xhtml+xml`, `image/svg+xml`, `text/xml`, `application/xml` and any other `+xml` type) can carry script that runs when the file is served back from your origin. Without `contentTypes` every other type is stored and these are refused with `ContentTypeError`; a wildcard (`"image/*"`, `"*/*"`) never covers them either. To accept one, list it by name: `contentTypes: ["image/*", "image/svg+xml"]`. `isActiveContentType(type)` from `gemi/services` tells you whether a type is one of them.
 - **No partial objects.** A download that fails, is aborted or grows past `maxSize` halfway rejects and stores nothing. A `Content-Length` over `maxSize` is refused before the body is read.
 - **Memory.** `FileSystemDriver` streams to a temporary file next to the target and renames it into place, so memory stays at one chunk. The S3 and Azure drivers read the file into memory (bounded by `maxSize`) and upload it with `put()` once it is complete.
 
@@ -96,7 +97,7 @@ It rejects with `safeFetch`'s errors, all `SafeFetchError` subclasses with a `co
 | Error | `code` | When |
 | --- | --- | --- |
 | `HttpStatusError` | `http-status` | The server answered with a non-2xx status (`error.status`). |
-| `ContentTypeError` | `content-type` | The sniffed type (`error.contentType`) is not in `contentTypes`. |
+| `ContentTypeError` | `content-type` | The sniffed type (`error.contentType`) is not in `contentTypes`, or is active content (HTML, SVG, XML) that isn't listed by name. |
 | `TooLargeError` | `too-large` | The file is larger than `maxSize`. |
 | `TimeoutError` | `timeout` | `timeout` or `fetch.connectTimeout` ran out. |
 | `BlockedAddressError`, `BlockedHostError`, `InvalidUrlError` | `blocked-address`, … | The URL was refused before connecting. |

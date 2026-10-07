@@ -30,10 +30,10 @@ What to do: nothing. To replace a hand-written sitemap or robots.txt, return the
 
 ## Storage: `putFromUrl(url, options)` copies a remote file into storage (#848)
 
-**New.** `Storage.putFromUrl(url, { name | directory, bucket, maxSize, timeout, contentTypes, signal, fetch })` downloads through `safeFetch` (SSRF guard, redirects, size cap, timeout), sniffs the content type from the file's first bytes instead of trusting `Content-Type`, refuses a type outside `contentTypes` before anything is stored, and resolves with `{ name, contentType, size, url }`. A download that fails or grows past `maxSize` halfway stores nothing. A wildcard in `contentTypes` (`"image/*"`) never covers SVG, HTML or XML; list them by name. See [File Storage](docs/file-storage.md#putfromurlurl-options).
+**New.** `Storage.putFromUrl(url, { name | directory, bucket, maxSize, timeout, contentTypes, signal, fetch })` downloads through `safeFetch` (SSRF guard, redirects, size cap, timeout), sniffs the content type from the file's first bytes instead of trusting `Content-Type`, refuses a type outside `contentTypes` before anything is stored, and resolves with `{ name, contentType, size, url }`. A download that fails or grows past `maxSize` halfway stores nothing. Active content (HTML, XHTML, SVG and XML, any `+xml` type) is refused with `ContentTypeError` unless `contentTypes` lists it by name: without `contentTypes` every other type is stored, and a wildcard (`"image/*"`, `"*/*"`) never covers it. (This default changed after #855 was merged, before any release: #855 stored any type when `contentTypes` was left out.) See [File Storage](docs/file-storage.md#putfromurlurl-options).
 
 - New from `gemi/http`: `HttpStatusError` (`code: "http-status"`, `status`), a `SafeFetchError` thrown for a non-2xx answer.
-- New from `gemi/services`: `sniffContentType(bytes)`, and the types `PutFromUrlOptions`, `PutFromUrlResult`, `PutStreamParams`.
+- New from `gemi/services`: `sniffContentType(bytes)`, `isActiveContentType(type)`, and the types `PutFromUrlOptions`, `PutFromUrlResult`, `PutStreamParams`.
 - `FileStorageDriver` gains `putStream({ name, bucket, body, contentType }, { signal })`. The default reads the stream into memory and calls `put()`; `FileSystemDriver` overrides it to stream into a temporary file and rename it into place. Custom drivers keep compiling and working.
 
 What to do: nothing. Where an app combines `safeFetch` (or `fetch`) with `Storage.put` by hand, switch to `Storage.putFromUrl` and pass `contentTypes` for URLs that come from users.
