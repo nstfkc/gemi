@@ -19,6 +19,8 @@ import type {
   JobRelease,
   QueueDriver,
 } from "./QueueDriver";
+import { MemoryWorkflowStore } from "./workflow/MemoryWorkflowStore";
+import type { WorkflowStore } from "./workflow/WorkflowStore";
 
 type Entry = {
   job: ClaimedJob;
@@ -72,6 +74,7 @@ const FINISHED_BATCH_TTL = 24 * 60 * 60_000;
 export class MemoryQueueDriver implements QueueDriver {
   private entries = new Map<string, Entry>();
   private batches = new Map<string, BatchRecord>();
+  private workflows: MemoryWorkflowStore | undefined;
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerAt = Infinity;
@@ -118,6 +121,11 @@ export class MemoryQueueDriver implements QueueDriver {
   }
 
   async enqueueBatch(batch: EnqueueBatch): Promise<void> {
+    this.recordBatch(batch);
+  }
+
+  /** `enqueueBatch`, synchronously, for the workflow store too. */
+  private recordBatch(batch: EnqueueBatch) {
     const now = Date.now();
     this.forgetFinishedBatches(now);
     const record = newBatchRecord({ ...batch, total: batch.args.length, now });
@@ -141,6 +149,10 @@ export class MemoryQueueDriver implements QueueDriver {
   }
 
   async cancelBatch(id: string): Promise<boolean> {
+    return this.cancelBatchNow(id);
+  }
+
+  private cancelBatchNow(id: string): boolean {
     const prev = this.batches.get(id);
     if (!prev || prev.finishedAt !== null || prev.cancelledAt !== null) return false;
     const now = Date.now();
@@ -148,6 +160,22 @@ export class MemoryQueueDriver implements QueueDriver {
     this.save(prev, next, now);
     this.changed();
     return true;
+  }
+
+  /**
+   * Workflows (#846), kept in memory beside the jobs and lost with them. The
+   * store's writes, ticks and batches included, happen synchronously here.
+   */
+  workflowStore(): WorkflowStore {
+    this.workflows ??= new MemoryWorkflowStore({
+      enqueue: (job) => {
+        this.add(job);
+        this.changed();
+      },
+      enqueueBatch: (batch) => this.recordBatch(batch),
+      cancelBatch: (id) => void this.cancelBatchNow(id),
+    });
+    return this.workflows;
   }
 
   async reportProgress(job: ClaimedJob, progress: number): Promise<void> {

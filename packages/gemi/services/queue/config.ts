@@ -2,6 +2,7 @@ import type { Application } from "../../foundation/Application";
 import type { Job } from "./Job";
 import type { LockStore } from "../lock/LockStore";
 import type { QueueDriver } from "./QueueDriver";
+import type { WorkflowClass } from "./workflow/Workflow";
 
 // Config key: `queue`. Derived from `QueueServiceProvider`.
 export interface QueueConfig {
@@ -48,6 +49,16 @@ export interface QueueConfig {
    * jobs is what this field is for; pointing it at `app/` is not.
    */
   jobsDir?: string;
+
+  /**
+   * The `Workflow` subclasses this application runs, or nothing, by the same
+   * rule as `jobs`: declared (including `[]`) is used as given, and absent
+   * discovers the classes under `workflowsDir`.
+   */
+  workflows?: WorkflowClass[];
+
+  /** Where to look when `workflows` was not declared. Default `app/workflows`. */
+  workflowsDir?: string;
 
   concurrency?: number;
 
@@ -146,6 +157,8 @@ export function queueConfigDefaults(): Required<QueueConfig> {
   return {
     jobs: [],
     jobsDir: "app/jobs",
+    workflows: [],
+    workflowsDir: "app/workflows",
     concurrency: 1,
     driver: "memory",
     visibilityTimeout: 5 * 60_000,

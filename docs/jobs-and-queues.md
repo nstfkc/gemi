@@ -602,6 +602,8 @@ Reach for a job when work is:
 - **Non-blocking** — the user doesn't need the result in the HTTP response.
 - **Batchable or retryable** — sending many emails, syncing records, where automatic retries help. For a fan-out whose end matters, see [Batches](#batches).
 
+For work in several stages that must survive deploys, sleep or wait for a person (crawl, wait for a choice, charge once, build, report), use a [Workflow](./workflows.md).
+
 For work that must happen on a **schedule** (nightly reports, hourly cleanups) rather than in response to a request, use a cron job instead — see [Cron](./cron.md).
 
 ## Related

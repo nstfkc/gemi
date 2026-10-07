@@ -1,5 +1,6 @@
 import { app } from "../../foundation/app";
 import { type BatchStatus, type JobCall, clampProgress } from "./batch";
+import type { ClaimedJob } from "./QueueDriver";
 import { type DispatchedBatch, type JobBatchOptions, QueueManager } from "./QueueManager";
 
 /** `this.batch` inside a job dispatched with `dispatchBatch`. */
@@ -122,6 +123,9 @@ export class Job {
 
   /** @internal Where `progress` writes; set by the queue for a job of a batch. */
   $progress: ((value: number) => Promise<void>) | undefined;
+
+  /** @internal The claim this run is, set by the queue before `run`. */
+  $claimed: ClaimedJob | undefined;
 
   /** @internal What `release` or `fail` asked for during this run. */
   $outcome:

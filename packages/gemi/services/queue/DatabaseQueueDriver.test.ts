@@ -12,11 +12,15 @@ import {
   createBatchTableStatements,
   createTableStatements,
 } from "./DatabaseQueueDriver";
+import { createWorkflowTableStatements } from "./workflow/DatabaseWorkflowStore";
+import type { Step } from "./workflow/Step";
+import { Workflow } from "./workflow/Workflow";
 import type { BatchStatus } from "./batch";
 import { Job } from "./Job";
 import type { QueueDriver } from "./QueueDriver";
 import { QueueManager } from "./QueueManager";
 import { queueDriverContract } from "./queueDriverContract";
+import { workflowContract } from "./workflow/workflowContract";
 
 /**
  * The database driver, against SQLite always and against Postgres and MySQL
@@ -107,6 +111,9 @@ function server(name: string, dialect: Dialect, url: string): Backend {
         async dispose() {
           await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
           await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}_batches`)}`);
+          for (const suffix of ["_workflows", "_workflow_steps"]) {
+            await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}${suffix}`)}`);
+          }
           await Promise.all(clients.map((client) => client.close()));
         },
       };
@@ -151,6 +158,22 @@ for (const backend of backends) {
       },
     },
   );
+}
+
+// Workflows (#846), end to end on each database: two drivers on one
+// database are two processes.
+for (const backend of backends) {
+  workflowContract(`DatabaseQueueDriver on ${backend.name}`, async () => {
+    const db = await backend.prepare();
+    return {
+      driver: () =>
+        new DatabaseQueueDriver(
+          { name: DEFAULT_CONNECTION, sql: db.connect(), dialect: backend.dialect },
+          { table: db.table },
+        ),
+      dispose: db.dispose,
+    };
+  }, { concurrentWorkers: backend.dialect !== "sqlite" });
 }
 
 if (!POSTGRES_URL || !MYSQL_URL) {
@@ -778,6 +801,57 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     }
   });
 
+  test("a workflow started inside a transaction commits with it, or not at all", async () => {
+    const { application } = await database();
+    const { sql, driver } = application();
+    const ran: number[] = [];
+    class InTx extends Workflow {
+      static name = "InTx";
+      async run(step: Step, n: number) {
+        await step.run("go", () => ran.push(n));
+      }
+    }
+    const queue = worker(driver, [], { workflows: [InTx] });
+    queue.start();
+
+    let committed = "";
+    await withTransaction(sql, async () => {
+      committed = await queue.workflows.start(InTx, [1]);
+    });
+    await until(async () => (await queue.workflows.find(committed))?.status === "completed");
+
+    let rolledBack = "";
+    await expect(
+      withTransaction(sql, async () => {
+        rolledBack = await queue.workflows.start(InTx, [2]);
+        throw new Error("rollback");
+      }),
+    ).rejects.toThrow("rollback");
+    await sleep(100);
+    expect(await queue.workflows.find(rolledBack)).toBeNull();
+    expect(ran).toEqual([1]);
+  });
+
+  test("ended workflows are pruned with their steps", async () => {
+    const { driver } = await database();
+    class Quick extends Workflow {
+      static name = "Quick";
+      async run(step: Step) {
+        await step.run("one", () => 1);
+      }
+    }
+    const queue = worker(driver(), [], { workflows: [Quick] });
+    queue.start();
+    const id = await queue.workflows.start(Quick, []);
+    await until(async () => (await queue.workflows.find(id))?.status === "completed");
+
+    const store = queue.workflows.store;
+    expect(await store.prune!(60_000)).toBe(0);
+    await sleep(20);
+    expect(await store.prune!(0)).toBe(1);
+    expect(await queue.workflows.find(id)).toBeNull();
+  });
+
   test("a dead job of a batch is not retried, and finished batches are pruned", async () => {
     const { driver } = await database();
     const d = driver();
@@ -833,6 +907,52 @@ describe("DatabaseQueueDriver", () => {
     expect(batches).toContain("CREATE TABLE IF NOT EXISTS `gemi_job_batches`");
     // Prisma's default VARCHAR(191) is too short for the list of failed ids.
     expect(batches).toContain("`failed_job_ids` LONGTEXT NOT NULL");
+  });
+
+  test("the workflow tables match Prisma's DDL for the documented models", () => {
+    const [workflows, steps, index] = createWorkflowTableStatements(
+      "postgres",
+      "gemi_workflows",
+      "gemi_workflow_steps",
+    );
+    expect(workflows).toContain(`"progress" DOUBLE PRECISION NOT NULL DEFAULT 0`);
+    expect(workflows).toContain(`CONSTRAINT "gemi_workflows_pkey" PRIMARY KEY ("id")`);
+    expect(steps).toContain(`CONSTRAINT "gemi_workflow_steps_pkey" PRIMARY KEY ("workflow_id","key")`);
+    expect(index).toBe(
+      `CREATE INDEX IF NOT EXISTS "gemi_workflows_status_idx" ON "gemi_workflows"("status")`,
+    );
+    const [sqliteSteps] = createWorkflowTableStatements("sqlite", "w", "s").slice(1);
+    expect(sqliteSteps).toContain(`PRIMARY KEY ("workflow_id", "key")`);
+    const mysql = createWorkflowTableStatements("mysql", "gemi_workflows", "gemi_workflow_steps");
+    expect(mysql).toHaveLength(2);
+    expect(mysql[0]).toContain("INDEX `gemi_workflows_status_idx`(`status`)");
+    expect(mysql[0]).toContain("`result` LONGTEXT NULL");
+    expect(mysql[1]).toContain("PRIMARY KEY (`workflow_id`, `key`)");
+  });
+
+  test("the workflow tables sit beside the jobs table", () => {
+    const sql = new SQL("sqlite://:memory:");
+    const plain = new DatabaseQueueDriver({ sql, dialect: "sqlite" });
+    expect([plain.workflowTable, plain.workflowStepTable]).toEqual([
+      "gemi_workflows",
+      "gemi_workflow_steps",
+    ]);
+    const other = new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { table: "jobs" });
+    expect([other.workflowTable, other.workflowStepTable]).toEqual([
+      "jobs_workflows",
+      "jobs_workflow_steps",
+    ]);
+    expect(
+      () => new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { workflowTable: "x; drop" }),
+    ).toThrow("not a plain identifier");
+  });
+
+  test("workflows on a database without their tables fail with what to do", async () => {
+    const sql = new SQL("sqlite://:memory:");
+    const driver = new DatabaseQueueDriver({ sql, dialect: "sqlite" });
+    await expect(
+      driver.workflowStore().create({ id: "w", name: "W", args: "[]" }),
+    ).rejects.toThrow("Workflows need the");
   });
 
   test("the batches table is gemi_job_batches beside gemi_jobs, and <table>_batches otherwise", () => {

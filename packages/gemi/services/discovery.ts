@@ -16,6 +16,7 @@ import type { EventClass } from "./events/Event";
 import { Listener, type ListenerClass } from "./events/Listener";
 import { Job } from "./queue/Job";
 import { queueConfigDefaults } from "./queue/config";
+import { Workflow, type WorkflowClass } from "./queue/workflow/Workflow";
 
 /**
  * Reading an application's jobs off the filesystem, for the two subsystems that
@@ -95,6 +96,29 @@ export async function discoverJobs(
   const jobs = await discoverClasses(resolved, Job);
   warnIfNameWillNotSurviveTheBuild(jobs);
   return jobs;
+}
+
+/**
+ * The `Workflow` subclasses under `dir`, defaulting to the queue slice's
+ * `app/workflows`: what a `queue` slice with no `workflows` key resolves to.
+ * A missing directory is no workflows, said nothing about unless the tree
+ * above it is missing too.
+ */
+export async function discoverWorkflows(
+  dir: string = queueConfigDefaults().workflowsDir,
+): Promise<WorkflowClass[]> {
+  const resolved = resolveDir(dir);
+  warnIfSourceIsMissing(resolved, "workflows", "queue");
+  const workflows = (await discoverClasses(resolved, Workflow)) as WorkflowClass[];
+  for (const workflow of workflows) {
+    if (Object.getOwnPropertyDescriptor(workflow, "name")?.writable) continue;
+    console.warn(
+      `Workflow ${workflow.name} does not declare \`static name\`. A workflow ` +
+        `is stored under its name, and a production build renames the class. ` +
+        `Add: static name = "${workflow.name}";`,
+    );
+  }
+  return workflows;
 }
 
 /**

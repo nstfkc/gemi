@@ -26,6 +26,10 @@ import type {
   JobRelease,
   QueueDriver,
 } from "./QueueDriver";
+import {
+  DatabaseWorkflowStore,
+  createWorkflowTableStatements,
+} from "./workflow/DatabaseWorkflowStore";
 
 export type DatabaseQueueDriverOptions = {
   /**
@@ -40,6 +44,14 @@ export type DatabaseQueueDriverOptions = {
    * the batch methods.
    */
   batchTable?: string;
+  /**
+   * The tables workflows are kept in. Default `gemi_workflows` and
+   * `gemi_workflow_steps` beside `gemi_jobs`, and `<table>_workflows` and
+   * `<table>_workflow_steps` beside a jobs table of another name. Plain
+   * identifiers, like `table`. Only touched by `Workflow`.
+   */
+  workflowTable?: string;
+  workflowStepTable?: string;
   /**
    * SQLite only: how long, in milliseconds, a statement waits for another
    * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
@@ -156,6 +168,9 @@ const CANCELLED_ERROR = "Its batch was cancelled before it ran.";
 export class DatabaseQueueDriver implements QueueDriver {
   readonly table: string;
   readonly batchTable: string;
+  readonly workflowTable: string;
+  readonly workflowStepTable: string;
+  private workflows: DatabaseWorkflowStore | undefined;
   private readonly sql: SQL;
   private readonly dialect: Dialect;
   /** The connection's name, when it came with one; see `transaction`. */
@@ -173,7 +188,13 @@ export class DatabaseQueueDriver implements QueueDriver {
     const table = options.table ?? "gemi_jobs";
     const batchTable =
       options.batchTable ?? (table === "gemi_jobs" ? "gemi_job_batches" : `${table}_batches`);
-    for (const name of [table, batchTable]) {
+    const defaults = table === "gemi_jobs";
+    const workflowTable =
+      options.workflowTable ?? (defaults ? "gemi_workflows" : `${table}_workflows`);
+    const workflowStepTable =
+      options.workflowStepTable ??
+      (defaults ? "gemi_workflow_steps" : `${table}_workflow_steps`);
+    for (const name of [table, batchTable, workflowTable, workflowStepTable]) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
         throw new Error(
           `The queue table name "${name}" is not a plain identifier. Use ` +
@@ -189,6 +210,8 @@ export class DatabaseQueueDriver implements QueueDriver {
     }
     this.table = table;
     this.batchTable = batchTable;
+    this.workflowTable = workflowTable;
+    this.workflowStepTable = workflowStepTable;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
     this.connection = connection.name;
@@ -240,8 +263,9 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   /**
-   * Creates the jobs table, the batches table and their indexes if they do
-   * not exist — the same DDL Prisma generates for the models in the docs, so
+   * Creates the jobs table, the batches table, the two workflow tables and
+   * their indexes if they do not exist — the same DDL Prisma generates for
+   * the models in the docs, so
    * a table made either way is the table the other expects — and adds the
    * batch columns to a jobs table from before batches. For tests and for an
    * app that does not manage its schema with Prisma; one that does should add
@@ -261,6 +285,13 @@ export class DatabaseQueueDriver implements QueueDriver {
     }
     for (const statement of indexes) await this.sql.unsafe(statement);
     for (const statement of createBatchTableStatements(this.dialect, this.batchTable)) {
+      await this.sql.unsafe(statement);
+    }
+    for (const statement of createWorkflowTableStatements(
+      this.dialect,
+      this.workflowTable,
+      this.workflowStepTable,
+    )) {
       await this.sql.unsafe(statement);
     }
   }
@@ -577,14 +608,46 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   async cancelBatch(id: string): Promise<boolean> {
-    return this.atomically(async (q) => {
-      const prev = await this.lockBatch(q, id);
-      if (!prev || prev.finishedAt !== null || prev.cancelledAt !== null) return false;
-      const now = await this.clock(q);
-      const next = markCancelled(prev, now, await this.cancelWaiting(q, id));
-      await this.saveBatch(q, prev, next, now);
-      return true;
-    });
+    return this.atomically((q) => this.cancelBatchOn(q, id));
+  }
+
+  /** `cancelBatch`, inside a transaction the caller has open. */
+  private async cancelBatchOn(q: SQL, id: string): Promise<boolean> {
+    const prev = await this.lockBatch(q, id);
+    if (!prev || prev.finishedAt !== null || prev.cancelledAt !== null) return false;
+    const now = await this.clock(q);
+    const next = markCancelled(prev, now, await this.cancelWaiting(q, id));
+    await this.saveBatch(q, prev, next, now);
+    return true;
+  }
+
+  /**
+   * Workflows (#846), in `workflowTable` and `workflowStepTable` of this
+   * driver's database. Their writes share this driver's transactions, so a
+   * step's record and the tick or batch it schedules commit together.
+   */
+  workflowStore(): DatabaseWorkflowStore {
+    this.workflows ??= new DatabaseWorkflowStore(
+      {
+        sql: this.sql,
+        dialect: this.dialect,
+        connection: this.connection,
+        configure: () => this.configure(),
+        atomically: (fn) => this.atomically(fn),
+        transaction: () => this.transaction(),
+        now: (q) => this.now(q),
+        ms: (q, value) => this.ms(q, value),
+        timeOrNull: (q, value) => this.timeOrNull(q, value),
+        fraction: (q, value) => this.fraction(q, value),
+        clock: (q) => this.clock(q),
+        insertJob: (q, job) => this.insert(q, job),
+        insertBatch: (q, batch) => this.insertBatch(q, batch),
+        cancelBatch: (q, id) => this.cancelBatchOn(q, id),
+        quoted: (table) => this.quoted(table),
+      },
+      { table: this.workflowTable, stepTable: this.workflowStepTable },
+    );
+    return this.workflows;
   }
 
   async reportProgress(job: ClaimedJob, progress: number): Promise<void> {

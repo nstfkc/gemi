@@ -181,6 +181,40 @@ export {
   type JobCallArgs,
 } from "./queue/Job";
 
+// Workflows: durable, resumable, built on the queue (#846).
+export {
+  Workflow,
+  type WorkflowArgs,
+  type WorkflowClass,
+  type WorkflowStatus,
+  type WorkflowStepStatus,
+} from "./queue/workflow/Workflow";
+export {
+  Step,
+  StepFailedError,
+  StepTimeoutError,
+  WaitTimeoutError,
+  WorkflowCancelledError,
+  type StepBatchOptions,
+  type StepContext,
+  type StepRunOptions,
+  type StepWaitOptions,
+} from "./queue/workflow/Step";
+export type { Duration } from "./queue/workflow/duration";
+export type {
+  StepRecord,
+  StepRunStatus,
+  WorkflowRecord,
+  WorkflowRunStatus,
+  WorkflowStore,
+} from "./queue/workflow/WorkflowStore";
+export { WorkflowRuntime } from "./queue/workflow/WorkflowRuntime";
+export { MemoryWorkflowStore } from "./queue/workflow/MemoryWorkflowStore";
+export {
+  DatabaseWorkflowStore,
+  createWorkflowTableStatements,
+} from "./queue/workflow/DatabaseWorkflowStore";
+
 // Locks: the primitive under unique jobs and cron `withoutOverlapping`.
 export {
   LockManager,
@@ -324,6 +358,7 @@ export { CommandRegistry } from "../console/CommandRegistry";
 // any more.
 export {
   discoverJobs,
+  discoverWorkflows,
   discoverCronJobs,
   discoverCommands,
   discoverListeners,

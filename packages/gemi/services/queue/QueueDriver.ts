@@ -42,6 +42,7 @@
  */
 import type { LockStore } from "../lock/LockStore";
 import type { BatchCallbacks, BatchStatus } from "./batch";
+import type { WorkflowStore } from "./workflow/WorkflowStore";
 
 export interface QueueDriver {
   /**
@@ -201,6 +202,15 @@ export interface QueueDriver {
    * `progress`. A stale claim's report is ignored.
    */
   reportProgress?(job: ClaimedJob, progress: number): Promise<void>;
+
+  /**
+   * Where `Workflow` keeps its workflows and steps (#846), over the same
+   * storage, so that a workflow's writes and the jobs and batches they
+   * schedule are recorded in one atomic step. Optional; a driver without it
+   * cannot run workflows. Called once per manager. A driver that has it also
+   * needs the batch methods for `step.batch`.
+   */
+  workflowStore?(): WorkflowStore;
 }
 
 export type EnqueueBatch = {

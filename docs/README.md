@@ -67,6 +67,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
+- **[Workflows](./workflows.md)** — durable multi-step `Workflow`s: steps, sleeps, signals, batches and cancel.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
