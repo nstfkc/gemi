@@ -7,7 +7,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_CONNECTION } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { TransactionDependencyError, currentTransaction, withTransaction } from "../../orm/context";
-import { DatabaseQueueDriver, createTableStatements } from "./DatabaseQueueDriver";
+import {
+  DatabaseQueueDriver,
+  createBatchTableStatements,
+  createTableStatements,
+} from "./DatabaseQueueDriver";
+import type { BatchStatus } from "./batch";
 import { Job } from "./Job";
 import type { QueueDriver } from "./QueueDriver";
 import { QueueManager } from "./QueueManager";
@@ -101,6 +106,7 @@ function server(name: string, dialect: Dialect, url: string): Backend {
         },
         async dispose() {
           await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
+          await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}_batches`)}`);
           await Promise.all(clients.map((client) => client.close()));
         },
       };
@@ -137,6 +143,7 @@ for (const backend of backends) {
     (driver) => disposers.get(driver)?.(),
     {
       claimsByName: true,
+      batches: true,
       transaction: {
         run: (driver, fn) => withTransaction(clients.get(driver)!, fn),
         // See `DatabaseQueueDriver.transaction` for why SQLite never joins.
@@ -680,6 +687,110 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     await queue.push(Recorder, "[5]");
     await until(() => runs.length === 1, 1_000);
   });
+
+  test("two workers run a batch, and its callbacks run once", async () => {
+    const { driver, rows } = await database();
+    const runs: Array<{ n: number; worker: string }> = [];
+    const finished: Array<[string, BatchStatus]> = [];
+    const callback = (worker: string) =>
+      class Finished extends Job {
+        static name = "Finished";
+        run(label: string, status: BatchStatus) {
+          finished.push([`${worker}:${label}`, status]);
+        }
+      };
+    const a = worker(driver(), [recorder("RecordRun", "a", runs), callback("a")]);
+    const b = worker(driver(), [recorder("RecordRun", "b", runs), callback("b")]);
+
+    const Finished = callback("producer");
+    const id = Bun.randomUUIDv7();
+    await driver().enqueueBatch({
+      id,
+      name: "two-workers",
+      job: "RecordRun",
+      args: Array.from({ length: 30 }, (_, n) => JSON.stringify([n])),
+      allowFailures: false,
+      callbacks: { then: Finished.with("then"), finally: Finished.with("finally") },
+    });
+    a.start();
+    b.start();
+
+    await until(async () => finished.length === 2 && (await rows()).length === 0);
+    // A second `then` would show up just after the first two.
+    await sleep(100);
+
+    expect(runs.map((run) => run.n).sort((x, y) => x - y)).toEqual(
+      Array.from({ length: 30 }, (_, n) => n),
+    );
+    expect(finished.map(([label]) => label.split(":")[1]).sort()).toEqual(["finally", "then"]);
+    expect(finished[0]![1]).toMatchObject({ id, total: 30, succeeded: 30, pending: 0 });
+    expect(await driver().findBatch(id)).toMatchObject({ succeeded: 30, progress: 1 });
+  });
+
+  test("a table from before batches still runs jobs, and createTable adds what batches need", async () => {
+    const url = { postgres: POSTGRES_URL, mysql: MYSQL_URL }[backend.name] ?? ":memory:";
+    const sql = new SQL(url);
+    const table = `old_${crypto.randomUUID().replaceAll("-", "").slice(0, 10)}`;
+    const quoted = quoteTable(backend.dialect, table);
+    const batches = quoteTable(backend.dialect, `${table}_batches`);
+    const mysql = backend.dialect === "mysql";
+    try {
+      // The table as 0.116 created it: no batch_id, no progress.
+      for (const statement of createTableStatements(backend.dialect, table)) {
+        await sql.unsafe(statement);
+      }
+      await sql.unsafe(
+        mysql
+          ? `DROP INDEX \`${table}_batch_id_idx\` ON ${quoted}`
+          : `DROP INDEX ${quoteTable(backend.dialect, `${table}_batch_id_idx`)}`,
+      );
+      await sql.unsafe(`ALTER TABLE ${quoted} DROP COLUMN ${mysql ? "`batch_id`" : '"batch_id"'}`);
+      await sql.unsafe(`ALTER TABLE ${quoted} DROP COLUMN ${mysql ? "`progress`" : '"progress"'}`);
+
+      const old = new DatabaseQueueDriver({ sql, dialect: backend.dialect }, { table });
+      await old.enqueue({ name: "A", args: "[]" });
+      const [claimed] = await old.claim(1, { visibilityTimeoutMs: 1000 });
+      expect(claimed).toMatchObject({ name: "A", attempt: 1 });
+      expect(claimed!.batchId).toBeUndefined();
+      await old.complete(claimed!);
+
+      const batch = {
+        id: Bun.randomUUIDv7(),
+        name: null,
+        job: "A",
+        args: ["[]"],
+        allowFailures: false,
+        callbacks: {},
+      };
+      await expect(old.enqueueBatch(batch)).rejects.toThrow("Job batches need");
+
+      await old.createTable();
+      await old.createTable();
+      await old.enqueueBatch(batch);
+      const [inBatch] = await old.claim(1, { visibilityTimeoutMs: 1000 });
+      expect(inBatch!.batchId).toBe(batch.id);
+      await old.complete(inBatch!);
+      expect(await old.findBatch(batch.id)).toMatchObject({ succeeded: 1, pending: 0 });
+    } finally {
+      await sql.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
+      await sql.unsafe(`DROP TABLE IF EXISTS ${batches}`);
+      await sql.close();
+    }
+  });
+
+  test("a dead job of a batch is not retried, and finished batches are pruned", async () => {
+    const { driver } = await database();
+    const d = driver();
+    const id = Bun.randomUUIDv7();
+    await d.enqueueBatch({ id, name: null, job: "A", args: ["[]"], allowFailures: true, callbacks: {} });
+    const [job] = await d.claim(1, { visibilityTimeoutMs: 1000 });
+    await d.fail(job!, { error: "boom", retryInMs: null });
+
+    expect(await d.retryDead(job!.id)).toBe(false);
+    expect(await d.pruneBatches(60_000)).toBe(0);
+    expect(await d.pruneBatches(0)).toBe(1);
+    expect(await d.findBatch(id)).toBeNull();
+  });
 });
 
 describe("DatabaseQueueDriver", () => {
@@ -716,6 +827,26 @@ describe("DatabaseQueueDriver", () => {
     expect(rest).toEqual([]);
     expect(statement).toContain("CREATE TABLE IF NOT EXISTS `gemi_jobs`");
     expect(statement).toContain("INDEX `gemi_jobs_status_available_at_idx`");
+    expect(statement).toContain("INDEX `gemi_jobs_batch_id_idx`");
+    const [batches, ...more] = createBatchTableStatements("mysql", "gemi_job_batches");
+    expect(more).toEqual([]);
+    expect(batches).toContain("CREATE TABLE IF NOT EXISTS `gemi_job_batches`");
+    // Prisma's default VARCHAR(191) is too short for the list of failed ids.
+    expect(batches).toContain("`failed_job_ids` LONGTEXT NOT NULL");
+  });
+
+  test("the batches table is gemi_job_batches beside gemi_jobs, and <table>_batches otherwise", () => {
+    const sql = new SQL(":memory:");
+    expect(new DatabaseQueueDriver({ sql, dialect: "sqlite" }).batchTable).toBe("gemi_job_batches");
+    expect(
+      new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { table: "jobs" }).batchTable,
+    ).toBe("jobs_batches");
+    expect(
+      new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { batchTable: "batches" }).batchTable,
+    ).toBe("batches");
+    expect(
+      () => new DatabaseQueueDriver({ sql, dialect: "sqlite" }, { batchTable: "x; drop" }),
+    ).toThrow("not a plain identifier");
   });
 });
 

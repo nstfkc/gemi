@@ -148,7 +148,12 @@ export type { LogEntry } from "./logging/types";
 
 // Queue
 export { QueueServiceProvider } from "./queue/QueueServiceProvider";
-export { QueueManager, type DrainResult } from "./queue/QueueManager";
+export {
+  QueueManager,
+  type DrainResult,
+  type DispatchedBatch,
+  type JobBatchOptions,
+} from "./queue/QueueManager";
 export { MemoryQueueDriver } from "./queue/MemoryQueueDriver";
 export {
   DatabaseQueueDriver,
@@ -162,8 +167,16 @@ export type {
   ClaimedJob,
   JobFailure,
   JobRelease,
+  EnqueueBatch,
 } from "./queue/QueueDriver";
-export { Job, type JobThrottle, type JobConcurrency } from "./queue/Job";
+export type { BatchStatus, BatchCallbacks, JobCall } from "./queue/batch";
+export {
+  Job,
+  type JobThrottle,
+  type JobConcurrency,
+  type JobBatch,
+  type JobCallArgs,
+} from "./queue/Job";
 
 // Locks: the primitive under unique jobs and cron `withoutOverlapping`.
 export {

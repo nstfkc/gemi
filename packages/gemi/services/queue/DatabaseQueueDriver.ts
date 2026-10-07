@@ -4,9 +4,23 @@ import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { DatabaseLockStore } from "../lock/DatabaseLockStore";
 import { commitDependsOn, currentConnectionName, currentTransaction } from "../../orm/context";
+import {
+  type BatchCallbacks,
+  type BatchOutcome,
+  type BatchRecord,
+  type BatchStatus,
+  cancelsBatch,
+  clampProgress,
+  countOutcome,
+  markCancelled,
+  newBatchRecord,
+  settle,
+  statusOf,
+} from "./batch";
 import type {
   ClaimOptions,
   ClaimedJob,
+  EnqueueBatch,
   EnqueueJob,
   JobFailure,
   JobRelease,
@@ -19,6 +33,13 @@ export type DatabaseQueueDriverOptions = {
    * and underscores — because it is spliced into every statement.
    */
   table?: string;
+  /**
+   * The table batches are kept in. Default `gemi_job_batches` beside
+   * `gemi_jobs`, and `<table>_batches` beside a jobs table of another name.
+   * A plain identifier, like `table`. Only touched by `Job.dispatchBatch` and
+   * the batch methods.
+   */
+  batchTable?: string;
   /**
    * SQLite only: how long, in milliseconds, a statement waits for another
    * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
@@ -44,7 +65,30 @@ type Row = {
   attempts: number | string;
   available_at: number | string | bigint;
   created_at: number | string | bigint;
+  /** Absent on a table from before batches; see `claim`. */
+  batch_id?: string | null;
 };
+
+type BatchRow = {
+  id: string;
+  name: string | null;
+  total: number | string;
+  pending: number | string;
+  succeeded: number | string;
+  failed: number | string;
+  cancelled: number | string;
+  failed_job_ids: string;
+  options: string;
+  cancelled_at: number | string | bigint | null;
+  finished_at: number | string | bigint | null;
+  created_at: number | string | bigint;
+};
+
+/** How many job rows one `INSERT` of a batch carries. */
+const BATCH_INSERT_CHUNK = 200;
+
+/** The `last_error` of a waiting job ended by its batch's cancellation. */
+const CANCELLED_ERROR = "Its batch was cancelled before it ran.";
 
 /**
  * A driver that keeps jobs in a table of the application's own database, so
@@ -94,6 +138,15 @@ type Row = {
  * `transaction` below for why SQLite is left out, and why a driver built from
  * a bare client never joins.
  *
+ * ### Batches
+ *
+ * A batch is a row of `batchTable`, and its jobs are rows of the jobs table
+ * with `batch_id` set. Ending a job of a batch, counting it and enqueueing any
+ * callback it makes due happen in one transaction that locks the batch row
+ * first; see the "Batches" section below. A table from before batches, without
+ * `batch_id` and `progress`, still runs every other job: the claim reads `*`,
+ * and only the batch methods need the new columns.
+ *
  * ### What it does not do
  *
  * It has no `subscribe`: another process's dispatch cannot wake this one, so
@@ -102,12 +155,15 @@ type Row = {
  */
 export class DatabaseQueueDriver implements QueueDriver {
   readonly table: string;
+  readonly batchTable: string;
   private readonly sql: SQL;
   private readonly dialect: Dialect;
   /** The connection's name, when it came with one; see `transaction`. */
   private readonly connection: string | undefined;
   private readonly busyTimeout: number;
   private configured: Promise<void> | undefined;
+  /** SQLite: the transaction before the next; see `atomically`. */
+  private sqliteTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     connection: Pick<DatabaseConnection, "sql" | "dialect"> &
@@ -115,11 +171,15 @@ export class DatabaseQueueDriver implements QueueDriver {
     options: DatabaseQueueDriverOptions = {},
   ) {
     const table = options.table ?? "gemi_jobs";
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
-      throw new Error(
-        `The queue table name "${table}" is not a plain identifier. Use ` +
-          `letters, digits and underscores.`,
-      );
+    const batchTable =
+      options.batchTable ?? (table === "gemi_jobs" ? "gemi_job_batches" : `${table}_batches`);
+    for (const name of [table, batchTable]) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        throw new Error(
+          `The queue table name "${name}" is not a plain identifier. Use ` +
+            `letters, digits and underscores.`,
+        );
+      }
     }
     const busyTimeout = options.busyTimeout ?? 1000;
     if (!Number.isInteger(busyTimeout) || busyTimeout < 0) {
@@ -128,6 +188,7 @@ export class DatabaseQueueDriver implements QueueDriver {
       );
     }
     this.table = table;
+    this.batchTable = batchTable;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
     this.connection = connection.name;
@@ -179,17 +240,39 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   /**
-   * Creates the table and its indexes if they do not exist — the same DDL
-   * Prisma generates for the model in the docs, so a table made either way is
-   * the table the other expects. For tests and for an app that does not
-   * manage its schema with Prisma; one that does should add the model
-   * instead, or `prisma migrate` will see a table it does not know and drop
-   * it.
+   * Creates the jobs table, the batches table and their indexes if they do
+   * not exist — the same DDL Prisma generates for the models in the docs, so
+   * a table made either way is the table the other expects — and adds the
+   * batch columns to a jobs table from before batches. For tests and for an
+   * app that does not manage its schema with Prisma; one that does should add
+   * the models instead, or `prisma migrate` will see tables it does not know
+   * and drop them.
    */
   async createTable(): Promise<void> {
     await this.configure();
-    for (const statement of createTableStatements(this.dialect, this.table)) {
+    // The table first and its indexes after any upgrade, because one of them
+    // is on `batch_id`, which a table from before batches does not have yet.
+    const [table, ...indexes] = createTableStatements(this.dialect, this.table);
+    await this.sql.unsafe(table!);
+    if (!(await this.hasBatchColumns())) {
+      for (const statement of addBatchColumnsStatements(this.dialect, this.table)) {
+        await this.sql.unsafe(statement);
+      }
+    }
+    for (const statement of indexes) await this.sql.unsafe(statement);
+    for (const statement of createBatchTableStatements(this.dialect, this.batchTable)) {
       await this.sql.unsafe(statement);
+    }
+  }
+
+  /** Whether the jobs table has `batch_id` and `progress` yet. */
+  private async hasBatchColumns(): Promise<boolean> {
+    try {
+      await this.sql.unsafe(`SELECT batch_id, progress FROM ${this.quoted(this.table)} WHERE 1 = 0`);
+      return true;
+    } catch (error) {
+      if (isMissingSchema(error)) return false;
+      throw error;
     }
   }
 
@@ -277,6 +360,10 @@ export class DatabaseQueueDriver implements QueueDriver {
         : await this.claimUpdating(count, options);
 
     // `RETURNING` promises no order, and the manager expects oldest first.
+    //
+    // Every column is read back (`*`) rather than a list, so that `batch_id`
+    // comes back where the table has it and the claim still works on a table
+    // from before batches, which never has a batch job in it.
     return rows
       .map((row) => ({
         order: Number(row.available_at),
@@ -286,6 +373,7 @@ export class DatabaseQueueDriver implements QueueDriver {
           args: String(row.payload),
           attempt: Number(row.attempts),
           createdAt: Number(row.created_at),
+          ...(row.batch_id == null ? {} : { batchId: String(row.batch_id) }),
         },
       }))
       .sort((a, b) => a.order - b.order || (a.job.id < b.job.id ? -1 : 1))
@@ -293,6 +381,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   async complete(job: ClaimedJob): Promise<void> {
+    if (job.batchId !== undefined) return this.endBatchJob(job, "succeeded");
     await this.configure();
     const q = this.sql;
     await q`
@@ -302,6 +391,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   async fail(job: ClaimedJob, failure: JobFailure): Promise<void> {
+    if (job.batchId !== undefined) return this.endBatchJob(job, "failed", failure);
     await this.configure();
     const q = this.sql;
     const now = this.now(q);
@@ -367,6 +457,13 @@ export class DatabaseQueueDriver implements QueueDriver {
   async retryDead(id: string): Promise<boolean> {
     await this.configure();
     const q = this.sql;
+    // A job of a batch has been counted as failed or cancelled already, and
+    // its batch may have finished and run its callbacks. Run again, it would
+    // be counted a second time.
+    const [dead] = (await q`
+      SELECT * FROM ${this.name(q)} WHERE id = ${id} AND status = 'dead'
+    `) as Row[];
+    if (!dead || dead.batch_id != null) return false;
     const now = this.now(q);
     const result = await q`
       UPDATE ${this.name(q)}
@@ -391,6 +488,276 @@ export class DatabaseQueueDriver implements QueueDriver {
       WHERE status = 'dead' AND updated_at <= ${this.now(q)} - ${this.ms(q, olderThanMs)}
     `;
     return affected(result);
+  }
+
+  // ---------------------------------------------------------------------
+  // Batches
+  //
+  // A batch is a row in `batchTable` with its counters, and its jobs are
+  // ordinary rows of the jobs table with `batch_id` set. Every change to the
+  // counters happens in a transaction that first locks the batch row, so the
+  // ends of two jobs of one batch are counted one after the other, and the
+  // one that brings `pending` to 0 is the only one that sees it reach 0. The
+  // job's own row is ended in that transaction, guarded by its attempt like
+  // every other report, so a stale claim neither ends the job nor counts it;
+  // and the callback jobs that become due are inserted in it, so they commit
+  // with the count or not at all. That is the whole of "exactly once".
+  //
+  // Locks are always taken batch row first, then job rows, so the driver's
+  // own transactions cannot deadlock on each other.
+  // ---------------------------------------------------------------------
+
+  enqueueBatch(batch: EnqueueBatch): Promise<void> {
+    // On the caller's transaction when it is one this driver joins, as
+    // `enqueue` is; otherwise in a transaction of its own, so a batch is
+    // never half recorded.
+    const tx = this.transaction();
+    const written = tx
+      ? this.insertBatch(tx, batch)
+      : this.atomically((q) => this.insertBatch(q, batch));
+    if (tx) commitDependsOn(written);
+    return written;
+  }
+
+  private async insertBatch(q: SQL, batch: EnqueueBatch): Promise<void> {
+    await this.configure();
+    const now = await this.clock(q);
+    const record = newBatchRecord({ ...batch, total: batch.args.length, now });
+    // A batch of no jobs is finished as soon as it exists.
+    const { record: settled, calls } = settle(record, record, now);
+    await explainMissingSchema(
+      q`
+        INSERT INTO ${this.batches(q)}
+          (id, name, total, pending, succeeded, failed, cancelled, failed_job_ids, options,
+           cancelled_at, finished_at, created_at, updated_at)
+        VALUES
+          (${settled.id}, ${settled.name}, ${settled.total}, ${settled.pending}, 0, 0, 0,
+           '[]', ${batchOptions(settled)}, NULL, ${this.timeOrNull(q, settled.finishedAt)},
+           ${this.ms(q, now)}, ${this.ms(q, now)})
+      `,
+      this.batchTable,
+    );
+
+    const at = this.ms(q, now);
+    for (let start = 0; start < batch.args.length; start += BATCH_INSERT_CHUNK) {
+      const rows = batch.args
+        .slice(start, start + BATCH_INSERT_CHUNK)
+        .map(
+          (args) =>
+            q`(${Bun.randomUUIDv7()}, ${batch.job}, ${args}, 'pending', 0, ${at}, ${at}, ${at}, ${batch.id}, 0)`,
+        )
+        .reduce((list, row) => q`${list}, ${row}`);
+      await explainMissingSchema(
+        q`
+          INSERT INTO ${this.name(q)}
+            (id, name, payload, status, attempts, available_at, created_at, updated_at, batch_id, progress)
+          VALUES ${rows}
+        `,
+        this.table,
+      );
+    }
+    for (const call of calls) await this.insert(q, call);
+  }
+
+  async findBatch(id: string, options: { progress?: boolean } = {}): Promise<BatchStatus | null> {
+    await this.configure();
+    const q = this.sql;
+    const [row] = (await explainMissingSchema(
+      q`SELECT * FROM ${this.batches(q)} WHERE id = ${id}`,
+      this.batchTable,
+    )) as BatchRow[];
+    if (!row) return null;
+    const record = batchRecord(row);
+    if (options.progress === false || record.pending === 0) return statusOf(record);
+    const [sum] = (await q`
+      SELECT COALESCE(SUM(progress), 0) AS running FROM ${this.name(q)}
+      WHERE batch_id = ${id} AND status IN ('pending', 'claimed')
+    `) as Array<{ running: unknown }>;
+    return statusOf(record, Number(sum?.running ?? 0));
+  }
+
+  async cancelBatch(id: string): Promise<boolean> {
+    return this.atomically(async (q) => {
+      const prev = await this.lockBatch(q, id);
+      if (!prev || prev.finishedAt !== null || prev.cancelledAt !== null) return false;
+      const now = await this.clock(q);
+      const next = markCancelled(prev, now, await this.cancelWaiting(q, id));
+      await this.saveBatch(q, prev, next, now);
+      return true;
+    });
+  }
+
+  async reportProgress(job: ClaimedJob, progress: number): Promise<void> {
+    const value = clampProgress(progress);
+    await this.configure();
+    const q = this.sql;
+    await q`
+      UPDATE ${this.name(q)} SET progress = ${this.fraction(q, value)}
+      WHERE id = ${job.id} AND status = 'claimed' AND attempts = ${job.attempt}
+    `;
+  }
+
+  /**
+   * Deletes batches that finished more than `olderThanMs` ago, and resolves
+   * to how many. Nothing else removes them; a finished batch is only kept so
+   * `findBatch` can still answer for it.
+   */
+  async pruneBatches(olderThanMs: number): Promise<number> {
+    await this.configure();
+    const q = this.sql;
+    const result = await q`
+      DELETE FROM ${this.batches(q)}
+      WHERE finished_at IS NOT NULL AND finished_at <= ${this.now(q)} - ${this.ms(q, olderThanMs)}
+    `;
+    return affected(result);
+  }
+
+  /**
+   * `complete` and `fail` for a job of a batch: the job's row is ended and the
+   * batch counts it, in one transaction.
+   */
+  private endBatchJob(job: ClaimedJob, kind: "succeeded" | "failed", failure?: JobFailure) {
+    const batchId = job.batchId!;
+    return this.atomically(async (q) => {
+      const prev = await this.lockBatch(q, batchId);
+      const guard = q`id = ${job.id} AND status = 'claimed' AND attempts = ${job.attempt}`;
+      const now = this.now(q);
+
+      if (kind === "succeeded") {
+        const result = await q`DELETE FROM ${this.name(q)} WHERE ${guard}`;
+        if (affected(result) === 0 || !prev) return;
+        return this.count(q, prev, "succeeded", job.id);
+      }
+
+      const cancelled =
+        failure!.cancelled === true ||
+        (failure!.retryInMs !== null && prev !== undefined && prev.cancelledAt !== null);
+      if (failure!.retryInMs !== null && !cancelled) {
+        // A retry starts its share of the batch's progress from 0 again.
+        await q`
+          UPDATE ${this.name(q)}
+          SET status = 'pending', available_at = ${now} + ${this.ms(q, failure!.retryInMs)},
+              lease_expires_at = NULL, last_error = ${failure!.error}, progress = 0,
+              updated_at = ${now}
+          WHERE ${guard}
+        `;
+        return;
+      }
+
+      const result = await q`
+        UPDATE ${this.name(q)}
+        SET status = 'dead', lease_expires_at = NULL, last_error = ${failure!.error},
+            updated_at = ${now}
+        WHERE ${guard}
+      `;
+      if (affected(result) === 0 || !prev) return;
+      return this.count(q, prev, cancelled ? "cancelled" : "failed", job.id);
+    });
+  }
+
+  /** Counts one job's end against its locked batch row. */
+  private async count(q: SQL, prev: BatchRecord, outcome: BatchOutcome, jobId: string) {
+    const now = await this.clock(q);
+    let next = countOutcome(prev, outcome, jobId);
+    if (cancelsBatch(prev, next)) {
+      next = markCancelled(next, now, await this.cancelWaiting(q, prev.id));
+    }
+    await this.saveBatch(q, prev, next, now);
+  }
+
+  /**
+   * Ends the batch's waiting jobs as cancelled — kept as dead rows that say
+   * why — and resolves to how many there were. Their rows are locked after
+   * the batch row, the order every batch transaction takes.
+   */
+  private async cancelWaiting(q: SQL, batchId: string): Promise<number> {
+    const now = this.now(q);
+    const result = await q`
+      UPDATE ${this.name(q)}
+      SET status = 'dead', last_error = ${CANCELLED_ERROR}, updated_at = ${now}
+      WHERE batch_id = ${batchId} AND status = 'pending'
+    `;
+    return affected(result);
+  }
+
+  /** Writes the batch's new counters and enqueues the callbacks they made due. */
+  private async saveBatch(q: SQL, prev: BatchRecord, next: BatchRecord, now: number) {
+    const { record, calls } = settle(prev, next, now);
+    await q`
+      UPDATE ${this.batches(q)}
+      SET pending = ${record.pending}, succeeded = ${record.succeeded}, failed = ${record.failed},
+          cancelled = ${record.cancelled}, failed_job_ids = ${JSON.stringify(record.failedJobIds)},
+          cancelled_at = ${this.timeOrNull(q, record.cancelledAt)},
+          finished_at = ${this.timeOrNull(q, record.finishedAt)}, updated_at = ${this.ms(q, now)}
+      WHERE id = ${record.id}
+    `;
+    for (const call of calls) await this.insert(q, call);
+  }
+
+  /**
+   * Reads the batch row and holds it until the transaction ends. Postgres and
+   * MySQL lock the row; SQLite has no row locks, so a write to the row takes
+   * the file's write lock instead, waiting out another process's for the
+   * busy timeout rather than failing on the upgrade from a read lock.
+   */
+  private async lockBatch(q: SQL, id: string): Promise<BatchRecord | undefined> {
+    let rows: BatchRow[];
+    if (this.dialect === "sqlite") {
+      await q`UPDATE ${this.batches(q)} SET updated_at = updated_at WHERE id = ${id}`;
+      rows = await q`SELECT * FROM ${this.batches(q)} WHERE id = ${id}`;
+    } else {
+      rows = await q`SELECT * FROM ${this.batches(q)} WHERE id = ${id} FOR UPDATE`;
+    }
+    return rows[0] ? batchRecord(rows[0]) : undefined;
+  }
+
+  /**
+   * Runs `fn` in a transaction of the driver's own.
+   *
+   * On SQLite one at a time per driver. Bun gives a SQLite client a single
+   * connection, and a second `begin` on it while one is open is refused with
+   * "cannot start a transaction within a transaction". One the application
+   * has open on the same client — an ORM transaction, when the queue shares
+   * the default connection — is waited out the same way, a few times.
+   */
+  private atomically<T>(fn: (q: SQL) => Promise<T>): Promise<T> {
+    const run = async () => {
+      await this.configure();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return (await this.sql.begin((tx) => fn(tx))) as T;
+        } catch (error) {
+          if (
+            this.dialect !== "sqlite" ||
+            attempt >= 50 ||
+            !/within a transaction/i.test(String((error as Error)?.message ?? error))
+          ) {
+            throw error;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+    };
+    if (this.dialect !== "sqlite") return run();
+    const result = this.sqliteTail.then(run, run);
+    this.sqliteTail = result.catch(() => {});
+    return result;
+  }
+
+  /** The database's clock now, as a number, for values computed here. */
+  private async clock(q: SQL): Promise<number> {
+    const [row] = (await q`SELECT ${this.now(q)} AS now`) as Array<{ now: unknown }>;
+    return Number(row!.now);
+  }
+
+  /** An epoch-milliseconds value or `NULL`, typed as the BIGINT columns are. */
+  private timeOrNull(q: SQL, value: number | null) {
+    return value === null ? q`NULL` : this.ms(q, value);
+  }
+
+  /** A 0..1 progress value as a parameter Postgres can assign to its column. */
+  private fraction(q: SQL, value: number) {
+    return this.dialect === "postgres" ? q`CAST(${value} AS DOUBLE PRECISION)` : q`${value}`;
   }
 
   /**
@@ -419,7 +786,7 @@ export class DatabaseQueueDriver implements QueueDriver {
             lease_expires_at = ${now} + ${lease}, updated_at = ${now}
         FROM next
         WHERE job.id = next.id
-        RETURNING job.id, job.name, job.payload, job.attempts, job.available_at, job.created_at
+        RETURNING job.*
       `;
     }
 
@@ -433,7 +800,7 @@ export class DatabaseQueueDriver implements QueueDriver {
         ORDER BY available_at, id
         LIMIT ${limit}
       )
-      RETURNING id, name, payload, attempts, available_at, created_at
+      RETURNING *
     `;
   }
 
@@ -488,7 +855,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   ): Promise<Row[]> {
     return await connection.begin(async (tx) => {
       const table = this.name(tx);
-      const columns = tx.unsafe("id, name, payload, attempts, available_at, created_at");
+      const columns = tx.unsafe("*");
 
       // Waiting and due, oldest first, along the (status, available_at) index.
       const rows: Row[] = await tx`
@@ -586,8 +953,17 @@ export class DatabaseQueueDriver implements QueueDriver {
    * `@@map`) made, and a reserved word such as `order` is a syntax error.
    */
   private name(q: SQL) {
+    return q.unsafe(this.quoted(this.table));
+  }
+
+  /** The batches table, quoted as `name` quotes the jobs table. */
+  private batches(q: SQL) {
+    return q.unsafe(this.quoted(this.batchTable));
+  }
+
+  private quoted(table: string) {
     const mysql = this.dialect === "mysql" || this.dialect === "mariadb";
-    return q.unsafe(mysql ? `\`${this.table}\`` : `"${this.table}"`);
+    return mysql ? `\`${table}\`` : `"${table}"`;
   }
 
   /** The database's clock, in epoch milliseconds. */
@@ -648,9 +1024,12 @@ export function createTableStatements(dialect: Dialect, table: string): string[]
     \`last_error\` LONGTEXT NULL,
     \`created_at\` BIGINT NOT NULL,
     \`updated_at\` BIGINT NOT NULL,
+    \`batch_id\` VARCHAR(191) NULL,
+    \`progress\` DOUBLE NULL,
 
     INDEX \`${table}_status_available_at_idx\`(\`status\`, \`available_at\`),
     INDEX \`${table}_status_lease_expires_at_idx\`(\`status\`, \`lease_expires_at\`),
+    INDEX \`${table}_batch_id_idx\`(\`batch_id\`),
     PRIMARY KEY (\`id\`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
     ];
@@ -671,9 +1050,152 @@ export function createTableStatements(dialect: Dialect, table: string): string[]
     "lease_expires_at" BIGINT,
     "last_error" TEXT,
     "created_at" BIGINT NOT NULL,
-    "updated_at" BIGINT NOT NULL${constraint}
+    "updated_at" BIGINT NOT NULL,
+    "batch_id" TEXT,
+    "progress" ${dialect === "sqlite" ? "REAL" : "DOUBLE PRECISION"}${constraint}
 )`,
     `CREATE INDEX IF NOT EXISTS "${table}_status_available_at_idx" ON "${table}"("status", "available_at")`,
     `CREATE INDEX IF NOT EXISTS "${table}_status_lease_expires_at_idx" ON "${table}"("status", "lease_expires_at")`,
+    `CREATE INDEX IF NOT EXISTS "${table}_batch_id_idx" ON "${table}"("batch_id")`,
   ];
+}
+
+/**
+ * The two columns and the index batches add to a jobs table made before them,
+ * as Prisma's migration for the updated model writes them. `createTable` runs
+ * these when the columns are missing; an app on Prisma gets the same from
+ * `prisma migrate dev` after updating the model.
+ */
+export function addBatchColumnsStatements(dialect: Dialect, table: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `ALTER TABLE \`${table}\` ADD COLUMN \`batch_id\` VARCHAR(191) NULL,
+    ADD COLUMN \`progress\` DOUBLE NULL,
+    ADD INDEX \`${table}_batch_id_idx\`(\`batch_id\`)`,
+    ];
+  }
+  const progress = dialect === "sqlite" ? "REAL" : "DOUBLE PRECISION";
+  if (dialect === "sqlite") {
+    return [
+      `ALTER TABLE "${table}" ADD COLUMN "batch_id" TEXT`,
+      `ALTER TABLE "${table}" ADD COLUMN "progress" ${progress}`,
+      `CREATE INDEX IF NOT EXISTS "${table}_batch_id_idx" ON "${table}"("batch_id")`,
+    ];
+  }
+  return [
+    `ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "batch_id" TEXT,
+ADD COLUMN IF NOT EXISTS "progress" ${progress}`,
+    `CREATE INDEX IF NOT EXISTS "${table}_batch_id_idx" ON "${table}"("batch_id")`,
+  ];
+}
+
+/**
+ * The batches table, as Prisma generates it for the `GemiJobBatch` model in
+ * the docs, with `IF NOT EXISTS` added.
+ */
+export function createBatchTableStatements(dialect: Dialect, table: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `CREATE TABLE IF NOT EXISTS \`${table}\` (
+    \`id\` VARCHAR(191) NOT NULL,
+    \`name\` VARCHAR(191) NULL,
+    \`total\` INTEGER NOT NULL,
+    \`pending\` INTEGER NOT NULL,
+    \`succeeded\` INTEGER NOT NULL DEFAULT 0,
+    \`failed\` INTEGER NOT NULL DEFAULT 0,
+    \`cancelled\` INTEGER NOT NULL DEFAULT 0,
+    \`failed_job_ids\` LONGTEXT NOT NULL,
+    \`options\` LONGTEXT NOT NULL,
+    \`cancelled_at\` BIGINT NULL,
+    \`finished_at\` BIGINT NULL,
+    \`created_at\` BIGINT NOT NULL,
+    \`updated_at\` BIGINT NOT NULL,
+
+    PRIMARY KEY (\`id\`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    ];
+  }
+
+  const key = dialect === "sqlite" ? `"id" TEXT NOT NULL PRIMARY KEY,` : `"id" TEXT NOT NULL,`;
+  const constraint =
+    dialect === "sqlite" ? "" : `,\n\n    CONSTRAINT "${table}_pkey" PRIMARY KEY ("id")`;
+  return [
+    `CREATE TABLE IF NOT EXISTS "${table}" (
+    ${key}
+    "name" TEXT,
+    "total" INTEGER NOT NULL,
+    "pending" INTEGER NOT NULL,
+    "succeeded" INTEGER NOT NULL DEFAULT 0,
+    "failed" INTEGER NOT NULL DEFAULT 0,
+    "cancelled" INTEGER NOT NULL DEFAULT 0,
+    "failed_job_ids" TEXT NOT NULL,
+    "options" TEXT NOT NULL,
+    "cancelled_at" BIGINT,
+    "finished_at" BIGINT,
+    "created_at" BIGINT NOT NULL,
+    "updated_at" BIGINT NOT NULL${constraint}
+)`,
+  ];
+}
+
+/** A batch row as the record `batch.ts` works on. */
+function batchRecord(row: BatchRow): BatchRecord {
+  const options = JSON.parse(row.options) as {
+    allowFailures?: boolean;
+    callbacks?: BatchCallbacks;
+  };
+  const time = (value: BatchRow["cancelled_at"]) => (value == null ? null : Number(value));
+  return {
+    id: String(row.id),
+    name: row.name == null ? null : String(row.name),
+    total: Number(row.total),
+    pending: Number(row.pending),
+    succeeded: Number(row.succeeded),
+    failed: Number(row.failed),
+    cancelled: Number(row.cancelled),
+    failedJobIds: JSON.parse(row.failed_job_ids) as string[],
+    cancelledAt: time(row.cancelled_at),
+    finishedAt: time(row.finished_at),
+    createdAt: Number(row.created_at),
+    allowFailures: options.allowFailures === true,
+    callbacks: options.callbacks ?? {},
+  };
+}
+
+/** What the `options` column holds: what does not change once dispatched. */
+function batchOptions(record: BatchRecord): string {
+  return JSON.stringify({ allowFailures: record.allowFailures, callbacks: record.callbacks });
+}
+
+/**
+ * Whether a database error says a table or column does not exist, in the
+ * words of any of the three: Postgres' `relation … does not exist` and
+ * `column … does not exist`, MySQL's `Table … doesn't exist` and `Unknown
+ * column`, SQLite's `no such table` and `no such column`.
+ */
+function isMissingSchema(error: unknown): boolean {
+  const message = String((error as Error)?.message ?? error);
+  return /does not exist|doesn't exist|unknown column|no such (table|column)|has no column/i.test(
+    message,
+  );
+}
+
+/**
+ * Runs a statement that needs the batch schema, and turns "no such table or
+ * column" into an error that says what to do about it.
+ */
+async function explainMissingSchema<T>(statement: PromiseLike<T>, table: string): Promise<T> {
+  try {
+    return await statement;
+  } catch (error) {
+    if (!isMissingSchema(error)) throw error;
+    throw new Error(
+      `Job batches need the "${table}" table and the batch_id and progress columns ` +
+        `of the jobs table, and the database says one is missing. Add the ` +
+        `GemiJobBatch model and the two GemiJob fields from the docs ` +
+        `(docs/jobs-and-queues.md#batches) and migrate, or call the driver's ` +
+        `createTable().`,
+      { cause: error },
+    );
+  }
 }

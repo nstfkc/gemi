@@ -1,6 +1,19 @@
+import {
+  type BatchOutcome,
+  type BatchRecord,
+  type BatchStatus,
+  cancelsBatch,
+  clampProgress,
+  countOutcome,
+  markCancelled,
+  newBatchRecord,
+  settle,
+  statusOf,
+} from "./batch";
 import type {
   ClaimOptions,
   ClaimedJob,
+  EnqueueBatch,
   EnqueueJob,
   JobFailure,
   JobRelease,
@@ -14,7 +27,16 @@ type Entry = {
   leased: boolean;
   /** Tie-break for `until`, so jobs that became claimable together stay FIFO. */
   seq: number;
+  /** What a job of a batch last reported with `this.progress()`. */
+  progress: number;
 };
+
+/**
+ * How long a finished batch is kept for `findBatch`. Nothing else removes
+ * one, and a long-running process would otherwise keep every batch it ever
+ * ran.
+ */
+const FINISHED_BATCH_TTL = 24 * 60 * 60_000;
 
 /**
  * The default driver: a Map in this process's memory.
@@ -39,12 +61,17 @@ type Entry = {
  * not be known by anyone, and the manager dead-letters it at once with a line
  * saying so; filtered out, it would wait here unseen until the process exited.
  *
+ * Batches are kept in a Map beside the jobs, and a finished one for a day.
+ * Everything a batch does happens synchronously inside the call that causes
+ * it, so the counters and the callbacks need no further care here.
+ *
  * One timer at most, for the next moment something becomes claimable, and it
  * is unref'd: a queue with nothing due does not hold the process open, and
  * neither does one waiting out a backoff — the same way the queue never has.
  */
 export class MemoryQueueDriver implements QueueDriver {
   private entries = new Map<string, Entry>();
+  private batches = new Map<string, BatchRecord>();
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerAt = Infinity;
@@ -62,21 +89,70 @@ export class MemoryQueueDriver implements QueueDriver {
     return this.entries.size - this.waiting;
   }
 
-  async enqueue({
-    name,
-    args,
-    delayMs = 0,
-    id = crypto.randomUUID(),
-  }: EnqueueJob): Promise<string> {
+  async enqueue(job: EnqueueJob): Promise<string> {
+    const id = this.add(job);
+    this.changed();
+    return id;
+  }
+
+  private add(
+    { name, args, delayMs = 0, id = crypto.randomUUID() }: EnqueueJob,
+    batchId?: string,
+  ): string {
     const now = Date.now();
     this.entries.set(id, {
-      job: { id, name, args, attempt: 0, createdAt: now },
+      job: {
+        id,
+        name,
+        args,
+        attempt: 0,
+        createdAt: now,
+        ...(batchId === undefined ? {} : { batchId }),
+      },
       until: now + Math.max(0, delayMs),
       leased: false,
       seq: this.seq++,
+      progress: 0,
     });
-    this.changed();
     return id;
+  }
+
+  async enqueueBatch(batch: EnqueueBatch): Promise<void> {
+    const now = Date.now();
+    this.forgetFinishedBatches(now);
+    const record = newBatchRecord({ ...batch, total: batch.args.length, now });
+    for (const args of batch.args) this.add({ name: batch.job, args }, batch.id);
+    // A batch of no jobs is finished as soon as it exists.
+    const { record: settled, calls } = settle(record, record, now);
+    this.batches.set(batch.id, settled);
+    for (const call of calls) this.add(call);
+    this.changed();
+  }
+
+  async findBatch(id: string, options: { progress?: boolean } = {}): Promise<BatchStatus | null> {
+    const record = this.batches.get(id);
+    if (!record) return null;
+    if (options.progress === false || record.pending === 0) return statusOf(record);
+    let running = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.job.batchId === id) running += entry.progress;
+    }
+    return statusOf(record, running);
+  }
+
+  async cancelBatch(id: string): Promise<boolean> {
+    const prev = this.batches.get(id);
+    if (!prev || prev.finishedAt !== null || prev.cancelledAt !== null) return false;
+    const now = Date.now();
+    const next = markCancelled(prev, now, this.cancelWaiting(id));
+    this.save(prev, next, now);
+    this.changed();
+    return true;
+  }
+
+  async reportProgress(job: ClaimedJob, progress: number): Promise<void> {
+    const entry = this.current(job);
+    if (entry) entry.progress = clampProgress(progress);
   }
 
   async claim(limit: number, options: ClaimOptions): Promise<ClaimedJob[]> {
@@ -98,8 +174,10 @@ export class MemoryQueueDriver implements QueueDriver {
   }
 
   async complete(job: ClaimedJob): Promise<void> {
-    if (!this.current(job)) return;
+    const entry = this.current(job);
+    if (!entry) return;
     this.entries.delete(job.id);
+    this.count(entry, "succeeded");
     this.schedule();
   }
 
@@ -107,8 +185,15 @@ export class MemoryQueueDriver implements QueueDriver {
     const entry = this.current(job);
     if (!entry) return;
 
-    if (failure.retryInMs === null) {
+    // A retry of a job whose batch was cancelled meanwhile would only be
+    // ended as cancelled when it was next claimed; ended here instead.
+    const batch = entry.job.batchId === undefined ? undefined : this.batches.get(entry.job.batchId);
+    const cancelled =
+      failure.cancelled === true || (failure.retryInMs !== null && batch?.cancelledAt != null);
+
+    if (failure.retryInMs === null || cancelled) {
       this.entries.delete(job.id);
+      this.count(entry, cancelled ? "cancelled" : "failed");
       this.schedule();
       return;
     }
@@ -116,6 +201,7 @@ export class MemoryQueueDriver implements QueueDriver {
     entry.leased = false;
     entry.until = Date.now() + Math.max(0, failure.retryInMs);
     entry.seq = this.seq++;
+    entry.progress = 0;
     this.changed();
   }
 
@@ -137,6 +223,48 @@ export class MemoryQueueDriver implements QueueDriver {
       if (entry) entry.until = until;
     }
     this.schedule();
+  }
+
+  /** Counts a job's end against its batch, if it has one. */
+  private count(entry: Entry, outcome: BatchOutcome) {
+    const batchId = entry.job.batchId;
+    if (batchId === undefined) return;
+    const prev = this.batches.get(batchId);
+    if (!prev) return;
+    const now = Date.now();
+    let next = countOutcome(prev, outcome, entry.job.id);
+    if (cancelsBatch(prev, next)) {
+      next = markCancelled(next, now, this.cancelWaiting(batchId));
+    }
+    this.save(prev, next, now);
+    this.changed();
+  }
+
+  /** Stores the batch's new state and enqueues the callbacks it made due. */
+  private save(prev: BatchRecord, next: BatchRecord, now: number) {
+    const { record, calls } = settle(prev, next, now);
+    this.batches.set(record.id, record);
+    for (const call of calls) this.add(call);
+  }
+
+  /** Drops the batch's waiting jobs, and says how many there were. */
+  private cancelWaiting(batchId: string): number {
+    let count = 0;
+    for (const [id, entry] of this.entries) {
+      if (entry.job.batchId === batchId && !entry.leased) {
+        this.entries.delete(id);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private forgetFinishedBatches(now: number) {
+    for (const [id, record] of this.batches) {
+      if (record.finishedAt !== null && now - record.finishedAt > FINISHED_BATCH_TTL) {
+        this.batches.delete(id);
+      }
+    }
   }
 
   subscribe(wake: () => void): () => void {

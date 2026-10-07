@@ -267,14 +267,17 @@ model GemiJob {
   lastError      String? @map("last_error")
   createdAt      BigInt  @map("created_at")
   updatedAt      BigInt  @map("updated_at")
+  batchId        String? @map("batch_id") // for batches
+  progress       Float?                   // for batches
 
   @@index([status, availableAt])
   @@index([status, leaseExpiresAt])
+  @@index([batchId])
   @@map("gemi_jobs")
 }
 ```
 
-On MySQL, add `@db.LongText` to `payload` and `lastError`. Prisma's default there is `VARCHAR(191)`, which is too short for a job's arguments or a stack trace. Without Prisma, `await driver.createTable()` creates the same table and indexes if they do not exist.
+On MySQL, add `@db.LongText` to `payload` and `lastError`. Prisma's default there is `VARCHAR(191)`, which is too short for a job's arguments or a stack trace. Without Prisma, `await driver.createTable()` creates the same table and indexes if they do not exist. [Batches](#batches) also need the `GemiJobBatch` model.
 
 For another connection or table name, build the driver yourself:
 
@@ -465,13 +468,139 @@ Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `Database
 
 The queue slice's `locks` picks another store: `"auto"` (the default: the driver's own), `"memory"`, `"database"` (the default connection), a `LockStore`, or `(app) => LockStore`.
 
+## Batches
+
+`Job.dispatchBatch` queues one job per argument tuple as a **batch**, and runs follow-up jobs once the batch is done. Use it for a fan-out whose end matters, for example building every page of an import and then reporting which ones failed.
+
+```typescript
+import { Job } from "gemi/services";
+import { BuildPageJob } from "@/app/jobs/BuildPageJob";
+import { ImportFinishedJob } from "@/app/jobs/ImportFinishedJob";
+import { ImportFailedJob } from "@/app/jobs/ImportFailedJob";
+import { ImportCleanupJob } from "@/app/jobs/ImportCleanupJob";
+
+const batch = await BuildPageJob.dispatchBatch(
+  pages.map((page) => [page.id, importId] as const), // one `run` tuple per job
+  {
+    name: `import:${importId}`,
+    allowFailures: true,                       // default false: the first failure cancels the rest
+    then: ImportFinishedJob.with(importId),    // every job ended, and none failed (or allowFailures)
+    catch: ImportFailedJob.with(importId),     // the first failed job, or a cancel
+    finally: ImportCleanupJob.with(importId),  // every job ended, whatever happened
+  },
+);
+// batch: { id, total }
+
+const status = await Job.findBatch(batch.id); // BuildPageJob.findBatch works too
+await Job.cancelBatch(batch.id);
+```
+
+Each tuple is typed against `run`, like `dispatch`'s arguments. The jobs, the batch and its callbacks are recorded in one atomic write: all of them or none. Inside a transaction a batch behaves like a [single dispatch](#dispatching-inside-a-transaction): it is recorded when the transaction commits and dropped if it rolls back.
+
+### Callbacks are jobs
+
+`then`, `catch` and `finally` are jobs, not functions. `SomeJob.with(...args)` names a job and its arguments without dispatching it. When a callback becomes due, it is enqueued with the batch's status appended as its last argument, so it is retried and dead-lettered like any other job and survives a deploy:
+
+```typescript
+import { type BatchStatus, Job } from "gemi/services";
+
+export class ImportFinishedJob extends Job {
+  static name = "ImportFinishedJob";
+
+  async run(importId: string, batch: BatchStatus) {
+    await markImportDone(importId, { failedJobs: batch.failedJobIds });
+  }
+}
+```
+
+`with` leaves a trailing `BatchStatus` parameter out of the arguments it asks for, because the batch adds it.
+
+Each callback is enqueued **exactly once**, by whichever process ends the job that makes it due. The database driver ends the job, updates the batch's counters and enqueues the callbacks in one transaction, so a crash in between leaves none of it done, and a slow worker whose lease was taken over cannot count its job twice. `then` and `finally` are enqueued together, `then` first, so they may run at the same time on different workers. Don't rely on `finally` running after `then` has finished.
+
+| Callback | Enqueued when |
+| --- | --- |
+| `then` | Every job has ended, the batch was not cancelled, and no job failed (or `allowFailures` is set). |
+| `catch` | The first job is dead-lettered, or the batch is cancelled, whichever comes first. Once. |
+| `finally` | Every job has ended, whatever happened. |
+
+A job's own `onSuccess`, `onFail` and `onDeadletter` still run as usual. A batch callback is an extra on top of them.
+
+### Failures and `allowFailures`
+
+A job of a batch fails the way any job does: it is retried up to `maxAttempts` and then dead-lettered. Only the dead-letter counts against the batch. Without `allowFailures`, the first dead-lettered job **cancels the batch**: its waiting jobs never run, `catch` and then `finally` are enqueued, and `then` is not. With `allowFailures: true` the rest keep running, `catch` still runs at the first failure, and `then` runs at the end with the failed jobs listed in `failedJobIds`.
+
+### Progress — `this.progress()`
+
+Inside `run`, `this.progress(fraction)` reports how far the job is, from 0 to 1. The batch's `progress` is the ended jobs plus what the running jobs reported, divided by `total`. A retry starts its job from 0 again. Each call is one write, so report at steps rather than for every item of a loop. Outside a batch, `this.progress()` does nothing.
+
+```typescript
+async run(pageId: string, importId: string) {
+  const page = await fetchPage(pageId);
+  await this.progress(0.5);
+  if (await this.batch?.cancelled()) return; // stop early once the batch is cancelled
+  await renderPage(page);
+}
+```
+
+### Status — `Job.findBatch(id)`
+
+`Job.findBatch(id)` resolves to the batch's status, or `null` for an id the queue has no batch under:
+
+| Field | Description |
+| --- | --- |
+| `id`, `name` | The batch's id and the `name` it was dispatched with (or `null`). |
+| `total` | How many jobs it was dispatched with. |
+| `pending` | Jobs that have not ended: waiting, running, or waiting out a retry. |
+| `succeeded`, `failed`, `cancelled` | How the ended ones ended. `cancelled` jobs never ran to the end because the batch was cancelled. |
+| `failedJobIds` | The ids of the dead-lettered jobs, in the order they failed. |
+| `progress` | 0 to 1; see above. |
+| `cancelledAt`, `finishedAt`, `createdAt` | Epoch milliseconds, or `null`. `finishedAt` is set when the last job ends. |
+
+### Cancelling — `Job.cancelBatch(id)`
+
+`Job.cancelBatch(id)` resolves to `true` if it cancelled a running batch, and to `false` for one that is unknown, finished or already cancelled. The batch's waiting jobs are dead-lettered unrun (with `last_error` saying why) and counted as `cancelled`. A job that is already running is not interrupted: it finishes unless it checks `this.batch?.cancelled()` and returns early. A cancelled job's `onDeadletter` does not run. `catch` is enqueued at once, unless a failure already enqueued it, and `finally` once the running jobs have ended.
+
+### Limits
+
+- **Worker jobs** (`worker = true`) and **unique jobs** (`uniqueId`) cannot be dispatched in a batch, and `dispatchBatch` throws for them. A worker thread has no way to report progress, and a deduplicated job would leave the batch waiting for a job that is not part of it.
+- **One job class per batch.** For several classes, dispatch several batches.
+- **No adding jobs** to a batch that has been dispatched.
+- **A dead-lettered job of a batch cannot be retried** with `retryDead`, which resolves `false` for it, because the batch has already counted it.
+- **Drivers.** The memory driver keeps batches in memory, and finished ones for a day. The database driver keeps them in a `gemi_job_batches` table; see below. A driver of your own supports batches by implementing `enqueueBatch`, `findBatch`, `cancelBatch` and `reportProgress` (see `QueueDriver`), and `dispatchBatch` throws on one that does not.
+
+### The batches table
+
+With `driver: "database"`, batches need the `GemiJobBatch` model and the `batchId` and `progress` fields of the [`GemiJob` model](#the-database-driver). Add them and run `prisma migrate dev`:
+
+```prisma
+model GemiJobBatch {
+  id           String  @id
+  name         String?
+  total        Int
+  pending      Int
+  succeeded    Int     @default(0)
+  failed       Int     @default(0)
+  cancelled    Int     @default(0)
+  failedJobIds String  @map("failed_job_ids")
+  options      String
+  cancelledAt  BigInt? @map("cancelled_at")
+  finishedAt   BigInt? @map("finished_at")
+  createdAt    BigInt  @map("created_at")
+  updatedAt    BigInt  @map("updated_at")
+
+  @@map("gemi_job_batches")
+}
+```
+
+On MySQL, add `@db.LongText` to `failedJobIds` and `options`. Without Prisma, `await driver.createTable()` creates the table and adds the two columns to an existing `gemi_jobs`. Until then, everything except batches works as before, and `dispatchBatch` rejects with an error that names what is missing. A driver on another jobs table keeps its batches in `<table>_batches`, or in the table named by the `batchTable` option. Finished batches are kept until `driver.pruneBatches(olderThanMs)` deletes them, for example from a cron job.
+
 ## When to use a job
 
 Reach for a job when work is:
 
 - **Slow** — external API calls, AI generation, image/video processing.
 - **Non-blocking** — the user doesn't need the result in the HTTP response.
-- **Batchable or retryable** — sending many emails, syncing records, where automatic retries help.
+- **Batchable or retryable** — sending many emails, syncing records, where automatic retries help. For a fan-out whose end matters, see [Batches](#batches).
 
 For work that must happen on a **schedule** (nightly reports, hourly cleanups) rather than in response to a request, use a cron job instead — see [Cron](./cron.md).
 

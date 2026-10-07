@@ -3,7 +3,9 @@ import { describe, expect, test } from "vitest";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import { queueDriverContract } from "./queueDriverContract";
 
-queueDriverContract("MemoryQueueDriver", () => new MemoryQueueDriver());
+queueDriverContract("MemoryQueueDriver", () => new MemoryQueueDriver(), undefined, {
+  batches: true,
+});
 
 describe("MemoryQueueDriver", () => {
   test("counts what is waiting and what is leased", async () => {

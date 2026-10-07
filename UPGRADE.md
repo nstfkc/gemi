@@ -28,6 +28,32 @@ What to do: nothing. To replace hand-written `@font-face` rules and preloads in 
 
 What to do: nothing. To replace a hand-written sitemap or robots.txt, return these from a `this.file(...)` view route marked `no-locale`, and delete any `public/sitemap.xml` or `public/robots.txt`, which would be served first.
 
+## Queue: job batches with `Job.dispatchBatch` (#846)
+
+**New, with a schema change for the database driver.** `Job.dispatchBatch(tuples, { name, allowFailures, then, catch, finally })` queues one job per `run` tuple as a batch, in one atomic write, and resolves to `{ id, total }`. Callbacks are jobs, built with `SomeJob.with(...args)`. They are enqueued exactly once (the counter update, the job's end and the callback's enqueue share one transaction) and get the batch's status as their last argument. Inside a job, `this.progress(0..1)` reports progress and `this.batch?.cancelled()` checks for a cancel. `Job.findBatch(id)` returns the status, and `Job.cancelBatch(id)` cancels a running batch. Without `allowFailures`, the first dead-lettered job cancels the batch. See [Batches](docs/jobs-and-queues.md#batches).
+
+- New from `gemi/services`: the types `BatchStatus`, `BatchCallbacks`, `JobCall`, `JobBatch`, `JobCallArgs`, `JobBatchOptions`, `DispatchedBatch` and `EnqueueBatch`.
+- `Job` gains a `batch` property and a `progress()` method. A job class that already declares either one under that name must rename it.
+- `QueueDriver` gains the optional `enqueueBatch`, `findBatch`, `cancelBatch` and `reportProgress` methods, `ClaimedJob.batchId` and `JobFailure.cancelled`. A custom driver without them keeps working, and `dispatchBatch` throws on it.
+- `DatabaseQueueDriver`: new `batchTable` option (default `gemi_job_batches`), `pruneBatches(olderThanMs)`, and `createTable()` now also creates the batches table and adds the new columns to an existing jobs table. `retryDead(id)` resolves `false` for a job of a batch. A claim now reads the whole row (`*`), so it works on tables both with and without the new columns.
+
+What to do: nothing, unless you use batches. Existing jobs run unchanged on the old schema. To use batches with `driver: "database"`, add `batchId String? @map("batch_id")`, `progress Float?` and `@@index([batchId])` to the `GemiJob` model, add the `GemiJobBatch` model from the docs (on MySQL, `@db.LongText` on `failedJobIds` and `options`), and run `prisma migrate dev`. Without Prisma, call `driver.createTable()`, or run the equivalent SQL:
+
+```sql
+-- Postgres
+ALTER TABLE "gemi_jobs" ADD COLUMN "batch_id" TEXT, ADD COLUMN "progress" DOUBLE PRECISION;
+CREATE INDEX "gemi_jobs_batch_id_idx" ON "gemi_jobs"("batch_id");
+-- SQLite
+ALTER TABLE "gemi_jobs" ADD COLUMN "batch_id" TEXT;
+ALTER TABLE "gemi_jobs" ADD COLUMN "progress" REAL;
+CREATE INDEX "gemi_jobs_batch_id_idx" ON "gemi_jobs"("batch_id");
+-- MySQL / MariaDB
+ALTER TABLE `gemi_jobs` ADD COLUMN `batch_id` VARCHAR(191) NULL, ADD COLUMN `progress` DOUBLE NULL,
+  ADD INDEX `gemi_jobs_batch_id_idx`(`batch_id`);
+```
+
+plus the `gemi_job_batches` table, which `prisma migrate dev` generates from the model and `createTable()` creates (`IF NOT EXISTS`, so it is safe to call on every boot). Deploy the migration before the code that calls `dispatchBatch`.
+
 ## Storage: `putFromUrl(url, options)` copies a remote file into storage (#848)
 
 **New.** `Storage.putFromUrl(url, { name | directory, bucket, maxSize, timeout, contentTypes, signal, fetch })` downloads through `safeFetch` (SSRF guard, redirects, size cap, timeout), sniffs the content type from the file's first bytes instead of trusting `Content-Type`, refuses a type outside `contentTypes` before anything is stored, and resolves with `{ name, contentType, size, url }`. A download that fails or grows past `maxSize` halfway stores nothing. A wildcard in `contentTypes` (`"image/*"`) never covers SVG, HTML or XML; list them by name. See [File Storage](docs/file-storage.md#putfromurlurl-options).

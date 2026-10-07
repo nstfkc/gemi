@@ -41,6 +41,7 @@
  * every other one.
  */
 import type { LockStore } from "../lock/LockStore";
+import type { BatchCallbacks, BatchStatus } from "./batch";
 
 export interface QueueDriver {
   /**
@@ -87,7 +88,14 @@ export interface QueueDriver {
    */
   claim(limit: number, options: ClaimOptions): Promise<ClaimedJob[]>;
 
-  /** Ends a claim successfully. The job is never claimed again. */
+  /**
+   * Ends a claim successfully. The job is never claimed again.
+   *
+   * For a job of a batch (`batchId`), the batch's counters are updated in the
+   * same atomic step as the job is ended, and any batch callback that became
+   * due is enqueued in it too; see `enqueueBatch`. A stale claim's report
+   * changes neither.
+   */
   complete(job: ClaimedJob): Promise<void>;
 
   /**
@@ -95,6 +103,11 @@ export interface QueueDriver {
    * again after that long, keeping its attempt count. With `retryInMs: null`
    * it is dead-lettered: terminal, never claimed again. What a driver keeps of
    * a dead-lettered job is its own business; the memory driver keeps nothing.
+   *
+   * For a job of a batch, a dead-letter is counted as the batch's `complete`
+   * counts a success, and a retry resets the job's reported progress to 0. A
+   * retry of a job whose batch has been cancelled is a dead-letter instead,
+   * counted as `cancelled`, as is a failure with `cancelled: true`.
    */
   fail(job: ClaimedJob, failure: JobFailure): Promise<void>;
 
@@ -146,7 +159,63 @@ export interface QueueDriver {
    * once per manager.
    */
   lockStore?(): LockStore;
+
+  /**
+   * Records a batch and all of its jobs in one atomic step: either every job
+   * and the batch are recorded, or none is. Optional; a driver without it
+   * cannot run `Job.dispatchBatch`.
+   *
+   * The driver then keeps the batch's counters (see `batch.ts`): every
+   * `complete` or dead-lettering `fail` of one of its jobs counts it, in the
+   * same atomic step that ends the job, and the step that counts the last one
+   * finishes the batch and enqueues its due callbacks. A callback's arguments
+   * are its own followed by the batch's status, and it is enqueued in that
+   * same step, so it is enqueued exactly once, by whichever process ended the
+   * job that made it due.
+   *
+   * Like `enqueue`, it writes on the caller's ORM transaction when
+   * `joinsTransaction` says so. A batch of no jobs is finished at once.
+   */
+  enqueueBatch?(batch: EnqueueBatch): Promise<void>;
+
+  /**
+   * The batch's status, or `null` for an id the driver has no batch under.
+   * `progress: false` skips summing what the running jobs reported, for a
+   * caller that only wants the counters and `cancelledAt`; `progress` is then
+   * the ended jobs over `total`.
+   */
+  findBatch?(id: string, options?: { progress?: boolean }): Promise<BatchStatus | null>;
+
+  /**
+   * Cancels a batch that is still running, and resolves to whether it did:
+   * `false` for a batch that is unknown, finished or already cancelled. Its
+   * waiting jobs are ended as `cancelled` and never claimed; running ones
+   * finish, or notice through `this.batch.cancelled()`. `catch` becomes due
+   * unless a failure already made it due, and `finally` once nothing is
+   * pending. `then` never runs for a cancelled batch.
+   */
+  cancelBatch?(id: string): Promise<boolean>;
+
+  /**
+   * Records how far a claimed job of a batch is, from 0 to 1, for the batch's
+   * `progress`. A stale claim's report is ignored.
+   */
+  reportProgress?(job: ClaimedJob, progress: number): Promise<void>;
 }
+
+export type EnqueueBatch = {
+  /** The id to record the batch under. Chosen by the manager. */
+  id: string;
+  /** The `name` option, for finding it in storage. */
+  name: string | null;
+  /** The registered name every job of the batch runs as. */
+  job: string;
+  /** One JSON array of `run` arguments per job. */
+  args: string[];
+  /** Whether a failed job leaves the rest running; see `batch.ts`. */
+  allowFailures: boolean;
+  callbacks: BatchCallbacks;
+};
 
 export type EnqueueJob = {
   /** The job's registered name — its class's `static name`. */
@@ -204,6 +273,8 @@ export type ClaimedJob = {
   attempt: number;
   /** When `enqueue` recorded it, in epoch milliseconds. */
   createdAt: number;
+  /** The batch the job belongs to. Absent for a job dispatched on its own. */
+  batchId?: string;
 };
 
 export type JobRelease = {
@@ -216,4 +287,9 @@ export type JobFailure = {
   error: string;
   /** Milliseconds until the retry is claimable, or `null` to dead-letter. */
   retryInMs: number | null;
+  /**
+   * The job is dead-lettered because its batch was cancelled, not because it
+   * failed: the batch counts it as `cancelled`. Only with `retryInMs: null`.
+   */
+  cancelled?: boolean;
 };

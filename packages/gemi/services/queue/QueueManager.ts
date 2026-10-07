@@ -14,7 +14,8 @@ import { DatabaseQueueDriver } from "./DatabaseQueueDriver";
 import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
-import type { ClaimOptions, ClaimedJob, QueueDriver } from "./QueueDriver";
+import type { ClaimOptions, ClaimedJob, EnqueueBatch, QueueDriver } from "./QueueDriver";
+import type { BatchCallbacks, BatchStatus, JobCall } from "./batch";
 import { withDefaults } from "../../support/withDefaults";
 
 /**
@@ -127,6 +128,34 @@ declare global {
    */
   var __gemiDevQueue: { stop(): Promise<unknown> } | undefined;
 }
+
+/** What `Job.dispatchBatch` resolves to. */
+export type DispatchedBatch = {
+  /** The batch's id, for `Job.findBatch` and `Job.cancelBatch`. */
+  id: string;
+  /** How many jobs it was dispatched with. */
+  total: number;
+};
+
+/** The options of `Job.dispatchBatch`. */
+export type JobBatchOptions = {
+  /** A label kept with the batch, for finding it in storage and in its status. */
+  name?: string;
+  /**
+   * Whether a dead-lettered job leaves the rest running. Default `false`: the
+   * first one cancels the batch.
+   */
+  allowFailures?: boolean;
+  /**
+   * Enqueued once every job has ended, when the batch was not cancelled and
+   * no job failed (or `allowFailures` is set). Build it with `Job.with(...)`.
+   */
+  then?: JobCall;
+  /** Enqueued at the first failed job, or at `cancelBatch`, whichever is first. */
+  catch?: JobCall;
+  /** Enqueued once every job has ended, whatever happened. */
+  finally?: JobCall;
+};
 
 /** What `drain` could not wait out. */
 export type DrainResult = {
@@ -377,6 +406,127 @@ export class QueueManager {
       reportFailure: options.reportFailure,
       joins,
     });
+  }
+
+  /**
+   * Queues a batch: every job, the batch and its callbacks in one atomic
+   * write. See `Job.dispatchBatch`.
+   *
+   * Inside an ORM transaction the batch belongs to it, exactly as a single
+   * dispatch does in `push`: written on it by a driver that joins, otherwise
+   * held and recorded at the commit, resolving at once to the id it will have.
+   */
+  pushBatch(
+    job: new () => Job,
+    args: string[],
+    options: JobBatchOptions = {},
+  ): Promise<DispatchedBatch> {
+    if (!this.driver.enqueueBatch) {
+      throw new Error(
+        `This queue's driver does not support batches. The memory and ` +
+          `database drivers do.`,
+      );
+    }
+    const instance = new job();
+    if (instance.worker) {
+      throw new Error(
+        `${job.name} is a worker job, and a worker job cannot be dispatched ` +
+          `in a batch: its thread has no way to report progress or reach the ` +
+          `batch.`,
+      );
+    }
+    if (job.prototype.uniqueId !== Job.prototype.uniqueId) {
+      throw new Error(
+        `${job.name} is unique (it defines uniqueId), and a unique job cannot ` +
+          `be dispatched in a batch: a duplicate would resolve to a job outside ` +
+          `the batch, and the batch would wait for it forever.`,
+      );
+    }
+
+    const callbacks: BatchCallbacks = {};
+    for (const key of ["then", "catch", "finally"] as const) {
+      const call = options[key];
+      if (call === undefined) continue;
+      if (typeof call?.name !== "string" || !Array.isArray(call.args)) {
+        throw new Error(
+          `The batch's ${key} callback is not a job call. Build it with ` +
+            `SomeJob.with(...args).`,
+        );
+      }
+      callbacks[key] = { name: call.name, args: call.args };
+    }
+
+    const batch: EnqueueBatch = {
+      id: Bun.randomUUIDv7(),
+      name: options.name ?? null,
+      job: job.name,
+      args,
+      allowFailures: options.allowFailures === true,
+      callbacks,
+    };
+    const dispatched: DispatchedBatch = { id: batch.id, total: args.length };
+
+    const joins = this.driver.joinsTransaction?.() === true;
+    if (!joins) {
+      const held = deferUntilCommit(() =>
+        this.recordBatch(batch, { committed: true }).then(
+          () => {},
+          () => {},
+        ),
+      );
+      if (held) return Promise.resolve(dispatched);
+    }
+    return this.recordBatch(batch, { joins }).then(() => dispatched);
+  }
+
+  /** `pushBatch`, once it is known that the batch is recorded now; see `record`. */
+  private recordBatch(
+    batch: EnqueueBatch,
+    options: { joins?: boolean; committed?: boolean },
+  ): Promise<void> {
+    const written = this.driver.enqueueBatch!(batch);
+    this.startIfIdle();
+    const wake = () => !this.driver.subscribe && this.state === "running" && this.wake();
+    const wakeAtCommit = options.joins === true && deferUntilCommit(wake);
+    written.then(
+      () => wakeAtCommit || wake(),
+      (error: unknown) => {
+        // Only a held batch is reported here: its caller's promise resolved
+        // inside the transaction, so it has nothing left to catch. Every
+        // other caller awaits the rejection, as it needs the batch's id.
+        if (!options.committed) return;
+        console.error(
+          `[gemi] The queue driver could not record a batch of ${batch.job}, ` +
+            `which was held until its transaction committed. The transaction ` +
+            `stays committed; the batch's jobs did not run and will not be ` +
+            `retried.`,
+          error,
+        );
+      },
+    );
+    return written;
+  }
+
+  /** The batch's status, or `null` for an unknown id. See `Job.findBatch`. */
+  async findBatch(id: string): Promise<BatchStatus | null> {
+    if (!this.driver.findBatch) {
+      throw new Error(`This queue's driver does not support batches.`);
+    }
+    return this.driver.findBatch(id);
+  }
+
+  /**
+   * Cancels a running batch, and resolves to whether it did. See
+   * `Job.cancelBatch`.
+   */
+  async cancelBatch(id: string): Promise<boolean> {
+    if (!this.driver.cancelBatch) {
+      throw new Error(`This queue's driver does not support batches.`);
+    }
+    const cancelled = await this.driver.cancelBatch(id);
+    // Cancelling can make `catch` and `finally` due.
+    if (cancelled) this.claimSoon();
+    return cancelled;
   }
 
   /**
@@ -1048,6 +1198,24 @@ export class QueueManager {
       return;
     }
 
+    // A job of a cancelled batch is ended unrun. Its batch dead-lettered it
+    // while it was waiting, unless it had been claimed already: its lease
+    // lapsed, say, or it was waiting out a retry's claim.
+    if (claimed.batchId !== undefined) {
+      const batch = await this.driver.findBatch?.(claimed.batchId, { progress: false });
+      if (batch?.cancelledAt != null) {
+        await this.driver.fail(claimed, {
+          error: `Its batch was cancelled before it ran.`,
+          retryInMs: null,
+          cancelled: true,
+        });
+        return;
+      }
+      const handle = this.batchHandle(claimed);
+      job.batch = handle.batch;
+      job.$progress = handle.progress;
+    }
+
     // Per-key limits (#661), before the job runs. A job over a limit goes
     // back without spending an attempt: it is waiting for capacity, not
     // failing.
@@ -1104,6 +1272,20 @@ export class QueueManager {
 
     await this.driver.complete(claimed);
     await this.releaseUnique(job, args, claimed);
+  }
+
+  /** What `this.batch` and `this.progress()` reach in a job of a batch. */
+  private batchHandle(claimed: ClaimedJob) {
+    const id = claimed.batchId!;
+    const driver = this.driver;
+    return {
+      batch: {
+        id,
+        cancelled: async () =>
+          (await driver.findBatch?.(id, { progress: false }))?.cancelledAt != null,
+      },
+      progress: (value: number) => driver.reportProgress?.(claimed, value) ?? Promise.resolve(),
+    };
   }
 
   /**
