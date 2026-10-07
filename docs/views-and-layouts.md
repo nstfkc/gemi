@@ -316,6 +316,15 @@ Meta.alternates([
 On a client-side navigation the `<html>` attributes and these links follow the
 new page.
 
+### Fonts
+
+`Meta.fonts` declares the response's `@font-face` rules and preloads, which
+`<Head />` renders. See [Fonts](./static-views-and-islands.md#fonts).
+
+```typescript
+Meta.fonts([{ family: "Acme Sans", src: "/fonts/acme.woff2", weight: "100 900", preload: true }]);
+```
+
 ## Breadcrumbs: `useBreadcrumbs`
 
 Every view/layout handler can return a `breadcrumb` string; gemi records it against

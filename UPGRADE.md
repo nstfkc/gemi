@@ -1,3 +1,13 @@
+# Unreleased
+
+## `Meta.fonts`: `@font-face` and font preloads per response (#849)
+
+**New.** `Meta.fonts([{ family, src, weight, style, stretch, display, unicodeRange, preload }])` declares the response's fonts from a handler, on static and hydrated views. `<Head />` renders an escaped `@font-face` rule for each and a `<link rel="preload" as="font" crossorigin>` (with the format's `type`) for each one marked `preload`; duplicates are collapsed. `display` defaults to `"swap"`. Calls add up across a layout's and a page's handlers. A descriptor that isn't a plain CSS value throws a `TypeError`. See [Fonts](docs/static-views-and-islands.md#fonts).
+
+- New from `gemi/client`: the types `MetaFont`, `FontSource` and `FontFormat`.
+
+What to do: nothing. To replace hand-written `@font-face` rules and preloads in a layout, declare the fonts with `Meta.fonts` from the handlers instead.
+
 # Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)
