@@ -138,6 +138,15 @@ const CANCELLED_ERROR = "Its batch was cancelled before it ran.";
  * `transaction` below for why SQLite is left out, and why a driver built from
  * a bare client never joins.
  *
+ * ### Batches
+ *
+ * A batch is a row of `batchTable`, and its jobs are rows of the jobs table
+ * with `batch_id` set. Ending a job of a batch, counting it and enqueueing any
+ * callback it makes due happen in one transaction that locks the batch row
+ * first; see the "Batches" section below. A table from before batches, without
+ * `batch_id` and `progress`, still runs every other job: the claim reads `*`,
+ * and only the batch methods need the new columns.
+ *
  * ### What it does not do
  *
  * It has no `subscribe`: another process's dispatch cannot wake this one, so

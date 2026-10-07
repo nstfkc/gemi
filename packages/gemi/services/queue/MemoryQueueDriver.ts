@@ -61,6 +61,10 @@ const FINISHED_BATCH_TTL = 24 * 60 * 60_000;
  * not be known by anyone, and the manager dead-letters it at once with a line
  * saying so; filtered out, it would wait here unseen until the process exited.
  *
+ * Batches are kept in a Map beside the jobs, and a finished one for a day.
+ * Everything a batch does happens synchronously inside the call that causes
+ * it, so the counters and the callbacks need no further care here.
+ *
  * One timer at most, for the next moment something becomes claimable, and it
  * is unref'd: a queue with nothing due does not hold the process open, and
  * neither does one waiting out a backoff — the same way the queue never has.
