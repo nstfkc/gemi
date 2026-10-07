@@ -1,3 +1,7 @@
+import { type MetaFont, type NormalizedFont, normalizeFonts } from "../client/fonts";
+
+export type { MetaFont };
+
 export type OpenGraphParams = {
   title: string;
   description?: string;
@@ -38,6 +42,7 @@ export class Metadata {
     htmlAttributes: null,
     canonical: null,
     alternates: null,
+    fonts: null,
   };
 
   /**
@@ -55,6 +60,7 @@ export class Metadata {
       htmlAttributes: this.content.htmlAttributes,
       canonical: this.content.canonical,
       alternates: this.content.alternates,
+      fonts: this.content.fonts,
     };
   }
 
@@ -75,6 +81,13 @@ export class Metadata {
   alternates(links: AlternateLink[]) {
     this.touched = true;
     this.content.alternates = links;
+  }
+
+  /** Added to what earlier calls declared, so a layout and its page can both declare fonts. */
+  fonts(fonts: MetaFont[]) {
+    const normalized: NormalizedFont[] = normalizeFonts(fonts);
+    this.touched = true;
+    this.content.fonts = [...(this.content.fonts ?? []), ...normalized];
   }
 
   title(title: string) {

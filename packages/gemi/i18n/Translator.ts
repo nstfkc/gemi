@@ -1,7 +1,7 @@
 import type { HttpRequest } from "../http/HttpRequest";
 import type { Dictionary } from "./Dictionary";
 import type { TranslationConfig } from "./config";
-import { resolveLocale } from "./resolveLocale";
+import { negotiateLocale, resolveLocale } from "./resolveLocale";
 import {
   createFormatter,
   isValidTimeZone,
@@ -124,14 +124,15 @@ export class Translator {
       return previousLocale;
     }
 
-    // Entries are in the browser's preference order; the first one the app can
-    // serve, even by language alone (`de-AT` → `de-DE`), wins.
-    const acceptLanguage = req.headers.get("accept-language") ?? "";
-    for (const entry of acceptLanguage.split(",")) {
-      const locale = resolve(entry);
-      if (locale) {
-        return locale;
-      }
+    // The best entry by `q` weight the app can serve, even by language alone
+    // (`de-AT` → `de-DE`), wins.
+    const acceptedLocale = negotiateLocale(
+      req.headers.get("accept-language"),
+      this.config.supportedLocales,
+      this.config.defaultLocale,
+    );
+    if (acceptedLocale) {
+      return acceptedLocale;
     }
 
     return fallbackLocale;
