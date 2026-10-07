@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.116.0 to 0.117.0
 
 ## i18n: `negotiateLocale` for a whole `Accept-Language` header, with `q` weights (#851)
 
