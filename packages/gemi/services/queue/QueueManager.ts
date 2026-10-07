@@ -17,6 +17,11 @@ import { MemoryQueueDriver } from "./MemoryQueueDriver";
 import type { ClaimOptions, ClaimedJob, EnqueueBatch, QueueDriver } from "./QueueDriver";
 import type { BatchCallbacks, BatchStatus, JobCall } from "./batch";
 import { withDefaults } from "../../support/withDefaults";
+import { backoffFor } from "./backoff";
+import type { WorkflowClass } from "./workflow/Workflow";
+import { WorkflowRuntime } from "./workflow/WorkflowRuntime";
+
+export { backoffFor };
 
 /**
  * The thread a `worker = true` job runs in.
@@ -204,6 +209,7 @@ export class QueueManager {
   /** Unknown names already reported as left for another replica; see `run`. */
   private readonly releasedNames = new Set<string>();
   private lockManager: LockManager | undefined;
+  private workflowRuntime: WorkflowRuntime | undefined;
 
   /**
    * `application` is entered around every job, so `app()` inside one resolves
@@ -219,6 +225,7 @@ export class QueueManager {
     this.application = options.application;
     this.driver = resolveDriver(this.config.driver, this.application);
     this.useJobs(this.config.jobs);
+    if (this.config.workflows.length > 0) this.useWorkflows(this.config.workflows);
   }
 
   /**
@@ -263,6 +270,49 @@ export class QueueManager {
     for (const job of jobs) {
       this.claim(job);
     }
+    this.registerTickJob();
+  }
+
+  /**
+   * Replaces the registered workflows, for the provider to hand over what it
+   * found under `app/workflows`. With at least one, the internal job their
+   * passes run in is registered too. See `Workflow`.
+   */
+  useWorkflows(workflows: WorkflowClass[]) {
+    this.config.workflows = workflows;
+    this.workflows.use(workflows);
+    this.registerTickJob();
+  }
+
+  /** The registered workflow classes, as handed over. */
+  get registeredWorkflows(): ReadonlyArray<WorkflowClass> {
+    return [...this.config.workflows];
+  }
+
+  /**
+   * Workflows (#846) over this queue's driver: what `Workflow.start`,
+   * `signal`, `find` and `cancel` call.
+   */
+  get workflows(): WorkflowRuntime {
+    this.workflowRuntime ??= new WorkflowRuntime(this);
+    return this.workflowRuntime;
+  }
+
+  /**
+   * The tick job, beside the app's own, once there is a workflow to tick.
+   * Not in `registeredJobs`, which reports what the app handed over.
+   */
+  private registerTickJob() {
+    if (!this.workflowRuntime || Object.keys(this.workflowRuntime.workflows).length === 0) return;
+    const tick = this.workflowRuntime.tickJob;
+    if (this.jobs[tick.name] && this.jobs[tick.name] !== tick) {
+      console.error(
+        `A queued job is named "${tick.name}", which the workflow runtime uses. ` +
+          `Workflows will not run until it is renamed.`,
+      );
+      return;
+    }
+    this.jobs[tick.name] = tick;
   }
 
   /**
@@ -421,6 +471,29 @@ export class QueueManager {
     args: string[],
     options: JobBatchOptions = {},
   ): Promise<DispatchedBatch> {
+    const batch = this.buildBatch(job, args, options);
+    const dispatched: DispatchedBatch = { id: batch.id, total: args.length };
+
+    const joins = this.driver.joinsTransaction?.() === true;
+    if (!joins) {
+      const held = deferUntilCommit(() =>
+        this.recordBatch(batch, { committed: true }).then(
+          () => {},
+          () => {},
+        ),
+      );
+      if (held) return Promise.resolve(dispatched);
+    }
+    return this.recordBatch(batch, { joins }).then(() => dispatched);
+  }
+
+  /**
+   * @internal The batch `pushBatch` records, checked: for `pushBatch` and for
+   * a workflow's `step.batch`, which records it in a write of its own. Throws
+   * on the caller's stack for a driver without batches, a worker job, a
+   * unique job and a callback that is not a job call.
+   */
+  buildBatch(job: new () => Job, args: string[], options: JobBatchOptions = {}): EnqueueBatch {
     if (!this.driver.enqueueBatch) {
       throw new Error(
         `This queue's driver does not support batches. The memory and ` +
@@ -456,7 +529,7 @@ export class QueueManager {
       callbacks[key] = { name: call.name, args: call.args };
     }
 
-    const batch: EnqueueBatch = {
+    return {
       id: Bun.randomUUIDv7(),
       name: options.name ?? null,
       job: job.name,
@@ -464,19 +537,6 @@ export class QueueManager {
       allowFailures: options.allowFailures === true,
       callbacks,
     };
-    const dispatched: DispatchedBatch = { id: batch.id, total: args.length };
-
-    const joins = this.driver.joinsTransaction?.() === true;
-    if (!joins) {
-      const held = deferUntilCommit(() =>
-        this.recordBatch(batch, { committed: true }).then(
-          () => {},
-          () => {},
-        ),
-      );
-      if (held) return Promise.resolve(dispatched);
-    }
-    return this.recordBatch(batch, { joins }).then(() => dispatched);
   }
 
   /** `pushBatch`, once it is known that the batch is recorded now; see `record`. */
@@ -792,7 +852,8 @@ export class QueueManager {
    * For a job the driver has just made claimable: start the loop, or wake a
    * running one that only polls, as `push` does for a dispatch.
    */
-  private claimSoon() {
+  /** @internal */
+  claimSoon() {
     this.startIfIdle();
     if (!this.driver.subscribe && this.state === "running") this.wake();
   }
@@ -1198,6 +1259,8 @@ export class QueueManager {
       return;
     }
 
+    job.$claimed = { ...claimed };
+
     // A job of a cancelled batch is ended unrun. Its batch dead-lettered it
     // while it was waiting, unless it had been claimed already: its lease
     // lapsed, say, or it was waiting out a retry's claim.
@@ -1409,17 +1472,6 @@ export function markQueueWorker(worker = true) {
 
 export function isQueueWorker(): boolean {
   return (globalThis as { [QUEUE_WORKER]?: boolean })[QUEUE_WORKER] === true;
-}
-
-/**
- * The delay before the retry that follows attempt `attempt`: the number
- * itself, or the array's entry for that retry with its last entry repeated.
- */
-export function backoffFor(backoff: number | number[], attempt: number) {
-  const delay = Array.isArray(backoff)
-    ? backoff[Math.min(attempt, backoff.length) - 1]
-    : backoff;
-  return Math.max(0, delay ?? 0);
 }
 
 function resolveDriver(

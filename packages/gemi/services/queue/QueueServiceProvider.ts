@@ -2,7 +2,7 @@ import { isMainThread } from "node:worker_threads";
 
 import type { Application } from "../../foundation/Application";
 import { ServiceProvider } from "../../support/ServiceProvider";
-import { discoverJobs } from "../discovery";
+import { discoverJobs, discoverWorkflows } from "../discovery";
 import { withDefaults } from "../../support/withDefaults";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { LockManager } from "../lock/LockManager";
@@ -64,10 +64,16 @@ export class QueueServiceProvider extends ServiceProvider {
    */
   async boot() {
     const slice = this.app.config.get<QueueConfig>("queue", {});
-    if (slice.jobs !== undefined) return;
-
-    const { jobsDir } = withDefaults(queueConfigDefaults(), slice);
-    this.app.make(QueueManager).useJobs(await discoverJobs(jobsDir));
+    const { jobsDir, workflowsDir } = withDefaults(queueConfigDefaults(), slice);
+    if (slice.jobs === undefined) {
+      this.app.make(QueueManager).useJobs(await discoverJobs(jobsDir));
+    }
+    // Workflows by the same rule, under `app/workflows`. An app with none
+    // has no such directory, and discovery says nothing about that.
+    if (slice.workflows === undefined) {
+      const workflows = await discoverWorkflows(workflowsDir);
+      if (workflows.length > 0) this.app.make(QueueManager).useWorkflows(workflows);
+    }
   }
 
   /**
