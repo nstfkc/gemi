@@ -1,4 +1,4 @@
-import type { AlternateLink, HtmlAttributes, OpenGraphParams } from "../http/Metadata";
+import type { AlternateLink, HtmlAttributes, MetaFont, OpenGraphParams } from "../http/Metadata";
 import { RequestContext } from "../http/requestContext";
 
 export class Meta {
@@ -27,5 +27,13 @@ export class Meta {
   /** `<link rel="alternate" hreflang>` for each language this page exists in, rendered by `<Head />`. */
   static alternates(links: AlternateLink[]) {
     RequestContext.getStore().metadata.alternates(links);
+  }
+  /**
+   * `@font-face` rules for this response, and a `<link rel="preload" as="font">`
+   * for each font marked `preload`; `<Head />` renders both. Calls add up.
+   * Throws a `TypeError` for a descriptor that isn't a valid CSS value.
+   */
+  static fonts(fonts: MetaFont[]) {
+    RequestContext.getStore().metadata.fonts(fonts);
   }
 }
