@@ -4,13 +4,14 @@ import type { Kernel } from "../kernel/Kernel";
 import { discoverCommands } from "../services/discovery";
 import { DiscoveryError } from "../support/discover";
 import { withDefaults } from "../support/withDefaults";
+import { frameworkCommands } from "./builtins";
 import { CommandFailed, type CommandClass } from "./Command";
 import { CommandRegistry } from "./CommandRegistry";
 import { commandConfigDefaults, type CommandConfig } from "./config";
 import { createContext, processWriters, type CommandWriters } from "./context";
 import { ConsoleError } from "./errors";
 import { parseArgv } from "./parse";
-import { renderList, renderUsage } from "./usage";
+import { renderBuiltins, renderList, renderUsage } from "./usage";
 
 export { ConsoleError };
 
@@ -90,12 +91,22 @@ export async function runConsole(params: RunConsoleParams): Promise<number> {
     const registry = new CommandRegistry(commands);
     const source = { declared, dir };
 
+    // gemi's own commands, after the app's: an app command of the same name
+    // wins, and the framework's are listed under a heading of their own so
+    // the app's listing reads exactly as it did.
+    const builtins = frameworkCommands.filter(
+      (candidate) => registry.get(candidate.commandName) === undefined,
+    );
+
     if (params.name === undefined) {
       out(renderList(registry.commands, source));
+      if (builtins.length > 0) out(`\n${renderBuiltins(builtins)}`);
       return 0;
     }
 
-    const command = registry.get(params.name);
+    const command =
+      registry.get(params.name) ??
+      builtins.find((candidate) => candidate.commandName === params.name);
     running = command;
 
     if (!command) {

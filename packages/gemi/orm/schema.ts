@@ -44,7 +44,26 @@
  * `prisma generate`" — and the allowlist is what makes the failure loud rather
  * than silent if one ever slips past it.
  */
-export const SCHEMA_ARTIFACT_VERSION = 2;
+export const SCHEMA_ARTIFACT_VERSION = 3;
+
+/**
+ * Every artifact version this runtime reads. **3** added
+ * `FieldSchema.encrypted`, and is the version emitted only for a schema that
+ * uses it: a runtime that predates encrypted columns would ignore the flag and
+ * write those columns in plaintext, which is exactly the silent skew this
+ * version check exists to make loud. A schema without encrypted columns is
+ * still emitted as **2** — it is the same artifact — so regenerating does not
+ * force every teammate and deploy onto the new runtime for nothing.
+ */
+export const READABLE_ARTIFACT_VERSIONS: readonly number[] = [2, 3];
+
+/** The version a generated artifact for these schemas is stamped with. */
+export function artifactVersionFor(schemas: readonly ModelSchema[]): number {
+  const encrypted = schemas.some((schema) =>
+    Object.values(schema.fields).some((field) => field.encrypted === true),
+  );
+  return encrypted ? 3 : 2;
+}
 
 /**
  * Prisma's scalar types, verbatim. Not SQL types — the mapping from these to a
@@ -156,6 +175,18 @@ export interface FieldSchema {
    */
   enum?: string;
   default?: DefaultSpec;
+  /**
+   * `/// @gemi.encrypted` on the field: stored as an encrypted envelope and
+   * decrypted on every read (`orm/encryption.ts`). Only on a non-list `String`
+   * that is not a key, has no default and is not a relation's foreign key —
+   * the generator refuses the rest.
+   *
+   * Absent rather than `false`, so an artifact without encrypted columns is
+   * byte-identical to one generated before this existed. An artifact *with*
+   * one is emitted as version 3, which a runtime that predates this refuses —
+   * see `SCHEMA_ARTIFACT_VERSION`.
+   */
+  encrypted?: true;
 }
 
 export interface RelationSchema {
@@ -218,7 +249,8 @@ export class StaleSchemaArtifactError extends Error {
   constructor(found: number) {
     super(
       `The generated model artifact is version ${found}, but this version of ` +
-        `gemi reads version ${SCHEMA_ARTIFACT_VERSION}. Re-run \`prisma generate\` ` +
+        `gemi reads version ${READABLE_ARTIFACT_VERSIONS.join(" or ")}. Re-run ` +
+        `\`prisma generate\` ` +
         `to refresh app/models/generated.`,
     );
     this.name = "StaleSchemaArtifactError";
@@ -229,7 +261,7 @@ export class StaleSchemaArtifactError extends Error {
  * Called by the generated `index.ts` with its own artifact version literal.
  */
 export function assertSchemaArtifactVersion(version: number): void {
-  if (version !== SCHEMA_ARTIFACT_VERSION) {
+  if (!READABLE_ARTIFACT_VERSIONS.includes(version)) {
     throw new StaleSchemaArtifactError(version);
   }
 }

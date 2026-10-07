@@ -289,6 +289,16 @@ export default class extends Kernel {
 
 > The slice is called `command`, not `console`, for a small and annoying reason: a file named `app/config/console.ts` arrives in your kernel as `import console from "../config/console"`, which shadows the global `console` for the rest of that module.
 
+### Commands gemi provides
+
+`gemi run` also reaches a few commands that ship with gemi, listed under **Provided by gemi** after your own:
+
+| Command | What it does |
+| --- | --- |
+| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
+
+A command of your own with the same name takes its place, and the built-in one is no longer listed.
+
 ### Asking what an application has
 
 `discoverCommands()` walks `app/commands` (or a directory you name) and returns the classes it finds, without an application around it:

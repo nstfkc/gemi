@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import {
+  artifactVersionFor,
   assertSchemaArtifactVersion,
+  READABLE_ARTIFACT_VERSIONS,
   SCHEMA_ARTIFACT_VERSION,
   StaleSchemaArtifactError,
 } from "./schema";
@@ -31,13 +33,30 @@ describe("the generated artifact's version", () => {
   });
 
   /**
+   * Version 3 only added `FieldSchema.encrypted`, and a schema without an
+   * encrypted column is still emitted as 2 — it is the same artifact. So 2
+   * stays readable, and upgrading gemi does not force a regenerate.
+   */
+  test("version 2, an artifact without encrypted columns, is still accepted", () => {
+    expect(READABLE_ARTIFACT_VERSIONS).toEqual([2, 3]);
+    expect(() => assertSchemaArtifactVersion(2)).not.toThrow();
+  });
+
+  test("an artifact is stamped 3 only when it has an encrypted column", () => {
+    const plain = { name: "A", table: "A", fields: { id: { name: "id", column: "id", type: "Int" as const, nullable: false, isId: true, isUpdatedAt: false } }, primaryKey: ["id"], uniques: [], relations: {} };
+    const secret = { ...plain, name: "B", table: "B", fields: { ...plain.fields, token: { name: "token", column: "token", type: "String" as const, nullable: false, isId: false, isUpdatedAt: false, encrypted: true as const } } };
+    expect(artifactVersionFor([plain])).toBe(2);
+    expect(artifactVersionFor([plain, secret])).toBe(3);
+  });
+
+  /**
    * Both directions. An artifact from a *newer* gemi is as much a mismatch as
    * one from an older gemi, and the check is `!==` rather than `<` precisely so
    * that downgrading is caught too — a comparison that only looked for "older"
    * would pass an artifact this version cannot read.
    */
   test.each([
-    ["older", SCHEMA_ARTIFACT_VERSION - 1],
+    ["older", 1],
     ["newer", SCHEMA_ARTIFACT_VERSION + 1],
     ["much older", 0],
   ])("an artifact from a %s gemi is refused", (_label, version) => {
@@ -61,7 +80,7 @@ describe("the generated artifact's version", () => {
     expect(error!.name).toBe("StaleSchemaArtifactError");
     // What was found, what is wanted, and the fix.
     expect(error!.message).toContain("version 7");
-    expect(error!.message).toContain(`version ${SCHEMA_ARTIFACT_VERSION}`);
+    expect(error!.message).toContain("version 2 or 3");
     expect(error!.message).toContain("prisma generate");
     expect(error!.message).toContain("app/models/generated");
   });
@@ -83,7 +102,7 @@ describe("the generated artifact's version", () => {
     const declared = generated.match(/export const ARTIFACT_VERSION = (\d+)/);
     expect(declared, "the artifact no longer declares a version").not.toBeNull();
 
-    expect(Number(declared![1])).toBe(SCHEMA_ARTIFACT_VERSION);
+    expect(READABLE_ARTIFACT_VERSIONS).toContain(Number(declared![1]));
     expect(() => assertSchemaArtifactVersion(Number(declared![1]))).not.toThrow();
   });
 });

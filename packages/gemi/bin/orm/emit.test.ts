@@ -837,10 +837,22 @@ describe("emitArtifacts()", () => {
     expect(Object.keys(files)).toEqual(["schema.ts", "models.ts", "index.ts"]);
   });
 
+  // 2 for a schema without encrypted columns — the artifact did not change
+  // shape — and 3 for one with them, which an older runtime must refuse
+  // rather than write those columns in plaintext. See `SCHEMA_ARTIFACT_VERSION`.
   test("stamps the artifact version so the runtime can refuse a stale one", () => {
-    expect(files["schema.ts"]).toContain(
-      `export const ARTIFACT_VERSION = ${SCHEMA_ARTIFACT_VERSION};`,
-    );
+    expect(files["schema.ts"]).toContain(`export const ARTIFACT_VERSION = 2;`);
+    expect(
+      emitArtifacts([
+        model({
+          name: "Secret",
+          fields: [
+            field({ name: "id", isId: true }),
+            field({ name: "token", type: "String", documentation: "@gemi.encrypted" }),
+          ],
+        }),
+      ])["schema.ts"],
+    ).toContain(`export const ARTIFACT_VERSION = ${SCHEMA_ARTIFACT_VERSION};`);
     expect(files["index.ts"]).toContain(
       "assertSchemaArtifactVersion(ARTIFACT_VERSION)",
     );
@@ -1084,5 +1096,97 @@ describe("emitArtifacts()", () => {
       /static findMany<T extends FindManyArgs<UserTypes>>\(/,
     );
     expect(models).not.toContain("FindManyArgs<UserTypes> & {");
+  });
+});
+
+/**
+ * `/// @gemi.encrypted` (#844). The flag is recorded only on the field that
+ * carries it, so a schema without one generates the artifact it always did,
+ * and every column the ORM could never serve encrypted is refused here.
+ */
+describe("encrypted columns", () => {
+  const secret = (extra: Partial<DMMF.Field> = {}, modelExtra: Partial<DMMF.Model> = {}) =>
+    model({
+      name: "Secret",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({
+          name: "token",
+          type: "String",
+          documentation: "The provider's token.\n@gemi.encrypted",
+          ...extra,
+        }),
+        field({ name: "label", type: "String", documentation: "Not @gemi.encryptedish" }),
+      ],
+      ...modelExtra,
+    });
+
+  test("records encrypted: true on the annotated field only", () => {
+    const [schema] = buildModelSchemas([secret()]);
+    expect(schema.fields.token.encrypted).toBe(true);
+    expect(schema.fields.label).not.toHaveProperty("encrypted");
+    expect(schema.fields.id).not.toHaveProperty("encrypted");
+  });
+
+  test("a nullable String can be encrypted", () => {
+    const [schema] = buildModelSchemas([secret({ isRequired: false })]);
+    expect(schema.fields.token).toMatchObject({ nullable: true, encrypted: true });
+  });
+
+  test("a schema without encrypted columns emits no trace of the flag", () => {
+    expect(emitArtifacts([USER, POST])["schema.ts"]).not.toContain("encrypted");
+  });
+
+  test.each([
+    ["a non-String column", { type: "Int" }, /only String/],
+    ["a list", { isList: true }, /list/],
+    ["an @id", { isId: true }, /@id/],
+    ["an @unique", { isUnique: true }, /@unique/],
+    ["a column with a @default", { hasDefaultValue: true, default: "x" }, /@default/],
+  ] as const)("refuses %s", (_label, extra, message) => {
+    expect(() => buildModelSchemas([secret(extra as Partial<DMMF.Field>)])).toThrow(
+      UnsupportedSchemaError,
+    );
+    expect(() => buildModelSchemas([secret(extra as Partial<DMMF.Field>)])).toThrow(message);
+  });
+
+  test("refuses a column in a compound unique key", () => {
+    expect(() =>
+      buildModelSchemas([secret({}, { uniqueFields: [["token", "label"]] })]),
+    ).toThrow(/primary or unique key/);
+  });
+
+  test("refuses a foreign key", () => {
+    const owner = model({
+      name: "Owner",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({
+          kind: "object",
+          name: "secrets",
+          type: "Secret",
+          isList: true,
+          relationName: "OwnerToSecret",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+      ],
+    });
+    const child = model({
+      name: "Secret",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({ name: "ownerKey", type: "String", documentation: "@gemi.encrypted" }),
+        field({
+          kind: "object",
+          name: "owner",
+          type: "Owner",
+          relationName: "OwnerToSecret",
+          relationFromFields: ["ownerKey"],
+          relationToFields: ["id"],
+        }),
+      ],
+    });
+    expect(() => buildModelSchemas([owner, child])).toThrow(/foreign key/);
   });
 });
