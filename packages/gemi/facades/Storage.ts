@@ -58,12 +58,14 @@ export class Storage extends Facade {
    * other ports and too many redirects are refused, and `maxSize` and
    * `timeout` hold while the body streams in. The stored type is sniffed from
    * the file's first bytes, never taken from the `Content-Type` header, and is
-   * checked against `contentTypes` before anything is stored. A download
+   * checked against `contentTypes` before anything is stored. HTML, SVG and
+   * XML, which can carry script, are refused unless `contentTypes` lists them
+   * by name, also when `contentTypes` is left out. A download
    * that fails or grows past `maxSize` halfway stores nothing.
    *
    * Rejects with `safeFetch`'s errors (`SafeFetchError` subclasses):
    * `HttpStatusError` for a non-2xx answer, `ContentTypeError` for a type not
-   * in `contentTypes`, `TooLargeError`, `TimeoutError`, `BlockedAddressError`
+   * in `contentTypes` (or unlisted active content), `TooLargeError`, `TimeoutError`, `BlockedAddressError`
    * and so on; an abort rejects with the signal's reason.
    */
   static async putFromUrl(

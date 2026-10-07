@@ -205,22 +205,44 @@ function textOrBinary(b: Uint8Array): string {
   }
 }
 
-// Types a browser treats as active content: a wildcard such as `image/*` or
-// `text/*` never lets them through, they have to be listed by name.
-const ACTIVE_TYPES = new Set(["image/svg+xml", "text/html", "application/xhtml+xml", "application/xml"]);
+// Types a browser treats as active content: HTML, SVG and XML can carry
+// script. A wildcard such as `image/*`, `text/*` or `*/*` never lets them
+// through, and `putFromUrl` without `contentTypes` refuses them; they have to
+// be listed by name.
+const ACTIVE_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "image/svg+xml",
+  "text/xml",
+  "application/xml",
+  "text/xsl",
+  "application/xslt+xml",
+]);
+
+/**
+ * Whether a media type is active content a browser may run script from:
+ * HTML, XHTML, SVG and XML, including any `+xml` type (`image/svg+xml`,
+ * `application/atom+xml`, ...).
+ */
+export function isActiveContentType(type: string): boolean {
+  const essence = type.split(";")[0]!.trim().toLowerCase();
+  return ACTIVE_TYPES.has(essence) || essence.endsWith("+xml");
+}
 
 /**
  * Whether a sniffed type is in an allow-list of media types such as
- * `["image/*", "application/pdf"]`. A wildcard never covers SVG, HTML or XML,
- * which can carry script; name them explicitly to accept them.
+ * `["image/*", "application/pdf"]`. A wildcard never covers HTML, SVG or XML
+ * (see `isActiveContentType`), which can carry script; name them explicitly
+ * to accept them.
  */
 export function isAllowedContentType(type: string, allowed: readonly string[]): boolean {
+  const essence = type.split(";")[0]!.trim().toLowerCase();
   return allowed.some((entry) => {
     const pattern = entry.split(";")[0]!.trim().toLowerCase();
-    if (pattern === "*/*" || pattern === "*") return !ACTIVE_TYPES.has(type);
+    if (pattern === "*/*" || pattern === "*") return !isActiveContentType(essence);
     if (pattern.endsWith("/*")) {
-      return type.startsWith(pattern.slice(0, -1)) && !ACTIVE_TYPES.has(type);
+      return essence.startsWith(pattern.slice(0, -1)) && !isActiveContentType(essence);
     }
-    return type === pattern;
+    return essence === pattern;
   });
 }
