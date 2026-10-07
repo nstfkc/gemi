@@ -100,3 +100,50 @@ describe("FileStorageDriver.objects() default", () => {
     await expect(iterate()).rejects.toThrow(/LegacyDriver does not implement objects\(\)/);
   });
 });
+
+describe("FileStorageDriver's default putStream()", () => {
+  class RecordingDriver extends LegacyDriver {
+    public puts: PutFileParams[] = [];
+    override async put(params: PutFileParams | Blob) {
+      this.puts.push(params as PutFileParams);
+      return (params as PutFileParams).name;
+    }
+  }
+
+  const streamOf = (...chunks: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      },
+    });
+
+  test("reads the stream and hands put() one buffer", async () => {
+    const driver = new RecordingDriver();
+    const name = await driver.putStream({
+      name: "a.txt",
+      bucket: "b",
+      contentType: "text/plain",
+      body: streamOf("01234", "56789"),
+    });
+
+    expect(name).toBe("a.txt");
+    expect(driver.puts).toHaveLength(1);
+    expect(driver.puts[0]).toMatchObject({ name: "a.txt", bucket: "b", contentType: "text/plain" });
+    expect(String(driver.puts[0]!.body)).toBe(CONTENT);
+  });
+
+  test("a stream that errors never reaches put()", async () => {
+    const driver = new RecordingDriver();
+    const failure = new Error("cut off");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1]));
+        controller.error(failure);
+      },
+    });
+
+    await expect(driver.putStream({ name: "a.txt", body })).rejects.toBe(failure);
+    expect(driver.puts).toHaveLength(0);
+  });
+});

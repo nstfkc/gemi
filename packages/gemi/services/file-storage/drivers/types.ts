@@ -18,6 +18,18 @@ export interface PutFileOptions {
   signal?: AbortSignal;
 }
 
+/** What `putStream()` takes: `PutFileParams` with a stream for a body. */
+export interface PutStreamParams {
+  name: string;
+  bucket?: string;
+  /**
+   * The bytes to store. An error from the stream (a size limit, a broken
+   * connection) rejects `putStream()`, and no object is left behind.
+   */
+  body: ReadableStream<Uint8Array>;
+  contentType?: string;
+}
+
 export interface FetchFileOptions {
   /**
    * Cancels the read. An abort before the object is found rejects `fetch()`
@@ -103,6 +115,12 @@ export interface FileMetadata {
 export interface IFileStorageDriver {
   fetch(input: ReadFileParams | string, options?: FetchFileOptions): Promise<Response>;
   put(params: PutFileParams | Blob, options?: PutFileOptions): Promise<string>;
+  /**
+   * Optional: stores a stream. `FileStorageDriver`'s default reads the stream
+   * into memory and calls `put()`; a driver whose backend can take a stream
+   * overrides it. Either way, a stream that errors leaves no object behind.
+   */
+  putStream?(params: PutStreamParams, options?: PutFileOptions): Promise<string>;
   /**
    * Optional: `FileStorageDriver` supplies a `fetch()`-backed default, so
    * drivers written before this existed keep working.

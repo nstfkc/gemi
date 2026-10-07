@@ -147,3 +147,18 @@ export class NetworkError extends SafeFetchError {
     );
   }
 }
+
+/**
+ * The response's status was not 2xx. `safeFetch` itself returns any status as
+ * `fetch` does; helpers built on it that need the body, such as
+ * `Storage.putFromUrl()`, throw this instead.
+ */
+export class HttpStatusError extends SafeFetchError {
+  override readonly code = "http-status";
+  constructor(
+    url: string,
+    readonly status: number,
+  ) {
+    super(`The server answered ${status}.`, url);
+  }
+}

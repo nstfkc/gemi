@@ -16,6 +16,7 @@ export type {
   ListObjectsOptions,
   PutFileOptions,
   PutFileParams,
+  PutStreamParams,
   ReadFileParams,
   ReadResult,
   StoredObject,
@@ -24,6 +25,11 @@ export {
   FileStorageDriver,
   assertDeletablePrefix,
 } from "./file-storage/drivers/FileStorageDriver";
+export {
+  type PutFromUrlOptions,
+  type PutFromUrlResult,
+} from "./file-storage/putFromUrl";
+export { sniffContentType } from "./file-storage/sniffContentType";
 // The toolkit a custom driver needs to resolve a range against its backend.
 export {
   resolveRange,
