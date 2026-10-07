@@ -1,5 +1,13 @@
 # Unreleased
 
+## i18n: `negotiateLocale` for a whole `Accept-Language` header, with `q` weights (#851)
+
+**New, and a small behaviour change.** `gemi/i18n` now exports `negotiateLocale(acceptLanguage, locales, defaultLocale?)`, which picks the best of `locales` for an `Accept-Language` header (or `null`), with the same matching as `resolveLocale` (`de-AT` → `de`). See [Negotiating a locale yourself](docs/i18n.md#negotiating-a-locale-yourself).
+
+gemi's own locale detection uses it, so `Accept-Language` is now read by `q` weight instead of header order: `en;q=0.3,tr;q=0.9` picks `tr`, a `q=0` entry is never chosen (`de;q=0` also rules out `de-DE`), and malformed weights are skipped. Browsers send entries in weight order, so real visitors see no difference.
+
+What to do: nothing. An app that matches `Accept-Language` itself (for runtime, user-defined languages) can replace its loop with `negotiateLocale`.
+
 ## `Meta.fonts`: `@font-face` and font preloads per response (#849)
 
 **New.** `Meta.fonts([{ family, src, weight, style, stretch, display, unicodeRange, preload }])` declares the response's fonts from a handler, on static and hydrated views. `<Head />` renders an escaped `@font-face` rule for each and a `<link rel="preload" as="font" crossorigin>` (with the format's `type`) for each one marked `preload`; duplicates are collapsed. `display` defaults to `"swap"`. Calls add up across a layout's and a page's handlers. A descriptor that isn't a plain CSS value throws a `TypeError`. See [Fonts](docs/static-views-and-islands.md#fonts).
