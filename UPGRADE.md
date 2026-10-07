@@ -1,3 +1,13 @@
+# Unreleased
+
+## i18n: `negotiateLocale` for a whole `Accept-Language` header, with `q` weights (#851)
+
+**New, and a small behaviour change.** `gemi/i18n` now exports `negotiateLocale(acceptLanguage, locales, defaultLocale?)`, which picks the best of `locales` for an `Accept-Language` header (or `null`), with the same matching as `resolveLocale` (`de-AT` → `de`). See [Negotiating a locale yourself](docs/i18n.md#negotiating-a-locale-yourself).
+
+gemi's own locale detection uses it, so `Accept-Language` is now read by `q` weight instead of header order: `en;q=0.3,tr;q=0.9` picks `tr`, a `q=0` entry is never chosen (`de;q=0` also rules out `de-DE`), and malformed weights are skipped. Browsers send entries in weight order, so real visitors see no difference.
+
+What to do: nothing. An app that matches `Accept-Language` itself (for runtime, user-defined languages) can replace its loop with `negotiateLocale`.
+
 # Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)
