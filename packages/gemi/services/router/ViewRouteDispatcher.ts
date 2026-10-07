@@ -1566,11 +1566,13 @@ export class ViewRouteDispatcher {
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-          if (isViewDataRequest) {
-            return viewDataBreakResponse(err.payload.viewData ?? err.payload.api);
-          } else {
-            return viewBreakResponse(err.payload.view);
-          }
+          // A cookie set before the break (an OAuth round trip's state cookie
+          // ahead of `Redirect.external`) goes out with it, as on an api route.
+          const broken = isViewDataRequest
+            ? viewDataBreakResponse(err.payload.viewData ?? err.payload.api)
+            : viewBreakResponse(err.payload.view);
+          for (const cookie of ctx.cookies) broken.headers.append("Set-Cookie", cookie.toString());
+          return broken;
         }
         // `Query.instant` rethrows the entry's error object into this catch —
         // already reported when the rejection settled, so skip the duplicate.

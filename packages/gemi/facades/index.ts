@@ -17,6 +17,7 @@ export { Redis } from "./Redis";
 export { RateLimiter } from "./RateLimiter";
 export { Lock } from "./Lock";
 export { Crypt } from "./Crypt";
+export { Connections } from "./Connections";
 export { ChangeFeed } from "./ChangeFeed";
 export { Features } from "./Features";
 // `ConnectionQueries` is what `DB.connection(name)` hands back, so it has to be

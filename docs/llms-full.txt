@@ -10470,6 +10470,9 @@ a binding into the container, and a facade resolves it.**
 | --- | --- | --- | --- |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
+| `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
+| `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
+| `onConnected` | `({ user, provider, connection, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -11382,6 +11385,196 @@ order also works — the callback only ever writes a non-empty `providerId`, fin
 `findFirst`, and leaves `username` empty for Google, so it runs against the old schema — but
 until the constraint exists, concurrent first sign-ins are not guarded. Applications that
 override `createSocialAccount` should check that it passes `providerId` through.
+
+## OAuth connections
+
+[OAuth](#oauth) above signs a user in. A **connection** is the other half: a signed-in user
+connects their account at a provider (Figma, GitHub, Google Drive) so the app can call the
+provider's API on their behalf. gemi keeps the tokens encrypted, refreshes them, and spends them
+only on the provider's API.
+
+Register providers under `connections`, keyed by the name used in the URLs and in code.
+`OAuthConnectionProvider` is exported from `gemi/services`:
+
+```typescript
+import { defineAuthConfig, OAuthConnectionProvider } from "gemi/services";
+
+export default defineAuthConfig({
+  connections: {
+    figma: new OAuthConnectionProvider({
+      authorizeUrl: "https://www.figma.com/oauth",
+      tokenUrl: "https://api.figma.com/v1/oauth/token",
+      clientId: process.env.FIGMA_CLIENT_ID!,
+      clientSecret: process.env.FIGMA_CLIENT_SECRET!,
+      scopes: ["file_content:read"],
+      apiBaseUrl: "https://api.figma.com",
+    }),
+  },
+});
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `authorizeUrl`, `tokenUrl` | (required) | The provider's authorization and token endpoints. https only (http only for `localhost`). |
+| `revokeUrl` | none | The RFC 7009 revocation endpoint, for `revoke()`. |
+| `clientId`, `clientSecret` | (required) | The app's credentials at the provider. |
+| `scopes` | (required) | The scopes to request. |
+| `scopeSeparator` | `" "` | How the scopes are joined on the authorization URL. Some providers want `","`. |
+| `clientAuth` | `"body"` | `"body"` sends `client_id`/`client_secret` as form fields, `"basic"` as HTTP Basic credentials. |
+| `pkce` | `true` | Send an S256 PKCE challenge. Turn it off only for a provider that rejects one. |
+| `authorizationParams` | `{}` | Extra parameters for the authorization URL, e.g. `{ access_type: "offline", prompt: "consent" }` for Google. They cannot replace `state`, the PKCE challenge, `redirect_uri`, `client_id` or `scope`. |
+| `redirectUri` | `${HOST_NAME}/auth/connections/<name>/callback` | The callback URL registered with the provider. |
+| `apiBaseUrl` | (required) | Where the provider's API lives, e.g. `https://api.figma.com`. `connection.fetch` takes paths relative to it and **refuses every other origin**, so the token only ever goes to the provider's API host. A provider without one fails the boot. |
+| `refreshLeewaySeconds` | `60` | Refresh this long before the access token expires. |
+
+### Connecting
+
+The framework mounts two view routes, both behind the [`auth` middleware](#the-auth-middleware):
+
+- `/auth/connections/:provider` sends the browser to the provider's consent screen.
+- `/auth/connections/:provider/callback` checks the round trip, exchanges the code, stores the
+  connection for the signed-in user, calls `onConnected`, and redirects back.
+
+A "Connect Figma" button is a link. `?redirect=` names the same-origin page to come back to
+(default `redirectPath`):
+
+```tsx
+<a href="/auth/connections/figma?redirect=/settings/integrations">Connect Figma</a>
+```
+
+The round trip has the same protection as a sign-in (see [State and PKCE](#state-and-pkce)), in a
+cookie of its own (`__Host-gemi_oauth_connection` on https), so a sign-in and a connection can
+be in flight at once. The state also names the user who started it: a callback that arrives
+while someone else is signed in is refused. Connecting again replaces the user's earlier
+connection to that provider.
+
+The callback returns to the page with `?connection=<provider>`, plus
+`&connection_error=<code>` when it failed: `access_denied` (or another code from the provider),
+`missing_state`, `invalid_state`, `expired_state`, `user_mismatch`, `missing_code`,
+`invalid_grant` (or another code from the token endpoint), `exchange_failed` or
+`unknown_provider`.
+
+`onConnected` runs after a connection is stored:
+
+```typescript
+export default defineAuthConfig({
+  onConnected: async ({ user, provider, connection, req }) => {
+    await AuditLog.create({ data: { userId: user.id, action: `connected:${provider}` } });
+  },
+});
+```
+
+### Calling the provider's API
+
+```typescript
+import { Connections } from "gemi/facades";
+
+const figma = await Connections.for(user, "figma"); // null when not connected
+if (!figma) return { connected: false };
+
+const res = await figma.fetch(`/v1/files/${fileKey}`);
+const file = await res.json();
+```
+
+`connection.fetch(input, init)` is `fetch` as the user:
+
+- It adds `Authorization: Bearer <token>`.
+- When the token expires within `refreshLeewaySeconds`, it refreshes first.
+- After a `401` it refreshes and retries once. A request with a streamed body is not retried.
+- A path is resolved against `apiBaseUrl`, and a URL on another origin throws
+  `OAuthConnectionError` (`forbidden_url`) without sending anything. `apiBaseUrl` is required,
+  so the token never leaves the provider's API host, even for a URL that came from user input.
+- Redirects are followed by hand. The token is dropped on a redirect to another origin.
+
+A refresh the token endpoint refuses (`400`/`401`, e.g. `invalid_grant` after the user revoked
+the app at the provider) marks the connection and throws `OAuthReconnectRequiredError`. Every
+later call throws the same without asking the provider again, and `connection.needsReconnect`
+is `true`, until the user connects again. Send them back to `/auth/connections/<provider>`. A
+network error or a `5xx` throws `OAuthConnectionError` (`refresh_failed`) and leaves the
+connection as it was.
+
+Refreshes are serialised per connection: callers in one process share one refresh, and
+processes take a lock in the queue's lock store (see
+[Locks](./jobs-and-queues.md#locks--the-lock-facade)), so a provider that rotates refresh tokens
+sees each one spent once.
+
+The rest of a connection:
+
+- `connection.scopes`, `connection.hasScopes("a", "b")`, `providerAccountId`, `expiresAt`,
+  `needsReconnect`, `connectedAt`.
+- `await connection.accessToken()` returns a valid token for an SDK that wants the token
+  itself. Prefer `fetch`, which also retries a 401.
+- `await connection.refresh()` refreshes now.
+- `await connection.revoke()` revokes the grant at the provider (the refresh token when there
+  is one, else the access token) and deletes the connection. If the provider refuses, nothing
+  is deleted and `OAuthConnectionError` (`revoke_failed`) is thrown. Without a `revokeUrl` it
+  throws `revoke_unsupported`.
+- `await connection.disconnect()` deletes the connection without telling the provider.
+- `Connections.list(user)` returns every connection the user has.
+- `Connections.save(user, provider, { accessToken, refreshToken?, expiresAt?, scopes? })`
+  stores tokens obtained some other way.
+
+A connection never exposes a token as a property, and `JSON.stringify` / `console.log` of one
+leave the tokens out.
+
+### Where connections are kept
+
+In the `gemi_oauth_connections` table on the default database connection. The access and
+refresh tokens are encrypted with the app's encryption keys (see
+[Encrypted columns](./orm.md#encrypted-columns)), so an app with connections needs an
+`encryption` config with a key, and fails to boot (`EncryptionKeyError`) without one. `gemi run encryption:rotate` re-encrypts them after a key
+change, with the encrypted columns.
+
+With Prisma, add the model:
+
+```prisma
+model GemiOAuthConnection {
+  id                String  @id
+  userId            String  @map("user_id")
+  provider          String
+  providerAccountId String? @map("provider_account_id")
+  scopes            String
+  accessToken       String  @map("access_token")
+  refreshToken      String? @map("refresh_token")
+  tokenType         String? @map("token_type")
+  expiresAt         BigInt? @map("expires_at")
+  needsReconnect    Int     @default(0) @map("needs_reconnect")
+  revision          BigInt  @default(0)
+  createdAt         BigInt  @map("created_at")
+  updatedAt         BigInt  @map("updated_at")
+
+  @@unique([userId, provider])
+  @@map("gemi_oauth_connections")
+}
+```
+
+Do **not** mark `accessToken` or `refreshToken` with `@gemi.encrypted`: gemi encrypts them
+itself, and the ORM model would then read them back as plaintext. Unmarked, an ORM read of the
+model sees only ciphertext. Without Prisma, `createTable()` on the default store creates the table:
+`await (app(ConnectionManager).store as DatabaseConnectionStore).createTable()`. `user_id` holds the user's id as a string, with no foreign key; delete a user's
+connections when you delete the user.
+
+`connectionStore` in the auth config picks another store: a `ConnectionStore`, or a function
+returning one, e.g. `new DatabaseConnectionStore(db, () => app(Encrypter), { table: "oauth_tokens" })`.
+
+### Testing
+
+`Connections.fake(handlers)` keeps connections in memory and answers each provider's API with
+its handler. No token or revocation endpoint is called:
+
+```typescript
+import { Connections } from "gemi/facades";
+
+const fake = Connections.fake({
+  figma: (req) => Response.json({ name: "Design system" }),
+});
+await Connections.save(user, "figma", { accessToken: "test" });
+
+// ... run the code under test ...
+
+expect(fake.fakeRequests.map((r) => new URL(r.url).pathname)).toEqual(["/v1/files/abc"]);
+Connections.restore();
+```
 
 ## The Auth facade
 
@@ -12692,6 +12885,7 @@ import {
   Redis,
   RateLimiter,
   Crypt,
+  Connections,
 } from "gemi/facades";
 ```
 
@@ -13088,6 +13282,22 @@ const webhookSecret = Crypt.decrypt(sealed);
 ```
 
 Without a configured key, both throw `EncryptionKeyError`.
+
+## Connections
+
+`Connections` reaches the OAuth connections users have made to providers in `auth.connections`, to call those providers' APIs on their behalf. See [OAuth connections](./authentication.md#oauth-connections).
+
+- `Connections.for(user, provider)` — the user's connection, or `null`. `connection.fetch(path)` sends the bearer token to the provider's `apiBaseUrl`, refreshing it when it is about to expire and retrying once after a 401.
+- `Connections.list(user)` — every connection the user has.
+- `Connections.save(user, provider, tokens)` — stores tokens obtained some other way.
+- `Connections.fake(handlers)` / `Connections.restore()` — for tests: connections in memory, each provider's API answered by its handler.
+
+```typescript
+import { Connections } from "gemi/facades";
+
+const figma = await Connections.for(user, "figma");
+const res = await figma?.fetch(`/v1/files/${fileKey}`);
+```
 
 ## Related
 
@@ -15160,7 +15370,7 @@ export default class extends Kernel {
 
 | Command | What it does |
 | --- | --- |
-| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
+| `encryption:rotate [Model]` | Re-encrypts [encrypted columns](./orm.md#rotating-the-key) still under an older key, and, without a model, the [OAuth connection](./authentication.md#oauth-connections) tokens. `--dry-run`, `--batch-size`, `--encrypt-plaintext`. |
 
 A command of your own with the same name takes its place, and the built-in one is no longer listed.
 

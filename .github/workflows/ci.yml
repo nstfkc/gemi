@@ -537,6 +537,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "20"
 
+      # OAuth connections' token table, encrypted, with the revision
+      # compare-and-swap that serialises refreshes (#845).
+      - name: OAuth connection store on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/connections/ConnectionStore.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "14"
+
       # The change feed's database driver on Postgres: the driver contract,
       # publishing inside transactions, and LISTEN/NOTIFY between instances
       # through the `postgres` package (this Bun's SQL cannot LISTEN before

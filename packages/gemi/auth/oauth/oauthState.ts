@@ -36,8 +36,14 @@ export const OAUTH_STATE_TTL_SECONDS = 60 * 10;
 const COOKIE_NAME = "gemi_oauth";
 const SECURE_COOKIE_NAME = `__Host-${COOKIE_NAME}`;
 
-export function oauthStateCookieName(secure: boolean): string {
-  return secure ? SECURE_COOKIE_NAME : COOKIE_NAME;
+/**
+ * `base` separates round trips that must not overwrite each other's cookie:
+ * a sign-in and an OAuth connection (`gemi_oauth_connection`) can be in
+ * flight in one browser at once.
+ */
+export function oauthStateCookieName(secure: boolean, base: string = COOKIE_NAME): string {
+  if (base === COOKIE_NAME) return secure ? SECURE_COOKIE_NAME : COOKIE_NAME;
+  return secure ? `__Host-${base}` : base;
 }
 
 export interface OAuthStatePayload {
@@ -47,6 +53,14 @@ export interface OAuthStatePayload {
   codeVerifier: string;
   /** Epoch milliseconds after which the round trip is refused. */
   expiresAt: number;
+  /**
+   * Who started the round trip, for a flow that must finish as the same user
+   * (an OAuth connection is stored for the signed-in user, so a callback that
+   * arrives for someone else is refused). Absent for a sign-in.
+   */
+  subject?: string;
+  /** A same-origin path to return to after the callback. */
+  returnTo?: string;
 }
 
 function base64url(buffer: Buffer): string {
@@ -65,7 +79,11 @@ function constantTimeEqual(a: string, b: string): boolean {
 }
 
 /** A fresh `state` and PKCE pair. */
-export function createOAuthState(provider: string, now = Date.now()) {
+export function createOAuthState(
+  provider: string,
+  now = Date.now(),
+  extra: Pick<OAuthStatePayload, "subject" | "returnTo"> = {},
+) {
   const state = base64url(randomBytes(32));
   // 32 random bytes → 43 base64url characters, inside RFC 7636's 43–128.
   const codeVerifier = base64url(randomBytes(32));
@@ -75,6 +93,8 @@ export function createOAuthState(provider: string, now = Date.now()) {
     state,
     codeVerifier,
     expiresAt: now + OAUTH_STATE_TTL_SECONDS * 1000,
+    ...(extra.subject !== undefined ? { subject: extra.subject } : {}),
+    ...(extra.returnTo !== undefined ? { returnTo: extra.returnTo } : {}),
   };
   return { state, codeVerifier, codeChallenge, cookieValue: sealOAuthState(payload) };
 }
@@ -106,7 +126,9 @@ export function openOAuthState(value: string | null | undefined): OAuthStatePayl
       typeof payload?.provider !== "string" ||
       typeof payload?.state !== "string" ||
       typeof payload?.codeVerifier !== "string" ||
-      typeof payload?.expiresAt !== "number"
+      typeof payload?.expiresAt !== "number" ||
+      (payload.subject !== undefined && typeof payload.subject !== "string") ||
+      (payload.returnTo !== undefined && typeof payload.returnTo !== "string")
     ) {
       return null;
     }
