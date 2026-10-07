@@ -1,3 +1,15 @@
+# Unreleased
+
+## OAuth connections: the callback works when the provider redirects back
+
+**Fix.** Back from the provider, `/auth/connections/:provider/callback` sent a signed-in user to the sign-in page (`/auth/sign-in?redirect=%2Fauth%2Fconnections%2F...%2Fcallback...`) and the connection was never stored. The provider's redirect is a navigation another site started, and the browser leaves the `SameSite=Strict` `access_token` cookie off it, so `auth` saw nobody.
+
+That hop is now answered with a small same-origin page (a `<meta http-equiv="refresh">`, no script, `no-store`) that loads the same URL again with `?gemi_same_site=1`. The second navigation is same-site, the session cookie goes with it, and the callback runs as before. It bounces once: still signed out on the second hop, the request gets the usual `auth` redirect to `signInPath`. The session cookie stays `Strict`; the state cookie was already `Lax`.
+
+The bounce is `SameSiteBounceMiddleware` (new, from `gemi/http`). Register it under an alias and list it before `auth` on an app route that a provider redirects back to while it needs the session, such as a payment provider's return URL. See [`same-site-bounce`](docs/middleware.md#same-site-bounce--samesitebouncemiddleware).
+
+What to do: nothing. The `auth` middleware on `/auth/connections/:provider` (the connect route) is unchanged.
+
 # Upgrading from 0.118.0 to 0.119.1
 
 0.119.0 was tagged but never became available on npm; 0.119.1 is the same release, published again. Upgrade straight from 0.118.0 to 0.119.1.

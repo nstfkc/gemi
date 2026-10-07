@@ -1,4 +1,5 @@
 import { ApiRouter } from "../http/ApiRouter";
+import { SameSiteBounceMiddleware } from "../http/SameSiteBounceMiddleware";
 import { ViewRouter } from "../http/ViewRouter";
 import { AuthController } from "./AuthController";
 import { ConnectionsController } from "./connections/ConnectionsController";
@@ -16,10 +17,16 @@ class OAuthViewRouter extends ViewRouter {
 
 /** OAuth connections (#845): connect the signed-in user's account at a provider. */
 class ConnectionsViewRouter extends ViewRouter {
-  middlewares = ["cache:private", "auth"];
+  middlewares = ["cache:private"];
   routes = {
-    "/:provider": this.redirect([ConnectionsController, "connect"]),
-    "/:provider/callback": this.redirect([ConnectionsController, "callback"]),
+    "/:provider": this.redirect([ConnectionsController, "connect"]).middleware(["auth"]),
+    // The provider's redirect back is a cross-site navigation, which the
+    // `SameSite=Strict` session cookie does not ride along on: the bounce
+    // reloads it from this origin before `auth` looks for the user.
+    "/:provider/callback": this.redirect([ConnectionsController, "callback"]).middleware([
+      SameSiteBounceMiddleware as unknown as string,
+      "auth",
+    ]),
   };
 }
 

@@ -1068,6 +1068,12 @@ The framework mounts two view routes, both behind the [`auth` middleware](#the-a
 - `/auth/connections/:provider/callback` checks the round trip, exchanges the code, stores the
   connection for the signed-in user, calls `onConnected`, and redirects back.
 
+The provider's redirect back is a navigation another site started, so the browser leaves the
+`SameSite=Strict` session cookie off it. The callback answers that hop with a small same-origin
+page that loads the same URL again (with `?gemi_same_site=1`); that navigation carries the cookie,
+and the callback goes on as the signed-in user. See
+[`same-site-bounce`](middleware.md#same-site-bounce--samesitebouncemiddleware).
+
 A "Connect Figma" button is a link. `?redirect=` names the same-origin page to come back to
 (default `redirectPath`):
 

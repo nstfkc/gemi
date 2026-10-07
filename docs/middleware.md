@@ -210,6 +210,20 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
 
 `cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
 
+### `same-site-bounce` → `SameSiteBounceMiddleware`
+
+For a page that needs the session and that another site redirects the browser to: an OAuth callback, a payment provider's return URL. The `access_token` cookie is `SameSite=Strict`, so the browser leaves it off a navigation another site started, and `auth` sends a signed-in user to the sign-in page. Listed before `auth`, this answers such a request with a small page (`<meta http-equiv="refresh">`, no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`) that loads the same URL again from this origin with `?gemi_same_site=1`. That navigation is same-site, so the cookie goes with it.
+
+```typescript
+// app/config/middleware.ts
+aliases: { auth: AuthenticationMiddleware, "same-site-bounce": SameSiteBounceMiddleware },
+
+// a route
+"/billing/return": this.view("BillingReturn", handler).middleware(["same-site-bounce", "auth"]),
+```
+
+It only bounces a `GET` page load (not a `.json` navigation, not an api route) with no user on the context, no session token, and a `Sec-Fetch-Site` of `cross-site` or none at all. It bounces once: a request that already carries `gemi_same_site` goes on to `auth`, which redirects to the sign-in page if there is still no session. Nothing is read or consumed on the bounced hop, so the route's own cookies are still there for the second one; a cookie that has to arrive on the provider's redirect must itself be `SameSite=Lax`. gemi's `/auth/connections/:provider/callback` uses it without an alias.
+
 ### `csrf` → `CSRFMiddleware`
 
 Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.

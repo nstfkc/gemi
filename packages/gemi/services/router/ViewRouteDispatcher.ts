@@ -197,9 +197,11 @@ function clientDomain(req: HttpRequest) {
 }
 
 export function viewBreakResponse(view: Record<string, any>) {
-  const { status = 400, error } = view;
-  return new Response(error?.message, {
-    ...view,
+  // `body` is a page of the breaker's own (the same-site bounce); otherwise
+  // the error's message, as before.
+  const { status = 400, error, body, ...init } = view;
+  return new Response(body ?? error?.message, {
+    ...init,
     status,
   });
 }
