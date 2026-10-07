@@ -9,6 +9,7 @@ export {
   BlockedHostError,
   ContentTypeError,
   DnsError,
+  HttpStatusError,
   InvalidUrlError,
   NetworkError,
   SafeFetchError,

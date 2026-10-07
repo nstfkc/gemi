@@ -105,6 +105,7 @@ export {
   BlockedHostError,
   BlockedAddressError,
   DnsError,
+  HttpStatusError,
   TimeoutError,
   TooLargeError,
   ContentTypeError,
