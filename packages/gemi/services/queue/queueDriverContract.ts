@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
-import type { QueueDriver } from "./QueueDriver";
+import type { BatchStatus } from "./batch";
+import type { EnqueueBatch, QueueDriver } from "./QueueDriver";
 
 /**
  * What every `QueueDriver` promises the `QueueManager`, as a suite a driver's
@@ -27,6 +28,9 @@ import type { QueueDriver } from "./QueueDriver";
  * checks that the driver says so, because the manager then holds the dispatch
  * until the commit itself; that half is `QueueManager.transaction.test.ts`.
  *
+ * `features.batches` runs the batch tests: `enqueueBatch`, the counters
+ * `complete` and `fail` keep, `findBatch`, `cancelBatch` and `reportProgress`.
+ *
  * Not a `*.test.ts` file, so vitest never runs it on its own, and not exported
  * from `gemi/services`, because it imports vitest.
  *
@@ -49,6 +53,8 @@ export function queueDriverContract(
       run(driver: QueueDriver, fn: () => Promise<void>): Promise<void>;
       joins: boolean;
     };
+    /** The driver implements the batch methods, and runs the tests that pin them. */
+    batches?: boolean;
   } = {},
 ) {
   // Every name the ordinary tests enqueue is registered, so a driver that
@@ -644,6 +650,307 @@ export function queueDriverContract(
           await transaction.run(driver, async () => {
             expect(driver.joinsTransaction?.() ?? false).toBe(false);
           });
+        }),
+      );
+    }
+  });
+
+  if (!features.batches) return;
+
+  describe(`${name} — batches`, () => {
+    const batchOf = (
+      id: string,
+      count: number,
+      options: Partial<Omit<EnqueueBatch, "id" | "args">> = {},
+    ): EnqueueBatch => ({
+      id,
+      name: options.name ?? null,
+      job: options.job ?? "A",
+      args: Array.from({ length: count }, (_, n) => JSON.stringify([n])),
+      allowFailures: options.allowFailures ?? false,
+      callbacks: options.callbacks ?? {},
+    });
+
+    const callbacks = {
+      then: { name: "B", args: ["then"] },
+      catch: { name: "B", args: ["catch"] },
+      finally: { name: "B", args: ["finally"] },
+    };
+
+    /** Claims everything claimable, batch jobs and callbacks alike. */
+    const claimAll = (driver: QueueDriver) => driver.claim(1000, LEASE);
+
+    /** The callbacks claimable now, as `[label, status]`. */
+    const claimCallbacks = async (driver: QueueDriver) =>
+      (await claimAll(driver))
+        .filter((job) => job.name === "B")
+        .map((job) => JSON.parse(job.args) as [string, BatchStatus]);
+
+    test(
+      "records every job of a batch, each claimable with its batch id",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 3, { name: "import:7" }));
+
+        const claimed = await claimAll(driver);
+        expect(claimed.map((job) => JSON.parse(job.args))).toEqual([[0], [1], [2]]);
+        expect(claimed.every((job) => job.batchId === "batch-1" && job.name === "A")).toBe(true);
+        expect(new Set(claimed.map((job) => job.id)).size).toBe(3);
+
+        expect(await driver.findBatch!("batch-1")).toMatchObject({
+          id: "batch-1",
+          name: "import:7",
+          total: 3,
+          pending: 3,
+          succeeded: 0,
+          failed: 0,
+          cancelled: 0,
+          failedJobIds: [],
+          progress: 0,
+          cancelledAt: null,
+          finishedAt: null,
+        });
+      }),
+    );
+
+    test(
+      "a job dispatched on its own has no batch id",
+      withDriver(async (driver) => {
+        await driver.enqueue({ name: "A", args: "[]" });
+        const [claimed] = await claimAll(driver);
+        expect(claimed!.batchId).toBeUndefined();
+      }),
+    );
+
+    test(
+      "the last job to complete finishes the batch and enqueues then and finally, once",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 3, { callbacks }));
+        const jobs = await claimAll(driver);
+
+        await driver.complete(jobs[0]!);
+        await driver.complete(jobs[1]!);
+        expect(await claimCallbacks(driver)).toEqual([]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({ pending: 1, succeeded: 2 });
+
+        await driver.complete(jobs[2]!);
+        // A stale report of the same claim changes nothing.
+        await driver.complete(jobs[2]!);
+
+        const calls = await claimCallbacks(driver);
+        expect(calls.map(([label]) => label)).toEqual(["then", "finally"]);
+        expect(calls[0]![1]).toMatchObject({
+          id: "batch-1",
+          total: 3,
+          pending: 0,
+          succeeded: 3,
+          progress: 1,
+        });
+        expect(typeof calls[0]![1].finishedAt).toBe("number");
+        expect(await driver.findBatch!("batch-1")).toMatchObject({ pending: 0, succeeded: 3 });
+      }),
+    );
+
+    test(
+      "concurrent completions finish the batch exactly once",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 12, { callbacks }));
+        const jobs = await claimAll(driver);
+        await Promise.all(jobs.map((job) => driver.complete(job)));
+
+        expect((await claimCallbacks(driver)).map(([label]) => label)).toEqual(["then", "finally"]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({ pending: 0, succeeded: 12 });
+      }),
+    );
+
+    test(
+      "a dead-letter fails the batch: catch at once, the waiting jobs cancelled, finally at the end",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 4, { callbacks }));
+        const [first, second] = await driver.claim(2, LEASE);
+
+        await driver.fail(first!, { error: "boom", retryInMs: null });
+
+        // The two that were waiting are never handed out.
+        const after = await claimAll(driver);
+        expect(after.filter((job) => job.name === "A")).toEqual([]);
+        expect(after.map((job) => JSON.parse(job.args)[0])).toEqual(["catch"]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({
+          pending: 1,
+          failed: 1,
+          cancelled: 2,
+          failedJobIds: [first!.id],
+        });
+        expect((await driver.findBatch!("batch-1"))!.cancelledAt).toEqual(expect.any(Number));
+
+        // The one still running finishes, and that ends the batch.
+        await driver.complete(second!);
+        const calls = await claimCallbacks(driver);
+        expect(calls.map(([label]) => label)).toEqual(["finally"]);
+        expect(calls[0]![1]).toMatchObject({ pending: 0, succeeded: 1, failed: 1, cancelled: 2 });
+      }),
+    );
+
+    test(
+      "with allowFailures a dead-letter leaves the rest running, and then still runs",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 3, { callbacks, allowFailures: true }));
+        const jobs = await claimAll(driver);
+
+        await driver.fail(jobs[0]!, { error: "boom", retryInMs: null });
+        await driver.fail(jobs[1]!, { error: "boom again", retryInMs: null });
+        expect((await claimCallbacks(driver)).map(([label]) => label)).toEqual(["catch"]);
+
+        await driver.complete(jobs[2]!);
+        const calls = await claimCallbacks(driver);
+        expect(calls.map(([label]) => label)).toEqual(["then", "finally"]);
+        expect(calls[1]![1]).toMatchObject({
+          succeeded: 1,
+          failed: 2,
+          cancelled: 0,
+          cancelledAt: null,
+          failedJobIds: [jobs[0]!.id, jobs[1]!.id],
+        });
+      }),
+    );
+
+    test(
+      "a retry is not counted, and starts its progress from 0",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 2));
+        const [job] = await driver.claim(1, LEASE);
+
+        await driver.reportProgress!(job!, 0.5);
+        expect((await driver.findBatch!("batch-1"))!.progress).toBeCloseTo(0.25);
+
+        await driver.fail(job!, { error: "flaky", retryInMs: 0 });
+        expect(await driver.findBatch!("batch-1")).toMatchObject({ pending: 2, failed: 0, progress: 0 });
+
+        const retried = (await claimAll(driver)).find((claimed) => claimed.id === job!.id);
+        expect(retried).toMatchObject({ attempt: 2, batchId: "batch-1" });
+      }),
+    );
+
+    test(
+      "progress is the ended jobs plus what the running ones reported, over the total",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 4));
+        const jobs = await claimAll(driver);
+
+        await driver.complete(jobs[0]!);
+        await driver.reportProgress!(jobs[1]!, 0.5);
+        await driver.reportProgress!(jobs[2]!, 0.25);
+        // A stale claim's report is ignored.
+        await driver.reportProgress!({ ...jobs[3]!, attempt: 7 }, 1);
+
+        expect((await driver.findBatch!("batch-1"))!.progress).toBeCloseTo((1 + 0.5 + 0.25) / 4);
+        // Without the running jobs' share, when asked not to sum it.
+        expect((await driver.findBatch!("batch-1", { progress: false }))!.progress).toBeCloseTo(
+          1 / 4,
+        );
+      }),
+    );
+
+    test(
+      "cancelBatch ends the waiting jobs, runs catch at once and finally once the running ones end",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 3, { callbacks }));
+        const [running] = await driver.claim(1, LEASE);
+
+        expect(await driver.cancelBatch!("batch-1")).toBe(true);
+        expect(await driver.cancelBatch!("batch-1")).toBe(false);
+
+        const after = await claimAll(driver);
+        expect(after.map((job) => JSON.parse(job.args)[0])).toEqual(["catch"]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({ pending: 1, cancelled: 2 });
+
+        await driver.complete(running!);
+        const calls = await claimCallbacks(driver);
+        expect(calls.map(([label]) => label)).toEqual(["finally"]);
+        expect(calls[0]![1]).toMatchObject({ pending: 0, succeeded: 1, cancelled: 2 });
+        expect(await driver.cancelBatch!("batch-1")).toBe(false);
+      }),
+    );
+
+    test(
+      "a retry of a job whose batch was cancelled is ended as cancelled instead",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 1, { callbacks }));
+        const [job] = await driver.claim(1, LEASE);
+        await driver.cancelBatch!("batch-1");
+
+        await driver.fail(job!, { error: "flaky", retryInMs: 0 });
+
+        const after = await claimAll(driver);
+        expect(after.filter((claimed) => claimed.name === "A")).toEqual([]);
+        expect(after.map((claimed) => JSON.parse(claimed.args)[0])).toEqual(["catch", "finally"]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({
+          pending: 0,
+          failed: 0,
+          cancelled: 1,
+        });
+      }),
+    );
+
+    test(
+      "a failure marked cancelled is counted as cancelled, not failed",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 1, { callbacks }));
+        const [job] = await driver.claim(1, LEASE);
+
+        await driver.fail(job!, { error: "cancelled", retryInMs: null, cancelled: true });
+
+        expect(await driver.findBatch!("batch-1")).toMatchObject({
+          pending: 0,
+          failed: 0,
+          cancelled: 1,
+          failedJobIds: [],
+        });
+      }),
+    );
+
+    test(
+      "a batch of no jobs is finished at once",
+      withDriver(async (driver) => {
+        await driver.enqueueBatch!(batchOf("batch-1", 0, { callbacks }));
+
+        const calls = await claimCallbacks(driver);
+        expect(calls.map(([label]) => label)).toEqual(["then", "finally"]);
+        expect(await driver.findBatch!("batch-1")).toMatchObject({
+          total: 0,
+          pending: 0,
+          progress: 1,
+          finishedAt: expect.any(Number),
+        });
+      }),
+    );
+
+    test(
+      "an unknown batch is null, and cannot be cancelled",
+      withDriver(async (driver) => {
+        expect(await driver.findBatch!("nope")).toBeNull();
+        expect(await driver.cancelBatch!("nope")).toBe(false);
+      }),
+    );
+
+    const transaction = features.transaction;
+    if (transaction?.joins) {
+      test(
+        "a batch enqueued inside a transaction is claimable at the commit, and gone after a rollback",
+        withDriver(async (driver) => {
+          await transaction.run(driver, async () => {
+            await driver.enqueueBatch!(batchOf("committed", 2));
+            expect(await claimAll(driver)).toEqual([]);
+          });
+          expect(await claimAll(driver)).toHaveLength(2);
+
+          await expect(
+            transaction.run(driver, async () => {
+              await driver.enqueueBatch!(batchOf("rolled-back", 2));
+              throw new Error("rolled back");
+            }),
+          ).rejects.toThrow("rolled back");
+          expect(await claimAll(driver)).toEqual([]);
+          expect(await driver.findBatch!("rolled-back")).toBeNull();
         }),
       );
     }
