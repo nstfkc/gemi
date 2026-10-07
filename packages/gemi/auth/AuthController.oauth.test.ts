@@ -363,6 +363,61 @@ describe("the email", () => {
   });
 });
 
+describe("a provider that does not link by email", () => {
+  const unlinked = { ...scripted, linkByEmail: false };
+  beforeEach(() => {
+    auth.config.oauthProviders.unlinked = unlinked;
+  });
+  afterEach(() => {
+    delete auth.config.oauthProviders.unlinked;
+  });
+
+  test("an existing user's email is refused with account_exists, and nothing is linked", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    const link = vi.spyOn(auth.userProvider, "createSocialAccount");
+    profile = { providerId: "p1", email: "Ada@Example.com" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result, cookies } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.error).toBe("account_exists");
+    expect(result.session).toBeNull();
+    expect(link).not.toHaveBeenCalled();
+    expect(seen.created).toEqual([]);
+    expect(cookieValue(cookies, "access_token")).toBeUndefined();
+  });
+
+  test("a new email still creates a user, with the identity linked", async () => {
+    const link = vi.spyOn(auth.userProvider, "createSocialAccount");
+    profile = { providerId: "p1", email: "grace@example.com", username: "grace" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.session.user.id).toBe(99);
+    expect(seen.created).toMatchObject([{ email: "grace@example.com" }]);
+    expect(link).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "unlinked", providerId: "p1", userId: 99 }),
+    );
+  });
+
+  test("an identity already linked signs in whatever the email", async () => {
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    vi.spyOn(auth.userProvider, "findUserBySocialAccount").mockResolvedValue({
+      id: 1,
+      email: "ada@example.com",
+    } as never);
+    profile = { providerId: "p1", email: "ada@example.com" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.session.user.id).toBe(1);
+    expect(seen.lookups).toEqual([]);
+  });
+});
+
 describe("a failed callback", () => {
   test("?error= short-circuits with the provider's reason and the return path", async () => {
     const { cookie } = await start("scripted", "http://localhost", "?redirect=%2Finvoices");

@@ -886,7 +886,14 @@ export class AuthController extends Controller {
           name,
           username,
           locale,
+          linkExisting: oauthProvider.linkByEmail !== false,
         });
+        if (resolved === "account_exists") {
+          console.error(
+            `Authentication error: a ${provider} sign-in matched an existing user by email, and ${provider} does not link by email`,
+          );
+          return this.oauthFailure(req, "account_exists");
+        }
         if (resolved) {
           user = resolved.user;
           action = resolved.action;
@@ -1010,7 +1017,13 @@ export class AuthController extends Controller {
     name?: string;
     username?: string;
     locale: string;
-  }): Promise<{ user: User; action: "signin" | "signup" } | null> {
+    /**
+     * Whether an existing user with this email is signed in (and the identity
+     * linked to them). `false` for a provider with `linkByEmail: false`: the
+     * callback is refused with `account_exists` instead.
+     */
+    linkExisting?: boolean;
+  }): Promise<{ user: User; action: "signin" | "signup" } | "account_exists" | null> {
     const { provider, providerId, email, rawEmail, name, username, locale } = args;
     const { userProvider, config } = app(AuthManager);
 
@@ -1038,6 +1051,10 @@ export class AuthController extends Controller {
     }
 
     if (existing) {
+      // The provider does not vouch for the address: the same email is not
+      // proof that this is the same person, so nothing is signed in or linked.
+      if (args.linkExisting === false) return "account_exists";
+
       if (!providerId) return { user: existing, action: "signin" };
 
       const accounts = await userProvider.findSocialAccounts(

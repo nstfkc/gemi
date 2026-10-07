@@ -93,6 +93,17 @@ describe("OAuthConnectionProvider", () => {
     expect(url.searchParams.has("code_challenge")).toBe(false);
   });
 
+  test("takes Figma's user_id_string over its rounded numeric user_id", async () => {
+    // Parsed from `"user_id": 1234567890123456789`, the number is already off.
+    answer = () =>
+      new Response(
+        '{"access_token":"at","user_id":1234567890123456789,"user_id_string":"1234567890123456789"}',
+        { headers: { "content-type": "application/json" } },
+      );
+    const tokens = await provider().exchangeCode({ code: "c", codeVerifier: "v", redirectUri: "https://a.example/cb" });
+    expect(tokens.providerAccountId).toBe("1234567890123456789");
+  });
+
   test("exchanges a code: client credentials in the body, the verifier, JSON accepted", async () => {
     answer = () =>
       Response.json({

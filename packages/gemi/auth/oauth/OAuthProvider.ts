@@ -55,6 +55,20 @@ export class OAuthCallbackError extends Error {
 
 export abstract class OAuthProvider {
   /**
+   * Whether a first sign-in through this provider may sign into an existing
+   * user who has the same email. `true` (the default) links the provider
+   * identity to that user, which is right when the provider has verified the
+   * address (`emailVerified: true`, Google's `email_verified`).
+   *
+   * Set it to `false` for a provider that does not promise the email it
+   * returns is verified: an address anyone can type into their profile there
+   * must not sign into the account of whoever owns it here. The callback then
+   * refuses with `account_exists`, the user signs in the way they did before
+   * and links the provider from there. A new email still creates a user.
+   */
+  linkByEmail?: boolean = true;
+
+  /**
    * The provider's authorization URL. Put `ctx.state` on it unchanged — a
    * callback whose `state` does not match is refused — and `ctx.codeChallenge`
    * when the provider supports PKCE.
