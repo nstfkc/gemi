@@ -252,6 +252,18 @@ export type {
   OAuthCallbackContext,
   OAuthProfile,
 } from "../auth/oauth/OAuthProvider";
+// OAuth connections (#845): calling a provider's API on a user's behalf.
+export { OAuthConnectionProvider } from "../auth/connections/OAuthConnectionProvider";
+export type {
+  OAuthConnectionProviderConfig,
+  OAuthTokenSet,
+} from "../auth/connections/OAuthConnectionProvider";
+export { OAuthConnectionError, OAuthReconnectRequiredError } from "../auth/connections/errors";
+export type { OAuthConnectionErrorCode } from "../auth/connections/errors";
+export { ConnectionManager, ProviderConnection } from "../auth/connections/ConnectionManager";
+export type { ConnectionOwner, FakeConnectionHandler } from "../auth/connections/ConnectionManager";
+export { DatabaseConnectionStore, MemoryConnectionStore } from "../auth/connections/ConnectionStore";
+export type { ConnectionRecord, ConnectionStore } from "../auth/connections/ConnectionStore";
 
 // Middleware
 export { MiddlewareServiceProvider } from "./middleware/MiddlewareServiceProvider";

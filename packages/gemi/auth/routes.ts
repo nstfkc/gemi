@@ -1,6 +1,7 @@
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
 import { AuthController } from "./AuthController";
+import { ConnectionsController } from "./connections/ConnectionsController";
 
 class OAuthViewRouter extends ViewRouter {
   middlewares = ["cache:private"];
@@ -13,6 +14,15 @@ class OAuthViewRouter extends ViewRouter {
   };
 }
 
+/** OAuth connections (#845): connect the signed-in user's account at a provider. */
+class ConnectionsViewRouter extends ViewRouter {
+  middlewares = ["cache:private", "auth"];
+  routes = {
+    "/:provider": this.redirect([ConnectionsController, "connect"]),
+    "/:provider/callback": this.redirect([ConnectionsController, "callback"]),
+  };
+}
+
 export class AuthViewRouter extends ViewRouter {
   middlewares = ["cache:private"];
   routes = {
@@ -21,6 +31,7 @@ export class AuthViewRouter extends ViewRouter {
       "signInWithMagicLink",
     ]),
     "/oauth": OAuthViewRouter,
+    "/connections": ConnectionsViewRouter,
   };
 }
 

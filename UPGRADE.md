@@ -13,6 +13,20 @@
 
 What to do: nothing, unless you want encrypted columns. To encrypt a column that already holds data, mark it, deploy, and run `gemi run encryption:rotate <Model> --encrypt-plaintext` straight away: its rows raise `DecryptionError` until then.
 
+## Auth: OAuth connections for calling a provider's API as the user (#845)
+
+**New.** A signed-in user can connect their account at a provider (Figma, GitHub, Google Drive) and the app calls the provider's API on their behalf. See [OAuth connections](docs/authentication.md#oauth-connections).
+
+- Providers go under `auth.connections`: `new OAuthConnectionProvider({ authorizeUrl, tokenUrl, revokeUrl?, clientId, clientSecret, scopes, apiBaseUrl })` from `gemi/services`. New config fields `connections`, `connectionStore` and `onConnected`.
+- Two new view routes behind the `auth` middleware: `/auth/connections/:provider` and `/auth/connections/:provider/callback`, with the sign-in flow's state and PKCE in a cookie of its own (`gemi_oauth_connection`), bound to the signed-in user.
+- `Connections.for(user, provider)` from `gemi/facades` returns a connection whose `fetch` adds the bearer token, refreshes before expiry and once after a 401, and refuses any origin but `apiBaseUrl`. A refused refresh throws `OAuthReconnectRequiredError` and marks the connection. `revoke()` (RFC 7009) and `disconnect()` remove it. `Connections.fake()` for tests.
+- Tokens are stored encrypted with the app's encryption keys (#844) in a `gemi_oauth_connections` table, so an app that configures connections needs an `encryption` key and the table (a Prisma model is in the docs). `gemi run encryption:rotate` without a model also re-encrypts the tokens.
+- New from `gemi/services`: `OAuthConnectionProvider`, `OAuthConnectionError`, `OAuthReconnectRequiredError`, `ConnectionManager`, `ProviderConnection`, `DatabaseConnectionStore`, `MemoryConnectionStore`, and the types `OAuthConnectionProviderConfig`, `OAuthTokenSet`, `OAuthConnectionErrorCode`, `ConnectionOwner`, `FakeConnectionHandler`, `ConnectionRecord`, `ConnectionStore`.
+
+**Fixed.** A cookie a view handler set before breaking the request (a `Redirect.to` / `Redirect.external`, a `RequestBreakerError`) was dropped from the response. It is now sent with it, as on an api route.
+
+What to do: nothing, unless you want connections. To use them, configure an `encryption` key, add the `GemiOAuthConnection` model (or call `createTable()`), and register providers under `auth.connections`. If a view handler of yours set a cookie and then redirected, that cookie now reaches the browser.
+
 # Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)

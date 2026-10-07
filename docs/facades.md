@@ -27,6 +27,7 @@ import {
   Redis,
   RateLimiter,
   Crypt,
+  Connections,
 } from "gemi/facades";
 ```
 
@@ -422,6 +423,22 @@ const webhookSecret = Crypt.decrypt(sealed);
 ```
 
 Without a configured key, both throw `EncryptionKeyError`.
+
+## Connections
+
+`Connections` reaches the OAuth connections users have made to providers in `auth.connections`, to call those providers' APIs on their behalf. See [OAuth connections](./authentication.md#oauth-connections).
+
+- `Connections.for(user, provider)` — the user's connection, or `null`. `connection.fetch(path)` sends the bearer token to the provider's `apiBaseUrl`, refreshing it when it is about to expire and retrying once after a 401.
+- `Connections.list(user)` — every connection the user has.
+- `Connections.save(user, provider, tokens)` — stores tokens obtained some other way.
+- `Connections.fake(handlers)` / `Connections.restore()` — for tests: connections in memory, each provider's API answered by its handler.
+
+```typescript
+import { Connections } from "gemi/facades";
+
+const figma = await Connections.for(user, "figma");
+const res = await figma?.fetch(`/v1/files/${fileKey}`);
+```
 
 ## Related
 
