@@ -11261,6 +11261,34 @@ who has that address nor creates one. `GoogleOAuthProvider` reports Google's `em
 and treats a missing one as unverified. A custom provider that returns no `emailVerified` keeps
 matching by email.
 
+A provider that does not promise its emails are verified at all (Figma's API, for one, says
+nothing about it) should not sign anyone into an existing user by email. Set
+`linkByEmail = false` on it:
+
+```typescript
+class FigmaOAuthProvider extends OAuthProvider {
+  linkByEmail = false;
+  // getRedirectUrl, onCallback …
+}
+```
+
+Its callbacks then still resolve a linked identity (step 1) and still create a user for a new
+email, but an email that belongs to an existing user is refused with `account_exists`: nothing
+is signed in or linked. The user signs in the way they did before and links the provider from
+their account (for example with an [OAuth connection](#oauth-connections) and `onConnected`).
+
+A provider users may only sign in with after linking it to an account they made another way
+sets `createUsers = false` as well. An identity that is not linked is then refused with
+`signup_disabled` instead of getting a new user (and, with `linkByEmail = false`, with
+`account_exists` when its email has one); only a linked identity signs in:
+
+```typescript
+class FigmaOAuthProvider extends OAuthProvider {
+  linkByEmail = false;
+  createUsers = false;
+}
+```
+
 The email is trimmed and lower-cased before it is looked up and stored, the way the email-code
 flow does it, so `Maria@Example.com` from the provider is the `maria@example.com` who signed up
 with a code. A user stored with the provider's exact spelling by an earlier version is still
@@ -11291,6 +11319,8 @@ export default defineAuthConfig({
 | `no_identity`, `missing_email`, `invalid_email` | The provider returned no usable identity. |
 | `email_not_verified` | See [Verified email only](#verified-email-only). |
 | `account_conflict` | The email belongs to a user already linked to a different account at this provider. |
+| `account_exists` | The email belongs to an existing user, and the provider has `linkByEmail = false`. |
+| `signup_disabled` | The identity is not linked to a user, and the provider has `createUsers = false`. |
 | `unknown_provider` | No provider is registered under this name. |
 
 The `intended_url` cookie is cleared whether the callback succeeds or fails.
@@ -11501,7 +11531,7 @@ sees each one spent once.
 
 The rest of a connection:
 
-- `connection.scopes`, `connection.hasScopes("a", "b")`, `providerAccountId`, `expiresAt`,
+- `connection.scopes`, `connection.hasScopes("a", "b")`, `providerAccountId` (the token response's `user_id_string`, `user_id` or `account_id`), `expiresAt`,
   `needsReconnect`, `connectedAt`.
 - `await connection.accessToken()` returns a valid token for an SDK that wants the token
   itself. Prefer `fetch`, which also retries a 401.
