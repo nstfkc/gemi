@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.117.0 to 0.118.0
 
 ## Queue: durable `Workflow`s (#846)
 
