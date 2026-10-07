@@ -879,6 +879,18 @@ email, but an email that belongs to an existing user is refused with `account_ex
 is signed in or linked. The user signs in the way they did before and links the provider from
 their account (for example with an [OAuth connection](#oauth-connections) and `onConnected`).
 
+A provider users may only sign in with after linking it to an account they made another way
+sets `createUsers = false` as well. An identity that is not linked is then refused with
+`signup_disabled` instead of getting a new user (and, with `linkByEmail = false`, with
+`account_exists` when its email has one); only a linked identity signs in:
+
+```typescript
+class FigmaOAuthProvider extends OAuthProvider {
+  linkByEmail = false;
+  createUsers = false;
+}
+```
+
 The email is trimmed and lower-cased before it is looked up and stored, the way the email-code
 flow does it, so `Maria@Example.com` from the provider is the `maria@example.com` who signed up
 with a code. A user stored with the provider's exact spelling by an earlier version is still
@@ -910,6 +922,7 @@ export default defineAuthConfig({
 | `email_not_verified` | See [Verified email only](#verified-email-only). |
 | `account_conflict` | The email belongs to a user already linked to a different account at this provider. |
 | `account_exists` | The email belongs to an existing user, and the provider has `linkByEmail = false`. |
+| `signup_disabled` | The identity is not linked to a user, and the provider has `createUsers = false`. |
 | `unknown_provider` | No provider is registered under this name. |
 
 The `intended_url` cookie is cleared whether the callback succeeds or fails.

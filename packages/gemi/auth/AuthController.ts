@@ -887,12 +887,19 @@ export class AuthController extends Controller {
           username,
           locale,
           linkExisting: oauthProvider.linkByEmail !== false,
+          createUser: oauthProvider.createUsers !== false,
         });
         if (resolved === "account_exists") {
           console.error(
             `Authentication error: a ${provider} sign-in matched an existing user by email, and ${provider} does not link by email`,
           );
           return this.oauthFailure(req, "account_exists");
+        }
+        if (resolved === "signup_disabled") {
+          console.error(
+            `Authentication error: a ${provider} sign-in is not linked to a user, and ${provider} does not create users`,
+          );
+          return this.oauthFailure(req, "signup_disabled");
         }
         if (resolved) {
           user = resolved.user;
@@ -1023,7 +1030,14 @@ export class AuthController extends Controller {
      * callback is refused with `account_exists` instead.
      */
     linkExisting?: boolean;
-  }): Promise<{ user: User; action: "signin" | "signup" } | "account_exists" | null> {
+    /**
+     * Whether a new user is created for an email no user has. `false` for a
+     * provider with `createUsers: false`: refused with `signup_disabled`.
+     */
+    createUser?: boolean;
+  }): Promise<
+    { user: User; action: "signin" | "signup" } | "account_exists" | "signup_disabled" | null
+  > {
     const { provider, providerId, email, rawEmail, name, username, locale } = args;
     const { userProvider, config } = app(AuthManager);
 
@@ -1097,6 +1111,9 @@ export class AuthController extends Controller {
 
       return { user: existing, action: "signin" };
     }
+
+    // The provider only signs in users who linked it from their account.
+    if (args.createUser === false) return "signup_disabled";
 
     // Same shape as `signUp`: the user, the row that has to exist beside it,
     // and `onUserCreated`, in one transaction. The social account in

@@ -69,6 +69,19 @@ export abstract class OAuthProvider {
   linkByEmail?: boolean = true;
 
   /**
+   * Whether a sign-in through this provider may create a user. `true` (the
+   * default) creates one for an identity that is not linked and whose email
+   * no user has.
+   *
+   * Set it to `false` for a provider users may only sign in with once they
+   * have linked it to an account they made another way: the callback then
+   * refuses such an identity with `signup_disabled`, and only an identity
+   * already linked (or, with `linkByEmail`, an existing user's verified email)
+   * signs in.
+   */
+  createUsers?: boolean = true;
+
+  /**
    * The provider's authorization URL. Put `ctx.state` on it unchanged — a
    * callback whose `state` does not match is refused — and `ctx.codeChallenge`
    * when the provider supports PKCE.

@@ -1,3 +1,18 @@
+# Upgrading from 0.118.0 to 0.119.0
+
+## OAuth: `linkByEmail` and `createUsers` on a sign-in provider; Figma's `user_id_string` (#863)
+
+**New, and a small fix.** Two optional properties on `OAuthProvider` (from `gemi/services`), both `true` by default, so existing providers behave as before:
+
+- `linkByEmail = false`: a callback whose identity is not linked yet is refused with `account_exists` when its email belongs to an existing user, instead of signing into that user and linking the identity. For a provider that does not promise its emails are verified (Figma).
+- `createUsers = false`: a callback whose identity is not linked (and does not sign in by email) is refused with `signup_disabled` instead of creating a user. For a provider users may only sign in with after linking it from their account.
+
+See [Verified email only](docs/authentication.md#verified-email-only) and the failure codes in [When a callback fails](docs/authentication.md#when-a-callback-fails).
+
+`OAuthConnectionProvider` now reads `user_id_string` from the token response before `user_id`. Figma deprecated the numeric `user_id` because its ids do not fit a double, so `providerAccountId` for a Figma connection was rounded.
+
+What to do: nothing. A Figma connection's `providerAccountId` is exact from its next connect; one stored earlier keeps the rounded value until the user connects again. A callback view that spells out failure codes can add `account_exists` and `signup_disabled`.
+
 # Upgrading from 0.117.0 to 0.118.0
 
 ## Queue: durable `Workflow`s (#846)
