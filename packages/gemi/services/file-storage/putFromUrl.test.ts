@@ -15,6 +15,9 @@ import { putFromUrl, type PutFromUrlOptions } from "./putFromUrl";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 const SVG = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+const HTML = new TextEncoder().encode("<!doctype html><script>alert(1)</script>");
+const XML = new TextEncoder().encode('<?xml version="1.0"?><feed/>');
+const TEXT = new TextEncoder().encode('{"a": 1}\n');
 
 /** A PNG signature followed by `size - 8` bytes, sent in 16 KiB chunks with no Content-Length. */
 function chunkedPng(size: number, chunk = 16 * 1024) {
@@ -47,6 +50,13 @@ beforeAll(() => {
           return new Response(PNG, { headers: { "content-type": "text/html" } });
         case "/svg":
           return new Response(SVG, { headers: { "content-type": "image/svg+xml" } });
+        case "/html":
+          // A harmless-looking header: the bytes are what count.
+          return new Response(HTML, { headers: { "content-type": "image/png" } });
+        case "/xml":
+          return new Response(XML);
+        case "/text":
+          return new Response(TEXT);
         case "/big":
           return new Response(chunkedPng(Number(url.searchParams.get("size"))), {
             headers: { "content-type": "image/png" },
@@ -202,6 +212,42 @@ describe("putFromUrl on the filesystem driver", () => {
     });
     expect(result.contentType).toBe("image/svg+xml");
     expect(result.name).toMatch(/\.svg$/);
+  });
+
+  test("without contentTypes, HTML, SVG and XML are refused before anything is stored", async () => {
+    const put = vi.spyOn(driver, "putStream");
+    for (const [path, type] of [
+      ["html", "text/html"],
+      ["svg", "image/svg+xml"],
+      ["xml", "application/xml"],
+    ] as const) {
+      const error = await putFromUrl(driver, `${base}/${path}`, { fetch: local }).catch((e) => e);
+      expect(error).toBeInstanceOf(ContentTypeError);
+      expect(error).toMatchObject({ code: "content-type", contentType: type });
+    }
+    expect(put).not.toHaveBeenCalled();
+    expect(await storedFiles()).toEqual([]);
+  });
+
+  test("without contentTypes, any other type is stored", async () => {
+    const text = await putFromUrl(driver, `${base}/text`, { fetch: local });
+    expect(text.contentType).toBe("text/plain");
+    const binary = await putFromUrl(driver, `${base}/declared`, { fetch: local });
+    expect(binary.contentType).toBe("application/octet-stream");
+    expect(await storedFiles()).toEqual([binary.name, text.name].sort());
+  });
+
+  test("*/* does not let HTML through; naming it does", async () => {
+    await expect(
+      putFromUrl(driver, `${base}/html`, { contentTypes: ["*/*"], fetch: local }),
+    ).rejects.toBeInstanceOf(ContentTypeError);
+
+    const result = await putFromUrl(driver, `${base}/html`, {
+      contentTypes: ["text/html"],
+      fetch: local,
+    });
+    expect(result.contentType).toBe("text/html");
+    expect(result.name).toMatch(/\.html$/);
   });
 
   test("a non-2xx answer rejects with HttpStatusError", async () => {

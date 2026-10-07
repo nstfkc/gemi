@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { extensionFor, isAllowedContentType, sniffContentType } from "./sniffContentType";
+import {
+  extensionFor,
+  isActiveContentType,
+  isAllowedContentType,
+  sniffContentType,
+} from "./sniffContentType";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
 const text = (value: string) => new TextEncoder().encode(value);
@@ -87,5 +92,32 @@ describe("isAllowedContentType", () => {
     expect(isAllowedContentType("text/html", ["text/*"])).toBe(false);
     expect(isAllowedContentType("text/html", ["*/*"])).toBe(false);
     expect(isAllowedContentType("image/svg+xml", ["image/*", "image/svg+xml"])).toBe(true);
+    expect(isAllowedContentType("text/xml", ["text/*"])).toBe(false);
+    expect(isAllowedContentType("application/xml", ["application/*"])).toBe(false);
+    expect(isAllowedContentType("application/atom+xml", ["*/*"])).toBe(false);
+    expect(isAllowedContentType("application/xml", ["application/xml"])).toBe(true);
+  });
+});
+
+describe("isActiveContentType", () => {
+  test("HTML, SVG and XML in all their variants", () => {
+    for (const type of [
+      "text/html",
+      "TEXT/HTML; charset=utf-8",
+      "application/xhtml+xml",
+      "image/svg+xml",
+      "text/xml",
+      "application/xml",
+      "application/rss+xml",
+      "text/xsl",
+    ]) {
+      expect(isActiveContentType(type)).toBe(true);
+    }
+  });
+
+  test("everything else", () => {
+    for (const type of ["image/png", "text/plain", "application/json", "application/pdf", "application/octet-stream"]) {
+      expect(isActiveContentType(type)).toBe(false);
+    }
   });
 });

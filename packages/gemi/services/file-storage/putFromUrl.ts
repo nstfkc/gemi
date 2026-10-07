@@ -40,7 +40,8 @@ export interface PutFromUrlOptions {
    * `Content-Type` header. A wildcard never covers `image/svg+xml`,
    * `text/html` or XML, which can carry script: list them by name to accept
    * them. Anything else rejects with `ContentTypeError` before anything is
-   * stored. Default: any type.
+   * stored. Default: any type except active content (HTML, XHTML, SVG and
+   * XML), which is refused unless listed here by name.
    */
   contentTypes?: readonly string[];
   /** Cancels the download and the upload. */
@@ -134,8 +135,11 @@ export async function putFromUrl(
     headBytes.subarray(0, Math.min(headSize, SNIFF_BYTES)),
   );
 
-  if (contentTypes?.length && !isAllowedContentType(contentType, contentTypes)) {
-    await fail(new ContentTypeError(response.url, contentType, contentTypes));
+  // Without `contentTypes`, anything but active content: an HTML or SVG file
+  // served back from the app's own origin could run script there.
+  const allowed = contentTypes?.length ? contentTypes : ["*/*"];
+  if (!isAllowedContentType(contentType, allowed)) {
+    await fail(new ContentTypeError(response.url, contentType, allowed));
   }
 
   const objectName =

@@ -29,7 +29,10 @@ export {
   type PutFromUrlOptions,
   type PutFromUrlResult,
 } from "./file-storage/putFromUrl";
-export { sniffContentType } from "./file-storage/sniffContentType";
+export {
+  isActiveContentType,
+  sniffContentType,
+} from "./file-storage/sniffContentType";
 // The toolkit a custom driver needs to resolve a range against its backend.
 export {
   resolveRange,
