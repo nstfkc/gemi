@@ -6,13 +6,14 @@ import type {
   StoredObject,
   PutFileOptions,
   PutFileParams,
+  PutStreamParams,
   ReadFileParams,
   ReadResult,
 } from "./types";
 import { FileStorageDriver, assertDeletablePrefix } from "./FileStorageDriver";
 import { abortableBody } from "./abortableBody";
-import { readdir, rmdir, stat, unlink } from "fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { mkdir, open, readdir, rename, rmdir, stat, unlink } from "fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
 import { projectRoot } from "../../../support/discover";
@@ -79,6 +80,59 @@ export class FileSystemDriver extends FileStorageDriver {
     await Bun.write(path, buffer as any);
 
     return name;
+  }
+
+  /**
+   * Writes the stream to a temporary file next to the target and renames it
+   * into place once the stream has ended, so an error or an abort halfway
+   * leaves no file, and a reader never sees a half-written one. Memory stays
+   * at one chunk however large the file.
+   */
+  async putStream(
+    { name, body }: PutStreamParams,
+    { signal }: PutFileOptions = {},
+  ): Promise<string> {
+    const reader = body.getReader();
+    let partial: string | null = null;
+    try {
+      signal?.throwIfAborted();
+      if (!name) {
+        throw new Error("Object name has to be specified");
+      }
+      const root = resolve(this.folderPath);
+      const path = resolve(root, name);
+      const rel = relative(root, path);
+      if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        throw new Error(`Refusing to write "${name}": it is outside the storage folder`);
+      }
+
+      await mkdir(dirname(path), { recursive: true });
+      partial = `${path}.${Bun.randomUUIDv7()}.partial`;
+      const file = await open(partial, "wx");
+      try {
+        for (;;) {
+          signal?.throwIfAborted();
+          const { done, value } = await reader.read();
+          if (done) break;
+          // `write` may take fewer bytes than it was given.
+          for (let offset = 0; offset < value.byteLength; ) {
+            const { bytesWritten } = await file.write(value, offset);
+            offset += bytesWritten;
+          }
+        }
+      } finally {
+        await file.close();
+      }
+      signal?.throwIfAborted();
+      await rename(partial, path);
+      return name;
+    } catch (error) {
+      // Also on a refusal before the first read: the source (a download) is
+      // released now rather than when its own timeout runs out.
+      await reader.cancel(error).catch(() => {});
+      if (partial) await unlink(partial).catch(() => {});
+      throw error;
+    }
   }
 
   async fetch(

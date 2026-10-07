@@ -19,6 +19,11 @@ import type {
   StoredObject,
 } from "../services/file-storage/drivers/types";
 import { FilesystemManager } from "../services/file-storage/FilesystemManager";
+import {
+  putFromUrl,
+  type PutFromUrlOptions,
+  type PutFromUrlResult,
+} from "../services/file-storage/putFromUrl";
 import { Facade } from "./Facade";
 
 type Metadata = Prettify<sharp.Metadata>;
@@ -34,6 +39,38 @@ export class Storage extends Facade {
    */
   static async put(params: PutFileParams | Blob, options: PutFileOptions = {}) {
     return this.getFacadeRoot().driver.put(params, options);
+  }
+
+  /**
+   * Downloads a remote file and stores it, for URLs that come from users or
+   * other services: an image link, a provider's signed download URL.
+   *
+   * ```ts
+   * const { name, contentType, size } = await Storage.putFromUrl(url, {
+   *   directory: `sites/${site.id}`,
+   *   contentTypes: ["image/*"],
+   *   maxSize: 10 * 1024 * 1024,
+   *   signal: req.rawRequest.signal,
+   * });
+   * ```
+   *
+   * The download goes through `safeFetch`, so private and internal addresses,
+   * other ports and too many redirects are refused, and `maxSize` and
+   * `timeout` hold while the body streams in. The stored type is sniffed from
+   * the file's first bytes, never taken from the `Content-Type` header, and is
+   * checked against `contentTypes` before anything is stored. A download
+   * that fails or grows past `maxSize` halfway stores nothing.
+   *
+   * Rejects with `safeFetch`'s errors (`SafeFetchError` subclasses):
+   * `HttpStatusError` for a non-2xx answer, `ContentTypeError` for a type not
+   * in `contentTypes`, `TooLargeError`, `TimeoutError`, `BlockedAddressError`
+   * and so on; an abort rejects with the signal's reason.
+   */
+  static async putFromUrl(
+    url: string | URL,
+    options: PutFromUrlOptions = {},
+  ): Promise<PutFromUrlResult> {
+    return putFromUrl(this.getFacadeRoot().driver, url, options);
   }
 
   static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {
