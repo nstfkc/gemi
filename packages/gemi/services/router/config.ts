@@ -19,6 +19,9 @@ export interface ApiRouteConfig {
   onRequestFail?: (req: HttpRequest, error: any) => void | Promise<void>;
 }
 
+/** See `ViewRouteConfig.localeRouting`. */
+export type LocaleRouting = "prefix" | "off";
+
 // Config key: `route.view`. Derived from `ViewRouterServiceProvider`.
 export interface ViewRouteConfig {
   root: (props: any) => JSX.Element;
@@ -34,6 +37,24 @@ export interface ViewRouteConfig {
    * app cannot audit them all at once.
    */
   partialRendering?: boolean;
+
+  /**
+   * How these views take part in locale routing when `translation`
+   * configures `supportedLocales`. Set it on a `route.domains` group's `view`
+   * to opt that host out (e.g. user-published sites that are not the app's
+   * own UI), or with the `"no-locale"` middleware directive on one router or
+   * route.
+   *
+   * - `"prefix"` (default): URLs carry the locale (`/tr-TR/about`), and a
+   *   visitor whose cookie or `Accept-Language` names another locale is
+   *   redirected to it.
+   * - `"off"`: URLs never carry a locale and nothing redirects. A first
+   *   segment like `/tr-TR` is an ordinary path. Nothing is detected from the
+   *   cookie or `Accept-Language`, and no `i18n-locale` cookie is set. The
+   *   request renders in `translation.defaultLocale` unless middleware picks
+   *   one with `Lang.setLocale(locale, { cookie: false })`.
+   */
+  localeRouting?: LocaleRouting;
 
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
@@ -244,6 +265,7 @@ export function viewRouteConfigDefaults(): Omit<
 > {
   return {
     partialRendering: true,
+    localeRouting: "prefix",
     onRequestStart: () => {},
     onRequestEnd: () => {},
     onRequestFail: () => {},

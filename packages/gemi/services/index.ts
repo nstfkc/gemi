@@ -355,6 +355,7 @@ export {
   type ApiRouteConfig,
   type McpRouteConfig,
   type ViewRouteConfig,
+  type LocaleRouting,
 } from "./router/config";
 export {
   defineLogConfig,

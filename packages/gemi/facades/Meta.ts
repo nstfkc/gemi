@@ -1,4 +1,4 @@
-import type { OpenGraphParams } from "../http/Metadata";
+import type { AlternateLink, HtmlAttributes, OpenGraphParams } from "../http/Metadata";
 import { RequestContext } from "../http/requestContext";
 
 export class Meta {
@@ -11,5 +11,21 @@ export class Meta {
   }
   static openGraph(params: OpenGraphParams) {
     RequestContext.getStore().metadata.openGraph(params);
+  }
+  /**
+   * Attributes for this response's `<html>` element (`lang`, `dir`), e.g. a
+   * page whose language is its content's rather than the visitor's. The
+   * layout receives them as `htmlAttributes`; spread it onto `<html>`.
+   */
+  static htmlAttributes(attributes: HtmlAttributes) {
+    RequestContext.getStore().metadata.htmlAttributes(attributes);
+  }
+  /** `<link rel="canonical">`, rendered by `<Head />`. */
+  static canonical(url: string) {
+    RequestContext.getStore().metadata.canonical(url);
+  }
+  /** `<link rel="alternate" hreflang>` for each language this page exists in, rendered by `<Head />`. */
+  static alternates(links: AlternateLink[]) {
+    RequestContext.getStore().metadata.alternates(links);
   }
 }

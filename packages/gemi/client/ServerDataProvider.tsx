@@ -34,6 +34,8 @@ export interface ServerDataContextValue {
     defaultLocale: string;
     /** The IANA zone dates are formatted in, resolved on the server. */
     timeZone?: string;
+    /** `"off"` when these views are out of locale routing (`ViewRouteConfig.localeRouting`). */
+    localeRouting?: "off";
   };
   componentTree: ComponentTree;
   auth: {

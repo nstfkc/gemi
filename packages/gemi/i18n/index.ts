@@ -15,6 +15,9 @@ export {
   type DictionaryHandle,
 } from "./defineDictionary";
 export { translate } from "./translate";
+// How gemi maps a requested tag onto a supported locale (`en` → `en-US`,
+// `de-AT` → `de-DE`), for an app that negotiates a locale itself.
+export { resolveLocale } from "./resolveLocale";
 export type { DictionaryTranslations, LocaleStrings } from "./dictionaryShape";
 export {
   createFormatter,

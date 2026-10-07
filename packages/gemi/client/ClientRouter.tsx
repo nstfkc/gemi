@@ -11,7 +11,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
+import type { PropsWithChildren, ComponentType, lazy } from "react";
 import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 
 import { ServerDataContext } from "./ServerDataProvider";
@@ -31,6 +31,7 @@ import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
 import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
+import { resolveHtmlAttributes, type RootLayoutProps } from "./htmlAttributes";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
 import { initialRenderedRoute } from "../utils/partialRender";
@@ -331,7 +332,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           appId,
           features,
         } = payload;
-        updateMeta(meta);
+        updateMeta(meta, i18n?.currentLocale ?? i18n?.defaultLocale);
         if (directive?.kind === "Redirect") {
           // An absolute URL (`Redirect.external`, an off-origin sign-in page)
           // is not a route: the router would prefix a locale and look it up.
@@ -434,7 +435,7 @@ export const ClientRouter = (props: {
   viewImportMap?: Record<string, ReturnType<typeof lazy>>;
   /** Server only: full view modules for `Loading`/`Error` fallbacks. */
   viewModules?: Record<string, Record<string, any>>;
-  RootLayout: ComponentType<{ children: ReactNode; locale: string }>;
+  RootLayout: ComponentType<RootLayoutProps>;
   /** App-wide `useQuery` defaults; per-call config always wins. */
   queryConfig?: QueryConfig;
 }) => {
@@ -449,7 +450,12 @@ export const ClientRouter = (props: {
     assetBase,
     breadcrumbs,
     i18n,
+    meta,
   } = useContext(ServerDataContext);
+  const htmlAttributes = resolveHtmlAttributes(
+    meta?.htmlAttributes,
+    i18n.currentLocale ?? i18n.defaultLocale,
+  );
 
   return (
     <ThemeProvider>
@@ -472,7 +478,7 @@ export const ClientRouter = (props: {
               urlLocaleSegment={router.urlLocaleSegment}
             >
               <StrictMode>
-                <RootLayout locale={i18n.currentLocale}>
+                <RootLayout locale={i18n.currentLocale} htmlAttributes={htmlAttributes}>
                   <Routes componentTree={componentTree} />
                 </RootLayout>
               </StrictMode>

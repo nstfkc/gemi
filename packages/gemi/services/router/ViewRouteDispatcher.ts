@@ -7,7 +7,7 @@ import {
   type FlatViewRoutes,
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
-import { viewRouteConfigDefaults, type ViewRouteConfig } from "./config";
+import { viewRouteConfigDefaults, type LocaleRouting, type ViewRouteConfig } from "./config";
 import { resolvePartialRender } from "./planPartialRender";
 import { matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
@@ -111,6 +111,13 @@ const renderToReadableStream = async (...args: any[]): Promise<any> => {
  * open forever; the browser resolves whatever was aborted over `/api`.
  */
 const STREAM_DEADLINE_MS = 10_000;
+
+/**
+ * `"no-locale"` in a route's (or its router's) middleware list takes it out of
+ * locale routing, as `localeRouting: "off"` does a whole view tree. A
+ * directive read by the dispatcher, like `"no-stream"`, not real middleware.
+ */
+const NO_LOCALE_DIRECTIVE = "no-locale";
 
 const themeScript = `
 !function(){try{var d=document.documentElement,c=d.classList;
@@ -260,10 +267,14 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.partialRendering`. */
   readonly partialRendering: boolean;
 
+  /** See `ViewRouteConfig.localeRouting`. */
+  readonly localeRouting: LocaleRouting;
+
   constructor(config: ViewRouteConfig) {
     const defaults = viewRouteConfigDefaults();
 
     this.partialRendering = config.partialRendering ?? defaults.partialRendering;
+    this.localeRouting = config.localeRouting ?? defaults.localeRouting;
 
     this.hooks = {
       onRequestStart: config.onRequestStart ?? defaults.onRequestStart,
@@ -994,18 +1005,27 @@ export class ViewRouteDispatcher {
     const urlPathnameWithLocale = url.pathname.replace(".json", "").replace(".og", "");
 
     const [, maybeLocale, ...rest] = urlPathnameWithLocale.split("/");
-    let urlPathname = `/${rest.join("/")}`;
+    let urlPathname = urlPathnameWithLocale;
     let urlLocaleSegment = null;
     let urlLocale: string | null = null;
 
     const translator = app(Translator);
 
-    const isPathnameWithLocale =
-      !translator.supportedLocales.includes(maybeLocale);
+    // The route the path names as it stands, before any locale is read off it.
+    const directMatch = matchViewRoute(this.flatViewRoutes, urlPathnameWithLocale);
 
-    if (isPathnameWithLocale) {
-      urlPathname = urlPathnameWithLocale;
-    } else {
+    // Whether this request takes part in locale routing at all: a locale-aware
+    // app, on a view tree that did not opt out (`localeRouting: "off"`, e.g. a
+    // domain group serving pages that are not the app's own UI), for a route
+    // without the `"no-locale"` directive. Without it, the URL never carries a
+    // locale, nothing redirects, and nothing is detected per visitor.
+    const localeRouted =
+      translator.isLocaleAware &&
+      this.localeRouting === "prefix" &&
+      !directMatch?.route.middleware.includes(NO_LOCALE_DIRECTIVE);
+
+    if (localeRouted && translator.supportedLocales.includes(maybeLocale)) {
+      urlPathname = `/${rest.join("/")}`;
       urlLocaleSegment = maybeLocale;
       urlLocale = maybeLocale;
     }
@@ -1016,10 +1036,9 @@ export class ViewRouteDispatcher {
     // existence is the signal — a path the app actually serves is served, and
     // only one it does not is read as a locale that needs redirecting. Without
     // this, `/de-luxe` answered `302 /de-DE` and the page was gone.
-    const pathIsARoute =
-      urlLocale === null && matchViewRoute(this.flatViewRoutes, urlPathname) !== null;
+    const pathIsARoute = urlLocale === null && directMatch !== null;
 
-    if (translator.isLocaleAware && !isOgRequest && urlLocale === null && !pathIsARoute) {
+    if (localeRouted && !isOgRequest && urlLocale === null && !pathIsARoute) {
       // A locale prefix the app doesn't serve verbatim but can map onto one it
       // does — `/en/about` → `/en-US/about`, `/de-AT/about` → `/de-DE/about` —
       // is sent to that locale's URL rather than rendered as an unknown path.
@@ -1042,7 +1061,7 @@ export class ViewRouteDispatcher {
       }
     }
 
-    if (translator.isLocaleAware && !isOgRequest) {
+    if (localeRouted && !isOgRequest) {
       const locale = app(Translator).detectLocale(
         new HttpRequest(req, {}, "view", urlPathname),
       );
@@ -1077,7 +1096,12 @@ export class ViewRouteDispatcher {
     let staticView: StaticViewOptions | undefined;
 
     try {
-      const match = matchViewRoute(this.flatViewRoutes, urlPathname);
+      let match = matchViewRoute(this.flatViewRoutes, urlPathname);
+      // A `"no-locale"` route has no locale-prefixed URL: `/tr-TR/about` is
+      // not its page under another name.
+      if (urlLocale && match?.route.middleware.includes(NO_LOCALE_DIRECTIVE)) {
+        match = null;
+      }
       if (match) {
         currentPathName = match.routePath;
         params = match.params;
@@ -1181,6 +1205,10 @@ export class ViewRouteDispatcher {
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
         Lang.setLocale(locale, { cookie: staticCookies.locale });
+      } else if (translator.isLocaleAware && !localeRouted) {
+        // Out of locale routing: the default locale, not the visitor's, and no
+        // cookie. Middleware may still pick one with `Lang.setLocale`.
+        ctx.setLocale(translator.defaultLocale);
       } else {
         Lang.setLocale(undefined, { cookie: staticCookies.locale });
       }
@@ -1279,6 +1307,9 @@ export class ViewRouteDispatcher {
           if (urlLocale) {
             locale = urlLocale.replaceAll("/", "");
             ctx.setLocale(locale);
+          } else if (!localeRouted) {
+            // Whatever middleware chose, else the default set above.
+            locale = ctx.locale ?? translator.defaultLocale;
           } else {
             locale = translator.detectLocale(detectionRequest);
             ctx.setLocale(locale);
@@ -1296,6 +1327,8 @@ export class ViewRouteDispatcher {
               [locale]: translations,
             },
             defaultLocale: translator.defaultLocale,
+            // Tells the client router not to read or write a locale segment.
+            ...(localeRouted ? {} : { localeRouting: "off" }),
           };
         }
 

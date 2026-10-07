@@ -1,3 +1,16 @@
+# Unreleased
+
+## i18n: opt out of locale routing, and set `<html lang>` per response (#842)
+
+**New.** In an app with `translation.supportedLocales`, every view route took part in locale routing, including a `route.domains` group that serves pages which are not the app's own UI. A visitor whose `Accept-Language` or `i18n-locale` cookie named a non-default locale was redirected to `/<locale>/…`, a path such a host does not have, and `<html lang>` followed the visitor. See [Opting out of locale routing](docs/i18n.md#opting-out-of-locale-routing).
+
+- `ViewRouteConfig.localeRouting: "prefix" | "off"` (default `"prefix"`), also on a domain group's `view`. With `"off"`, nothing redirects, `/tr-TR/…` is an ordinary path, the locale is `defaultLocale` (or what middleware sets with `Lang.setLocale`), and no `i18n-locale` cookie is set. Type `LocaleRouting` from `gemi/services`.
+- The `"no-locale"` middleware directive does the same for one router or route. A `/<locale>/…` URL for such a route is a 404.
+- `Meta.htmlAttributes({ lang, dir })`, `Meta.canonical(url)` and `Meta.alternates([{ hrefLang, href }])`. Layouts now receive `htmlAttributes` (`{ lang, dir }`: what the response set, else the request's locale and its direction) next to `locale`. `<Head />` renders the canonical and alternate links.
+- New from `gemi/client`: `textDirection` and the types `RootLayoutProps` and `HtmlAttributes`. New from `gemi/i18n`: `resolveLocale`.
+
+What to do: nothing, because behaviour is unchanged unless you opt out. For a host or route outside your locale scheme, set `localeRouting: "off"` or `"no-locale"`. To control `<html lang>`/`dir`, spread `props.htmlAttributes` onto `<html>` in your layouts.
+
 # Upgrading from 0.114.0 to 0.115.0
 
 ## Storage: portable `objects(prefix)` and `deletePrefix(prefix)` (#833)
