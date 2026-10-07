@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.115.0 to 0.116.0
 
 ## i18n: opt out of locale routing, and set `<html lang>` per response (#842)
 
