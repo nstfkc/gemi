@@ -1,4 +1,6 @@
-# Upgrading from 0.118.0 to 0.119.0
+# Upgrading from 0.118.0 to 0.119.1
+
+0.119.0 was tagged but never became available on npm; 0.119.1 is the same release, published again. Upgrade straight from 0.118.0 to 0.119.1.
 
 ## OAuth: `linkByEmail` and `createUsers` on a sign-in provider; Figma's `user_id_string` (#863)
 
