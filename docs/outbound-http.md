@@ -64,8 +64,11 @@ All extend `SafeFetchError`, which has `code` and `url` (the hop that failed).
 | `ContentTypeError` | `content-type` | The type isn't in `contentTypes`. |
 | `TooManyRedirectsError` | `too-many-redirects` | More than `maxRedirects` redirects. |
 | `NetworkError` | `network` | Refused, reset, a TLS failure, a malformed response. |
+| `HttpStatusError` | `http-status` | Not thrown by `safeFetch`, which returns any status; thrown by helpers built on it, such as [`Storage.putFromUrl()`](./file-storage.md#putfromurlurl-options), for a non-2xx answer (`status`). |
 
 Aborting through your own `signal` rejects with the signal's reason, as `fetch` does.
+
+To download a file into storage, use [`Storage.putFromUrl()`](./file-storage.md#putfromurlurl-options): it fetches through `safeFetch`, sniffs the type from the bytes and stores nothing on a failure.
 
 `classifyAddress(ip)` is exported too: it returns `{ kind, range }` for a non-public address and `null` for a public one, for when you need to check an address you got some other way.
 

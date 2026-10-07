@@ -141,15 +141,27 @@ class TestViewRouter extends ViewRouter {
       Meta.description("Rendered once, shipped without React");
       return { heading: "Hello" };
     }).static(),
-    "/site": this.view("site/WithIslands", () => ({
-      note: `</gemi-island><script>alert("x")</script>&"'`,
-    })).static({ layout: "site/Layout" }),
+    "/site": this.view("site/WithIslands", () => {
+      Meta.fonts([
+        { family: "Acme Sans", src: "/storage/acme.woff2", weight: "400 700", preload: true },
+        { family: "Acme Sans", src: "/storage/acme-italic.woff2", style: "italic" },
+      ]);
+      Meta.fonts([
+        // Declared again by another handler: rendered and preloaded once.
+        { family: "Acme Sans", src: "/storage/acme.woff2", weight: "400 700", preload: true },
+        { family: '</style><script>alert("x")</script>', src: "/storage/evil.ttf", preload: true },
+      ]);
+      return { note: `</gemi-island><script>alert("x")</script>&"'` };
+    }).static({ layout: "site/Layout" }),
     "/untagged": this.view("site/Untagged", () => ({})).static(),
     "/bad-props": this.view("site/BadProps", () => ({})).static(),
     "/missing": this.view("site/Missing", () => {
       throw new RecordNotFoundError("Page", "findUniqueOrThrow");
     }).static(),
-    "/hydrated": this.view("Hydrated", () => ({})),
+    "/hydrated": this.view("Hydrated", () => {
+      Meta.fonts([{ family: "Hydrated Serif", src: "/fonts/serif.woff2", preload: true }]);
+      return {};
+    }),
   };
 }
 
@@ -244,6 +256,24 @@ describe("static views", () => {
     ]);
   });
 
+  test("render Meta.fonts as escaped @font-face rules and deduplicated preloads", async () => {
+    const html = await (await fetchDocument("/site")).text();
+    const head = html.match(/<head>(.*?)<\/head>/s)![1]!;
+
+    expect(head.match(/<link rel="preload"[^>]*>/g)).toEqual([
+      '<link rel="preload" as="font" href="/storage/acme.woff2" type="font/woff2" crossorigin=""/>',
+      '<link rel="preload" as="font" href="/storage/evil.ttf" type="font/ttf" crossorigin=""/>',
+    ]);
+    const styles = head.match(/<style data-gemi-fonts="">(.*?)<\/style>/s)!;
+    const rules = styles[1]!.split("\n");
+    expect(rules).toEqual([
+      '@font-face { font-family: "Acme Sans"; src: url("/storage/acme.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }',
+      '@font-face { font-family: "Acme Sans"; src: url("/storage/acme-italic.woff2") format("woff2"); font-style: italic; font-display: swap; }',
+      '@font-face { font-family: "\\3c /style\\3e \\3c script\\3e alert(\\"x\\")\\3c /script\\3e "; src: url("/storage/evil.ttf") format("truetype"); font-display: swap; }',
+    ]);
+    expect(html).not.toContain('<script>alert("x")');
+  });
+
   test("are one body for every visitor, so they do not vary on User-Agent", async () => {
     const res = await fetchDocument("/plain");
     expect(res.headers.get("Vary") ?? "").not.toContain("User-Agent");
@@ -271,6 +301,17 @@ describe("static views", () => {
     const data = JSON.parse(html.match(/window\.__GEMI_DATA__ = (\{.*?\});window\.loaders/s)![1]);
 
     expect(data.staticRoutes).toEqual(["/plain", "/site", "/untagged", "/bad-props", "/missing"]);
+  });
+
+  test("Meta.fonts works on a hydrated view too, and reaches the client router", async () => {
+    const html = await (await fetchDocument("/hydrated")).text();
+    const data = JSON.parse(html.match(/window\.__GEMI_DATA__ = (\{.*?\});window\.loaders/s)![1]);
+
+    expect(html).toContain('<link rel="preload" as="font" href="/fonts/serif.woff2" type="font/woff2" crossorigin=""/>');
+    expect(html).toContain('font-family: "Hydrated Serif"');
+    expect(data.meta.fonts).toEqual([
+      expect.objectContaining({ family: "Hydrated Serif", preload: true }),
+    ]);
   });
 });
 

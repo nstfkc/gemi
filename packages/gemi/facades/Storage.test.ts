@@ -74,3 +74,19 @@ describe("Storage.fetch()", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe("Storage.putFromUrl()", () => {
+  test("goes through safeFetch, so a private address never reaches the driver", async () => {
+    const putStream = vi.fn(async () => "never");
+    const put = vi.fn(async () => "never");
+    vi.spyOn(Storage, "getFacadeRoot").mockReturnValue({
+      driver: { putStream, put },
+    } as any);
+
+    await expect(Storage.putFromUrl("http://169.254.169.254/latest/meta-data")).rejects.toMatchObject({
+      code: "blocked-address",
+    });
+    expect(putStream).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+  });
+});
