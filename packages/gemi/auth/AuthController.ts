@@ -886,7 +886,21 @@ export class AuthController extends Controller {
           name,
           username,
           locale,
+          linkExisting: oauthProvider.linkByEmail !== false,
+          createUser: oauthProvider.createUsers !== false,
         });
+        if (resolved === "account_exists") {
+          console.error(
+            `Authentication error: a ${provider} sign-in matched an existing user by email, and ${provider} does not link by email`,
+          );
+          return this.oauthFailure(req, "account_exists");
+        }
+        if (resolved === "signup_disabled") {
+          console.error(
+            `Authentication error: a ${provider} sign-in is not linked to a user, and ${provider} does not create users`,
+          );
+          return this.oauthFailure(req, "signup_disabled");
+        }
         if (resolved) {
           user = resolved.user;
           action = resolved.action;
@@ -1010,7 +1024,20 @@ export class AuthController extends Controller {
     name?: string;
     username?: string;
     locale: string;
-  }): Promise<{ user: User; action: "signin" | "signup" } | null> {
+    /**
+     * Whether an existing user with this email is signed in (and the identity
+     * linked to them). `false` for a provider with `linkByEmail: false`: the
+     * callback is refused with `account_exists` instead.
+     */
+    linkExisting?: boolean;
+    /**
+     * Whether a new user is created for an email no user has. `false` for a
+     * provider with `createUsers: false`: refused with `signup_disabled`.
+     */
+    createUser?: boolean;
+  }): Promise<
+    { user: User; action: "signin" | "signup" } | "account_exists" | "signup_disabled" | null
+  > {
     const { provider, providerId, email, rawEmail, name, username, locale } = args;
     const { userProvider, config } = app(AuthManager);
 
@@ -1038,6 +1065,10 @@ export class AuthController extends Controller {
     }
 
     if (existing) {
+      // The provider does not vouch for the address: the same email is not
+      // proof that this is the same person, so nothing is signed in or linked.
+      if (args.linkExisting === false) return "account_exists";
+
       if (!providerId) return { user: existing, action: "signin" };
 
       const accounts = await userProvider.findSocialAccounts(
@@ -1080,6 +1111,9 @@ export class AuthController extends Controller {
 
       return { user: existing, action: "signin" };
     }
+
+    // The provider only signs in users who linked it from their account.
+    if (args.createUser === false) return "signup_disabled";
 
     // Same shape as `signUp`: the user, the row that has to exist beside it,
     // and `onUserCreated`, in one transaction. The social account in

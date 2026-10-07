@@ -58,7 +58,10 @@ export interface OAuthTokenSet {
   expiresAt: Date | null;
   /** The scopes granted, when the provider says; otherwise the ones requested. */
   scopes: string[];
-  /** The provider's id for the account, when the token response carries one (Figma's `user_id`). */
+  /**
+   * The provider's id for the account, when the token response carries one
+   * (Figma's `user_id_string`; `user_id` or `account_id` otherwise).
+   */
   providerAccountId: string | null;
 }
 
@@ -218,7 +221,9 @@ export class OAuthConnectionProvider {
 
     const expiresIn = Number(payload.expires_in);
     const scope = typeof payload.scope === "string" ? payload.scope : undefined;
-    const accountId = payload.user_id ?? payload.account_id;
+    // Figma's `user_id_string` before its deprecated numeric `user_id`, which
+    // JSON parsing has already rounded: Figma's ids do not fit a double.
+    const accountId = payload.user_id_string ?? payload.user_id ?? payload.account_id;
     return {
       accessToken: payload.access_token,
       refreshToken:

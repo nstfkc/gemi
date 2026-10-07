@@ -363,6 +363,124 @@ describe("the email", () => {
   });
 });
 
+describe("a provider that does not link by email", () => {
+  const unlinked = { ...scripted, linkByEmail: false };
+  beforeEach(() => {
+    auth.config.oauthProviders.unlinked = unlinked;
+  });
+  afterEach(() => {
+    delete auth.config.oauthProviders.unlinked;
+  });
+
+  test("an existing user's email is refused with account_exists, and nothing is linked", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    const link = vi.spyOn(auth.userProvider, "createSocialAccount");
+    profile = { providerId: "p1", email: "Ada@Example.com" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result, cookies } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.error).toBe("account_exists");
+    expect(result.session).toBeNull();
+    expect(link).not.toHaveBeenCalled();
+    expect(seen.created).toEqual([]);
+    expect(cookieValue(cookies, "access_token")).toBeUndefined();
+  });
+
+  test("a new email still creates a user, with the identity linked", async () => {
+    const link = vi.spyOn(auth.userProvider, "createSocialAccount");
+    profile = { providerId: "p1", email: "grace@example.com", username: "grace" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.session.user.id).toBe(99);
+    expect(seen.created).toMatchObject([{ email: "grace@example.com" }]);
+    expect(link).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "unlinked", providerId: "p1", userId: 99 }),
+    );
+  });
+
+  test("an identity already linked signs in whatever the email", async () => {
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    vi.spyOn(auth.userProvider, "findUserBySocialAccount").mockResolvedValue({
+      id: 1,
+      email: "ada@example.com",
+    } as never);
+    profile = { providerId: "p1", email: "ada@example.com" };
+
+    const { state, cookie } = await start("unlinked");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "unlinked");
+
+    expect(result.session.user.id).toBe(1);
+    expect(seen.lookups).toEqual([]);
+  });
+});
+
+describe("a provider that does not create users", () => {
+  const linkOnly = { ...scripted, linkByEmail: false, createUsers: false };
+  beforeEach(() => {
+    auth.config.oauthProviders.linkOnly = linkOnly;
+  });
+  afterEach(() => {
+    delete auth.config.oauthProviders.linkOnly;
+  });
+
+  test("a new email is refused with signup_disabled, and no user is created", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const link = vi.spyOn(auth.userProvider, "createSocialAccount");
+    profile = { providerId: "p1", email: "grace@example.com" };
+
+    const { state, cookie } = await start("linkOnly");
+    const { result, cookies } = await finish(`?code=c&state=${state}`, cookie, "linkOnly");
+
+    expect(result.error).toBe("signup_disabled");
+    expect(result.session).toBeNull();
+    expect(seen.created).toEqual([]);
+    expect(link).not.toHaveBeenCalled();
+    expect(cookieValue(cookies, "access_token")).toBeUndefined();
+  });
+
+  test("with linkByEmail off too, an existing user's email is still account_exists", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    profile = { providerId: "p1", email: "ada@example.com" };
+
+    const { state, cookie } = await start("linkOnly");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "linkOnly");
+
+    expect(result.error).toBe("account_exists");
+    expect(seen.created).toEqual([]);
+  });
+
+  test("a linked identity signs in", async () => {
+    vi.spyOn(auth.userProvider, "findUserBySocialAccount").mockResolvedValue({
+      id: 1,
+      email: "ada@example.com",
+    } as never);
+    profile = { providerId: "p1", email: "new@example.com" };
+
+    const { state, cookie } = await start("linkOnly");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "linkOnly");
+
+    expect(result.session.user.id).toBe(1);
+    expect(seen.created).toEqual([]);
+  });
+
+  test("with linkByEmail on, an existing user's verified email still signs in", async () => {
+    auth.config.oauthProviders.linkOnly = { ...scripted, createUsers: false };
+    knownUsers["ada@example.com"] = { id: 1, email: "ada@example.com" };
+    profile = { providerId: "p1", email: "ada@example.com", emailVerified: true };
+
+    const { state, cookie } = await start("linkOnly");
+    const { result } = await finish(`?code=c&state=${state}`, cookie, "linkOnly");
+
+    expect(result.session.user.id).toBe(1);
+    expect(seen.created).toEqual([]);
+  });
+});
+
 describe("a failed callback", () => {
   test("?error= short-circuits with the provider's reason and the return path", async () => {
     const { cookie } = await start("scripted", "http://localhost", "?redirect=%2Finvoices");
