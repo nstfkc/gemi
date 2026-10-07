@@ -2,6 +2,7 @@ import type { AlternateLink } from "../http/Metadata";
 import { type ReactNode, useContext } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
 import { resolveHtmlAttributes } from "./htmlAttributes";
+import { fontFaceRules, fontPreloads } from "./fonts";
 
 /** Marks the `<link>`s rendered from metadata, so a navigation can replace them. */
 const GEMI_META_ATTRIBUTE = "data-gemi-meta";
@@ -20,6 +21,16 @@ function metaLinks(
   return links;
 }
 
+/** Marks the `<style>`s holding `Meta.fonts`' `@font-face` rules. */
+const GEMI_FONTS_ATTRIBUTE = "data-gemi-fonts";
+
+/**
+ * The `@font-face` rules already in the document. A navigation adds the new
+ * page's and removes none: a skipped layout's fonts are still in use, and an
+ * unused `@font-face` costs nothing (it is only fetched when text uses it).
+ */
+const appliedFontRules = new Set<string>();
+
 /** Whether a navigation has set `<html>` attributes from metadata. */
 let htmlAttributesApplied = false;
 
@@ -29,7 +40,7 @@ export function updateMeta(meta: any, locale?: string | null) {
   if (!meta) {
     return;
   }
-  const { title, description, htmlAttributes, canonical, alternates } = meta;
+  const { title, description, htmlAttributes, canonical, alternates, fonts } = meta;
   // A page that set `<html>` attributes gets them; after one, a page that set
   // none goes back to its locale's. A layout that never asked keeps its own.
   if (htmlAttributes || htmlAttributesApplied) {
@@ -52,6 +63,14 @@ export function updateMeta(meta: any, locale?: string | null) {
     if (link.hrefLang) element.setAttribute("hreflang", link.hrefLang);
     element.setAttribute(GEMI_META_ATTRIBUTE, "");
     document.head.appendChild(element);
+  }
+  const newFontRules = fontFaceRules(fonts).filter((rule) => !appliedFontRules.has(rule));
+  if (newFontRules.length > 0) {
+    const style = document.createElement("style");
+    style.setAttribute(GEMI_FONTS_ATTRIBUTE, "");
+    style.textContent = newFontRules.join("\n");
+    document.head.appendChild(style);
+    for (const rule of newFontRules) appliedFontRules.add(rule);
   }
   if (title) {
     document.title = title;
@@ -145,6 +164,11 @@ export const Head = ({
   if (meta?.htmlAttributes) {
     htmlAttributesApplied = true;
   }
+  const fontRules = fontFaceRules(meta?.fonts);
+  // Browser only: on the server the set would be shared by every request.
+  if (typeof window !== "undefined") {
+    for (const rule of fontRules) appliedFontRules.add(rule);
+  }
   return (
     <head>
       <meta charSet={charSet} />
@@ -172,6 +196,24 @@ export const Head = ({
           {...{ [GEMI_META_ATTRIBUTE]: "" }}
         />
       ))}
+      {fontPreloads(meta?.fonts).map((preload) => (
+        <link
+          key={`preload:${preload.href}`}
+          rel="preload"
+          as="font"
+          href={preload.href}
+          type={preload.type ?? undefined}
+          crossOrigin=""
+        />
+      ))}
+      {fontRules.length > 0 && (
+        <style
+          {...{ [GEMI_FONTS_ATTRIBUTE]: "" }}
+          // Escaped by `fontFaceRule`: strings are CSS-escaped (`<` included),
+          // descriptors are checked by `Meta.fonts`.
+          dangerouslySetInnerHTML={{ __html: fontRules.join("\n") }}
+        />
+      )}
       {children}
     </head>
   );

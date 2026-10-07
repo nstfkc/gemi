@@ -116,3 +116,24 @@ export {
   type Classification,
   type InvalidUrlReason,
 } from "./safeFetch/index";
+
+export {
+  Sitemap,
+  SitemapError,
+  Robots,
+  RobotsTxt,
+  type ParsedSitemap,
+  type SitemapChangeFreq,
+  type SitemapEntry,
+  type SitemapIndexEntry,
+  type SitemapLimits,
+  type SitemapReadOptions,
+  type SitemapResponseOptions,
+  type SitemapUrl,
+  type RobotsConfig,
+  type RobotsFetchOptions,
+  type RobotsGroup,
+  type RobotsRule,
+  type RobotsStatus,
+} from "./sitemap/index";
+export type { AlternateLink } from "./Metadata";

@@ -111,6 +111,7 @@ export {
   type HtmlAttributes,
   type RootLayoutProps,
 } from "./htmlAttributes";
+export type { MetaFont, FontSource, FontFormat } from "./fonts";
 
 export { useForgotPassword } from "./auth/useForgotPassword";
 export { useSignIn } from "./auth/useSignIn";
