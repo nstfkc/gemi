@@ -1,3 +1,28 @@
+# Unreleased
+
+## OAuth connections: a refresh endpoint of its own (Figma), `connection.status` (#869)
+
+**Fix and small additions.** `OAuthConnectionProvider` spent refresh tokens at `tokenUrl` with `grant_type=refresh_token`. Figma documents a separate refresh endpoint (`POST https://api.figma.com/v1/oauth/refresh`, only `refresh_token` in the body) and HTTP Basic client credentials on both the exchange and the refresh, so a Figma connection could be refused at its first refresh and marked as needing a reconnect.
+
+- New provider options: `refreshUrl` (default `tokenUrl`) and `refreshGrantType` (default `"refresh_token"`; `false` leaves `grant_type` out). `clientAuth` now applies to the refresh endpoint too.
+- New: `connection.status` (`"connected" | "needs_reconnect"`, also in `toJSON()`), and the `ConnectionStatus` type from `gemi/services`. `needs_reconnect` covers a refused refresh and an expired access token with no refresh token, so a settings page can show it without calling the provider.
+- Behaviour change: a refresh refused with `invalid_client` no longer marks the connection as needing a reconnect. It throws `OAuthConnectionError` (`refresh_failed`) instead: the app's credentials are wrong, and once they are fixed the stored refresh tokens work again.
+
+What to do: for Figma, configure the provider as Figma documents it:
+
+```ts
+figma: new OAuthConnectionProvider({
+  authorizeUrl: "https://www.figma.com/oauth",
+  tokenUrl: "https://api.figma.com/v1/oauth/token",
+  refreshUrl: "https://api.figma.com/v1/oauth/refresh",
+  refreshGrantType: false,
+  clientAuth: "basic",
+  // clientId, clientSecret, scopes, apiBaseUrl as before
+}),
+```
+
+Connections already marked `needsReconnect` stay marked until the user connects again. Other providers need no change.
+
 # Upgrading from 0.120.0 to 0.120.1
 
 ## Static navigation: a page's own `<style>` in its content no longer forces a full load (#867)

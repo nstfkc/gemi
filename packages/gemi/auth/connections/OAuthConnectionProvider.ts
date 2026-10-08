@@ -3,8 +3,20 @@ import { OAuthConnectionError } from "./errors";
 export interface OAuthConnectionProviderConfig {
   /** The provider's authorization endpoint: `https://www.figma.com/oauth`. */
   authorizeUrl: string;
-  /** The token endpoint, for the code exchange and refreshes. */
+  /** The token endpoint, for the code exchange (and refreshes, unless `refreshUrl` says otherwise). */
   tokenUrl: string;
+  /**
+   * Where refresh tokens are spent, for a provider with a refresh endpoint of
+   * its own: Figma refreshes at `https://api.figma.com/v1/oauth/refresh`.
+   * Default `tokenUrl`.
+   */
+  refreshUrl?: string;
+  /**
+   * The `grant_type` sent with a refresh. Default `"refresh_token"` (RFC 6749
+   * §6). `false` leaves it out, for a refresh endpoint that documents only
+   * `refresh_token` (Figma's).
+   */
+  refreshGrantType?: string | false;
   /**
    * The RFC 7009 revocation endpoint. Without one, `revoke()` is refused and
    * `disconnect()` (which forgets the tokens locally) is the way to remove a
@@ -18,7 +30,7 @@ export interface OAuthConnectionProviderConfig {
   /** How `scopes` are joined on the authorization URL. Default `" "` (RFC 6749). */
   scopeSeparator?: string;
   /**
-   * How the client authenticates to the token and revocation endpoints:
+   * How the client authenticates to the token, refresh and revocation endpoints:
    * `"body"` sends `client_id` and `client_secret` as form fields (what most
    * providers document), `"basic"` sends them as HTTP Basic credentials.
    * Default `"body"`.
@@ -75,6 +87,9 @@ export interface OAuthTokenSet {
  *   figma: new OAuthConnectionProvider({
  *     authorizeUrl: "https://www.figma.com/oauth",
  *     tokenUrl: "https://api.figma.com/v1/oauth/token",
+ *     refreshUrl: "https://api.figma.com/v1/oauth/refresh",
+ *     refreshGrantType: false,
+ *     clientAuth: "basic",
  *     clientId: process.env.FIGMA_CLIENT_ID!,
  *     clientSecret: process.env.FIGMA_CLIENT_SECRET!,
  *     scopes: ["file_content:read"],
@@ -85,15 +100,17 @@ export interface OAuthTokenSet {
  */
 export class OAuthConnectionProvider {
   readonly config: Required<
-    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri">
+    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl">
   > &
-    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri">;
+    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl">;
 
   constructor(config: OAuthConnectionProviderConfig) {
     for (const key of ["authorizeUrl", "tokenUrl"] as const) {
       assertHttpUrl(key, config[key]);
     }
-    if (config.revokeUrl !== undefined) assertHttpUrl("revokeUrl", config.revokeUrl);
+    for (const key of ["refreshUrl", "revokeUrl"] as const) {
+      if (config[key] !== undefined) assertHttpUrl(key, config[key]);
+    }
     // Required (not just recommended): it is what keeps `connection.fetch`
     // from sending the user's token anywhere but the provider's API host. A
     // missing one (`process.env.X` unset, or plain JS) fails the boot, when
@@ -112,6 +129,7 @@ export class OAuthConnectionProvider {
       authorizationParams: {},
       refreshLeewaySeconds: 60,
       ...config,
+      refreshGrantType: config.refreshGrantType ?? "refresh_token",
     };
   }
 
@@ -142,16 +160,28 @@ export class OAuthConnectionProvider {
       redirect_uri: args.redirectUri,
     });
     if (this.config.pkce) body.set("code_verifier", args.codeVerifier);
-    return this.tokenRequest(body, { scopes: this.config.scopes, refreshToken: null, phase: "exchange" });
+    return this.tokenRequest(this.config.tokenUrl, body, {
+      scopes: this.config.scopes,
+      refreshToken: null,
+      phase: "exchange",
+    });
   }
 
   /**
-   * Spends `refreshToken` for a new access token. A provider that does not
-   * rotate refresh tokens answers without one, and the old one is kept.
+   * Spends `refreshToken` for a new access token at `refreshUrl` (default
+   * `tokenUrl`). A provider that does not rotate refresh tokens (Figma)
+   * answers without one, and the old one is kept.
    */
   refresh(refreshToken: string, scopes: string[]): Promise<OAuthTokenSet> {
-    const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
-    return this.tokenRequest(body, { scopes, refreshToken, phase: "refresh" });
+    const body = new URLSearchParams();
+    const grantType = this.config.refreshGrantType;
+    if (grantType !== false && grantType !== "") body.set("grant_type", grantType);
+    body.set("refresh_token", refreshToken);
+    return this.tokenRequest(this.config.refreshUrl ?? this.config.tokenUrl, body, {
+      scopes,
+      refreshToken,
+      phase: "refresh",
+    });
   }
 
   /** Revokes `token` at the provider (RFC 7009). */
@@ -196,13 +226,14 @@ export class OAuthConnectionProvider {
   }
 
   private async tokenRequest(
+    endpoint: string,
     body: URLSearchParams,
     previous: { scopes: string[]; refreshToken: string | null; phase: "exchange" | "refresh" },
   ): Promise<OAuthTokenSet> {
     const failure = previous.phase === "exchange" ? "exchange_failed" : "refresh_failed";
     let response: Response;
     try {
-      response = await fetch(this.config.tokenUrl, this.post(body));
+      response = await fetch(endpoint, this.post(body));
     } catch (cause) {
       throw new OAuthConnectionError(failure, "The token request failed.", { cause });
     }

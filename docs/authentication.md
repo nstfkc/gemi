@@ -1037,6 +1037,11 @@ export default defineAuthConfig({
     figma: new OAuthConnectionProvider({
       authorizeUrl: "https://www.figma.com/oauth",
       tokenUrl: "https://api.figma.com/v1/oauth/token",
+      // Figma refreshes at an endpoint of its own, with only `refresh_token` in the body,
+      // and wants the client as HTTP Basic credentials on both.
+      refreshUrl: "https://api.figma.com/v1/oauth/refresh",
+      refreshGrantType: false,
+      clientAuth: "basic",
       clientId: process.env.FIGMA_CLIENT_ID!,
       clientSecret: process.env.FIGMA_CLIENT_SECRET!,
       scopes: ["file_content:read"],
@@ -1049,11 +1054,13 @@ export default defineAuthConfig({
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `authorizeUrl`, `tokenUrl` | (required) | The provider's authorization and token endpoints. https only (http only for `localhost`). |
+| `refreshUrl` | `tokenUrl` | Where refresh tokens are spent, for a provider with a refresh endpoint of its own (Figma's `https://api.figma.com/v1/oauth/refresh`). https only. |
+| `refreshGrantType` | `"refresh_token"` | The `grant_type` sent with a refresh. `false` leaves it out, for a refresh endpoint that documents only `refresh_token` (Figma's). |
 | `revokeUrl` | none | The RFC 7009 revocation endpoint, for `revoke()`. |
 | `clientId`, `clientSecret` | (required) | The app's credentials at the provider. |
 | `scopes` | (required) | The scopes to request. |
 | `scopeSeparator` | `" "` | How the scopes are joined on the authorization URL. Some providers want `","`. |
-| `clientAuth` | `"body"` | `"body"` sends `client_id`/`client_secret` as form fields, `"basic"` as HTTP Basic credentials. |
+| `clientAuth` | `"body"` | How the client authenticates to the token, refresh and revocation endpoints: `"body"` sends `client_id`/`client_secret` as form fields, `"basic"` as HTTP Basic credentials (Figma). |
 | `pkce` | `true` | Send an S256 PKCE challenge. Turn it off only for a provider that rejects one. |
 | `authorizationParams` | `{}` | Extra parameters for the authorization URL, e.g. `{ access_type: "offline", prompt: "consent" }` for Google. They cannot replace `state`, the PKCE challenge, `redirect_uri`, `client_id` or `scope`. |
 | `redirectUri` | `${HOST_NAME}/auth/connections/<name>/callback` | The callback URL registered with the provider. |
@@ -1130,7 +1137,18 @@ the app at the provider) marks the connection and throws `OAuthReconnectRequired
 later call throws the same without asking the provider again, and `connection.needsReconnect`
 is `true`, until the user connects again. Send them back to `/auth/connections/<provider>`. A
 network error or a `5xx` throws `OAuthConnectionError` (`refresh_failed`) and leaves the
-connection as it was.
+connection as it was. So does an `invalid_client` refusal: the app's own credentials (or
+`clientAuth`) are wrong, reconnecting would fail the same way, and once the config is fixed the
+stored refresh tokens work again.
+
+To show the state on a settings page without calling the provider, read `connection.status`:
+`"needs_reconnect"` when a refresh was refused, or when the access token has expired and there
+is no refresh token to renew it; `"connected"` otherwise. It is in `toJSON()` too.
+
+```tsx
+const figma = await Connections.for(user, "figma");
+const state = figma ? figma.status : "not_connected"; // "connected" | "needs_reconnect" | "not_connected"
+```
 
 Refreshes are serialised per connection: callers in one process share one refresh, and
 processes take a lock in the queue's lock store (see
@@ -1140,7 +1158,7 @@ sees each one spent once.
 The rest of a connection:
 
 - `connection.scopes`, `connection.hasScopes("a", "b")`, `providerAccountId` (the token response's `user_id_string`, `user_id` or `account_id`), `expiresAt`,
-  `needsReconnect`, `connectedAt`.
+  `needsReconnect`, `status`, `connectedAt`.
 - `await connection.accessToken()` returns a valid token for an SDK that wants the token
   itself. Prefer `fetch`, which also retries a 401.
 - `await connection.refresh()` refreshes now.
