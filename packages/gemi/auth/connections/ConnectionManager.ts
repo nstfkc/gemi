@@ -14,6 +14,9 @@ import { type OAuthConnectionProvider, type OAuthTokenSet, isLoopback } from "./
 /** A user, as far as a connection is concerned: anything with an `id`. */
 export type ConnectionOwner = { id: string | number } | string | number;
 
+/** See `ProviderConnection.status`. */
+export type ConnectionStatus = "connected" | "needs_reconnect";
+
 /** What `Connections.fake` answers an API request with. */
 export type FakeConnectionHandler = (request: Request) => Response | Promise<Response>;
 
@@ -185,8 +188,17 @@ export class ConnectionManager {
       tokens = await provider.refresh(current.refreshToken, current.scopes);
     } catch (error) {
       // A refusal from the token endpoint is final: the grant is gone. A
-      // network error or a 5xx is not, and leaves the connection alone.
-      if (error instanceof OAuthConnectionError && error.status !== undefined && error.status >= 400 && error.status < 500) {
+      // network error or a 5xx is not, and leaves the connection alone. Nor
+      // is `invalid_client`: the app's own credentials (or `clientAuth`) are
+      // wrong, reconnecting would fail the same way, and marking would make
+      // every user reconnect once the config is fixed.
+      if (
+        error instanceof OAuthConnectionError &&
+        error.status !== undefined &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.providerError !== "invalid_client"
+      ) {
         await this.store.markNeedsReconnect(current.id);
         throw new OAuthReconnectRequiredError(current.provider, {
           cause: error,
@@ -253,6 +265,20 @@ export class ProviderConnection {
   }
   get connectedAt(): Date {
     return this.record.createdAt;
+  }
+
+  /**
+   * What to show the user: `"needs_reconnect"` when a refresh was refused, or
+   * when the access token has expired and there is no refresh token to renew
+   * it; `"connected"` otherwise. Read without calling the provider.
+   */
+  get status(): ConnectionStatus {
+    if (this.record.needsReconnect) return "needs_reconnect";
+    const expiresAt = this.record.expiresAt?.getTime();
+    if (this.record.refreshToken === null && expiresAt !== undefined && expiresAt <= Date.now()) {
+      return "needs_reconnect";
+    }
+    return "connected";
   }
 
   /** Whether every one of `scopes` was granted. */
@@ -333,6 +359,7 @@ export class ProviderConnection {
       scopes: [...this.scopes],
       expiresAt: this.expiresAt,
       needsReconnect: this.needsReconnect,
+      status: this.status,
       connectedAt: this.connectedAt,
     };
   }

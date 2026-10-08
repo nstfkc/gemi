@@ -317,7 +317,7 @@ export type {
 export { OAuthConnectionError, OAuthReconnectRequiredError } from "../auth/connections/errors";
 export type { OAuthConnectionErrorCode } from "../auth/connections/errors";
 export { ConnectionManager, ProviderConnection } from "../auth/connections/ConnectionManager";
-export type { ConnectionOwner, FakeConnectionHandler } from "../auth/connections/ConnectionManager";
+export type { ConnectionOwner, ConnectionStatus, FakeConnectionHandler } from "../auth/connections/ConnectionManager";
 export { DatabaseConnectionStore, MemoryConnectionStore } from "../auth/connections/ConnectionStore";
 export type { ConnectionRecord, ConnectionStore } from "../auth/connections/ConnectionStore";
 

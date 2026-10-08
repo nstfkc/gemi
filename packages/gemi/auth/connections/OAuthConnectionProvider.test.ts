@@ -161,6 +161,48 @@ describe("OAuthConnectionProvider", () => {
     expect((await provider().refresh("rt-1", [])).refreshToken).toBe("rt-2");
   });
 
+  test("refreshes at refreshUrl, as Figma documents it: Basic credentials, no grant_type", async () => {
+    // https://developers.figma.com/docs/rest-api/oauth-apps/: POST /v1/oauth/refresh with
+    // `refresh_token` in the body and the client as HTTP Basic; the answer has no refresh_token.
+    answer = (path) =>
+      path === "/v1/oauth/refresh"
+        ? Response.json({ access_token: "at-2", token_type: "bearer", expires_in: 7776000 })
+        : Response.json({ error: "invalid_request" }, { status: 400 });
+    const figma = provider({
+      tokenUrl: `${base}/v1/oauth/token`,
+      refreshUrl: `${base}/v1/oauth/refresh`,
+      refreshGrantType: false,
+      clientAuth: "basic",
+    });
+
+    const tokens = await figma.refresh("rt-1", ["file_content:read"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].path).toBe("/v1/oauth/refresh");
+    expect(seen[0].form).toEqual({ refresh_token: "rt-1" });
+    const basic = seen[0].headers.get("authorization")!;
+    expect(basic.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(basic.slice(6), "base64").toString()).toBe("client%20id:s3cret%3A");
+    expect(seen[0].headers.get("content-type")).toBe("application/x-www-form-urlencoded");
+    expect(tokens).toMatchObject({ accessToken: "at-2", refreshToken: "rt-1", tokenType: "bearer", scopes: ["file_content:read"] });
+
+    // The code exchange still goes to tokenUrl.
+    seen = [];
+    answer = () => Response.json({ access_token: "at", refresh_token: "rt", user_id_string: "9" });
+    await figma.exchangeCode({ code: "c", codeVerifier: "v", redirectUri: "https://a.example/cb" });
+    expect(seen[0].path).toBe("/v1/oauth/token");
+    expect(seen[0].form).toMatchObject({ grant_type: "authorization_code", code: "c" });
+    expect(seen[0].headers.get("authorization")).toBe(basic);
+  });
+
+  test("refreshUrl defaults to tokenUrl, refreshGrantType to refresh_token, and must be https", async () => {
+    answer = () => Response.json({ access_token: "at" });
+    await provider({ refreshGrantType: undefined }).refresh("rt", []);
+    expect(seen[0]).toMatchObject({ path: "/token", form: { grant_type: "refresh_token", refresh_token: "rt" } });
+    await provider({ refreshGrantType: "custom_refresh" }).refresh("rt", []);
+    expect(seen[1].form.grant_type).toBe("custom_refresh");
+    expect(() => provider({ refreshUrl: "http://provider.example/refresh" })).toThrow(/refreshUrl must be an https URL/);
+  });
+
   test("a refusal carries the status and the error code, never the body", async () => {
     answer = () => Response.json({ error: "invalid_grant", error_description: "token rt-secret is revoked" }, { status: 400 });
     const error = await provider()

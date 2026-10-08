@@ -21,6 +21,7 @@ type Hit = { path: string; auth: string | null; form: Record<string, string> };
 let hits: Hit[] = [];
 let validTokens = new Set<string>();
 let tokenAnswer: () => Response;
+let refreshAnswer: () => Response = () => new Response("not found", { status: 404 });
 let tokenDelay = 0;
 let issued = 0;
 let server: ReturnType<typeof Bun.serve>;
@@ -34,12 +35,13 @@ beforeAll(() => {
       const url = new URL(req.url);
       const auth = req.headers.get("authorization");
       const text = await req.text();
-      const form = url.pathname === "/token" || url.pathname === "/revoke" ? Object.fromEntries(new URLSearchParams(text)) : {};
+      const form = ["/token", "/refresh", "/revoke"].includes(url.pathname) ? Object.fromEntries(new URLSearchParams(text)) : {};
       hits.push({ path: url.pathname, auth, form });
       if (url.pathname === "/token") {
         if (tokenDelay) await Bun.sleep(tokenDelay);
         return tokenAnswer();
       }
+      if (url.pathname === "/refresh") return refreshAnswer();
       if (url.pathname === "/revoke") return new Response(null, { status: 200 });
       if (url.pathname === "/hop") return Response.redirect(`http://localhost:${server.port}/api/elsewhere`, 302);
       if (url.pathname === "/hop-same") return Response.redirect(`${base}/api/me`, 307);
@@ -196,6 +198,56 @@ describe("ConnectionManager", () => {
     // Connecting again clears it.
     await connect();
     expect((await manager.for(user, "figma"))!.needsReconnect).toBe(false);
+  });
+
+  test("a refused refresh shows in status and toJSON, so the app does not show the connection as working", async () => {
+    const connection = await connect({ expiresAt: new Date(Date.now() - 1000) });
+    expect(connection.status).toBe("connected");
+    tokenAnswer = () => Response.json({ error: "invalid_grant" }, { status: 400 });
+    await connection.accessToken().catch(() => {});
+
+    const listed = await manager.list(user);
+    expect(listed.map((c) => c.status)).toEqual(["needs_reconnect"]);
+    expect(JSON.parse(JSON.stringify(listed[0]))).toMatchObject({ needsReconnect: true, status: "needs_reconnect" });
+  });
+
+  test("an expired connection without a refresh token reports needs_reconnect before any call", async () => {
+    expect((await connect({ refreshToken: null, expiresAt: new Date(Date.now() - 1000) })).status).toBe("needs_reconnect");
+    expect((await connect({ refreshToken: null, expiresAt: null })).status).toBe("connected");
+    expect((await connect({ refreshToken: null, expiresAt: new Date(Date.now() + 60_000) })).status).toBe("connected");
+  });
+
+  test("invalid_client (the app's own credentials) does not mark the connection", async () => {
+    const connection = await connect({ expiresAt: new Date(Date.now() - 1000) });
+    tokenAnswer = () => Response.json({ error: "invalid_client" }, { status: 401 });
+    const error = await connection.accessToken().catch((e) => e);
+    expect(error).not.toBeInstanceOf(OAuthReconnectRequiredError);
+    expect(error).toMatchObject({ code: "refresh_failed", status: 401, providerError: "invalid_client" });
+    expect((await store.find("7", "figma"))?.needsReconnect).toBe(false);
+
+    // Once the config is fixed, the same refresh token works.
+    tokenAnswer = () => Response.json({ access_token: "at-9", expires_in: 3600 });
+    expect(await connection.accessToken()).toBe("at-9");
+  });
+
+  test("a provider with its own refresh endpoint is refreshed there", async () => {
+    manager = new ConnectionManager({
+      providers: {
+        figma: provider({ refreshUrl: `${base}/refresh`, refreshGrantType: false, clientAuth: "basic" }),
+      },
+      store,
+    });
+    const connection = await connect({ expiresAt: new Date(Date.now() - 1000) });
+    validTokens.add("at-fig");
+    refreshAnswer = () => Response.json({ access_token: "at-fig", expires_in: 3600 });
+    const res = await connection.fetch("/api/me");
+    expect(res.status).toBe(200);
+    const refresh = hits.find((hit) => hit.path === "/refresh")!;
+    expect(refresh.form).toEqual({ refresh_token: "rt-1" });
+    expect(refresh.auth).toMatch(/^Basic /);
+    expect(tokenHits()).toHaveLength(0);
+    // Figma does not rotate: the stored refresh token is still the first one.
+    expect((await store.find("7", "figma"))?.refreshToken).toBe("rt-1");
   });
 
   test("a 5xx or network error during refresh leaves the connection alone", async () => {
