@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.119.2 to 0.120.0
 
 ## Static views: client-side navigation between static pages (#865)
 
