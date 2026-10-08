@@ -79,3 +79,26 @@ export const ISLAND_RUNTIME_SOURCE = `import { createElement } from "react";
 import { hydrateRoot } from "react-dom/client";
 export ${ISLAND_HYDRATE_SOURCE}
 `;
+
+/**
+ * The island loader, inlined into a static document that uses islands.
+ *
+ * Kept byte-for-byte constant (the per-page island table travels in a
+ * separate `<script type="application/json">`, which a Content Security Policy
+ * does not treat as script), so a strict policy can allow it by hash:
+ * `script-src 'sha256-…'` with `ISLAND_LOADER_CSP_HASH`. Everything it loads
+ * is a plain `import()` of a same-origin (or asset-base) file.
+ *
+ * The table is `{ i: [{ s: entry URL, e: export, l: load }] }` and each
+ * marker's `data-island` indexes `i`. Per marker, on its schedule: import the
+ * island's entry (the module as `m`, the runtime's `h`), then
+ * `h(marker, m[export])`, which calls `hydrateRoot`. A failure is logged and
+ * leaves the server-rendered markup in place.
+ */
+export const ISLAND_LOADER_SOURCE =
+  'const d=document,c=JSON.parse(d.getElementById("gemi-islands").textContent),' +
+  "w=f=>(window.requestIdleCallback||setTimeout)(f)," +
+  "m=(e,o)=>{if(!e.g){e.g=1;import(o.s).then(x=>x.h(e,x.m[o.e])).catch(r=>console.error(r))}};" +
+  'for(const e of d.querySelectorAll("gemi-island")){const o=c.i[e.dataset.island];if(!o)continue;' +
+  'if(o.l=="eager")m(e,o);else if(o.l=="idle"||!window.IntersectionObserver||!e.children.length)w(()=>m(e,o));' +
+  "else{const v=new IntersectionObserver(n=>{if(n.some(x=>x.isIntersecting)){v.disconnect();m(e,o)}});for(const k of e.children)v.observe(k)}}";

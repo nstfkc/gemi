@@ -9,12 +9,15 @@ import {
   bundleStats,
   chunkName,
   markdownReport,
+  measureSource,
   overBudget,
   textReport,
   unusedBudgets,
   type BuildStats,
 } from "./bundleStats";
 import type { RouteTableEntry } from "./routeTable";
+import { ISLAND_LOADER_SOURCE } from "../internal/islandRuntime";
+import { STATIC_NAVIGATION_SOURCE } from "../internal/staticNavigationRuntime";
 
 /**
  * A client build on disk: each file is `size` bytes of text that compresses
@@ -122,6 +125,13 @@ const routes: RouteTableEntry[] = [
   { path: "/app", group: "", views: ["app/AppLayout", "app/Dashboard"] },
   { path: "/p/:slug", group: "", views: ["site/Page"], static: { layout: "site/SiteLayout" } },
   { path: "/plain", group: "", views: ["Plain"], static: {} },
+  { path: "/nav", group: "", views: ["Plain"], static: { navigation: true } },
+  {
+    path: "/p-nav/:slug",
+    group: "",
+    views: ["site/Page"],
+    static: { layout: "site/SiteLayout", navigation: true },
+  },
   { path: "/", group: "admin", views: ["Home"] },
 ];
 
@@ -157,8 +167,10 @@ describe("bundleStats", () => {
       "app/views/site/Form.tsx?gemi-island",
       "app/views/site/NavMenu.tsx?gemi-island",
     ]);
-    // No client entry, no view code; the runtime and React count once.
+    // No client entry, no view code; the runtime and React count once, and
+    // the loader inlined into the HTML counts too.
     expect(route.chunks).toEqual([
+      "(inline) island loader",
       "Form.js",
       "NavMenu.js",
       "_virtual_gemi-island-runtime.js",
@@ -176,8 +188,23 @@ describe("bundleStats", () => {
         "assets/form-JJJJJJJJ.js",
         "assets/navMenu-IIIIIIII.js",
         "assets/react-BBBBBBBB.js",
-      ),
+      ) + measureSource(ISLAND_LOADER_SOURCE).raw,
     );
+  });
+
+  test("a static route with navigation counts the navigation runtime instead of the loader", () => {
+    const nav = measureSource(STATIC_NAVIGATION_SOURCE);
+    const withIslands = stats.routes["/p-nav/:slug"]!;
+    const plain = stats.routes["/p/:slug"]!;
+    expect(withIslands.chunks).toEqual([
+      "(inline) static navigation",
+      ...plain.chunks.filter((chunk) => chunk !== "(inline) island loader"),
+    ]);
+    expect(withIslands.gzip).toBe(
+      plain.gzip - measureSource(ISLAND_LOADER_SOURCE).gzip + nav.gzip,
+    );
+    // Every page gets it, islands or not.
+    expect(stats.routes["/nav"]).toMatchObject({ ...nav, chunks: ["(inline) static navigation"] });
   });
 
   test("a static route without islands ships nothing, though its view imports React", () => {

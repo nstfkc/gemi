@@ -309,6 +309,11 @@ asset base's origin). In dev, the loader first installs the React Refresh
 preamble and Vite's client, so its hash differs; use a looser dev policy, as
 Vite itself needs. In dev, Vite serves islands from source.
 
+A page with [`navigation`](#client-side-navigation) inlines the navigation
+runtime instead of the loader. Allow it with `STATIC_NAVIGATION_CSP_HASH`,
+also from `gemi/services`; the runtime fetches pages from your own origin, so
+`connect-src` needs `'self'`.
+
 ### Testing
 
 Add the island transform to `vitest.config.ts`, next to the request plugin, so
@@ -325,6 +330,142 @@ export default defineConfig({ plugins: [gemiRequestPlugin(), gemiIslandPlugin()]
 Without it islands still render: the component is loaded through the `import()`.
 The render params a test passes need no `resolveIsland`; without one, the page
 is its markup and no loader is added.
+
+To test that a site's links navigate client-side, `renderStaticDocument` (from
+`gemi/testing`) puts a page's HTML into a DOM (`// @vitest-environment jsdom`)
+and runs the navigation runtime against pages you stub. `navigate(href)`
+clicks the page's link to `href` and says how it ended: `"swap"`,
+`"full-load"`, or `"native"` when the runtime left the click to the browser.
+
+```typescript
+// @vitest-environment jsdom
+import { expect, test } from "vitest";
+import { renderStaticDocument } from "gemi/testing";
+
+test("the menu's links stay on the page", async () => {
+  const page = renderStaticDocument(homeHtml, { url: "/", pages: { "/about": aboutHtml } });
+
+  expect((await page.navigate("/about")).kind).toBe("swap");
+  expect(document.title).toBe("About");
+  expect(page.requests).toEqual(["http://localhost:3000/about"]);
+  page.dispose();
+});
+```
+
+`back()` goes back a history entry, `requests` lists every fetch (prefetches
+included) and `fullLoads` every full load the runtime asked for. Pass the
+island modules by their entry URL in `islands` to hydrate them too; they
+hydrate asynchronously, so wrap what follows in `act`.
+
+## Client-side navigation
+
+By default a link between two static pages is a full page load, as on any
+website. Opt a static view into client-side navigation with `navigation`:
+
+```typescript
+import { ViewRouter } from "gemi/http";
+
+export default class extends ViewRouter {
+  routes = {
+    "/p/:slug": this.view("site/Page", [PageController, "show"]).static({
+      layout: "site/SiteLayout",
+      navigation: true,
+    }),
+  };
+}
+```
+
+The page then ships a small inline runtime (about 2.5 KB gzip, with the island
+loader it replaces) even when it has no islands. React isn't part of it; it's
+only loaded for islands, as before. Without `navigation` the document is exactly
+what it was.
+
+When a visitor clicks a link, the runtime fetches the next page and swaps it
+in instead of loading it:
+
+- **Which links.** A primary-button click with no modifier keys on an `<a href>`
+  to the same origin, with no `target` (or `_self`), no `download`, no
+  `rel="external"` and no `data-gemi-reload` on it or an ancestor, and that no
+  other handler has already handled (`preventDefault`). A link to a `#hash` on
+  the current page stays a native anchor. Forms are untouched.
+- **The request.** `GET` with `Accept: text/html` and `X-Gemi-Navigate: 1`, so a
+  CDN or a log can tell the two apart. Redirects are followed; the address bar
+  shows where they end.
+- **When it's a full load instead.** Each navigable page carries
+  `<meta name="gemi-static" content="<layout>|<build>|<version>">`. The next page
+  is swapped in only when its marker and its stylesheets are the same as the
+  current page's. Another layout (a hydrated app page, the app's 404), a new
+  deploy, another `version` (see below), a different stylesheet, a response that
+  isn't a 2xx HTML page, a redirect to another origin, a network error or a
+  10-second timeout all become an ordinary page load of the link.
+- **The swap.** `document.title`, `<html lang dir>`, the head tags `Head` and
+  `Meta` own (`meta` by name or property, `canonical`, `alternate`, icons, font
+  preloads and `@font-face` rules, JSON-LD), and the body's attributes and
+  content. The stylesheets stay in place. Islands of the old page are
+  unmounted, so their effects clean up (a menu's scroll lock, say); the new
+  page's islands hydrate on their own `load` schedule, with eager islands'
+  `modulepreload`s added to the head. Inline `<script>`s in the new body don't
+  run; use the events below.
+- **History and scroll.** Each navigation is a history entry. Back and forward
+  swap the entry's page back in (from the cache below when it's fresh) and
+  restore its scroll position. A new page starts at the top, or at the link's
+  `#hash` target. Scrolling is instant, never smooth.
+- **Focus.** After a navigation, focus moves to the `#hash` target, else the
+  first `h1`, else `main`, else `body` (with a temporary `tabindex="-1"`), and a
+  polite live region announces the new title to screen readers.
+- **Without JavaScript**, links are plain links and every page is a full load.
+
+### Options
+
+```typescript
+this.view("site/PublishedSite", [PublishedSiteController, "show"]).static({
+  layout: "site/SiteLayout",
+  navigation: {
+    // A page with another version is loaded in full, not swapped in.
+    version: (req) => publicationIdFor(req),
+    prefetch: "intent",
+  },
+});
+```
+
+| Option | Default | |
+|---|---|---|
+| `version` | `""` | `(req) => string`, called per request after the handler. Use it when pages of one layout and build can still differ in what they need, such as a site's publication with its own theme. |
+| `prefetch` | `"intent"` | `"intent"`: fetch a link's page ahead when the pointer rests on it for 65 ms, when it gets focus or when a touch starts. The last 10 pages are kept for 30 s and a click uses them (or the fetch in flight). Off when the browser asks to save data. `"none"`: fetch on click only. |
+
+`navigation: true` is `navigation: {}`.
+
+### Opting a link or an element out
+
+- `data-gemi-reload` on a link (or any ancestor) makes it a full page load.
+- `data-gemi-persist="<key>"` on an element keeps that element, and the islands
+  in it, across navigations when the next page has an element with the same
+  key; the next page's copy is dropped. A header with an island, or a media
+  player, survives navigation with its state.
+
+### Events
+
+The runtime dispatches two events on `document`:
+
+- `gemi:before-navigate`, cancelable, with `detail.url`, before it takes a
+  click. Cancel it to let the browser follow that link normally (a full load).
+- `gemi:page-load`, with `detail.url`, `detail.title` and `detail.initial`:
+  once for the page the browser loaded (`initial: true`) and after every
+  client-side navigation.
+
+From an island, `onStaticNavigate` (from `gemi/client`) is the same notice. It's
+called right away for the current page, then after every navigation, and
+returns a function that stops it. Without the runtime it does nothing.
+
+```tsx
+import { useEffect } from "react";
+import { onStaticNavigate } from "gemi/client";
+
+export default function Analytics() {
+  useEffect(() => onStaticNavigate(({ url }) => track(url)), []);
+  return null;
+}
+```
 
 ## How much it ships
 

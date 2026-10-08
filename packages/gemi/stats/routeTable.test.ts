@@ -25,6 +25,10 @@ class RootViews extends ViewRouter {
   routes = {
     "/": this.view("Home"),
     "/p/:slug": this.view("site/Page").static({ layout: "site/SiteLayout" }),
+    "/n/:slug": this.view("site/Page").static({
+      layout: "site/SiteLayout",
+      navigation: { version: () => "v1" },
+    }),
     "/app": this.layout("app/AppLayout", {
       "/": this.view("app/Dashboard"),
       "/settings": this.view("app/Settings"),
@@ -91,6 +95,10 @@ describe("collectRouteTable", () => {
       static: { layout: "site/SiteLayout" },
     });
     expect(byPath("", "/docs/:slug")?.static).toEqual({});
+    expect(byPath("", "/n/:slug")?.static).toEqual({
+      layout: "site/SiteLayout",
+      navigation: true,
+    });
   });
 
   test("leaves out file and redirect routes", () => {

@@ -23,6 +23,7 @@ export {
   type FileOutput,
   type ViewHandler,
   type StaticViewOptions,
+  type StaticNavigationOptions,
 } from "./ViewRouter";
 export { toMiddlewareList, type MiddlewareInput } from "./middlewareList";
 export {

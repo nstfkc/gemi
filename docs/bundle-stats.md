@@ -42,8 +42,11 @@ island's component is reachable from those views through any import. The route
 counts each such entry with its static imports, React and `react-dom/client`
 included. A page loads only the islands it actually shows, so this is the most
 it can load. Chunks the islands share (React, the island runtime, a helper)
-count once per route. The island loader is inline in the HTML and isn't counted.
-A static page without islands is `0`.
+count once per route. The script inlined into the HTML counts as well, as
+`(inline) island loader` when the route can render an island, or
+`(inline) static navigation` for a route with
+[`navigation`](./static-views-and-islands.md#client-side-navigation), which every
+such page gets. A static page without islands or navigation is `0`.
 
 Sizes come from the client build's manifest and files in `dist/client`. Gzip
 is level 9 and brotli quality 11, the files `gemi build` writes next to each

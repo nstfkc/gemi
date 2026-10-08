@@ -323,6 +323,40 @@ export interface StaticViewOptions {
    * `Origin` check) needs nothing from the page.
    */
   csrf?: boolean;
+  /**
+   * Client-side navigation between static pages (#865). Off by default, and
+   * then the document is exactly what it was without it.
+   *
+   * On, the page ships a small runtime (about 2.5 KB gzip, with the island
+   * loader it replaces; no React unless the page has islands) that follows
+   * same-origin links by fetching the next page and swapping it in: title,
+   * the head tags `Head`/`Meta` render and the body, re-hydrating the new
+   * page's islands and unmounting the old ones. When the next page has
+   * another layout, build, `version` or stylesheet, or anything fails, it is
+   * an ordinary full page load. Without JavaScript, links are plain links.
+   *
+   * `true` is `{}`: the defaults below.
+   */
+  navigation?: boolean | StaticNavigationOptions;
+}
+
+/** `.static({ navigation: { … } })`. */
+export interface StaticNavigationOptions {
+  /**
+   * Any string identifying what the page is built from beyond gemi's build:
+   * a page whose version differs from the current one is loaded in full
+   * rather than swapped in (a new publication with its own assets or theme,
+   * say). Called per request, after the handler. Defaults to `""`, so only the
+   * layout and the build decide.
+   */
+  version?: (req: HttpRequest<any, any>) => string | Promise<string>;
+  /**
+   * `"intent"` (default): fetch a link's page ahead when the pointer rests on
+   * it (65 ms), it gets focus or a touch starts, into a small cache (10 pages,
+   * 30 s), which the navigation then uses. Off when the visitor asked to save
+   * data. `"none"`: fetch on click only.
+   */
+  prefetch?: "intent" | "none";
 }
 
 export class ViewRoute<Input, Output, Params> {
@@ -384,8 +418,9 @@ export class ViewRoute<Input, Output, Params> {
    * add one small loader plus each used island's own module.
    *
    * Because nothing hydrates, event handlers, effects and state in the view
-   * never run in the browser. Links are plain `<a>`s, and a client-side
-   * navigation from a hydrated page to this route becomes a full page load.
+   * never run in the browser. Links are plain `<a>`s (followed client-side
+   * between static pages with `navigation`), and a client-side navigation
+   * from a hydrated page to this route becomes a full page load.
    *
    * Returns `this`, so the route's type (and its `ViewPaths` entry) is
    * unchanged.

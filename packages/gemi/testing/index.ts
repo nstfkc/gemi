@@ -25,3 +25,11 @@ export type { PageProps, PageDictionary } from "./Page";
  * test's module graph.
  */
 export type { DispatchedEvent, FakeEventManager } from "../services/events/FakeEventManager";
+
+export { renderStaticDocument } from "./staticDocument";
+export type {
+  StaticDocumentHandle,
+  StaticDocumentOptions,
+  StaticNavigationResult,
+  StaticTestPage,
+} from "./staticDocument";
