@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.120.1 to 0.121.0
 
 ## OAuth connections: a refresh endpoint of its own (Figma), `connection.status` (#869)
 
