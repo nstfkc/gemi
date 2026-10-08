@@ -488,6 +488,32 @@ describe("history", () => {
     expect(doc.requests).toEqual([`${ORIGIN}/b`, `${ORIGIN}/a`]);
   });
 
+  test("going back cancels a navigation still loading", async () => {
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    const a = await page({ title: "A", body: nav('<a href="/b">b</a>') });
+    const b = await page({ title: "B", body: nav('<a href="/c">c</a>') });
+    const c = await page({ title: "C", body: "<h1>C</h1>" });
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>') },
+      {
+        pages: async (url) =>
+          url.pathname === "/c" ? slow.then(() => c) : url.pathname === "/b" ? b : a,
+      },
+    );
+    await doc.navigate("/b");
+    document
+      .querySelector('a[href="/c"]')!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(await doc.back()).toEqual({ kind: "swap", url: `${ORIGIN}/a` });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(document.title).toBe("A");
+    expect(location.pathname).toBe("/a");
+  });
+
   test("restores the scroll position of the entry it goes back to", async () => {
     const doc = await two();
     const scrollTo = vi.spyOn(window, "scrollTo");

@@ -435,20 +435,6 @@ export class ViewRouteDispatcher {
     const { req, runInRequestScope, staticView, currentViews, data, serverQueries, headers } =
       args;
 
-    // `.static({ navigation })`: what the runtime compares before swapping a
-    // fetched page in. Asked before the render, while the request is current.
-    let navigation: StaticNavigationMarker | undefined;
-    if (staticView.navigation) {
-      const options = staticView.navigation === true ? {} : staticView.navigation;
-      const version = options.version
-        ? String(await runInRequestScope(() => options.version!(req)))
-        : "";
-      navigation = {
-        identity: [staticView.layout ?? "", args.buildId ?? "", version].join("|"),
-        prefetch: options.prefetch === "none" ? "none" : "intent",
-      };
-    }
-
     let rootLayout: unknown;
     if (staticView.layout) {
       rootLayout = args.viewImportMap[staticView.layout];
@@ -486,6 +472,20 @@ export class ViewRouteDispatcher {
     });
 
     try {
+      // `.static({ navigation })`: what the runtime compares before swapping
+      // a fetched page in. Inside the `try`, so a `version` that throws still
+      // completes the request (the `finally`) like a failed render.
+      let navigation: StaticNavigationMarker | undefined;
+      if (staticView.navigation) {
+        const options = staticView.navigation === true ? {} : staticView.navigation;
+        const version = options.version
+          ? String(await runInRequestScope(() => options.version!(req)))
+          : "";
+        navigation = {
+          identity: [staticView.layout ?? "", args.buildId ?? "", version].join("|"),
+          prefetch: options.prefetch === "none" ? "none" : "intent",
+        };
+      }
       const stream = await renderToReadableStream(
         createElement(StaticRenderContext.Provider, {
           value: collector,

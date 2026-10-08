@@ -274,6 +274,8 @@ on(d, "click", (event) => {
 });
 
 on(w, "popstate", () => {
+  // Whatever was loading is for another entry now.
+  current++;
   if (withoutHash(location) == shown) {
     // Within this document (a `#hash` entry): only the scroll changes.
     const at = scrolls[h.state?.g];
