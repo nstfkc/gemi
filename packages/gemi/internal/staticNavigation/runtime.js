@@ -15,10 +15,11 @@
 //   `unmount()` it.
 // - Clicks on eligible same-origin links fetch the next document. It is swapped
 //   in only when its `<meta name="gemi-static">` (layout | build | version) and
-//   its stylesheets equal this one's; anything else, an error or a timeout is a
-//   full load (`location.assign`).
+//   its document-level stylesheets equal this one's (`COMPARED`); anything else,
+//   an error or a timeout is a full load (`location.assign`).
 // - The swap: title, `<html lang dir>`, the head tags `Head`/`Meta` own, then the
-//   body (`data-gemi-persist` elements and the stylesheets stay in place).
+//   body (`data-gemi-persist` elements and the body's own stylesheets stay in
+//   place; a `<style>` nested in the content leaves and arrives with it).
 
 const d = document;
 const w = window;
@@ -74,13 +75,20 @@ const hydrate = (root, table) => {
 // --- Documents ---------------------------------------------------------------
 
 const IDENTITY = 'meta[name="gemi-static"]';
-const SHEETS = "style:not([data-gemi-fonts]),link[rel=stylesheet]";
+const STYLE = "style:not([data-gemi-fonts])";
+const SHEETS = STYLE + ",link[rel=stylesheet]";
+// The stylesheets two pages must share to swap (#867): the head's, the body's
+// own (its children, kept in place by the swap) and every `<link>` (one that
+// arrived with the body would load after it, unstyled meanwhile). A `<style>`
+// nested in the content is part of the content: it is parsed with it, in the
+// same swap, and leaves with it.
+const COMPARED = `head>${STYLE},body>${STYLE},link[rel=stylesheet]`;
 // What `Head` and `Meta` render per page; the rest of the head stays.
 const HEAD =
   'meta[name]:not([name=viewport]),meta[property],link[rel~=canonical],link[rel~=alternate],link[rel~=icon],link[rel=preload][as=font],style[data-gemi-fonts],script[type="application/ld+json"]';
 
 const identity = (doc) => doc.querySelector(IDENTITY)?.content;
-const sheets = (doc) => [...doc.querySelectorAll(SHEETS)].map((e) => e.outerHTML).join();
+const sheets = (doc) => [...doc.querySelectorAll(COMPARED)].map((e) => e.outerHTML).join();
 const withoutHash = (url) => url.href.split("#")[0];
 
 // The polite live region that announces each new page's title.
@@ -208,8 +216,9 @@ const swap = (doc) => {
   }
   for (const [placeholder, element] of kept) placeholder.replaceWith(element);
 
-  // The stylesheets are the same (checked), so the old ones stay where they
-  // are rather than be parsed again. (Copies: removing from a live
+  // The body's own stylesheets are the same (checked), so the old ones stay
+  // where they are rather than be parsed again. Everything else, nested
+  // `<style>`s included, is replaced by the next page's. (Copies: removing from a live
   // collection while iterating it would skip nodes.)
   for (const node of [...body.childNodes]) if (!node.matches?.(SHEETS)) node.remove();
   for (const node of [...next.children]) if (node.matches(SHEETS)) node.remove();
