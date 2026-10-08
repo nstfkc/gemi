@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
-import { ISLAND_ENTRY_QUERY } from "../internal/islandRuntime";
+import { ISLAND_ENTRY_QUERY, ISLAND_LOADER_SOURCE } from "../internal/islandRuntime";
+import { STATIC_NAVIGATION_SOURCE } from "../internal/staticNavigationRuntime";
 import {
   CLIENT_ENTRY_KEY,
   type ViteManifest,
@@ -26,8 +27,10 @@ import type { RouteTableEntry } from "./routeTable";
  * from the route's views (and the document layout) through static or lazy
  * imports; the route then counts that island entry with its static imports. A
  * page loads only the islands it shows, so this is its most. Chunks the islands
- * share (the runtime, React) count once per route. The island loader is inline
- * in the HTML and not counted.
+ * share (the runtime, React) count once per route. The script inlined into the
+ * HTML counts too: the island loader when the route can render an island, or
+ * the navigation runtime (which carries the loader) for `.static({ navigation })`,
+ * which every such page gets.
  *
  * Sizes are raw, gzip -9 and brotli q11, the encodings `gemi build` writes
  * next to each asset; those files are read when present.
@@ -189,22 +192,37 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
     return { ...sum(files), views, chunks: files.map(chunkName) };
   };
 
-  const staticRoute = (views: string[], layout: string | undefined): RouteStats => {
-    const roots = [layout ?? ROOT_LAYOUT, ...views]
+  const staticRoute = (
+    views: string[],
+    options: NonNullable<RouteTableEntry["static"]>,
+  ): RouteStats => {
+    const roots = [options.layout ?? ROOT_LAYOUT, ...views]
       .map(viewKey)
       .filter((key): key is string => Boolean(key));
     const islands = islandsBelow(roots);
     const keys = new Set<string>();
     for (const island of islands) closure(island, keys);
     const files = jsFiles(keys);
-    return { ...sum(files), views, static: true, islands, chunks: files.map(chunkName) };
+    const inline = options.navigation
+      ? INLINE_NAVIGATION
+      : islands.length > 0
+        ? INLINE_LOADER
+        : null;
+    const chunks = files.map(chunkName);
+    return {
+      ...(inline ? add(sum(files), inline.size) : sum(files)),
+      views,
+      static: true,
+      islands,
+      chunks: inline ? [inline.name, ...chunks] : chunks,
+    };
   };
 
   const routes: BuildStats["routes"] = {};
   if (options.routes) {
     for (const entry of options.routes) {
       routes[routeKey(entry)] = entry.static
-        ? staticRoute(entry.views, entry.static.layout)
+        ? staticRoute(entry.views, entry.static)
         : hydrated(entry.views);
     }
   } else {
@@ -243,6 +261,25 @@ export function bundleStats(options: BundleStatsOptions): BuildStats {
     css: sum(css),
   };
 }
+
+/** Raw, gzip -9 and brotli q11 bytes of a string. */
+export function measureSource(source: string): Size {
+  const bytes = Buffer.from(source);
+  return {
+    raw: bytes.length,
+    gzip: gzipSync(bytes, { level: 9 }).length,
+    brotli: brotliCompressSync(bytes, {
+      params: { [constants.BROTLI_PARAM_QUALITY]: 11 },
+    }).length,
+  };
+}
+
+/** The scripts a static page inlines, as `chunks` names them. */
+const INLINE_LOADER = { name: "(inline) island loader", size: measureSource(ISLAND_LOADER_SOURCE) };
+const INLINE_NAVIGATION = {
+  name: "(inline) static navigation",
+  size: measureSource(STATIC_NAVIGATION_SOURCE),
+};
 
 /** The island runtime's chunk: `virtual:gemi-island-runtime`, shared by every island. */
 const ISLAND_RUNTIME_NAME = "gemi-island-runtime";

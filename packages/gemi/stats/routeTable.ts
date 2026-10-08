@@ -11,8 +11,11 @@ export interface RouteTableEntry {
   group: string;
   /** View paths (`app/views/<path>.tsx`), outermost layout first. */
   views: string[];
-  /** Set for a `.static()` route; `layout` is its document layout, if any. */
-  static?: { layout?: string };
+  /**
+   * Set for a `.static()` route; `layout` is its document layout, if any, and
+   * `navigation` is set when it ships the navigation runtime.
+   */
+  static?: { layout?: string; navigation?: true };
 }
 
 /** View paths that name no component: file and redirect routes. */
@@ -36,7 +39,12 @@ export function collectRouteTable(kernel: Kernel): RouteTableEntry[] {
           group,
           views,
           ...(route.static
-            ? { static: route.static.layout ? { layout: route.static.layout } : {} }
+            ? {
+                static: {
+                  ...(route.static.layout ? { layout: route.static.layout } : {}),
+                  ...(route.static.navigation ? { navigation: true as const } : {}),
+                },
+              }
             : {}),
         });
       }

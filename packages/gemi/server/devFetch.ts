@@ -311,6 +311,8 @@ export function createDevFetch(
             src: `/${moduleKey}${ISLAND_ENTRY_QUERY}`,
             preload: [],
           }),
+          // Vite serves modules fresh, so dev has one build.
+          buildId: "dev",
           bootstrapModules: [DEV_ENTRY_PATH],
           viewImportMap,
           viewModules,

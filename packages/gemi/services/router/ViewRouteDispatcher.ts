@@ -42,7 +42,12 @@ import { createRoutePayloadStream } from "./routePayloadStream";
 import { loadSharp } from "../../support/sharp";
 import type { StaticViewOptions } from "../../http/ViewRouter";
 import { StaticRenderContext, createStaticRenderCollector } from "../../client/islands";
-import { injectIslands, spliceIslandSlots, type IslandResolver } from "./staticDocument";
+import {
+  injectIslands,
+  spliceIslandSlots,
+  type IslandResolver,
+  type StaticNavigationMarker,
+} from "./staticDocument";
 import { applyStaticCacheControl, staticCookiePolicy } from "./staticCache";
 
 /**
@@ -425,6 +430,7 @@ export class ViewRouteDispatcher {
     viewImportMap: Record<string, any>;
     viewModules?: Record<string, any>;
     resolveIsland?: IslandResolver;
+    buildId?: string;
   }) {
     const { req, runInRequestScope, staticView, currentViews, data, serverQueries, headers } =
       args;
@@ -466,6 +472,20 @@ export class ViewRouteDispatcher {
     });
 
     try {
+      // `.static({ navigation })`: what the runtime compares before swapping
+      // a fetched page in. Inside the `try`, so a `version` that throws still
+      // completes the request (the `finally`) like a failed render.
+      let navigation: StaticNavigationMarker | undefined;
+      if (staticView.navigation) {
+        const options = staticView.navigation === true ? {} : staticView.navigation;
+        const version = options.version
+          ? String(await runInRequestScope(() => options.version!(req)))
+          : "";
+        navigation = {
+          identity: [staticView.layout ?? "", args.buildId ?? "", version].join("|"),
+          prefetch: options.prefetch === "none" ? "none" : "intent",
+        };
+      }
       const stream = await renderToReadableStream(
         createElement(StaticRenderContext.Provider, {
           value: collector,
@@ -496,7 +516,13 @@ export class ViewRouteDispatcher {
       const html = spliceIslandSlots(await new Response(stream).text());
 
       return new Response(
-        injectIslands(html, collector, args.resolveIsland, process.env.NODE_ENV !== "production"),
+        injectIslands(
+          html,
+          collector,
+          args.resolveIsland,
+          process.env.NODE_ENV !== "production",
+          navigation,
+        ),
         { status: 200, headers },
       );
     } finally {
@@ -655,6 +681,11 @@ export class ViewRouteDispatcher {
       assetBase?: string;
       /** Where island client modules are served from; see `injectIslands`. */
       resolveIsland?: IslandResolver;
+      /**
+       * Identifies the client build, so a static page with `navigation` loads
+       * a page of another deploy in full rather than swapping it in.
+       */
+      buildId?: string;
     }) => {
       const {
         bootstrapModules = [],
@@ -668,6 +699,7 @@ export class ViewRouteDispatcher {
         modulePreloadManifest,
         assetBase,
         resolveIsland,
+        buildId,
       } = params;
 
       // `clientEntry` and `bootstrapModules` are two spellings of the same job,
@@ -760,6 +792,7 @@ export class ViewRouteDispatcher {
           viewImportMap,
           viewModules,
           resolveIsland,
+          buildId,
         });
       }
 

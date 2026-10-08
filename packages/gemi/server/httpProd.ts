@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join, resolve, sep } from "node:path";
 import { compressResponse } from "./compression";
 import { listPublicFiles, staticFileResponse } from "./staticFile";
@@ -141,6 +142,14 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // The island entries (`<module>?gemi-island`) a static view's document
   // loads; see `injectIslands`.
   const resolveIsland = createIslandResolver(manifest, assetBase);
+
+  // Identifies this client build: a static page with `navigation` swaps in
+  // only pages of the same build. The manifest names every content-hashed
+  // file, so it changes whenever any of them does.
+  const buildId = createHash("sha256")
+    .update(await Bun.file(`${distDir}/client/.vite/manifest.json`).text())
+    .digest("base64url")
+    .slice(0, 12);
 
   // A static view's CSS comes from the whole import closure of its views (and
   // its own layout's, which then replaces the app stylesheet): there is no
@@ -287,6 +296,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           cssManifest,
           assetBase,
           resolveIsland,
+          buildId,
         });
       }
     } catch (err) {

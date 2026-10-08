@@ -6,6 +6,10 @@ import {
   type StaticRenderCollector,
 } from "../../client/islands";
 import { htmlSafeJson } from "./streamQueryInjection";
+import { ISLAND_LOADER_SOURCE } from "../../internal/islandRuntime";
+import { STATIC_NAVIGATION_SOURCE } from "../../internal/staticNavigationRuntime";
+
+export { ISLAND_LOADER_SOURCE, STATIC_NAVIGATION_SOURCE };
 
 /**
  * Where an island's entry is served from: `src` is imported by the loader,
@@ -21,29 +25,6 @@ export type IslandResolver = (moduleKey: string) => IslandAsset | undefined;
 export const ISLAND_DATA_ID = "gemi-islands";
 
 /**
- * The island loader, inlined into a static document that uses islands.
- *
- * Kept byte-for-byte constant (the per-page island table travels in a
- * separate `<script type="application/json">`, which a Content Security Policy
- * does not treat as script), so a strict policy can allow it by hash:
- * `script-src 'sha256-…'` with `ISLAND_LOADER_CSP_HASH`. Everything it loads
- * is a plain `import()` of a same-origin (or asset-base) file.
- *
- * The table is `{ i: [{ s: entry URL, e: export, l: load }] }` and each
- * marker's `data-island` indexes `i`. Per marker, on its schedule: import the
- * island's entry (the module as `m`, the runtime's `h`), then
- * `h(marker, m[export])`, which calls `hydrateRoot`. A failure is logged and
- * leaves the server-rendered markup in place.
- */
-export const ISLAND_LOADER_SOURCE =
-  'const d=document,c=JSON.parse(d.getElementById("gemi-islands").textContent),' +
-  "w=f=>(window.requestIdleCallback||setTimeout)(f)," +
-  "m=(e,o)=>{if(!e.g){e.g=1;import(o.s).then(x=>x.h(e,x.m[o.e])).catch(r=>console.error(r))}};" +
-  'for(const e of d.querySelectorAll("gemi-island")){const o=c.i[e.dataset.island];if(!o)continue;' +
-  'if(o.l=="eager")m(e,o);else if(o.l=="idle"||!window.IntersectionObserver||!e.children.length)w(()=>m(e,o));' +
-  "else{const v=new IntersectionObserver(n=>{if(n.some(x=>x.isIntersecting)){v.disconnect();m(e,o)}});for(const k of e.children)v.observe(k)}}";
-
-/**
  * `'sha256-…'` for the production island loader, ready to put in a
  * `script-src` directive. The dev loader also installs the React Refresh
  * preamble and Vite's HMR client first, so it does not match; a dev policy
@@ -52,16 +33,6 @@ export const ISLAND_LOADER_SOURCE =
 export const ISLAND_LOADER_CSP_HASH = `'sha256-${createHash("sha256")
   .update(ISLAND_LOADER_SOURCE)
   .digest("base64")}'`;
-
-/**
- * The dev loader: the React Refresh preamble first (`@vitejs/plugin-react`
- * refuses to run a component module before it is installed), then Vite's HMR
- * client, so editing an island's component hot-updates it in place. Either is
- * missing without the React plugin or outside Vite, hence the catches.
- */
-const DEV_ISLAND_LOADER_SOURCE =
-  'await import("/refresh.js").catch(()=>{});await import("/@vite/client").catch(()=>{});' +
-  ISLAND_LOADER_SOURCE;
 
 /**
  * `</head>` is looked up from the front and `</body>` from the back: the
@@ -78,52 +49,98 @@ const attr = (value: string) =>
   value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 
 /**
- * Adds the island loader to a settled static document, only when the render
- * recorded an island, so a page without one keeps no script at all.
+ * `'sha256-…'` for the production navigation runtime (`.static({ navigation })`),
+ * for a `script-src` directive. It replaces the island loader on those pages
+ * (it carries its own), so a policy for them needs this hash instead of (or
+ * besides) `ISLAND_LOADER_CSP_HASH`. Like the loader's, the dev script differs.
+ */
+export const STATIC_NAVIGATION_CSP_HASH = `'sha256-${createHash("sha256")
+  .update(STATIC_NAVIGATION_SOURCE)
+  .digest("base64")}'`;
+
+/**
+ * Dev scripts start with the React Refresh preamble (`@vitejs/plugin-react`
+ * refuses to run a component module before it is installed), then Vite's HMR
+ * client, so editing an island's component hot-updates it in place. Either is
+ * missing without the React plugin or outside Vite, hence the catches.
+ */
+const DEV_PREAMBLE =
+  'await import("/refresh.js").catch(()=>{});await import("/@vite/client").catch(()=>{});';
+
+/** The name of the `<meta>` that identifies a navigable static document. */
+export const STATIC_IDENTITY_META = "gemi-static";
+
+/**
+ * A static document's navigation settings, from `.static({ navigation })`:
+ * `identity` is the `<meta name="gemi-static">` content (`layout|build|version`)
+ * the runtime compares before it swaps a fetched page in.
+ */
+export interface StaticNavigationMarker {
+  identity: string;
+  prefetch: "intent" | "none";
+}
+
+/**
+ * Adds the client runtime to a settled static document.
+ *
+ * Without `navigation`, that is the island loader, and only when the render
+ * recorded an island, so a page without one keeps no script at all. With it,
+ * the page always gets the navigation runtime (which carries the loader) and
+ * the `<meta name="gemi-static">` that identifies it.
  *
  * Eager islands get `modulepreload`s in the head for their entry's whole
  * static import closure (React included); lazy ones are fetched when their
  * schedule fires, so nothing about them is announced up front.
  *
- * Without a resolver (a test rendering through `app.fetch`), the markup is
- * the whole result: nothing is injected and nothing is logged.
+ * Without a resolver (a test rendering through `app.fetch`), no island table
+ * is injected and nothing is logged.
  */
 export function injectIslands(
   html: string,
   collector: StaticRenderCollector,
   resolveIsland: IslandResolver | undefined,
   dev: boolean,
+  navigation?: StaticNavigationMarker,
 ): string {
-  if (collector.islands.length === 0 || !resolveIsland) {
-    return html;
-  }
-
   const preloads = new Set<string>();
-  const entries = collector.islands.map((island) => {
-    const asset = island.module ? resolveIsland(island.module) : undefined;
-    if (!asset) {
-      // The markup is still there and still works without JS; a missing build
-      // entry must not take the page down with it.
-      console.error(
-        `[gemi] island ${island.module ?? "(unknown module)"}: no client build entry. ` +
-          "Declare it as island(() => import(\"./Component\")) so gemi's Vite plugin builds it.",
-      );
-      return null;
-    }
-    if (island.load === "eager") {
-      for (const href of asset.preload) preloads.add(href);
-    }
-    return { s: asset.src, e: island.export, l: island.load };
-  });
+  let entries: ({ s: string; e: string; l: string } | null)[] = [];
+  if (resolveIsland) {
+    entries = collector.islands.map((island) => {
+      const asset = island.module ? resolveIsland(island.module) : undefined;
+      if (!asset) {
+        // The markup is still there and still works without JS; a missing build
+        // entry must not take the page down with it.
+        console.error(
+          `[gemi] island ${island.module ?? "(unknown module)"}: no client build entry. ` +
+            "Declare it as island(() => import(\"./Component\")) so gemi's Vite plugin builds it.",
+        );
+        return null;
+      }
+      if (island.load === "eager") {
+        for (const href of asset.preload) preloads.add(href);
+      }
+      return { s: asset.src, e: island.export, l: island.load };
+    });
+  }
+  const hasIslands = entries.some((entry) => entry !== null);
 
-  if (entries.every((entry) => entry === null)) {
+  if (!hasIslands && !navigation) {
     return html;
   }
 
-  const head = [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("");
+  const identity = navigation
+    ? `<meta name="${STATIC_IDENTITY_META}" content="${attr(navigation.identity)}"${
+        navigation.prefetch === "none" ? ' data-prefetch="none"' : ""
+      }/>`
+    : "";
+  const head =
+    identity +
+    [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("");
+  const source = navigation ? STATIC_NAVIGATION_SOURCE : ISLAND_LOADER_SOURCE;
   const body =
-    `<script type="application/json" id="${ISLAND_DATA_ID}">${htmlSafeJson({ i: entries })}</script>` +
-    `<script type="module">${dev ? DEV_ISLAND_LOADER_SOURCE : ISLAND_LOADER_SOURCE}</script>`;
+    (hasIslands
+      ? `<script type="application/json" id="${ISLAND_DATA_ID}">${htmlSafeJson({ i: entries })}</script>`
+      : "") + `<script type="module">${dev ? DEV_PREAMBLE + source : source}</script>`;
 
   return insertBefore(insertBefore(html, "</head>", head, false), "</body>", body, true);
 }

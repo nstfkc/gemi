@@ -1,3 +1,16 @@
+# Unreleased
+
+## Static views: client-side navigation between static pages (#865)
+
+**New, opt-in.** `.static({ navigation: true })`, or `navigation: { version, prefetch }`, gives a static view a small inline runtime (about 2.5 KB gzip, island loader included; no React unless the page has islands) that follows same-origin links by fetching the next page and swapping it in: title, the head tags `Head`/`Meta` own and the body, unmounting the old page's islands and hydrating the new page's. A page with another layout, build, `version` or stylesheet, or any error, is a normal full load. Back/forward, scroll restoration, focus and a live-region announcement, prefetch on hover/focus/touch, `data-gemi-reload` and `data-gemi-persist` are covered. See [Client-side navigation](docs/static-views-and-islands.md#client-side-navigation).
+
+- New: `StaticNavigationOptions` (from `gemi/http`); `onStaticNavigate` and the `StaticPageLoad` type (from `gemi/client`); `STATIC_NAVIGATION_CSP_HASH` (from `gemi/services`); `renderStaticDocument` and its types (from `gemi/testing`), a jsdom helper to test a site's links.
+- DOM events on `document`: `gemi:before-navigate` (cancelable) and `gemi:page-load`.
+- A navigable page carries `<meta name="gemi-static" content="<layout>|<build>|<version>">`. The build id is a hash of the client manifest, passed to the render as `buildId` by `gemi start` (`"dev"` under `gemi dev`).
+- `gemi stats` now counts the script a static page inlines: `(inline) island loader` on a static route that can render an island (it was left out before, so those routes grow by under 1 KB gzip), `(inline) static navigation` on a route with `navigation`. The route table's `static` entry gains `navigation: true`.
+
+What to do: nothing; pages without `navigation` are byte-for-byte unchanged. To turn it on, add `navigation` to the static views that link to each other (they must share a layout to swap). With a strict Content Security Policy, allow `STATIC_NAVIGATION_CSP_HASH` on those pages. A stats budget for a static route with islands may need the extra few hundred bytes of the loader.
+
 # Upgrading from 0.119.1 to 0.119.2
 
 ## OAuth connections: the callback works when the provider redirects back

@@ -138,4 +138,5 @@ export { OpenGraphImage } from "./OpenGraphImage";
 export { useTheme } from "./ThemeProvider";
 export { useAppIdMissmatch } from "./useAppIdMissmatch";
 export { island } from "./islands";
+export { onStaticNavigate, type StaticPageLoad } from "./staticNavigation";
 export type { IslandLoad, IslandOptions, IslandLoader } from "./islands";
