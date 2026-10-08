@@ -303,6 +303,42 @@ describe("the swap", () => {
     expect(document.body.textContent).not.toContain("placeholder");
   });
 
+  test("a page's own <style>s in its content swap with it (#867)", async () => {
+    const doc = await start(
+      {
+        title: "A",
+        body:
+          '<div data-gemi-persist="player"><style id="player-css">.player{}</style></div>' +
+          nav('<a href="/b">b</a>') +
+          '<main><style id="a-css">.a{color:red}</style><h1>A</h1></main>',
+      },
+      {
+        pages: {
+          "/b": await page({
+            title: "B",
+            body:
+              '<div data-gemi-persist="player"></div>' +
+              '<main><style id="b-css">.b{color:blue}</style><section><style id="b-deep">.c{}</style></section><h1>B</h1></main>',
+          }),
+        },
+      },
+    );
+    const style = document.getElementById("app.css");
+    const playerCss = document.getElementById("player-css");
+
+    expect(await doc.navigate("/b")).toMatchObject({ kind: "swap" });
+
+    expect(document.title).toBe("B");
+    // The old page's own styles left with its content; the new page's came with its.
+    expect(document.getElementById("a-css")).toBeNull();
+    expect(document.getElementById("b-css")!.textContent).toBe(".b{color:blue}");
+    expect(document.getElementById("b-deep")).not.toBeNull();
+    // The body's own stylesheet and a persisted element's style stay.
+    expect(document.getElementById("app.css")).toBe(style);
+    expect(document.getElementById("player-css")).toBe(playerCss);
+    expect(document.querySelectorAll("style")).toHaveLength(4);
+  });
+
   test("follows a redirect to the final URL", async () => {
     const doc = await start(
       { title: "A", body: nav('<a href="/old">old</a>') },
@@ -340,6 +376,11 @@ describe("full loads instead of a swap", () => {
     ["another build", { identity: "site/Layout|b2|" }],
     ["another version", { identity: "site/Layout|b1|pub-2" }],
     ["another stylesheet", { stylesheet: "body{margin:1px}" }],
+    ["another <style> in the head", { head: "<style>h1{color:red}</style>" }],
+    ["another <link rel=stylesheet> in the head", { head: '<link rel="stylesheet" href="/b.css">' }],
+    ["another <style> as a child of the body", { body: "<style>h1{}</style><h1>B</h1>" }],
+    // It would load after the swap, so the page would show unstyled meanwhile.
+    ["another <link rel=stylesheet> in its content", { body: '<main><link rel="stylesheet" href="/b.css"><h1>B</h1></main>' }],
   ])("when the next page has %s", async (_, change) => {
     const doc = await start404({ "/b": await page({ title: "B", body: "<h1>B</h1>", ...change }) });
 

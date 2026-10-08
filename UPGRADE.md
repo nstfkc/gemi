@@ -1,3 +1,11 @@
+# Unreleased
+
+## Static navigation: a page's own `<style>` in its content no longer forces a full load (#867)
+
+**Fix.** A static page with `navigation` swapped the next page in only when every stylesheet in the document matched, including `<style>` elements nested in the body (component CSS rendered next to its markup). Two pages with different component CSS were therefore always a full load. Now only the document-level stylesheets are compared: the `<style>`s and `<link rel="stylesheet">`s in the head and directly in `<body>`, plus every `<link rel="stylesheet">` anywhere (one that arrived with the body would load after the swap and flash unstyled content). A nested `<style>` belongs to the content: the old page's are removed with it and the next page's are parsed in the same swap. See [Client-side navigation](docs/static-views-and-islands.md#client-side-navigation).
+
+What to do: nothing. A different head stylesheet, body-level stylesheet or `<link rel="stylesheet">` is still a full load.
+
 # Upgrading from 0.119.2 to 0.120.0
 
 ## Static views: client-side navigation between static pages (#865)

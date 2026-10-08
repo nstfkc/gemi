@@ -4499,15 +4499,24 @@ in instead of loading it:
   shows where they end.
 - **When it's a full load instead.** Each navigable page carries
   `<meta name="gemi-static" content="<layout>|<build>|<version>">`. The next page
-  is swapped in only when its marker and its stylesheets are the same as the
-  current page's. Another layout (a hydrated app page, the app's 404), a new
-  deploy, another `version` (see below), a different stylesheet, a response that
-  isn't a 2xx HTML page, a redirect to another origin, a network error or a
-  10-second timeout all become an ordinary page load of the link.
+  is swapped in only when its marker and its document-level stylesheets are the
+  same as the current page's: the `<style>`s and `<link rel="stylesheet">`s in
+  the head and directly in `<body>`, and every `<link rel="stylesheet">`
+  anywhere (a new one would load after the swap, so the page would show
+  unstyled meanwhile). Another layout (a hydrated app page, the app's 404), a
+  new deploy, another `version` (see below), a different stylesheet, a response
+  that isn't a 2xx HTML page, a redirect to another origin, a network error or
+  a 10-second timeout all become an ordinary page load of the link.
+- **A page's own `<style>`.** A `<style>` nested in the body's content (a
+  component rendering its CSS next to its markup) is part of the content, not
+  compared: the old page's leave with the old content and the next page's
+  arrive with the new one, parsed in the same swap, so pages with different
+  component CSS still swap. One inside a `data-gemi-persist` element stays
+  with that element.
 - **The swap.** `document.title`, `<html lang dir>`, the head tags `Head` and
   `Meta` own (`meta` by name or property, `canonical`, `alternate`, icons, font
   preloads and `@font-face` rules, JSON-LD), and the body's attributes and
-  content. The stylesheets stay in place. Islands of the old page are
+  content. The document-level stylesheets stay in place. Islands of the old page are
   unmounted, so their effects clean up (a menu's scroll lock, say); the new
   page's islands hydrate on their own `load` schedule, with eager islands'
   `modulepreload`s added to the head. Inline `<script>`s in the new body don't
