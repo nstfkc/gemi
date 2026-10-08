@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.120.0 to 0.120.1
 
 ## Static navigation: a page's own `<style>` in its content no longer forces a full load (#867)
 
