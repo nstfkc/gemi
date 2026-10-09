@@ -157,9 +157,10 @@ await ig.fetch(`/v25.0/${ig.providerAccountId}/media_publish`, {
 });
 ```
 
-`connection.fetch` sends the token as `Authorization: Bearer` and only to
-`https://graph.instagram.com`. For an endpoint that wants the token in the query string,
-`await ig.accessToken()` returns it, already renewed when it was close to expiring.
+`connection.fetch` sends the token as the `access_token` query parameter, the only placement
+Meta documents for `graph.instagram.com`, and only to that origin. A redirect to another origin
+is followed without it. `await ig.accessToken()` returns the token itself, already renewed when it
+was close to expiring.
 
 ### Refreshing
 
@@ -179,9 +180,10 @@ machinery applies:
   `/auth/connections/instagram`.
 
 The Graph API answers a revoked or expired token with a `400` (`OAuthException`, code `190`)
-rather than a `401`, so `connection.fetch` returns that response instead of refreshing and
-retrying. Treat code `190` as "reconnect": `await ig.refresh()` (on a token at least a day old) then fails with
-`OAuthReconnectRequiredError` and marks the connection.
+rather than a `401`. `connection.fetch` treats that like a `401`: it renews the token and retries
+once. When the renewal is refused, or the token is too young to renew (so the grant itself is
+gone), the connection is marked `needs_reconnect` and `OAuthReconnectRequiredError` is thrown.
+Any other `400` is returned to the caller untouched.
 
 A connection nobody uses for 60 days expires. To keep idle connections alive, renew them from a
 [cron job](./cron.md), for example weekly:

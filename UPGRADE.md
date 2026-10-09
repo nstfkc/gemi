@@ -8,6 +8,7 @@
 - **Sign-in without an email.** A provider with `createUsersWithoutEmail = true` (Instagram's sets it) creates a user with `email: null`, identified by its `SocialAccount`, where before the callback refused with `missing_email`. New `auth.oauthCompleteProfilePath` sends such users to a page that asks for an email. See [Providers without an email](docs/authentication.md#providers-without-an-email).
 - **Several accounts per provider** for connections: `multiple: true` on a connection provider. `Connections.for(user, provider, accountId?)` and `Connections.list(user, provider?)` take the new optional arguments. Each account's row is stored under `<provider>:<account id>` in the existing `provider` column, so **no migration**. See [Several accounts per provider](docs/authentication.md#several-accounts-per-provider).
 - **`refreshStrategy`** on `OAuthConnectionProvider`, for a provider that refreshes without a refresh token. Resolve `null` to keep the current token. Providers without one refresh exactly as before.
+- **`tokenPlacement`** (`"header"` by default, or `"query"` for an `access_token` query parameter) and **`isTokenRejected`** (default: a `401`) on `OAuthConnectionProvider`. Instagram's provider sends the token as the query parameter, and treats a `400` with OAuthException code `190` as a refused token.
 - `onConnected` receives `profile` (what the provider reported about the account, or `null`).
 - `parseMetaSignedRequest` and `MetaSignedRequestError` verify the `signed_request` of Meta's deauthorize and data-deletion callbacks.
 

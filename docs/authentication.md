@@ -1105,6 +1105,8 @@ export default defineAuthConfig({
 | `refreshLeewaySeconds` | `60` | Refresh this long before the access token expires. |
 | `refreshStrategy` | none | How to refresh, for a provider that does not spend a refresh token. See [Refreshing without a refresh token](#refreshing-without-a-refresh-token). |
 | `multiple` | `false` | A user may connect several accounts at this provider. See [Several accounts per provider](#several-accounts-per-provider). |
+| `tokenPlacement` | `"header"` | How `connection.fetch` sends the token: `"header"` as `Authorization: Bearer`, `"query"` as an `access_token` query parameter (Instagram's Graph API). Either way only to `apiBaseUrl`'s origin. |
+| `isTokenRejected` | a `401` | `(response) => boolean \| Promise<boolean>`: whether an API response refuses the token itself, which makes `fetch` refresh and retry once. Read `response.clone()`, and only once the status says it could be a refusal. Instagram's also counts a `400` with error code `190`. |
 
 ### Connecting
 
@@ -1169,7 +1171,8 @@ const file = await res.json();
 
 - It adds `Authorization: Bearer <token>`.
 - When the token expires within `refreshLeewaySeconds`, it refreshes first.
-- After a `401` it refreshes and retries once. A request with a streamed body is not retried.
+- After a `401` (or what the provider's `isTokenRejected` says is a refusal) it refreshes and
+  retries once. A request with a streamed body is not retried.
 - A path is resolved against `apiBaseUrl`, and a URL on another origin throws
   `OAuthConnectionError` (`forbidden_url`) without sending anything. `apiBaseUrl` is required,
   so the token never leaves the provider's API host, even for a URL that came from user input.
@@ -1206,8 +1209,11 @@ else leaves it alone. Locking, the leeway and the retry after a `401` work as fo
 ```typescript
 new OAuthConnectionProvider({
   // …
-  refreshStrategy: async ({ accessToken, refreshToken, scopes, expiresAt, issuedAt, providerAccountId }) => {
-    if (Date.now() - issuedAt.getTime() < 24 * 3600_000) return null;
+  refreshStrategy: async ({ accessToken, scopes, issuedAt, providerAccountId, reason }) => {
+    if (Date.now() - issuedAt.getTime() < 24 * 3600_000) {
+      if (reason === "rejected") throw new OAuthConnectionError("refresh_failed", "Token refused.", { status: 401 });
+      return null;
+    }
     const res = await fetch(`https://api.acme.example/renew?token=${encodeURIComponent(accessToken)}`);
     if (!res.ok) throw new OAuthConnectionError("refresh_failed", "Acme refused the renewal.", { status: res.status });
     const body = await res.json();
@@ -1223,8 +1229,10 @@ new OAuthConnectionProvider({
 });
 ```
 
-`issuedAt` is when the current token was stored. A `providerAccountId` of `null` in the result
-keeps the stored one. A provider without a `refreshStrategy` behaves as before: it spends the
+`issuedAt` is when the current token was stored. `reason` says why the refresh runs:
+`"expiring"` (within the leeway), `"rejected"` (the API just refused the token, so a strategy
+that would otherwise wait should treat the grant as gone and throw a `4xx`) or `"requested"`
+(`connection.refresh()`). A `providerAccountId` of `null` in the result keeps the stored one. A provider without a `refreshStrategy` behaves as before: it spends the
 refresh token, and a connection without one needs reconnecting once its token expires.
 
 Refreshes are serialised per connection: callers in one process share one refresh, and

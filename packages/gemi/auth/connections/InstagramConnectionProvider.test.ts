@@ -27,6 +27,8 @@ let hits: Hit[] = [];
 let codeAnswer: () => Response;
 let refreshAnswer: () => Response;
 let meUserId = IG_ID;
+let liveTokens = new Set<string>();
+let apiErrorCode = 190;
 let server: ReturnType<typeof Bun.serve>;
 let base: string;
 let issued = 0;
@@ -60,8 +62,16 @@ beforeAll(() => {
           { headers: { "content-type": "application/json" } },
         );
       }
+      if (url.pathname === "/hop") return Response.redirect(`http://localhost:${server.port}/api/elsewhere`, 302);
       if (url.pathname.startsWith("/api/")) {
-        return Response.json({ token: req.headers.get("authorization") });
+        const token = url.searchParams.get("access_token");
+        if (!token || !liveTokens.has(token)) {
+          return Response.json(
+            { error: { message: "Error validating access token", type: "OAuthException", code: apiErrorCode } },
+            { status: 400 },
+          );
+        }
+        return Response.json({ token, auth: req.headers.get("authorization") });
       }
       return new Response("not found", { status: 404 });
     },
@@ -88,6 +98,8 @@ beforeEach(() => {
   hits = [];
   issued = 0;
   meUserId = IG_ID;
+  liveTokens = new Set(["long-1", "renewed-1"]);
+  apiErrorCode = 190;
   codeAnswer = () =>
     new Response(`{"data":[{"access_token":"short-1","user_id":${IG_ID},"permissions":"instagram_business_basic,instagram_business_content_publish"}]}`);
   refreshAnswer = () => {
@@ -234,7 +246,7 @@ describe("refreshing", () => {
     vi.setSystemTime(Date.now() + 6 * DAY);
 
     const res = await (await manager.for(user, "instagram"))!.fetch("/api/me");
-    expect(await res.json()).toEqual({ token: "Bearer renewed-1" });
+    expect(await res.json()).toEqual({ token: "renewed-1", auth: null });
   });
 
   test("a token younger than 24 hours is not sent to the refresh endpoint", async () => {
@@ -276,6 +288,73 @@ describe("refreshing", () => {
   });
 });
 
+describe("calling the Graph API", () => {
+  async function connectAged(ageMs: number) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await manager.save(user, "instagram", {
+      accessToken: "long-1",
+      expiresAt: new Date(Date.now() + 60 * DAY),
+      providerAccountId: IG_ID,
+    });
+    vi.setSystemTime(Date.now() + ageMs);
+    return (await manager.for(user, "instagram"))!;
+  }
+
+  test("sends the token as the access_token query parameter, not a header", async () => {
+    const connection = await connectAged(0);
+    const res = await connection.fetch("/api/me?fields=username");
+    expect(await res.json()).toEqual({ token: "long-1", auth: null });
+    const hit = hits.at(-1)!;
+    expect(hit.query).toEqual({ fields: "username", access_token: "long-1" });
+    expect(hit.auth).toBeNull();
+  });
+
+  test("a redirect to another origin is followed without the token", async () => {
+    const connection = await connectAged(0);
+    await connection.fetch("/hop");
+    const [hop, elsewhere] = hits.slice(-2);
+    expect(hop.query.access_token).toBe("long-1");
+    expect(elsewhere.path).toBe("/api/elsewhere");
+    expect(elsewhere.query.access_token).toBeUndefined();
+  });
+
+  test("a 400 with OAuthException 190 refreshes and retries once, like a 401", async () => {
+    const connection = await connectAged(2 * DAY);
+    liveTokens.delete("long-1");
+    const res = await connection.fetch("/api/me");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ token: "renewed-1", auth: null });
+    expect(hits.filter((hit) => hit.path === "/refresh_access_token")).toHaveLength(1);
+  });
+
+  test("190 on a token too young to renew marks the connection needs_reconnect", async () => {
+    const connection = await connectAged(60_000);
+    liveTokens.delete("long-1");
+    await expect(connection.fetch("/api/me")).rejects.toBeInstanceOf(OAuthReconnectRequiredError);
+    expect(hits.some((hit) => hit.path === "/refresh_access_token")).toBe(false);
+    expect((await manager.for(user, "instagram"))!.status).toBe("needs_reconnect");
+  });
+
+  test("190 where Instagram refuses the renewal too marks the connection", async () => {
+    refreshAnswer = () =>
+      Response.json({ error: { type: "OAuthException", code: 190, message: "expired" } }, { status: 400 });
+    const connection = await connectAged(2 * DAY);
+    liveTokens.delete("long-1");
+    await expect(connection.fetch("/api/me")).rejects.toBeInstanceOf(OAuthReconnectRequiredError);
+    expect(connection.status).toBe("needs_reconnect");
+  });
+
+  test("another 400 is the caller's answer: no refresh, body intact", async () => {
+    apiErrorCode = 100;
+    const connection = await connectAged(2 * DAY);
+    liveTokens.delete("long-1");
+    const res = await connection.fetch("/api/me");
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe(100);
+    expect(hits.some((hit) => hit.path === "/refresh_access_token")).toBe(false);
+  });
+});
+
 describe("refreshStrategy on any provider", () => {
   test("is used instead of the refresh token, and null keeps the current token", async () => {
     let answer: "renew" | "skip" = "skip";
@@ -299,7 +378,13 @@ describe("refreshStrategy on any provider", () => {
     const connection = (await m.for(user, "custom"))!;
     await connection.refresh();
     expect(await connection.accessToken()).toBe("custom-1");
-    expect(seen[0]).toMatchObject({ accessToken: "custom-1", refreshToken: null, scopes: ["read"], providerAccountId: "acct" });
+    expect(seen[0]).toMatchObject({
+      accessToken: "custom-1",
+      refreshToken: null,
+      scopes: ["read"],
+      providerAccountId: "acct",
+      reason: "requested",
+    });
 
     answer = "renew";
     await connection.refresh();

@@ -81,7 +81,29 @@ export interface OAuthConnectionProviderConfig {
    * one connection per user, and connecting again replaces it.
    */
   multiple?: boolean;
+  /**
+   * How `connection.fetch` sends the token: `"header"` (the default) as
+   * `Authorization: Bearer`, `"query"` as an `access_token` query parameter,
+   * for an API that documents only that (Instagram's Graph API). Either way
+   * the token goes only to `apiBaseUrl`'s origin.
+   */
+  tokenPlacement?: "header" | "query";
+  /**
+   * Whether an API response says the access token itself was refused, which
+   * makes `connection.fetch` refresh and retry once. Default: the status is
+   * 401. Instagram also answers a dead token with a 400 whose error `code` is
+   * 190. Read `response.clone()`, never the response itself: it is handed
+   * back to the caller when this answers `false`. Clone only once the status
+   * says it could be a refusal, so a large success body is not buffered twice.
+   */
+  isTokenRejected?: (response: Response) => boolean | Promise<boolean>;
 }
+
+/**
+ * Why a connection is being refreshed: its token is about to expire, the API
+ * refused it, or the app called `connection.refresh()`.
+ */
+export type ConnectionRefreshReason = "expiring" | "rejected" | "requested";
 
 /** What a `refreshStrategy` is handed: the connection's current grant. */
 export interface ConnectionRefreshContext {
@@ -92,6 +114,11 @@ export interface ConnectionRefreshContext {
   /** When the current access token was stored (the last connect or refresh). */
   issuedAt: Date;
   providerAccountId: string | null;
+  /**
+   * Why: `"rejected"` when the API just refused the token, so a strategy that
+   * would otherwise wait (`null`) should treat the grant as gone.
+   */
+  reason: ConnectionRefreshReason;
 }
 
 /** See `OAuthConnectionProviderConfig.refreshStrategy`. */
@@ -143,9 +170,12 @@ export interface OAuthTokenSet {
  */
 export class OAuthConnectionProvider {
   readonly config: Required<
-    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy">
+    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy" | "isTokenRejected">
   > &
-    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy">;
+    Pick<
+      OAuthConnectionProviderConfig,
+      "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy" | "isTokenRejected"
+    >;
 
   constructor(config: OAuthConnectionProviderConfig) {
     for (const key of ["authorizeUrl", "tokenUrl"] as const) {
@@ -172,9 +202,20 @@ export class OAuthConnectionProvider {
       authorizationParams: {},
       refreshLeewaySeconds: 60,
       multiple: false,
+      tokenPlacement: "header",
       ...config,
       refreshGrantType: config.refreshGrantType ?? "refresh_token",
     };
+  }
+
+  /**
+   * Whether `response` refuses the access token itself: `isTokenRejected`
+   * when configured, else a 401.
+   */
+  async isTokenRejected(response: Response): Promise<boolean> {
+    const check = this.config.isTokenRejected;
+    if (!check) return response.status === 401;
+    return await check(response);
   }
 
   /** The URL to send the browser to. */

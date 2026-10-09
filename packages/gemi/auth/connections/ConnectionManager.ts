@@ -9,7 +9,12 @@ import {
   MemoryConnectionStore,
 } from "./ConnectionStore";
 import { OAuthConnectionError, OAuthReconnectRequiredError } from "./errors";
-import { type OAuthConnectionProvider, type OAuthTokenSet, isLoopback } from "./OAuthConnectionProvider";
+import {
+  type ConnectionRefreshReason,
+  type OAuthConnectionProvider,
+  type OAuthTokenSet,
+  isLoopback,
+} from "./OAuthConnectionProvider";
 
 /** A user, as far as a connection is concerned: anything with an `id`. */
 export type ConnectionOwner = { id: string | number } | string | number;
@@ -230,17 +235,17 @@ export class ConnectionManager {
    *
    * @internal
    */
-  refresh(record: ConnectionRecord): Promise<ConnectionRecord> {
+  refresh(record: ConnectionRecord, reason: ConnectionRefreshReason = "requested"): Promise<ConnectionRecord> {
     const inFlight = this.refreshing.get(record.id);
     if (inFlight) return inFlight;
-    const task = this.withLock(record.id, () => this.refreshOnce(record)).finally(() =>
+    const task = this.withLock(record.id, () => this.refreshOnce(record, reason)).finally(() =>
       this.refreshing.delete(record.id),
     );
     this.refreshing.set(record.id, task);
     return task;
   }
 
-  private async refreshOnce(seen: ConnectionRecord): Promise<ConnectionRecord> {
+  private async refreshOnce(seen: ConnectionRecord, reason: ConnectionRefreshReason): Promise<ConnectionRecord> {
     // Re-read under the lock: another process may have refreshed already.
     const name = this.providerName(seen.provider) ?? seen.provider;
     const current = await this.store.find(seen.userId, seen.provider);
@@ -267,6 +272,7 @@ export class ConnectionManager {
             scopes: [...current.scopes],
             expiresAt: current.expiresAt,
             issuedAt: current.updatedAt,
+            reason,
             providerAccountId: current.providerAccountId,
           })
         : await provider.refresh(current.refreshToken as string, current.scopes);
@@ -390,14 +396,14 @@ export class ProviderConnection {
     const url = this.resolveUrl(input);
     const record = await this.current();
     const first = await this.send(url, init, record.accessToken);
-    // Retry only a 401 for the token itself, not one from where a redirect
+    // Retry only a refusal of the token itself, not one from where a redirect
     // led after the token was dropped.
-    if (first.response.status !== 401 || !first.authorized || init.body instanceof ReadableStream) {
-      return first.response;
-    }
+    if (!first.authorized || init.body instanceof ReadableStream) return first.response;
+    const provider = this.manager.provider(this.provider);
+    if (!(await provider.isTokenRejected(first.response))) return first.response;
 
     await first.response.body?.cancel().catch(() => {});
-    const refreshed = await this.refreshFrom(record);
+    const refreshed = await this.refreshFrom(record, "rejected");
     return (await this.send(url, init, refreshed.accessToken)).response;
   }
 
@@ -460,14 +466,17 @@ export class ProviderConnection {
     const leeway = this.manager.provider(this.provider).config.refreshLeewaySeconds * 1000;
     const expiresAt = this.record.expiresAt?.getTime();
     if (expiresAt !== undefined && expiresAt - Date.now() <= leeway) {
-      return this.refreshFrom(this.record);
+      return this.refreshFrom(this.record, "expiring");
     }
     return this.record;
   }
 
-  private async refreshFrom(record: ConnectionRecord): Promise<ConnectionRecord> {
+  private async refreshFrom(
+    record: ConnectionRecord,
+    reason: ConnectionRefreshReason = "requested",
+  ): Promise<ConnectionRecord> {
     try {
-      this.record = await this.manager.refresh(record);
+      this.record = await this.manager.refresh(record, reason);
     } catch (error) {
       if (error instanceof OAuthReconnectRequiredError) {
         this.record = { ...this.record, needsReconnect: true };
@@ -536,9 +545,18 @@ export class ProviderConnection {
 
   private request(url: URL, init: RequestInit, method: string, body: RequestInit["body"], token: string | null): Request {
     const headers = new Headers(init.headers);
-    if (token === null) headers.delete("authorization");
-    else headers.set("Authorization", `Bearer ${token}`);
-    return new Request(url, { ...init, method, body, headers });
+    const target = new URL(url);
+    const placement = this.manager.provider(this.provider).config.tokenPlacement;
+    if (token === null) {
+      headers.delete("authorization");
+    } else if (placement === "query") {
+      // Where the provider documents it (Instagram's Graph API). Only ever on
+      // `apiBaseUrl`'s origin: a redirect elsewhere is sent with `token` null.
+      target.searchParams.set("access_token", token);
+    } else {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    return new Request(target, { ...init, method, body, headers });
   }
 }
 

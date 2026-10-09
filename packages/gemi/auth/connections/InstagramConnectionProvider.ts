@@ -66,8 +66,10 @@ const MIN_REFRESH_AGE_MS = 24 * 60 * 60 * 1000;
  * there is no refresh token. Instagram has no revocation endpoint, so
  * `revoke()` throws `revoke_unsupported`; use `disconnect()`.
  *
- * `connection.fetch` sends the token as `Authorization: Bearer`, to
- * `https://graph.instagram.com` only.
+ * `connection.fetch` sends the token as the `access_token` query parameter
+ * (the only placement Meta documents), to `https://graph.instagram.com` only,
+ * and treats a 400 with OAuthException code 190 like a 401: it refreshes and
+ * retries once, and marks the connection when the grant is gone.
  */
 export class InstagramConnectionProvider extends OAuthConnectionProvider {
   readonly instagram: Required<Omit<InstagramEndpoints, "graphApiVersion">> & Pick<InstagramEndpoints, "graphApiVersion">;
@@ -93,10 +95,22 @@ export class InstagramConnectionProvider extends OAuthConnectionProvider {
       apiBaseUrl: endpoints.graphUrl,
       refreshLeewaySeconds: config.refreshLeewaySeconds ?? 10 * 24 * 60 * 60,
       multiple: config.multiple ?? false,
+      // The Graph API documents the token as a query parameter only.
+      tokenPlacement: "query",
+      isTokenRejected: isInstagramTokenRejected,
       refreshStrategy: async (current) => {
-        // Too young to refresh: Instagram would refuse, and its refusal
-        // would read as a revoked grant. The token is still good.
-        if (Date.now() - current.issuedAt.getTime() < MIN_REFRESH_AGE_MS) return null;
+        if (Date.now() - current.issuedAt.getTime() < MIN_REFRESH_AGE_MS) {
+          // The API just refused a token too young to renew: the grant is
+          // gone (the app was removed, the password changed). Mark it.
+          if (current.reason === "rejected") {
+            throw new OAuthConnectionError("refresh_failed", "Instagram refused the access token (OAuthException 190).", {
+              status: 401,
+            });
+          }
+          // Too young to refresh: Instagram would refuse, and its refusal
+          // would read as a revoked grant. The token is still good.
+          return null;
+        }
         const token = await instagramCall("refresh_failed", () =>
           refreshInstagramToken({ accessToken: current.accessToken, graphUrl: endpoints.graphUrl }),
         );
@@ -158,6 +172,20 @@ export class InstagramConnectionProvider extends OAuthConnectionProvider {
       new OAuthConnectionError("refresh_failed", "Instagram connections renew the access token itself; call connection.refresh()."),
     );
   }
+}
+
+/**
+ * A 401, or the Graph API's answer to a dead token: a 400 whose error `code`
+ * is 190 (`OAuthException`: expired, revoked, or the app was removed).
+ */
+export async function isInstagramTokenRejected(response: Response): Promise<boolean> {
+  if (response.status === 401) return true;
+  if (response.status !== 400) return false;
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: { code?: unknown } } | null;
+  return Number(body?.error?.code) === 190;
 }
 
 /** An `InstagramApiError` as the `OAuthConnectionError` the connection machinery classifies. */
