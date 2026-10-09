@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.121.0 to 0.122.0
 
 ## Instagram sign-in and connections; sign-in without an email; several accounts per connection provider; custom refresh strategies
 
