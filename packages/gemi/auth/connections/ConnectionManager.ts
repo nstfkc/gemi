@@ -9,7 +9,12 @@ import {
   MemoryConnectionStore,
 } from "./ConnectionStore";
 import { OAuthConnectionError, OAuthReconnectRequiredError } from "./errors";
-import { type OAuthConnectionProvider, type OAuthTokenSet, isLoopback } from "./OAuthConnectionProvider";
+import {
+  type ConnectionRefreshReason,
+  type OAuthConnectionProvider,
+  type OAuthTokenSet,
+  isLoopback,
+} from "./OAuthConnectionProvider";
 
 /** A user, as far as a connection is concerned: anything with an `id`. */
 export type ConnectionOwner = { id: string | number } | string | number;
@@ -39,7 +44,20 @@ export class ConnectionManager {
   private fakeStore: MemoryConnectionStore | undefined;
   readonly fakeRequests: Request[] = [];
 
-  constructor(private readonly options: ConnectionManagerOptions) {}
+  constructor(private readonly options: ConnectionManagerOptions) {
+    for (const [name, provider] of Object.entries(options.providers)) {
+      if (!provider.config.multiple) continue;
+      // A multiple-account provider's connections are stored under
+      // `<name>:<account id>`, which must not be read as another provider's.
+      const clash = Object.keys(options.providers).find((other) => other.startsWith(`${name}${ACCOUNT_SEPARATOR}`));
+      if (name.includes(ACCOUNT_SEPARATOR) || clash) {
+        throw new Error(
+          `auth.connections: "${clash ?? name}" cannot be used alongside the multiple-account provider "${name}" ` +
+            `("${ACCOUNT_SEPARATOR}" separates a provider from an account id in the store).`,
+        );
+      }
+    }
+  }
 
   get providers(): Record<string, OAuthConnectionProvider> {
     return this.options.providers;
@@ -72,25 +90,51 @@ export class ConnectionManager {
     return provider;
   }
 
-  /** The user's connection to `provider`, or `null` when they have not connected it. */
-  async for(user: ConnectionOwner, provider: string): Promise<ProviderConnection | null> {
-    this.provider(provider);
-    const record = await this.store.find(ownerId(user), provider);
-    return record ? new ProviderConnection(this, record) : null;
+  /**
+   * The user's connection to `provider`, or `null` when they have not
+   * connected it. With `accountId`, only the connection to that account
+   * (`providerAccountId`). For a provider with `multiple: true` and no
+   * `accountId`, the account added most recently; use `list(user,
+   * provider)` for all of them.
+   */
+  async for(user: ConnectionOwner, provider: string, accountId?: string): Promise<ProviderConnection | null> {
+    const config = this.provider(provider);
+    const userId = ownerId(user);
+    if (!config.config.multiple) {
+      const record = await this.store.find(userId, provider);
+      if (!record || (accountId !== undefined && record.providerAccountId !== accountId)) return null;
+      return new ProviderConnection(this, record);
+    }
+    if (accountId !== undefined) {
+      const record =
+        (await this.store.find(userId, storeKey(provider, accountId))) ??
+        // Stored before the provider was switched to `multiple`.
+        (await this.store.find(userId, provider));
+      return record && record.providerAccountId === accountId ? new ProviderConnection(this, record) : null;
+    }
+    const [latest] = (await this.list(user, provider)).sort(
+      (a, b) => b.connectedAt.getTime() - a.connectedAt.getTime(),
+    );
+    return latest ?? null;
   }
 
-  /** Every connection the user has. */
-  async list(user: ConnectionOwner): Promise<ProviderConnection[]> {
+  /** Every connection the user has, or only those to `provider`. */
+  async list(user: ConnectionOwner, provider?: string): Promise<ProviderConnection[]> {
+    if (provider !== undefined) this.provider(provider);
     const records = await this.store.list(ownerId(user));
     return records
-      .filter((record) => record.provider in this.options.providers)
+      .filter((record) => {
+        const name = this.providerName(record.provider);
+        return name !== null && (provider === undefined || name === provider);
+      })
       .map((record) => new ProviderConnection(this, record));
   }
 
   /**
    * Stores tokens for the user, replacing any earlier connection to the same
-   * provider. The connect callback calls this; call it yourself for tokens
-   * obtained some other way.
+   * provider — or, for a provider with `multiple: true`, to the same account
+   * (`providerAccountId`, required there). The connect callback calls this;
+   * call it yourself for tokens obtained some other way.
    */
   async save(
     user: ConnectionOwner,
@@ -98,15 +142,49 @@ export class ConnectionManager {
     tokens: Partial<OAuthTokenSet> & { accessToken: string },
   ): Promise<ProviderConnection> {
     const config = this.provider(provider);
-    const record = await this.store.save(ownerId(user), provider, {
+    const userId = ownerId(user);
+    const { profile: _profile, ...grant } = tokens;
+    const set: OAuthTokenSet = {
       refreshToken: null,
       tokenType: null,
       expiresAt: null,
       providerAccountId: null,
       scopes: config.config.scopes,
-      ...tokens,
-    });
+      ...grant,
+    };
+    if (!config.config.multiple) {
+      return new ProviderConnection(this, await this.store.save(userId, provider, set));
+    }
+
+    const accountId = set.providerAccountId;
+    if (typeof accountId !== "string" || accountId === "") {
+      throw new OAuthConnectionError(
+        "missing_account_id",
+        `"${provider}" allows several accounts per user, so a connection needs the provider's account id ` +
+          "(providerAccountId), and the token exchange did not supply one.",
+      );
+    }
+    const record = await this.store.save(userId, storeKey(provider, accountId), set);
+    // The same account, stored before the provider was switched to `multiple`.
+    const legacy = await this.store.find(userId, provider);
+    if (legacy && legacy.providerAccountId === accountId) await this.store.delete(legacy.id);
     return new ProviderConnection(this, record);
+  }
+
+  /**
+   * The configured provider a stored connection belongs to: the store key
+   * itself, or `<name>` of a multiple-account provider's `<name>:<account id>`.
+   * `null` for a provider no longer configured.
+   *
+   * @internal
+   */
+  providerName(key: string): string | null {
+    const providers = this.options.providers;
+    if (Object.hasOwn(providers, key)) return key;
+    const at = key.indexOf(ACCOUNT_SEPARATOR);
+    if (at <= 0) return null;
+    const name = key.slice(0, at);
+    return Object.hasOwn(providers, name) && providers[name].config.multiple ? name : null;
   }
 
   // --- testing ---------------------------------------------------------------
@@ -157,35 +235,47 @@ export class ConnectionManager {
    *
    * @internal
    */
-  refresh(record: ConnectionRecord): Promise<ConnectionRecord> {
+  refresh(record: ConnectionRecord, reason: ConnectionRefreshReason = "requested"): Promise<ConnectionRecord> {
     const inFlight = this.refreshing.get(record.id);
     if (inFlight) return inFlight;
-    const task = this.withLock(record.id, () => this.refreshOnce(record)).finally(() =>
+    const task = this.withLock(record.id, () => this.refreshOnce(record, reason)).finally(() =>
       this.refreshing.delete(record.id),
     );
     this.refreshing.set(record.id, task);
     return task;
   }
 
-  private async refreshOnce(seen: ConnectionRecord): Promise<ConnectionRecord> {
+  private async refreshOnce(seen: ConnectionRecord, reason: ConnectionRefreshReason): Promise<ConnectionRecord> {
     // Re-read under the lock: another process may have refreshed already.
+    const name = this.providerName(seen.provider) ?? seen.provider;
     const current = await this.store.find(seen.userId, seen.provider);
     if (!current || current.id !== seen.id) {
-      throw new OAuthReconnectRequiredError(seen.provider);
+      throw new OAuthReconnectRequiredError(name);
     }
     if (current.revision !== seen.revision && !current.needsReconnect) return current;
-    if (current.needsReconnect) throw new OAuthReconnectRequiredError(seen.provider);
+    if (current.needsReconnect) throw new OAuthReconnectRequiredError(name);
 
-    const provider = this.provider(current.provider);
-    if (this.faked || current.refreshToken === null) {
-      if (this.faked) return current;
+    const provider = this.provider(name);
+    if (this.faked) return current;
+    const strategy = provider.config.refreshStrategy;
+    if (!strategy && current.refreshToken === null) {
       await this.store.markNeedsReconnect(current.id);
-      throw new OAuthReconnectRequiredError(current.provider);
+      throw new OAuthReconnectRequiredError(name);
     }
 
-    let tokens: OAuthTokenSet;
+    let tokens: OAuthTokenSet | null;
     try {
-      tokens = await provider.refresh(current.refreshToken, current.scopes);
+      tokens = strategy
+        ? await strategy({
+            accessToken: current.accessToken,
+            refreshToken: current.refreshToken,
+            scopes: [...current.scopes],
+            expiresAt: current.expiresAt,
+            issuedAt: current.updatedAt,
+            reason,
+            providerAccountId: current.providerAccountId,
+          })
+        : await provider.refresh(current.refreshToken as string, current.scopes);
     } catch (error) {
       // A refusal from the token endpoint is final: the grant is gone. A
       // network error or a 5xx is not, and leaves the connection alone. Nor
@@ -200,7 +290,7 @@ export class ConnectionManager {
         error.providerError !== "invalid_client"
       ) {
         await this.store.markNeedsReconnect(current.id);
-        throw new OAuthReconnectRequiredError(current.provider, {
+        throw new OAuthReconnectRequiredError(name, {
           cause: error,
           status: error.status,
           providerError: error.providerError,
@@ -208,12 +298,14 @@ export class ConnectionManager {
       }
       throw error;
     }
+    // The strategy has nothing to refresh yet: keep the current token.
+    if (tokens === null) return current;
 
     const updated = await this.store.updateTokens(current.id, current.revision, tokens);
     if (updated) return updated;
     // Someone else wrote first (only possible without a shared lock store).
     const winner = await this.store.find(current.userId, current.provider);
-    if (!winner) throw new OAuthReconnectRequiredError(current.provider);
+    if (!winner) throw new OAuthReconnectRequiredError(name);
     return winner;
   }
 
@@ -243,8 +335,9 @@ export class ProviderConnection {
     private record: ConnectionRecord,
   ) {}
 
+  /** The provider's name under `auth.connections`. */
   get provider(): string {
-    return this.record.provider;
+    return this.manager.providerName(this.record.provider) ?? this.record.provider;
   }
   get userId(): string {
     return this.record.userId;
@@ -303,14 +396,14 @@ export class ProviderConnection {
     const url = this.resolveUrl(input);
     const record = await this.current();
     const first = await this.send(url, init, record.accessToken);
-    // Retry only a 401 for the token itself, not one from where a redirect
+    // Retry only a refusal of the token itself, not one from where a redirect
     // led after the token was dropped.
-    if (first.response.status !== 401 || !first.authorized || init.body instanceof ReadableStream) {
-      return first.response;
-    }
+    if (!first.authorized || init.body instanceof ReadableStream) return first.response;
+    const provider = this.manager.provider(this.provider);
+    if (!(await provider.isTokenRejected(first.response))) return first.response;
 
     await first.response.body?.cancel().catch(() => {});
-    const refreshed = await this.refreshFrom(record);
+    const refreshed = await this.refreshFrom(record, "rejected");
     return (await this.send(url, init, refreshed.accessToken)).response;
   }
 
@@ -337,7 +430,7 @@ export class ProviderConnection {
    */
   async revoke(): Promise<void> {
     if (!this.manager.faked) {
-      const provider = this.manager.provider(this.record.provider);
+      const provider = this.manager.provider(this.provider);
       if (this.record.refreshToken !== null) {
         await provider.revoke(this.record.refreshToken, "refresh_token");
       } else {
@@ -369,18 +462,21 @@ export class ProviderConnection {
   }
 
   private async current(): Promise<ConnectionRecord> {
-    if (this.record.needsReconnect) throw new OAuthReconnectRequiredError(this.record.provider);
-    const leeway = this.manager.provider(this.record.provider).config.refreshLeewaySeconds * 1000;
+    if (this.record.needsReconnect) throw new OAuthReconnectRequiredError(this.provider);
+    const leeway = this.manager.provider(this.provider).config.refreshLeewaySeconds * 1000;
     const expiresAt = this.record.expiresAt?.getTime();
     if (expiresAt !== undefined && expiresAt - Date.now() <= leeway) {
-      return this.refreshFrom(this.record);
+      return this.refreshFrom(this.record, "expiring");
     }
     return this.record;
   }
 
-  private async refreshFrom(record: ConnectionRecord): Promise<ConnectionRecord> {
+  private async refreshFrom(
+    record: ConnectionRecord,
+    reason: ConnectionRefreshReason = "requested",
+  ): Promise<ConnectionRecord> {
     try {
-      this.record = await this.manager.refresh(record);
+      this.record = await this.manager.refresh(record, reason);
     } catch (error) {
       if (error instanceof OAuthReconnectRequiredError) {
         this.record = { ...this.record, needsReconnect: true };
@@ -391,7 +487,7 @@ export class ProviderConnection {
   }
 
   private resolveUrl(input: string | URL): URL {
-    const base = this.manager.provider(this.record.provider).config.apiBaseUrl;
+    const base = this.manager.provider(this.provider).config.apiBaseUrl;
     let url: URL;
     try {
       url = new URL(String(input), base);
@@ -404,7 +500,7 @@ export class ProviderConnection {
     if (url.origin !== new URL(base).origin) {
       throw new OAuthConnectionError(
         "forbidden_url",
-        `connection.fetch only sends the ${this.record.provider} token to ${new URL(base).origin} ` +
+        `connection.fetch only sends the ${this.provider} token to ${new URL(base).origin} ` +
           `(apiBaseUrl), not to ${url.origin}.`,
       );
     }
@@ -426,13 +522,13 @@ export class ProviderConnection {
     // Followed by hand (unless the caller asked for "manual" or "error"), so
     // the token never follows a redirect to another origin.
     if (init.redirect === "manual" || init.redirect === "error") {
-      const response = await this.manager.send(this.record.provider, this.request(target, init, method, body, token));
+      const response = await this.manager.send(this.provider, this.request(target, init, method, body, token));
       return { response, authorized };
     }
 
     for (let hop = 0; ; hop++) {
       const request = this.request(target, { ...init, redirect: "manual" }, method, body, authorized ? token : null);
-      const response = await this.manager.send(this.record.provider, request);
+      const response = await this.manager.send(this.provider, request);
       const location = response.headers.get("location");
       if (!REDIRECTS.has(response.status) || location === null || hop >= 5) return { response, authorized };
 
@@ -449,13 +545,29 @@ export class ProviderConnection {
 
   private request(url: URL, init: RequestInit, method: string, body: RequestInit["body"], token: string | null): Request {
     const headers = new Headers(init.headers);
-    if (token === null) headers.delete("authorization");
-    else headers.set("Authorization", `Bearer ${token}`);
-    return new Request(url, { ...init, method, body, headers });
+    const target = new URL(url);
+    const placement = this.manager.provider(this.provider).config.tokenPlacement;
+    if (token === null) {
+      headers.delete("authorization");
+    } else if (placement === "query") {
+      // Where the provider documents it (Instagram's Graph API). Only ever on
+      // `apiBaseUrl`'s origin: a redirect elsewhere is sent with `token` null.
+      target.searchParams.set("access_token", token);
+    } else {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    return new Request(target, { ...init, method, body, headers });
   }
 }
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+
+/** Between a multiple-account provider's name and the account id, in the store's `provider` column. */
+const ACCOUNT_SEPARATOR = ":";
+
+function storeKey(provider: string, accountId: string): string {
+  return `${provider}${ACCOUNT_SEPARATOR}${accountId}`;
+}
 
 function ownerId(user: ConnectionOwner): string {
   const id = typeof user === "object" && user !== null ? user.id : user;

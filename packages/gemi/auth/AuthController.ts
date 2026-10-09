@@ -853,6 +853,36 @@ export class AuthController extends Controller {
 
     let action: "signin" | "signup" = "signin";
 
+    // A provider that never returns an email (Instagram) may create users
+    // without one; they are the provider identity, and sign back in by it.
+    const withoutEmail =
+      !user && !email && !rawEmail && !!providerId && oauthProvider.createUsersWithoutEmail === true;
+
+    if (!user && withoutEmail) {
+      if (oauthProvider.createUsers === false) {
+        console.error(
+          `Authentication error: a ${provider} sign-in is not linked to a user, and ${provider} does not create users`,
+        );
+        return this.oauthFailure(req, "signup_disabled");
+      }
+      try {
+        user = await this.createOAuthUserWithoutEmail({
+          provider,
+          providerId: providerId as string,
+          name,
+          username,
+          locale: app(Translator).detectLocale(req),
+        });
+        action = "signup";
+      } catch (error) {
+        // Lost a race to create the same identity: sign in only if it now
+        // resolves, as below.
+        const winner = await userProvider.findUserBySocialAccount(provider, providerId as string);
+        if (!winner) throw error;
+        user = winner;
+      }
+    }
+
     if (!user) {
       if (!email) {
         console.error(
@@ -969,9 +999,55 @@ export class AuthController extends Controller {
     });
 
     // Where `oauthRedirect` was asked to return to, else `redirectPath`.
-    const redirectTo = takeIntendedUrl(req) ?? config.redirectPath;
+    let redirectTo = takeIntendedUrl(req) ?? config.redirectPath;
+
+    // A user with no email (see `createUsersWithoutEmail`) goes to the page
+    // that asks for one first, with the intended page riding along.
+    const completeProfile = config.oauthCompleteProfilePath
+      ? safeRedirectPath(config.oauthCompleteProfilePath, "")
+      : "";
+    if (completeProfile && !user.email) {
+      const url = new URL(completeProfile, "http://gemi.invalid");
+      url.searchParams.set(INTENDED_URL_PARAM, redirectTo);
+      redirectTo = `${url.pathname}${url.search}${url.hash}`;
+    }
 
     return { session, redirectTo };
+  }
+
+  /**
+   * A first sign-in through a provider with `createUsersWithoutEmail`: the
+   * user (no email, nothing to verify) and its `SocialAccount`, in one
+   * transaction with `onUserCreated`.
+   *
+   * Not a route — `protected` keeps it off the controller's public surface.
+   */
+  protected async createOAuthUserWithoutEmail(args: {
+    provider: string;
+    providerId: string;
+    name?: string;
+    username?: string;
+    locale: string;
+  }): Promise<User> {
+    const { userProvider, config } = app(AuthManager);
+    return await userProvider.transaction(async () => {
+      const created = await userProvider.createUser({
+        email: null,
+        name: args.name ?? args.username ?? "",
+        locale: args.locale,
+      });
+      await userProvider.createSocialAccount({
+        provider: args.provider,
+        providerId: args.providerId,
+        userId: created.id,
+        username: args.username,
+        expiresAt: new Date(),
+        accessToken: "",
+        refreshToken: "",
+      });
+      await config.onUserCreated(created);
+      return created;
+    });
   }
 
   /**

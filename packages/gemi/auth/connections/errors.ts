@@ -10,7 +10,8 @@ export type OAuthConnectionErrorCode =
   | "reconnect_required"
   | "revoke_failed"
   | "revoke_unsupported"
-  | "forbidden_url";
+  | "forbidden_url"
+  | "missing_account_id";
 
 export class OAuthConnectionError extends Error {
   readonly status?: number;

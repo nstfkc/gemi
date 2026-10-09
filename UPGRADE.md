@@ -1,3 +1,25 @@
+# Unreleased
+
+## Instagram sign-in and connections; sign-in without an email; several accounts per connection provider; custom refresh strategies
+
+**New features (minor release).** Nothing changes for an app that does not use them.
+
+- **`InstagramOAuthProvider`** and **`InstagramConnectionProvider`** (from `gemi/services`): the Instagram API with Instagram Login. The connection exchanges the code for a short-lived token, trades it for a 60-day long-lived token, reads `/me`, and renews the token with `ig_refresh_token`. See [Instagram](docs/instagram.md).
+- **Sign-in without an email.** A provider with `createUsersWithoutEmail = true` (Instagram's sets it) creates a user with `email: null`, identified by its `SocialAccount`, where before the callback refused with `missing_email`. New `auth.oauthCompleteProfilePath` sends such users to a page that asks for an email. See [Providers without an email](docs/authentication.md#providers-without-an-email).
+- **Several accounts per provider** for connections: `multiple: true` on a connection provider. `Connections.for(user, provider, accountId?)` and `Connections.list(user, provider?)` take the new optional arguments. Each account's row is stored under `<provider>:<account id>` in the existing `provider` column, so **no migration**. See [Several accounts per provider](docs/authentication.md#several-accounts-per-provider).
+- **`refreshStrategy`** on `OAuthConnectionProvider`, for a provider that refreshes without a refresh token. Resolve `null` to keep the current token. Providers without one refresh exactly as before.
+- **`tokenPlacement`** (`"header"` by default, or `"query"` for an `access_token` query parameter) and **`isTokenRejected`** (default: a `401`) on `OAuthConnectionProvider`. Instagram's provider sends the token as the query parameter, and treats a `400` with OAuthException code `190` as a refused token.
+- `onConnected` receives `profile` (what the provider reported about the account, or `null`).
+- `parseMetaSignedRequest` and `MetaSignedRequestError` verify the `signed_request` of Meta's deauthorize and data-deletion callbacks.
+
+Small behaviour and type changes:
+
+- `CreateUserArgs.email` is `string | null`. An app that overrides `UserProvider.createUser` and uses Instagram (or any provider with `createUsersWithoutEmail`) must accept `null`. The templates' `User.email` is already nullable. An app whose `email` column is `NOT NULL` must not turn `createUsersWithoutEmail` on (or must make the column nullable).
+- `MemoryConnectionStore.updateTokens` keeps the stored `providerAccountId` when the new tokens have none, as `DatabaseConnectionStore` always did.
+- New `OAuthConnectionErrorCode`: `"missing_account_id"`.
+
+What to do: nothing, unless you adopt the features. For Instagram, set `INSTAGRAM_CLIENT_ID` and `INSTAGRAM_CLIENT_SECRET` and register the callback URLs with Meta (see the Instagram page).
+
 # Upgrading from 0.120.1 to 0.121.0
 
 ## OAuth connections: a refresh endpoint of its own (Figma), `connection.status` (#869)

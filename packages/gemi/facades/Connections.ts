@@ -24,17 +24,24 @@ export class Connections extends Facade {
     return ConnectionManager;
   }
 
-  /** The user's connection to `provider`, or `null`. */
-  static for(user: ConnectionOwner, provider: string): Promise<ProviderConnection | null> {
-    return this.getFacadeRoot().for(user, provider);
+  /**
+   * The user's connection to `provider`, or `null`. With `accountId`, only
+   * the connection to that account (`providerAccountId`); for a provider with
+   * `multiple: true` and no `accountId`, the account added most recently.
+   */
+  static for(user: ConnectionOwner, provider: string, accountId?: string): Promise<ProviderConnection | null> {
+    return this.getFacadeRoot().for(user, provider, accountId);
   }
 
-  /** Every connection the user has. */
-  static list(user: ConnectionOwner): Promise<ProviderConnection[]> {
-    return this.getFacadeRoot().list(user);
+  /** Every connection the user has, or only those to `provider` (every account, with `multiple: true`). */
+  static list(user: ConnectionOwner, provider?: string): Promise<ProviderConnection[]> {
+    return this.getFacadeRoot().list(user, provider);
   }
 
-  /** Stores tokens for the user (replacing an earlier connection to the provider). */
+  /**
+   * Stores tokens for the user, replacing an earlier connection to the
+   * provider (to the same `providerAccountId`, with `multiple: true`).
+   */
   static save(
     user: ConnectionOwner,
     provider: string,

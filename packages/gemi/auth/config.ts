@@ -90,6 +90,13 @@ export interface ConnectedArgs {
   /** The key under `auth.connections`. */
   provider: string;
   connection: ProviderConnection;
+  /**
+   * What the provider said about the account while connecting, when its
+   * connection provider reports it (`InstagramConnectionProvider`: `id`,
+   * `user_id`, `username`, `name`, `account_type`, `profile_picture_url`).
+   * Not stored by gemi: keep what you need. `null` otherwise.
+   */
+  profile: Record<string, unknown> | null;
   req: HttpRequest<any, any>;
 }
 
@@ -188,6 +195,15 @@ export interface AuthConfig {
    * instead.
    */
   oauthFailurePath?: string | null;
+  /**
+   * Where a successful OAuth sign-in sends a user who has **no email** (one
+   * created through a provider with `createUsersWithoutEmail`, such as
+   * Instagram), instead of the intended page, which rides along as
+   * `?redirect=`. A same-origin path: a page that asks for an email and
+   * saves it (verify it before trusting it). `null`, the default, sends them
+   * on like everyone else.
+   */
+  oauthCompleteProfilePath?: string | null;
 
   /**
    * Providers a user can connect their account to, to call the provider's API
@@ -417,6 +433,7 @@ export function authConfigDefaults(
     signUpRequest: SignUpRequest as any,
     oauthProviders: {},
     oauthFailurePath: null,
+    oauthCompleteProfilePath: null,
     connections: {},
     connectionStore: null,
     onConnected: () => {},

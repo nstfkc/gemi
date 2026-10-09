@@ -126,7 +126,8 @@ export interface SessionWithUser {
 
 export interface CreateUserArgs {
   name: string;
-  email: string;
+  /** `null` only for a user created by an OAuth provider with `createUsersWithoutEmail`. */
+  email: string | null;
   password?: string;
   verificationToken?: string;
   emailVerifiedAt?: Date;

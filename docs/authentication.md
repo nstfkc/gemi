@@ -73,9 +73,10 @@ a binding into the container, and a facade resolves it.**
 | --- | --- | --- | --- |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
+| `oauthCompleteProfilePath` | `string \| null` | `null` | Where a successful OAuth sign-in sends a user who has no email (see [Providers without an email](#providers-without-an-email)), with the intended page as `?redirect=`. `null` sends them on like everyone else. |
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
-| `onConnected` | `({ user, provider, connection, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. |
+| `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -750,7 +751,8 @@ with `generateCode` rather than writing `MagicLinkToken` yourself.
 ## OAuth
 
 Register providers under `oauthProviders`, keyed by the name that appears in the callback
-URL. `GoogleOAuthProvider` and `XOAuthProvider` are exported from `gemi/services`:
+URL. `GoogleOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider` (see
+[Instagram](./instagram.md)) are exported from `gemi/services`:
 
 ```typescript
 import {
@@ -891,6 +893,40 @@ class FigmaOAuthProvider extends OAuthProvider {
 }
 ```
 
+### Providers without an email
+
+Some providers never return an email. Instagram is one. By default a first sign-in without an
+email is refused with `missing_email`. A provider that sets `createUsersWithoutEmail = true`
+(`InstagramOAuthProvider` does) instead creates a user with **`email: null`**, no
+`emailVerifiedAt`, and a `SocialAccount` holding the identity, in one transaction with
+`onUserCreated`. The provider identity is the account: the user signs back in by
+`(provider, providerId)`, which the provider must return. The user model's `email` has to be
+nullable (`String? @unique`, as in the templates).
+
+```typescript
+class AcmeOAuthProvider extends OAuthProvider {
+  createUsersWithoutEmail = true;
+  // getRedirectUrl, onCallback returning { providerId, username, name } …
+}
+```
+
+To ask these users for an email, set `oauthCompleteProfilePath`. A successful OAuth sign-in by
+a user whose `email` is empty then redirects there, with the page the user was going to as
+`?redirect=`:
+
+```typescript
+export default defineAuthConfig({
+  oauthCompleteProfilePath: "/onboarding/email",
+});
+```
+
+That page should verify the address before saving it (send an email code to it, for example),
+since nothing else vouches for it, and then continue to `?redirect=`. Sessions are keyed by the
+user id, so a user without an email signs in and out like any other. Password and email-code
+sign-in need an email, so such a user only signs in through the provider until they add one.
+
+`createUsers = false` still refuses an unlinked identity with `signup_disabled`.
+
 The email is trimmed and lower-cased before it is looked up and stored, the way the email-code
 flow does it, so `Maria@Example.com` from the provider is the `maria@example.com` who signed up
 with a code. A user stored with the provider's exact spelling by an earlier version is still
@@ -918,7 +954,7 @@ export default defineAuthConfig({
 | `missing_code` | No `?code=`. |
 | `invalid_grant`, `exchange_failed` | The token exchange failed. |
 | `provider_error` | The provider's `onCallback` threw something other than `OAuthCallbackError`. |
-| `no_identity`, `missing_email`, `invalid_email` | The provider returned no usable identity. |
+| `no_identity`, `missing_email`, `invalid_email` | The provider returned no usable identity. `missing_email`: an identity with no email, from a provider without `createUsersWithoutEmail`. |
 | `email_not_verified` | See [Verified email only](#verified-email-only). |
 | `account_conflict` | The email belongs to a user already linked to a different account at this provider. |
 | `account_exists` | The email belongs to an existing user, and the provider has `linkByEmail = false`. |
@@ -1027,7 +1063,8 @@ provider's API on their behalf. gemi keeps the tokens encrypted, refreshes them,
 only on the provider's API.
 
 Register providers under `connections`, keyed by the name used in the URLs and in code.
-`OAuthConnectionProvider` is exported from `gemi/services`:
+`OAuthConnectionProvider` is exported from `gemi/services`, and so is
+`InstagramConnectionProvider`, a ready-made one for Instagram (see [Instagram](./instagram.md)):
 
 ```typescript
 import { defineAuthConfig, OAuthConnectionProvider } from "gemi/services";
@@ -1066,6 +1103,10 @@ export default defineAuthConfig({
 | `redirectUri` | `${HOST_NAME}/auth/connections/<name>/callback` | The callback URL registered with the provider. |
 | `apiBaseUrl` | (required) | Where the provider's API lives, e.g. `https://api.figma.com`. `connection.fetch` takes paths relative to it and **refuses every other origin**, so the token only ever goes to the provider's API host. A provider without one fails the boot. |
 | `refreshLeewaySeconds` | `60` | Refresh this long before the access token expires. |
+| `refreshStrategy` | none | How to refresh, for a provider that does not spend a refresh token. See [Refreshing without a refresh token](#refreshing-without-a-refresh-token). |
+| `multiple` | `false` | A user may connect several accounts at this provider. See [Several accounts per provider](#several-accounts-per-provider). |
+| `tokenPlacement` | `"header"` | How `connection.fetch` sends the token: `"header"` as `Authorization: Bearer`, `"query"` as an `access_token` query parameter (Instagram's Graph API). Either way only to `apiBaseUrl`'s origin. |
+| `isTokenRejected` | a `401` | `(response) => boolean \| Promise<boolean>`: whether an API response refuses the token itself, which makes `fetch` refresh and retry once. Read `response.clone()`, and only once the status says it could be a refusal. Instagram's also counts a `400` with error code `190`. |
 
 ### Connecting
 
@@ -1092,19 +1133,23 @@ The round trip has the same protection as a sign-in (see [State and PKCE](#state
 cookie of its own (`__Host-gemi_oauth_connection` on https), so a sign-in and a connection can
 be in flight at once. The state also names the user who started it: a callback that arrives
 while someone else is signed in is refused. Connecting again replaces the user's earlier
-connection to that provider.
+connection to that provider (to that account, with [`multiple`](#several-accounts-per-provider)).
 
 The callback returns to the page with `?connection=<provider>`, plus
 `&connection_error=<code>` when it failed: `access_denied` (or another code from the provider),
 `missing_state`, `invalid_state`, `expired_state`, `user_mismatch`, `missing_code`,
-`invalid_grant` (or another code from the token endpoint), `exchange_failed` or
+`invalid_grant` (or another code from the token endpoint), `exchange_failed`,
+`missing_account_id` (a `multiple` provider's exchange named no account) or
 `unknown_provider`.
 
-`onConnected` runs after a connection is stored:
+`onConnected` runs after a connection is stored. `profile` is what the provider said about
+the account while connecting, for a connection provider that reports it
+(`InstagramConnectionProvider` passes the Instagram profile), and `null` otherwise. gemi does
+not store it:
 
 ```typescript
 export default defineAuthConfig({
-  onConnected: async ({ user, provider, connection, req }) => {
+  onConnected: async ({ user, provider, connection, profile, req }) => {
     await AuditLog.create({ data: { userId: user.id, action: `connected:${provider}` } });
   },
 });
@@ -1126,7 +1171,8 @@ const file = await res.json();
 
 - It adds `Authorization: Bearer <token>`.
 - When the token expires within `refreshLeewaySeconds`, it refreshes first.
-- After a `401` it refreshes and retries once. A request with a streamed body is not retried.
+- After a `401` (or what the provider's `isTokenRejected` says is a refusal) it refreshes and
+  retries once. A request with a streamed body is not retried.
 - A path is resolved against `apiBaseUrl`, and a URL on another origin throws
   `OAuthConnectionError` (`forbidden_url`) without sending anything. `apiBaseUrl` is required,
   so the token never leaves the provider's API host, even for a URL that came from user input.
@@ -1150,6 +1196,45 @@ const figma = await Connections.for(user, "figma");
 const state = figma ? figma.status : "not_connected"; // "connected" | "needs_reconnect" | "not_connected"
 ```
 
+#### Refreshing without a refresh token
+
+Some providers have no refresh token. Instagram renews the access token itself, at an endpoint
+of its own, and only once the token is a day old. Such a provider declares how it refreshes with
+`refreshStrategy`. The strategy is given the connection's current grant and resolves the new
+tokens, or `null` when there is nothing to refresh yet (the current token is kept and nothing is
+marked). To refuse, it throws `OAuthConnectionError` with the HTTP `status`, which is classified
+like a token endpoint's answer: a `4xx` other than `invalid_client` marks the connection, anything
+else leaves it alone. Locking, the leeway and the retry after a `401` work as for any provider.
+
+```typescript
+new OAuthConnectionProvider({
+  // …
+  refreshStrategy: async ({ accessToken, scopes, issuedAt, providerAccountId, reason }) => {
+    if (Date.now() - issuedAt.getTime() < 24 * 3600_000) {
+      if (reason === "rejected") throw new OAuthConnectionError("refresh_failed", "Token refused.", { status: 401 });
+      return null;
+    }
+    const res = await fetch(`https://api.acme.example/renew?token=${encodeURIComponent(accessToken)}`);
+    if (!res.ok) throw new OAuthConnectionError("refresh_failed", "Acme refused the renewal.", { status: res.status });
+    const body = await res.json();
+    return {
+      accessToken: body.access_token,
+      refreshToken: null,
+      tokenType: "bearer",
+      expiresAt: new Date(Date.now() + body.expires_in * 1000),
+      scopes,
+      providerAccountId,
+    };
+  },
+});
+```
+
+`issuedAt` is when the current token was stored. `reason` says why the refresh runs:
+`"expiring"` (within the leeway), `"rejected"` (the API just refused the token, so a strategy
+that would otherwise wait should treat the grant as gone and throw a `4xx`) or `"requested"`
+(`connection.refresh()`). A `providerAccountId` of `null` in the result keeps the stored one. A provider without a `refreshStrategy` behaves as before: it spends the
+refresh token, and a connection without one needs reconnecting once its token expires.
+
 Refreshes are serialised per connection: callers in one process share one refresh, and
 processes take a lock in the queue's lock store (see
 [Locks](./jobs-and-queues.md#locks--the-lock-facade)), so a provider that rotates refresh tokens
@@ -1167,12 +1252,47 @@ The rest of a connection:
   is deleted and `OAuthConnectionError` (`revoke_failed`) is thrown. Without a `revokeUrl` it
   throws `revoke_unsupported`.
 - `await connection.disconnect()` deletes the connection without telling the provider.
-- `Connections.list(user)` returns every connection the user has.
+- `Connections.list(user)` returns every connection the user has, and `Connections.list(user, provider)` those to one provider.
+- `Connections.for(user, provider, accountId)` returns the connection to that account (`providerAccountId`), or `null`.
 - `Connections.save(user, provider, { accessToken, refreshToken?, expiresAt?, scopes? })`
   stores tokens obtained some other way.
 
 A connection never exposes a token as a property, and `JSON.stringify` / `console.log` of one
 leave the tokens out.
+
+### Several accounts per provider
+
+By default a user has one connection per provider, and connecting again replaces it. A provider
+with `multiple: true` lets a user connect several accounts there, each its own connection,
+told apart by `providerAccountId`:
+
+```typescript
+connections: {
+  instagram: new InstagramConnectionProvider({ multiple: true }),
+},
+```
+
+```typescript
+const all = await Connections.list(user, "instagram"); // every connected account
+const one = await Connections.for(user, "instagram", accountId); // that account, or null
+const latest = await Connections.for(user, "instagram"); // the account added most recently
+await one?.disconnect(); // only that account
+```
+
+- The code exchange must name the account (`providerAccountId`). A callback whose exchange
+  does not is refused with `missing_account_id`, and `Connections.save` throws
+  `OAuthConnectionError` (`missing_account_id`).
+- Connecting an account again replaces that account's connection, and only that one.
+- `connection.provider` is still the name under `auth.connections`.
+- Each account refreshes, and is marked `needs_reconnect`, on its own.
+
+**Storage.** Each account's connection is kept under `<provider>:<account id>` in the table's
+`provider` column (`instagram:17841400000000123`), so the existing `@@unique([userId, provider])`
+holds one row per account and no migration is needed. A provider name of a `multiple` provider
+therefore cannot contain `:`, and no other provider may be named `<that name>:…`; the boot
+fails if one is. Turning `multiple` on for a provider that already has connections keeps them:
+they are found and listed as before, and reconnecting the same account replaces the old row.
+Turning it off again leaves the per-account rows unread, so do not.
 
 ### Where connections are kept
 

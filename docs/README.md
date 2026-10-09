@@ -58,6 +58,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Auth
 - **[Authentication](./authentication.md)** — `app/config/auth.ts`, the user provider, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
+- **[Instagram](./instagram.md)** — "Sign in with Instagram" and "Connect Instagram": `InstagramOAuthProvider`, `InstagramConnectionProvider` (long-lived tokens, renewal, several accounts), and Meta's signed deauthorize/data-deletion requests.
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades

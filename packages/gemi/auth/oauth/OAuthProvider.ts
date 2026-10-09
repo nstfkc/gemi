@@ -82,6 +82,20 @@ export abstract class OAuthProvider {
   createUsers?: boolean = true;
 
   /**
+   * Whether a first sign-in may create a user **without an email**, for a
+   * provider that never returns one (Instagram). `false` (the default)
+   * refuses an unlinked identity without an email with `missing_email`.
+   *
+   * When `true`, such an identity (it must have a `providerId`) gets a new
+   * user whose `email` is `null`, linked by a `SocialAccount` row: the account
+   * is the provider identity, and it signs back in by it. The user model's
+   * `email` has to be nullable (`String? @unique`, as in the templates). Point
+   * `auth.oauthCompleteProfilePath` at a page that asks these users for an
+   * email. `createUsers = false` still refuses them with `signup_disabled`.
+   */
+  createUsersWithoutEmail?: boolean = false;
+
+  /**
    * The provider's authorization URL. Put `ctx.state` on it unchanged — a
    * callback whose `state` does not match is refused — and `ctx.codeChallenge`
    * when the provider supports PKCE.
