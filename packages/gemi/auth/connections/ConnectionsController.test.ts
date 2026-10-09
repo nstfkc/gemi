@@ -13,7 +13,7 @@ import type { OAuthTokenSet } from "./OAuthConnectionProvider";
 const exchanged: { code: string; codeVerifier: string; redirectUri: string }[] = [];
 let exchangeResult: () => Promise<OAuthTokenSet>;
 const saved: { userId: unknown; provider: string; tokens: OAuthTokenSet }[] = [];
-const connected: { provider: string }[] = [];
+const connected: { provider: string; profile?: unknown }[] = [];
 
 const figma = {
   config: { redirectUri: undefined as string | undefined },
@@ -40,8 +40,8 @@ const manager = {
 const authManager = {
   config: {
     redirectPath: "/dashboard",
-    onConnected: async (args: { provider: string }) => {
-      connected.push({ provider: args.provider });
+    onConnected: async (args: { provider: string; profile: unknown }) => {
+      connected.push(args.profile === null ? { provider: args.provider } : { provider: args.provider, profile: args.profile });
     },
   },
 };
@@ -169,6 +169,14 @@ describe("callback", () => {
     expect(connected).toEqual([{ provider: "figma" }]);
     // Single use: the cookie is deleted.
     expect(cookies).toContainEqual(expect.stringMatching(/^gemi_oauth_connection=; Max-Age=-1/));
+  });
+
+  test("hands onConnected the profile the exchange reported", async () => {
+    const base = await exchangeResult();
+    exchangeResult = async () => ({ ...base, profile: { username: "acme" } });
+    const { state, cookie } = await connect();
+    await callback(`?code=c&state=${state}`, cookie);
+    expect(connected).toEqual([{ provider: "figma", profile: { username: "acme" } }]);
   });
 
   test("a callback finished by another signed-in user is refused", async () => {

@@ -72,7 +72,11 @@ export class MemoryConnectionStore implements ConnectionStore {
   async updateTokens(id: string, revision: number, tokens: OAuthTokenSet) {
     const row = this.rows.get(id);
     if (!row || row.revision !== revision) return null;
-    const next = { ...row, ...fromTokens(tokens), needsReconnect: false, revision: revision + 1, updatedAt: new Date() };
+    // As the database store's COALESCE: a refresh that does not name the
+    // account keeps the one the connection has.
+    const fresh = fromTokens(tokens);
+    fresh.providerAccountId ??= row.providerAccountId;
+    const next = { ...row, ...fresh, needsReconnect: false, revision: revision + 1, updatedAt: new Date() };
     this.rows.set(id, next);
     return { ...next };
   }

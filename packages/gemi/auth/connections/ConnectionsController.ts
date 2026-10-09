@@ -95,7 +95,13 @@ export class ConnectionsController extends Controller {
         redirectUri: redirectUri(req, name, provider.config.redirectUri),
       });
       const connection = await manager.save(user, name, tokens);
-      await app(AuthManager).config.onConnected({ user, provider: name, connection, req });
+      await app(AuthManager).config.onConnected({
+        user,
+        provider: name,
+        connection,
+        profile: tokens.profile ?? null,
+        req,
+      });
     } catch (error) {
       if (error instanceof OAuthConnectionError) {
         console.error(`OAuth connection to ${name} failed: ${error.message}`);

@@ -59,7 +59,45 @@ export interface OAuthConnectionProviderConfig {
   apiBaseUrl: string;
   /** Refresh this many seconds before the access token expires. Default 60. */
   refreshLeewaySeconds?: number;
+  /**
+   * How a connection is refreshed, for a provider that does not spend a
+   * refresh token at a token endpoint. Instagram, for one, renews the
+   * long-lived access token itself (`ig_refresh_token`) and issues no refresh
+   * token. Unset, a refresh spends the refresh token at `refreshUrl`, and a
+   * connection without one has to be reconnected once its token expires.
+   *
+   * Resolve the new tokens, or `null` when there is nothing to refresh yet
+   * (the current token is kept, and nothing is marked). Throw
+   * `OAuthConnectionError` with the HTTP `status` for a refusal: a 4xx (other
+   * than `invalid_client`) marks the connection `needs_reconnect`, anything
+   * else leaves it alone.
+   */
+  refreshStrategy?: ConnectionRefreshStrategy;
+  /**
+   * Lets a user connect more than one account at this provider (several
+   * Instagram accounts to post to). Connections are then told apart by
+   * `providerAccountId`, which the exchange must supply; connecting an
+   * account again replaces only that account's connection. Default `false`:
+   * one connection per user, and connecting again replaces it.
+   */
+  multiple?: boolean;
 }
+
+/** What a `refreshStrategy` is handed: the connection's current grant. */
+export interface ConnectionRefreshContext {
+  accessToken: string;
+  refreshToken: string | null;
+  scopes: string[];
+  expiresAt: Date | null;
+  /** When the current access token was stored (the last connect or refresh). */
+  issuedAt: Date;
+  providerAccountId: string | null;
+}
+
+/** See `OAuthConnectionProviderConfig.refreshStrategy`. */
+export type ConnectionRefreshStrategy = (
+  context: ConnectionRefreshContext,
+) => Promise<OAuthTokenSet | null>;
 
 /** What a token endpoint answered, normalised. */
 export interface OAuthTokenSet {
@@ -75,6 +113,11 @@ export interface OAuthTokenSet {
    * (Figma's `user_id_string`; `user_id` or `account_id` otherwise).
    */
   providerAccountId: string | null;
+  /**
+   * What the provider said about the account at connect time (Instagram's
+   * username and picture, say), handed to `onConnected` and not stored.
+   */
+  profile?: Record<string, unknown>;
 }
 
 /**
@@ -100,9 +143,9 @@ export interface OAuthTokenSet {
  */
 export class OAuthConnectionProvider {
   readonly config: Required<
-    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl">
+    Omit<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy">
   > &
-    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl">;
+    Pick<OAuthConnectionProviderConfig, "revokeUrl" | "redirectUri" | "refreshUrl" | "refreshStrategy">;
 
   constructor(config: OAuthConnectionProviderConfig) {
     for (const key of ["authorizeUrl", "tokenUrl"] as const) {
@@ -128,6 +171,7 @@ export class OAuthConnectionProvider {
       pkce: true,
       authorizationParams: {},
       refreshLeewaySeconds: 60,
+      multiple: false,
       ...config,
       refreshGrantType: config.refreshGrantType ?? "refresh_token",
     };

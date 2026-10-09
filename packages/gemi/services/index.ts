@@ -302,6 +302,12 @@ export {
 } from "../auth/sessionToken";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
+export { InstagramOAuthProvider } from "../auth/oauth/InstagramOAuthProvider";
+export type { InstagramOAuthProviderConfig } from "../auth/oauth/InstagramOAuthProvider";
+export { InstagramApiError } from "../auth/oauth/instagram";
+export type { InstagramEndpoints, InstagramProfile } from "../auth/oauth/instagram";
+export { MetaSignedRequestError, parseMetaSignedRequest } from "../auth/oauth/metaSignedRequest";
+export type { MetaSignedRequest } from "../auth/oauth/metaSignedRequest";
 export { OAuthCallbackError, OAuthProvider } from "../auth/oauth/OAuthProvider";
 export type {
   OAuthAuthorizationContext,
@@ -310,7 +316,11 @@ export type {
 } from "../auth/oauth/OAuthProvider";
 // OAuth connections (#845): calling a provider's API on a user's behalf.
 export { OAuthConnectionProvider } from "../auth/connections/OAuthConnectionProvider";
+export { InstagramConnectionProvider } from "../auth/connections/InstagramConnectionProvider";
+export type { InstagramConnectionProviderConfig } from "../auth/connections/InstagramConnectionProvider";
 export type {
+  ConnectionRefreshContext,
+  ConnectionRefreshStrategy,
   OAuthConnectionProviderConfig,
   OAuthTokenSet,
 } from "../auth/connections/OAuthConnectionProvider";

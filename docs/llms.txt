@@ -44,7 +44,8 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## Auth
 
-- [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, the user provider, sessions, magic links, OAuth sign-in, OAuth connections (calling a provider's API as the user: `auth.connections`, `Connections.for(user, provider).fetch`, encrypted tokens, refresh, revoke), the Auth facade, and client auth hooks.
+- [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, the user provider, sessions, magic links, OAuth sign-in, OAuth connections (calling a provider's API as the user: `auth.connections`, `Connections.for(user, provider).fetch`, encrypted tokens, refresh, custom `refreshStrategy`, several accounts per provider, revoke), the Auth facade, and client auth hooks.
+- [Instagram](https://nstfkc.github.io/gemi/instagram.md): the Instagram API with Instagram Login — `InstagramOAuthProvider` (sign-in without an email: `createUsersWithoutEmail`, `oauthCompleteProfilePath`), `InstagramConnectionProvider` (code → long-lived token, `ig_refresh_token` renewal through `refreshStrategy`, several accounts per user with `multiple: true`, publishing through `connection.fetch`), and `parseMetaSignedRequest` for Meta's deauthorize and data-deletion callbacks.
 - [Authorization](https://nstfkc.github.io/gemi/authorization.md): role-based middleware and authorization errors.
 
 ## Services & facades
