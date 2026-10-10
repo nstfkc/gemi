@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.123.0 to 0.124.0
 
 ## Broadcasting: the Redis pub/sub driver (#874)
 
