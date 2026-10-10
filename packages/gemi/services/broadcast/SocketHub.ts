@@ -95,6 +95,9 @@ export class SocketHub {
   /** Topic → the `revocationSeq` of its last revocation. */
   private readonly revokedAt = new Map<string, number>();
   private closing = false;
+  /** Resolves once every socket `shutdown` closed is gone, or was cut. */
+  private closed: Promise<void> | null = null;
+  private onAllClosed: (() => void) | null = null;
   private startPromise: Promise<void> | null = null;
 
   constructor(
@@ -398,6 +401,7 @@ export class SocketHub {
       this.release(data.reservation);
       data.reservation = null;
     }
+    if (this.closing && this.sockets.size === 0) this.onAllClosed?.();
   }
 
   private rateWindow(ws: GemiSocket) {
@@ -657,11 +661,20 @@ export class SocketHub {
    * jittered `retryAfter` (1–5 s) so a restart's reconnects do not arrive at
    * once, then closes them (1012). Sockets that have not closed after
    * `terminateAfterMs` are cut. Idempotent.
+   *
+   * Resolves once every socket has closed, or at `terminateAfterMs` when the
+   * rest were cut: by the hub's own count, which the drain waits on instead
+   * of Bun's (on a loaded CI runner, Bun's graceful `stop()` was seen to wait
+   * on terminated sockets for good).
    */
-  shutdown(options: { terminateAfterMs?: number } = {}) {
-    if (this.closing) return;
+  shutdown(options: { terminateAfterMs?: number } = {}): Promise<void> {
+    if (this.closed) return this.closed;
     this.closing = true;
+    this.closed = new Promise<void>((resolve) => {
+      this.onAllClosed = resolve;
+    });
     const sockets = [...this.sockets];
+    if (sockets.length === 0) this.onAllClosed?.();
     if (sockets.length > 0) {
       console.log(`[gemi] Closing ${sockets.length} broadcast socket(s) (1012).`);
     }
@@ -677,8 +690,10 @@ export class SocketHub {
           // Already gone.
         }
       }
+      this.onAllClosed?.();
     }, options.terminateAfterMs ?? 2_000);
     (timer as { unref?: () => void }).unref?.();
+    return this.closed;
   }
 
   /** Whether `shutdown` ran. */

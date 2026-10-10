@@ -267,25 +267,24 @@ describe("drain", () => {
 
   // Seen on a loaded Linux CI runner: with WebSockets in play, the graceful
   // stop's promise stayed pending after every request and socket was gone.
-  test("with sockets to close, nothing in flight ends the drain even if stop() never settles", async () => {
-    let pendingWebSockets = 1;
-    const stoppable: Stoppable = {
-      stop: () => new Promise<void>(() => {}),
-      pendingRequests: 0,
-      get pendingWebSockets() {
-        return pendingWebSockets;
-      },
-    };
+  test("with sockets to close, the drain ends once they are closed and no request is in flight, even if stop() never settles", async () => {
+    const stoppable: Stoppable = { stop: () => new Promise<void>(() => {}), pendingRequests: 0 };
+    let socketsClosedAt = 0;
     const started = Date.now();
     const code = await drain({
       server: stoppable,
-      closeSockets: () => {
-        setTimeout(() => (pendingWebSockets = 0), 100);
-      },
+      closeSockets: () =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            socketsClosedAt = Date.now();
+            resolve();
+          }, 100),
+        ),
       shutdownProviders: providers(),
       settings: settings({ timeoutMs: 5_000 }),
     });
     expect(code).toBe(0);
+    expect(socketsClosedAt).toBeGreaterThan(0);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(events).toEqual(["providers"]);
   });

@@ -118,8 +118,6 @@ function seconds(value: string | undefined, fallback: number): number {
 export type Stoppable = {
   stop(closeActiveConnections?: boolean): Promise<void>;
   readonly pendingRequests: number;
-  /** Open WebSockets (Bun). Read only once `closeSockets` has run. */
-  readonly pendingWebSockets?: number;
 };
 
 /**
@@ -161,10 +159,11 @@ export async function drain(params: {
   server: Stoppable | undefined;
   /**
    * Says `bye` to the broadcast sockets and closes them, right after the
-   * listener closes. A graceful `stop()` waits for open WebSockets, which
-   * otherwise never close on their own.
+   * listener closes, and resolves once they are closed or cut. A graceful
+   * `stop()` waits for open WebSockets, which otherwise never close on their
+   * own.
    */
-  closeSockets?: () => void;
+  closeSockets?: () => void | Promise<void>;
   shutdownProviders: (options: { timeoutMs: number }) => Promise<ShutdownReport>;
   settings: ShutdownSettings;
 }): Promise<number> {
@@ -182,8 +181,9 @@ export async function drain(params: {
       await sleep(Math.min(settings.delayMs, deadline - Date.now()));
     }
     const stopped = server.stop();
+    let socketsClosed: Promise<unknown> = Promise.resolve();
     try {
-      params.closeSockets?.();
+      socketsClosed = Promise.resolve(params.closeSockets?.()).catch(() => {});
     } catch (error) {
       console.error("[gemi] Closing the broadcast sockets failed:", error);
     }
@@ -194,10 +194,13 @@ export async function drain(params: {
     // zeroed the budget to fit a 5s grace period, with nothing to abandon.
     const remaining = deadline - Date.now();
     // With broadcast sockets, the stop's own promise has been seen to stay
-    // pending after every request finished and every socket closed (Bun
-    // 1.4.2 on a Linux CI runner). Nothing in flight is the drain's real
-    // condition, so it is watched for as well.
-    const done = params.closeSockets ? Promise.race([stopped, nothingInFlight(server)]) : stopped;
+    // pending for good after every request finished and every socket was
+    // closed or terminated (Bun 1.4.2 on a loaded Linux CI runner, with its
+    // `pendingWebSockets` stuck above 0). So the drain also ends on its real
+    // condition: no request in flight, and the hub's sockets closed or cut.
+    const done = params.closeSockets
+      ? Promise.race([stopped, Promise.all([socketsClosed, noRequestInFlight(server)])])
+      : stopped;
     drained =
       remaining > 0 ? await settlesWithin(done, remaining) : server.pendingRequests === 0;
     if (!drained) {
@@ -218,11 +221,14 @@ export async function drain(params: {
   return clean ? 0 : 1;
 }
 
-/** Resolves once `server` has no request and no WebSocket open. */
-function nothingInFlight(server: Stoppable): Promise<void> {
+/**
+ * Resolves once `server` has no request in flight. A streamed response counts
+ * until its last chunk (measured on Bun 1.4, macOS and Linux).
+ */
+function noRequestInFlight(server: Stoppable): Promise<void> {
   return new Promise((resolve) => {
     const check = () => {
-      if (server.pendingRequests === 0 && (server.pendingWebSockets ?? 0) === 0) {
+      if (server.pendingRequests === 0) {
         resolve();
         return;
       }
