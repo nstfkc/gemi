@@ -170,12 +170,17 @@ function suite(redisUrl: string) {
   }, 30_000);
 
   afterAll(async () => {
-    for (const instance of [a, b]) {
-      if (!instance) continue;
-      instance.proc.kill("SIGTERM");
-      await instance.proc.exited;
-    }
-  });
+    await Promise.all(
+      [a, b].map(async (instance) => {
+        if (!instance) return;
+        instance.proc.kill("SIGTERM");
+        // A drain that hangs must not fail the suite: cut it.
+        const timer = setTimeout(() => instance.proc.kill("SIGKILL"), 3_000);
+        await instance.proc.exited;
+        clearTimeout(timer);
+      }),
+    );
+  }, 15_000);
 
   afterEach(async () => {
     await Promise.all(

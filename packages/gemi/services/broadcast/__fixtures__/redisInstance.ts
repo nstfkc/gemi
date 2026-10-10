@@ -100,8 +100,9 @@ await sockets.start(server);
 console.log(`ready ${server.port}`);
 
 process.on("SIGTERM", async () => {
+  setTimeout(() => process.exit(0), 2_000).unref();
   await sockets.shutdown({ terminateAfterMs: 200 });
   server.stop(true);
-  await app.shutdown();
+  await app.shutdown({ timeoutMs: 1_000 });
   process.exit(0);
 });
