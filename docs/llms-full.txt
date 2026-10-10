@@ -13926,7 +13926,7 @@ const res = await figma?.fetch(`/v1/files/${fileKey}`);
 - `Broadcast.to(pattern, params).emit(event, data)`: to a channel a `ChannelRouter` declares. Inside a transaction it waits for the commit.
 - `Broadcast.toUser(user).emit(...)`: to the user's own channel, `user.<id>`.
 - `Broadcast.toOthers(req).to(...)`: skips the sender's socket.
-- `Broadcast.revoke({ user } | { channel, params })`: closes subscriptions that may no longer be allowed; clients resubscribe and are authorized again.
+- `Broadcast.revoke({ user } | { channel, params })`: `{ user }` closes the user's sockets, which reconnect as whoever they are now; `{ channel, params }` authorizes every subscription to the channel again and denies only the ones now refused.
 - `Broadcast.fake()`: for tests, records emits; call `restore()` after.
 
 ```typescript
@@ -17268,7 +17268,9 @@ Resyncs are coalesced to one per subscription per 2 seconds, and refetches only 
 - **Reconnects** use full-jitter backoff between 1 and 30 seconds, or the `retryAfter` the server sent with `bye`. An `online` event retries at once.
 - **Heartbeat.** The client pings every `heartbeatMs` (from the server) and reconnects when it has heard nothing for twice that, so a connection a proxy dropped silently is noticed within about a minute.
 - **Hidden tabs** keep the socket for 60 seconds, then disconnect. Showing the tab reconnects and resyncs.
-- **Refusals.** `unknown_channel` and `invalid_params` are final and never retried. `denied`, `error`, `rate_limited` and `limit` are retried on the next reconnect, since access and load change.
+- **Refusals.** `unknown_channel` and `invalid_params` are final and never retried. `rate_limited`, `error` and `limit` are retried on the same socket, with backoff (`rate_limited` after 5 seconds at the least). `denied` and `revoked` are the channel's answer for this session, so they are retried on the next connection, for instance after signing in.
+- **Remounts.** A subscription outlives its last hook by 1.5 seconds, so a component that remounts (StrictMode, a route change back, a list re-rendering its rows) reuses it without a new `sub`.
+- **Bursts.** `useChannelInvalidate` and `useQuery({ live })` coalesce events: the first one starts a 150 ms window, and the events inside it refetch once at its end. A steady stream still refetches once per window. `useChannel`'s `on` handlers get every event.
 - **Sessions.** A socket keeps the session it was opened with. `useSignIn`, `useEmailCode` and `useSignOut` reconnect it, so its channels are authorized as the new session. After signing in some other way (a full-page OAuth redirect reloads the page anyway), nothing else is needed.
 - **Server renders and islands** open no socket: the hooks act only in effects, and on the server they report `"closed"`.
 - **`toOthers`.** While the socket is open, mutations (`useMutation`, `usePost` and the rest) send the socket's id in `X-Gemi-Socket`, so `Broadcast.toOthers(req)` in the controller skips the tab that made the change.
@@ -17291,7 +17293,9 @@ The socket endpoint is served by `gemi start` and `gemi dev` on the app's own po
 
 1. The app's **global middleware** runs, as for any request. A middleware that refuses the request refuses the socket with the same response.
 2. The **session** is resolved from the `access_token` cookie, or the `access_token` header a native client sends, or a user a global middleware put on the context.
-3. **Origin check.** A browser sends cookies with a WebSocket upgrade whatever page opened it, so an upgrade that carries cookies must send an allowed `Origin`, and one without `Origin` is refused (`403`). An `Origin` that is not allowed is refused even without cookies. Allowed are: the request's own host, `APP_URL` and `HOST_NAME`, the `route.domains` root and its subdomains, and `allowedOrigins`. A native client that sends no cookies may leave `Origin` out.
+3. **Origin check.** A browser sends cookies with a WebSocket upgrade whatever page opened it, so an upgrade that carries cookies must send an allowed `Origin`, and one without `Origin` is refused (`403`). An `Origin` that is not allowed is refused even without cookies. Allowed are: the request's own host, `APP_URL` and `HOST_NAME`, and `allowedOrigins`. A native client that sends no cookies may leave `Origin` out.
+
+   **Subdomains are not allowed by default**, `route.domains` ones included. A page on `tenant.example.com` is same-site with an app on `example.com`, so the app's `SameSite` cookies ride along with its upgrade, and a WebSocket has no CORS: the Origin check is the only guard against a tenant page opening a socket as its visitor. To allow subdomains you trust, list a wildcard: `allowedOrigins: ["https://*.example.com"]` (or `"*.example.com"` for either scheme). It does not admit `example.com` itself. Behind `route.domains.trustProxy`, the "own host" is the raw `Host` header, so a custom domain whose pages open a socket needs its origin listed.
 4. **Limits** per process, per client IP and per user (`503` or `429`).
 5. The socket opens with the subprotocol `gemi.v1`.
 
@@ -17304,20 +17308,25 @@ An open socket was authorized when it subscribed. When access changes, close wha
 ```typescript
 import { Broadcast } from "gemi/facades";
 
-// After removing a member from a site: every subscription to it is told `denied` (`revoked`).
+// After removing a member from a site: every subscription to it is authorized again.
 Broadcast.revoke({ channel: "site.:siteId", params: { siteId: site.publicId } });
 
 // Every socket of a user is closed (4001); its tabs reconnect and resubscribe.
 Broadcast.revoke({ user });
 ```
 
-Clients that still have access get back in, because every resubscribe is authorized again. Inside a transaction, `revoke` waits for the commit, so the resubscribes see the committed state. **Signing out** (gemi's `sign-out` route) revokes the user's sockets for you.
+`revoke({ channel })` runs the channel's authorization again for every subscription to it, on every process, as each socket's upgrade request. Only the ones refused now are denied (`revoked`); the others stay, and get a fresh `subscribed`, so their clients resync anything published while the answers were pending (the topic is paused for those sockets meanwhile). A subscription whose authorization was already running when the revocation landed is authorized once more, so it cannot join on a stale answer. Inside a transaction, `revoke` waits for the commit, so the authorizations see the committed state.
+
+`revoke({ user })` closes the user's sockets (`4001`); their tabs reconnect at once, as whoever they are now. **Signing out** (gemi's `sign-out` route) does this for you.
+
+Authorization runs when a socket subscribes and when a `revoke` asks for it, not again on its own: a socket does not notice its session expiring. End access that matters with `revoke`.
 
 ### Limits and lifecycle
 
 - **Backpressure.** A socket that falls `backpressureLimit` bytes behind is closed with `1013`, and its client reconnects and resyncs. No queue is kept per socket.
-- **Rate limits.** A socket may send `subscribeRate.limit` `sub`/`unsub` frames per window. Past it a `sub` is refused with `rate_limited`; at twice the limit the socket is closed (`1008`).
-- **Inbound frames** are JSON text up to `maxInboundMessageBytes`. Anything else closes the socket (`1003`).
+- **Rate limits.** A socket may send `subscribeRate.limit` `sub` frames per window (`unsub` is not counted). Past it a `sub` is refused with `rate_limited`, which the client retries on the same socket; at twice the limit the socket is closed (`1008`). More than 120 `ping`s per window close it too.
+- **Per-IP cap behind a proxy.** `maxConnectionsPerIp` counts the client address, which is the TCP peer unless `GEMI_TRUST_PROXY` says which `X-Forwarded-For` entry to believe. Behind a proxy or load balancer without it, every client shares the proxy's address, so the cap applies to the whole app, per process. `gemi start` warns at boot when the app has channels and `GEMI_TRUST_PROXY` is not set. Set it, or raise the limit.
+- **Inbound frames** are JSON text up to `maxInboundMessageBytes`. Anything else, an unknown `op` included, closes the socket (`1003`). A new operation therefore comes with a new subprotocol version (`gemi.v2`), never inside `gemi.v1`.
 - **Idle sockets.** Bun pings them, and closes one that answers nothing for `idleTimeout` seconds.
 - **Shutdown.** When `gemi start` drains, it closes the listener, sends every socket `bye` with code `1012` and a `retryAfter` between 1 and 5 seconds (so a deploy's reconnects do not arrive at once), and closes them. That happens before the providers shut down. In development, the application a reload replaced closes its sockets the same way.
 - **Logging.** gemi logs the channel, the operation and the close code. It never logs payloads.
@@ -17333,7 +17342,7 @@ export default defineBroadcastConfig({
   maxEventBytes: 16 * 1024,
   warnEventBytes: 4 * 1024,
   path: "/__gemi/socket",
-  allowedOrigins: [], // besides the app's own host, APP_URL, HOST_NAME and route.domains
+  allowedOrigins: [], // besides the app's own host, APP_URL and HOST_NAME; "https://*.example.com" for subdomains
   maxConnectionsPerProcess: 10_000,
   maxConnectionsPerIp: 100,
   maxConnectionsPerUser: 50,
@@ -17342,7 +17351,7 @@ export default defineBroadcastConfig({
   backpressureLimit: 1 << 20, // 1 MB
   idleTimeout: 120, // seconds
   heartbeatMs: 25_000,
-  subscribeRate: { limit: 100, windowMs: 60_000 },
+  subscribeRate: { limit: 300, windowMs: 60_000 },
 });
 ```
 
@@ -17368,8 +17377,8 @@ Native clients speak the same protocol as the browser. Open a WebSocket to the e
 | From the server | |
 |---|---|
 | `{"op":"hello","socketId":"…","tag":"…","heartbeatMs":25000}` | First frame. Send `socketId` in `X-Gemi-Socket` on your requests. |
-| `{"op":"subscribed","id":"1","t":"site.abc"}` | Joined topic `t`. Resync now. |
-| `{"op":"denied","id":"1","code":"denied"}` | Refused or revoked. |
+| `{"op":"subscribed","id":"1","t":"site.abc"}` | Joined topic `t`, or still allowed after a revoke. Resync now. |
+| `{"op":"denied","id":"1","code":"denied"}` | Refused, or `revoked` after a `Broadcast.revoke`. |
 | `{"op":"ev","t":"site.abc","ev":"changed","d":{…},"x":"…"}` | An event. Drop it when `x` is your `tag`. |
 | `{"op":"gap"}` | Resync everything. |
 | `{"op":"pong"}` | |

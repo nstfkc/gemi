@@ -69,3 +69,38 @@ export function useChannelSubscription(
   if (typeof window === "undefined") return active ? CLOSED : IDLE;
   return state;
 }
+
+/**
+ * How long an event-driven refetch waits for the events behind it: a burst
+ * (a progress tick per second, a bulk update) refetches once per window, not
+ * once per event. The window starts at the first event and is never pushed
+ * back, so a steady stream still refetches every `EVENT_COALESCE_MS`.
+ */
+export const EVENT_COALESCE_MS = 150;
+
+/**
+ * `fn`, run at most once per `ms`: the first call starts the window, and the
+ * calls inside it fold into the one run at its end. Stable across renders;
+ * a pending run is dropped on unmount.
+ */
+export function useCoalesced(fn: () => void, ms: number = EVENT_COALESCE_MS): () => void {
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+    },
+    [],
+  );
+  const coalesced = useRef<() => void>(null as unknown as () => void);
+  coalesced.current ??= () => {
+    if (timer.current) return;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      fnRef.current();
+    }, ms);
+  };
+  return coalesced.current;
+}

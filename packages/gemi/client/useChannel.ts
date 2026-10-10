@@ -4,7 +4,11 @@ import { applyParams } from "../utils/applyParams";
 import { toVariantKey } from "../utils/variantKey";
 import { QueryManagerContext } from "./QueryManagerContext";
 import type { ChannelParamValues } from "./realtime/RealtimeClient";
-import { useChannelSubscription, type ChannelState } from "./realtime/useChannelSubscription";
+import {
+  useChannelSubscription,
+  useCoalesced,
+  type ChannelState,
+} from "./realtime/useChannelSubscription";
 import type { BroadcastRPC } from "./rpc";
 import type { GetRPC } from "./useQuery";
 import { useParams } from "./useParams";
@@ -121,7 +125,8 @@ export type InvalidatePath =
 
 /**
  * Refetches `paths` on any event on the channel and on every resync. Only
- * the variants being rendered refetch now; the rest are marked stale.
+ * the variants being rendered refetch now; the rest are marked stale. Events
+ * are coalesced: a burst within 150 ms refetches once.
  *
  * ```tsx
  * useChannelInvalidate("page.:pageId", { pageId }, ["/pages/:pageId", "/pages/:pageId/pictures"]);
@@ -154,10 +159,13 @@ export function useChannelInvalidate<P extends ChannelPattern>(
     }
   };
 
+  // A burst of events is one refetch; a resync (already coalesced by the
+  // socket, and the answer to missed events) refetches at once.
+  const onEvent = useCoalesced(invalidate);
   return useChannelSubscription(
     pattern,
     channelParams,
-    { onEvent: invalidate, onResync: invalidate },
+    { onEvent, onResync: invalidate },
     config.enabled !== false,
   );
 }

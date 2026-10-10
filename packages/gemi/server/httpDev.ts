@@ -28,7 +28,11 @@ export { viteErrorPayload } from "./devFetch";
  * One `websocket` handler for both kinds of socket the dev server accepts:
  * the broadcast hub's (`ws.data.gemiSocket`), dispatched to the hub that
  * accepted it, which after a reload may be the previous application's, and
- * the HMR relay's. The server-wide settings are the hub's.
+ * the HMR relay's. The server-wide settings are the hub's, relaxed where
+ * they would bite the relay: Bun applies one `maxPayloadLength` and one
+ * backpressure policy to every socket, and Vite's frames are not bound by the
+ * hub's 16 KB. The hub still enforces its own inbound limit (`onMessage`)
+ * and closes its own slow sockets (`deliver`, 1013).
  */
 function withBroadcastSockets(
   hmr: WebSocketHandler<HmrRelayData>,
@@ -38,6 +42,8 @@ function withBroadcastSockets(
   const isBroadcast = (ws: ServerWebSocket<any>) => ws.data?.gemiSocket === true;
   return {
     ...sockets.socketOptions(),
+    maxPayloadLength: 16 * 1024 * 1024,
+    closeOnBackpressureLimit: false,
     open: (ws) => (isBroadcast(ws) ? broadcast.open?.(ws) : hmr.open?.(ws)),
     message: (ws, message) =>
       isBroadcast(ws) ? broadcast.message(ws, message) : hmr.message(ws, message),

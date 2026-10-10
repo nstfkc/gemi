@@ -37,15 +37,33 @@ export interface GemiSocketData {
   readonly subs: Map<string, Subscription>;
   /** Topic → how many of this socket's subscriptions are on it. */
   readonly topics: Map<string, number>;
-  rate: { windowStart: number; count: number };
+  rate: { windowStart: number; subs: number; pings: number };
+  /**
+   * The process, IP and user connection counts this socket holds. Taken
+   * before the upgrade's first `await`, so concurrent upgrades cannot
+   * overshoot the caps, and given back exactly once.
+   */
+  reservation: Reservation | null;
   /** The hub has closed it (backpressure, revoke, bye); its close is on the way. */
   closing: boolean;
   closed: boolean;
 }
 
 interface Subscription {
+  pattern: string;
+  params: Record<string, string | number>;
   topic: string | null;
 }
+
+interface Reservation {
+  ip: string | null;
+  userId: string | null;
+}
+
+/** Pings a socket may send per `subscribeRate` window before it is closed (1008). */
+const PING_LIMIT_PER_WINDOW = 120;
+/** How often a subscription is authorized again when revocations keep landing. */
+const MAX_AUTHORIZE_ATTEMPTS = 3;
 
 type GemiSocket = ServerWebSocket<GemiSocketData>;
 
@@ -70,6 +88,12 @@ export class SocketHub {
   private readonly topicReady = new Map<string, Promise<void>>();
   private readonly perIp = new Map<string, number>();
   private readonly perUser = new Map<string, number>();
+  /** Sockets held or being upgraded: the process cap's count. */
+  private connections = 0;
+  /** Bumped by every topic revocation; see `revokedAt`. */
+  private revocationSeq = 0;
+  /** Topic → the `revocationSeq` of its last revocation. */
+  private readonly revokedAt = new Map<string, number>();
   private closing = false;
   private startPromise: Promise<void> | null = null;
 
@@ -142,19 +166,39 @@ export class SocketHub {
     }
     const origin = this.checkOrigin(req);
     if (origin !== true) return refuse(403, origin);
-    if (this.sockets.size >= this.config.maxConnectionsPerProcess) {
+    if (this.connections >= this.config.maxConnectionsPerProcess) {
       return refuse(503, "Too many connections.", { "Retry-After": "10" });
     }
     const ip = clientIp(req, server);
     if (ip && (this.perIp.get(ip) ?? 0) >= this.config.maxConnectionsPerIp) {
       return refuse(429, "Too many connections from this address.", { "Retry-After": "30" });
     }
+    // Counted now, before the first `await`: checks made while another
+    // upgrade's middleware or session lookup is pending see it.
+    const reservation = this.reserve(ip);
+    let handedOver = false;
+    try {
+      const response = await this.authenticate(req, server, reservation);
+      handedOver = response === undefined;
+      return response;
+    } finally {
+      if (!handedOver) this.release(reservation);
+    }
+  }
 
+  private async authenticate(
+    req: Request,
+    server: Server<GemiSocketData>,
+    reservation: Reservation,
+  ): Promise<Response | undefined> {
     // The global middleware covers the endpoint as it covers every route: a
     // gate that refuses a request refuses its socket.
     const outcome = await runGlobalMiddleware(req);
     if (outcome.refusal) return outcome.refusal;
     const carried = outcome.carried;
+    if (this.closing || isShuttingDown()) {
+      return refuse(503, "The server is restarting.", { "Retry-After": "5" });
+    }
 
     let user: unknown;
     try {
@@ -179,6 +223,10 @@ export class SocketHub {
     if (userId && (this.perUser.get(userId) ?? 0) >= this.config.maxConnectionsPerUser) {
       return refuse(429, "Too many connections for this user.", { "Retry-After": "30" });
     }
+    if (userId) {
+      reservation.userId = userId;
+      this.perUser.set(userId, (this.perUser.get(userId) ?? 0) + 1);
+    }
 
     const socketId = newSocketId();
     const data: GemiSocketData = {
@@ -189,10 +237,11 @@ export class SocketHub {
       request: { url: req.url, headers: [...req.headers] },
       carried,
       userId,
-      ip,
+      ip: reservation.ip,
       subs: new Map(),
       topics: new Map(),
-      rate: { windowStart: Date.now(), count: 0 },
+      rate: { windowStart: Date.now(), subs: 0, pings: 0 },
+      reservation,
       closing: false,
       closed: false,
     };
@@ -232,30 +281,29 @@ export class SocketHub {
     // The request's own host: the page and the socket share an origin.
     const host = req.headers.get("host");
     if (host && url.host.toLowerCase() === host.toLowerCase()) return true;
+    // Subdomains are never implied, `route.domains` ones included: those
+    // serve tenant content, are same-site with the app (so its cookies ride
+    // along), and a WebSocket has no CORS. A wildcard entry opts in.
     for (const allowed of [
       process.env.APP_URL,
       process.env.HOST_NAME,
       ...this.config.allowedOrigins,
     ]) {
-      if (!allowed) continue;
-      try {
-        if (new URL(allowed).origin === url.origin) return true;
-      } catch {
-        // A bare host in `allowedOrigins`.
-        if (allowed.toLowerCase() === url.host.toLowerCase()) return true;
-      }
-    }
-    const root = this.domainsRoot();
-    if (root) {
-      const hostname = url.hostname.toLowerCase();
-      if (hostname === root || hostname.endsWith(`.${root}`)) return true;
+      if (allowed && originMatches(allowed.trim(), url)) return true;
     }
     return false;
   }
 
-  private domainsRoot(): string | null {
-    const root = this.application.config.get<{ root?: string } | undefined>("route.domains")?.root;
-    return typeof root === "string" && root ? root.trim().toLowerCase().replace(/\.$/, "") : null;
+  private reserve(ip: string | null): Reservation {
+    this.connections++;
+    if (ip) this.perIp.set(ip, (this.perIp.get(ip) ?? 0) + 1);
+    return { ip, userId: null };
+  }
+
+  private release(reservation: Reservation) {
+    this.connections--;
+    decrement(this.perIp, reservation.ip);
+    decrement(this.perUser, reservation.userId);
   }
 
   /** `Bun.serve`'s `websocket` option. */
@@ -290,8 +338,6 @@ export class SocketHub {
       return;
     }
     this.sockets.add(ws);
-    if (data.ip) this.perIp.set(data.ip, (this.perIp.get(data.ip) ?? 0) + 1);
-    if (data.userId) this.perUser.set(data.userId, (this.perUser.get(data.userId) ?? 0) + 1);
     send(ws, {
       op: "hello",
       socketId: data.socketId,
@@ -318,10 +364,18 @@ export class SocketHub {
     }
     switch (frame?.op) {
       case "ping":
-        send(ws, { op: "pong" });
+        if (this.countPing(ws)) send(ws, { op: "pong" });
         return;
       case "sub":
-        void this.subscribe(ws, frame);
+        this.subscribe(ws, frame).catch((error) => {
+          console.error("[gemi] A socket subscription failed.", error);
+          if (typeof frame.id === "string" && ws.data.subs.has(frame.id)) {
+            const sub = ws.data.subs.get(frame.id)!;
+            ws.data.subs.delete(frame.id);
+            if (sub.topic && !ws.data.closed) this.leave(ws, sub.topic);
+            if (!ws.data.closed) deny(ws, frame.id, "error");
+          }
+        });
         return;
       case "unsub":
         this.unsubscribeFrame(ws, frame);
@@ -339,27 +393,48 @@ export class SocketHub {
       if (sub.topic) this.leave(ws, sub.topic);
     }
     data.subs.clear();
-    if (!this.sockets.delete(ws)) return;
-    decrement(this.perIp, data.ip);
-    decrement(this.perUser, data.userId);
+    this.sockets.delete(ws);
+    if (data.reservation) {
+      this.release(data.reservation);
+      data.reservation = null;
+    }
   }
 
-  /** `true` when the socket may go on; `false` when it was closed for it. */
-  private countOp(ws: GemiSocket): "ok" | "limited" | "closed" {
-    const { limit, windowMs } = this.config.subscribeRate;
+  private rateWindow(ws: GemiSocket) {
     const rate = ws.data.rate;
     const now = Date.now();
-    if (now - rate.windowStart >= windowMs) {
+    if (now - rate.windowStart >= this.config.subscribeRate.windowMs) {
       rate.windowStart = now;
-      rate.count = 0;
+      rate.subs = 0;
+      rate.pings = 0;
     }
-    rate.count++;
-    if (rate.count > limit * 2) {
+    return rate;
+  }
+
+  /**
+   * Counts a `sub`. Only `sub` frames count: an `unsub` costs the server
+   * nothing to speak of, and counting it would charge a component's every
+   * mount and unmount twice.
+   */
+  private countSub(ws: GemiSocket): "ok" | "limited" | "closed" {
+    const { limit } = this.config.subscribeRate;
+    const rate = this.rateWindow(ws);
+    rate.subs++;
+    if (rate.subs > limit * 2) {
       console.warn(`[gemi] Socket closed for sending too many subscribe frames (1008).`);
       ws.close(CloseCode.PolicyViolation, "Too many subscribe frames.");
       return "closed";
     }
-    return rate.count > limit ? "limited" : "ok";
+    return rate.subs > limit ? "limited" : "ok";
+  }
+
+  /** `false` when the socket was closed for pinging too often. */
+  private countPing(ws: GemiSocket): boolean {
+    const rate = this.rateWindow(ws);
+    rate.pings++;
+    if (rate.pings <= PING_LIMIT_PER_WINDOW) return true;
+    ws.close(CloseCode.PolicyViolation, "Too many pings.");
+    return false;
   }
 
   private async subscribe(ws: GemiSocket, frame: Record<string, unknown>) {
@@ -369,7 +444,7 @@ export class SocketHub {
       ws.close(CloseCode.UnsupportedData, "A sub needs an id.");
       return;
     }
-    const rate = this.countOp(ws);
+    const rate = this.countSub(ws);
     if (rate === "closed") return;
     if (rate === "limited") return deny(ws, id, "rate_limited");
     const pattern = frame.ch;
@@ -378,24 +453,28 @@ export class SocketHub {
     if (data.subs.has(id)) return deny(ws, id, "invalid");
     if (data.subs.size >= this.config.maxChannelsPerSocket) return deny(ws, id, "limit");
 
-    const sub: Subscription = { topic: null };
+    const sub: Subscription = { pattern, params, topic: null };
     data.subs.set(id, sub);
-    const channels = this.manager.channels;
-    if (!channels) {
+    if (!this.manager.channels) {
       data.subs.delete(id);
       return deny(ws, id, "unknown_channel");
     }
 
-    const result = await this.run(() =>
-      channels.authorize(
-        new Request(data.request.url, { headers: data.request.headers }),
-        pattern,
-        params,
-        { carried: data.carried },
-      ),
-    );
-    // Unsubscribed, or the socket closed, while it was being authorized.
-    if (data.closed || data.subs.get(id) !== sub) return;
+    // A revocation of the topic committed while the authorization ran may
+    // not have been seen by it: authorize again until none has.
+    let result: AuthorizeResult;
+    for (let attempt = 1; ; attempt++) {
+      const seq = this.revocationSeq;
+      result = await this.authorize(ws, sub);
+      // Unsubscribed, or the socket closed, while it was being authorized.
+      if (data.closed || data.subs.get(id) !== sub) return;
+      if (result.ok !== true) break;
+      if ((this.revokedAt.get(result.topic) ?? 0) <= seq) break;
+      if (attempt >= MAX_AUTHORIZE_ATTEMPTS) {
+        data.subs.delete(id);
+        return deny(ws, id, "error");
+      }
+    }
     if (result.ok !== true) {
       data.subs.delete(id);
       return deny(ws, id, (result as { code: DeniedCode }).code);
@@ -422,13 +501,27 @@ export class SocketHub {
     send(ws, { op: "subscribed", id, t: result.topic });
   }
 
+  /** Runs the channel's authorization for `sub`, as the socket's upgrade request. */
+  private authorize(ws: GemiSocket, sub: Subscription): Promise<AuthorizeResult> {
+    const data = ws.data;
+    const channels = this.manager.channels;
+    if (!channels) return Promise.resolve({ ok: false, code: "unknown_channel" });
+    return this.run(() =>
+      channels.authorize(
+        new Request(data.request.url, { headers: data.request.headers }),
+        sub.pattern,
+        sub.params,
+        { carried: data.carried },
+      ),
+    ) as Promise<AuthorizeResult>;
+  }
+
   private unsubscribeFrame(ws: GemiSocket, frame: Record<string, unknown>) {
     const id = frame.id;
     if (typeof id !== "string" || !SUBSCRIPTION_ID.test(id)) {
       ws.close(CloseCode.UnsupportedData, "An unsub needs an id.");
       return;
     }
-    if (this.countOp(ws) === "closed") return;
     const sub = ws.data.subs.get(id);
     if (!sub) return;
     ws.data.subs.delete(id);
@@ -446,10 +539,12 @@ export class SocketHub {
       if (!set) {
         set = new Set();
         this.byTopic.set(topic, set);
-        this.topicReady.set(
-          topic,
-          Promise.resolve().then(() => this.manager.topicAdded(topic)),
-        );
+        const ready = Promise.resolve().then(() => this.manager.topicAdded(topic));
+        this.topicReady.set(topic, ready);
+        // A failed `topicAdded` is not cached: the next join tries again.
+        ready.catch(() => {
+          if (this.topicReady.get(topic) === ready) this.topicReady.delete(topic);
+        });
       }
       set.add(ws);
     }
@@ -506,15 +601,49 @@ export class SocketHub {
       }
       return;
     }
-    const set = this.byTopic.get(revocation.topic);
+    const topic = revocation.topic;
+    const seq = ++this.revocationSeq;
+    this.revokedAt.set(topic, seq);
+    const set = this.byTopic.get(topic);
     if (!set) return;
-    for (const ws of set) {
-      for (const [id, sub] of ws.data.subs) {
-        if (sub.topic !== revocation.topic) continue;
-        ws.data.subs.delete(id);
-        this.leave(ws, revocation.topic);
-        deny(ws, id, "revoked");
-      }
+    for (const ws of set) void this.reauthorize(ws, topic, seq);
+  }
+
+  /**
+   * After `revoke({ channel })`: every subscription `ws` has on `topic` is
+   * authorized again, as the socket's upgrade request. The ones refused are
+   * denied with `revoked`; the others stay, and get a fresh `subscribed` so
+   * the client resyncs whatever was published while the topic was paused.
+   * The socket receives nothing on the topic until the answers are in.
+   */
+  private async reauthorize(ws: GemiSocket, topic: string, seq: number) {
+    const data = ws.data;
+    const subs = [...data.subs].filter(([, sub]) => sub.topic === topic);
+    if (subs.length === 0) return;
+    ws.unsubscribe(topic);
+    const results = await Promise.all(
+      subs.map(([, sub]) =>
+        this.authorize(ws, sub).catch((error) => {
+          console.error(`[gemi] Authorizing "${topic}" again after a revoke failed.`, error);
+          return { ok: false, code: "revoked" } as AuthorizeResult;
+        }),
+      ),
+    );
+    if (data.closed) return;
+    // A later revocation of the topic runs its own pass, and decides.
+    if (this.revokedAt.get(topic) !== seq) return;
+    subs.forEach(([id, sub], index) => {
+      const result = results[index];
+      if (data.subs.get(id) !== sub) return;
+      if (result.ok === true && result.topic === topic) return;
+      data.subs.delete(id);
+      this.leave(ws, topic);
+      deny(ws, id, "revoked");
+    });
+    if (!data.topics.has(topic)) return;
+    ws.subscribe(topic);
+    for (const [id, sub] of data.subs) {
+      if (sub.topic === topic) send(ws, { op: "subscribed", id, t: topic });
     }
   }
 
@@ -570,6 +699,34 @@ export class SocketHub {
   private run<T>(fn: () => T): T {
     return kernelContext.run(this.application, fn);
   }
+}
+
+type AuthorizeResult = { ok: true; topic: string } | { ok: false; code: DeniedCode };
+
+/**
+ * Whether an `allowedOrigins` entry (or `APP_URL` / `HOST_NAME`) admits
+ * `url`. An entry is an origin (`https://app.example.com`), a bare host
+ * (`app.example.com`), or a wildcard for the subdomains of a host
+ * (`*.example.com`, `https://*.example.com`), which does not admit the host
+ * itself.
+ */
+export function originMatches(allowed: string, url: URL): boolean {
+  const wildcard = /^(?:(https?):\/\/)?\*\.([^/:]+)(?::(\d+))?\/?$/i.exec(allowed);
+  if (wildcard) {
+    const [, scheme, base, port] = wildcard;
+    if (scheme && `${scheme.toLowerCase()}:` !== url.protocol) return false;
+    if ((port ?? "") !== url.port) return false;
+    return url.hostname.toLowerCase().endsWith(`.${base.toLowerCase().replace(/\.$/, "")}`);
+  }
+  if (/^https?:\/\//i.test(allowed)) {
+    try {
+      return new URL(allowed).origin === url.origin;
+    } catch {
+      return false;
+    }
+  }
+  // A bare host.
+  return allowed.toLowerCase().replace(/\/$/, "") === url.host.toLowerCase();
 }
 
 function closeSocket(ws: GemiSocket, code: number, reason: string) {

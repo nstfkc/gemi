@@ -134,11 +134,12 @@ export class Server {
    * default to the `GEMI_SHUTDOWN_*` environment variables.
    */
   stop(settings: Partial<ShutdownSettings> = {}): Promise<number> {
+    const sockets = this.app.sockets();
     this.stopping ??= drain({
       server: this.server,
       // Once the listener is closed: `bye` to every broadcast socket, which
       // the graceful stop would otherwise wait on for good.
-      closeSockets: () => this.app.sockets()?.shutdown(),
+      closeSockets: sockets ? () => sockets.shutdown() : undefined,
       shutdownProviders: (options) => this.app.shutdown(options),
       settings: { ...(this.settings ?? shutdownSettings()), ...settings },
     });

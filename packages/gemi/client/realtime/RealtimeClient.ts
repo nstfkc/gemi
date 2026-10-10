@@ -60,6 +60,15 @@ interface ClientInternals {
 export const RESYNC_COALESCE_MS = 2_000;
 /** How long the socket stays open after its last subscription goes. */
 export const IDLE_CLOSE_MS = 5_000;
+/**
+ * How long a subscription outlives its last listener. A hook that remounts
+ * within it (StrictMode's double mount, a route change back, a list that
+ * re-renders its rows) picks the same subscription up again: no `unsub`, no
+ * new `sub`, nothing counted against the server's rate limit.
+ */
+export const RELEASE_LINGER_MS = 1_500;
+/** The least wait before resending a `sub` denied with `rate_limited`. */
+const RATE_LIMITED_RETRY_MS = 5_000;
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const DEFAULT_HEARTBEAT_MS = 25_000;
@@ -78,6 +87,11 @@ interface Entry {
   topic: string | null;
   lastResyncAt: number;
   resyncTimer: ReturnType<typeof setTimeout> | null;
+  /** Set while the entry outlives its last listener; see `RELEASE_LINGER_MS`. */
+  lingerTimer: ReturnType<typeof setTimeout> | null;
+  /** A transient denial's resend, on the same socket. */
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  retries: number;
 }
 
 /** `pattern` and its params, canonical: two hooks on one channel share a `sub`. */
@@ -152,12 +166,19 @@ export class RealtimeClient implements RealtimeSocket {
         topic: null,
         lastResyncAt: 0,
         resyncTimer: null,
+        lingerTimer: null,
+        retryTimer: null,
+        retries: 0,
       };
       this.entries.set(key, entry);
       this.byId.set(entry.id, entry);
       if (this.isOpen()) {
         this.sendSub(entry);
       }
+    }
+    if (entry.lingerTimer) {
+      clearTimeout(entry.lingerTimer);
+      entry.lingerTimer = null;
     }
     entry.listeners.add(listener);
     listener.onStatus?.(entry.status, entry.code);
@@ -177,8 +198,16 @@ export class RealtimeClient implements RealtimeSocket {
 
   private release(entry: Entry, listener: ChannelListener) {
     entry.listeners.delete(listener);
-    if (entry.listeners.size > 0) return;
+    if (entry.listeners.size > 0 || entry.lingerTimer) return;
+    entry.lingerTimer = setTimeout(() => {
+      entry.lingerTimer = null;
+      if (entry.listeners.size === 0) this.drop(entry);
+    }, RELEASE_LINGER_MS);
+  }
+
+  private drop(entry: Entry) {
     if (entry.resyncTimer) clearTimeout(entry.resyncTimer);
+    this.clearRetry(entry);
     this.entries.delete(entry.key);
     this.byId.delete(entry.id);
     this.dropTopic(entry);
@@ -278,6 +307,8 @@ export class RealtimeClient implements RealtimeSocket {
         let ids = this.topics.get(frame.t);
         if (!ids) this.topics.set(frame.t, (ids = new Set()));
         ids.add(entry.id);
+        this.clearRetry(entry);
+        entry.retries = 0;
         this.setStatus(entry, "open", null);
         // The window between the view rendering and this ack, or the time
         // the socket was down, may have carried events this tab missed.
@@ -290,6 +321,7 @@ export class RealtimeClient implements RealtimeSocket {
         this.dropTopic(entry);
         entry.permanent = isPermanentDenial(frame.code);
         this.setStatus(entry, "denied", frame.code);
+        this.scheduleRetry(entry, frame.code);
         return;
       }
       case "ev": {
@@ -330,6 +362,8 @@ export class RealtimeClient implements RealtimeSocket {
     this.topics.clear();
     for (const entry of this.entries.values()) {
       entry.topic = null;
+      // The reconnect resends it.
+      this.clearRetry(entry);
       if (!entry.permanent) this.setStatus(entry, "closed", null);
     }
     if (code === CloseCode.Revoked) this.revoked = true;
@@ -425,6 +459,31 @@ export class RealtimeClient implements RealtimeSocket {
     else entry.resyncTimer = setTimeout(fire, wait);
   }
 
+  /**
+   * A transient denial (`rate_limited`, `error`, `limit`) is retried on the
+   * same socket, with backoff: a healthy socket may never reconnect. `denied`
+   * and `revoked` are the channel's answer for this session, so they wait for
+   * the next connection (a sign-in reconnects), and a permanent one is never
+   * resent.
+   */
+  private scheduleRetry(entry: Entry, code: DeniedCode) {
+    if (code !== "rate_limited" && code !== "error" && code !== "limit") return;
+    this.clearRetry(entry);
+    const floor = code === "rate_limited" ? RATE_LIMITED_RETRY_MS : MIN_BACKOFF_MS;
+    const delay = Math.max(floor, backoffDelay(entry.retries, this.random()));
+    entry.retries++;
+    entry.retryTimer = setTimeout(() => {
+      entry.retryTimer = null;
+      if (this.entries.get(entry.key) !== entry || entry.status !== "denied") return;
+      if (this.isOpen()) this.sendSub(entry);
+    }, delay);
+  }
+
+  private clearRetry(entry: Entry) {
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+  }
+
   private dropTopic(entry: Entry) {
     if (!entry.topic) return;
     const ids = this.topics.get(entry.topic);
@@ -516,6 +575,8 @@ export class RealtimeClient implements RealtimeSocket {
     if (this.hiddenTimer) clearTimeout(this.hiddenTimer);
     for (const entry of this.entries.values()) {
       if (entry.resyncTimer) clearTimeout(entry.resyncTimer);
+      if (entry.lingerTimer) clearTimeout(entry.lingerTimer);
+      this.clearRetry(entry);
     }
     this.entries.clear();
     this.byId.clear();

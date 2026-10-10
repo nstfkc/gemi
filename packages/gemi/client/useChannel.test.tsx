@@ -157,9 +157,57 @@ describe("useChannelInvalidate", () => {
     expect(await screen.findByText("v2")).toBeDefined();
     expect(calls(fetchMock, "/pages/p1")).toBe(2);
   });
+
+  test("a burst of events refetches once per 150 ms window", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    const socket = fakeSocket();
+    const fetchMock = stubFetch(() => ({ version: 1 }));
+    function View() {
+      useChannelInvalidate("page.:pageId" as any, { pageId: "p1" }, ["/pages/:pageId" as any]);
+      useQuery("/pages/:pageId" as any, { params: { pageId: "p1" } });
+      return null;
+    }
+    render(
+      <Page socket={socket} queryData={{ "/pages/p1": { version: 0 } }}>
+        <View />
+      </Page>,
+    );
+    for (let i = 0; i < 20; i++) {
+      await act(async () => socket.emit("page.p1", "progress", { i }));
+    }
+    expect(calls(fetchMock, "/pages/p1")).toBe(0);
+    await act(async () => vi.advanceTimersByTime(150));
+    expect(calls(fetchMock, "/pages/p1")).toBe(1);
+    // A steady stream still refetches, once per window.
+    for (let i = 0; i < 3; i++) {
+      await act(async () => socket.emit("page.p1", "progress", { i }));
+      await act(async () => vi.advanceTimersByTime(150));
+    }
+    expect(calls(fetchMock, "/pages/p1")).toBe(4);
+  });
 });
 
 describe("useQuery({ live })", () => {
+  test("a burst of events refetches once", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    const socket = fakeSocket();
+    const fetchMock = stubFetch(() => ({ n: 1 }));
+    function View() {
+      useQuery("/imports/:id" as any, { params: { id: "i1" } }, { live: "user" as any });
+      return null;
+    }
+    render(
+      <Page socket={socket} queryData={{ "/imports/i1": { n: 0 } }}>
+        <View />
+      </Page>,
+    );
+    for (let i = 0; i < 10; i++) {
+      await act(async () => socket.emit("user.1", "import", { i }));
+    }
+    await act(async () => vi.advanceTimersByTime(150));
+    expect(calls(fetchMock, "/imports/i1")).toBe(1);
+  });
+
   test("refetchUntil pauses while the channel is open and resumes as the fallback", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     const socket = fakeSocket();
@@ -183,7 +231,7 @@ describe("useQuery({ live })", () => {
 
     // An event refetches.
     await act(async () => socket.emit("user.1", "import", { id: "i1" }));
-    await act(async () => vi.advanceTimersByTime(0));
+    await act(async () => vi.advanceTimersByTime(150));
     expect(calls(fetchMock, "/imports/i1")).toBe(1);
 
     // Live delivery down: polling takes over.

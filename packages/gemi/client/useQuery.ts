@@ -29,7 +29,7 @@ import {
   type RetryOption,
 } from "./retryPolicy";
 import { resolveLiveChannel, type LiveChannel } from "./useChannel";
-import { useChannelSubscription } from "./realtime/useChannelSubscription";
+import { useChannelSubscription, useCoalesced } from "./realtime/useChannelSubscription";
 
 /**
  * A DOM event or React's synthetic one. Never a plain object, so a cached
@@ -340,10 +340,12 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     const target = liveResourceRef.current;
     for (const key of target.variantKeys()) target.invalidate(key);
   }, []);
+  const refreshLiveOnEvent = useCoalesced(refreshLive);
   const liveState = useChannelSubscription(
     liveChannel?.pattern ?? null,
     liveChannel?.params ?? {},
-    { onEvent: refreshLive, onResync: refreshLive },
+    // A burst of events is one refetch (see `useCoalesced`).
+    { onEvent: refreshLiveOnEvent, onResync: refreshLive },
     liveChannel !== null,
   );
   const liveOpen = liveState.status === "open";

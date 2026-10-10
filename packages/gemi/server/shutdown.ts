@@ -118,6 +118,8 @@ function seconds(value: string | undefined, fallback: number): number {
 export type Stoppable = {
   stop(closeActiveConnections?: boolean): Promise<void>;
   readonly pendingRequests: number;
+  /** Open WebSockets (Bun). Read only once `closeSockets` has run. */
+  readonly pendingWebSockets?: number;
 };
 
 /**
@@ -191,8 +193,13 @@ export async function drain(params: {
     // every clean shutdown log an abandonment and exit 1 for the operator who
     // zeroed the budget to fit a 5s grace period, with nothing to abandon.
     const remaining = deadline - Date.now();
+    // With broadcast sockets, the stop's own promise has been seen to stay
+    // pending after every request finished and every socket closed (Bun
+    // 1.4.2 on a Linux CI runner). Nothing in flight is the drain's real
+    // condition, so it is watched for as well.
+    const done = params.closeSockets ? Promise.race([stopped, nothingInFlight(server)]) : stopped;
     drained =
-      remaining > 0 ? await settlesWithin(stopped, remaining) : server.pendingRequests === 0;
+      remaining > 0 ? await settlesWithin(done, remaining) : server.pendingRequests === 0;
     if (!drained) {
       console.error(
         `[gemi] Shutdown grace period elapsed with ${server.pendingRequests} request(s) still in flight; abandoning them.`,
@@ -209,6 +216,21 @@ export async function drain(params: {
   const clean = drained && report.failed.length === 0 && report.timedOut.length === 0;
   console.log(`[gemi] Shutdown ${clean ? "complete" : "finished with errors"}.`);
   return clean ? 0 : 1;
+}
+
+/** Resolves once `server` has no request and no WebSocket open. */
+function nothingInFlight(server: Stoppable): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (server.pendingRequests === 0 && (server.pendingWebSockets ?? 0) === 0) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(check, 50);
+      (timer as { unref?: () => void }).unref?.();
+    };
+    check();
+  });
 }
 
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {

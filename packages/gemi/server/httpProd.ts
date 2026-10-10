@@ -316,6 +316,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
   // The broadcast socket endpoint, when the app declares `route.channels`.
   const sockets = app.sockets();
+  if (sockets && forwardedTrust.kind === "none") {
+    console.warn(
+      "[gemi] Broadcast sockets: GEMI_TRUST_PROXY is not set, so a socket's address is its TCP peer. Behind a proxy or load balancer every client shares the proxy's address, and broadcast.maxConnectionsPerIp caps the whole app per process. Set GEMI_TRUST_PROXY (see forwardedFor) or raise that limit.",
+    );
+  }
 
   const server = Bun.serve<any>({
     maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB

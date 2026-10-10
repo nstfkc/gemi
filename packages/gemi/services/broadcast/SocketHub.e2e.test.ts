@@ -26,7 +26,10 @@ import type { ServerFrame } from "./protocol";
  */
 
 class TestUser extends Middleware {
-  run() {
+  async run() {
+    // `x-slow`: a session lookup that takes a while.
+    const slow = Number(this.req.headers.get("x-slow") ?? 0);
+    if (slow > 0) await new Promise((resolve) => setTimeout(resolve, slow));
     const raw =
       this.req.cookies.get("test_user") ?? this.req.headers.get("x-test-user") ?? undefined;
     if (raw) this.req.ctx().setUser({ id: Number(raw) });
@@ -46,8 +49,22 @@ class Gate extends Middleware {
   }
 }
 
+/** `team.:teamId` membership, as "userId:teamId". */
+const members = new Set<string>();
+/** How long the `team` authorization takes after reading the membership. */
+let teamAuthorizeDelayMs = 0;
+
 class Channels extends ChannelRouter {
   channels = {
+    // Reads the membership first, then waits: a slow query whose answer can
+    // be stale by the time it returns.
+    "team.:teamId": this.private(async (req, { teamId }) => {
+      const member = members.has(`${req.ctx().user?.id}:${teamId}`);
+      if (teamAuthorizeDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, teamAuthorizeDelayMs));
+      }
+      return member;
+    }),
     user: this.private(),
     status: this.public(),
     // Signed-in users may join the sites whose ids start with "s".
@@ -104,7 +121,7 @@ class AppKernel extends Kernel {
     },
     broadcast: {
       driver,
-      allowedOrigins: ["https://partner.example"],
+      allowedOrigins: ["https://partner.example", "*.wild.example"],
       maxChannelsPerSocket: 4,
       maxConnectionsPerUser: 3,
       subscribeRate: { limit: 10, windowMs: 60_000 },
@@ -146,6 +163,8 @@ afterEach(async () => {
   );
   await settle();
   driver.delayMs = 0;
+  members.clear();
+  teamAuthorizeDelayMs = 0;
   vi.restoreAllMocks();
 });
 
@@ -305,6 +324,29 @@ describe("the Origin check", () => {
     }
   });
 
+  test("subdomains are not implied: not of APP_URL, nor of an allowed origin", async () => {
+    vi.stubEnv("APP_URL", "https://example.com");
+    try {
+      const cookie = "test_user=1";
+      expect(await attempt({ Cookie: cookie, Origin: "https://evil-tenant.example.com" })).toBe(
+        403,
+      );
+      expect(await attempt({ Cookie: cookie, Origin: "https://tenant.partner.example" })).toBe(
+        403,
+      );
+      await connect({ cookie, origin: "https://example.com" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("a wildcard entry admits the subdomains, and not the host itself", async () => {
+    await connect({ cookie: "test_user=1", origin: "https://tenant.wild.example" });
+    await connect({ cookie: "test_user=1", origin: "http://a.b.wild.example" });
+    expect(await attempt({ Cookie: "test_user=1", Origin: "https://wild.example" })).toBe(403);
+    expect(await attempt({ Cookie: "test_user=1", Origin: "https://evilwild.example" })).toBe(403);
+  });
+
   test("a native client with no cookies needs no Origin", async () => {
     const client = await connect({ origin: null, headers: { "x-test-user": "2" } });
     const ack = await subscribe(client, "u", "user");
@@ -354,15 +396,27 @@ describe("authorization", () => {
 
   test("too many sub frames are rate limited, then the socket is closed", async () => {
     const client = await connect();
-    const codes: string[] = [];
-    for (let i = 0; i < 11; i++) {
-      client.send({ op: "unsub", id: `x${i}` });
+    for (let i = 0; i < 10; i++) {
+      expect(await subscribe(client, `x${i}`, "nope")).toMatchObject({ code: "unknown_channel" });
     }
-    const denied = await subscribe(client, "late", "status");
-    codes.push((denied as any).code);
-    expect(codes).toEqual(["rate_limited"]);
-    for (let i = 0; i < 10; i++) client.send({ op: "unsub", id: `y${i}` });
+    expect(await subscribe(client, "late", "status")).toMatchObject({ code: "rate_limited" });
+    for (let i = 0; i < 10; i++) client.send({ op: "sub", id: `y${i}`, ch: "status" });
     expect((await client.closed).code).toBe(1008);
+  });
+
+  test("unsub frames do not count against the rate limit", async () => {
+    const client = await connect();
+    for (let i = 0; i < 50; i++) client.send({ op: "unsub", id: `x${i}` });
+    expect(await subscribe(client, "s", "status")).toMatchObject({ op: "subscribed" });
+  });
+
+  test("concurrent upgrades cannot overshoot the per-user cap while the session loads", async () => {
+    const results = await Promise.allSettled(
+      Array.from({ length: 6 }, () =>
+        connect({ cookie: "test_user=98", headers: { "x-slow": "50" } }),
+      ),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(3);
   });
 
   test("connections per user are capped", async () => {
@@ -486,19 +540,46 @@ describe("revoke", () => {
     await settle();
     expect(bob.ws.readyState).toBe(WebSocket.OPEN);
   });
+});
 
-  test("{ channel } denies its subscriptions with revoked, and nothing more arrives", async () => {
-    const alice = await connect({ cookie: "test_user=7" });
-    await subscribe(alice, "site", "site.:siteId", { siteId: "s1" });
-    await subscribe(alice, "status", "status");
-    Broadcast.revoke({ channel: "site.:siteId", params: { siteId: "s1" } });
-    expect(await alice.next("denied")).toEqual({ op: "denied", id: "site", code: "revoked" });
-    Broadcast.to("site.:siteId", { siteId: "s1" }).emit("changed");
-    Broadcast.to("status").emit("deploy");
-    expect(await alice.next("ev")).toMatchObject({ t: "status" });
+describe("revoke { channel }", () => {
+  test("only the members who lost access are denied; the others keep receiving", async () => {
+    members.add("31:t1");
+    members.add("32:t1");
+    const alice = await connect({ cookie: "test_user=31" });
+    const bob = await connect({ cookie: "test_user=32" });
+    expect(await subscribe(alice, "team", "team.:teamId", { teamId: "t1" })).toMatchObject({
+      op: "subscribed",
+    });
+    expect(await subscribe(bob, "team", "team.:teamId", { teamId: "t1" })).toMatchObject({
+      op: "subscribed",
+    });
+
+    members.delete("31:t1");
+    Broadcast.revoke({ channel: "team.:teamId", params: { teamId: "t1" } });
+    expect(await alice.next("denied")).toEqual({ op: "denied", id: "team", code: "revoked" });
+    // Bob is authorized again and told so: his client resyncs.
+    expect(await bob.next("subscribed")).toEqual({ op: "subscribed", id: "team", t: "team.t1" });
+
+    Broadcast.to("team.:teamId", { teamId: "t1" }).emit("changed");
+    expect(await bob.next("ev")).toMatchObject({ t: "team.t1", ev: "changed" });
     await settle();
     expect(alice.frames.filter((f) => f.op === "ev")).toEqual([]);
     expect(alice.ws.readyState).toBe(WebSocket.OPEN);
+    expect(bob.frames.filter((f) => f.op === "denied")).toEqual([]);
+  });
+
+  test("an authorization that started before the revocation is run again", async () => {
+    members.add("33:t2");
+    teamAuthorizeDelayMs = 150;
+    const alice = await connect({ cookie: "test_user=33" });
+    alice.send({ op: "sub", id: "team", ch: "team.:teamId", p: { teamId: "t2" } });
+    // The authorization has read the membership and is waiting.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    members.delete("33:t2");
+    Broadcast.revoke({ channel: "team.:teamId", params: { teamId: "t2" } });
+    const answer = await alice.next("*" as "denied", (f: any) => f.id === "team");
+    expect(answer).toEqual({ op: "denied", id: "team", code: "denied" });
   });
 });
 

@@ -114,6 +114,10 @@ describe("RealtimeClient", () => {
     releaseA();
     expect(latest().sent.filter((f) => f.op === "unsub")).toHaveLength(0);
     releaseB();
+    // It lingers in case a hook remounts, then goes.
+    vi.advanceTimersByTime(1_499);
+    expect(latest().sent.filter((f) => f.op === "unsub")).toHaveLength(0);
+    vi.advanceTimersByTime(1);
     expect(latest().sent.filter((f) => f.op === "unsub")).toEqual([{ op: "unsub", id: "1" }]);
     // Closed after the idle delay, and not reopened.
     vi.advanceTimersByTime(5_000);
@@ -238,6 +242,54 @@ describe("RealtimeClient", () => {
     expect(first.closedWith).toBeDefined();
     vi.advanceTimersByTime(1_000);
     expect(MockSocket.instances).toHaveLength(2);
+  });
+
+  test("a remount within the linger reuses the subscription: no unsub, no new sub", () => {
+    instance = client();
+    const a = recorder();
+    const release = instance.subscribe("status", {}, a.listener);
+    latest().open();
+    latest().receive({ op: "subscribed", id: "1", t: "status" });
+    release();
+    vi.advanceTimersByTime(500);
+    const b = recorder();
+    instance.subscribe("status", {}, b.listener);
+    expect(b.log).toEqual(["status:open"]);
+    vi.advanceTimersByTime(10_000);
+    expect(latest().sent.filter((f) => f.op === "unsub")).toHaveLength(0);
+    expect(latest().subs()).toHaveLength(1);
+    latest().receive({ op: "ev", t: "status", ev: "deploy" });
+    expect(b.log).toContain("ev:deploy:undefined");
+  });
+
+  test("rate_limited and error are retried on the same socket, with backoff", () => {
+    instance = client(() => 0);
+    const a = recorder();
+    const b = recorder();
+    instance.subscribe("busy", {}, a.listener);
+    instance.subscribe("flaky", {}, b.listener);
+    latest().open();
+    latest().receive({ op: "denied", id: "1", code: "rate_limited" });
+    latest().receive({ op: "denied", id: "2", code: "error" });
+    expect(latest().subs()).toHaveLength(2);
+    vi.advanceTimersByTime(1_000);
+    expect(latest().subs().slice(2)).toEqual([{ op: "sub", id: "2", ch: "flaky" }]);
+    vi.advanceTimersByTime(4_000);
+    expect(latest().subs().slice(3)).toEqual([{ op: "sub", id: "1", ch: "busy" }]);
+    latest().receive({ op: "subscribed", id: "1", t: "busy" });
+    expect(a.log.at(-1)).toBe("resync");
+    expect(MockSocket.instances).toHaveLength(1);
+  });
+
+  test("denied and revoked wait for the next connection", () => {
+    instance = client(() => 0);
+    const a = recorder();
+    instance.subscribe("site", {}, a.listener);
+    latest().open(600_000);
+    latest().receive({ op: "denied", id: "1", code: "revoked" });
+    vi.advanceTimersByTime(60_000);
+    expect(MockSocket.instances).toHaveLength(1);
+    expect(latest().subs()).toHaveLength(1);
   });
 
   test("a permanent denial is not resent on reconnect; a retryable one is", () => {

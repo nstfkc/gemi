@@ -37,18 +37,31 @@ export interface BroadcastConfig {
   path?: string;
 
   /**
-   * Origins (`"https://app.example.com"`) allowed to open a socket that
-   * carries cookies, besides the app's own: the request's own host,
-   * `APP_URL` / `HOST_NAME`, and the `route.domains` root and its
-   * subdomains. A cookie-carrying upgrade without an `Origin` header is
-   * refused, and so is any upgrade from an origin not on the list.
+   * Origins allowed to open a socket, besides the app's own (the request's
+   * own host, and `APP_URL` / `HOST_NAME`). An entry is an origin
+   * (`"https://app.example.com"`), a bare host (`"app.example.com"`), or a
+   * wildcard for a host's subdomains (`"*.example.com"`,
+   * `"https://*.example.com"`), which does not admit the host itself.
+   *
+   * Subdomains are never allowed by default, `route.domains` ones included:
+   * a tenant's subdomain is same-site with the app, so the app's cookies ride
+   * along with its upgrade, and a WebSocket has no CORS. List a wildcard only
+   * for subdomains whose pages you trust. A cookie-carrying upgrade without
+   * an `Origin` header is refused, and so is any upgrade from an origin not
+   * allowed.
    */
   allowedOrigins?: string[];
 
   /** Open sockets per process. Upgrades past it get a `503`. Default `10000`. */
   maxConnectionsPerProcess?: number;
 
-  /** Open sockets per client IP, per process. Default `100`. */
+  /**
+   * Open sockets per client IP, per process. Default `100`. The address is
+   * the TCP peer unless `GEMI_TRUST_PROXY` says which `X-Forwarded-For` entry
+   * to believe: behind a proxy without it, every client shares the proxy's
+   * address and this caps the whole app per process (the server warns at
+   * boot).
+   */
   maxConnectionsPerIp?: number;
 
   /** Open sockets per signed-in user, per process. Default `50`. */
@@ -81,9 +94,10 @@ export interface BroadcastConfig {
   heartbeatMs?: number;
 
   /**
-   * `sub` and `unsub` frames a socket may send per window. Past it a `sub` is
-   * denied with `rate_limited`; at twice it the socket is closed with `1008`.
-   * Default `{ limit: 100, windowMs: 60000 }`.
+   * `sub` frames a socket may send per window (an `unsub` is not counted).
+   * Past it a `sub` is denied with `rate_limited`, which the client retries
+   * on the same socket after a few seconds; at twice it the socket is closed
+   * with `1008`. Default `{ limit: 300, windowMs: 60000 }`.
    */
   subscribeRate?: { limit: number; windowMs: number };
 }
@@ -107,6 +121,6 @@ export function broadcastConfigDefaults(): Required<BroadcastConfig> {
     backpressureLimit: 1 << 20,
     idleTimeout: 120,
     heartbeatMs: 25_000,
-    subscribeRate: { limit: 100, windowMs: 60_000 },
+    subscribeRate: { limit: 300, windowMs: 60_000 },
   };
 }
