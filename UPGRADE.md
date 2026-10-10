@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.122.0 to 0.123.0
 
 ## Broadcasting: `Broadcast`, `ChannelRouter`, `useChannel` over Bun WebSockets (#874)
 
