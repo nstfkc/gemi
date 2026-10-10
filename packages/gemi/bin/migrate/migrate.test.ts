@@ -636,3 +636,58 @@ export default class AuthServiceProvider extends AuthenticationServiceProvider {
     expect(config).not.toContain("isUniqueConstraintError");
   });
 });
+
+/**
+ * #874 brings back a `Broadcast` facade, `BroadcastManager`, `defineBroadcastConfig`
+ * and a `broadcast` config slice, under the names #31 removed. The codemod
+ * must not treat the new ones as the old API: an app that adopts them and then
+ * runs `gemi migrate` keeps its files exactly as they are.
+ */
+describe("the new Broadcast (#874) is not mapped onto the API #31 removed", () => {
+  const BROADCAST_CONFIG = `import { defineBroadcastConfig } from "gemi/services";
+
+export default defineBroadcastConfig({ driver: "memory", maxEventBytes: 16 * 1024 });
+`;
+  const CHANNELS = `import { ChannelRouter } from "gemi/http";
+
+export default class extends ChannelRouter {
+  channels = { "site.:siteId": this.private(), status: this.public() };
+}
+`;
+  const CONTROLLER = `import { Controller } from "gemi/http";
+import { Broadcast } from "gemi/facades";
+import { BroadcastEvent, BroadcastManager } from "gemi/services";
+
+export class SiteController extends Controller {
+  async save() {
+    Broadcast.to("site.:siteId", { siteId: "abc" }).emit("changed");
+  }
+}
+`;
+
+  test("no codemod table names a broadcasting identifier", async () => {
+    const tables = await import("./tables");
+    const everything = JSON.stringify([
+      tables.PROVIDER_MIGRATIONS,
+      tables.FACADE_RENAMES,
+      tables.SERVICE_RENAMES,
+      tables.RETIRED_CONFIG_FIELDS,
+      tables.DELETED_EXPORTS,
+      tables.MODULE_MOVES,
+      tables.EXTRACTION_TARGETS,
+    ]);
+    expect(everything).not.toMatch(/broadcast/i);
+  });
+
+  test("an app using the new API is left byte-identical", async () => {
+    write("app/kernel/Kernel.ts", KERNEL_43);
+    write("app/config/broadcast.ts", BROADCAST_CONFIG);
+    write("app/http/routes/channels.ts", CHANNELS);
+    write("app/http/controllers/SiteController.ts", CONTROLLER);
+    await runMigrate({ rootDir: root });
+    expect(read("app/config/broadcast.ts")).toBe(BROADCAST_CONFIG);
+    expect(read("app/http/routes/channels.ts")).toBe(CHANNELS);
+    expect(read("app/http/controllers/SiteController.ts")).toBe(CONTROLLER);
+    expect(logged.join("\n")).not.toMatch(/broadcast/i);
+  });
+});

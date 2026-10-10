@@ -8,6 +8,17 @@ export interface ViewRPC {}
 export interface I18nDictionary {}
 
 /**
+ * The application's broadcast channels: `{ "site.:siteId": { params, events } }`.
+ *
+ * Generated from the app's `app/http/routes/channels.ts` (its `ChannelRouter`)
+ * by the framework's own `gemi.d.ts`, the way `RPC` is from its `ApiRouter`.
+ * `params` is what the pattern takes; `events` maps each event name the
+ * channel declares (`.events(...)`) to its payload. Empty for an app without a
+ * channels file, and then every channel takes any event.
+ */
+export interface BroadcastRPC {}
+
+/**
  * The application's features: `{ "feature-key": boolean }`.
  *
  * Augmented from the app's `app/features/index.ts` by the framework's own

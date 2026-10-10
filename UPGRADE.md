@@ -1,3 +1,19 @@
+# Unreleased
+
+## Broadcasting, preview: `Broadcast`, `BroadcastEvent`, `ChannelRouter` (#874)
+
+**New, nothing to migrate.** The server side of real-time broadcasting over Bun WebSockets. Emits are checked and recorded by `Broadcast.fake()` but **reach no socket yet**: the WebSocket transport and the client hooks ship in the next releases. See [Broadcasting](docs/broadcasting.md).
+
+- **`Broadcast`** (from `gemi/facades`): `Broadcast.to("site.:siteId", { siteId }).emit("changed", data)`, `Broadcast.toUser(user)`, `Broadcast.toOthers(req)`. Inside an ORM transaction an emit waits for the commit and is dropped on rollback. Payloads are JSON: a warning above 4 KB and `BroadcastPayloadTooLargeError` above 16 KB.
+- **`BroadcastEvent`** (from `gemi/services`): an `Event` subclass with `broadcastOn`/`broadcastAs`/`broadcastWith`, broadcast after its listeners run. Under `Event.fake()` it is recorded and not broadcast.
+- **`ChannelRouter`** and **`authorizeChannel`** (from `gemi/http`): the channels clients may join, in `app/http/routes/channels.ts`, registered as `route.channels` in `app/config/route.ts`, with `this.public()`, `this.private(callback | Policy)`, per-pattern `.middleware(...)` and the special `"user"` channel. A malformed pattern fails the boot. The patterns and `.events(...)` generate the `BroadcastRPC` type in `gemi/client`.
+- **`defineBroadcastConfig`** and the `broadcast` config slice (`app/config/broadcast.ts`): `driver` (`"memory"` by default, or a `BroadcastDriver`), `maxEventBytes`, `warnEventBytes`.
+- **`Broadcast.fake()`**: `assertSent`, `assertNotSent`, `assertSentTimes`, `assertNothingSent`, `restore()`.
+
+These reuse names that #31 removed, with a different design: channels are authorized per subscribe in a rebuilt request context, and delivery goes through a driver. Code written for the removed API (`Broadcast.channel(...).publish(...)`, `BroadcastingChannel`) does not compile against it. `gemi migrate` leaves both alone.
+
+Behaviour change for existing apps: none. `BroadcastServiceProvider` joins the framework providers and resolves nothing until it is used. One detail: a `BroadcastEvent` dispatched with no listener does not log the "nothing is listening" development warning that other events do.
+
 # Upgrading from 0.121.0 to 0.122.0
 
 ## Instagram sign-in and connections; sign-in without an email; several accounts per connection provider; custom refresh strategies

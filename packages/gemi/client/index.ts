@@ -97,6 +97,7 @@ export type {
   RPC,
   ViewRPC,
   I18nDictionary,
+  BroadcastRPC,
   Features,
   FeatureKey,
   ClientFeatureKey,

@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import type { HttpRequest } from "../../http/HttpRequest";
 import type { ApiRouter } from "../../http/ApiRouter";
+import type { ChannelRouterClass } from "../../http/ChannelRouter";
 import type { McpRouter } from "../../http/McpRouter";
 import type { McpRemoteFileOptions } from "../mcp/McpRegistry";
 import type { McpRemoteHttpConfig } from "../mcp/http/McpHttpServer";
@@ -241,6 +242,12 @@ export interface RouteConfig {
   view: ViewRouteConfig;
   mcp?: McpRouteConfig;
   domains?: DomainsConfig;
+  /**
+   * The app's `ChannelRouter`, normally `app/http/routes/channels.ts`: the
+   * broadcast channels clients may subscribe to. Optional: without it every
+   * subscription is refused, and emits still work.
+   */
+  channels?: ChannelRouterClass;
 }
 
 export function defineRouteConfig(config: RouteConfig): RouteConfig {

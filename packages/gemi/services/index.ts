@@ -260,6 +260,33 @@ export type {
   ChangeFeedResponse,
   StreamOptions as ChangeFeedStreamOptions,
 } from "./change-feed/stream";
+// Broadcasting: volatile, real-time push to WebSocket clients (#874). Preview:
+// emits reach sockets once the transport ships.
+export { BroadcastServiceProvider } from "./broadcast/BroadcastServiceProvider";
+export {
+  BroadcastManager,
+  BroadcastPayloadTooLargeError,
+  BroadcastScope,
+  PendingBroadcast,
+  type SocketSource,
+} from "./broadcast/BroadcastManager";
+export { BroadcastEvent, isBroadcastEvent } from "./broadcast/BroadcastEvent";
+export type {
+  BroadcastDeliver,
+  BroadcastDriver,
+  BroadcastDriverHooks,
+} from "./broadcast/BroadcastDriver";
+export { MemoryBroadcastDriver } from "./broadcast/MemoryBroadcastDriver";
+export {
+  InvalidChannelError,
+  type ChannelParams,
+  type ChannelTarget,
+} from "./broadcast/channels";
+export type { SentBroadcast } from "./broadcast/types";
+export {
+  SOCKET_ID_HEADER,
+  type BroadcastEventFrame,
+} from "./broadcast/wire";
 export { MemoryLockStore } from "./lock/MemoryLockStore";
 export {
   DatabaseLockStore,
@@ -463,6 +490,11 @@ export {
   changeFeedConfigDefaults,
   type ChangeFeedConfig,
 } from "./change-feed/config";
+export {
+  defineBroadcastConfig,
+  broadcastConfigDefaults,
+  type BroadcastConfig,
+} from "./broadcast/config";
 export {
   defineEventConfig,
   eventConfigDefaults,
