@@ -2,7 +2,10 @@ import { join } from "node:path";
 
 import { createServer } from "vite";
 
+import type { ServerWebSocket, WebSocketHandler } from "bun";
+
 import { App } from "../app";
+import type { SocketTransport } from "../app/App";
 import gemiVite from "../vite";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
@@ -20,6 +23,34 @@ import {
 } from "./hmrRelay";
 
 export { viteErrorPayload } from "./devFetch";
+
+/**
+ * One `websocket` handler for both kinds of socket the dev server accepts:
+ * the broadcast hub's (`ws.data.gemiSocket`), dispatched to the hub that
+ * accepted it, which after a reload may be the previous application's, and
+ * the HMR relay's. The server-wide settings are the hub's, relaxed where
+ * they would bite the relay: Bun applies one `maxPayloadLength` and one
+ * backpressure policy to every socket, and Vite's frames are not bound by the
+ * hub's 16 KB. The hub still enforces its own inbound limit (`onMessage`)
+ * and closes its own slow sockets (`deliver`, 1013).
+ */
+function withBroadcastSockets(
+  hmr: WebSocketHandler<HmrRelayData>,
+  sockets: SocketTransport,
+): WebSocketHandler<any> {
+  const broadcast = sockets.websocket as WebSocketHandler<any>;
+  const isBroadcast = (ws: ServerWebSocket<any>) => ws.data?.gemiSocket === true;
+  return {
+    ...sockets.socketOptions(),
+    maxPayloadLength: 16 * 1024 * 1024,
+    closeOnBackpressureLimit: false,
+    open: (ws) => (isBroadcast(ws) ? broadcast.open?.(ws) : hmr.open?.(ws)),
+    message: (ws, message) =>
+      isBroadcast(ws) ? broadcast.message(ws, message) : hmr.message(ws, message),
+    close: (ws, code, reason) =>
+      isBroadcast(ws) ? broadcast.close?.(ws, code, reason) : hmr.close?.(ws, code, reason),
+  };
+}
 
 const rootDir = process.cwd();
 const appDir = join(rootDir, "app");
@@ -135,17 +166,25 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   // `null` when an app's own `server.ws` in `gemi.config.ts` sent Vite's
   // websocket elsewhere; the browser then connects there directly.
   const relayPort = hmrRelayPort(vite.config?.server?.ws);
-  const server = Bun.serve<HmrRelayData>({
+  // The broadcast socket endpoint, when the app declares `route.channels`.
+  // It shares the port, and Bun's one `websocket` handler, with the HMR
+  // relay: a socket is the hub's when its data says so.
+  const sockets = app.sockets();
+  const server = Bun.serve<any>({
     port: httpPort,
     idleTimeout,
     fetch: (req, server) => {
       if (relayPort !== null && isHmrUpgrade(req)) {
         return upgradeHmr(req, server, relayPort);
       }
+      if (sockets?.matches(req)) {
+        return sockets.upgrade(req, server);
+      }
       return devFetch(req);
     },
-    websocket: hmrRelayHandler,
+    websocket: sockets ? withBroadcastSockets(hmrRelayHandler, sockets) : hmrRelayHandler,
   });
+  await sockets?.start(server);
 
   // `bun --hot` re-evaluates its *whole* module graph on a server-code change —
   // node_modules included — so after a reload `react`, `react-dom/server` and the

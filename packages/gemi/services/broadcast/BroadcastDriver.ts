@@ -43,6 +43,14 @@ export interface BroadcastDriver {
   /** The last local socket left `topic`. */
   topicRemoved?(topic: string): void | Promise<void>;
 
+  /**
+   * Fans a revocation out to every process, this one included, each of
+   * which applies it through `hooks.onRevoke`. Optional: a driver without it
+   * reaches this process only, which is all the memory driver can reach
+   * anyway.
+   */
+  revoke?(revocation: BroadcastRevocation): void | Promise<void>;
+
   /** Stops receiving and releases connections. Called on shutdown. */
   close(): void | Promise<void>;
 }
@@ -54,4 +62,16 @@ export interface BroadcastDriverHooks {
    * clients refetch.
    */
   onGap?(): void;
+
+  /**
+   * A revocation reached this process (`Broadcast.revoke`, from here or from
+   * another instance). The transport closes the matching subscriptions.
+   */
+  onRevoke?(revocation: BroadcastRevocation): void;
 }
+
+/**
+ * What `Broadcast.revoke` closes, as it travels between processes: every
+ * socket of a user (by id, as a string), or every subscription to a topic.
+ */
+export type BroadcastRevocation = { user: string } | { topic: string };

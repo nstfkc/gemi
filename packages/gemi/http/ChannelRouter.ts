@@ -315,7 +315,7 @@ function isChannelDeclaration(value: unknown): value is ChannelDeclaration<any> 
  * subscription is refused as an `error`, which a client may retry, rather than
  * `denied`, which it should not.
  */
-async function signedInUser(req: HttpRequest<any, any>): Promise<unknown | null> {
+export async function signedInUser(req: HttpRequest<any, any>): Promise<unknown | null> {
   if (!RequestContext.getStore().user && readAccessToken(req) === null) return null;
   try {
     return await Auth.user();

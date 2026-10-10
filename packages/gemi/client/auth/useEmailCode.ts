@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { usePost } from "../useMutation";
 import { useFrameworkQuery } from "../useQuery";
+import { reconnectRealtime } from "../realtime/RealtimeClient";
 
 interface UseEmailCodeArgs {
   /** After `verify` signs in. `isNewUser` is true when the account was just created. */
@@ -35,6 +36,8 @@ export function useEmailCode(args: UseEmailCodeArgs = {}) {
       onSuccess: (result: any) => {
         if (result?.session?.user) {
           mutate(result.session.user);
+          // The socket was opened as a guest: authorize its channels as the user.
+          reconnectRealtime();
         }
         args.onSuccess?.(result);
       },

@@ -1,21 +1,33 @@
 # Unreleased
 
-## Broadcasting, preview: `Broadcast`, `BroadcastEvent`, `ChannelRouter` (#874)
+## Broadcasting: `Broadcast`, `ChannelRouter`, `useChannel` over Bun WebSockets (#874)
 
-**New, nothing to migrate.** The server side of real-time broadcasting over Bun WebSockets. Emits are checked and recorded by `Broadcast.fake()` but **reach no socket yet**: the WebSocket transport and the client hooks ship in the next releases. See [Broadcasting](docs/broadcasting.md).
+**New, nothing to migrate.** Real-time "something changed" hints from the server to the browsers looking at it, over a WebSocket on the app's own port. Events are volatile: delivered at most once, never stored or replayed; a client that may have missed one refetches over HTTP. See [Broadcasting](docs/broadcasting.md).
 
-- **`Broadcast`** (from `gemi/facades`): `Broadcast.to("site.:siteId", { siteId }).emit("changed", data)`, `Broadcast.toUser(user)`, `Broadcast.toOthers(req)`. Inside an ORM transaction an emit waits for the commit and is dropped on rollback. Payloads are JSON: a warning above 4 KB and `BroadcastPayloadTooLargeError` above 16 KB.
+Server:
+
+- **`Broadcast`** (from `gemi/facades`): `Broadcast.to("site.:siteId", { siteId }).emit("changed", data)`, `Broadcast.toUser(user)`, `Broadcast.toOthers(req)`, and `Broadcast.revoke({ user } | { channel, params })`. Inside an ORM transaction an emit (and a revoke) waits for the commit and is dropped on rollback. Payloads are JSON: a warning above 4 KB and `BroadcastPayloadTooLargeError` above 16 KB.
 - **`BroadcastEvent`** (from `gemi/services`): an `Event` subclass with `broadcastOn`/`broadcastAs`/`broadcastWith`, broadcast after its listeners run. Under `Event.fake()` it is recorded and not broadcast.
 - **`ChannelRouter`** and **`authorizeChannel`** (from `gemi/http`): the channels clients may join, in `app/http/routes/channels.ts`, registered as `route.channels` in `app/config/route.ts`, with `this.public()`, `this.private(callback | Policy)`, per-pattern `.middleware(...)` and the special `"user"` channel. The boot fails on a malformed pattern, a pattern starting with a param, two patterns that can build the same topic, a pattern that can build `user.<id>` other than `"user"`, and `this.private()` without a callback on a pattern with params. The patterns and `.events(...)` generate the `BroadcastRPC` type in `gemi/client`.
-- **`defineBroadcastConfig`** and the `broadcast` config slice (`app/config/broadcast.ts`): `driver` (`"memory"` by default, or a `BroadcastDriver`), `maxEventBytes`, `warnEventBytes`.
-- **`Broadcast.fake()`**: `assertSent`, `assertNotSent`, `assertSentTimes`, `assertNothingSent`, `restore()`.
+- **The transport.** With `route.channels` set, `gemi start` and `gemi dev` accept WebSocket upgrades on `/__gemi/socket` (subprotocol `gemi.v1`; in dev beside the HMR relay). An upgrade runs the global middleware, resolves the session (cookie or `access_token` header), refuses a cookie-carrying upgrade without an allowed `Origin`, and applies connection limits. Allowed origins are the request's own host, `APP_URL`/`HOST_NAME` and `allowedOrigins`; **subdomains are never implied**, `route.domains` tenants included, and are opted into with a wildcard entry such as `"https://*.example.com"`. Every `sub` is authorized by the router; `Broadcast.revoke({ channel, params })` authorizes every subscription to it again and denies only the ones now refused. Behind a proxy, set `GEMI_TRUST_PROXY`, or `maxConnectionsPerIp` counts every client as the proxy (`gemi start` warns). Slow sockets are closed with `1013`, a drain sends `bye` (`1012`, jittered `retryAfter`) before the providers shut down.
+- **`defineBroadcastConfig`** and the `broadcast` config slice (`app/config/broadcast.ts`): `driver` (`"memory"` by default, or a `BroadcastDriver`), `maxEventBytes`, `warnEventBytes`, `path`, `allowedOrigins`, `maxConnectionsPerProcess`, `maxConnectionsPerIp`, `maxConnectionsPerUser`, `maxChannelsPerSocket`, `maxInboundMessageBytes`, `backpressureLimit`, `idleTimeout`, `heartbeatMs`, `subscribeRate`.
+- **`Broadcast.fake()`**: `assertSent`, `assertNotSent`, `assertSentTimes`, `assertNothingSent`, `revoked`, `restore()`.
 
-These reuse names that #31 removed, with a different design: channels are authorized per subscribe in a rebuilt request context, and delivery goes through a driver. Code written for the removed API (`Broadcast.channel(...).publish(...)`, `BroadcastingChannel`) does not compile against it. `gemi migrate` leaves both alone.
+Client (`gemi/client`):
+
+- **`useChannel(pattern, { params }, { on, onResync })`**, **`useChannelInvalidate(pattern, params, paths)`** and **`useQuery(..., { live })`**. One socket per tab, shared by every hook; reconnects with backoff; resyncs (refetches) after every (re)connect, on each subscription's acknowledgement and on `gap`. A `live` query pauses `refetchUntil`/`refreshInterval` while its channel is open and falls back to them otherwise. Events refetch at most once per 150 ms. A transient refusal (`rate_limited`, `error`, `limit`) is retried on the same socket.
+- `useSignIn`, `useEmailCode` and `useSignOut` reconnect the tab's socket, so its channels are authorized as the new session.
+- **`init(RootLayout, { realtime: { path, hiddenDisconnectMs } })`** and `configureRealtime`, for a non-default path.
+- **`fakeSocket()`** and `<Page socket={...}>` in `gemi/testing`.
+
+These reuse names that #31 removed, with a different design: channels are authorized per subscribe in a rebuilt request context, and delivery goes through a driver. Code written for the removed API (`Broadcast.channel(...).publish(...)`, `BroadcastingChannel`, `useBroadcast`) does not compile against it. `gemi migrate` leaves both alone.
 
 Behaviour changes for existing apps:
 
 - An `afterCommit(...)` callback (and a `static afterCommit` event dispatch) that reaches the ORM after its transaction has already committed now runs at once. It used to be queued on the drained list and never run. This happens to work started inside a transaction and not awaited by it, such as a listener still awaiting. After a rollback it is still dropped.
-- Otherwise none. `BroadcastServiceProvider` joins the framework providers and resolves nothing until it is used. One detail: a `BroadcastEvent` dispatched with no listener does not log the "nothing is listening" development warning that other events do.
+- **Signing out** (`AuthController.signOut`) now also calls `Broadcast.revoke({ user })`, closing that user's open sockets so every channel is authorized again. Nothing happens in an app without broadcasting.
+- While a broadcast socket is open in the tab, `useMutation` (and `usePost` and the rest) send an `X-Gemi-Socket` header with its id, for `Broadcast.toOthers(req)`. The requests are same-origin, so no CORS change is needed.
+- Nothing else for an app without `route.channels`: no socket endpoint is served, and `BroadcastServiceProvider` resolves nothing until it is used. One detail: a `BroadcastEvent` dispatched with no listener does not log the "nothing is listening" development warning that other events do.
 
 # Upgrading from 0.121.0 to 0.122.0
 

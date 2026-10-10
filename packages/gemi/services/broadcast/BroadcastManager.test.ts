@@ -17,6 +17,7 @@ import { BroadcastServiceProvider } from "./BroadcastServiceProvider";
 import { InvalidChannelError } from "./channels";
 import { FakeBroadcastManager } from "./FakeBroadcastManager";
 import { MemoryBroadcastDriver } from "./MemoryBroadcastDriver";
+import { socketTag } from "./socketTag";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -76,8 +77,9 @@ describe("BroadcastManager", () => {
     manager.toOthers("not a socket id!").to("status").emit("y");
     expect(delivered.map((d) => d.frame)).toEqual([
       { op: "ev", t: "user.42", ev: "credits", d: { balance: 3 } },
-      { op: "ev", t: "page.p1", ev: "changed", x: SOCKET },
-      { op: "ev", t: "user.7", ev: "x", x: SOCKET },
+      // The frame names the skipped socket by its tag, never its id.
+      { op: "ev", t: "page.p1", ev: "changed", x: socketTag(SOCKET) },
+      { op: "ev", t: "user.7", ev: "x", x: socketTag(SOCKET) },
       { op: "ev", t: "status", ev: "y" },
     ]);
   });

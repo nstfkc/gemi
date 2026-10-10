@@ -2,7 +2,12 @@ import type { Application } from "../../foundation/Application";
 import type { ChannelRouter, ChannelRouterClass } from "../../http/ChannelRouter";
 import { afterCommit } from "../../orm/context";
 import { withDefaults } from "../../support/withDefaults";
-import type { BroadcastDeliver, BroadcastDriver, BroadcastDriverHooks } from "./BroadcastDriver";
+import type {
+  BroadcastDeliver,
+  BroadcastDriver,
+  BroadcastDriverHooks,
+  BroadcastRevocation,
+} from "./BroadcastDriver";
 import type { BroadcastableEvent } from "./brand";
 import {
   assertEventName,
@@ -18,6 +23,7 @@ import {
 import { broadcastConfigDefaults, type BroadcastConfig } from "./config";
 import { MemoryBroadcastDriver } from "./MemoryBroadcastDriver";
 import type { BroadcastDataArgs, BroadcastEventsFor, SentBroadcast } from "./types";
+import { socketTag } from "./socketTag";
 import { encodeEventFrame, isSocketId, SOCKET_ID_HEADER } from "./wire";
 
 /** An emit whose frame is bigger than `maxEventBytes`. Nothing was sent. */
@@ -71,6 +77,7 @@ export class BroadcastManager {
   readonly driver: BroadcastDriver;
   private readonly warnedAboutSize = new Set<string>();
   private started = false;
+  private hooks: BroadcastDriverHooks | undefined;
   private channelRouter: ChannelRouter | null | undefined;
 
   constructor(
@@ -156,7 +163,9 @@ export class BroadcastManager {
     assertEventName(event);
     let frame: string;
     try {
-      frame = encodeEventFrame(target.topic, event, data, except);
+      // The frame names the skipped socket by its tag, never its id: see
+      // `socketTag`.
+      frame = encodeEventFrame(target.topic, event, data, except ? socketTag(except) : null);
     } catch (cause) {
       throw new TypeError(`The broadcast "${event}" could not be encoded. Payloads must be JSON.`, {
         cause,
@@ -215,11 +224,13 @@ export class BroadcastManager {
       throw new Error("The broadcast driver was already started in this process.");
     }
     this.started = true;
+    this.hooks = hooks;
     try {
       await this.driver.start(deliver, hooks);
     } catch (error) {
       // So the transport can try again.
       this.started = false;
+      this.hooks = undefined;
       throw error;
     }
   }
@@ -236,7 +247,46 @@ export class BroadcastManager {
 
   async close(): Promise<void> {
     this.started = false;
+    this.hooks = undefined;
     await this.driver.close();
+  }
+
+  /**
+   * Closes subscriptions that may no longer be allowed: every socket of a
+   * user (`{ user }`: its sockets are closed, and its client reconnects and
+   * authorizes every channel again), or every subscription to a channel
+   * (`{ channel }`, a pattern with `params` or a topic: each is told
+   * `denied` with `revoked`). Sign-out calls it for the user.
+   *
+   * Inside an ORM transaction it waits for the commit, so the
+   * resubscriptions it causes are authorized against the committed state.
+   * Never throws for a transport problem; a bad channel throws at the call
+   * site.
+   */
+  revoke(
+    target:
+      | { user: { id: unknown } | string | number }
+      | { channel: string | ChannelTarget; params?: Record<string, unknown> },
+  ): void {
+    const revocation = toRevocation(target);
+    void afterCommit(() => this.sendRevocation(revocation));
+  }
+
+  protected sendRevocation(revocation: BroadcastRevocation): void {
+    const failed = (error: unknown) =>
+      console.error(`[gemi] A broadcast revocation could not be sent.`, error);
+    try {
+      if (typeof this.driver.revoke === "function") {
+        const result = this.driver.revoke(revocation);
+        if (result && typeof (result as Promise<void>).catch === "function") {
+          (result as Promise<void>).catch(failed);
+        }
+        return;
+      }
+      this.hooks?.onRevoke?.(revocation);
+    } catch (error) {
+      failed(error);
+    }
   }
 
   private checkSize(event: string, frame: string) {
@@ -316,6 +366,22 @@ function resolveTarget(
     );
   }
   return { topic: assertTopic(pattern) };
+}
+
+function toRevocation(
+  target:
+    | { user: { id: unknown } | string | number }
+    | { channel: string | ChannelTarget; params?: Record<string, unknown> },
+): BroadcastRevocation {
+  if (target && typeof target === "object" && "user" in target) {
+    // `userTopic` checks the id the way a `user.<id>` topic needs it.
+    const topic = userTopic(target.user);
+    return { user: topic.slice(USER_CHANNEL.length + 1) };
+  }
+  if (target && typeof target === "object" && "channel" in target) {
+    return { topic: resolveTarget(target.channel, target.params).topic };
+  }
+  throw new InvalidChannelError("Broadcast.revoke takes { user } or { channel }.");
 }
 
 function socketIdOf(source: SocketSource): string | null {

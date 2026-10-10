@@ -1,6 +1,13 @@
 import type { Kernel } from "../kernel";
 import type { CarriedContext } from "../http/requestContext";
 import { isApiPath } from "../services/router/apiPath";
+import type { SocketHub } from "../services/broadcast/SocketHub";
+
+/** What the servers use of the broadcast `SocketHub`. */
+export type SocketTransport = Pick<
+  SocketHub,
+  "matches" | "upgrade" | "websocket" | "socketOptions" | "start" | "shutdown"
+>;
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -63,6 +70,15 @@ export class App {
       return [];
     }
     return domains.acceptsCustomDomains ? true : [`.${domains.resolver.root}`];
+  }
+
+  /**
+   * The broadcast WebSocket endpoint the servers wire into `Bun.serve`, or
+   * `null` when the app has no `route.channels`. Typed structurally: the hub
+   * belongs to the app's copy of gemi (see the note above).
+   */
+  public sockets(): SocketTransport | null {
+    return this.kernel.sockets.call(this.kernel);
   }
 
   public getRouteManifest() {

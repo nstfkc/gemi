@@ -1,5 +1,6 @@
 import { usePost } from "../useMutation";
 import { useFrameworkQuery } from "../useQuery";
+import { reconnectRealtime } from "../realtime/RealtimeClient";
 
 interface UseSignInArgs {
   onSuccess?: (data: any) => void;
@@ -21,6 +22,8 @@ export function useSignIn(args: UseSignInArgs = defaultArgs) {
       onSuccess: (user) => {
         args.onSuccess(user);
         mutate(user as any);
+        // The socket was opened as a guest: authorize its channels as the user.
+        reconnectRealtime();
       },
     },
   );

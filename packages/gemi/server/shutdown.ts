@@ -128,6 +128,8 @@ export type Stoppable = {
  * 2. After `delayMs`, the listener closes (`server.stop()` without force):
  *    new connections are refused, while every request in flight — a streamed
  *    response included, to its last chunk — runs to completion.
+ *    Broadcast sockets are told `bye` and closed (`closeSockets`): a graceful
+ *    stop waits for open WebSockets, which never close on their own.
  * 3. That completion is awaited until `timeoutMs` from the start.
  * 4. From here a request is refused with a `503` before it reaches the app
  *    (`serveForShutdown`), and every provider's `shutdown()` runs, reverse
@@ -155,6 +157,13 @@ export type Stoppable = {
  */
 export async function drain(params: {
   server: Stoppable | undefined;
+  /**
+   * Says `bye` to the broadcast sockets and closes them, right after the
+   * listener closes, and resolves once they are closed or cut. A graceful
+   * `stop()` waits for open WebSockets, which otherwise never close on their
+   * own.
+   */
+  closeSockets?: () => void | Promise<void>;
   shutdownProviders: (options: { timeoutMs: number }) => Promise<ShutdownReport>;
   settings: ShutdownSettings;
 }): Promise<number> {
@@ -172,14 +181,28 @@ export async function drain(params: {
       await sleep(Math.min(settings.delayMs, deadline - Date.now()));
     }
     const stopped = server.stop();
+    let socketsClosed: Promise<unknown> = Promise.resolve();
+    try {
+      socketsClosed = Promise.resolve(params.closeSockets?.()).catch(() => {});
+    } catch (error) {
+      console.error("[gemi] Closing the broadcast sockets failed:", error);
+    }
     // No time left to wait — a `GEMI_SHUTDOWN_TIMEOUT` of 0, or a delay that
     // spent all of it — is "do not wait for what is in flight", and that is
     // only a failure when something *is* in flight. Reading it as one made
     // every clean shutdown log an abandonment and exit 1 for the operator who
     // zeroed the budget to fit a 5s grace period, with nothing to abandon.
     const remaining = deadline - Date.now();
+    // With broadcast sockets, the stop's own promise has been seen to stay
+    // pending for good after every request finished and every socket was
+    // closed or terminated (Bun 1.4.2 on a loaded Linux CI runner, with its
+    // `pendingWebSockets` stuck above 0). So the drain also ends on its real
+    // condition: no request in flight, and the hub's sockets closed or cut.
+    const done = params.closeSockets
+      ? Promise.race([stopped, Promise.all([socketsClosed, noRequestInFlight(server)])])
+      : stopped;
     drained =
-      remaining > 0 ? await settlesWithin(stopped, remaining) : server.pendingRequests === 0;
+      remaining > 0 ? await settlesWithin(done, remaining) : server.pendingRequests === 0;
     if (!drained) {
       console.error(
         `[gemi] Shutdown grace period elapsed with ${server.pendingRequests} request(s) still in flight; abandoning them.`,
@@ -196,6 +219,24 @@ export async function drain(params: {
   const clean = drained && report.failed.length === 0 && report.timedOut.length === 0;
   console.log(`[gemi] Shutdown ${clean ? "complete" : "finished with errors"}.`);
   return clean ? 0 : 1;
+}
+
+/**
+ * Resolves once `server` has no request in flight. A streamed response counts
+ * until its last chunk (measured on Bun 1.4, macOS and Linux).
+ */
+function noRequestInFlight(server: Stoppable): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (server.pendingRequests === 0) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(check, 50);
+      (timer as { unref?: () => void }).unref?.();
+    };
+    check();
+  });
 }
 
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {

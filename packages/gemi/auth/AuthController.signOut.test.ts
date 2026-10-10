@@ -50,7 +50,12 @@ const auth = {
     domain: undefined,
   }),
   cookieDomain: () => undefined,
+  // The container, as far as sign-out's `Broadcast.revoke` reaches it.
+  bound: (token: unknown) => token === BroadcastManager,
+  make: () => broadcast,
 };
+
+const broadcast = { revoke: vi.fn() };
 
 vi.mock("../foundation/app", () => ({ app: () => auth }));
 vi.mock("../facades", () => ({
@@ -64,6 +69,7 @@ vi.mock("../facades", () => ({
 }));
 
 const { AuthController } = await import("./AuthController");
+const { BroadcastManager } = await import("../services/broadcast/BroadcastManager");
 const { AuthManager } = await import("./AuthManager");
 
 async function signOut(headers: Record<string, string>) {
@@ -142,6 +148,18 @@ describe("signing out", () => {
     expect(written(cookies)).toEqual([""]);
     expect(result).toEqual({});
     expect(onSignOut).not.toHaveBeenCalled();
+  });
+
+  test("closes the user's broadcast sockets, so every channel is authorized again", async () => {
+    await signOut({ Cookie: "access_token=v2.abc" });
+
+    expect(broadcast.revoke).toHaveBeenCalledWith({ user: { id: 1 } });
+  });
+
+  test("revokes no sockets when there was no session", async () => {
+    await signOut({});
+
+    expect(broadcast.revoke).not.toHaveBeenCalled();
   });
 
   test("does not go through getSession, whose slide would write the cookie back", async () => {

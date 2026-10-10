@@ -6,6 +6,8 @@ import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import { mutationErrorFromBody, type MutationError } from "./MutationError";
+import { currentSocketId } from "./realtime/RealtimeClient";
+import { SOCKET_ID_HEADER } from "../services/broadcast/protocol";
 
 type Methods = {
   POST: {
@@ -252,6 +254,7 @@ export function useMutation<
         method,
         headers: {
           ...contentType,
+          ...socketIdHeader(),
         },
         ...(body ? { body } : {}),
         signal: controller.signal,
@@ -562,4 +565,13 @@ export function useUpload<
     trigger,
     cancel,
   };
+}
+
+/**
+ * `X-Gemi-Socket` with this tab's broadcast socket id, while one is open, so
+ * a controller's `Broadcast.toOthers(req)` skips the tab that made the change.
+ */
+function socketIdHeader(): Record<string, string> {
+  const id = currentSocketId();
+  return id ? { [SOCKET_ID_HEADER]: id } : {};
 }

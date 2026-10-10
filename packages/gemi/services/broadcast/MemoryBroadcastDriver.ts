@@ -1,4 +1,9 @@
-import type { BroadcastDeliver, BroadcastDriver } from "./BroadcastDriver";
+import type {
+  BroadcastDeliver,
+  BroadcastDriver,
+  BroadcastDriverHooks,
+  BroadcastRevocation,
+} from "./BroadcastDriver";
 
 /**
  * The default driver: an emit reaches the sockets of **this process only**.
@@ -13,6 +18,7 @@ import type { BroadcastDeliver, BroadcastDriver } from "./BroadcastDriver";
  */
 export class MemoryBroadcastDriver implements BroadcastDriver {
   private deliver: BroadcastDeliver | null = null;
+  private hooks: BroadcastDriverHooks | undefined;
 
   /** Whether the transport has started this driver. */
   get started(): boolean {
@@ -23,11 +29,17 @@ export class MemoryBroadcastDriver implements BroadcastDriver {
     this.deliver?.(topic, frame);
   }
 
-  start(deliver: BroadcastDeliver): void {
+  start(deliver: BroadcastDeliver, hooks?: BroadcastDriverHooks): void {
     this.deliver = deliver;
+    this.hooks = hooks;
+  }
+
+  revoke(revocation: BroadcastRevocation): void {
+    this.hooks?.onRevoke?.(revocation);
   }
 
   close(): void {
     this.deliver = null;
+    this.hooks = undefined;
   }
 }

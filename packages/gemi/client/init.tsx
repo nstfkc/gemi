@@ -10,6 +10,7 @@ import {
   recoverFromChunkLoadError,
   type ChunkLoadRecoveryOptions,
 } from "./chunkLoadRecovery";
+import { configureRealtime, type RealtimeOptions } from "./realtime/RealtimeClient";
 
 export interface InitOptions {
   /**
@@ -26,6 +27,13 @@ export interface InitOptions {
    * boundary. See `recoverFromChunkLoadError`.
    */
   chunkLoadRecovery?: ChunkLoadRecoveryOptions | false;
+  /**
+   * The broadcast socket the channel hooks use: `path` (match
+   * `defineBroadcastConfig({ path })`, default `/__gemi/socket`) and
+   * `hiddenDisconnectMs` (how long a hidden tab keeps its socket, default
+   * 60 000).
+   */
+  realtime?: RealtimeOptions;
 }
 
 /**
@@ -66,6 +74,7 @@ export function init(
   options: InitOptions = {},
 ) {
   configureChunkLoadRecovery(options.chunkLoadRecovery);
+  if (options.realtime) configureRealtime(options.realtime);
   if (typeof window !== "undefined" && options.chunkLoadRecovery !== false) {
     installPreloadErrorRecovery();
   }

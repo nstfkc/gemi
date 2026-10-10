@@ -57,7 +57,9 @@ vi.mock("./devFetch", () => ({
 
 vi.mock("./banner", () => ({ printStartupBanner: vi.fn() }));
 
-const app = { devAllowedHosts: () => true } as any;
+// `sockets` is the broadcast endpoint: none unless a test sets one.
+let sockets: any = null;
+const app = { devAllowedHosts: () => true, sockets: () => sockets } as any;
 const instrumentation = {} as any;
 
 async function startDev() {
@@ -86,6 +88,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  sockets = null;
   vi.restoreAllMocks();
   delete (globalThis as any).__gemiVite;
   if (originalPort === undefined) delete process.env.PORT;
@@ -259,5 +262,76 @@ describe("httpDev's HMR websocket behind a proxy", () => {
 
     expect(await res.text()).toBe("ok");
     expect(upgradeHmr).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The broadcast socket endpoint (#874) shares the dev server's port, and
+ * Bun's one `websocket` handler, with the HMR relay.
+ */
+describe("httpDev's broadcast sockets", () => {
+  function fakeTransport() {
+    const handler = { open: vi.fn(), message: vi.fn(), close: vi.fn() };
+    return {
+      handler,
+      matches: (req: Request) => new URL(req.url).pathname === "/__gemi/socket",
+      upgrade: vi.fn(async () => undefined),
+      websocket: handler,
+      socketOptions: () => ({ idleTimeout: 120, sendPings: true }),
+      start: vi.fn(async () => {}),
+      shutdown: vi.fn(),
+    };
+  }
+
+  test("the endpoint is upgraded by the hub, and HMR is still relayed", async () => {
+    delete process.env.PORT;
+    sockets = fakeTransport();
+    await startDev();
+    const { fetch, websocket, idleTimeout } = servedOptions[0];
+    const server = { upgrade: vi.fn() };
+
+    const socketReq = new Request("http://localhost:5173/__gemi/socket", {
+      headers: { upgrade: "websocket", "sec-websocket-protocol": "gemi.v1" },
+    });
+    expect(await fetch(socketReq, server)).toBeUndefined();
+    expect(sockets.upgrade).toHaveBeenCalledWith(socketReq, server);
+    expect(sockets.start).toHaveBeenCalledTimes(1);
+
+    const hmrReq = new Request("http://localhost:5173/", {
+      headers: { upgrade: "websocket", "sec-websocket-protocol": "vite-hmr" },
+    });
+    await fetch(hmrReq, server);
+    expect(upgradeHmr).toHaveBeenCalledWith(hmrReq, server, 15_173);
+
+    // The HTTP idle timeout is untouched; the socket settings are the hub's.
+    expect(idleTimeout).toBe(10);
+    expect(websocket.sendPings).toBe(true);
+  });
+
+  test("each socket goes to its own handler", async () => {
+    delete process.env.PORT;
+    sockets = fakeTransport();
+    await startDev();
+    const { websocket } = servedOptions[0];
+
+    const broadcastSocket = { data: { gemiSocket: true } } as any;
+    websocket.open(broadcastSocket);
+    websocket.message(broadcastSocket, '{"op":"ping"}');
+    websocket.close(broadcastSocket, 1000, "");
+    expect(sockets.handler.open).toHaveBeenCalledWith(broadcastSocket);
+    expect(sockets.handler.message).toHaveBeenCalledWith(broadcastSocket, '{"op":"ping"}');
+    expect(sockets.handler.close).toHaveBeenCalledWith(broadcastSocket, 1000, "");
+
+    // An HMR relay socket: its upstream is already closed, so the relay's own
+    // `open` closes the browser's side, which the hub never sees.
+    const close = vi.fn();
+    const hmrSocket = {
+      data: { upstream: { readyState: 3, close: vi.fn() }, early: [] },
+      close,
+      send: vi.fn(),
+    } as any;
+    websocket.open(hmrSocket);
+    expect(close).toHaveBeenCalledWith(1000);
+    expect(sockets.handler.open).toHaveBeenCalledTimes(1);
   });
 });

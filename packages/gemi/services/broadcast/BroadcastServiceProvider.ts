@@ -2,6 +2,7 @@ import { assertChannelPatterns, type ChannelRouterClass } from "../../http/Chann
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { BroadcastManager } from "./BroadcastManager";
 import type { BroadcastConfig } from "./config";
+import { SocketHub } from "./SocketHub";
 
 export class BroadcastServiceProvider extends ServiceProvider {
   register() {
@@ -13,6 +14,9 @@ export class BroadcastServiceProvider extends ServiceProvider {
           channels: this.app.config.get<ChannelRouterClass | undefined>("route.channels"),
         }),
     );
+    // The WebSocket transport, built by the HTTP server (`Kernel.sockets()`)
+    // when the app declares `route.channels`.
+    this.app.singleton(SocketHub, () => new SocketHub(this.app.make(BroadcastManager), this.app));
   }
 
   /**
@@ -24,8 +28,13 @@ export class BroadcastServiceProvider extends ServiceProvider {
     if (Channels) assertChannelPatterns(new Channels());
   }
 
-  /** Stops receiving and closes the driver's connections. */
+  /**
+   * Says `bye` to the sockets (the server's drain did already, in
+   * production; a dev reload retiring this application did not), then stops
+   * receiving and closes the driver's connections.
+   */
   async shutdown() {
+    if (this.app.resolved(SocketHub)) this.app.make(SocketHub).shutdown();
     if (!this.app.resolved(BroadcastManager)) return;
     await this.app.make(BroadcastManager).close();
   }

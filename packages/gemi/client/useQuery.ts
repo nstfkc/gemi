@@ -28,6 +28,8 @@ import {
   type RetryDelayOption,
   type RetryOption,
 } from "./retryPolicy";
+import { resolveLiveChannel, type LiveChannel } from "./useChannel";
+import { useChannelSubscription, useCoalesced } from "./realtime/useChannelSubscription";
 
 /**
  * A DOM event or React's synthetic one. Never a plain object, so a cached
@@ -105,6 +107,18 @@ export interface Config<T> {
    */
   suspense?: boolean;
   refetchUntil?: (data: T, duration: number) => number;
+  /**
+   * A broadcast channel that keeps this query fresh: its events and resyncs
+   * refetch the query (every cached variant; the rendered ones now). While
+   * the channel is open, `refetchUntil` and `refreshInterval` are paused;
+   * while it is not (connecting, denied, offline, on the server), they run
+   * as the fallback.
+   *
+   * ```ts
+   * useQuery("/site-imports/:importId", { params }, { refetchUntil: (d) => (d.active ? 2000 : 0), live: "user" });
+   * ```
+   */
+  live?: LiveChannel;
 }
 
 type WithOptionalValues<T> = {
@@ -317,6 +331,25 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   const configRef = useRef(config);
   configRef.current = config;
 
+  // `live`: the channel's events and resyncs refetch every cached variant of
+  // this path (the rendered ones now), and polling pauses while it is open.
+  const liveChannel = resolveLiveChannel(config.live);
+  const liveResourceRef = useRef(resource);
+  liveResourceRef.current = resource;
+  const refreshLive = useCallback(() => {
+    const target = liveResourceRef.current;
+    for (const key of target.variantKeys()) target.invalidate(key);
+  }, []);
+  const refreshLiveOnEvent = useCoalesced(refreshLive);
+  const liveState = useChannelSubscription(
+    liveChannel?.pattern ?? null,
+    liveChannel?.params ?? {},
+    // A burst of events is one refetch (see `useCoalesced`).
+    { onEvent: refreshLiveOnEvent, onResync: refreshLive },
+    liveChannel !== null,
+  );
+  const liveOpen = liveState.status === "open";
+
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
@@ -508,7 +541,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
 
   useEffect(() => {
     const cfg = configRef.current;
-    if (!cfg.refetchUntil) return;
+    if (!cfg.refetchUntil || liveOpen) return;
     if (snapshot && !snapshot.loading && snapshot.hasData && !snapshot.error) {
       const nextDuration = cfg.refetchUntil(
         snapshot.data,
@@ -528,7 +561,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
         clearTimeout(refetchUntilTimerRef.current);
       }
     };
-  }, [snapshot, resource, variantKey]);
+  }, [snapshot, resource, variantKey, liveOpen]);
 
   const handleReload = useCallback(() => {
     if (configRef.current.debug) {
@@ -542,7 +575,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   }, [variantKey, resource]);
 
   useEffect(() => {
-    if (!fetchedRef.current) return;
+    if (!fetchedRef.current || liveOpen) return;
     refreshIntervalRef.current = setInterval(() => {
       handleReload();
     }, config.refreshInterval);
@@ -552,7 +585,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
         clearInterval(refreshIntervalRef.current);
       }
     };
-  }, [config.refreshInterval, handleReload]);
+  }, [config.refreshInterval, handleReload, liveOpen]);
 
   // Revalidate when the tab comes back to the foreground — opt-in via
   // `revalidateOnFocus` (per call or app-wide). `resource.revalidate` applies

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { WebSocketHandler } from "bun";
 import { join, resolve, sep } from "node:path";
 import { compressResponse } from "./compression";
 import { listPublicFiles, staticFileResponse } from "./staticFile";
@@ -313,12 +314,25 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // before `Bun.serve` so a bad value fails the boot, not every request.
   const forwardedTrust = parseTrustProxy(process.env.GEMI_TRUST_PROXY);
 
-  const server = Bun.serve({
+  // The broadcast socket endpoint, when the app declares `route.channels`.
+  const sockets = app.sockets();
+  if (sockets && forwardedTrust.kind === "none") {
+    console.warn(
+      "[gemi] Broadcast sockets: GEMI_TRUST_PROXY is not set, so a socket's address is its TCP peer. Behind a proxy or load balancer every client shares the proxy's address, and broadcast.maxConnectionsPerIp caps the whole app per process. Set GEMI_TRUST_PROXY (see forwardedFor) or raise that limit.",
+    );
+  }
+
+  const server = Bun.serve<any>({
     maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
     fetch: async (req, server) => {
       // `requestIP` is null for closed/unix sockets — guard so it never
       // throws before the request is handled.
       applyForwardedTrust(req.headers, server.requestIP(req)?.address ?? null, forwardedTrust);
+      // Ahead of the instrumentation: an upgrade is not a response to trace,
+      // and the hub runs the global middleware itself.
+      if (sockets?.matches(req)) {
+        return sockets.upgrade(req, server);
+      }
       // The app's global middleware goes in front of the static handler as well
       // as the router, so it can refuse `/assets/*` too.
       const res = await instrumentation(req, (req) =>
@@ -334,7 +348,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     },
     idleTimeout: serverIdleTimeout(),
     port: process.env.PORT || 5173,
+    websocket: sockets?.websocket as WebSocketHandler<any>,
   });
+  await sockets?.start(server);
 
   printStartupBanner({ port: server.port, rootDir });
 
