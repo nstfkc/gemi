@@ -1,6 +1,8 @@
 import { assertChannelPatterns, type ChannelRouterClass } from "../../http/ChannelRouter";
 import { ServiceProvider } from "../../support/ServiceProvider";
+import type { BroadcastDriver } from "./BroadcastDriver";
 import { BroadcastManager } from "./BroadcastManager";
+import { RedisBroadcastDriver } from "./RedisBroadcastDriver";
 import type { BroadcastConfig } from "./config";
 import { SocketHub } from "./SocketHub";
 
@@ -26,7 +28,14 @@ export class BroadcastServiceProvider extends ServiceProvider {
   boot() {
     const Channels = this.app.config.get<ChannelRouterClass | undefined>("route.channels");
     if (Channels) assertChannelPatterns(new Channels());
-    assertSharedSecret(this.app.config.get<BroadcastConfig>("broadcast", {}));
+    const config = this.app.config.get<BroadcastConfig>("broadcast", {});
+    // A driver the app builds (an instance, or a factory) may be the redis
+    // one too: build the manager to see. A name needs no manager.
+    const built =
+      typeof config.driver === "function" || typeof config.driver === "object"
+        ? this.app.make(BroadcastManager).driver
+        : undefined;
+    assertSharedSecret(config, process.env, built);
   }
 
   /**
@@ -51,8 +60,10 @@ export class BroadcastServiceProvider extends ServiceProvider {
 export function assertSharedSecret(
   config: BroadcastConfig,
   env: Record<string, string | undefined> = process.env,
+  driver?: BroadcastDriver,
 ): void {
-  if (config.driver !== "redis" || env.SECRET) return;
+  const redis = config.driver === "redis" || driver instanceof RedisBroadcastDriver;
+  if (!redis || env.SECRET) return;
   const message =
     `[gemi] The "redis" broadcast driver needs SECRET set, the same on every ` +
     `instance: Broadcast.toOthers tags the sender's socket with a key derived ` +

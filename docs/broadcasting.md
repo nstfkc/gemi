@@ -269,7 +269,7 @@ import { defineBroadcastConfig } from "gemi/services";
 
 export default defineBroadcastConfig({
   driver: "memory", // or "redis" for several instances or a queue worker; see Drivers
-  redis: { prefix: "gemi:bc:" }, // the "redis" driver's settings; see Drivers
+  redis: {}, // the "redis" driver's settings; see Drivers
   maxEventBytes: 16 * 1024,
   warnEventBytes: 4 * 1024,
   path: "/__gemi/socket",
@@ -303,7 +303,7 @@ The driver decides which processes see an emit. Delivery to sockets always happe
 export default defineBroadcastConfig({
   driver: "redis",
   redis: {
-    prefix: "gemi:bc:", // the Redis channel names; give each app sharing a Redis its own
+    // prefix: "myapp:prod:", // the Redis channel names; default derived from SECRET (see below)
     // url: "redis://bus:6379", // defaults to app/config/redis.ts, then REDIS_URL
     // options: { tls: true },  // Bun RedisClient options; default from app/config/redis.ts
     subscribeTimeoutMs: 5_000, // how long a first subscription may wait for Redis
@@ -318,11 +318,12 @@ The connection is the app's own Redis (`app/config/redis.ts`, else `REDIS_URL`) 
 
 How it works:
 
+- **Channel names.** Every topic is `<prefix><topic>`. The default prefix is `gemi:bc:<8 hex>:`, the hex derived from `SECRET` (never the secret itself): the instances of one app share it, and another app or environment on the same Redis, with another `SECRET`, does not see its events or revocations. Set `prefix` to choose it yourself; every instance must use the same one.
 - **Publishing.** Every emit is `PUBLISH`ed on `<prefix><topic>`. A process opens its publisher connection on its first emit, so a worker that never emits opens none.
 - **Receiving.** A process that serves sockets keeps one subscriber connection. It subscribes to a topic when the first of its sockets joins it, and unsubscribes when the last one leaves, so it only receives the topics it has sockets on. A subscription is acknowledged (`subscribed`) only once Redis has confirmed it, so the resync that follows cannot miss an event. If Redis does not answer within `subscribeTimeoutMs`, the `sub` is refused with `error`, which the client retries.
 - **One delivery path.** Every process delivers what it receives back from Redis, the emitting process included, so nothing is delivered twice and an emit is ordered the same everywhere.
-- **Reconnects.** When the subscriber connection drops (or stops answering pings), gemi opens a new one with backoff, subscribes every topic again and sends every socket of that process `{ op: "gap" }`: their clients resync. Events published in between are lost, which the resync covers. While Redis is down, emits fail (logged, never thrown at the call site) and the server keeps serving; it does not wait for Redis to boot.
-- **Revocations** travel on `<prefix>__control` (a name no channel can have) to every process. The process that calls `Broadcast.revoke` applies it to its own sockets at once, even when Redis is down. An instance whose subscriber is disconnected at that moment misses it: its sockets keep receiving hints on the channel until they reconnect, though everything they fetch over HTTP is authorized as usual.
+- **Reconnects.** When the subscriber connection drops (or stops answering pings), gemi opens a new one with backoff, subscribes every topic again and sends every socket of that process `{ op: "gap" }`: their clients resync. Events published in between are lost, which the resync covers. While Redis is down, the server keeps serving, and does not wait for Redis to boot. Emits made while the publisher is reconnecting are queued by Bun's client and sent once it is back; after it gives up (about 30 seconds), they fail, logged and never thrown at the call site, and the next emit opens a new connection. A failed publish is retried once on a new connection.
+- **Revocations** travel on `<prefix>__control` (a name no channel can have) to every process. The process that calls `Broadcast.revoke` applies it to its own sockets at once, even when Redis is down. An instance whose subscriber was reconnecting may have missed one, so after every `gap` it **authorizes every subscription again**, as `revoke({ channel })` does, spread over 2 seconds: a subscription the missed revocation ended (a signed-out session, a removed member) is denied with `revoked`. A `revoke({ user })` missed this way ends the user's channels rather than closing the socket.
 
 Payloads pass through Redis in clear text: use TLS (`rediss://`) to a Redis outside your private network, and keep payloads to ids and change hints.
 

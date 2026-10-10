@@ -6,7 +6,11 @@ import type { BroadcastRevocation } from "./BroadcastDriver";
 import { BroadcastManager } from "./BroadcastManager";
 import { assertSharedSecret } from "./BroadcastServiceProvider";
 import { MemoryBroadcastDriver } from "./MemoryBroadcastDriver";
-import { RedisBroadcastDriver, type RedisPubSubClient } from "./RedisBroadcastDriver";
+import {
+  defaultBroadcastPrefix,
+  RedisBroadcastDriver,
+  type RedisPubSubClient,
+} from "./RedisBroadcastDriver";
 import { memoryBroadcastInWorker } from "./workerWarning";
 
 /**
@@ -20,6 +24,10 @@ class FakeRedisServer {
   up = true;
   /** Pings go unanswered while set. */
   deaf = false;
+  /** UNSUBSCRIBEs go unanswered while set. */
+  hangUnsubscribe = false;
+  /** Fails this many PUBLISHes ("Connection has failed"), as Bun's client that gave up does. */
+  failPublishes = 0;
   /** Every SUBSCRIBE/UNSUBSCRIBE, in order, as "+chan" / "-chan". */
   readonly log: string[] = [];
 
@@ -79,6 +87,10 @@ class FakeClient implements RedisPubSubClient {
 
   async publish(channel: string, message: string) {
     await this.ensure();
+    if (this.server.failPublishes > 0) {
+      this.server.failPublishes--;
+      throw new Error("Connection has failed");
+    }
     return this.server.publish(channel, message);
   }
 
@@ -93,6 +105,7 @@ class FakeClient implements RedisPubSubClient {
 
   async unsubscribe(channel: string) {
     await this.ensure();
+    if (this.server.hangUnsubscribe) return new Promise<never>(() => {});
     this.server.log.push(`-${channel}`);
     this.subs.delete(channel);
   }
@@ -136,6 +149,7 @@ const drivers: RedisBroadcastDriver[] = [];
 function instance(server: FakeRedisServer, options: { healthCheckMs?: number } = {}) {
   const driver = new RedisBroadcastDriver({
     createClient: server.client,
+    prefix: "gemi:bc:",
     subscribeTimeoutMs: 200,
     healthCheckMs: options.healthCheckMs ?? 0,
   });
@@ -340,6 +354,62 @@ describe("RedisBroadcastDriver", () => {
     expect(a.delivered.map(([, frame]) => frame)).toEqual(["1"]);
   });
 
+  test("a revocation whose publish fails once is sent again on a new publisher", async () => {
+    const server = new FakeRedisServer();
+    const a = instance(server);
+    const b = instance(server);
+    await Promise.all([a.start(), b.start()]);
+    server.failPublishes = 1;
+    await a.driver.revoke({ user: "9" });
+    await tick();
+    expect(b.revoked).toEqual([{ user: "9" }]);
+  });
+
+  test("a revocation that cannot be published rejects, naming it", async () => {
+    const server = new FakeRedisServer();
+    const a = instance(server);
+    await a.start();
+    server.failPublishes = 2;
+    await expect(a.driver.revoke({ topic: "site.1" })).rejects.toThrow(/"topic":"site.1"/);
+    // Applied here regardless.
+    expect(a.revoked).toEqual([{ topic: "site.1" }]);
+  });
+
+  test("an UNSUBSCRIBE that hangs drops the connection, so no listener is doubled", async () => {
+    const server = new FakeRedisServer();
+    const a = instance(server);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await a.start();
+    await a.driver.topicAdded("t");
+    server.hangUnsubscribe = true;
+    await expect(a.driver.topicRemoved("t")).rejects.toThrow(/unsubscribe timed out/);
+    server.hangUnsubscribe = false;
+    await until(() => a.driver.connected);
+    await a.driver.topicAdded("t");
+    expect(server.subscribers("gemi:bc:t")).toBe(1);
+    await a.driver.publish("t", "once");
+    await tick();
+    expect(a.delivered).toEqual([["t", "once"]]);
+  });
+
+  test("the default prefix is derived from SECRET, never the secret itself", () => {
+    const prefix = defaultBroadcastPrefix("app-one-secret");
+    expect(prefix).toMatch(/^gemi:bc:[0-9a-f]{8}:$/);
+    expect(prefix).not.toContain("app-one-secret");
+    expect(defaultBroadcastPrefix("app-one-secret")).toBe(prefix);
+    expect(defaultBroadcastPrefix("app-two-secret")).not.toBe(prefix);
+    expect(defaultBroadcastPrefix(undefined)).toBe("gemi:bc:");
+    const previous = process.env.SECRET;
+    process.env.SECRET = "app-one-secret";
+    try {
+      expect(new RedisBroadcastDriver({}).prefix).toBe(prefix);
+      expect(new RedisBroadcastDriver({ prefix: "mine:" }).prefix).toBe("mine:");
+    } finally {
+      if (previous === undefined) delete process.env.SECRET;
+      else process.env.SECRET = previous;
+    }
+  });
+
   test("the prefix names the channels", async () => {
     const server = new FakeRedisServer();
     const driver = new RedisBroadcastDriver({ createClient: server.client, prefix: "app2:" });
@@ -386,6 +456,11 @@ describe("configuration", () => {
     expect(warn).toHaveBeenCalledTimes(1);
     assertSharedSecret({ driver: "memory" }, { NODE_ENV: "production" });
     expect(warn).toHaveBeenCalledTimes(1);
+    // A driver the app built itself is checked by what it is.
+    const built = new RedisBroadcastDriver({ prefix: "x:" });
+    expect(() =>
+      assertSharedSecret({ driver: () => built }, { NODE_ENV: "production" }, built),
+    ).toThrow(/needs SECRET/);
   });
 
   test("queue:work warns about the memory driver only when the app declares channels", () => {

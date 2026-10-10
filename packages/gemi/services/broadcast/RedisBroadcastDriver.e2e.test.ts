@@ -256,6 +256,35 @@ function suite(redisUrl: string) {
       await quiet(alice, "ev");
     });
 
+    test("a revocation missed while a subscriber reconnects is caught by re-authorizing after the gap", async () => {
+      await post(b, "/members", { member: "3:t9", add: true });
+      await post(b, "/members", { member: "4:t9", add: true });
+      const carol = await connect(b, 3);
+      const dave = await connect(b, 4);
+      await subscribe(carol, "team", "team.:teamId", { teamId: "t9" });
+      await subscribe(dave, "team", "team.:teamId", { teamId: "t9" });
+      await post(b, "/members", { member: "3:t9", add: false });
+
+      const admin = new Bun.RedisClient(redisUrl);
+      try {
+        // b's subscriber is gone while a revokes: b never sees the revocation.
+        await admin.send("CLIENT", ["KILL", "TYPE", "pubsub"]);
+      } finally {
+        admin.close();
+      }
+      await post(a, "/revoke", { channel: "team.:teamId", params: { teamId: "t9" } });
+
+      expect(await carol.next("gap", undefined, 10_000)).toEqual({ op: "gap" });
+      expect(await carol.next("denied", undefined, 10_000)).toMatchObject({
+        id: "team",
+        code: "revoked",
+      });
+      // Dave is still a member: authorized again, and keeps receiving.
+      await dave.next("subscribed", (frame) => frame.id === "team", 10_000);
+      await post(a, "/emit", { channel: "team.:teamId", params: { teamId: "t9" }, event: "y" });
+      expect(await dave.next("ev")).toMatchObject({ t: "team.t9", ev: "y" });
+    }, 30_000);
+
     test("a dropped subscriber connection reconnects and sends its sockets a gap", async () => {
       const onA = await connect(a);
       await subscribe(onA, "s", "status");

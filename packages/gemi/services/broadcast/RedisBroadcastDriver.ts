@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { hkdfSync, randomBytes } from "node:crypto";
 import type { RedisOptions } from "bun";
 
 import type {
@@ -28,7 +28,12 @@ export interface RedisBroadcastDriverOptions {
   url?: string;
   /** Bun `RedisClient` options. Defaults to `app/config/redis.ts`'s `options`. */
   options?: RedisOptions;
-  /** Prepended to every topic to name its Redis channel. Default `"gemi:bc:"`. */
+  /**
+   * Prepended to every topic to name its Redis channel. Default:
+   * `gemi:bc:<8 hex characters derived from SECRET>:`, so instances of one
+   * app share channels and other apps or environments on the same Redis
+   * (which have another `SECRET`) do not. `"gemi:bc:"` without `SECRET`.
+   */
   prefix?: string;
   /**
    * How long a first socket's subscription may wait for Redis before it is
@@ -55,7 +60,15 @@ interface ControlMessage {
   r: BroadcastRevocation;
 }
 
-const DEFAULT_PREFIX = "gemi:bc:";
+/**
+ * The default channel prefix: `gemi:bc:<8 hex>:`, the hex derived from
+ * `secret` with HKDF, never the secret itself. `"gemi:bc:"` without one.
+ */
+export function defaultBroadcastPrefix(secret: string | undefined = process.env.SECRET): string {
+  if (!secret) return "gemi:bc:";
+  const key = Buffer.from(hkdfSync("sha256", secret, "gemi", "gemi.broadcast.prefix", 4));
+  return `gemi:bc:${key.toString("hex")}:`;
+}
 /** Appended to the prefix: a segment no topic can have (`__` is reserved). */
 const CONTROL_CHANNEL = "__control";
 const MIN_RECONNECT_MS = 250;
@@ -112,7 +125,7 @@ export class RedisBroadcastDriver implements BroadcastDriver {
   private closed = false;
 
   constructor(private readonly config: RedisBroadcastDriverOptions = {}) {
-    this.prefix = config.prefix ?? DEFAULT_PREFIX;
+    this.prefix = config.prefix ?? defaultBroadcastPrefix();
     this.controlChannel = this.prefix + CONTROL_CHANNEL;
     this.subscribeTimeoutMs = config.subscribeTimeoutMs ?? 5_000;
     this.healthCheckMs = config.healthCheckMs ?? 30_000;
@@ -129,13 +142,21 @@ export class RedisBroadcastDriver implements BroadcastDriver {
 
   /**
    * Applies the revocation here at once, then sends it to every other
-   * process. Another process whose subscriber is down while it is sent does
-   * not see it; see the docs.
+   * process. A process whose subscriber is reconnecting while it is sent
+   * misses it, and re-authorizes every subscription after its gap instead
+   * (the transport does, on `onGap`).
    */
   async revoke(revocation: BroadcastRevocation): Promise<void> {
     this.hooks?.onRevoke?.(revocation);
     const message: ControlMessage = { op: "revoke", from: this.instanceId, r: revocation };
-    await this.send(this.controlChannel, JSON.stringify(message));
+    try {
+      await this.send(this.controlChannel, JSON.stringify(message));
+    } catch (error) {
+      throw new Error(
+        `The broadcast revocation ${JSON.stringify(revocation)} could not reach the other instances.`,
+        { cause: error },
+      );
+    }
   }
 
   /**
@@ -193,8 +214,31 @@ export class RedisBroadcastDriver implements BroadcastDriver {
     }
   }
 
+  /**
+   * Publishes, retrying once on a new publisher: Bun's client that gave up
+   * (Redis was away for longer than its retries) fails the first command
+   * after Redis is back, before its `onclose` lets it be replaced.
+   */
   private async send(channel: string, message: string): Promise<void> {
-    await this.publisherClient().publish(channel, message);
+    const client = this.publisherClient();
+    try {
+      await client.publish(channel, message);
+    } catch {
+      if (this.closed) throw new Error("The broadcast driver is closed.");
+      this.dropPublisher(client);
+      await this.publisherClient().publish(channel, message);
+    }
+  }
+
+  private dropPublisher(client: RedisPubSubClient) {
+    if (this.publisher !== client) return;
+    this.publisher = null;
+    client.onclose = null;
+    try {
+      client.close();
+    } catch {
+      // Already closed.
+    }
   }
 
   /**
@@ -378,7 +422,19 @@ export class RedisBroadcastDriver implements BroadcastDriver {
       if (!this.active.has(topic) || !this.connected) return;
       const client = this.subscriber!;
       this.active.delete(topic);
-      await client.unsubscribe(this.prefix + topic);
+      try {
+        await withTimeout(
+          client.unsubscribe(this.prefix + topic),
+          this.subscribeTimeoutMs,
+          "unsubscribe",
+        );
+      } catch (error) {
+        // Redis may still be subscribed while the books say not, and the
+        // next join would add a second listener: start over on a new
+        // connection, which subscribes only what is wanted.
+        if (this.subscriber === client) this.drop(client);
+        throw error;
+      }
       return;
     }
     // Wanted again by a join queued behind this leave, which subscribes it.

@@ -4,10 +4,11 @@
 
 **New, nothing to migrate.** `driver: "redis"` in `app/config/broadcast.ts` carries every emit to every process of the app through Redis pub/sub, so broadcasting works with several replicas and from `gemi queue:work` workers. See [Broadcasting: Redis](docs/broadcasting.md#redis).
 
-- **Config:** `driver: "redis"` and a new `redis` slice: `prefix` (default `"gemi:bc:"`), `url` and `options` (default to `app/config/redis.ts`, then `REDIS_URL`), `subscribeTimeoutMs` (default 5000), `healthCheckMs` (default 30000). It uses Bun's built-in Redis client: nothing to install.
+- **Config:** `driver: "redis"` and a new `redis` slice: `prefix` (default `gemi:bc:<8 hex>:`, derived from `SECRET` so apps and environments sharing one Redis stay apart; set it to pin the channel names), `url` and `options` (default to `app/config/redis.ts`, then `REDIS_URL`), `subscribeTimeoutMs` (default 5000), `healthCheckMs` (default 30000). It uses Bun's built-in Redis client: nothing to install.
 - **`SECRET` is required with it**, the same on every instance (`toOthers` tags are keyed from it). The boot fails in production without it, and warns in development.
 - One subscriber connection per process, subscribed per topic while the process has sockets on it; one publisher connection, opened on the first emit. When the subscriber reconnects, the process's sockets get `{op:"gap"}` and resync.
-- `Broadcast.revoke` reaches every instance (on `<prefix>__control`), and applies to the calling process's own sockets at once.
+- `Broadcast.revoke` reaches every instance (on `<prefix>__control`), and applies to the calling process's own sockets at once. A failed publish is retried once on a new connection.
+- **After a `gap`** (the subscriber reconnected), the instance authorizes every local subscription again, spread over 2 s, so a revocation it missed still takes effect.
 - New exports from `gemi/services`: `RedisBroadcastDriver` and the `RedisBroadcastDriverOptions`, `RedisPubSubClient` and `BroadcastRevocation` types.
 
 Behaviour changes:
