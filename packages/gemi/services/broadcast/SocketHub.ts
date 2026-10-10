@@ -62,6 +62,8 @@ interface Reservation {
 
 /** Pings a socket may send per `subscribeRate` window before it is closed (1008). */
 const PING_LIMIT_PER_WINDOW = 120;
+/** Over how long the re-authorizations after a `gap` are spread. */
+const GAP_REAUTHORIZE_SPREAD_MS = 2_000;
 /** How often a subscription is authorized again when revocations keep landing. */
 const MAX_AUTHORIZE_ATTEMPTS = 3;
 
@@ -131,7 +133,7 @@ export class SocketHub {
     this.server = server as Server<GemiSocketData>;
     this.startPromise ??= this.manager
       .start((topic, frame) => this.deliver(topic, frame), {
-        onGap: () => this.sendAll({ op: "gap" }),
+        onGap: () => this.onGap(),
         onRevoke: (revocation) => this.applyRevocation(revocation),
       })
       .catch((error) => {
@@ -593,6 +595,25 @@ export class SocketHub {
       }
     }
     this.server.publish(topic, frame);
+  }
+
+  /**
+   * The driver may have lost frames, revocations included (a Redis
+   * subscriber that reconnected). Clients are told to resync, and every
+   * subscription is authorized again, as after `revoke({ channel })`, so
+   * one whose access a missed revocation ended is denied. Spread over
+   * `GAP_REAUTHORIZE_SPREAD_MS`, so a Redis blip does not send every
+   * authorization to the database at once.
+   */
+  private onGap() {
+    this.sendAll({ op: "gap" });
+    for (const topic of this.byTopic.keys()) {
+      const delay = Math.floor(Math.random() * GAP_REAUTHORIZE_SPREAD_MS);
+      const timer = setTimeout(() => {
+        if (!this.closing) this.applyRevocation({ topic });
+      }, delay);
+      (timer as { unref?: () => void }).unref?.();
+    }
   }
 
   /** Applies a revocation that reached this process. */

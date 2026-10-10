@@ -2,7 +2,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { BROADCAST_PROTOCOL } from "../../services/broadcast/protocol";
-import { backoffDelay, RealtimeClient, type ChannelListener } from "./RealtimeClient";
+import {
+  backoffDelay,
+  MAX_LIMIT_RETRIES,
+  RealtimeClient,
+  type ChannelListener,
+} from "./RealtimeClient";
 
 class MockSocket {
   static instances: MockSocket[] = [];
@@ -279,6 +284,30 @@ describe("RealtimeClient", () => {
     latest().receive({ op: "subscribed", id: "1", t: "busy" });
     expect(a.log.at(-1)).toBe("resync");
     expect(MockSocket.instances).toHaveLength(1);
+  });
+
+  test("limit is retried a few times on one socket, then waits for the next connection", () => {
+    instance = client(() => 0);
+    const a = recorder();
+    instance.subscribe("full", {}, a.listener);
+    latest().open(600_000);
+    for (let i = 0; i < MAX_LIMIT_RETRIES; i++) {
+      latest().receive({ op: "denied", id: "1", code: "limit" });
+      vi.advanceTimersByTime(1_000);
+    }
+    expect(latest().subs()).toHaveLength(1 + MAX_LIMIT_RETRIES);
+    latest().receive({ op: "denied", id: "1", code: "limit" });
+    vi.advanceTimersByTime(120_000);
+    expect(latest().subs()).toHaveLength(1 + MAX_LIMIT_RETRIES);
+    // A new socket tries again, with a fresh count.
+    latest().drop();
+    vi.advanceTimersByTime(1_000);
+    expect(MockSocket.instances).toHaveLength(2);
+    latest().open(600_000);
+    expect(latest().subs()).toEqual([{ op: "sub", id: "1", ch: "full" }]);
+    latest().receive({ op: "denied", id: "1", code: "limit" });
+    vi.advanceTimersByTime(1_000);
+    expect(latest().subs()).toHaveLength(2);
   });
 
   test("denied and revoked wait for the next connection", () => {

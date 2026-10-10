@@ -47,7 +47,9 @@ export interface BroadcastDriver {
    * Fans a revocation out to every process, this one included, each of
    * which applies it through `hooks.onRevoke`. Optional: a driver without it
    * reaches this process only, which is all the memory driver can reach
-   * anyway.
+   * anyway. This is the control slot: the redis driver carries revocations
+   * on `<prefix>__control`, a name no channel can take (`__` segments are
+   * reserved).
    */
   revoke?(revocation: BroadcastRevocation): void | Promise<void>;
 

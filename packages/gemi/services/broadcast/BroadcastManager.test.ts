@@ -181,8 +181,8 @@ describe("BroadcastManager", () => {
   });
 
   test("an unknown driver name is refused", () => {
-    expect(() => new BroadcastManager({ driver: "redis" as any })).toThrow(
-      /Unknown broadcast driver "redis"/,
+    expect(() => new BroadcastManager({ driver: "kafka" as any })).toThrow(
+      /Unknown broadcast driver "kafka"/,
     );
   });
 });

@@ -1,5 +1,6 @@
 import type { Application, ShutdownReport } from "../../foundation/Application";
 import { markShuttingDown, shutdownSettings, type ShutdownSettings } from "../../server/shutdown";
+import { memoryBroadcastInWorker } from "../broadcast/workerWarning";
 import { QueueManager } from "./QueueManager";
 
 /** The part of a `Kernel` a worker drives. */
@@ -94,6 +95,8 @@ export class QueueWorker {
     console.log(
       `[gemi] Queue worker started: claiming up to ${queue.config.concurrency} job(s) at a time.`,
     );
+    const broadcastWarning = memoryBroadcastInWorker(application);
+    if (broadcastWarning) console.warn(broadcastWarning);
   }
 
   /**

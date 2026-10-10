@@ -260,8 +260,7 @@ export type {
   ChangeFeedResponse,
   StreamOptions as ChangeFeedStreamOptions,
 } from "./change-feed/stream";
-// Broadcasting: volatile, real-time push to WebSocket clients (#874). Preview:
-// emits reach sockets once the transport ships.
+// Broadcasting: volatile, real-time push to WebSocket clients (#874).
 export { BroadcastServiceProvider } from "./broadcast/BroadcastServiceProvider";
 export {
   BroadcastManager,
@@ -275,8 +274,14 @@ export type {
   BroadcastDeliver,
   BroadcastDriver,
   BroadcastDriverHooks,
+  BroadcastRevocation,
 } from "./broadcast/BroadcastDriver";
 export { MemoryBroadcastDriver } from "./broadcast/MemoryBroadcastDriver";
+export {
+  RedisBroadcastDriver,
+  type RedisBroadcastDriverOptions,
+  type RedisPubSubClient,
+} from "./broadcast/RedisBroadcastDriver";
 export {
   InvalidChannelError,
   type ChannelParams,
