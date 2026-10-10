@@ -1,5 +1,7 @@
 export { Page } from "./Page";
 export type { PageProps, PageDictionary } from "./Page";
+export { fakeSocket, FakeSocket } from "../client/realtime/FakeSocket";
+export type { FakeSubscription } from "../client/realtime/FakeSocket";
 
 /**
  * The recorder `Event.fake()` installs, published here as a **type only**.

@@ -73,7 +73,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Change Feeds](./change-feed.md)** — `ChangeFeed.publish` on a channel, an SSE route with `ChangeFeed.stream`, and `useSubscription` in the browser: other tabs and instances learn that something changed.
-- **[Broadcasting (preview)](./broadcasting.md)** — `Broadcast.to(...).emit(...)` and `BroadcastEvent` to the channels a `ChannelRouter` declares: real-time hints over Bun WebSockets (transport not released yet).
+- **[Broadcasting](./broadcasting.md)** — `Broadcast.to(...).emit(...)` and `BroadcastEvent` to the channels a `ChannelRouter` declares, and `useChannel`, `useChannelInvalidate` and `useQuery({ live })` on the client: real-time hints over Bun WebSockets.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
 ## Core concepts at a glance

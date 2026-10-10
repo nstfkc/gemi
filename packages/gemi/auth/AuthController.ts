@@ -13,6 +13,7 @@ import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
 import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
+import { BroadcastManager } from "../services/broadcast/BroadcastManager";
 import { readAccessToken } from "./accessToken";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../utils/intendedUrl";
 import { Redirect } from "../facades/Redirect";
@@ -579,6 +580,9 @@ export class AuthController extends Controller {
     // to clear it. The hook still only ever sees a real user, as it did when
     // `Auth.user()` stood in front of it.
     if (session?.user) {
+      // The user's open sockets were authorized while signed in: close them,
+      // so each client reconnects and every channel is authorized again.
+      revokeSockets(session.user);
       session.user["extension"] = await config.extendSession(session.user);
       await config.onSignOut(session.user);
     }
@@ -1363,5 +1367,21 @@ export class AuthController extends Controller {
     await notifyAuthenticated(auth.config, { session, isNewUser, method: "email-code", req });
 
     return { session, isNewUser };
+  }
+}
+
+/**
+ * `Broadcast.revoke({ user })` on sign-out. Never fails the sign-out: an app
+ * without broadcasting, or a user without an id, has nothing to revoke.
+ */
+function revokeSockets(user: User) {
+  try {
+    const id = (user as { id?: unknown } | null)?.id;
+    if (id === undefined || id === null) return;
+    const application = app();
+    if (typeof application?.bound !== "function" || !application.bound(BroadcastManager)) return;
+    application.make(BroadcastManager).revoke({ user: { id } });
+  } catch (error) {
+    console.error("[gemi] Revoking the signed-out user's sockets failed:", error);
   }
 }

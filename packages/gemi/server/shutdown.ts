@@ -128,6 +128,8 @@ export type Stoppable = {
  * 2. After `delayMs`, the listener closes (`server.stop()` without force):
  *    new connections are refused, while every request in flight — a streamed
  *    response included, to its last chunk — runs to completion.
+ *    Broadcast sockets are told `bye` and closed (`closeSockets`): a graceful
+ *    stop waits for open WebSockets, which never close on their own.
  * 3. That completion is awaited until `timeoutMs` from the start.
  * 4. From here a request is refused with a `503` before it reaches the app
  *    (`serveForShutdown`), and every provider's `shutdown()` runs, reverse
@@ -155,6 +157,12 @@ export type Stoppable = {
  */
 export async function drain(params: {
   server: Stoppable | undefined;
+  /**
+   * Says `bye` to the broadcast sockets and closes them, right after the
+   * listener closes. A graceful `stop()` waits for open WebSockets, which
+   * otherwise never close on their own.
+   */
+  closeSockets?: () => void;
   shutdownProviders: (options: { timeoutMs: number }) => Promise<ShutdownReport>;
   settings: ShutdownSettings;
 }): Promise<number> {
@@ -172,6 +180,11 @@ export async function drain(params: {
       await sleep(Math.min(settings.delayMs, deadline - Date.now()));
     }
     const stopped = server.stop();
+    try {
+      params.closeSockets?.();
+    } catch (error) {
+      console.error("[gemi] Closing the broadcast sockets failed:", error);
+    }
     // No time left to wait — a `GEMI_SHUTDOWN_TIMEOUT` of 0, or a delay that
     // spent all of it — is "do not wait for what is in flight", and that is
     // only a failure when something *is* in flight. Reading it as one made

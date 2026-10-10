@@ -6,7 +6,7 @@ description: Best practices for the gemi framework (Bun + Vite + React 19 SSR fu
 # gemi Best Practices
 
 Rules for building on **gemi**, the full-stack TypeScript framework this app runs on
-(Bun + Vite, React 19 SSR). 45 rules across 11 categories, ordered by impact.
+(Bun + Vite, React 19 SSR). 47 rules across 11 categories, ordered by impact.
 
 Every rule is derived from the gemi documentation and from patterns that recur across
 gemi codebases. This skill ships with the `gemi` package, so it describes the
@@ -144,6 +144,7 @@ carried for free.
 - `query-mutate-over-refetch` - Write the cache with `mutate` / `useMutate` instead of refetching
 - `query-debounce-search-variant` - Debounce a value before it becomes a query variant
 - `query-revalidate-on-focus` - Opt in only for cross-tab-mutable data; let `staleTime` gate it
+- `query-live-over-polling` - Prefer `live` / `useChannelInvalidate` over a bare `refetchUntil` poll
 
 ### 3. Data Access — ORM (HIGH)
 
@@ -209,6 +210,7 @@ Counter-intuitive behaviours that produce silent failures rather than errors:
 | A `defineDictionary` behind a helper passes tests and fails the **build** | `i18n-define-dictionary-inline` |
 | `Promise.all` inside a transaction shares one reserved connection | `orm-transaction-sequential` |
 | A lazy query never refetches when its variant changes | `query-lazy-vs-mount-gate` |
+| Broadcasts are not replayed: `useChannel` with `on` and no `onResync` goes stale after a reconnect | `query-live-over-polling` |
 | A prefetch whose `search` differs primes a slot nothing reads | `payload-prefetch-mirrors-usequery` |
 | A class name is minified in prod — jobs and services need a static string | `service-static-token-and-name` |
 | `paginate()` silently caps `perPage` at 100 | `orm-paginate-helper` |

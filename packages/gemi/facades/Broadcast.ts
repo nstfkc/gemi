@@ -24,9 +24,6 @@ import { Facade } from "./Facade";
  *
  * Inside an ORM transaction an emit waits for the commit and is dropped on
  * rollback. A channel or payload that is refused throws at the call site.
- *
- * Preview: emits are checked and recorded by `Broadcast.fake()`, and reach
- * sockets once the WebSocket transport ships.
  */
 export class Broadcast extends Facade {
   static getFacadeAccessor() {
@@ -57,6 +54,24 @@ export class Broadcast extends Facade {
    */
   static toOthers(source: SocketSource): BroadcastScope {
     return this.getFacadeRoot().toOthers(source);
+  }
+
+  /**
+   * Closes subscriptions that may no longer be allowed: every socket of a
+   * user (`{ user }`), or every subscription to a channel (`{ channel,
+   * params? }`). Clients reconnect or resubscribe, and authorization runs
+   * again. Sign-out calls it for the user.
+   *
+   * ```ts
+   * Broadcast.revoke({ channel: "site.:siteId", params: { siteId } }); // after removing a member
+   * ```
+   */
+  static revoke(
+    target:
+      | { user: { id: unknown } | string | number }
+      | { channel: string | ChannelTarget; params?: Record<string, unknown> },
+  ): void {
+    this.getFacadeRoot().revoke(target);
   }
 
   /**

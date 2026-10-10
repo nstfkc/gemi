@@ -13,6 +13,7 @@ import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
 import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
 import { DomainRouter } from "../services/router/DomainRouter";
 import { runGlobalMiddleware } from "../services/router/globalMiddleware";
+import { SocketHub } from "../services/broadcast/SocketHub";
 import { kernelContext } from "./context";
 import { frameworkProviders } from "./providers";
 
@@ -236,6 +237,14 @@ export class Kernel {
     return this.app.config.get("route.mcp.remote.enabled") === true
       ? this.app.make(McpHttpServer)
       : null;
+  }
+
+  /**
+   * The broadcast WebSocket endpoint, or `null` when the app declares no
+   * `route.channels` (nothing could be subscribed to, so nothing is upgraded).
+   */
+  sockets(): SocketHub | null {
+    return this.app.config.get("route.channels") ? this.app.make(SocketHub) : null;
   }
 
   /** The `global` middleware list for one request. Call it inside `run`. */

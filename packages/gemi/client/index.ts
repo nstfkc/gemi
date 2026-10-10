@@ -22,6 +22,20 @@ export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./
 export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
 export { useSubscription } from "./useSubscription";
+export { useChannel, useChannelInvalidate } from "./useChannel";
+export type {
+  ChannelPattern,
+  ChannelParamsFor,
+  ChannelEventsFor,
+  ChannelState,
+  ChannelStatus,
+  InvalidatePath,
+  LiveChannel,
+  UseChannelConfig,
+  UseChannelOptions,
+} from "./useChannel";
+export { configureRealtime } from "./realtime/RealtimeClient";
+export type { RealtimeOptions } from "./realtime/RealtimeClient";
 export type {
   SubscriptionConfig,
   SubscriptionData,

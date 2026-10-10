@@ -32,6 +32,8 @@ import {
 } from "../client/ServerDataProvider";
 import { ThemeProvider } from "../client/ThemeProvider";
 import type { ClientFeatureKey } from "../client/rpc";
+import { FakeSocket } from "../client/realtime/FakeSocket";
+import { RealtimeContext } from "../client/realtime/RealtimeContext";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
 import { applyParams } from "../utils/applyParams";
 import { Subject } from "../utils/Subject";
@@ -184,6 +186,13 @@ export interface PageProps {
    * pathname it was given.
    */
   onNavigate?: (href: string, action: "push" | "replace") => void;
+  /**
+   * The socket `useChannel`, `useChannelInvalidate` and `useQuery({ live })`
+   * subscribe through: a `fakeSocket()` the test pushes events and resyncs
+   * into. Left out, a fake of the page's own is used, so a component test
+   * never opens a WebSocket.
+   */
+  socket?: FakeSocket;
 }
 
 /** `"?a=b"` (or `""`) from any of the shapes `searchParams` accepts. */
@@ -389,7 +398,9 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     fallback = null,
     errorFallback,
     onNavigate,
+    socket,
   } = props;
+  const [ownSocket] = useState(() => new FakeSocket());
 
   // The caller's list, in the caller's order — a language switcher maps over
   // it, so hoisting the page's own locale to the front would reorder the
@@ -632,13 +643,15 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
                 transitionPath={["", pathname]}
               >
                 <RouteStateProvider state={routeState}>
-                  <Boundary
-                    errorFallback={errorFallback}
-                    fallback={fallback}
-                    resetKey={pathname}
-                  >
-                    {children}
-                  </Boundary>
+                  <RealtimeContext.Provider value={socket ?? ownSocket}>
+                    <Boundary
+                      errorFallback={errorFallback}
+                      fallback={fallback}
+                      resetKey={pathname}
+                    >
+                      {children}
+                    </Boundary>
+                  </RealtimeContext.Provider>
                 </RouteStateProvider>
               </RouteTransitionProvider>
             </ClientRouterContext.Provider>

@@ -444,11 +444,12 @@ const res = await figma?.fetch(`/v1/files/${fileKey}`);
 
 ## Broadcast
 
-`Broadcast` (preview) pushes change hints to the WebSocket clients on a channel. See [Broadcasting](./broadcasting.md).
+`Broadcast` pushes change hints to the WebSocket clients on a channel. See [Broadcasting](./broadcasting.md).
 
 - `Broadcast.to(pattern, params).emit(event, data)`: to a channel a `ChannelRouter` declares. Inside a transaction it waits for the commit.
 - `Broadcast.toUser(user).emit(...)`: to the user's own channel, `user.<id>`.
 - `Broadcast.toOthers(req).to(...)`: skips the sender's socket.
+- `Broadcast.revoke({ user } | { channel, params })`: closes subscriptions that may no longer be allowed; clients resubscribe and are authorized again.
 - `Broadcast.fake()`: for tests, records emits; call `restore()` after.
 
 ```typescript

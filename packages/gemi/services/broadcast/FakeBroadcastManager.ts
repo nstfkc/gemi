@@ -1,6 +1,7 @@
 import type { Application } from "../../foundation/Application";
 import { BroadcastManager } from "./BroadcastManager";
 import { parsePattern, topicMatches } from "./channels";
+import type { BroadcastRevocation } from "./BroadcastDriver";
 import type { SentBroadcast } from "./types";
 
 /**
@@ -16,6 +17,8 @@ import type { SentBroadcast } from "./types";
  */
 export class FakeBroadcastManager extends BroadcastManager {
   readonly sent: SentBroadcast[] = [];
+  /** Every `Broadcast.revoke`, as it would travel: `{ user }` or `{ topic }`. */
+  readonly revoked: BroadcastRevocation[] = [];
 
   static install(application: Application): FakeBroadcastManager {
     // Built if it was not yet: the fake takes its limits and the app's
@@ -55,6 +58,10 @@ export class FakeBroadcastManager extends BroadcastManager {
 
   protected override publish(sent: SentBroadcast): void {
     this.sent.push(sent);
+  }
+
+  protected override sendRevocation(revocation: BroadcastRevocation): void {
+    this.revoked.push(revocation);
   }
 
   /** Puts the real manager back. */
