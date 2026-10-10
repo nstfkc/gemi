@@ -17268,7 +17268,7 @@ Resyncs are coalesced to one per subscription per 2 seconds, and refetches only 
 - **Reconnects** use full-jitter backoff between 1 and 30 seconds, or the `retryAfter` the server sent with `bye`. An `online` event retries at once.
 - **Heartbeat.** The client pings every `heartbeatMs` (from the server) and reconnects when it has heard nothing for twice that, so a connection a proxy dropped silently is noticed within about a minute.
 - **Hidden tabs** keep the socket for 60 seconds, then disconnect. Showing the tab reconnects and resyncs.
-- **Refusals.** `unknown_channel` and `invalid_params` are final and never retried. `rate_limited`, `error` and `limit` are retried on the same socket, with backoff (`rate_limited` after 5 seconds at the least). `denied` and `revoked` are the channel's answer for this session, so they are retried on the next connection, for instance after signing in.
+- **Refusals.** `unknown_channel` and `invalid_params` are final and never retried. `rate_limited`, `error` and `limit` are retried on the same socket, with backoff (`rate_limited` after 5 seconds at the least). `limit` (the socket holds `maxChannelsPerSocket` channels) is retried 5 times on one socket, then waits for the next connection. `denied` and `revoked` are the channel's answer for this session, so they are retried on the next connection, for instance after signing in.
 - **Remounts.** A subscription outlives its last hook by 1.5 seconds, so a component that remounts (StrictMode, a route change back, a list re-rendering its rows) reuses it without a new `sub`.
 - **Bursts.** `useChannelInvalidate` and `useQuery({ live })` coalesce events: the first one starts a 150 ms window, and the events inside it refetch once at its end. A steady stream still refetches once per window. `useChannel`'s `on` handlers get every event.
 - **Sessions.** A socket keeps the session it was opened with. `useSignIn`, `useEmailCode` and `useSignOut` reconnect it, so its channels are authorized as the new session. After signing in some other way (a full-page OAuth redirect reloads the page anyway), nothing else is needed.
@@ -17338,7 +17338,8 @@ Authorization runs when a socket subscribes and when a `revoke` asks for it, not
 import { defineBroadcastConfig } from "gemi/services";
 
 export default defineBroadcastConfig({
-  driver: "memory",
+  driver: "memory", // or "redis" for several instances or a queue worker; see Drivers
+  redis: { prefix: "gemi:bc:" }, // the "redis" driver's settings; see Drivers
   maxEventBytes: 16 * 1024,
   warnEventBytes: 4 * 1024,
   path: "/__gemi/socket",
@@ -17361,8 +17362,39 @@ Every field is optional; the values above are the defaults. Add the slice to the
 
 The driver decides which processes see an emit. Delivery to sockets always happens in the process that holds them, with Bun's `server.publish`.
 
-- **`memory`** (the default) reaches the sockets of this process only. It is right for one instance whose web processes also run the jobs. It is wrong for several replicas or for a separate `gemi queue:work` worker: their emits reach nobody.
-- A **Redis pub/sub** driver for several instances comes in a later release. A custom driver implements `BroadcastDriver` from `gemi/services`.
+- **`memory`** (the default) reaches the sockets of this process only. It is right for one instance whose web processes also run the jobs. It is wrong for several replicas or for a separate `gemi queue:work` worker: their emits reach nobody. `gemi queue:work` warns at boot when the app declares channels and uses it.
+- **`redis`** reaches the sockets of every process of the app through Redis pub/sub, a worker's emits included. Use it as soon as there is more than one instance or a worker that emits.
+- A custom driver implements `BroadcastDriver` from `gemi/services`.
+
+### Redis
+
+```typescript
+// app/config/broadcast.ts
+export default defineBroadcastConfig({
+  driver: "redis",
+  redis: {
+    prefix: "gemi:bc:", // the Redis channel names; give each app sharing a Redis its own
+    // url: "redis://bus:6379", // defaults to app/config/redis.ts, then REDIS_URL
+    // options: { tls: true },  // Bun RedisClient options; default from app/config/redis.ts
+    subscribeTimeoutMs: 5_000, // how long a first subscription may wait for Redis
+    healthCheckMs: 30_000, // ping the subscriber connection; 0 turns it off
+  },
+});
+```
+
+The connection is the app's own Redis (`app/config/redis.ts`, else `REDIS_URL`) unless `redis.url` names another. gemi uses Bun's built-in Redis client; nothing to install.
+
+**`SECRET` is required**, and must be the same on every instance. A `Broadcast.toOthers(req)` frame names the socket to skip by a tag derived from `SECRET`, and an instance that derived another tag would hand the sender its own change back. The boot fails in production without it (and warns in development).
+
+How it works:
+
+- **Publishing.** Every emit is `PUBLISH`ed on `<prefix><topic>`. A process opens its publisher connection on its first emit, so a worker that never emits opens none.
+- **Receiving.** A process that serves sockets keeps one subscriber connection. It subscribes to a topic when the first of its sockets joins it, and unsubscribes when the last one leaves, so it only receives the topics it has sockets on. A subscription is acknowledged (`subscribed`) only once Redis has confirmed it, so the resync that follows cannot miss an event. If Redis does not answer within `subscribeTimeoutMs`, the `sub` is refused with `error`, which the client retries.
+- **One delivery path.** Every process delivers what it receives back from Redis, the emitting process included, so nothing is delivered twice and an emit is ordered the same everywhere.
+- **Reconnects.** When the subscriber connection drops (or stops answering pings), gemi opens a new one with backoff, subscribes every topic again and sends every socket of that process `{ op: "gap" }`: their clients resync. Events published in between are lost, which the resync covers. While Redis is down, emits fail (logged, never thrown at the call site) and the server keeps serving; it does not wait for Redis to boot.
+- **Revocations** travel on `<prefix>__control` (a name no channel can have) to every process. The process that calls `Broadcast.revoke` applies it to its own sockets at once, even when Redis is down. An instance whose subscriber is disconnected at that moment misses it: its sockets keep receiving hints on the channel until they reconnect, though everything they fetch over HTTP is authorized as usual.
+
+Payloads pass through Redis in clear text: use TLS (`rediss://`) to a Redis outside your private network, and keep payloads to ids and change hints.
 
 ## The protocol
 
@@ -17447,7 +17479,7 @@ expect(socket.subscriptions).toHaveLength(1);
 | Purpose | keeping a UI fresh | processing every change, in order |
 | Transport | one WebSocket per tab | an SSE route per feed |
 | Missed events | the client resyncs and refetches | replayed from the cursor |
-| Several instances | Redis pub/sub (coming) | Postgres NOTIFY |
+| Several instances | Redis pub/sub (`driver: "redis"`) | Postgres NOTIFY |
 | Authorization | `ChannelRouter` | the streaming route |
 
 Use `useChat` for agent runs.

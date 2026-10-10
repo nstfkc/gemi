@@ -26,6 +26,7 @@ export class BroadcastServiceProvider extends ServiceProvider {
   boot() {
     const Channels = this.app.config.get<ChannelRouterClass | undefined>("route.channels");
     if (Channels) assertChannelPatterns(new Channels());
+    assertSharedSecret(this.app.config.get<BroadcastConfig>("broadcast", {}));
   }
 
   /**
@@ -38,4 +39,24 @@ export class BroadcastServiceProvider extends ServiceProvider {
     if (!this.app.resolved(BroadcastManager)) return;
     await this.app.make(BroadcastManager).close();
   }
+}
+
+/**
+ * The redis driver carries one frame to every instance, and a `toOthers`
+ * frame names the socket to skip by a tag keyed from `SECRET` (`socketTag`).
+ * Without `SECRET` each process keys it at random, so the sender's own socket
+ * on another instance would not recognise its tag and would get its own
+ * emit back. Fails the boot in production; warns elsewhere.
+ */
+export function assertSharedSecret(
+  config: BroadcastConfig,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (config.driver !== "redis" || env.SECRET) return;
+  const message =
+    `[gemi] The "redis" broadcast driver needs SECRET set, the same on every ` +
+    `instance: Broadcast.toOthers tags the sender's socket with a key derived ` +
+    `from it, and every instance must derive the same one.`;
+  if (env.NODE_ENV === "production") throw new Error(message);
+  console.warn(message);
 }

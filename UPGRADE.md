@@ -1,3 +1,20 @@
+# Unreleased
+
+## Broadcasting: the Redis pub/sub driver (#874)
+
+**New, nothing to migrate.** `driver: "redis"` in `app/config/broadcast.ts` carries every emit to every process of the app through Redis pub/sub, so broadcasting works with several replicas and from `gemi queue:work` workers. See [Broadcasting: Redis](docs/broadcasting.md#redis).
+
+- **Config:** `driver: "redis"` and a new `redis` slice: `prefix` (default `"gemi:bc:"`), `url` and `options` (default to `app/config/redis.ts`, then `REDIS_URL`), `subscribeTimeoutMs` (default 5000), `healthCheckMs` (default 30000). It uses Bun's built-in Redis client: nothing to install.
+- **`SECRET` is required with it**, the same on every instance (`toOthers` tags are keyed from it). The boot fails in production without it, and warns in development.
+- One subscriber connection per process, subscribed per topic while the process has sockets on it; one publisher connection, opened on the first emit. When the subscriber reconnects, the process's sockets get `{op:"gap"}` and resync.
+- `Broadcast.revoke` reaches every instance (on `<prefix>__control`), and applies to the calling process's own sockets at once.
+- New exports from `gemi/services`: `RedisBroadcastDriver` and the `RedisBroadcastDriverOptions`, `RedisPubSubClient` and `BroadcastRevocation` types.
+
+Behaviour changes:
+
+- **`gemi queue:work` warns at boot** when the app declares `route.channels` and broadcasts with the `memory` driver: a worker has no sockets, so its emits reach no one.
+- **Client:** a subscription refused with `limit` (the socket already holds `maxChannelsPerSocket` channels) is retried at most 5 times on one socket, then waits for the next connection. It used to be retried for as long as the socket stayed open.
+
 # Upgrading from 0.122.0 to 0.123.0
 
 ## Broadcasting: `Broadcast`, `ChannelRouter`, `useChannel` over Bun WebSockets (#874)

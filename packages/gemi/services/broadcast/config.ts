@@ -1,19 +1,36 @@
 import type { Application } from "../../foundation/Application";
 import type { BroadcastDriver } from "./BroadcastDriver";
+import type { RedisBroadcastDriverOptions } from "./RedisBroadcastDriver";
 import { DEFAULT_SOCKET_PATH } from "./protocol";
 
 // Config key: `broadcast` (`app/config/broadcast.ts`).
 export interface BroadcastConfig {
   /**
-   * Which processes see an emit: `"memory"`, a `BroadcastDriver`, or a
-   * function returning one, called once with the application.
+   * Which processes see an emit: `"memory"`, `"redis"`, a `BroadcastDriver`,
+   * or a function returning one, called once with the application.
    *
    * `"memory"` is the default and reaches the sockets of **this process
    * only**: right for one instance whose web processes also run the jobs,
    * wrong for several replicas or a separate `gemi queue:work` worker. See
    * `MemoryBroadcastDriver`.
+   *
+   * `"redis"` reaches every process of the app through Redis pub/sub (see
+   * `redis` below and `RedisBroadcastDriver`). It needs `SECRET` set, the
+   * same on every instance; the boot fails without it.
    */
-  driver?: "memory" | BroadcastDriver | ((application: Application) => BroadcastDriver);
+  driver?: "memory" | "redis" | BroadcastDriver | ((application: Application) => BroadcastDriver);
+
+  /**
+   * The `"redis"` driver's settings. The connection defaults to the app's
+   * own (`app/config/redis.ts`: `url`, else `REDIS_URL`, and `options`);
+   * set `url` / `options` here to use another server. `prefix` (default
+   * `"gemi:bc:"`) names the Redis channels: give each app sharing one Redis
+   * its own.
+   */
+  redis?: Pick<
+    RedisBroadcastDriverOptions,
+    "url" | "options" | "prefix" | "subscribeTimeoutMs" | "healthCheckMs"
+  >;
 
   /**
    * The largest event frame, in bytes, JSON-encoded with its topic and name.
@@ -109,6 +126,7 @@ export function defineBroadcastConfig(config: BroadcastConfig): BroadcastConfig 
 export function broadcastConfigDefaults(): Required<BroadcastConfig> {
   return {
     driver: "memory",
+    redis: {},
     maxEventBytes: 16 * 1024,
     warnEventBytes: 4 * 1024,
     path: DEFAULT_SOCKET_PATH,

@@ -69,6 +69,13 @@ export const IDLE_CLOSE_MS = 5_000;
 export const RELEASE_LINGER_MS = 1_500;
 /** The least wait before resending a `sub` denied with `rate_limited`. */
 const RATE_LIMITED_RETRY_MS = 5_000;
+/**
+ * How often a `sub` denied with `limit` is resent on one socket. The socket
+ * holds as many channels as the server allows, so only a released one makes
+ * room: worth a few tries with backoff, not a retry for as long as the socket
+ * lives. Past it the subscription waits for the next connection.
+ */
+export const MAX_LIMIT_RETRIES = 5;
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const DEFAULT_HEARTBEAT_MS = 25_000;
@@ -242,7 +249,10 @@ export class RealtimeClient implements RealtimeSocket {
       if (this.ws !== ws) return;
       this.touch();
       for (const entry of this.entries.values()) {
-        if (!entry.permanent) this.sendSub(entry);
+        if (entry.permanent) continue;
+        // A new socket starts every transient denial's count over.
+        entry.retries = 0;
+        this.sendSub(entry);
       }
     };
     ws.onmessage = (event: MessageEvent) => {
@@ -464,10 +474,11 @@ export class RealtimeClient implements RealtimeSocket {
    * same socket, with backoff: a healthy socket may never reconnect. `denied`
    * and `revoked` are the channel's answer for this session, so they wait for
    * the next connection (a sign-in reconnects), and a permanent one is never
-   * resent.
+   * resent. `limit` gives up after `MAX_LIMIT_RETRIES` on one socket.
    */
   private scheduleRetry(entry: Entry, code: DeniedCode) {
     if (code !== "rate_limited" && code !== "error" && code !== "limit") return;
+    if (code === "limit" && entry.retries >= MAX_LIMIT_RETRIES) return;
     this.clearRetry(entry);
     const floor = code === "rate_limited" ? RATE_LIMITED_RETRY_MS : MIN_BACKOFF_MS;
     const delay = Math.max(floor, backoffDelay(entry.retries, this.random()));

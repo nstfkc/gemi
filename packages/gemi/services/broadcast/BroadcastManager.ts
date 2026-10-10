@@ -22,6 +22,8 @@ import {
 } from "./channels";
 import { broadcastConfigDefaults, type BroadcastConfig } from "./config";
 import { MemoryBroadcastDriver } from "./MemoryBroadcastDriver";
+import { RedisBroadcastDriver } from "./RedisBroadcastDriver";
+import type { RedisConfig } from "../redis/config";
 import type { BroadcastDataArgs, BroadcastEventsFor, SentBroadcast } from "./types";
 import { socketTag } from "./socketTag";
 import { encodeEventFrame, isSocketId, SOCKET_ID_HEADER } from "./wire";
@@ -89,7 +91,7 @@ export class BroadcastManager {
     } = {},
   ) {
     this.config = withDefaults(broadcastConfigDefaults(), config);
-    this.driver = resolveDriver(this.config.driver, options.application);
+    this.driver = resolveDriver(this.config, options.application);
   }
 
   /**
@@ -398,10 +400,23 @@ function socketIdOf(source: SocketSource): string | null {
 }
 
 function resolveDriver(
-  driver: BroadcastConfig["driver"],
+  config: Required<BroadcastConfig>,
   application: Application | undefined,
 ): BroadcastDriver {
+  const driver = config.driver;
   if (driver === undefined || driver === "memory") return new MemoryBroadcastDriver();
+  if (driver === "redis") {
+    // The app's own Redis connection, unless the broadcast config names one.
+    const redis = application?.config.get<RedisConfig>("redis", {}) ?? {};
+    const own = config.redis ?? {};
+    return new RedisBroadcastDriver({
+      url: own.url ?? redis.url ?? process.env.REDIS_URL,
+      options: own.options ?? redis.options,
+      prefix: own.prefix,
+      subscribeTimeoutMs: own.subscribeTimeoutMs,
+      healthCheckMs: own.healthCheckMs,
+    });
+  }
   if (typeof driver === "function") {
     if (!application) {
       throw new Error("A broadcast driver factory needs the application to be called with.");
@@ -413,6 +428,6 @@ function resolveDriver(
   }
   throw new Error(
     `Unknown broadcast driver "${String(driver)}" in app/config/broadcast.ts. ` +
-      `Use "memory", or pass a BroadcastDriver.`,
+      `Use "memory" or "redis", or pass a BroadcastDriver.`,
   );
 }
