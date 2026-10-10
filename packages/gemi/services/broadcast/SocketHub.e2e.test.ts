@@ -529,10 +529,12 @@ describe("shutdown", () => {
         server: local,
         closeSockets: () => sockets.shutdown(),
         shutdownProviders: async () => ({ failed: [], timedOut: [] }) as any,
-        settings: { timeoutMs: 5_000, delayMs: 0, providerTimeoutMs: 1_000 },
+        settings: { timeoutMs: 10_000, delayMs: 0, providerTimeoutMs: 1_000 },
       });
       expect(code).toBe(0);
-      expect(Date.now() - started).toBeLessThan(2_000);
+      // Well inside the drain budget: the sockets did not hold it up (the
+      // hub terminates any still open after 2 s).
+      expect(Date.now() - started).toBeLessThan(5_000);
       expect(await closed).toBe(1012);
       const bye = frames.find((f) => f.op === "bye");
       expect(bye.code).toBe(1012);
@@ -543,7 +545,7 @@ describe("shutdown", () => {
       local.stop(true);
       await own.shutdown({ timeoutMs: 1_000 });
     }
-  });
+  }, 20_000);
 
   test("once shutting down, upgrades are refused with 503", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});

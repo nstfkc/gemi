@@ -537,9 +537,16 @@ export class SocketHub {
       console.log(`[gemi] Closing ${sockets.length} broadcast socket(s) (1012).`);
     }
     for (const ws of sockets) this.sayBye(ws);
+    // Every one of them, closed or not: a socket whose close frame was
+    // answered can still hold the connection open, and a graceful
+    // `server.stop()` waits on it.
     const timer = setTimeout(() => {
       for (const ws of sockets) {
-        if (!ws.data.closed) ws.terminate();
+        try {
+          ws.terminate();
+        } catch {
+          // Already gone.
+        }
       }
     }, options.terminateAfterMs ?? 2_000);
     (timer as { unref?: () => void }).unref?.();
