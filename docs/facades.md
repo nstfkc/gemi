@@ -28,6 +28,7 @@ import {
   RateLimiter,
   Crypt,
   Connections,
+  Broadcast,
 } from "gemi/facades";
 ```
 
@@ -441,6 +442,21 @@ const figma = await Connections.for(user, "figma");
 const res = await figma?.fetch(`/v1/files/${fileKey}`);
 ```
 
+## Broadcast
+
+`Broadcast` (preview) pushes change hints to the WebSocket clients on a channel. See [Broadcasting](./broadcasting.md).
+
+- `Broadcast.to(pattern, params).emit(event, data)`: to a channel a `ChannelRouter` declares. Inside a transaction it waits for the commit.
+- `Broadcast.toUser(user).emit(...)`: to the user's own channel, `user.<id>`.
+- `Broadcast.toOthers(req).to(...)`: skips the sender's socket.
+- `Broadcast.fake()`: for tests, records emits; call `restore()` after.
+
+```typescript
+import { Broadcast } from "gemi/facades";
+
+Broadcast.to("site.:siteId", { siteId: site.publicId }).emit("changed", { pages: ["/about"] });
+```
+
 ## Related
 
 - [Authentication](./authentication.md)
@@ -450,3 +466,4 @@ const res = await figma?.fetch(`/v1/files/${fileKey}`);
 - [Internationalization](./i18n.md)
 - [Views & Layouts](./views-and-layouts.md)
 - [Configuration](./configuration.md)
+- [Broadcasting](./broadcasting.md)

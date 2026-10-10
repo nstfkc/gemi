@@ -1,6 +1,18 @@
 export { Controller, ResourceController } from "./Controller";
 export { ApiRouter, type ControllerRouteHandler, type CreateRPC } from "./ApiRouter";
 export {
+  ChannelRouter,
+  ChannelDeclaration,
+  authorizeChannel,
+  type BroadcastEventMap,
+  type ChannelAuthorization,
+  type ChannelAuthorizer,
+  type ChannelPolicy,
+  type ChannelRefusal,
+  type ChannelRouterClass,
+  type CreateBroadcastRPC,
+} from "./ChannelRouter";
+export {
   McpRouter,
   McpRouteDeclaration,
   type McpFileBinder,

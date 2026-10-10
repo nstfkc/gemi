@@ -3,6 +3,8 @@ import { deferUntilCommit } from "../../orm/context";
 import { withDefaults } from "../../support/withDefaults";
 import type { Job } from "../queue/Job";
 import { QueueManager } from "../queue/QueueManager";
+import { BroadcastManager } from "../broadcast/BroadcastManager";
+import { isBroadcastEvent, type BroadcastableEvent } from "../broadcast/brand";
 import { eventConfigDefaults, type EventConfig } from "./config";
 import type { Event, EventClass } from "./Event";
 import { jobForListener } from "./listenerJob";
@@ -361,9 +363,12 @@ export class EventManager {
     args?: readonly unknown[],
   ): Promise<void> {
     const name = (event.constructor as { name: string }).name;
-    const handlers = this.listeners[name];
+    const handlers = this.listeners[name] ?? [];
+    const broadcast = isBroadcastEvent(event);
 
-    if (!handlers?.length) {
+    // A broadcast event is often dispatched only to be broadcast, so having
+    // no listener is normal for it.
+    if (handlers.length === 0 && !broadcast) {
       this.warnNothingIsListening(name);
       return;
     }
@@ -383,6 +388,21 @@ export class EventManager {
           error,
         );
       }
+    }
+
+    if (broadcast) this.broadcast(event, name);
+  }
+
+  /**
+   * Sends a `BroadcastEvent` to its channels, once its sync listeners have
+   * run. Not under `Event.fake()`, which never gets here. A refused channel or
+   * payload is logged: the dispatch has already returned to its caller.
+   */
+  private broadcast(event: BroadcastableEvent, name: string) {
+    try {
+      app(BroadcastManager).broadcastEvent(event);
+    } catch (error) {
+      console.error(`The event ${name} could not be broadcast.`, error);
     }
   }
 

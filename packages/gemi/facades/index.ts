@@ -19,6 +19,7 @@ export { Lock } from "./Lock";
 export { Crypt } from "./Crypt";
 export { Connections } from "./Connections";
 export { ChangeFeed } from "./ChangeFeed";
+export { Broadcast } from "./Broadcast";
 export { Features } from "./Features";
 // `ConnectionQueries` is what `DB.connection(name)` hands back, so it has to be
 // nameable by an application that wants to keep one in a variable or annotate a
