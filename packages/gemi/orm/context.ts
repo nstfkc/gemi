@@ -264,9 +264,26 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
   const store = ormContext.getStore();
   if (store?.tx === undefined || store.afterCommit === undefined) return false;
 
+  // Async work started inside a transaction and not awaited by it — a sync
+  // listener still awaiting, an un-awaited emit — can reach here after the
+  // transaction settled, through a scope that still carries its handle and its
+  // list. Pushing then would queue onto a list already drained (or discarded),
+  // and the work would silently never run. A committed list answers "run it
+  // now"; a rolled-back one keeps the promise that nothing runs.
+  const settled = settledLists.get(store.afterCommit);
+  if (settled === "committed") return false;
+  if (settled === "rolled_back") return true;
+
   store.afterCommit.push(callback);
   return true;
 }
+
+/**
+ * How each outermost transaction's after-commit list ended, once it has. Keyed
+ * by the list itself, which every savepoint and every lingering async scope of
+ * that transaction shares by reference.
+ */
+const settledLists = new WeakMap<AfterCommitCallback[], "committed" | "rolled_back">();
 
 /**
  * Run `callback` once the open transaction commits, or now when none is open.
@@ -825,10 +842,17 @@ export function withTransaction<T>(
         // Only here, on the fulfilled path. A rejected `begin` rolled back, so
         // the scope and everything queued on it are discarded unread — which is
         // the whole of what `afterCommit` promises.
-        .then(async (result) => {
-          await drainAfterCommit(deferred, current);
-          return result;
-        }) as Promise<T>
+        .then(
+          async (result) => {
+            settledLists.set(deferred, "committed");
+            await drainAfterCommit(deferred, current);
+            return result;
+          },
+          (error: unknown) => {
+            settledLists.set(deferred, "rolled_back");
+            throw error;
+          },
+        ) as Promise<T>
     );
   } catch (error) {
     stopWatching();

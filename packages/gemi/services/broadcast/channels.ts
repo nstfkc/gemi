@@ -94,6 +94,12 @@ export function parsePattern(pattern: string): string[] {
       seen.add(name);
       continue;
     }
+    if (segment.startsWith("__")) {
+      throw new InvalidChannelError(
+        `The channel "${pattern}" has the segment "${segment}". Segments starting ` +
+          `with "__" are reserved for gemi (driver control messages).`,
+      );
+    }
     if (!LITERAL_SEGMENT.test(segment)) {
       throw new InvalidChannelError(
         `The channel pattern "${pattern}" has an invalid segment "${segment}". ` +

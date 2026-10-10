@@ -61,7 +61,13 @@ How channels behave:
 - **Authorization runs on every subscribe**, including every resubscribe after a reconnect. It runs in a request context rebuilt from the WebSocket upgrade request, so `Auth.user()`, `Cookie`, policies and middleware behave as they do in a route.
 - **`.events(...)`** lists the `BroadcastEvent` classes the channel carries, or takes an event map as a type argument. It only feeds the generated `BroadcastRPC` types, so client handlers are typed.
 
-A malformed pattern fails the boot.
+The router is checked at boot, and any of these fails it:
+
+- a malformed pattern, or one that starts with a param (`":kind.:id"`). Start every pattern with a literal segment;
+- two patterns that can build the same topic, such as `"site.:siteId"` and `"site.:id"` or `"site.featured"`. The client names the pattern it subscribes through, so the weaker of two overlapping patterns would decide who may join the other's topics;
+- a pattern other than `"user"` that can build a two-segment `user.…` topic, such as `"user.:userId"`. `user.<id>` belongs to the `"user"` channel;
+- `this.private()` without a callback on a pattern with params. It would let every signed-in user join every site. Pass a callback or a policy that checks the params;
+- a segment starting with `__`, which is reserved for gemi.
 
 ## Emitting
 
@@ -82,7 +88,7 @@ Broadcast.toOthers(req).to("page.:pageId", { pageId }).emit("changed");
 - **Transactions:** inside an ORM transaction an emit waits for the commit and is dropped on rollback. Outside one it is sent at once.
 - **Nothing comes back.** `emit` returns nothing and nothing is acknowledged.
 - **Payloads are JSON.** gemi warns (once per event name) above 4 KB and throws `BroadcastPayloadTooLargeError` above 16 KB. Send ids and a change hint, and let the client fetch. Never put secrets or personal data in a payload.
-- **Errors at the call site.** An undeclared param, a value that is not allowed, a bad event name or a payload over the limit throws where you emit.
+- **Errors at the call site.** An undeclared param, a value that is not allowed, a bad event name or a payload over the limit throws where you emit. So does `Broadcast.to("user")`: the `"user"` channel is a different topic per subscriber, so use `Broadcast.toUser(user)`.
 
 ## Typed events: `BroadcastEvent`
 
@@ -120,7 +126,7 @@ SiteChanged.dispatch(site, { pages: ["/about"] });
 - `broadcastAs()` defaults to the class's `static name`.
 - `broadcastWith()` defaults to no payload. A payload is never built from the event's fields, so nothing is sent by accident.
 - `static afterCommit = true` holds both the listeners and the broadcast until the commit.
-- The type arguments are the payload and the event name; `.events(SiteChanged)` on a channel reads them.
+- The type arguments are the payload and the event name; `.events(SiteChanged)` on a channel reads them. Return the name `as const` from `broadcastAs()`. Without the name argument it is `string`, and the channel's events lose their types.
 
 ## Drivers
 
@@ -153,7 +159,7 @@ broadcasts.restore();
 ```
 
 - `assertSent(channel, event?, predicate?)`, `assertNotSent`, `assertSentTimes(channel, times, event?, predicate?)` and `assertNothingSent()`. `channel` is a pattern (it matches every topic it builds), a concrete topic, or `"user"` (every `user.<id>`).
-- The fake checks channels and payload sizes like the real one, and records an emit made inside a transaction only once it commits.
+- The fake checks channels and payload sizes like the real one, and records an emit made inside a transaction only once it commits. It records the payload as clients receive it (JSON-encoded), and a malformed channel passed to an assertion throws.
 - A `BroadcastEvent` dispatched under `Event.fake()` is recorded as an event and **not** broadcast.
 - `restore()` is not optional: a fake left installed swallows every later test's broadcasts.
 

@@ -10,6 +10,13 @@
  * `d` is left out when the emit carried no data. `x` is the socket an emit
  * made with `Broadcast.toOthers(...)` skips: one frame goes to every process
  * and every socket, so the socket it names drops it itself.
+ *
+ * Open for the transport (PR 2 of #874): `x` shows every subscriber on the
+ * topic the sender's socket id, and another client could send that id in
+ * its own `X-Gemi-Socket` header to make its own emits skip the victim (a
+ * missed hint, recovered at the next resync). Before the protocol is
+ * released, either put a keyed hash of the id in `x` (handed to the client in
+ * `hello`) or honour `X-Gemi-Socket` only for a socket of the same session.
  */
 export interface BroadcastEventFrame {
   op: "ev";

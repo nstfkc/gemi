@@ -1,6 +1,6 @@
 import type { Application } from "../../foundation/Application";
 import { BroadcastManager } from "./BroadcastManager";
-import { topicMatches } from "./channels";
+import { parsePattern, topicMatches } from "./channels";
 import type { SentBroadcast } from "./types";
 
 /**
@@ -18,7 +18,9 @@ export class FakeBroadcastManager extends BroadcastManager {
   readonly sent: SentBroadcast[] = [];
 
   static install(application: Application): FakeBroadcastManager {
-    const current = application.resolved(BroadcastManager)
+    // Built if it was not yet: the fake takes its limits and the app's
+    // channels from it, and `restore()` puts it back.
+    const current = application.bound(BroadcastManager)
       ? application.make(BroadcastManager)
       : undefined;
     if (current instanceof FakeBroadcastManager) return current;
@@ -32,11 +34,23 @@ export class FakeBroadcastManager extends BroadcastManager {
     private readonly application: Application,
     private readonly previous: BroadcastManager | undefined,
   ) {
-    super({
-      driver: "memory",
-      maxEventBytes: previous?.config.maxEventBytes,
-      warnEventBytes: previous?.config.warnEventBytes,
-    });
+    super(
+      {
+        driver: "memory",
+        maxEventBytes: previous?.config.maxEventBytes,
+        warnEventBytes: previous?.config.warnEventBytes,
+      },
+      { application },
+    );
+    // The app's channels stay reachable, so a subscription authorized while
+    // the fake is installed is decided by the real router.
+    this.channelsFrom = previous;
+  }
+
+  private readonly channelsFrom: BroadcastManager | undefined;
+
+  override get channels() {
+    return this.channelsFrom?.channels ?? null;
   }
 
   protected override publish(sent: SentBroadcast): void {
@@ -113,6 +127,9 @@ export class FakeBroadcastManager extends BroadcastManager {
     event: string | undefined,
     predicate: ((data: any, sent: SentBroadcast) => boolean) | undefined,
   ): SentBroadcast[] {
+    // A malformed channel throws rather than matching nothing, so a typo in
+    // assertNotSent or assertSentTimes(..., 0) cannot pass vacuously.
+    parsePattern(channel);
     return this.sent.filter(
       (sent) =>
         (sent.pattern === channel || topicMatches(channel, sent.topic)) &&

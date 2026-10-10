@@ -7,6 +7,7 @@ import type { BroadcastableEvent } from "./brand";
 import {
   assertEventName,
   assertTopic,
+  InvalidChannelError,
   buildTopic,
   isChannelTarget,
   USER_CHANNEL,
@@ -128,9 +129,12 @@ export class BroadcastManager {
     const targets = Array.isArray(on) ? on : [on as ChannelTarget | string];
     const name = event.broadcastAs();
     const data = event.broadcastWith();
-    for (const target of targets) {
-      this.send(resolveTarget(target, undefined), name, data, null);
-    }
+    // Every target is checked and encoded before any is sent, so one bad
+    // target refuses the whole broadcast rather than leaving it half sent.
+    const prepared = targets.map((target) =>
+      this.prepare(resolveTarget(target, undefined), name, data, null),
+    );
+    for (const { sent, frame } of prepared) this.hand(sent, frame);
   }
 
   /**
@@ -139,6 +143,16 @@ export class BroadcastManager {
    * name, a payload that is not JSON, or one over `maxEventBytes`.
    */
   send(target: ChannelTarget, event: string, data: unknown, except: string | null): void {
+    const { sent, frame } = this.prepare(target, event, data, except);
+    this.hand(sent, frame);
+  }
+
+  private prepare(
+    target: ChannelTarget,
+    event: string,
+    data: unknown,
+    except: string | null,
+  ): { sent: SentBroadcast; frame: string } {
     assertEventName(event);
     let frame: string;
     try {
@@ -154,9 +168,15 @@ export class BroadcastManager {
       topic: target.topic,
       ...(target.pattern ? { pattern: target.pattern } : {}),
       event,
-      data,
+      // What clients receive: the payload as encoded, not the caller's object,
+      // which it may mutate afterwards.
+      data: (JSON.parse(frame) as { d?: unknown }).d,
       ...(except ? { except } : {}),
     };
+    return { sent, frame };
+  }
+
+  private hand(sent: SentBroadcast, frame: string) {
     void afterCommit(() => this.publish(sent, frame));
   }
 
@@ -195,7 +215,13 @@ export class BroadcastManager {
       throw new Error("The broadcast driver was already started in this process.");
     }
     this.started = true;
-    await this.driver.start(deliver, hooks);
+    try {
+      await this.driver.start(deliver, hooks);
+    } catch (error) {
+      // So the transport can try again.
+      this.started = false;
+      throw error;
+    }
   }
 
   /** For the transport: the first local socket joined `topic`. */
@@ -282,6 +308,12 @@ function resolveTarget(
   }
   if (params !== undefined || pattern.includes(":")) {
     return { topic: buildTopic(pattern, params ?? {}), pattern };
+  }
+  if (pattern === USER_CHANNEL) {
+    throw new InvalidChannelError(
+      `"user" is not a topic: the "user" channel resolves to user.<id> per ` +
+        `subscriber. Emit with Broadcast.toUser(user).`,
+    );
   }
   return { topic: assertTopic(pattern) };
 }

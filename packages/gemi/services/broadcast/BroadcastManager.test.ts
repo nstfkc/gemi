@@ -461,3 +461,184 @@ describe("BroadcastEvent", () => {
     expect(String(error.mock.calls[0][0])).toContain("The event Bad could not be broadcast");
   });
 });
+
+/**
+ * Regressions from the review of #875: work started inside a transaction and
+ * not awaited by it reaches `afterCommit` after the transaction settled,
+ * through a scope that still carries its handle and its (drained) list.
+ */
+describe("emits that outlive their transaction", () => {
+  async function makeApp(listeners: ListenerClass[] = []) {
+    const application = new Application(
+      new Repository({ events: { listeners }, queue: { jobs: [], concurrency: 5 } }),
+    );
+    application.registerMany([
+      QueueServiceProvider,
+      EventServiceProvider,
+      BroadcastServiceProvider,
+    ]);
+    await application.boot();
+    return application;
+  }
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  class Changed extends BroadcastEvent<undefined, "changed"> {
+    static name = "Changed";
+    broadcastOn() {
+      return this.channel("page.:pageId", { pageId: "p1" });
+    }
+    broadcastAs() {
+      return "changed" as const;
+    }
+  }
+  class SlowListener extends Listener {
+    static name = "SlowListener";
+    static event = Changed;
+    async handle() {
+      await sleep(20);
+    }
+  }
+
+  test("a BroadcastEvent whose sync listener awaits past the commit is still broadcast", async () => {
+    const application = await makeApp([SlowListener]);
+    await kernelContext.run(application, async () => {
+      const broadcasts = Broadcast.fake();
+      await withTransaction(fakePool(), async () => {
+        Changed.dispatch();
+      });
+      await sleep(60);
+      broadcasts.assertSentTimes("page.:pageId", 1, "changed");
+      broadcasts.restore();
+    });
+  });
+
+  test("and is dropped when that transaction rolled back", async () => {
+    const application = await makeApp([SlowListener]);
+    await kernelContext.run(application, async () => {
+      const broadcasts = Broadcast.fake();
+      await expect(
+        withTransaction(fakePool(), async () => {
+          Changed.dispatch();
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+      await sleep(60);
+      broadcasts.assertNothingSent();
+      broadcasts.restore();
+    });
+  });
+
+  test("an un-awaited emit after the commit is sent; after a rollback it is not", async () => {
+    const { manager, delivered } = await started();
+    await withTransaction(fakePool(), async () => {
+      void sleep(10).then(() => manager.to("status").emit("late"));
+    });
+    await expect(
+      withTransaction(fakePool(), async () => {
+        void sleep(10).then(() => manager.to("status").emit("late-rolled-back"));
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    await sleep(40);
+    expect(delivered.map((d) => d.frame.ev)).toEqual(["late"]);
+  });
+
+  test("an emit inside a savepoint that rolls back is dropped; the outer commit sends the rest", async () => {
+    const { manager, delivered } = await started();
+    await withTransaction(fakePool(), async () => {
+      manager.to("status").emit("outer");
+      await withTransaction(fakePool(), async () => {
+        manager.to("status").emit("inner");
+        throw new Error("savepoint");
+      }).catch(() => {});
+    });
+    expect(delivered.map((d) => d.frame.ev)).toEqual(["outer"]);
+  });
+});
+
+describe("review follow-ups", () => {
+  test('Broadcast.to("user") is refused: use toUser', () => {
+    const manager = new BroadcastManager();
+    expect(() => manager.to("user").emit("x")).toThrow(/Broadcast\.toUser/);
+  });
+
+  test('"__" segments are reserved', () => {
+    const manager = new BroadcastManager();
+    expect(() => manager.to("__control").emit("x")).toThrow(/reserved/);
+  });
+
+  test("a BroadcastEvent with one invalid target sends nothing", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    class Split extends BroadcastEvent {
+      static name = "Split";
+      broadcastOn() {
+        return ["status", "site.:siteId"];
+      }
+    }
+    const { manager, delivered } = await started();
+    expect(() => manager.broadcastEvent(new Split())).toThrow(InvalidChannelError);
+    expect(delivered).toEqual([]);
+    error.mockRestore();
+  });
+
+  test("a failed driver start can be retried", async () => {
+    let fail = true;
+    const driver: BroadcastDriver = {
+      publish: () => {},
+      start: () => {
+        if (fail) throw new Error("redis down");
+      },
+      close: () => {},
+    };
+    const manager = new BroadcastManager({ driver });
+    await expect(manager.start(() => {})).rejects.toThrow("redis down");
+    fail = false;
+    await manager.start(() => {});
+    expect(manager.isStarted).toBe(true);
+  });
+
+  test("the fake records what clients receive, not the caller's object", async () => {
+    const application = new Application(new Repository({}));
+    application.registerMany([BroadcastServiceProvider]);
+    await application.boot();
+    await kernelContext.run(application, async () => {
+      const broadcasts = Broadcast.fake();
+      const data = { pages: ["/a"] };
+      Broadcast.to("status").emit("changed", data);
+      data.pages.push("/b");
+      broadcasts.assertSent("status", "changed", (d) => d.pages.length === 1);
+      broadcasts.restore();
+    });
+  });
+
+  test("a malformed channel in an assertion throws instead of passing vacuously", async () => {
+    const application = new Application(new Repository({}));
+    application.registerMany([BroadcastServiceProvider]);
+    await application.boot();
+    await kernelContext.run(application, async () => {
+      const broadcasts = Broadcast.fake();
+      expect(() => broadcasts.assertNotSent("site.:siteId..x")).toThrow(InvalidChannelError);
+      expect(() => broadcasts.assertSentTimes("site.*", 0)).toThrow(InvalidChannelError);
+      broadcasts.restore();
+    });
+  });
+
+  test("the fake keeps the app's channels, so authorization still works under it", async () => {
+    const { ChannelRouter } = await import("../../http/ChannelRouter");
+    class Channels extends ChannelRouter {
+      channels = { status: this.public() };
+    }
+    const application = new Application(new Repository({ route: { channels: Channels } }));
+    application.registerMany([BroadcastServiceProvider]);
+    await application.boot();
+    await kernelContext.run(application, async () => {
+      const broadcasts = Broadcast.fake();
+      const router = application.make(BroadcastManager).channels;
+      expect(router).toBeInstanceOf(Channels);
+      expect(
+        await router!.authorize(new Request("http://localhost/__gemi/socket"), "status"),
+      ).toMatchObject({ ok: true, topic: "status" });
+      broadcasts.restore();
+    });
+  });
+});

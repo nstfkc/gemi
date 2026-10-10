@@ -5,7 +5,13 @@ import { Application } from "../foundation/Application";
 import { kernelContext } from "../kernel/context";
 import { MiddlewareServiceProvider } from "../services/middleware/MiddlewareServiceProvider";
 import { Repository } from "../support/Repository";
-import { authorizeChannel, ChannelRouter, type ChannelPolicy } from "./ChannelRouter";
+import {
+  assertChannelPatterns,
+  authorizeChannel,
+  ChannelDeclaration,
+  ChannelRouter,
+  type ChannelPolicy,
+} from "./ChannelRouter";
 import { RequestBreakerError } from "./Error";
 import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
@@ -256,5 +262,106 @@ describe("authorizeChannel", () => {
     ).toBe(true);
     expect(await authorizeChannel(Channels, "status")).toBe(true);
     expect(await authorizeChannel(Channels, "missing")).toBe(false);
+  });
+});
+
+describe("assertChannelPatterns (review of #875)", () => {
+  const router = (channels: Record<string, unknown>) =>
+    Object.assign(new ChannelRouter(), { channels }) as ChannelRouter;
+  const pub = () => new ChannelDeclaration("public");
+  const priv = (cb?: () => boolean) => new ChannelDeclaration("private", cb);
+
+  test("refuses two patterns that can build the same topic", () => {
+    expect(() =>
+      assertChannelPatterns(router({ "site.:siteId": priv(() => false), "site.:id": pub() })),
+    ).toThrow(/can build the same topic/);
+    expect(() =>
+      assertChannelPatterns(router({ "site.:siteId": priv(() => false), "site.secret": pub() })),
+    ).toThrow(/can build the same topic/);
+    expect(() =>
+      assertChannelPatterns(
+        router({
+          "site.:siteId": priv(() => true),
+          "page.:pageId": priv(() => true),
+          "site.:siteId.pages": pub(),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  test("refuses a pattern that starts with a param", () => {
+    expect(() =>
+      assertChannelPatterns(router({ "site.:siteId": priv(() => false), ":kind.:id": pub() })),
+    ).toThrow(/starts with a param/);
+  });
+
+  test("reserves user.<id> for the user channel", () => {
+    expect(() =>
+      assertChannelPatterns(router({ user: priv(), "user.:userId": priv(() => true) })),
+    ).toThrow(/belongs to the "user" channel/);
+    expect(() => assertChannelPatterns(router({ "user.settings": pub() }))).toThrow(
+      /belongs to the "user" channel/,
+    );
+    expect(() =>
+      assertChannelPatterns(router({ user: priv(), "user.:userId.inbox": priv(() => true) })),
+    ).not.toThrow();
+  });
+
+  test("refuses a private pattern with params and no authorization", () => {
+    expect(() => assertChannelPatterns(router({ "site.:siteId": priv() }))).toThrow(
+      /has params but no authorization/,
+    );
+    expect(() => assertChannelPatterns(router({ members: priv(), user: priv() }))).not.toThrow();
+  });
+
+  test("authorizeChannel surfaces a bad router; authorize refuses everything on it", async () => {
+    class Overlapping extends ChannelRouter {
+      channels = { "site.:siteId": this.private(() => false), ":kind.:id": this.public() };
+    }
+    await expect(
+      authorizeChannel(Overlapping, ":kind.:id", { kind: "site", id: "secret" }),
+    ).rejects.toThrow(/starts with a param/);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      await new Overlapping().authorize(socketRequest(), ":kind.:id", {
+        kind: "site",
+        id: "secret",
+      }),
+    ).toEqual({ ok: false, code: "error" });
+    expect(error).toHaveBeenCalled();
+  });
+});
+
+describe("guests and session failures", () => {
+  test("a request with a token whose session lookup fails is an error, not a guest", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Auth, "user").mockRejectedValue(new Error("session store down"));
+    expect(await new Channels().authorize(socketRequest("access_token=t"), "members")).toEqual({
+      ok: false,
+      code: "error",
+    });
+    expect(error).toHaveBeenCalled();
+  });
+
+  test("a token whose session is gone is a guest", async () => {
+    const { AuthenticationError } = await import("./errors");
+    vi.spyOn(Auth, "user").mockRejectedValue(new AuthenticationError());
+    expect(await new Channels().authorize(socketRequest("access_token=t"), "members")).toEqual({
+      ok: false,
+      code: "denied",
+    });
+  });
+
+  test('"user" with a user that has no id is refused as an error', async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      await new Channels().authorize(
+        socketRequest(),
+        "user",
+        {},
+        { carried: { user: { name: "x" } } },
+      ),
+    ).toEqual({ ok: false, code: "error" });
+    expect(error).toHaveBeenCalled();
   });
 });
