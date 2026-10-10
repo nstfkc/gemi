@@ -167,6 +167,26 @@ describe("RealtimeClient", () => {
     expect(a.log.filter((l) => l === "resync")).toHaveLength(2);
   });
 
+  test("reconnect() opens a new socket at once and resubscribes (after a sign-in)", () => {
+    instance = client(() => 0.5);
+    const a = recorder();
+    instance.subscribe("user", {}, a.listener);
+    latest().open();
+    latest().receive({ op: "subscribed", id: "1", t: "user.1" });
+    const first = latest();
+    instance.reconnect();
+    expect(first.closedWith).toBe(1000);
+    expect(MockSocket.instances).toHaveLength(2);
+    latest().open();
+    expect(latest().subs()).toEqual([{ op: "sub", id: "1", ch: "user" }]);
+  });
+
+  test("reconnect() with nothing subscribed opens nothing", () => {
+    instance = client();
+    instance.reconnect();
+    expect(MockSocket.instances).toHaveLength(0);
+  });
+
   test("backoff is full jitter between 1 and 30 seconds", () => {
     expect(backoffDelay(0, 0)).toBe(1_000);
     expect(backoffDelay(0, 0.99)).toBe(1_000);

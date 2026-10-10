@@ -496,6 +496,19 @@ export class RealtimeClient implements RealtimeSocket {
     }
   };
 
+  /**
+   * Drops the socket and opens a new one at once, when anything is
+   * subscribed. A socket keeps the session it was opened with (the upgrade's
+   * cookies), so signing in or out in this tab reconnects it: every channel
+   * is then authorized as the new session, and the acks resync.
+   */
+  reconnect() {
+    this.close();
+    this.clearReconnect();
+    this.attempt = 0;
+    if (this.entries.size > 0 && !this.pausedWhileHidden) this.connect();
+  }
+
   /** For tests: drops the socket, timers and listeners. */
   dispose() {
     this.clearReconnect();
@@ -551,6 +564,15 @@ export function getRealtimeClient(): RealtimeClient | null {
   if (typeof window === "undefined") return null;
   instance ??= new RealtimeClient(configured);
   return instance;
+}
+
+/**
+ * Reconnects the tab's socket, if it has one, so its channels are authorized
+ * as the current session. The auth hooks call it after signing in or out.
+ * Never creates the client.
+ */
+export function reconnectRealtime() {
+  instance?.reconnect();
 }
 
 /**

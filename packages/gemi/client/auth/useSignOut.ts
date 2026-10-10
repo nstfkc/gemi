@@ -1,5 +1,6 @@
 import { useMutate } from "../useMutate";
 import { usePost } from "../useMutation";
+import { reconnectRealtime } from "../realtime/RealtimeClient";
 
 interface UseSignOutArgs {
   onSuccess?: () => void;
@@ -18,6 +19,8 @@ export function useSignOut(args: UseSignOutArgs = defaultArgs) {
       onSuccess: () => {
         args.onSuccess();
         mutator({ path: "/auth/me" });
+        // The socket was opened as the signed-in user.
+        reconnectRealtime();
       },
     },
   );

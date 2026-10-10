@@ -16,6 +16,7 @@ Server:
 Client (`gemi/client`):
 
 - **`useChannel(pattern, { params }, { on, onResync })`**, **`useChannelInvalidate(pattern, params, paths)`** and **`useQuery(..., { live })`**. One socket per tab, shared by every hook; reconnects with backoff; resyncs (refetches) after every (re)connect, on each subscription's acknowledgement and on `gap`. A `live` query pauses `refetchUntil`/`refreshInterval` while its channel is open and falls back to them otherwise.
+- `useSignIn`, `useEmailCode` and `useSignOut` reconnect the tab's socket, so its channels are authorized as the new session.
 - **`init(RootLayout, { realtime: { path, hiddenDisconnectMs } })`** and `configureRealtime`, for a non-default path.
 - **`fakeSocket()`** and `<Page socket={...}>` in `gemi/testing`.
 

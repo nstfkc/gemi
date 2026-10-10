@@ -199,6 +199,7 @@ Resyncs are coalesced to one per subscription per 2 seconds, and refetches only 
 - **Heartbeat.** The client pings every `heartbeatMs` (from the server) and reconnects when it has heard nothing for twice that, so a connection a proxy dropped silently is noticed within about a minute.
 - **Hidden tabs** keep the socket for 60 seconds, then disconnect. Showing the tab reconnects and resyncs.
 - **Refusals.** `unknown_channel` and `invalid_params` are final and never retried. `denied`, `error`, `rate_limited` and `limit` are retried on the next reconnect, since access and load change.
+- **Sessions.** A socket keeps the session it was opened with. `useSignIn`, `useEmailCode` and `useSignOut` reconnect it, so its channels are authorized as the new session. After signing in some other way (a full-page OAuth redirect reloads the page anyway), nothing else is needed.
 - **Server renders and islands** open no socket: the hooks act only in effects, and on the server they report `"closed"`.
 - **`toOthers`.** While the socket is open, mutations (`useMutation`, `usePost` and the rest) send the socket's id in `X-Gemi-Socket`, so `Broadcast.toOthers(req)` in the controller skips the tab that made the change.
 
