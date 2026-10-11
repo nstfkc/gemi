@@ -11,6 +11,7 @@
 
 Behaviour changes:
 
+- **Types:** the hooks' `error` is `WithMutationErrorHelpers<MutationError | E> | null`, so an exact-type assertion such as `Equal<typeof error, MutationError | null>` no longer holds. `<Form>` has a third type parameter, the route's error type, inferred from `onError` in JSX, so `<Form onError={(error: MutationError) => …}>` still compiles on a route with typed errors. With explicit type arguments (`Form<"/route", "POST">`) on such a route, a handler annotated `(error: MutationError)` no longer fits: drop the annotation, or annotate it with the route's error type.
 - **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
 
 ## `useChat`: per-send body and metadata, and a stable key on sent messages (#818)

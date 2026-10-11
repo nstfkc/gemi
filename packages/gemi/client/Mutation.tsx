@@ -92,6 +92,7 @@ type FormSubmitEvent = Parameters<
 interface FormProps<
   M extends keyof Methods,
   K extends keyof Methods[M],
+  E = ErrorMethods[M][K & keyof ErrorMethods[M]],
 > extends Omit<ComponentProps<"form">, "action" | "onError"> {
   method?: M;
   action: K;
@@ -108,9 +109,7 @@ interface FormProps<
   // Method syntax, so a handler typed `(error: MutationError, form) => …`
   // still compiles for a route that has typed errors.
   onError?(
-    error: WithMutationErrorHelpers<
-      MutationError | ErrorMethods[M][K & keyof ErrorMethods[M]]
-    >,
+    error: WithMutationErrorHelpers<MutationError | E>,
     form: HTMLFormElement,
   ): void;
   /**
@@ -133,7 +132,8 @@ interface FormProps<
 export function Form<
   K extends keyof Methods[T],
   T extends keyof Methods = "POST",
->(props: FormProps<T, K>) {
+  E = ErrorMethods[T][K & keyof ErrorMethods[T]],
+>(props: FormProps<T, K, E>) {
   const _params = useParams();
   const {
     method = "POST",
