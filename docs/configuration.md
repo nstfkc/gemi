@@ -244,6 +244,19 @@ EMAIL_DEBUG=true
 # BUCKET_NAME=
 ```
 
+### The app's public origin
+
+`HOST_NAME` is the address the app is reached at from outside, e.g. `https://example.com` (`APP_URL` is accepted as an alias when `HOST_NAME` is unset). gemi uses it for `Url.absolute`, `Url.forDomain` outside a request, the OAuth `redirect_uri`s, the connections callback and relative `Meta` Open Graph images. Read it in your own code with `Url.origin()` from `gemi/facades` rather than `process.env`:
+
+```typescript
+import { Url } from "gemi/facades";
+
+const returnUrl = `${Url.origin()}/billing`;
+const devFriendly = Url.origin("http://localhost:5173"); // the fallback applies only when neither variable is set
+```
+
+The value is trimmed and its trailing `/` dropped, and a path is kept (`https://example.com/app`). `Url.origin()` throws when nothing is configured (and no fallback is given) or when the value is not an absolute `http(s)` URL, so a bad deploy config fails at the first link instead of producing one. It is read on every call, so tests set it with `vi.stubEnv("HOST_NAME", ...)`.
+
 ### `.env` file precedence
 
 gemi loads the standard Bun/dotenv set, in increasing precedence (later overrides earlier):

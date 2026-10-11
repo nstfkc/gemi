@@ -136,7 +136,7 @@ Url.forDomain({ subdomain: "acme" }, "/projects/:id", { id: project.id });
 // "https://acme.example.com/projects/42"
 ```
 
-Outside a request, in a job or an email, `Url.forDomain` takes the protocol from `HOST_NAME`.
+Outside a request, in a job or an email, `Url.forDomain` takes the protocol from the app origin, `Url.origin()` (`HOST_NAME`, else `APP_URL`).
 
 ## Sessions across subdomains
 
