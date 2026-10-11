@@ -1622,7 +1622,10 @@ describe("the server's id for the user's own turn (#466)", () => {
       start,
       renamed(1),
     ]);
-    expect(state.messages).toEqual([earlier, { ...typed("local_1"), id: "msg_1" }]);
+    expect(state.messages).toEqual([
+      earlier,
+      { ...typed("local_1"), id: "msg_1", localId: "local_1" },
+    ]);
   });
 
   test("is not a message the run touched, so run-end leaves it as typed", () => {
@@ -1632,7 +1635,7 @@ describe("the server's id for the user's own turn (#466)", () => {
       { seq: 2, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
     ]);
     expect(state.runMessageIds).toEqual([]);
-    expect(state.messages).toEqual([{ ...typed("local_1"), id: "msg_1" }]);
+    expect(state.messages).toEqual([{ ...typed("local_1"), id: "msg_1", localId: "local_1" }]);
   });
 
   test("is a no-op for a client that never held the copy, or already renamed it", () => {
@@ -1648,7 +1651,38 @@ describe("the server's id for the user's own turn (#466)", () => {
       start,
       renamed(1),
     ]);
-    expect(state.messages).toEqual([typed("msg_1")]);
+    // The key moves onto the copy that stays (#818), so it is not remounted.
+    expect(state.messages).toEqual([{ ...typed("msg_1"), localId: "local_1" }]);
+  });
+
+  test("keeps the client's key and the app's metadata on the renamed copy (#818)", () => {
+    // `useChat` sets `localId` on what it authors; the rename leaves it alone.
+    const sent: AgentMessage = {
+      ...typed("local_1"),
+      localId: "local_1",
+      metadata: { auto: true },
+    };
+    const state = fold(initialChatState({ messages: [sent] }), [start, renamed(1)]);
+    expect(state.messages).toEqual([{ ...sent, id: "msg_1" }]);
+  });
+
+  test("keeps a key the copy already had, rather than its current id (#818)", () => {
+    // A regenerated question is re-sent under its first key.
+    const sent: AgentMessage = { ...typed("local_1"), localId: "local_0" };
+    const state = fold(initialChatState({ messages: [sent] }), [start, renamed(1)]);
+    expect(state.messages).toEqual([{ ...sent, id: "msg_1", localId: "local_0" }]);
+  });
+
+  test("moves the key and metadata onto the server's copy when it is already there (#818)", () => {
+    const sent: AgentMessage = {
+      ...typed("local_1"),
+      localId: "local_1",
+      metadata: { auto: true },
+    };
+    const state = fold(initialChatState({ messages: [typed("msg_1"), sent] }), [start, renamed(1)]);
+    expect(state.messages).toEqual([
+      { ...typed("msg_1"), localId: "local_1", metadata: { auto: true } },
+    ]);
   });
 });
 
@@ -1691,7 +1725,7 @@ describe("a run another client started (#778)", () => {
   test("the client that sent the question still renames its copy and gets no second one", () => {
     const typed: AgentMessage = { ...question, id: "local_other", finishReason: undefined };
     const state = fold(initialChatState({ messages: [earlier, typed] }), RUN.slice(0, 2));
-    expect(state.messages).toEqual([earlier, { ...typed, id: "msg_1" }]);
+    expect(state.messages).toEqual([earlier, { ...typed, id: "msg_1", localId: "local_other" }]);
   });
 
   test("a question already read from the thread is not added again", () => {

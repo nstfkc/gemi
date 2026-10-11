@@ -12,6 +12,19 @@ Behaviour change:
 - **In development** (`NODE_ENV=development`, which `gemi dev` sets) the sink is **on by default** with `"text"` lines, so `Log.*` calls now print in the `gemi dev` terminal. Set `console: false` to keep the old silence.
 - **In production and tests nothing changes**: the sink is off unless you set `console`. To get `Log` into Railway's logs, set e.g. `console: "info"` (or `true`) in `app/config/log.ts`.
 
+## `useChat`: per-send body and metadata, and a stable key on sent messages (#818)
+
+**New, nothing to migrate.**
+
+- **`sendMessage(turn, { body, metadata })`.** `body` is merged over the hook's `body` for that one request (a key given here wins; the next send goes back to the hook's). It is typed as `Partial` of the controller's declared body. The envelope keys (`turn`, `clientRunId`, `threadId`, `messages`) still belong to the framework. `metadata` is kept on the message the send adds, as `message.metadata`; it is client-only, never sent or stored. New exported type `SendMessageOptions` from `gemi/ai/client`. `regenerate()` re-sends a question with its `metadata` (not a per-send `body`, which is not remembered).
+- **`AgentMessage.localId` and `AgentMessage.metadata`** (optional, client-only). A user message `useChat` sends carries `localId` from the start, and keeps it when the server's `message-id` renames `id`. Key message lists by `message.localId ?? message.id` so a sent message is not remounted about 50 ms after sending. `id` is still the server's id. Both fields are left out of the history a stateless chat posts.
+
+Behaviour changes:
+
+- **The `message-id` rename keeps `localId` (and `metadata`) on the message**, in `useChat` and in the Swift and Kotlin reducers. A message renamed by the server now has a `localId` field it did not have before; code that deep-compares messages with a fixed shape sees the extra key. When the server's copy of the message was already in the transcript (a thread re-read raced the event), the local copy is still dropped and its `localId`/`metadata` move onto the server's copy.
+- **A message `useChat` authors has `localId` set** (equal to its initial `id`).
+- **`regenerate()` re-sends the question under its `localId`**, so the question's row keeps its key while it is taken out and put back.
+
 # Upgrading from 0.123.0 to 0.124.0
 
 ## Broadcasting: the Redis pub/sub driver (#874)
