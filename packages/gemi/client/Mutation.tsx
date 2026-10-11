@@ -20,6 +20,7 @@ import {
   isFormError,
   isValidationError,
   type MutationError,
+  type WithMutationErrorHelpers,
 } from "./MutationError";
 
 type Any = any;
@@ -100,13 +101,16 @@ interface FormProps<
    * the route's typed errors (the bodies its handler answers with
    * `HttpResponse.error` / `httpError`); narrow it with `isValidationError`,
    * `isPermissionError`, `isHttpError` and the other guards from
-   * `gemi/client`. Validation and form errors are already rendered by
-   * `<ValidationErrors>` and `<FormError>`.
+   * `gemi/client`, or read it with `error.list()` / `error.field(name)`.
+   * Validation and form errors are already rendered by `<ValidationErrors>`
+   * and `<FormError>`.
    */
   // Method syntax, so a handler typed `(error: MutationError, form) => …`
   // still compiles for a route that has typed errors.
   onError?(
-    error: MutationError | ErrorMethods[M][K & keyof ErrorMethods[M]],
+    error: WithMutationErrorHelpers<
+      MutationError | ErrorMethods[M][K & keyof ErrorMethods[M]]
+    >,
     form: HTMLFormElement,
   ): void;
   /**

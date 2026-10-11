@@ -1,5 +1,18 @@
 # Unreleased
 
+## Mutation errors: `error.list()` and `error.field(name)` (#890)
+
+**New, nothing to migrate.** Every error the mutation hooks hand over (`error` and the `onError` argument of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form onError>`) carries two helpers. See [Data Fetching: Messages to show](docs/data-fetching.md#messages-to-show-errorlist-and-errorfieldname).
+
+- **`error.list(fallback?)`**: the failure in words, never empty. A validation error's messages, every field's in the server's order; else the `message` of a form error, a refusal or a route's typed error; else `[fallback]` (a server error, an answer that was not JSON, no answer). `fallback` defaults to `"Something went wrong. Try again."`.
+- **`error.field(name)`**: a validation error's messages for one field, `[]` otherwise.
+- **`mutationErrorList(error, fallback?)` / `mutationErrorField(error, name)`** from `gemi/client` do the same for any value, including a `useQuery` `QueryError` (its body is read). They replace app-level `Object.values(error.messages).flat()` helpers.
+- New exported types `MutationErrorHelpers` and `WithMutationErrorHelpers<T>`. The hooks' `error` and `onError` parameter are now `WithMutationErrorHelpers<MutationError | E>`, a subtype of what they were: handlers typed `(error: MutationError) => …` still compile, and `MutationError` itself is unchanged.
+
+Behaviour changes:
+
+- **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
+
 ## `useChat`: per-send body and metadata, and a stable key on sent messages (#818)
 
 **New, nothing to migrate.**
