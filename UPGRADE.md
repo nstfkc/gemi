@@ -1,3 +1,43 @@
+# Unreleased
+
+## AI: realtime voice calls on the OpenAI and Azure providers (#921, part 1)
+
+**New and experimental, nothing to migrate.** `OpenAIProvider#realtime` and `AzureOpenAIProvider#realtime` return a `RealtimeClient` for the Realtime API's WebRTC calls, using the provider's existing host and credential resolution. See [AI Voice](docs/ai-voice.md). **This API is experimental** until a live call has run on Azure and on OpenAI. It's tested against fixtures written from the vendors' documentation only, and names and defaults may change in a minor release.
+
+- `createCall({ sdp, session, safetyIdentifier, flow, webrtcFilter })` starts the call server-side from the browser's SDP offer and answers `{ sdpAnswer, callId }`.
+  - OpenAI defaults to the `"unified"` flow: one multipart POST to `/realtime/calls` with the server's key.
+  - Azure defaults to its documented `"ephemeral"` flow: a client secret is minted server-side, then the raw SDP is posted with that secret. No secret reaches the browser.
+  - `webrtcFilter` adds Azure's `?webrtcfilter=on`.
+- `clientSecret({ session, ttlSeconds })` mints an ephemeral secret.
+- `hangup(callId)` ends a call. A 404 counts as "already over" only when its body says the call wasn't found. If the vendor refuses `RealtimeSideband#hangup()`, the sideband stays open (still metering) and the error is thrown.
+- `sideband(callId)` opens the call's server-side control WebSocket (`RealtimeSideband`): typed vendor events (`for await` or `on()`), `addNote`, `functionOutput`, `createResponse`, `cancelResponse`, `updateSession`, `send`, `hangup` and `close`, with reconnect by `callId` after an abnormal close.
+- On Azure, realtime always uses the GA `/openai/v1/realtime` path with no `api-version`, even when `apiVersion` pins a dated version. **Not yet verified against a live Azure realtime deployment**; it follows Azure's GA documentation.
+- `Usage` gains `audioInputTokens`, `cachedAudioInputTokens` and `audioOutputTokens` (breakdowns of the totals, like `imageInputTokens`). A realtime `response.done` maps onto them, and `toRealtimeUsage` maps a raw vendor `usage`.
+- `conversation.item.input_audio_transcription.completed` gains `transcriptionUsage` (token-billed) or `transcriptionSeconds` (duration-billed). Transcription is billed separately from `response.done`.
+- New exports from `gemi/ai`: `RealtimeClient`, `RealtimeSideband`, `RealtimeRequestError`, `toRealtimeUsage`, `isCallNotFound`, and the types `RealtimeCallFlow`, `RealtimeSession`, `RealtimeTool`, `RealtimeTurnDetection`, `CreateCallParams`, `CreateCallResult`, `ClientSecret`, `ClientSecretParams`, `RealtimeEvent`, `RealtimeServerEvent`, `RealtimeClientEvent`, `RealtimeErrorDetail`, `RealtimeResponseOptions`, `RealtimeSidebandOptions`, `WebSocketFactory`, `WebSocketLike`.
+
+## AI: voice in front of an agent — `VoiceBridge`, `this.voice()`, `useVoiceSession` (#921, part 2)
+
+**New and experimental, nothing to migrate.** It may change in a minor release until a live call has run on Azure and on OpenAI. A realtime voice model can now front an existing `AgentController`: it talks to the user and delegates the work as turns on the chat's thread. See [Voice in front of an agent](docs/ai-voice.md#voice-in-front-of-an-agent).
+
+- **`this.voice(Controller)`** on `ApiRouter` mounts `POST /<path>` (`voiceStart`), `PATCH /<path>/:sessionId` (`voiceUpdate`) and `DELETE /<path>/:sessionId` (`voiceEnd`), guarded like `this.agent()` and with `.middleware({ start, update, end })`. In `CreateRPC` it is one key, `"/<path>"`, with `{ __voice: true; body }`.
+- **`AgentController`** gains `voice?: VoiceConfig<Body>` (`realtime`, `delegate`, `start(context)` → the session's options) and `voiceStore: VoiceSessionStore` (default `MemoryVoiceSessionStore`), plus the three route methods. They call `authorizeRequest` with `route: "stream"` (the existing union is unchanged, so overrides keep compiling).
+- **`VoiceBridge`**: the delegate tool (`ask_agent` by default) runs as `startTurn`, plus `stop_work`, `work_status` and `answer_question`. It sends progress notes, runs one turn at a time with a queue, waits for a run already on the thread, has limits (`maxDurationMs`, `idleTimeoutMs`, `maxQueued`, `hangupGraceMs`…), and calls `onUsage`, `onTranscriptionUsage` and `onTick` (throw `VoiceHangup(line)` to say a line and hang up) and `onEnd(summary)`.
+  - `summary.transcription` holds transcription usage, which is billed apart from `usage`.
+  - Hooks run in order, off the event loop.
+  - A session whose instructions or tool names a client changes is hung up. This is a speed bump, not a security boundary.
+  - **`start` must enforce abuse limits** (one live session per user, calls per hour, credit), because gemi has none built in.
+  - Every failure after `start` calls `onEnd(start_failed)`, and a vendor call that already exists is hung up.
+- **`useVoiceSession(path, { threadId, body, pushToTalk, params })`** from the new entry **`gemi/ai/voice`**: `status`, `captions`, `error`, `start`, `end`, `mute`, push-to-talk (`setPushToTalk`, `press`, `release`) and `setBody`. It uses no vendor SDK. It is its own entry, so it is never in an app's main chunk (checked by the packaging test). About 3.7 KB gzip before minification.
+- **The app's MCP tools in a voice call.** `start` may return `mcp: { registry, filter, scopes, authorize, timeoutMs }`. The tools are added to the session and run on the server through `McpRegistry.execute`, as a remote principal built from the signed-in user (`via: "voice"`). No token is minted, and nothing reaches the browser.
+  - The native Realtime `mcp` tool isn't used, because its `authorization` would travel in session events the browser's data channel receives.
+  - Approval-gated tools are left out.
+  - Limits: `maxToolCallsPerMinute`, `toolTimeoutMs` and `toolOutputChars`.
+  - New hook `onToolCall`, and `summary.toolCalls` lists every call.
+  - `tools` takes the app's own in-process tools the same way.
+- New exports from `gemi/ai`: `VoiceBridge`, `VoiceHangup`, `voiceTools`, `mcpVoiceTools`, `DEFAULT_DELEGATE_NAME`, `MemoryVoiceSessionStore`, `defaultVoiceStore`, and the types `VoiceConfig`, `VoiceStartContext`, `VoiceSessionOptions`, `VoiceBridgeParams`, `VoiceDelegate`, `VoiceLimits`, `VoiceLines`, `VoiceLiveRuns`, `VoiceTurnController`, `VoiceSummary`, `VoiceUsageInfo`, `VoiceTranscriptionUsage`, `VoiceToolHandler`, `VoiceToolRunInfo`, `VoiceToolCall`, `VoiceToolCallRecord`, `VoiceMcpOptions`, `VoiceTranscriptLine`, `VoiceRequestRecord`, `VoiceSessionRecord`, `VoiceSessionStore`, `VoiceEndReason`, `VoiceStartResponse`, `VoiceRoute`, `VoiceRouteRPC`, `VoiceRouteMethod`, `VoiceMiddlewareConfig`. From `gemi/ai/voice`: `useVoiceSession` and the types `UseVoiceSessionParams`, `UseVoiceSessionResult`, `VoiceStatus`, `VoiceCaption`.
+- **Not yet verified on a live call**: Azure's `call_id` sideband, and whether the browser's data channel receives the `function_call_output` items the sideband adds (they end the `working` status).
+
 # Upgrading from 0.130 to 0.131
 
 ## Domains: the client's IP address from a trusted proxy's header (#917)

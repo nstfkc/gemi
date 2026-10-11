@@ -127,6 +127,7 @@ function RootLayout({ children }: { children?: unknown }) {
   Feed: () => import("./Feed"),
   Writes: () => import("./Writes"),
   Files: () => import("./Files"),
+  Voice: () => import("./Voice"),
 };
 init(RootLayout);
 `,
@@ -182,6 +183,18 @@ init(RootLayout);
 
 export default function Query() {
   return <p>{String(useQuery("/health").data)}</p>;
+}
+`,
+  // Uses `gemi/client` as well, like every real view: a lazy chunk that
+  // imports React and nothing the entry holds makes the bundler move React
+  // out of the entry into a shared chunk, whatever gemi does.
+  "web/Voice.tsx": `import { useQuery } from "gemi/client";
+import { useVoiceSession } from "gemi/ai/voice";
+
+export default function Voice() {
+  const { data } = useQuery("/health");
+  const voice = useVoiceSession("/chat/voice" as never, { threadId: String(data) });
+  return <button onClick={() => voice.start()}>{voice.status}</button>;
 }
 `,
   "web/Files.tsx": `import { fetchBlob, fetchText } from "gemi/client";
@@ -428,6 +441,10 @@ describe("the published client, built into an app", () => {
     // hooks keep it in the entry for when this chunk cannot be loaded.
     mutationExtras: ["validation_error", ".variantKeys()"],
     fileRequest: ["content-disposition"],
+    // `useVoiceSession` (#921), from `gemi/ai/voice`: the hook and its peer
+    // connection, used by a lazily loaded view only.
+    voiceHook: ["ask_agent"],
+    voiceCall: ["oai-events", "getUserMedia"],
   };
   const ALL_MARKERS = Object.values(MARKERS).flat();
 

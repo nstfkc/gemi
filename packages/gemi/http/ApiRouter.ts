@@ -4,6 +4,9 @@ import type {
   AgentMiddlewareConfig,
   AgentRoute,
   AgentRouteRPC,
+  VoiceMiddlewareConfig,
+  VoiceRoute,
+  VoiceRouteRPC,
 } from "../ai/AgentController";
 import { isConstructor } from "../internal/isConstructor";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
@@ -329,6 +332,7 @@ export type ApiRoutes = Record<
   | typeof ApiRouter
   | ResourceRoutes<any>
   | AgentRoute<any>
+  | VoiceRoute<any>
 >;
 
 export type ResourceRoutes<T extends new () => ResourceController> = {
@@ -514,6 +518,36 @@ export class ApiRouter {
     return createAgentRouteHandlers(Controller as any, this) as unknown as AgentRoute<T>;
   }
 
+  /**
+   * Mounts voice calls in front of an agent controller (#921), the way
+   * `agent()` mounts its chat. The controller sets `voice` (a `VoiceConfig`).
+   *
+   * ```ts
+   * "/chat/voice": this.voice(ChatController).middleware({ start: "auth" }),
+   * ```
+   *
+   *   POST   /chat/voice             → voiceStart   create the call
+   *   PATCH  /chat/voice/:sessionId  → voiceUpdate  the session's body
+   *   DELETE /chat/voice/:sessionId  → voiceEnd     hang up
+   *
+   * All three run the controller's `authorizeRequest` as `route: "stream"`
+   * with the session's thread and body (every delegated turn is a `stream`
+   * turn on that thread, so the same check applies), and
+   * the enclosing router's `middlewares` guard them as they guard `agent()`'s.
+   * One key for the client: `useVoiceSession("/chat/voice")` from
+   * `gemi/ai/voice`.
+   *
+   * @experimental Not yet verified against a live Azure or OpenAI call.
+   */
+  public voice<T extends object>(Controller: T): VoiceRoute<T> {
+    if ((Controller as { kind?: unknown }).kind !== "agent-controller") {
+      throw new TypeError(
+        `this.voice() takes an AgentController class, and got ${describeController(Controller)}.`,
+      );
+    }
+    return createVoiceRouteHandlers(Controller as any, this) as unknown as VoiceRoute<T>;
+  }
+
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
   public file<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
@@ -629,6 +663,45 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
   };
 }
 
+/**
+ * The runtime behind `this.voice()`: a nested router, for the reasons
+ * `createAgentRouteHandlers` gives, guarded by the enclosing router's
+ * `middlewares` the same way.
+ */
+function createVoiceRouteHandlers<T extends new () => AgentController<any, any>>(
+  Controller: T,
+  owner: ApiRouter,
+) {
+  const handlers = {
+    start: new RouteHandler("POST", Controller as any, "voiceStart"),
+    update: new RouteHandler("PATCH", Controller as any, "voiceUpdate"),
+    end: new RouteHandler("DELETE", Controller as any, "voiceEnd"),
+  };
+
+  return class VoiceRouteHandlers extends ApiRouter {
+    static __internal_brand = "VoiceRoute" as const;
+    static controller = Controller;
+    static handlers = handlers;
+
+    constructor() {
+      super();
+      this.middlewares = [...(owner?.middlewares ?? [])];
+    }
+
+    routes: ApiRoutes = {
+      "/": handlers.start,
+      "/:sessionId": { patch: handlers.update, delete: handlers.end },
+    };
+
+    static middleware(config: VoiceMiddlewareConfig) {
+      if (config.start) handlers.start.middleware(config.start);
+      if (config.update) handlers.update.middleware(config.update);
+      if (config.end) handlers.end.middleware(config.end);
+      return this;
+    }
+  };
+}
+
 type TestControllerMethod<T extends new () => Controller, K extends string> =
   K extends ControllerMethods<T> ? K : never;
 
@@ -646,11 +719,13 @@ type RouteEntry<K, R> = { key: K; route: R };
 type RouteValue<R> =
   R extends AgentRoute<infer C extends new () => AgentController<any, any>>
     ? AgentRouteRPC<C>
-    : R extends ControllerRouteHandler<any, infer C, infer N>
-      ? ControllerRouteValue<C, N>
-      : R extends RouteHandler<any, infer Input, infer Output, infer Params>
-        ? ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
-        : never;
+    : R extends VoiceRoute<infer C extends new () => AgentController<any, any>>
+      ? VoiceRouteRPC<C>
+      : R extends ControllerRouteHandler<any, infer C, infer N>
+        ? ControllerRouteValue<C, N>
+        : R extends RouteHandler<any, infer Input, infer Output, infer Params>
+          ? ApiRouterHandler<Input, ResponseData<Output>, Params, ResponseError<Output>>
+          : never;
 
 /** Whether a route has a key: a controller route only when its method can be called. */
 type IsRoutable<R> =
@@ -711,7 +786,7 @@ type RouteParser<
   ? // Checked before every other branch: `RouteHandlers` is fully optional, so
     // *every* object type extends it, and an agent route reaching that arm
     // would silently produce nothing.
-    T[K] extends AgentRoute<any>
+    T[K] extends AgentRoute<any> | VoiceRoute<any>
     ? RouteEntry<ParsePrefixAndKey<Prefix, K>, T[K]>
     : T[K] extends ResourceRoutes<any>
       ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
@@ -750,7 +825,7 @@ type FileRouteParser<
   Prefix extends PropertyKey = "",
   K extends keyof T = keyof T,
 > = K extends any
-  ? T[K] extends AgentRoute<any>
+  ? T[K] extends AgentRoute<any> | VoiceRoute<any>
     ? never
     : T[K] extends ResourceRoutes<any>
       ? never

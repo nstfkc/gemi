@@ -43,7 +43,9 @@
   // `ai/client` is the third browser entry (`gemi/ai/client`). Only that
   // directory and what it imports: `ai/index.ts` and everything under it is
   // server code and must not be compiled — or shipped — as browser types.
-  "include": ["client", "testing", "ai/client"],
+  // `ai/voice` is the fourth (`gemi/ai/voice`, #921): browser files only — the
+  // voice server half lives at `ai/VoiceBridge.ts` and friends.
+  "include": ["client", "testing", "ai/client", "ai/voice"],
   "exclude": [
     "node_modules",
     "dist",

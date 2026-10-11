@@ -63,6 +63,21 @@ export type Usage = {
    */
   imageInputTokens?: number;
   imageOutputTokens?: number;
+  /**
+   * How much of `inputTokens` / `outputTokens` was audio, on a realtime (voice)
+   * response. A breakdown like `imageInputTokens`, not a separate bucket: the
+   * vendor's `input_tokens` already includes them.
+   *
+   * `cachedAudioInputTokens` is the audio share of `cachedInputTokens`. It is
+   * its own field because audio is priced several times higher than text and
+   * its cached rate is a small fraction of the uncached one, so a voice
+   * session cannot be priced from the totals.
+   *
+   * Absent on usage from a text or image call.
+   */
+  audioInputTokens?: number;
+  cachedAudioInputTokens?: number;
+  audioOutputTokens?: number;
   totalTokens: number;
 };
 

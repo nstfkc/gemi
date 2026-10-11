@@ -260,6 +260,69 @@ export type {
   ProviderToolSpec,
 } from "./AgentProvider";
 
+// --- realtime (voice) calls ------------------------------------------------
+//
+// `OpenAIProvider#realtime` / `AzureOpenAIProvider#realtime` return a
+// `RealtimeClient`; these are its types. See `providers/realtime.ts`.
+// Experimental until a live call has run on Azure and OpenAI (#921).
+export {
+  isCallNotFound,
+  RealtimeClient,
+  RealtimeRequestError,
+  toRealtimeUsage,
+} from "./providers/realtime";
+export type {
+  ClientSecret,
+  ClientSecretParams,
+  CreateCallParams,
+  CreateCallResult,
+  RealtimeCallFlow,
+  RealtimeSession,
+  RealtimeTool,
+  RealtimeTurnDetection,
+} from "./providers/realtime";
+export { RealtimeSideband } from "./providers/sideband";
+export type {
+  RealtimeClientEvent,
+  RealtimeErrorDetail,
+  RealtimeEvent,
+  RealtimeResponseOptions,
+  RealtimeServerEvent,
+  RealtimeSidebandOptions,
+  WebSocketFactory,
+  WebSocketLike,
+} from "./providers/sideband";
+
+// --- voice in front of an agent (#921) ---------------------------------------
+//
+// The server half. The browser half is `useVoiceSession` from `gemi/ai/voice`.
+export { DEFAULT_DELEGATE_NAME, VoiceBridge, VoiceHangup, voiceTools } from "./VoiceBridge";
+export type {
+  VoiceBridgeParams,
+  VoiceDelegate,
+  VoiceLimits,
+  VoiceLines,
+  VoiceLiveRuns,
+  VoiceRequestRecord,
+  VoiceSummary,
+  VoiceToolCallRecord,
+  VoiceTranscriptLine,
+  VoiceTurnController,
+  VoiceTranscriptionUsage,
+  VoiceUsageInfo,
+} from "./VoiceBridge";
+export { mcpVoiceTools } from "./voiceMcp";
+export type {
+  VoiceMcpOptions,
+  VoiceToolCall,
+  VoiceToolHandler,
+  VoiceToolRunInfo,
+} from "./voiceMcp";
+export { defaultVoiceStore, MemoryVoiceSessionStore } from "./voiceStore";
+export type { VoiceSessionRecord, VoiceSessionStore } from "./voiceStore";
+export type { VoiceConfig, VoiceSessionOptions, VoiceStartContext } from "./voiceConfig";
+export type { VoiceEndReason, VoiceStartResponse } from "./voice/wire";
+
 // --- the controller, its stores and the route it mounts -------------------
 export {
   AgentController,
@@ -282,6 +345,12 @@ export {
   RedisNonceStore,
   RedisReceiptStore,
   ScopedAttachments,
+} from "./AgentController";
+export type {
+  VoiceMiddlewareConfig,
+  VoiceRoute,
+  VoiceRouteMethod,
+  VoiceRouteRPC,
 } from "./AgentController";
 export type {
   AgentHookContext,
