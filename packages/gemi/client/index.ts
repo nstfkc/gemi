@@ -21,6 +21,8 @@ export type {
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
+export { useSetQueryData } from "./useSetQueryData";
+export type { QueryTarget, QueryUpdate } from "./useSetQueryData";
 export { useSubscription } from "./useSubscription";
 export { useChannel, useChannelInvalidate } from "./useChannel";
 export type {

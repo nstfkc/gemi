@@ -141,7 +141,7 @@ carried for free.
 - `query-lazy-vs-mount-gate` - A lazy query does not refetch when its variant changes
 - `query-share-cache-key` - Identical path + params + search dedupes across components for free
 - `query-keep-previous-data` - Keep the previous page rendered while the next variant loads
-- `query-mutate-over-refetch` - Write the cache with `mutate` / `useMutate` instead of refetching
+- `query-mutate-over-refetch` - Write the cache with `mutate` / `useMutate` / `updates` instead of refetching
 - `query-debounce-search-variant` - Debounce a value before it becomes a query variant
 - `query-revalidate-on-focus` - Opt in only for cross-tab-mutable data; let `staleTime` gate it
 - `query-live-over-polling` - Prefer `live` / `useChannelInvalidate` over a bare `refetchUntil` poll
