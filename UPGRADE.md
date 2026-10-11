@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.129 to 0.130
 
 ## Client: mutation extras, cache writes and `fetchBlob` load on first use (#915)
 
