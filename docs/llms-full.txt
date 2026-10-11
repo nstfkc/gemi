@@ -10767,6 +10767,8 @@ a binding into the container, and a facade resolves it.**
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
 | `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
+| `password` | `boolean` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. See [Switching flows off](#switching-flows-off). |
+| `magicLink` | `boolean` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. See [Switching flows off](#switching-flows-off). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -11437,6 +11439,40 @@ issued for one address never matches another's row, and rotating `SECRET` invali
 ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
 perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
 with `generateCode` rather than writing `MagicLinkToken` yourself.
+
+## Switching flows off
+
+Every app gets the email + password and magic-link + PIN routes under `/auth`. An app that
+signs in only with [email codes](#email-codes-sign-up-or-sign-in) or [OAuth](#oauth) turns
+off the ones it doesn't use, so that, for example, nobody can register an address with a
+password through `/auth/sign-up` before its owner has signed in:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  password: false,
+  magicLink: false,
+  emailCode: { enabled: true, createUser: true, send },
+  oauthProviders: { google },
+});
+```
+
+| Switch | `POST` routes that answer 404 when `false` |
+| --- | --- |
+| `password` | `/auth/sign-in`, `/auth/sign-in-v2`, `/auth/sign-up`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/change-password`, `/auth/verify-email` |
+| `magicLink` | `/auth/magic-link`, `/auth/sign-in-with-pin`, `/auth/sign-in-with-pin-v2` |
+
+Both default to `true`. A switched-off route answers `404` with
+`{ error: { kind: "not_found", ... } }` before it reads the body, so a client can't tell it
+from a route that doesn't exist. It does the same whether the request comes over HTTP or
+through `dispatchAs`. The routes stay registered under `/auth`, so an app route at the same
+path is still not served.
+
+Nothing else changes. `/auth/sign-out`, `/auth/me`, the email-code routes, OAuth and
+connections keep working. The `/auth/sign-in/magic-link` page also stays, because it takes
+the link `emailCode.send` is handed and the links `Auth.createMagicLink` issues.
+`hashPassword` and `verifyPassword` stay available to an app that calls them itself. A value
+that isn't `true` or `false` (say `"false"`) fails the boot.
 
 ## OAuth
 

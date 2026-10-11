@@ -14,6 +14,15 @@ Behaviour changes:
 - **Types:** the hooks' `error` is `WithMutationErrorHelpers<MutationError | E> | null`, so an exact-type assertion such as `Equal<typeof error, MutationError | null>` no longer holds. `<Form>` has a third type parameter, the route's error type, inferred from `onError` in JSX, so `<Form onError={(error: MutationError) => …}>` still compiles on a route with typed errors. With explicit type arguments (`Form<"/route", "POST">`) on such a route, a handler annotated `(error: MutationError)` no longer fits: drop the annotation, or annotate it with the route's error type.
 - **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
 
+## Auth: switch off the password and magic-link routes (#879)
+
+**New, nothing to migrate.** Two `defineAuthConfig` options let an app that signs in only with email codes or OAuth turn off the built-in routes it doesn't use, so it no longer needs a middleware that answers 404 for them. See [Switching flows off](docs/authentication.md#switching-flows-off).
+
+- **`password: false`** answers 404 on `POST /auth/sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password` and `verify-email`.
+- **`magicLink: false`** answers 404 on `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`.
+- Both default to `true`, so an app that sets neither behaves as before. A switched-off route answers 404 before it reads the body. Sign-out, `/auth/me`, email codes, OAuth and the `/auth/sign-in/magic-link` page are not affected. A value that isn't a boolean fails the boot.
+- An app that answered 404 for these paths in its own middleware, and set `verifyPassword: async () => false`, can drop both.
+
 ## Log: a console sink (#881)
 
 **New option, one behaviour change in development.** `Log.*` can now also write each entry to stdout (`debug`, `info`, `notice`) or stderr (`warning` and above), so it reaches platform logs such as Railway's. See [Log: console output](docs/facades.md#console-output).
