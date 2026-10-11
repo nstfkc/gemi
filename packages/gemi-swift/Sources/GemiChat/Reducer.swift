@@ -249,10 +249,27 @@ extension ChatState {
         }
         return
       }
+      // The copy keeps the client's key and the app's metadata (gemi #818);
+      // when the server's copy is already here, that one gets them.
+      let local = messages[index].json
+      func keep(_ json: inout JSONObject) {
+        if let localId = local["localId"], localId != .null {
+          json["localId"] = localId
+        } else {
+          json["localId"] = local["id"]
+        }
+        if let metadata = local["metadata"], truthy(metadata) { json["metadata"] = metadata }
+      }
       if messages.contains(where: { $0.json["id"] == messageId }) {
         messages.remove(at: index)
+        if let kept = messages.firstIndex(where: { $0.json["id"] == messageId }) {
+          var json = messages[kept].json
+          keep(&json)
+          messages[kept] = AgentMessage(json: json)
+        }
       } else {
         var json = messages[index].json
+        keep(&json)
         json["id"] = messageId
         messages[index] = AgentMessage(json: json)
       }

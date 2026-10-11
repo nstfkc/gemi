@@ -231,8 +231,25 @@ public data class ChatState(
           index == -1 && localId != null && stored != null && messages.none { it.json["id"] == messageId } ->
             copy(messages = messages + AgentMessage(stored))
           index == -1 -> this
-          messages.any { it.json["id"] == messageId } -> copy(messages = messages.filterIndexed { i, _ -> i != index })
-          else -> copy(messages = messages.toMutableList().also { it[index] = AgentMessage(it[index].json.with("id", messageId)) })
+          else -> {
+            // The copy keeps the client's key and the app's metadata (gemi
+            // #818); when the server's copy is already here, that one gets them.
+            val local = messages[index].json
+            fun keep(json: JsonObject) =
+              json
+                .with("localId", local["localId"].nonNull() ?: local["id"])
+                .let { kept -> local["metadata"]?.takeIf { it.truthy() }?.let { kept.with("metadata", it) } ?: kept }
+            if (messages.any { it.json["id"] == messageId }) {
+              copy(
+                messages =
+                  messages
+                    .filterIndexed { i, _ -> i != index }
+                    .map { if (it.json["id"] == messageId) AgentMessage(keep(it.json)) else it },
+              )
+            } else {
+              copy(messages = messages.toMutableList().also { it[index] = AgentMessage(keep(it[index].json).with("id", messageId)) })
+            }
+          }
         }
       }
 

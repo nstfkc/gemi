@@ -465,6 +465,32 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * message `interrupted` when it is not.
    */
   runId?: string;
+  /**
+   * The client's own id for a user message it sent, kept after the server's
+   * `message-id` renames `id` to the stored one (#818).
+   *
+   * `id` changes about one round trip after a send: the hook shows the turn
+   * under a `local_…` id and swaps in the server's when it arrives. A UI keyed
+   * by `id` remounts that element, and any entrance animation plays twice. Key
+   * by `message.localId ?? message.id` instead: the same value for the whole
+   * life of the message on this client, and the server id for everything the
+   * client never sent.
+   *
+   * Client-only. Set by `useChat` on the messages it authors, never stored by
+   * the server, and left off what the hook posts.
+   */
+  localId?: string;
+  /**
+   * What the app attached to this message when it sent it:
+   * `sendMessage(text, { metadata })` (#818). Carried over the `message-id`
+   * swap, so an app can tell its own kinds of turn apart ("sent on the user's
+   * behalf") without matching on ids or timestamps.
+   *
+   * Client-only, like `localId`: never sent to the server and not stored, so a
+   * re-read thread does not have it. What the server must know goes in the
+   * per-send `body`.
+   */
+  metadata?: Record<string, unknown>;
 };
 
 // --- what the client sends ----------------------------------------------

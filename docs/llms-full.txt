@@ -2433,6 +2433,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
 | `req.locale()` | `string` | The resolved request locale. |
 | `req.ctx()` | request context | Access to the per-request store (used by facades, `setHeaders`, etc.). |
+| `req.state` | `RequestState` | Typed values kept for this request: what a middleware resolved, read back with `req.state.require(key)`. See [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate). |
 
 ### Reading query params
 
@@ -3077,6 +3078,76 @@ Now `"admin"`, `"org"`, and `"ai-quota:100"` are usable anywhere in the DSL:
 class AdminRouter extends ViewRouter {
   middlewares = ["auth", "admin", "cache:private,0,no-store"];
   routes = { /* ... */ };
+}
+```
+
+### Passing values to the handler: `req.state`
+
+A middleware that looks something up (the tenant, the record a route acts on, a scope) can hand it to the handler, so the handler doesn't look it up again. Make a typed key with `stateKey`, set the value in the middleware and read it in the handler:
+
+```typescript
+// app/http/pageScope.ts
+import { stateKey } from "gemi/http";
+
+export type PageScope =
+  | { kind: "site"; siteId: number; projectId: number }
+  | { kind: "post"; postId: number; projectId: number };
+
+export const pageScope = stateKey<PageScope>("pageScope");
+```
+
+```typescript
+import { Middleware } from "gemi/http";
+import { pageScope } from "@/app/http/pageScope";
+
+class PageOwnerMiddleware extends Middleware {
+  async run() {
+    const scope = await resolvePageScope(this.req.params.pageId);
+    this.req.state.set(pageScope, scope);
+  }
+}
+```
+
+```typescript
+import { Controller, HttpRequest } from "gemi/http";
+import { pageScope } from "@/app/http/pageScope";
+
+class PageController extends Controller {
+  async show(req = new HttpRequest<{}, { pageId: string }>()) {
+    const scope = req.state.require(pageScope); // PageScope
+    // ...
+  }
+}
+```
+
+| Method | Returns |
+| --- | --- |
+| `req.state.get(key)` | The value, or `undefined` when nothing set it. |
+| `req.state.require(key)` | The value. Throws `MissingRequestStateError` (a 500) when nothing set it, for example when the route is missing the middleware. |
+| `req.state.set(key, value)` | Sets the value for the rest of the request and returns it. |
+| `req.state.has(key)` / `req.state.delete(key)` | What a `Map` answers. |
+
+- **Typed by the key.** `set` only takes a value of the key's type, and `require` returns that type, so no cast is needed.
+- **Keys compare by identity.** The name is only used in error messages. Two modules that pick the same name get separate values, and a key the module doesn't export stays private to it.
+- **One state per request.** The middleware's `this.req`, the handler's `req = new HttpRequest()` and a custom request class all read the same state, so you don't need a `WeakMap<HttpRequest, ...>` keyed on one of them.
+- **Global middleware.** State set in a [global middleware](#global-middleware) is carried into the route's request, as the user is.
+- **Not shared** with another request: an in-process tool call, a server-side query made during a page render, or the request that answers an agent's approval each start with empty state.
+
+An `AgentController` turn is one request, so it can use the same state. Set a value in `authorizeRequest()`, `instructions()` or `context()` and read it from `ctx.req.state` in `onMessage`, `onStreamComplete`, `onError` or `onAwaitingInput`. An upload is a request of its own, so a value its `authorizeRequest()` sets is readable in `attachmentDestination(file, req)`:
+
+```typescript
+const turn = stateKey<{ sentFrom: string; marked: boolean }>("turn");
+
+class SiteChatController extends AgentController {
+  context(req: HttpRequest<any, any>, { body }: { body: Record<string, unknown> }) {
+    req.state.set(turn, { sentFrom: String(body.sentFrom), marked: false });
+    return {};
+  }
+
+  protected async onMessage(message: AgentMessage, ctx: AgentHookContext) {
+    const current = ctx.req.state.get(turn);
+    // ...
+  }
 }
 ```
 
@@ -6859,6 +6930,7 @@ These are the web hook's rules; the comments in `packages/gemi/ai/useChat.tsx` e
 - **Answers given together go out as one turn.** A turn that leaves a pending call unanswered refuses it. So `approve`/`answer` calls made in one go — a loop over `pending` — are coalesced into a single request.
 - **`stop()` ends the run. `close()` doesn't.** `stop()` marks the turn aborted at once and tells the server, which ends the generation and any tool in flight. `close()` only drops the connection, like a React unmount; the run finishes on the server, and a later session on the thread attaches to it. Call `close()` when the screen goes away.
 - **A turn cut off by a server restart reads as `interrupted`.** On a thread, the server stores a turn while it runs. If the server dies mid-run, the thread keeps the user's message and the assistant message up to that point, and it comes back with `finishReason` `interrupted` (`FinishReason.interrupted` / `FinishReason.Interrupted`), provided the app's route reads it with `readThread`. A tool call it left open has a `denied` result with cause `"interrupted"`: the tool may have run, so don't show it as refused. Show the message as cut off. The next turn goes on from there.
+- **Key a message by `localId ?? id`.** A message the session sends is shown at once under a client id (`local_…`), and the server's `message-id` renames its `id` to the stored one about one round trip later. The renamed message keeps the client id as `localId`, so a list keyed by `localId ?? id` doesn't rebuild that row (and replay its entrance animation) when the id changes. `id` is still the server's, for everything else. On the web, `useChat` also takes per-send options, `sendMessage(text, { body, metadata })`: `body` is merged over the hook's for that request only, and `metadata` stays on the sent message, client-side only.
 - **`onAttachMiss`** fires when the attach probe finds no run. Behind a load balancer that's ambiguous, because the run may be alive on another instance. Re-reading the thread and calling `setMessages` shows the answer anyway.
 - **An upload has two ids, and either can be missing.** `upload` returns a `ChatUpload`. Its `fileId` is the provider's: put `upload.file` in a turn's `files` to show the model the file. Its `attachmentId` is gemi's: the handle a tool fetches the bytes by. A file the server kept but never sent to the provider has no `fileId`, so `file` is `nil`/`null`, not a turn carrying an empty id. An upload the server had no scope to keep has no `attachmentId`, and `downgraded` says so.
 - **An upload sends `body` too.** `upload` sends the session's `body`, when it is not empty, as a `body` form part (one JSON object) beside the file. The controller's `attachmentScope`, `authorizeRequest`, `checkUpload` and `attachmentDestination` then see the same fields on an upload as on a turn, so a chat whose subject is only in `body` (a page id, with no user and no thread) keeps its uploads under the same scope as its turns.
@@ -10644,6 +10716,8 @@ a binding into the container, and a facade resolves it.**
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
 | `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
+| `password` | `boolean` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. See [Switching flows off](#switching-flows-off). |
+| `magicLink` | `boolean` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. See [Switching flows off](#switching-flows-off). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -11314,6 +11388,40 @@ issued for one address never matches another's row, and rotating `SECRET` invali
 ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
 perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
 with `generateCode` rather than writing `MagicLinkToken` yourself.
+
+## Switching flows off
+
+Every app gets the email + password and magic-link + PIN routes under `/auth`. An app that
+signs in only with [email codes](#email-codes-sign-up-or-sign-in) or [OAuth](#oauth) turns
+off the ones it doesn't use, so that, for example, nobody can register an address with a
+password through `/auth/sign-up` before its owner has signed in:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  password: false,
+  magicLink: false,
+  emailCode: { enabled: true, createUser: true, send },
+  oauthProviders: { google },
+});
+```
+
+| Switch | `POST` routes that answer 404 when `false` |
+| --- | --- |
+| `password` | `/auth/sign-in`, `/auth/sign-in-v2`, `/auth/sign-up`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/change-password`, `/auth/verify-email` |
+| `magicLink` | `/auth/magic-link`, `/auth/sign-in-with-pin`, `/auth/sign-in-with-pin-v2` |
+
+Both default to `true`. A switched-off route answers `404` with
+`{ error: { kind: "not_found", ... } }` before it reads the body, so a client can't tell it
+from a route that doesn't exist. It does the same whether the request comes over HTTP or
+through `dispatchAs`. The routes stay registered under `/auth`, so an app route at the same
+path is still not served.
+
+Nothing else changes. `/auth/sign-out`, `/auth/me`, the email-code routes, OAuth and
+connections keep working. The `/auth/sign-in/magic-link` page also stays, because it takes
+the link `emailCode.send` is handed and the links `Auth.createMagicLink` issues.
+`hashPassword` and `verifyPassword` stay available to an app that calls them itself. A value
+that isn't `true` or `false` (say `"false"`) fails the boot.
 
 ## OAuth
 
@@ -13694,6 +13802,30 @@ Log.info("Order created", { orderId, total });
 Log.error("Payment failed", { orderId, reason });
 ```
 
+Every entry is appended as a JSON line to `storage/logs/*.log` and handed to `onLogCreated`. It can also be written to the process's output, which is what platform log viewers (Railway, Fly, Docker, the `gemi dev` terminal) collect.
+
+### Console output
+
+`console` in `app/config/log.ts` turns on the console sink: `debug`, `info` and `notice` go to stdout, `warning` and above to stderr, one line per entry.
+
+```typescript
+// app/config/log.ts
+import { defineLogConfig } from "gemi/services";
+
+export default defineLogConfig({
+  // true: every level. A level: that level and above. false: off.
+  console: process.env.NODE_ENV === "production" ? "info" : true,
+  // "json" (one JSON object per line) or "text" (a readable line).
+  consoleFormat: "json",
+});
+```
+
+- **Defaults:** on with `"text"` lines when `NODE_ENV` is `"development"` (`gemi dev`); off with `"json"` lines otherwise. Set `console` explicitly to log to stdout in production.
+- **`"json"`** writes `{"orderId":7,"timestamp":"…","level":"error","message":"Payment failed"}`: the metadata keys at the top level, then `timestamp`, `level` and `message`, which win over metadata keys of the same name. Railway and most log platforms parse such lines into structured, filterable fields.
+- **`"text"`** writes `2026-10-11T09:00:00.000Z ERROR Payment failed {"orderId":7}`.
+- An `Error` in the metadata is written with its `name`, `message`, `stack` and `cause`, so `Log.error("Payment failed", { err })` keeps the stack.
+- Inside a request, a console line carries the request's `method` and `path`, never its headers, query string or body. The file sink and `onLogCreated` keep the full request metadata as before.
+
 ## Meta
 
 `Meta` sets page metadata for the current request — used during SSR to populate `<head>` tags and Open Graph data. It writes to the request context, not to a container binding.
@@ -13806,6 +13938,7 @@ import { defineLogConfig } from "gemi/services";
 
 export default defineLogConfig({
   maxFileSize: 1024 * 1024 * 10,
+  console: "info", // also write to stdout/stderr, see Log above
   onLogCreated: async (entry) => {
     if (entry.level === "error") await notifySlack(entry);
   },

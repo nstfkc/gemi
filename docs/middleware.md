@@ -429,6 +429,76 @@ class AdminRouter extends ViewRouter {
 }
 ```
 
+### Passing values to the handler: `req.state`
+
+A middleware that looks something up (the tenant, the record a route acts on, a scope) can hand it to the handler, so the handler doesn't look it up again. Make a typed key with `stateKey`, set the value in the middleware and read it in the handler:
+
+```typescript
+// app/http/pageScope.ts
+import { stateKey } from "gemi/http";
+
+export type PageScope =
+  | { kind: "site"; siteId: number; projectId: number }
+  | { kind: "post"; postId: number; projectId: number };
+
+export const pageScope = stateKey<PageScope>("pageScope");
+```
+
+```typescript
+import { Middleware } from "gemi/http";
+import { pageScope } from "@/app/http/pageScope";
+
+class PageOwnerMiddleware extends Middleware {
+  async run() {
+    const scope = await resolvePageScope(this.req.params.pageId);
+    this.req.state.set(pageScope, scope);
+  }
+}
+```
+
+```typescript
+import { Controller, HttpRequest } from "gemi/http";
+import { pageScope } from "@/app/http/pageScope";
+
+class PageController extends Controller {
+  async show(req = new HttpRequest<{}, { pageId: string }>()) {
+    const scope = req.state.require(pageScope); // PageScope
+    // ...
+  }
+}
+```
+
+| Method | Returns |
+| --- | --- |
+| `req.state.get(key)` | The value, or `undefined` when nothing set it. |
+| `req.state.require(key)` | The value. Throws `MissingRequestStateError` (a 500) when nothing set it, for example when the route is missing the middleware. |
+| `req.state.set(key, value)` | Sets the value for the rest of the request and returns it. |
+| `req.state.has(key)` / `req.state.delete(key)` | What a `Map` answers. |
+
+- **Typed by the key.** `set` only takes a value of the key's type, and `require` returns that type, so no cast is needed.
+- **Keys compare by identity.** The name is only used in error messages. Two modules that pick the same name get separate values, and a key the module doesn't export stays private to it.
+- **One state per request.** The middleware's `this.req`, the handler's `req = new HttpRequest()` and a custom request class all read the same state, so you don't need a `WeakMap<HttpRequest, ...>` keyed on one of them.
+- **Global middleware.** State set in a [global middleware](#global-middleware) is carried into the route's request, as the user is.
+- **Not shared** with another request: an in-process tool call, a server-side query made during a page render, or the request that answers an agent's approval each start with empty state.
+
+An `AgentController` turn is one request, so it can use the same state. Set a value in `authorizeRequest()`, `instructions()` or `context()` and read it from `ctx.req.state` in `onMessage`, `onStreamComplete`, `onError` or `onAwaitingInput`. An upload is a request of its own, so a value its `authorizeRequest()` sets is readable in `attachmentDestination(file, req)`:
+
+```typescript
+const turn = stateKey<{ sentFrom: string; marked: boolean }>("turn");
+
+class SiteChatController extends AgentController {
+  context(req: HttpRequest<any, any>, { body }: { body: Record<string, unknown> }) {
+    req.state.set(turn, { sentFrom: String(body.sentFrom), marked: false });
+    return {};
+  }
+
+  protected async onMessage(message: AgentMessage, ctx: AgentHookContext) {
+    const current = ctx.req.state.get(turn);
+    // ...
+  }
+}
+```
+
 ### Middleware that runs on refusals
 
 A middleware that only adds response headers, like your own CORS middleware, can set `static runsOnRefusal = true`. When a middleware earlier in the chain refuses the request, the chain still runs every `runsOnRefusal` middleware after it, and the headers they set reach the refusal. `CorsMiddleware` sets it.

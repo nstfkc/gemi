@@ -242,6 +242,13 @@ export {
 // --- controller ----------------------------------------------------------
 
 export type AgentHookContext = {
+  /**
+   * The request that started the turn. Its `state` is the turn's own typed
+   * state (#887): a value set in `authorizeRequest()`, `instructions()` or
+   * `context()` (`req.state.set(key, value)`) is read here with
+   * `ctx.req.state.get(key)`, instead of a `WeakMap` keyed on the request.
+   * A request answering an approval is a new turn and starts with none.
+   */
   req: HttpRequest<any, any>;
   runId: string;
   threadId?: string;

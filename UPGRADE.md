@@ -21,6 +21,50 @@ protected async checkUpload(file, req, { body }) {
 
 An app that noted the upload's body in `authorizeRequest` (a `WeakMap` keyed by the request) to read it back in `attachmentDestination` can drop that and read `body` here instead. A check is not a reservation: two uploads checked at once both see the old usage.
 
+## Auth: switch off the password and magic-link routes (#879)
+
+**New, nothing to migrate.** Two `defineAuthConfig` options let an app that signs in only with email codes or OAuth turn off the built-in routes it doesn't use, so it no longer needs a middleware that answers 404 for them. See [Switching flows off](docs/authentication.md#switching-flows-off).
+
+- **`password: false`** answers 404 on `POST /auth/sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password` and `verify-email`.
+- **`magicLink: false`** answers 404 on `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`.
+- Both default to `true`, so an app that sets neither behaves as before. A switched-off route answers 404 before it reads the body. Sign-out, `/auth/me`, email codes, OAuth and the `/auth/sign-in/magic-link` page are not affected. A value that isn't a boolean fails the boot.
+- An app that answered 404 for these paths in its own middleware, and set `verifyPassword: async () => false`, can drop both.
+
+## Log: a console sink (#881)
+
+**New option, one behaviour change in development.** `Log.*` can now also write each entry to stdout (`debug`, `info`, `notice`) or stderr (`warning` and above), so it reaches platform logs such as Railway's. See [Log: console output](docs/facades.md#console-output).
+
+- **Config:** `console` in `defineLogConfig`: `true` (every level), a `LogLevel` (that level and above) or `false`. `consoleFormat`: `"json"` (one JSON object per line, metadata keys at the top level, then `timestamp`, `level`, `message`) or `"text"`. New type export `LogConsoleFormat` from `gemi/services`.
+- Console lines carry the caller's metadata plus, inside a request, its `method` and `path` only, never headers, query string or body. An `Error` in the metadata keeps its message and stack. The file sink and `onLogCreated` are unchanged.
+
+Behaviour change:
+
+- **In development** (`NODE_ENV=development`, which `gemi dev` sets) the sink is **on by default** with `"text"` lines, so `Log.*` calls now print in the `gemi dev` terminal. Set `console: false` to keep the old silence.
+- **In production and tests nothing changes**: the sink is off unless you set `console`. To get `Log` into Railway's logs, set e.g. `console: "info"` (or `true`) in `app/config/log.ts`.
+
+## Typed per-request state: `req.state` and `stateKey` (#887)
+
+**New, nothing to migrate.** A middleware can hand what it resolved to the handler, and an agent turn's `context()` can hand what it decided to its hooks, so you no longer need `WeakMap<HttpRequest, ...>` side maps. See [Middleware: passing values to the handler](docs/middleware.md#passing-values-to-the-handler-reqstate).
+
+- New exports from `gemi/http`: `stateKey<T>(name)`, `RequestState`, `MissingRequestStateError` and the `StateKey<T>` type.
+- **`req.state`** on every `HttpRequest` has `get(key)` (`T | undefined`), `require(key)` (`T`, or throws `MissingRequestStateError`, which the server answers with a 500), `set(key, value)`, `has(key)` and `delete(key)`. Keys compare by identity. The name is only used in messages.
+- Every `HttpRequest` built for one request shares one state: the middleware's `this.req`, the handler's `req = new HttpRequest()`, and custom request classes. State set in a global middleware is carried into the route's request, as the user is. Other requests (an in-process tool call, a server-side query during a page render, the request answering an approval) start empty.
+- **Agents:** a turn is one request, so `ctx.req.state` in `onMessage`, `onStreamComplete`, `onError` and `onAwaitingInput` holds what `authorizeRequest()`, `instructions()` or `context()` set. `AgentHookContext` gets no new field.
+- If a custom `HttpRequest` subclass of yours declares its own `state` member, rename it. `state` is now a built-in property and your member would shadow it.
+
+## `useChat`: per-send body and metadata, and a stable key on sent messages (#818)
+
+**New, nothing to migrate.**
+
+- **`sendMessage(turn, { body, metadata })`.** `body` is merged over the hook's `body` for that one request (a key given here wins; the next send goes back to the hook's). It is typed as `Partial` of the controller's declared body. The envelope keys (`turn`, `clientRunId`, `threadId`, `messages`) still belong to the framework. `metadata` is kept on the message the send adds, as `message.metadata`; it is client-only, never sent or stored. New exported type `SendMessageOptions` from `gemi/ai/client`. `regenerate()` re-sends a question with its `metadata` (not a per-send `body`, which is not remembered).
+- **`AgentMessage.localId` and `AgentMessage.metadata`** (optional, client-only). A user message `useChat` sends carries `localId` from the start, and keeps it when the server's `message-id` renames `id`. Key message lists by `message.localId ?? message.id` so a sent message is not remounted about 50 ms after sending. `id` is still the server's id. Both fields are left out of the history a stateless chat posts.
+
+Behaviour changes:
+
+- **The `message-id` rename keeps `localId` (and `metadata`) on the message**, in `useChat` and in the Swift and Kotlin reducers. A message renamed by the server now has a `localId` field it did not have before; code that deep-compares messages with a fixed shape sees the extra key. When the server's copy of the message was already in the transcript (a thread re-read raced the event), the local copy is still dropped and its `localId`/`metadata` move onto the server's copy.
+- **A message `useChat` authors has `localId` set** (equal to its initial `id`).
+- **`regenerate()` re-sends the question under its `localId`**, so the question's row keeps its key while it is taken out and put back.
+
 # Upgrading from 0.123.0 to 0.124.0
 
 ## Broadcasting: the Redis pub/sub driver (#874)
