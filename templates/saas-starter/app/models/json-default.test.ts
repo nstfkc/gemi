@@ -39,6 +39,7 @@ import { POSTGRES_URL } from "./scratch";
  *   items    Json    @default("[]")
  *   body     Json    @default("{}")
  *   settings Json    @default("{\"theme\":\"dark\",\"tags\":[1,2]}")
+ *   nothing  Json    @default("null")
  *   parentId Int?
  *   parent   JsonDefaultParent? @relation(fields: [parentId], references: [id])
  * }
@@ -58,6 +59,7 @@ const SQLITE_DDL = [
     "items" JSONB NOT NULL DEFAULT '[]',
     "body" JSONB NOT NULL DEFAULT '{}',
     "settings" JSONB NOT NULL DEFAULT '{"theme":"dark","tags":[1,2]}',
+    "nothing" JSONB NOT NULL DEFAULT 'null',
     "parentId" INTEGER,
     CONSTRAINT "JsonDefaultThing_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "JsonDefaultParent" ("id")
   )`,
@@ -73,6 +75,7 @@ const POSTGRES_DDL = [
     "items" JSONB NOT NULL DEFAULT '[]',
     "body" JSONB NOT NULL DEFAULT '{}',
     "settings" JSONB NOT NULL DEFAULT '{"theme":"dark","tags":[1,2]}',
+    "nothing" JSONB NOT NULL DEFAULT 'null',
     "docs" JSONB[] DEFAULT ARRAY['{"a":1}', '[]']::JSONB[],
     "parentId" INTEGER REFERENCES "JsonDefaultParent" ("id")
   )`,
@@ -102,6 +105,8 @@ function thingSchema(postgres: boolean): ModelSchema {
       settings: field("settings", "Json", {
         default: { kind: "value", value: '{"theme":"dark","tags":[1,2]}' },
       }),
+      // The JSON value null, in a NOT NULL column: SQL NULL would be refused.
+      nothing: field("nothing", "Json", { default: { kind: "value", value: "null" } }),
       // `Json[]` is a validation error on SQLite, so only Postgres has it. The
       // DMMF gives a list default as an array of source texts.
       ...(postgres
@@ -157,6 +162,7 @@ const DEFAULTS = {
   items: [],
   body: {},
   settings: { theme: "dark", tags: [1, 2] },
+  nothing: null,
 };
 
 function suite(label: string, url?: string) {
@@ -222,7 +228,7 @@ function suite(label: string, url?: string) {
       if (postgres) {
         const [row] = await raw.unsafe(
           `select jsonb_typeof("items") as items, jsonb_typeof("body") as body,
-                  jsonb_typeof("settings") as settings,
+                  jsonb_typeof("settings") as settings, jsonb_typeof("nothing") as nothing,
                   (select array_agg(jsonb_typeof(d)) from unnest("docs") d) as docs,
                   "label"
              from "JsonDefaultThing" where "id" = $1`,
@@ -231,7 +237,7 @@ function suite(label: string, url?: string) {
         return row;
       }
       const [row] = await raw.unsafe(
-        `select "items", "body", "settings", "label",
+        `select "items", "body", "settings", "nothing", "label",
                 json_type("items") as itemsType, json_type("body") as bodyType
            from "JsonDefaultThing" where "id" = ?`,
         [id],
@@ -246,11 +252,13 @@ function suite(label: string, url?: string) {
         expect(row.items).toBe("array");
         expect(row.body).toBe("object");
         expect(row.settings).toBe("object");
+        expect(row.nothing).toBe("null");
         expect(row.docs).toEqual(["object", "array"]);
       } else {
         expect(row.items).toBe("[]");
         expect(row.body).toBe("{}");
         expect(JSON.parse(row.settings)).toEqual(DEFAULTS.settings);
+        expect(row.nothing).toBe("null");
         expect(row.itemsType).toBe("array");
         expect(row.bodyType).toBe("object");
       }

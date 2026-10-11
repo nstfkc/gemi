@@ -10,6 +10,7 @@ import {
   isClientSideDefault,
 } from "./defaults";
 import type { DefaultKind, FieldSchema } from "./schema";
+import { JsonNull } from "./json-null";
 
 /**
  * `defaults.ts` had four exports and no test naming any of them (#258).
@@ -588,11 +589,16 @@ describe("clientSideValue produces one field's value", () => {
     ['{"a":1,"b":[true,null]}', { a: 1, b: [true, null] }],
     ['"hi"', "hi"],
     ["1", 1],
-    ["null", null],
   ])("a Json default %s is the value it spells", (text, parsed) => {
     const json = field({ type: "Json", default: { kind: "value", value: text } });
 
     expect(clientSideValue(json, now)).toEqual(parsed);
+  });
+
+  test('a Json default "null" is the JSON null, not SQL NULL', () => {
+    const json = field({ type: "Json", default: { kind: "value", value: "null" } });
+
+    expect(clientSideValue(json, now)).toBe(JsonNull);
   });
 
   test("a Json default is a fresh object per call", () => {

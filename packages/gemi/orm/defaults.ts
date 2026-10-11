@@ -1,3 +1,4 @@
+import { JsonNull } from "./json-null";
 import {
   NANOID_DEFAULT_LENGTH,
   type DefaultKind,
@@ -151,7 +152,11 @@ function jsonDefault(field: FieldSchema, value: unknown): unknown {
   if (field.isList && Array.isArray(value)) {
     return value.map((element) => parseJsonDefault(field, element));
   }
-  return parseJsonDefault(field, value);
+  // `@default("null")` is the JSON value null, which the database's own
+  // default (`'null'::jsonb`) stores as such. A bare `null` here would be
+  // encoded as SQL NULL instead, and fail a NOT NULL column.
+  const parsed = parseJsonDefault(field, value);
+  return parsed === null ? JsonNull : parsed;
 }
 
 function parseJsonDefault(field: FieldSchema, value: unknown): unknown {

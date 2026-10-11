@@ -195,7 +195,7 @@ every one of them gets a bare `TEXT NOT NULL`. All four are gemi's to supply:
 **A `Json` default is stored as the value it spells.** Prisma writes a Json default as a string,
 `items Json @default("[]")`, and the generated `schema.ts` keeps that text (`"value": "[]"`). gemi
 parses it when it fills the column, so a `create` that leaves `items` out stores the array `[]`
-(`jsonb_typeof` is `array`), the same as Prisma. Each row gets its own copy. A `Json[]` default
+(`jsonb_typeof` is `array`), the same as Prisma. `@default("null")` is the JSON value null, not SQL `NULL`. Each row gets its own copy. A `Json[]` default
 (`@default(["{}"])`, Postgres) is parsed element by element. Before #926 the text itself was
 stored, as the JSON string `"[]"`; see the upgrade notes for fixing rows written then.
 
