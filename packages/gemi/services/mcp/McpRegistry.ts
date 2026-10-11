@@ -1,6 +1,9 @@
-import type { ToolContext } from "../../ai/Agent";
+import type { AnyAgentTool, ToolContext } from "../../ai/Agent";
+import { generateWithin, type GenerateParams } from "../../ai/generate";
+import { isJobHandle, toolJobs } from "../../ai/jobs/AgentJob";
+import type { ToolAttachments } from "../../ai/store/Attachments";
 import type { User } from "../../auth/types";
-import type { ProgressSink } from "../../http/modelOriginated";
+import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
 import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
 import { ToolError } from "../../ai/redact";
 import { featureOn } from "../features/gate";
@@ -11,10 +14,12 @@ import type {
   McpFileBinder,
   McpMethod,
   McpModelParam,
+  McpNativeToolMetaRuntime,
   McpParamBinder,
   McpResultProjection,
   McpRouteDeclaration,
   McpRouter,
+  McpToolDeclaration,
 } from "../../http/McpRouter";
 import type {
   ApiRouteDispatcher,
@@ -196,29 +201,34 @@ export type McpToolAnnotations = {
  * One tool, described without committing to who consumes it.
  *
  * The registry's native output. An in-process agent projects it to an
- * `AgentTool` (`toAgentTools`); v2's `tools/list` will project it to JSON.
+ * `AgentTool` (`toAgentTools`); v2's `tools/list` projects it to JSON.
  * Emitting `AgentTool`s here instead would leave v2 reversing JSON Schema back
  * out of them.
+ *
+ * Two kinds (#759), told apart by `kind`: a route the app exposed with
+ * `fromApiRoute`, and a native tool it registered with `fromTool`. Only a
+ * route has a `method` and a `url`.
  */
-export interface McpToolDescriptor {
+export type McpToolDescriptor = McpRouteToolDescriptor | McpNativeToolDescriptor;
+
+/** What every tool has, whatever it runs. */
+interface McpToolDescriptorBase {
   /** The `routes` key, verbatim. See `McpRouter`. */
   readonly name: string;
   readonly description: string;
-  readonly method: McpMethod;
-  /** The route's path as declared, params unfilled. */
-  readonly url: string;
   /**
-   * What the model fills in: the declared `input`, plus a string for every
-   * `"input"` path param and every `"input"` file field, and the model-facing
-   * field of every `this.param(...)` (#767), under its own name and schema.
-   * Bound params and bound files are not in it at all, and neither is the raw
-   * name of a param the model names in its own terms.
+   * What the model fills in. For a route: the declared `input`, plus a string
+   * for every `"input"` path param and every `"input"` file field, and the
+   * model-facing field of every `this.param(...)` (#767), under its own name
+   * and schema. Bound params and bound files are not in it at all, and neither
+   * is the raw name of a param the model names in its own terms. For a native
+   * tool: the tool's own `inputSchema`.
    */
   readonly inputSchema: Schema<Record<string, unknown>>;
   /**
-   * The route meta's `output`: the shape of what the tool answers, after
-   * `result`. Absent when the meta declares none. v2's `tools/list` emits it
-   * as `outputSchema`.
+   * The shape of what the tool answers: a route meta's `output` (after
+   * `result`), a native tool's `outputSchema`. Absent when there is none. v2's
+   * `tools/list` emits it as `outputSchema`.
    */
   readonly outputSchema?: AnySchema;
   /** The meta's `title`: a name for a client to show. Absent when it declares none. */
@@ -232,8 +242,24 @@ export interface McpToolDescriptor {
    * `list` and `descriptors` do not.
    */
   readonly feature?: string;
+}
+
+/** A route exposed with `fromApiRoute`. */
+export interface McpRouteToolDescriptor extends McpToolDescriptorBase {
+  readonly kind: "route";
+  readonly method: McpMethod;
+  /** The route's path as declared, params unfilled. */
+  readonly url: string;
   /** The controller method mounted at the route, when there is one (#502). */
   readonly source?: RouteSource;
+}
+
+/** An `AgentTool` registered with `fromTool` (#759). */
+export interface McpNativeToolDescriptor extends McpToolDescriptorBase {
+  readonly kind: "tool";
+  readonly method?: undefined;
+  readonly url?: undefined;
+  readonly source?: undefined;
 }
 
 /**
@@ -306,7 +332,8 @@ const READABLE = /^(text\/|application\/([\w.+-]*\+)?(json|xml))/i;
 type PathParam = { name: string; modifier: string };
 
 type Plan = {
-  descriptor: McpToolDescriptor;
+  kind: "route";
+  descriptor: McpRouteToolDescriptor;
   /**
    * The same tool as a remote caller sees it: its `"input"` files are a file
    * object (`name`, `mimeType`, and base64 `data` or a `url`) rather than an
@@ -314,7 +341,7 @@ type Plan = {
    * the tool cannot be called remotely at all — it has a bound file, whose
    * binder needs the run's tool context.
    */
-  remote: McpToolDescriptor | null;
+  remote: McpRouteToolDescriptor | null;
   params: PathParam[];
   paramBinders: Map<string, McpParamBinder>;
   /** Params the model names in its own terms: the input key, and the resolver. */
@@ -323,6 +350,43 @@ type Plan = {
   jsonKeys: string[];
   result?: McpResultProjection;
 };
+
+/** A native tool (#759): the `AgentTool` itself, and how a remote caller runs it. */
+type NativePlan = {
+  kind: "tool";
+  descriptor: McpNativeToolDescriptor;
+  /** The same descriptor when the meta has `remote`, else `null`: local only. */
+  remote: McpNativeToolDescriptor | null;
+  tool: AnyAgentTool;
+  meta: McpNativeToolMetaRuntime;
+};
+
+/**
+ * The call a native tool is running for, by the `ToolContext` it was handed.
+ * Each call gets its own context object (see `startNative`), so a composite
+ * tool that runs another native tool does not lose its own entry.
+ */
+const nativeCalls = new WeakMap<ToolContext, McpCallContext>();
+
+/**
+ * The call a native tool is running for (#759): who is calling, the request
+ * their identity comes from, the tool and its parsed arguments. `undefined`
+ * when the tool was not called through the registry — an agent holding the
+ * `AgentTool` directly, or a run with no request to act as.
+ *
+ * What lets a composite tool run the routes it composes as its own caller:
+ *
+ * ```ts
+ * const call = mcpCallOf(ctx);
+ * if (!call) throw new ToolError("…");
+ * const pages = await registry.execute(call.caller, "list-pages", {}, ctx);
+ * ```
+ *
+ * A remote caller is held there to the tools its scopes reach, as anywhere.
+ */
+export function mcpCallOf(ctx: ToolContext): McpCallContext | undefined {
+  return nativeCalls.get(ctx);
+}
 
 /**
  * The tools an app's `McpRouter` declares, resolved against the api route
@@ -350,7 +414,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
    */
   declare readonly __router?: R;
 
-  private readonly plans = new Map<string, Plan>();
+  private readonly plans = new Map<string, Plan | NativePlan>();
   /** Each scope, resolved to the names of the tools it reaches. */
   private readonly scopeTools = new Map<string, { description: string; tools: Set<string> }>();
   private readonly files: { maxBytes: number; fetch: SafeFetchOptions | null };
@@ -367,7 +431,12 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     this.files = remoteFileOptions(options.files);
     this.featureOn = options.featureOn ?? featureOn;
     for (const [name, declaration] of Object.entries(router.routes ?? {})) {
-      this.plans.set(name, this.plan(name, declaration));
+      this.plans.set(
+        name,
+        isNativeDeclaration(declaration)
+          ? this.planNative(name, declaration)
+          : this.plan(name, declaration as McpRouteDeclaration),
+      );
     }
     this.resolveScopes();
   }
@@ -512,6 +581,9 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     if (!found) {
       throw new Error(`McpRegistry: there is no tool named "${name}".`);
     }
+    if (found.kind === "tool") {
+      return await this.executeNative(found, caller, args, ctx, options);
+    }
     const plan = found;
     const descriptor = caller.kind === "remote" ? plan.remote! : plan.descriptor;
 
@@ -617,7 +689,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     const where = `McpRouter: "${name}" (${declaration?.method} ${declaration?.url})`;
     if (!(declaration instanceof Object) || declaration.__internal_brand !== "McpRoute") {
       throw new Error(
-        `McpRouter: "${name}" is not a route. Declare it with this.fromApiRoute(...).`,
+        `McpRouter: "${name}" is not a route or a tool. Declare it with this.fromApiRoute(...) or this.fromTool(...).`,
       );
     }
     const { method, url, meta } = declaration;
@@ -749,7 +821,8 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       }
     }
 
-    const descriptor: McpToolDescriptor = Object.freeze({
+    const descriptor: McpRouteToolDescriptor = Object.freeze({
+      kind: "route" as const,
       name,
       description: meta.description,
       method,
@@ -779,6 +852,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
           });
 
     return {
+      kind: "route",
       descriptor,
       remote,
       params,
@@ -860,6 +934,257 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
         return result.value;
       },
     } as unknown as AnySchema;
+  }
+
+  /**
+   * A native tool (#759), checked as a route is: at boot, with a sentence
+   * naming the tool, so a tool the registry cannot list or run fails here
+   * rather than on the first call.
+   */
+  private planNative(name: string, declaration: McpToolDeclaration<any, any, any, any>): NativePlan {
+    if (!TOOL_NAME.test(name)) {
+      throw new Error(
+        `McpRouter: "${name}" is not a valid tool name. A routes key is the tool's name as a model and an MCP client see it, used verbatim — letters, digits, "_" and "-", at most 64.`,
+      );
+    }
+    const where = `McpRouter: "${name}" (a native tool)`;
+    const { tool, meta = {} } = declaration;
+    if (!(tool instanceof Object) || typeof tool.name !== "string") {
+      throw new Error(`${where} is not an AgentTool. Pass one built with AgentTool.create(...).`);
+    }
+    if (tool.answeredBy === "client" || typeof tool.execute !== "function") {
+      throw new Error(
+        `${where}: "${tool.name}" is answered by the client, and only a tool the server runs can be called through the registry.`,
+      );
+    }
+    if (typeof tool.inputSchema === "function") {
+      throw new Error(
+        `${where}: "${tool.name}" resolves its input schema per run, and the registry lists one schema to every caller. Give it a fixed inputSchema.`,
+      );
+    }
+    if (typeof tool.inputSchema?.safeParse !== "function") {
+      throw new Error(`${where}: its inputSchema must be a schema, built with s.`);
+    }
+    if (typeof meta !== "object" || meta === null) {
+      throw new Error(`${where}: the meta must be an object.`);
+    }
+    if (
+      meta.description !== undefined &&
+      (typeof meta.description !== "string" || meta.description.trim() === "")
+    ) {
+      throw new Error(`${where}: description must be a non-empty string.`);
+    }
+    if (meta.title !== undefined && (typeof meta.title !== "string" || meta.title === "")) {
+      throw new Error(`${where}: title must be a non-empty string.`);
+    }
+    if (meta.tags !== undefined && (!Array.isArray(meta.tags) || meta.tags.some((tag) => typeof tag !== "string"))) {
+      throw new Error(`${where}: tags must be an array of strings.`);
+    }
+    if (meta.requiresApproval === false && tool.requiresApproval) {
+      throw new Error(
+        `${where}: "${tool.name}" requires approval, and requiresApproval: false would run it without asking. Leave it out, or register a tool that does not ask.`,
+      );
+    }
+    const remote = meta.remote;
+    if (remote !== undefined) {
+      if (typeof remote !== "object" || remote === null || typeof remote.context !== "function") {
+        throw new Error(
+          `${where}: remote must be { context(call) }, building the AgentContext a remote call runs with.`,
+        );
+      }
+      if (remote.progress !== undefined && typeof remote.progress !== "function") {
+        throw new Error(`${where}: remote.progress must be a function.`);
+      }
+    }
+    const description = meta.description ?? tool.description;
+    if (typeof description !== "string" || description.trim() === "") {
+      throw new Error(`${where} needs a description: the tool's own, or the meta's.`);
+    }
+
+    const descriptor: McpNativeToolDescriptor = Object.freeze({
+      kind: "tool" as const,
+      name,
+      description,
+      inputSchema: tool.inputSchema as Schema<Record<string, unknown>>,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema as AnySchema } : {}),
+      ...(meta.title ? { title: meta.title } : {}),
+      annotations: annotationsFor(where, undefined, meta.annotations),
+      tags: Object.freeze([...(meta.tags ?? [])]),
+      requiresApproval: tool.requiresApproval || meta.requiresApproval === true,
+    });
+    return { kind: "tool", descriptor, remote: remote ? descriptor : null, tool, meta };
+  }
+
+  /**
+   * The `AgentTool` registered as the native tool `name`.
+   *
+   * @internal For `toAgentTools`, which carries its `timeoutMs` and `async`.
+   */
+  nativeTool(name: string): AnyAgentTool {
+    const plan = this.plans.get(name);
+    if (plan?.kind !== "tool") {
+      throw new Error(`McpRegistry: there is no native tool named "${name}".`);
+    }
+    return plan.tool;
+  }
+
+  /**
+   * Starts a native tool for a local caller, and answers what its `execute`
+   * returns — a promise or a generator, untouched — so `toAgentTools` hands
+   * the agent loop exactly what the tool would have, its yields and its job
+   * handle included.
+   *
+   * Without a caller — a run that was not started inside a request — the tool
+   * runs as the agent would run it directly, and `mcpCallOf` answers
+   * `undefined` inside it.
+   *
+   * @internal For `toAgentTools`. App code calls `execute`.
+   */
+  startNative(
+    caller: McpCaller | undefined,
+    name: string,
+    args: unknown,
+    ctx: ToolContext,
+  ): ReturnType<NonNullable<AnyAgentTool["execute"]>> {
+    const plan = this.plans.get(name);
+    if (plan?.kind !== "tool") {
+      throw new Error(`McpRegistry: there is no native tool named "${name}".`);
+    }
+    if (caller === undefined) return plan.tool.execute!(args, ctx);
+    assertCaller(caller);
+    if (caller.kind !== "local") {
+      throw new Error("McpRegistry: startNative is for a local caller. A remote call goes through execute().");
+    }
+    const parsed = plan.descriptor.inputSchema.safeParse(args);
+    if (parsed.ok === false) {
+      throw new McpToolError(`Invalid arguments for "${name}": ${parsed.errors.join(", ")}`);
+    }
+    return this.runNative(plan, { caller, req: caller.req, tool: plan.descriptor, input: parsed.value }, ctx);
+  }
+
+  /** Hands the tool a context of its own, keyed to the call, and starts it. */
+  private runNative(plan: NativePlan, call: McpCallContext, ctx: ToolContext) {
+    // A copy, so the entry is this call's even when a composite tool runs
+    // another native tool with the same `ctx`. Every member is a value or a
+    // closure, so the copy behaves as the original.
+    const own: ToolContext = { ...ctx };
+    nativeCalls.set(own, { ...call, ctx: own });
+    return plan.tool.execute!(call.input, own);
+  }
+
+  /**
+   * `execute` for a native tool. Local: run with the caller's `ctx`, its
+   * yields reported to `options.progress`. Remote: the meta's `remote` builds
+   * the context, and the answer is held to what a route's is — parsed by the
+   * output schema when there is one, cut at `MAX_RESULT_BODY` — and every
+   * failure but a `ToolError` is the server's, logged.
+   */
+  private async executeNative(
+    plan: NativePlan,
+    caller: McpCaller,
+    args: unknown,
+    ctx: ToolContext | undefined,
+    options: McpExecuteOptions,
+  ): Promise<unknown> {
+    const { name } = plan.descriptor;
+    const parsed = plan.descriptor.inputSchema.safeParse(args);
+    if (parsed.ok === false) {
+      throw new McpToolError(`Invalid arguments for "${name}": ${parsed.errors.join(", ")}`);
+    }
+    const call: McpCallContext = {
+      caller,
+      req: caller.req,
+      tool: plan.descriptor,
+      input: parsed.value,
+    };
+    const report = (value: unknown, n: number) => {
+      if (!options.progress) return;
+      let update: ProgressUpdate | undefined;
+      try {
+        update = plan.meta.remote?.progress
+          ? plan.meta.remote.progress(value, n)
+          : progressOf(value, n);
+      } catch (error) {
+        console.error(`[gemi/mcp] The progress mapping of "${name}" failed:`, error);
+        return;
+      }
+      if (update) options.progress(update);
+    };
+
+    if (caller.kind === "local") {
+      if (!ctx) {
+        throw new Error(
+          `McpRegistry: "${name}" is a native tool, which runs with the tool context of an agent call, and none was passed to execute().`,
+        );
+      }
+      return await drain(this.runNative(plan, { ...call, ctx }, ctx), report);
+    }
+
+    const remote = plan.meta.remote!;
+    const context = await this.bind(plan, "the remote context", () => remote.context(call));
+    if (typeof context !== "object" || context === null) {
+      console.error(`[gemi/mcp] The remote context of "${name}" is not an object:`, context);
+      throw new McpToolError(`"${name}" failed on the server.`, 500);
+    }
+    const timeoutMs = plan.tool.timeoutMs;
+    const signals = [
+      ...(options.signal ? [options.signal] : []),
+      ...(timeoutMs !== undefined ? [AbortSignal.timeout(timeoutMs)] : []),
+    ];
+    const signal =
+      signals.length === 0
+        ? new AbortController().signal
+        : signals.length === 1
+          ? signals[0]
+          : AbortSignal.any(signals);
+    const remoteCtx = remoteToolContext(plan, context, signal);
+
+    let output: unknown;
+    try {
+      output = await drain(this.runNative(plan, { ...call, ctx: remoteCtx }, remoteCtx), report, signal);
+    } catch (error) {
+      if (signal.aborted && error === signal.reason) {
+        if (options.signal?.aborted) {
+          throw new McpToolError(`"${name}" was cancelled.`, 499);
+        }
+        throw new McpToolError(`"${name}" did not finish within ${timeoutMs} ms.`, 504);
+      }
+      if (error instanceof McpToolError) throw error;
+      if (error instanceof ToolError || error instanceof McpCallRefusedError) {
+        // The tool's own refusal, for the model to read and correct — or a
+        // route it composes that this caller cannot reach.
+        throw new McpToolError(error.message);
+      }
+      console.error(`[gemi/mcp] "${name}" failed for a remote caller:`, error);
+      throw new McpToolError(`"${name}" failed on the server.`, 500);
+    }
+
+    const failed = (why: string) => {
+      console.error(`[gemi/mcp] "${name}" ${why}`);
+      return new McpToolError(`"${name}" failed on the server.`, 500);
+    };
+    if (isJobHandle(output)) {
+      throw failed("answered a job handle, and a remote call has no background jobs.");
+    }
+    let value = output;
+    if (plan.descriptor.outputSchema) {
+      const checked = plan.descriptor.outputSchema.safeParse(value);
+      if (checked.ok === false) {
+        throw failed(`answered what its output schema refuses: ${checked.errors.join(", ")}`);
+      }
+      value = checked.value;
+    }
+    if (value === undefined) return null;
+    if (typeof value === "string") {
+      return value.length > MAX_RESULT_BODY
+        ? `${value.slice(0, MAX_RESULT_BODY)}… [cut at ${MAX_RESULT_BODY} of ${value.length} characters]`
+        : value;
+    }
+    const serialised = JSON.stringify(value);
+    if (serialised !== undefined && serialised.length > MAX_RESULT_BODY) {
+      return `${serialised.slice(0, MAX_RESULT_BODY)}… [cut at ${MAX_RESULT_BODY} of ${serialised.length} characters]`;
+    }
+    return value;
   }
 
   // --- calling -------------------------------------------------------------
@@ -1147,7 +1472,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
    * server's.
    */
   private async bind<T>(
-    plan: Plan,
+    plan: { descriptor: { name: string } },
     what: string,
     fn: () => T | Promise<T>,
     options: { refusals?: boolean } = {},
@@ -1160,6 +1485,137 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       throw new McpToolError(`"${plan.descriptor.name}" failed on the server.`, 500);
     }
   }
+}
+
+/** By brand, as a param is, so two copies of gemi still recognise each other's. */
+function isNativeDeclaration(value: unknown): value is McpToolDeclaration<any, any, any, any> {
+  return value instanceof Object && (value as McpToolDeclaration).__internal_brand === "McpTool";
+}
+
+function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown, unknown, void> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as AsyncGenerator).next === "function" &&
+    Symbol.asyncIterator in (value as object)
+  );
+}
+
+/**
+ * Runs what a tool's `execute` returned to its end: a promise awaited, a
+ * generator pulled, each yield handed to `onYield` with its count. With a
+ * `signal`, an abort stops waiting at once and rejects with its reason; a
+ * generator is closed rather than left running.
+ */
+async function drain(
+  started: unknown,
+  onYield: (value: unknown, n: number) => void,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  let stop: Promise<never> | undefined;
+  if (signal) {
+    stop = new Promise<never>((_, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    // Nobody may be listening when the signal fires after the tool settled.
+    stop.catch(() => {});
+  }
+  const raced = <T>(value: Promise<T>): Promise<T> => (stop ? Promise.race([value, stop]) : value);
+  if (!isAsyncGenerator(started)) return await raced(Promise.resolve(started));
+  try {
+    let n = 0;
+    let next = await raced(started.next());
+    while (!next.done) {
+      onYield(next.value, ++n);
+      next = await raced(started.next());
+    }
+    return next.value;
+  } catch (error) {
+    void started.return(undefined).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * A yield as an MCP progress notification, when the meta maps none: a yield
+ * that already is one passes through, a string is the message, and anything
+ * else counts as one step.
+ */
+function progressOf(value: unknown, n: number): ProgressUpdate {
+  if (typeof value === "string") return { progress: n, message: value };
+  if (typeof value === "object" && value !== null) {
+    const { progress, total, message } = value as Record<string, unknown>;
+    if (typeof progress === "number" && Number.isFinite(progress)) {
+      return {
+        progress,
+        ...(typeof total === "number" ? { total } : {}),
+        ...(typeof message === "string" ? { message } : {}),
+      };
+    }
+    if (typeof message === "string") return { progress: n, message };
+  }
+  return { progress: n };
+}
+
+/**
+ * The `ToolContext` a native tool runs with for a remote caller: the app's
+ * `context`, the client's cancel and the tool's timeout as its signal, and
+ * `generate` bound to that signal. A remote call has no run, no thread, no
+ * turn and no attachment store, so everything that needs one throws a
+ * sentence the model reads — `jobs` with the same refusal a thread-less chat
+ * gets.
+ */
+function remoteToolContext(
+  plan: NativePlan,
+  context: ToolContext["context"],
+  signal: AbortSignal,
+): ToolContext {
+  const name = plan.descriptor.name;
+  const runId = `mcp_${crypto.randomUUID()}`;
+  const toolCallId = `mcp_call_${crypto.randomUUID()}`;
+  const none = (what: string) => async (): Promise<never> => {
+    throw new ToolError(
+      `"${name}" was called by a remote MCP client, which has no ${what}.`,
+      { retryable: false },
+    );
+  };
+  const attachments: ToolAttachments = {
+    put: none("attachment store"),
+    get: none("attachment store"),
+    read: none("attachment store"),
+    file: none("attachment store"),
+  } as unknown as ToolAttachments;
+  return {
+    context,
+    body: {},
+    runId,
+    toolCallId,
+    signal,
+    step: 1,
+    depth: 0,
+    resumed: false,
+    attachments,
+    turn: Object.freeze({ attachments: Object.freeze([]) as readonly string[] }),
+    runAgent: none("agent run to nest a sub-agent in"),
+    generateImage: none("attachment store to put an image in"),
+    editImage: none("attachment store to put an image in"),
+    generate: ((params: GenerateParams) =>
+      generateWithin(
+        { ...params, signal: params.signal ? AbortSignal.any([signal, params.signal]) : signal },
+        { origin: { mcp: name, runId, toolCallId } },
+      )) as ToolContext["generate"],
+    jobs: toolJobs({
+      jobs: undefined,
+      threadId: undefined,
+      runId,
+      toolCallId,
+      toolName: name,
+      depth: 0,
+      async: plan.tool.async,
+      attachments: null,
+    }),
+  };
 }
 
 /**
@@ -1282,13 +1738,14 @@ function verbAnnotations(method: McpMethod): McpToolAnnotations {
  */
 function annotationsFor(
   where: string,
-  method: McpMethod,
+  /** `undefined` for a native tool, which has no verb to imply anything. */
+  method: McpMethod | undefined,
   overrides: McpToolAnnotations | undefined,
 ): Readonly<McpToolAnnotations> {
   if (overrides !== undefined && (typeof overrides !== "object" || overrides === null)) {
     throw new Error(`${where}: annotations must be an object of hints.`);
   }
-  const merged: McpToolAnnotations = verbAnnotations(method);
+  const merged: McpToolAnnotations = method ? verbAnnotations(method) : {};
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (!ANNOTATION_KEYS.has(key)) {
       throw new Error(

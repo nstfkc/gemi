@@ -145,6 +145,9 @@ describe("a middleware's break response", () => {
 
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("30");
+    expect(await res.clone().json()).toEqual({
+      error: { kind: "rate_limit", message: "Rate limit exceeded", status: 429, retryAfter: 30_000 },
+    });
     // Gaps are still filled.
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example");
     expect(res.headers.get("Content-Type")).toBe("application/json");
