@@ -128,6 +128,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
 | `req.locale()` | `string` | The resolved request locale. |
 | `req.ctx()` | request context | Access to the per-request store (used by facades, `setHeaders`, etc.). |
+| `req.state` | `RequestState` | Typed values kept for this request: what a middleware resolved, read back with `req.state.require(key)`. See [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate). |
 
 ### Reading query params
 
