@@ -1398,7 +1398,8 @@ current user and session.
 
 | Method | Returns | Description |
 | --- | --- | --- |
-| `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
+| `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Never resolves to `null`: throws `AuthenticationError` if not signed in.** |
+| `Auth.userOrNull()` | `Promise<User \| null>` | The same lookup, but `null` for a signed-out visitor. For routes that serve both. An error from the lookup itself (e.g. the database is down) still throws. |
 | `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
 | `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
 | `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
@@ -1433,7 +1434,13 @@ which doubles as its own container token.
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
 > that's fine (the framework turns it into a 401 / redirect). So do `Auth.guard(...)` and
 > `Auth.guardSafe(...)`, which call it first: `guardSafe` returns `false` only for a signed-in
-> user the predicate refuses. On a route that may have no session, catch `AuthenticationError`.
+> user the predicate refuses. On a route that may have no session, use `Auth.userOrNull()`
+> rather than catching `AuthenticationError`:
+>
+> ```typescript
+> const user = await Auth.userOrNull(); // User | null
+> return { greeting: user ? `Hi ${user.email}` : "Welcome" };
+> ```
 
 See [Authorization](./authorization.md) for role checks.
 
@@ -1652,7 +1659,7 @@ for example in the sign-in page's loader, to send an already-signed-in visitor o
 
 ```typescript
 "/sign-in": this.view("auth/SignIn", async () => {
-  const user = await Auth.user().catch(() => null);
+  const user = await Auth.userOrNull();
   if (user) {
     // `as any`: the target is a runtime path, not a typed route.
     Redirect.to(Auth.intendedUrl() as any);
