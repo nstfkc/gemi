@@ -1,5 +1,18 @@
 # Unreleased
 
+## `Url.origin()`: the app's public origin in one place (#905)
+
+**New, plus two small behaviour changes.** `Url.origin(fallback?)` from `gemi/facades` returns the app's public origin, e.g. `https://example.com`: `HOST_NAME`, else `APP_URL`, trimmed and without a trailing `/`. It throws when neither is set and no `fallback` is given, or when the value is not an absolute `http(s)` URL. It is read on every call, so a test sets it with `vi.stubEnv("HOST_NAME", ...)`. See [The app's public origin](docs/configuration.md#the-apps-public-origin).
+
+gemi's own reads of `HOST_NAME` now go through the same resolver: `Url.absolute`, `Url.forDomain` outside a request, the Google / Instagram / X OAuth `redirect_uri`, the connections callback default and relative `Meta.openGraph` images. They keep their behaviour when nothing is set (no new errors).
+
+Behaviour changes:
+
+- **A trailing `/` on `HOST_NAME` is dropped** in those URLs, so `HOST_NAME=https://example.com/` no longer produces `https://example.com//...`. If you registered an OAuth redirect URI with a doubled slash to match, register the single-slash one.
+- **`APP_URL` is used when `HOST_NAME` is unset.** An app that sets only `APP_URL` gets absolute URLs and OAuth redirect URIs from it instead of an empty or `undefined` prefix. When both are set, `HOST_NAME` wins, as before.
+
+To adopt: replace hand-written helpers such as `(process.env.APP_URL ?? process.env.HOST_NAME ?? "http://localhost:5173").replace(/\/$/, "")` with `Url.origin("http://localhost:5173")`, and `(process.env.HOST_NAME ?? "").replace(/\/$/, "")` with `Url.origin()`.
+
 ## Server: a built-in health route and an event-loop liveness signal (#48)
 
 **New, one reserved path.** gemi now answers load-balancer health probes itself, and reports whether the process's event loop is stalling. See [Health checks](docs/configuration.md#health-checks).
