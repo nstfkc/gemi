@@ -354,6 +354,25 @@ const plan = await Cache.remember(`plan:${hash}`, "24h", () => planner.plan(inpu
 
 See [Cache](./cache.md).
 
+## Runs
+
+`Runs` fronts `RunManager` (token `runs`): tracked background runs with a status, progress, a deadline, and waiting over the change feed (`app/config/runs.ts`).
+
+- `Runs.create(options)`, `Runs.get(id)`, `Runs.list(filter)`.
+- `Runs.start(id)`, `Runs.progress(id, progress)`, `Runs.complete(id, result)`, `Runs.fail(id, error)`, `Runs.cancel(id)`: compare-and-set, `null` once the run has ended.
+- `Runs.execute(id, fn)`: runs `fn` as the run's work and settles the run from its outcome.
+- `Runs.wait(id, { timeout })`, `Runs.subscribe(id)`, `Runs.stream(req, id)`, `Runs.cursor(id)`, `Runs.channel(id)`.
+- `Runs.sweep()`, `Runs.prune(olderThan)`.
+
+```typescript
+import { Runs } from "gemi/facades";
+
+const run = await Runs.create({ kind: "page-build", deadline: "10m" });
+const done = await Runs.wait(run.id, { timeout: "2m" });
+```
+
+See [Runs](./runs.md).
+
 ## Hooks are config, not provider methods
 
 Laravel puts a lot of per-subsystem customization in a provider's `boot()`. gemi deliberately does not: subsystem hooks are **callbacks on the config slice**, so they sit next to the settings they modify and require no provider at all.
