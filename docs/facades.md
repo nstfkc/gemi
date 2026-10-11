@@ -417,6 +417,7 @@ export class BillingFacade extends Facade {
 `RateLimiter` is the rate limiter behind the `rate-limit` middleware, callable directly — for budgets that do not belong to a route.
 
 - `RateLimiter.consume(key, { limit, window, cost })` — records one hit against `key` and reports whether it fits. `window` is in **seconds**; `limit` and `window` default to the values in your `ratelimiter` config slice, and `cost` defaults to `1`.
+- `RateLimiter.enforce(key, { limit, window, cost }, message?)` — the same, but over budget it throws `RateLimitExceededError`, the `rate-limit` middleware's 429 (`Retry-After`, `{ error: { kind: "rate_limit", message, status: 429, retryAfter } }`). `message` is a string or a function of the result; it defaults to "Rate limit exceeded". Within budget it returns the result.
 
 ```typescript
 import { RateLimiter } from "gemi/facades";
@@ -432,6 +433,10 @@ if (!result.allowed) {
 ```
 
 The result carries `allowed`, `limit`, `remaining`, `resetAt` (epoch ms) and `retryAfter` (ms) — enough to build `X-RateLimit-*` headers or a user-facing message. Counting happens in whichever driver the provider is configured with (in-memory by default, Redis when you run more than one instance), so the same call is process-local in development and shared in production.
+
+```typescript
+await RateLimiter.enforce(`publish:${user.id}`, { limit: 10, window: 3600 }, "You can publish 10 times an hour.");
+```
 
 See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration.
 

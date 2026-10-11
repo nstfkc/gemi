@@ -372,6 +372,39 @@ export type AttachmentLimits = {
   accept?: string[];
 };
 
+/** The file `AgentController.checkUpload` is asked about: what it is, not its bytes. */
+export type UploadCheckFile = {
+  /** The file's name as the client sent it, `"upload"` when it sent none. */
+  name: string;
+  /** In bytes. */
+  size: number;
+  /** As the client sent it, `"application/octet-stream"` when it sent none. */
+  mimeType: string;
+};
+
+/**
+ * What an upload hook is told beyond the request (#836): the client's `body`
+ * option (what `attachmentScope` gets) and the thread the upload is for, when
+ * the store knows it.
+ */
+export type UploadContext<Body extends object = Record<string, unknown>> = {
+  body: Body;
+  /** Only a thread the store found; an id it has never seen is left out. */
+  threadId?: string;
+};
+
+/**
+ * What `AgentController.checkUpload` returns to refuse a file. Answered **422**
+ * with `{ error: { code, message } }`, which `useChat().attach()` rejects with
+ * as an `AttachError` carrying the same `code` and `message`.
+ */
+export type UploadRefusal = {
+  /** A code the composer can switch on. `"upload_refused"` when left out. */
+  code?: string;
+  /** The sentence the person reads. */
+  message: string;
+};
+
 /**
  * What `POST /<path>/files` answers.
  *
@@ -1899,8 +1932,58 @@ export abstract class AgentController<
   }
 
   /**
+   * THE APP'S OWN RULE ABOUT ONE UPLOAD (#836): a storage quota, a per-subject
+   * cap, anything that needs the file and the request's subject at once.
+   * Called once per upload, after `authorizeRequest` and `attachmentLimits` and
+   * before anything is stored or sent to the provider.
+   *
+   * It is told what the file is (`name`, `size`, `mimeType`) and what the
+   * upload is about: `body`, the client's `body` option exactly as
+   * `attachmentScope` gets it, and `threadId` when the store knows the thread.
+   * Return nothing to let the file through, or an `UploadRefusal` to refuse it:
+   * the route answers **422** with `{ error: { code, message } }` (`code`
+   * defaults to `"upload_refused"`), and `useChat().attach()` rejects with an
+   * `AttachError` carrying both, as it does for `attachmentLimits`' refusals.
+   * A `RequestBreakerError` thrown here is answered as itself; anything else
+   * thrown is a 500.
+   *
+   *   protected async checkUpload(file, req, { body }) {
+   *     if (typeof body.pageId !== "string") return;
+   *     const page = await Page.findFirst({ where: { publicId: body.pageId } });
+   *     if (!page) return;
+   *     const used = await storageUsedBy(page);
+   *     if (used + file.size > capFor(page)) {
+   *       return { code: "storage_full", message: "This site's storage is full." };
+   *     }
+   *   }
+   *
+   * The `body` rule from `attachmentScope` applies here too: it types the
+   * shape, not the contents, so check a field before looking it up, and
+   * decide whose quota to charge from what the lookup returned.
+   *
+   * Here rather than in `attachmentDestination`, which also sees the file: a
+   * quota is a rule about the file and its subject, not about where the bytes
+   * go, and a throw there is a 500 unless the app builds the response itself.
+   *
+   * A check here is not a reservation: two uploads checked at the same moment
+   * both see the old usage. A cap that must never be exceeded by one file is
+   * enforced where usage is recorded.
+   */
+  protected checkUpload(
+    file: UploadCheckFile,
+    req: HttpRequest<any, any>,
+    ctx: UploadContext<Body>,
+  ): UploadRefusal | null | void | Promise<UploadRefusal | null | void> {
+    void file;
+    void req;
+    void ctx;
+  }
+
+  /**
    * WHERE ONE FILE'S BYTES SHOULD GO. Called once per upload, with the file in
-   * hand.
+   * hand, and since #836 with the same `{ body, threadId }` that `checkUpload`
+   * gets as a third argument. An override written as
+   * `attachmentDestination(file, req)` works unchanged.
    *
    * The model needs to perceive a file only for vision or document reading; a
    * tool needs the bytes only to forward them. Those are different needs and
@@ -1935,9 +2018,11 @@ export abstract class AgentController<
   protected attachmentDestination(
     file: File,
     req: HttpRequest<any, any>,
+    extra?: UploadContext<Body>,
   ): AttachmentDestination | Promise<AttachmentDestination> {
     void file;
     void req;
+    void extra;
     return "both";
   }
 
@@ -2048,7 +2133,19 @@ export abstract class AgentController<
         createdAt: new Date().toISOString(),
       });
 
-    const policy = await this.attachmentDestination(file as File, req);
+    // The app's own rule about this file and its subject (#836), still before
+    // anything is kept or sent.
+    const uploadContext: UploadContext<Body> = { body: extraBody, threadId };
+    const appRefusal = await this.checkUpload(
+      { name, size: file.size, mimeType },
+      req,
+      uploadContext,
+    );
+    if (appRefusal) {
+      throw new LimitedUploadError(appRefusal.code || "upload_refused", appRefusal.message);
+    }
+
+    const policy = await this.attachmentDestination(file as File, req, uploadContext);
     const destination = narrowDestination(policy, form.get("destination"));
 
     const scope = await this.attachmentScope(req, threadId, { body: extraBody });
@@ -2717,9 +2814,10 @@ async function providerUpload(provider: { upload(file: File): Promise<string> },
 
 const REJECTED_FILE_STATUSES = new Set([400, 413, 415, 422]);
 
-/** A 422 from `upload` for a file outside `attachmentLimits`. */
+/** A 422 from `upload` for a file outside `attachmentLimits`, or one
+ *  `checkUpload` refused. */
 class LimitedUploadError extends RequestBreakerError {
-  constructor(code: "file_too_large" | "unsupported_file_type", message: string) {
+  constructor(code: string, message: string) {
     super(message);
     this.name = "LimitedUploadError";
     this.payload = {
