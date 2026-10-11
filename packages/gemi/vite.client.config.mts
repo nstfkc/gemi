@@ -21,6 +21,11 @@ export default defineConfig({
         // copy of `RouteStateContext` and `useParams()` would read a context
         // no provider fills.
         "ai/client/index": resolve(__dirname, "ai/client/index.ts"),
+        // `gemi/ai/voice` — `useVoiceSession` (#921). Its own entry so an app
+        // that never uses voice never bundles it, and in this build for the
+        // same shared-chunk reason (`client/useParams`). Its peer-connection
+        // code is a further dynamic chunk, `voiceCall`.
+        "ai/voice/index": resolve(__dirname, "ai/voice/index.ts"),
       },
       formats: ["es"],
       fileName: (_format, entryName) => `${entryName}.js`,

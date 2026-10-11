@@ -328,3 +328,34 @@ describe("CreateRPC for an agent route", () => {
     >();
   });
 });
+
+type VoiceBody = { pageId: string };
+
+class VoiceChatController extends AgentController<typeof supportAgent, VoiceBody> {
+  agent = supportAgent;
+}
+
+class VoiceRoot extends ApiRouter {
+  routes = {
+    "/chat/voice": this.voice(VoiceChatController),
+    "/guarded/voice": this.voice(VoiceChatController).middleware({ start: "auth" }),
+  };
+}
+
+type VoiceRPC = CreateRPC<VoiceRoot>;
+
+/** A voice route (#921) is one key too, read by `useVoiceSession`. */
+describe("CreateRPC for a voice route", () => {
+  test("keys the route by its mounted path, marked and carrying the controller's Body", () => {
+    expectTypeOf<"/chat/voice">().toExtend<keyof VoiceRPC>();
+    expectTypeOf<VoiceRPC["/chat/voice"]["__voice"]>().toEqualTypeOf<true>();
+    expectTypeOf<VoiceRPC["/chat/voice"]["body"]>().toEqualTypeOf<VoiceBody>();
+    expectTypeOf<VoiceRPC["/guarded/voice"]["body"]>().toEqualTypeOf<VoiceBody>();
+  });
+
+  test("does not emit a key per sub-route", () => {
+    expectTypeOf<"POST:/chat/voice">().not.toExtend<keyof VoiceRPC>();
+    expectTypeOf<"PATCH:/chat/voice/:sessionId">().not.toExtend<keyof VoiceRPC>();
+    expectTypeOf<"DELETE:/chat/voice/:sessionId">().not.toExtend<keyof VoiceRPC>();
+  });
+});

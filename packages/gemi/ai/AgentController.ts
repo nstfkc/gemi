@@ -70,6 +70,11 @@ import { markOrphans, overlayJobs } from "./jobs/overlay";
 import { DEFAULT_JOBS_CONTEXT_MAX, renderJobsBlock } from "./jobs/contextBlock";
 import type { AgentJobRecord } from "./jobs/AgentJobStore";
 import type { Schema } from "./Schema";
+import { RealtimeRequestError, type RealtimeSession } from "./providers/realtime";
+import type { VoiceConfig } from "./voiceConfig";
+import { defaultVoiceStore, type VoiceSessionRecord, type VoiceSessionStore } from "./voiceStore";
+import { DEFAULT_DELEGATE_NAME, VoiceBridge, voiceTools } from "./VoiceBridge";
+import type { VoiceStartResponse } from "./voice/wire";
 import type {
   AgentError,
   AgentMessage,
@@ -668,6 +673,21 @@ export abstract class AgentController<
    * done. See `MemoryLiveRuns`.
    */
   liveRuns: MemoryLiveRuns = defaultLiveRuns;
+
+  /**
+   * VOICE (#921): what `this.voice(Controller)` needs to run voice calls in
+   * front of this agent. Absent, the voice routes answer 404. See
+   * `VoiceConfig` and `docs/ai-voice.md`.
+   */
+  voice?: VoiceConfig<Body>;
+
+  /**
+   * Where voice sessions are recorded, so a `PATCH` or `DELETE` that lands on
+   * another instance finds the call. Defaults to the process-wide
+   * `MemoryVoiceSessionStore`: assign a shared one when more than one instance
+   * serves the route.
+   */
+  voiceStore: VoiceSessionStore = defaultVoiceStore;
 
   /**
    * Where attachment *records* live — the row that says which bytes, whose, and
@@ -2073,6 +2093,195 @@ export abstract class AgentController<
    * orphan in our own bucket is ours to sweep on a schedule we set, while an
    * orphan at the vendor sits under a retention policy that is not ours.
    */
+  /**
+   * `POST /<voice route>` (#921): starts a voice call in front of this agent.
+   *
+   * Takes the browser's SDP offer (`sdp`), the chat's `threadId`, `pushToTalk`
+   * and the app's `body`. Runs `authorizeRequest` (`route: "stream"`), then
+   * `voice.start` (credits, limits: throw to refuse), creates the call at the
+   * vendor with the server's key and the session `start` answered plus the
+   * bridge's tools, records it in `voiceStore`, and starts a `VoiceBridge` on
+   * its sideband in this process. Answers the vendor's SDP answer and the
+   * session's id.
+   *
+   * A vendor failure answers 502 (429 when the vendor rate-limited us) with
+   * code `voice_unavailable`, after calling the session's `onEnd` with reason
+   * `start_failed`, so an app that charged in `start` can refund.
+   */
+  async voiceStart(
+    req: HttpRequest<any, any> = new HttpRequest(),
+  ): Promise<VoiceStartResponse | Response> {
+    const voice = this.voice;
+    if (!voice) return voiceNotEnabled();
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
+    if (parsed.error) return invalidRequest(parsed);
+    const { sdp, threadId: claimed, pushToTalk } = parsed.body;
+    if (typeof sdp !== "string" || !sdp.trimStart().startsWith("v=")) {
+      return jsonResponse(400, {
+        code: "invalid_request",
+        message: "`sdp` must be the browser's SDP offer.",
+      });
+    }
+    const body = appBody<Body>(parsed.body, VOICE_START_KEYS);
+    const clientThreadId = typeof claimed === "string" && claimed !== "" ? claimed : undefined;
+    await this.authorizeRequest(req, { route: "stream", threadId: clientThreadId, body });
+
+    const user = req.ctx?.()?.user ?? null;
+    const options = await voice.start({
+      req,
+      body,
+      threadId: clientThreadId,
+      user,
+      pushToTalk: pushToTalk === true,
+    });
+    const threadId = options.threadId ?? clientThreadId;
+    if (!threadId) {
+      return jsonResponse(400, {
+        code: "invalid_request",
+        message:
+          "A voice session needs a thread: send `threadId`, or answer one from `voice.start`.",
+      });
+    }
+    if (threadId !== clientThreadId) {
+      await this.authorizeRequest(req, { route: "stream", threadId, body });
+    }
+
+    const session: RealtimeSession = {
+      ...options.session,
+      tools: [...voiceTools(voice.delegate), ...(options.session?.tools ?? [])],
+      ...(pushToTalk === true ? { turnDetection: null } : {}),
+    };
+    const startedAt = Date.now();
+    let call: { sdpAnswer: string; callId: string };
+    try {
+      call = await voice.realtime.createCall({
+        sdp,
+        session,
+        safetyIdentifier: options.safetyIdentifier,
+      });
+    } catch (error) {
+      console.error("[gemi/ai] a voice call could not be created.", error);
+      try {
+        await options.onEnd?.({
+          sessionId: "",
+          threadId,
+          reason: "start_failed",
+          startedAt,
+          endedAt: Date.now(),
+          durationMs: 0,
+          seconds: 0,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          transcript: [],
+          requests: [],
+          errors: [],
+        });
+      } catch {
+        // The answer is the same either way.
+      }
+      const limited = error instanceof RealtimeRequestError && error.code === "rate_limited";
+      return jsonResponse(limited ? 429 : 502, {
+        code: "voice_unavailable",
+        message: "Voice isn't available right now.",
+      });
+    }
+
+    const sessionId = crypto.randomUUID();
+    await this.voiceStore.create({
+      id: sessionId,
+      callId: call.callId,
+      threadId,
+      owner: await this.runOwner(req),
+      body: body as Record<string, unknown>,
+      startedAt,
+    });
+    const { threadId: _thread, session: _session, safetyIdentifier: _safety, ...hooks } = options;
+    const bridge = VoiceBridge.start<Body>({
+      ...hooks,
+      controller: this.constructor as unknown as VoiceBridgeController<Body>,
+      threadId,
+      user,
+      body,
+      call: { realtime: voice.realtime, callId: call.callId },
+      sessionId,
+      store: this.voiceStore,
+      liveRuns: this.liveRuns,
+      delegate: voice.delegate,
+      session,
+    });
+    return {
+      sessionId: bridge.sessionId,
+      sdp: call.sdpAnswer,
+      threadId,
+      delegate: voice.delegate?.name ?? DEFAULT_DELEGATE_NAME,
+      endsAt: startedAt + (options.limits?.maxDurationMs ?? 15 * 60_000),
+    };
+  }
+
+  /**
+   * `PATCH /<voice route>/:sessionId` (#921): the session's new `body` (the
+   * selection, the open page). Delegated turns get it from their next start,
+   * and `contextNote` tells the voice when the bridge is in this process.
+   */
+  async voiceUpdate(
+    req: HttpRequest<any, any> = new HttpRequest(),
+  ): Promise<{ updated: boolean } | Response> {
+    if (!this.voice) return voiceNotEnabled();
+    const found = await this.voiceSession(req);
+    if (found instanceof Response) return found;
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
+    if (parsed.error) return invalidRequest(parsed);
+    const body = appBody<Body>(parsed.body, []);
+    await this.authorizeRequest(req, { route: "stream", threadId: found.threadId, body });
+    if (found.endedAt !== undefined) {
+      return jsonResponse(409, { code: "voice_ended", message: "This voice session has ended." });
+    }
+    await this.voiceStore.update(found.id, { body: body as Record<string, unknown> });
+    VoiceBridge.get(found.id)?.setBody(body);
+    return { updated: true };
+  }
+
+  /**
+   * `DELETE /<voice route>/:sessionId` (#921): ends the call. On the instance
+   * holding the bridge it hangs up and runs `onEnd` before answering; on any
+   * other it hangs the call up at the vendor, and the holder's sideband sees
+   * the call end.
+   */
+  async voiceEnd(
+    req: HttpRequest<any, any> = new HttpRequest(),
+  ): Promise<{ ended: boolean } | Response> {
+    const voice = this.voice;
+    if (!voice) return voiceNotEnabled();
+    const found = await this.voiceSession(req);
+    if (found instanceof Response) return found;
+    await this.authorizeRequest(req, {
+      route: "stream",
+      threadId: found.threadId,
+      body: found.body as Body,
+    });
+    if (found.endedAt !== undefined) return { ended: false };
+    const bridge = VoiceBridge.get(found.id);
+    if (bridge) {
+      await bridge.end("hangup");
+    } else {
+      await voice.realtime.hangup(found.callId);
+      await this.voiceStore.update(found.id, { endedAt: Date.now(), endReason: "hangup" });
+    }
+    return { ended: true };
+  }
+
+  /** The session a voice `PATCH` or `DELETE` names, if the caller owns it. */
+  private async voiceSession(req: HttpRequest<any, any>): Promise<VoiceSessionRecord | Response> {
+    const id = (req.params as Record<string, unknown> | undefined)?.sessionId;
+    const record = typeof id === "string" && id ? await this.voiceStore.get(id) : null;
+    if (!record) {
+      return jsonResponse(404, { code: "voice_not_found", message: "No such voice session." });
+    }
+    if (record.owner !== null && record.owner !== (await this.runOwner(req))) {
+      return notYourRun();
+    }
+    return record;
+  }
+
   async upload(req: HttpRequest<any, any> = new HttpRequest()): Promise<UploadResult> {
     const form = await req.rawRequest.formData();
     const file = form.get("file");
@@ -3346,6 +3555,20 @@ function clientHistoryFiles(messages: unknown): { fileId?: string }[] {
   return files;
 }
 
+/** What `voiceStart` takes out of the body before the rest is the app's. */
+const VOICE_START_KEYS = ["sdp", "threadId", "pushToTalk"] as const;
+
+type VoiceBridgeController<Body extends object> = {
+  startTurn(params: AgentTurnParams<Body>): Promise<AgentTurn>;
+};
+
+function voiceNotEnabled(): Response {
+  return jsonResponse(404, {
+    code: "voice_not_enabled",
+    message: "This agent has no voice: set `voice` on its controller.",
+  });
+}
+
 function jsonResponse(status: number, error: Record<string, unknown>): Response {
   return new Response(JSON.stringify({ error }), {
     status,
@@ -3487,6 +3710,40 @@ export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
    * `instructions(req)` — the pre-existing signature, so every existing
    * override — gave inference nothing to work with and got the open record.
    */
+  body: InstanceType<T> extends { [BODY]?: infer B } ? B : Record<string, unknown>;
+};
+
+// --- the voice route (#921) ----------------------------------------------
+//
+//   class Api extends ApiRouter {
+//     routes = {
+//       "/chat": this.agent(ChatController),
+//       "/chat/voice": this.voice(ChatController),
+//     };
+//   }
+//
+//   POST   /chat/voice             → voiceStart   create the call
+//   PATCH  /chat/voice/:sessionId  → voiceUpdate  the session's body
+//   DELETE /chat/voice/:sessionId  → voiceEnd     hang up
+//
+// One key for the client, `useVoiceSession("/chat/voice")`, as `useChat` has.
+
+export type VoiceRouteMethod = "start" | "update" | "end";
+
+export type VoiceMiddlewareConfig = Partial<Record<VoiceRouteMethod, MiddlewareInput>>;
+
+/** What `this.voice(Controller)` returns. Unconstrained `T` for the reason
+ *  `AgentRoute`'s is (#774); checked when the route is mounted. */
+export type VoiceRoute<T> = {
+  __internal_brand: "VoiceRoute";
+  controller: T;
+  middleware(config: VoiceMiddlewareConfig): VoiceRoute<T>;
+};
+
+/** What `CreateRPC` produces for a voice route: the controller's `Body`, for
+ *  `useVoiceSession`'s `body` option. */
+export type VoiceRouteRPC<T extends new () => AgentController<any, any>> = {
+  __voice: true;
   body: InstanceType<T> extends { [BODY]?: infer B } ? B : Record<string, unknown>;
 };
 
