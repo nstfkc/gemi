@@ -11,6 +11,7 @@ import {
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { requestDomain } from "./requestDomain";
+import { RequestState } from "./requestState";
 import { ValidationError } from "./Router";
 import { InvalidValidationRuleError, validate } from "./validate";
 import type { ResolvedDomain } from "../services/router/DomainResolver";
@@ -163,6 +164,19 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
    * Kept apart from `params`, which are the path's alone.
    */
   domain: ResolvedDomain | null;
+  /**
+   * Typed values kept for the length of this request (#887): set by a
+   * middleware, read by the controller; set in an agent turn's `context()`,
+   * read in its `onMessage`. Every `HttpRequest` built for the same request
+   * shares it. See `stateKey` and `docs/middleware.md`.
+   *
+   * ```ts
+   * const pageScope = stateKey<PageScope>("pageScope");
+   * this.req.state.set(pageScope, scope); // middleware
+   * req.state.require(pageScope);         // controller
+   * ```
+   */
+  readonly state: RequestState;
 
   constructor(req?: Request, params?: any, kind?: HttpRequestKind, routePath?: string) {
     if (!req) {
@@ -172,12 +186,14 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
       this.kind = _req.kind;
       this.routePath = _req.routePath;
       this.domain = _req.domain ?? null;
+      this.state = _req.state ?? new RequestState();
     } else {
       this.params = params;
       this.rawRequest = req;
       this.routePath = routePath;
       this.kind = kind ?? "api";
       this.domain = requestDomain(req);
+      this.state = new RequestState();
     }
 
     this.headers = this.rawRequest.headers;

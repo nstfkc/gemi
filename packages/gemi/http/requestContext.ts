@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { HttpRequest } from "./HttpRequest";
 import { Metadata } from "./Metadata";
 import type { ByteRange } from "./range";
+import { RequestState } from "./requestState";
 // Type-only: `services/router` imports from `http`, so a runtime import here
 // would be circular.
 import type { ServerQueryStore } from "../services/router/ServerQueryStore";
@@ -42,10 +43,11 @@ const requestContext = new AsyncLocalStorage<Store>();
 /**
  * What a route's request context takes over from the global middleware list's
  * (see `runGlobalMiddleware`): the user, so one the list resolved is not
- * looked up a second time.
+ * looked up a second time, and the request state the list set (#887).
  */
 export interface CarriedContext {
   user: any;
+  state?: RequestState;
 }
 
 class Store {
@@ -293,6 +295,9 @@ export class RequestContext {
     const store = new Store(httpRequest);
     if (carried) {
       store.user = carried.user;
+      if (carried.state && httpRequest.state) {
+        RequestState.carry(carried.state, httpRequest.state);
+      }
     }
     return requestContext.run(store, fn);
   }

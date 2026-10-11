@@ -57,9 +57,10 @@ const passThrough: GlobalMiddlewareOutcome = {
  * `HttpRequest` a global middleware gets has no params and an empty
  * `routePath`, and its `kind` is read off the url the way `App.fetch` picks a
  * dispatcher. The scope is not the one the route later runs in: the route's
- * dispatcher opens a fresh one, as it always has. Two things cross over.
- * Headers and cookies reach the response through `apply`, and the user is
- * `carried` into the route's context, so a gate that looked the user up does
+ * dispatcher opens a fresh one, as it always has. Three things cross over.
+ * Headers and cookies reach the response through `apply`; the request state
+ * the list set (`req.state`, #887) is `carried` into the route's request; and
+ * so is the user, so a gate that looked the user up does
  * not make `auth` or `Auth.user()` look them up again. Both trust a user they
  * find on the context without checking it against a session or asking for a
  * token, so whatever a global middleware sets is treated as authenticated by
@@ -101,7 +102,7 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
 
     try {
       await registry.runGlobalMiddleware();
-      return { refusal: null, apply, carried: { user: ctx.user } };
+      return { refusal: null, apply, carried: { user: ctx.user, state: httpRequest.state } };
     } catch (err) {
       const isViewData = !isApi && pathname.endsWith(".json");
       if (err?.kind === GEMI_REQUEST_BREAKER_ERROR) {
