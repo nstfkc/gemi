@@ -76,8 +76,10 @@ under 16 characters or unset.
 4. Whatever is left gets a `404` with the body `Unknown host`. The same happens to a subdomain of `root` that nothing matches: `a.b.example.com`, or an `exists` that said no.
 
 > **Note:** with `route.domains` declared, **every** request needs a known host, including a load
-> balancer's health check sent to the server's IP address. Point health checks at the root host,
-> or answer them from a global middleware, which runs before host matching.
+> balancer's health check sent to the server's IP address. gemi's [built-in health
+> route](./configuration.md#health-checks), `/__gemi__/health`, is answered before host matching,
+> so point probes at it. For your own health route, use the root host or answer it from a global
+> middleware, which also runs before host matching.
 
 ## Reading the domain in a handler
 
