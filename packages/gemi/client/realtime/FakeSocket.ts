@@ -1,6 +1,6 @@
 import { buildTopic, topicMatches } from "../../services/broadcast/channels";
 import type { DeniedCode } from "../../services/broadcast/protocol";
-import { channelKey } from "./loader";
+import { channelKey } from "./channelKey";
 import type {
   ChannelListener,
   ChannelParamValues,

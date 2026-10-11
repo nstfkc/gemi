@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeFeedEvent } from "../services/change-feed/ChangeFeedDriver";
 import type { ChangeFeedResponse } from "../services/change-feed/wire";
 import { applyParams } from "../utils/applyParams";
-import { loadedModule } from "./realtime/loader";
+import { loadedModule } from "./lazyModule";
 import type { SubscriptionState } from "./subscriptionStream";
 import type { UrlParser } from "./types";
 import type { Data, GetRPC } from "./useQuery";

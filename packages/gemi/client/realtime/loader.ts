@@ -1,11 +1,7 @@
+import { loadLazy, loadedModule, type LazyModule } from "../lazyModule";
 import type { QueryResource } from "../QueryResource";
 import type { LiveChannel } from "./live";
-import type {
-  ChannelParamValues,
-  RealtimeClient,
-  RealtimeOptions,
-  RealtimeSocket,
-} from "./RealtimeClient";
+import type { RealtimeClient, RealtimeOptions, RealtimeSocket } from "./RealtimeClient";
 
 // The part of the realtime client every page carries: `gemi/client` reaches
 // it through `useQuery`, `useMutation`, `init` and the auth hooks. The client
@@ -17,47 +13,44 @@ import type {
 // which "the published client, built into an app" in `packaging.test.ts`
 // checks.
 
-/** `pattern` and its params, canonical: two hooks on one channel share a `sub`. */
-export function channelKey(pattern: string, params: ChannelParamValues): string {
-  const sorted = Object.keys(params)
-    .sort()
-    .map((key) => [key, String(params[key])]);
-  return `${pattern}\u0000${JSON.stringify(sorted)}`;
-}
-
-let configured: RealtimeOptions = {};
-let instance: RealtimeClient | null = null;
-let loading: Promise<RealtimeClient> | null = null;
+/**
+ * The tab's client, once loaded and created (`tabClient` in
+ * `./RealtimeClient` creates it), and the options it is created with.
+ */
+export const realtime: { client: RealtimeClient | null; options: RealtimeOptions } = {
+  client: null,
+  options: {},
+};
 
 /**
  * Sets the socket options (`init({ realtime })` calls it). Takes effect on
  * the next connection.
  */
 export function configureRealtime(options: RealtimeOptions = {}) {
-  configured = { ...configured, ...options };
-  instance?.configure(configured);
+  Object.assign(realtime.options, options);
+  realtime.client?.configure(realtime.options);
 }
 
 /** The tab's client if it is already loaded, else `null`. Never loads it. */
 export function loadedRealtimeClient(): RealtimeClient | null {
-  return instance;
+  return realtime.client;
 }
 
-/**
- * What a lazy `import()` resolved to, or a thrown error when it is missing.
- * Vite's preload helper resolves the `import()` to `undefined` instead of
- * rejecting when a `vite:preloadError` listener handled the failure (`init`'s
- * chunk-load recovery does, as it starts a reload): treated as a failed load.
- */
-export function loadedModule<T>(module: T | undefined): T {
-  if (!module) throw new Error("[gemi] A lazily loaded chunk is unavailable.");
-  return module;
-}
+let loading: Promise<RealtimeClient> | null = null;
 
-/** The lazily loaded modules. Replaceable in tests, to simulate a failed load. */
+/** The lazily loaded client. Replaceable in tests, to simulate a failed load. */
 export const lazyModules = {
   client: () => import("./RealtimeClient.js"),
-  live: () => import("./live.js"),
+};
+
+/**
+ * `./live`, loaded by the first live query. `<Page>` in `gemi/testing` sets
+ * `current` up front, so a live query on a provided socket subscribes during
+ * its effect, as it did before the module was split out.
+ */
+export const liveModule: LazyModule<Pick<typeof import("./live"), "followLive">> = {
+  current: null,
+  load: () => import("./live.js"),
 };
 
 /**
@@ -69,10 +62,10 @@ export const lazyModules = {
  */
 export function loadRealtimeClient(): Promise<RealtimeClient> | null {
   if (typeof window === "undefined") return null;
-  if (instance) return Promise.resolve(instance);
+  if (realtime.client) return Promise.resolve(realtime.client);
   loading ??= lazyModules
     .client()
-    .then((module) => (instance ??= new (loadedModule(module).RealtimeClient)(configured)))
+    .then((module) => loadedModule(module).tabClient())
     .catch((error: unknown) => {
       loading = null;
       throw error;
@@ -80,23 +73,11 @@ export function loadRealtimeClient(): Promise<RealtimeClient> | null {
   return loading;
 }
 
-type LiveModule = typeof import("./live");
-let liveModule: LiveModule | null = null;
-
-/**
- * Makes `./live` available without loading it: `<Page>` in `gemi/testing`
- * passes it, so a live query on a provided socket subscribes during its
- * effect, as it did before the module was split out.
- */
-export function provideLiveModule(module: LiveModule) {
-  liveModule = module;
-}
-
 /**
  * Follows `useQuery`'s `live` channel until the returned function is called.
- * `./live` and the socket client are loaded on first use, so `useQuery`
- * carries only this; once both are loaded later queries subscribe at once.
- * `setOpen` reports `false` until the channel is open.
+ * `./live` loads on first use and does the rest, loading the socket client
+ * in turn, so `useQuery` carries only this. `setOpen` reports `false` until
+ * the channel is open.
  */
 export function followLive(
   provided: RealtimeSocket | null,
@@ -104,24 +85,17 @@ export function followLive(
   resource: () => QueryResource,
   setOpen: (open: boolean) => void,
 ): () => void {
-  let cancelled = false;
-  let stop: (() => void) | null = null;
-  const start = (module: LiveModule, socket: RealtimeSocket | null) => {
-    liveModule = module;
-    if (!cancelled && socket) stop = module.subscribeLive(socket, live, resource, setOpen);
+  // `undefined` until it starts, `null` once stopped.
+  let stop: (() => void) | null | undefined;
+  const start = (module: Pick<typeof import("./live"), "followLive">) => {
+    if (stop === undefined) stop = module.followLive(provided, live, resource, setOpen);
   };
-  const socket = provided ?? instance;
-  if (liveModule && socket) {
-    start(liveModule, socket);
-  } else {
-    Promise.all([liveModule ?? lazyModules.live(), socket ?? loadRealtimeClient()])
-      .then(([module, socket]) => start(loadedModule(module), socket))
-      // A failed load leaves the channel closed, so the query keeps polling.
-      .catch(() => {});
-  }
+  if (liveModule.current) start(liveModule.current);
+  // A failed load leaves the channel closed, so the query keeps polling.
+  else loadLazy(liveModule).then(start).catch(() => {});
   return () => {
-    cancelled = true;
     stop?.();
+    stop = null;
     setOpen(false);
   };
 }
@@ -132,7 +106,7 @@ export function followLive(
  * Never loads or creates the client.
  */
 export function reconnectRealtime() {
-  instance?.reconnect();
+  realtime.client?.reconnect();
 }
 
 /**
@@ -140,5 +114,5 @@ export function reconnectRealtime() {
  * loads or creates the client.
  */
 export function currentSocketId(): string | null {
-  return instance?.socketId ?? null;
+  return realtime.client?.socketId ?? null;
 }

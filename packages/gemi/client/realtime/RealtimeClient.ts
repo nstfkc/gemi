@@ -7,7 +7,8 @@ import {
   type DeniedCode,
   type ServerFrame,
 } from "../../services/broadcast/protocol";
-import { channelKey } from "./loader";
+import { channelKey } from "./channelKey";
+import { realtime } from "./loader";
 
 /**
  * Where a channel subscription stands, as the hooks report it.
@@ -614,4 +615,12 @@ function reportListenerError(error: unknown) {
   setTimeout(() => {
     throw error;
   });
+}
+
+/**
+ * The tab's client, created on first use with the options `configureRealtime`
+ * set. `loadRealtimeClient` in `./loader` calls it once this module is loaded.
+ */
+export function tabClient(): RealtimeClient {
+  return (realtime.client ??= new RealtimeClient(realtime.options));
 }

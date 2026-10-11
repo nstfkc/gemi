@@ -1,6 +1,4 @@
-import { applyParams } from "../utils/applyParams";
-import { QueryError } from "./QueryError";
-import { parseRetryAfter } from "./retryPolicy";
+import { loadLazy, type LazyModule } from "./lazyModule";
 import type { FileRPC } from "./rpc";
 import type { UrlParser } from "./types";
 
@@ -52,6 +50,13 @@ export interface FetchedText extends Fetched {
   text: string;
 }
 
+// The request itself, loaded on the first call (#915): an app's bundler puts
+// whatever `gemi/client` reaches statically in every route's entry chunk.
+const request: LazyModule<typeof import("./fetchFileRequest")> = {
+  current: null,
+  load: () => import("./fetchFileRequest.js"),
+};
+
 /**
  * Downloads a file route's body as a `Blob`.
  *
@@ -66,13 +71,16 @@ export interface FetchedText extends Fetched {
  * `retryAfter`), the error `useQuery` throws, so `mutationErrorList(error)`
  * reads its message. A network failure rejects with the browser's `TypeError`,
  * an abort with its `AbortError`.
+ *
+ * The request code loads on the first call (#915), so a route that never
+ * downloads a file carries none of it; a failed load rejects as a network
+ * failure does.
  */
 export async function fetchBlob<P extends FilePath>(
   path: P,
   ...args: FetchFileArgs<P>
 ): Promise<FetchedBlob> {
-  const response = await request(path, args[0] as RequestOptions);
-  return { blob: await response.blob(), filename: filenameOf(response), response };
+  return (await loadLazy(request)).fetchFile(path, args[0], "blob") as Promise<FetchedBlob>;
 }
 
 /** `fetchBlob`, with the body read as text. */
@@ -80,66 +88,5 @@ export async function fetchText<P extends FilePath>(
   path: P,
   ...args: FetchFileArgs<P>
 ): Promise<FetchedText> {
-  const response = await request(path, args[0] as RequestOptions);
-  return { text: await response.text(), filename: filenameOf(response), response };
-}
-
-type RequestOptions = Omit<FetchFileOptions<string>, "params"> & {
-  params?: Record<string, string | number | undefined>;
-};
-
-async function request(path: string, options: RequestOptions = {}) {
-  const { params = {}, search, signal, init } = options;
-  const url = applyParams(path, params);
-  const query = searchString(search);
-  const response = await fetch(`/api${url}${query ? `?${query}` : ""}`, {
-    ...init,
-    method: "GET",
-    signal,
-  });
-  if (!response.ok) {
-    // An error body that is not JSON (a proxy's HTML 502) is still that status.
-    const body = await response.json().catch(() => null);
-    throw new QueryError(
-      url,
-      query,
-      response.status,
-      body,
-      parseRetryAfter(response.headers.get("retry-after")),
-    );
-  }
-  return response;
-}
-
-function searchString(search: FetchFileOptions<string>["search"]) {
-  if (!search) return "";
-  if (search instanceof URLSearchParams) return search.toString();
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(search)) {
-    if (value !== null && value !== undefined) params.append(key, String(value));
-  }
-  return params.toString();
-}
-
-/**
- * The file name in a `Content-Disposition` header: the RFC 5987
- * `filename*=UTF-8''...` form when present and decodable, else `filename`.
- *
- * @internal Exported for tests.
- */
-export function filenameOf(response: Response): string | null {
-  const header = response.headers.get("content-disposition");
-  if (!header) return null;
-  const extended = /filename\*\s*=\s*([^']*)'[^']*'([^;]+)/i.exec(header);
-  if (extended) {
-    try {
-      return decodeURIComponent(extended[2].trim());
-    } catch {
-      // A malformed escape: fall back to the plain form.
-    }
-  }
-  const plain = /filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]+))/i.exec(header);
-  if (!plain) return null;
-  const name = plain[1] !== undefined ? plain[1].replace(/\\(.)/g, "$1") : plain[2].trim();
-  return name || null;
+  return (await loadLazy(request)).fetchFile(path, args[0], "text") as Promise<FetchedText>;
 }

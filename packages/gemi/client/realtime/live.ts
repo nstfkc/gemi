@@ -2,6 +2,8 @@ import type { QueryResource } from "../QueryResource";
 import type { ChannelPattern } from "../useChannel";
 import { EVENT_COALESCE_MS } from "./useChannelSubscription";
 import type { ChannelParamValues, RealtimeSocket } from "./RealtimeClient";
+import { loadedModule } from "../lazyModule";
+import { realtime } from "./loader";
 
 /**
  * `useQuery`'s `live` option: the channel whose events and resyncs refetch
@@ -57,5 +59,36 @@ export function subscribeLive(
   return () => {
     if (timer) clearTimeout(timer);
     release();
+  };
+}
+
+/**
+ * What `followLive` in `./loader` hands over to once this module is loaded:
+ * subscribes on the provided socket, or the tab's client, loading that first
+ * when it is not there yet. Returns the function that stops it.
+ */
+export function followLive(
+  provided: RealtimeSocket | null,
+  live: LiveChannel,
+  resource: () => QueryResource,
+  setOpen: (open: boolean) => void,
+): () => void {
+  // `undefined` until it subscribes, `null` once stopped.
+  let stop: (() => void) | null | undefined;
+  const start = (socket: RealtimeSocket) => {
+    if (stop === undefined) stop = subscribeLive(socket, live, resource, setOpen);
+  };
+  const socket = provided ?? realtime.client;
+  if (socket) start(socket);
+  // Its own `import()` of the client rather than `loadRealtimeClient`, which
+  // would keep that in the entry chunk of every app with a `useQuery`. A
+  // failed load leaves the channel closed, so the query keeps polling.
+  else
+    import("./RealtimeClient.js")
+      .then((module) => start(loadedModule(module).tabClient()))
+      .catch(() => {});
+  return () => {
+    stop?.();
+    stop = null;
   };
 }

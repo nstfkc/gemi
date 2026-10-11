@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import type { DeniedCode } from "../../services/broadcast/protocol";
 import type { ChannelParamValues, ChannelStatus, RealtimeSocket } from "./RealtimeClient";
-import { channelKey, loadedRealtimeClient, loadRealtimeClient } from "./loader";
+import { loadedRealtimeClient, loadRealtimeClient } from "./loader";
 import { RealtimeContext } from "./RealtimeContext";
 
 export interface ChannelState {
@@ -37,7 +37,9 @@ export function useChannelSubscription(
   handlersRef.current = handlers;
   const paramsRef = useRef(params);
   paramsRef.current = params;
-  const key = pattern === null ? null : channelKey(pattern, params);
+  // The effect's key for `pattern` and `params`. Not canonical like the
+  // client's own (`channelKey`): params in another order only resubscribe.
+  const key = pattern === null ? null : JSON.stringify([pattern, params]);
 
   useEffect(() => {
     if (!active || pattern === null) {

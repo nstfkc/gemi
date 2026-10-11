@@ -108,9 +108,10 @@ export function undeclared() {
 
 /**
  * A browser app built with Vite against the installed package, for what
- * lands in the entry chunk every route loads (#891). `main.tsx` is the entry
- * and uses neither realtime hook; one lazily loaded view follows a channel and
- * another a `ChangeFeed`. Outside `app/` so `tsc` above never sees it.
+ * lands in the entry chunk every route loads (#891, #915). `main.tsx` is the
+ * entry and uses neither realtime hook; lazily loaded views follow a channel,
+ * a `ChangeFeed`, write into the query cache and read error helpers, and
+ * download files. Outside `app/` so `tsc` above never sees it.
  */
 const CLIENT_FIXTURE = {
   "web/main.tsx": `import { init, Link, useQuery } from "gemi/client";
@@ -124,6 +125,8 @@ function RootLayout({ children }: { children?: unknown }) {
   Plain: () => import("./Plain"),
   Live: () => import("./Live"),
   Feed: () => import("./Feed"),
+  Writes: () => import("./Writes"),
+  Files: () => import("./Files"),
 };
 init(RootLayout);
 `,
@@ -148,6 +151,43 @@ export default function Live() {
 export default function Feed() {
   const { status } = useSubscription("/health" as never, {}, { onChange: console.log });
   return <p>{status}</p>;
+}
+`,
+  "web/Writes.tsx": `import { usePost, useSetQueryData } from "gemi/client";
+
+export default function Writes() {
+  const setQueryData = useSetQueryData();
+  const save = usePost("/health" as never, {} as never, {
+    updates: [{ path: "/health" as never }],
+    onSuccess: (data: unknown) => setQueryData({ path: "/health" as never }, data as never),
+  } as never);
+  const error = save.error as any;
+  return <p>{error?.list().join()}{error?.field("name").join()}</p>;
+}
+`,
+  // A second app, with queries and nothing else: every lazily loaded gemi
+  // chunk goes unused, which is where an emitted-but-unused one shows (see
+  // "needs no chunk besides the entry to start").
+  "web-query/main.tsx": `import { init, useQuery } from "gemi/client";
+
+function RootLayout({ children }: { children?: unknown }) {
+  const { data } = useQuery("/health");
+  return <body>{String(data)}{children as never}</body>;
+}
+
+(window as any).views = { Query: () => import("./Query") };
+init(RootLayout);
+`,
+  "web-query/Query.tsx": `import { useQuery } from "gemi/client";
+
+export default function Query() {
+  return <p>{String(useQuery("/health").data)}</p>;
+}
+`,
+  "web/Files.tsx": `import { fetchBlob, fetchText } from "gemi/client";
+
+export default function Files() {
+  return <button onClick={() => Promise.all([fetchBlob("/f" as never), fetchText("/t" as never)])}>get</button>;
 }
 `,
 };
@@ -248,16 +288,18 @@ beforeAll(async () => {
 
   // `configFile: false`: the fixture's own build, not this package's.
   const { build } = await import("vite");
-  await build({
-    root: join(fixture, "web"),
-    configFile: false,
-    logLevel: "silent",
-    build: {
-      outDir: join(fixture, "web-dist"),
-      manifest: true,
-      rollupOptions: { input: join(fixture, "web/main.tsx") },
-    },
-  });
+  for (const app of ["web", "web-query"]) {
+    await build({
+      root: join(fixture, app),
+      configFile: false,
+      logLevel: "silent",
+      build: {
+        outDir: join(fixture, `${app}-dist`),
+        manifest: true,
+        rollupOptions: { input: join(fixture, app, "main.tsx") },
+      },
+    });
+  }
 }, 600_000);
 
 afterAll(async () => {
@@ -367,17 +409,27 @@ describe("the published package, installed into an app", () => {
 
 describe("the published client, built into an app", () => {
   /**
-   * The realtime socket and `useSubscription`'s SSE connection are loaded on
-   * first use, with a dynamic `import()` (#891). A value import of
-   * `client/realtime/RealtimeClient` or `client/subscriptionStream` from
-   * anything the entry reaches puts it back in every route's entry chunk,
-   * which no unit test would notice: an app's bundler places a module by what
-   * statically reaches it, and its entry reaches all of `gemi/client`.
+   * The realtime socket and `useSubscription`'s SSE connection (#891), and
+   * the mutation hooks' extras and `fetchBlob`'s request (#915), are loaded on
+   * first use, with a dynamic `import()`. A value import of
+   * `client/realtime/RealtimeClient`, `client/subscriptionStream`,
+   * `client/mutationErrorHelpers`, `client/queryUpdates` or
+   * `client/fetchFileRequest` from anything the entry reaches puts it back in
+   * every route's entry chunk, which no unit test would notice: an app's
+   * bundler places a module by what statically reaches it, and its entry
+   * reaches all of `gemi/client`.
    */
   const MARKERS = {
     socket: ["gemi.v1", "__gemi/socket", "hiddenDisconnectMs"],
     subscription: ["Last-Event-ID", "text/event-stream"],
+    // The error helpers' validation check (`mutationErrorList` has it too,
+    // which the fixture never calls) and the cache writes' walk over a
+    // resource's variants (#915). Not `error.list()`'s fallback message: the
+    // hooks keep it in the entry for when this chunk cannot be loaded.
+    mutationExtras: ["validation_error", ".variantKeys()"],
+    fileRequest: ["content-disposition"],
   };
+  const ALL_MARKERS = Object.values(MARKERS).flat();
 
   async function chunks() {
     const out = join(fixture, "web-dist");
@@ -392,38 +444,55 @@ describe("the published client, built into an app", () => {
     return { entry: code.get(join(out, entry!.file))!, code };
   }
 
-  test("keeps the socket client and the SSE reader out of the entry chunk", async () => {
+  test("keeps the socket client, the SSE reader, the mutation extras and the file request out of the entry chunk", async () => {
     const { entry } = await chunks();
-    for (const marker of [...MARKERS.socket, ...MARKERS.subscription]) {
+    for (const marker of ALL_MARKERS) {
       expect(entry.includes(marker), `the entry chunk contains "${marker}"`).toBe(false);
     }
   });
 
-  test("still ships both, in chunks of their own", async () => {
+  test("still ships each of them, in chunks of their own", async () => {
     // The liveness check for the one above: markers that are in no chunk at
     // all would pass it while measuring nothing.
     const { entry, code } = await chunks();
-    for (const marker of [...MARKERS.socket, ...MARKERS.subscription]) {
+    for (const marker of ALL_MARKERS) {
       const holders = [...code].filter(([, text]) => text !== entry && text.includes(marker));
       expect(holders.length, `no lazy chunk contains "${marker}"`).toBeGreaterThan(0);
     }
   });
 
-  test("loads `useQuery`'s live subscription lazily too", async () => {
-    // `client/realtime/live.ts` has no string of its own to look for, so this
-    // goes by the manifest: the gemi chunk it is built into must be a dynamic
-    // entry of the app's build, not something the entry imports statically.
+  test.each(["web", "web-query"])("%s needs no chunk besides the entry to start", async (app) => {
+    // A gemi chunk loaded lazily that imports from the code the entry holds,
+    // and whose `import()` the app's bundler drops as unused, can still be
+    // emitted. The bundler then moves that shared code out of the entry into a
+    // chunk of its own, which every route imports statically and which in our
+    // builds costs about 0.8 KB gzip more. It happened in an app with no
+    // mutation hook, once `gemi/testing` imported `client/mutationModules`
+    // (#915).
+    const manifest: Record<string, { isEntry?: boolean; imports?: string[] }> = await Bun.file(
+      join(fixture, `${app}-dist/.vite/manifest.json`),
+    ).json();
+    const entry = Object.values(manifest).find((chunk) => chunk.isEntry)!;
+    expect(entry.imports ?? []).toEqual([]);
+  });
+
+  // Modules with no string of their own to look for go by the manifest: the
+  // gemi chunk each is built into must be a dynamic entry of the app's build,
+  // not something the entry imports statically.
+  test.each([
+    ["`useQuery`'s live subscription", "live"],
+    ["the mutation hooks' extras (error helpers, cache writes)", "mutationExtras"],
+  ])("loads %s lazily too", async (_, name) => {
     const manifest: Record<
       string,
       { file: string; src?: string; isEntry?: boolean; isDynamicEntry?: boolean; imports?: string[] }
     > = await Bun.file(join(fixture, "web-dist/.vite/manifest.json")).json();
-    const live = Object.entries(manifest).find(([key]) =>
-      /node_modules\/gemi\/dist\/chunks\/live-[^/]+\.js$/.test(key),
-    );
-    expect(live, `no chunk built from gemi's live module:\n${Object.keys(manifest).join("\n")}`).toBeDefined();
-    expect(live![1].isDynamicEntry).toBe(true);
+    const pattern = new RegExp(`node_modules/gemi/dist/chunks/${name}-[^/]+\\.js$`);
+    const lazy = Object.entries(manifest).find(([key]) => pattern.test(key));
+    expect(lazy, `no chunk built from gemi's ${name} module:\n${Object.keys(manifest).join("\n")}`).toBeDefined();
+    expect(lazy![1].isDynamicEntry).toBe(true);
     const entry = Object.entries(manifest).find(([, chunk]) => chunk.isEntry)!;
-    expect(live![1].file).not.toBe(entry[1].file);
-    expect(entry[1].imports ?? []).not.toContain(live![0]);
+    expect(lazy![1].file).not.toBe(entry[1].file);
+    expect(entry[1].imports ?? []).not.toContain(lazy![0]);
   });
 });

@@ -135,7 +135,8 @@ const LEGACY_MESSAGES: Record<string, RefusalKind> = {
   "Rate limit exceeded": "rate_limit",
 };
 
-function isObject(error: unknown): error is Record<string, unknown> {
+/** @internal */
+export function isObject(error: unknown): error is Record<string, unknown> {
   return typeof error === "object" && error !== null;
 }
 
@@ -366,6 +367,11 @@ function unwrapQueryError(error: unknown): unknown {
 /**
  * `error.list(fallback)` for any value: an error kept from a mutation, a
  * `useQuery` `QueryError` (its body is read), or anything else.
+ *
+ * Kept in step with `list` in `./mutationErrorHelpers`, which the mutation
+ * hooks load on first use (#915) and so cannot share this code: an app's
+ * bundler would put it back in the entry chunk. `MutationError.helpers.test`
+ * runs the same cases through both.
  */
 export function mutationErrorList(
   error: unknown,
@@ -399,32 +405,4 @@ export function mutationErrorField(error: unknown, name: string): string[] {
   if (!isValidationError(value)) return [];
   const messages = value.messages?.[name];
   return Array.isArray(messages) ? [...messages] : [];
-}
-
-/**
- * Puts `list` and `field` on an error the hooks hand over, as non-enumerable
- * properties, so `toEqual`, a spread and `JSON.stringify` see the same object
- * as before. A key the error already has is left alone; a primitive or a
- * frozen value is returned as it is.
- *
- * @internal
- */
-export function withMutationErrorHelpers<T>(error: T): WithMutationErrorHelpers<T> {
-  if (!isObject(error) || !Object.isExtensible(error)) {
-    return error as WithMutationErrorHelpers<T>;
-  }
-  const helpers: MutationErrorHelpers = {
-    list: (fallback) => mutationErrorList(error, fallback),
-    field: (name) => mutationErrorField(error, name),
-  };
-  for (const key of ["list", "field"] as const) {
-    if (key in error) continue;
-    Object.defineProperty(error, key, {
-      value: helpers[key],
-      configurable: true,
-      writable: true,
-      enumerable: false,
-    });
-  }
-  return error as WithMutationErrorHelpers<T>;
 }

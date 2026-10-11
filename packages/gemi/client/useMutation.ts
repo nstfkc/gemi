@@ -1,4 +1,4 @@
-import { useContext, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -6,15 +6,17 @@ import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import {
+  isObject,
   mutationErrorFromBody,
-  withMutationErrorHelpers,
   type MutationError,
   type WithMutationErrorHelpers,
 } from "./MutationError";
-import { currentSocketId } from "./realtime/loader";
+import { realtime } from "./realtime/loader";
 import { SOCKET_ID_HEADER } from "../services/broadcast/socketHeader";
 import { QueryManagerContext } from "./QueryManagerContext";
-import { applyQueryUpdates, type QueryUpdate } from "./useSetQueryData";
+import type { QueryUpdate } from "./useSetQueryData";
+import { loadLazy } from "./lazyModule";
+import { mutationExtras, preloadMutationExtras } from "./mutationModules";
 
 type Methods = {
   POST: {
@@ -192,6 +194,7 @@ export function useMutation<
   // body and runs its own callbacks, and `data`/`error` hold the outcome of
   // whichever call settled last.
   const parallel = options.concurrency === "parallel";
+  useEffect(preloadMutationExtras, []);
 
   async function trigger(
     input?: U,
@@ -267,18 +270,31 @@ export function useMutation<
       body = JSON.stringify(input);
     }
 
+    const socketId = realtime.client?.socketId;
     try {
       const response = await fetch(`/api${finalUrl}`, {
         method,
         headers: {
           ...contentType,
-          ...socketIdHeader(),
+          // This tab's broadcast socket, while one is open, so a controller's
+          // `Broadcast.toOthers(req)` skips the tab that made the change.
+          ...(socketId ? { [SOCKET_ID_HEADER]: socketId } : {}),
         },
         ...(body ? { body } : {}),
         signal: controller.signal,
       });
 
       const data = await response.json();
+      // `data.error` rather than the envelope around it: `onError` is typed
+      // `(error: MutationError) => void`, and the envelope has no `kind` to
+      // branch on. A body without one — an app's own `HttpResponse.json` —
+      // is handed over whole.
+      const error = response.ok
+        ? null
+        : await withErrorHelpers<MutationError | E>(mutationErrorFromBody(data, response.status));
+      // Loaded before the check below, so a request superseded while it waits
+      // for the module writes nothing.
+      const extras = response.ok && options.updates ? await loadOrNull() : null;
 
       // A superseded request has nothing left to say: a newer submit is what
       // the user is waiting on, and its state is the state on screen.
@@ -290,33 +306,26 @@ export function useMutation<
       resetFormData();
 
       if (!response.ok) {
-        // `data.error` rather than the envelope around it: `onError` is typed
-        // `(error: MutationError) => void`, and the envelope has no `kind` to
-        // branch on. A body without one — an app's own `HttpResponse.json` —
-        // is handed over whole.
-        const error = withMutationErrorHelpers(
-          mutationErrorFromBody(data, response.status),
-        ) as WithMutationErrorHelpers<MutationError | E>;
-
         // `data` is the last result the caller was given, and a rejected
         // submit did not replace it — the same reason the pending state above
         // keeps it.
         settle((prev) => ({ data: prev.data, error }));
 
-        options.onError(error);
-        call.onError?.(error);
+        options.onError(error!);
+        call.onError?.(error!);
         return;
       }
 
       clearPrefetchCache?.();
-      applyQueryUpdates(getResource, _params, options.updates, data);
+      extras?.applyQueryUpdates(getResource, _params, options.updates, data);
       options.onSuccess(data);
       call.onSuccess?.(data);
 
       settle(() => ({ data, error: null }));
 
       return data as T;
-    } catch (error) {
+    } catch (thrown) {
+      const error = await withErrorHelpers(thrown as MutationError);
       if (isSuperseded()) {
         settle((prev) => prev, true);
         return;
@@ -333,13 +342,12 @@ export function useMutation<
       }
       // A `TypeError` from `fetch` (no answer) or a `SyntaxError` from
       // `response.json()` (an answer that was not JSON) — both `Error`s.
-      const failure = withMutationErrorHelpers(error as MutationError);
-      options.onError(failure);
-      call.onError?.(failure);
+      options.onError(error);
+      call.onError?.(error);
       // A parallel call's failure doesn't take back another call's result.
       settle((prev) => ({
         data: parallel ? prev.data : null,
-        error: failure,
+        error,
       }));
     }
   }
@@ -451,6 +459,7 @@ export function useUpload<
   const abortRef = useRef<VoidFunction | null>(null);
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
+  useEffect(preloadMutationExtras, []);
 
   // Clears the ref so a `cancel()` after the upload has settled does nothing:
   // it used to abort a finished request and report `onCanceled` for it.
@@ -565,20 +574,24 @@ export function useUpload<
         } catch {
           // Not JSON: a proxy's error page, say.
         }
+        const failure = await withErrorHelpers(error);
         setState("error");
-        options?.onError?.(withMutationErrorHelpers(error));
+        options?.onError?.(failure);
         return;
       }
       const json = JSON.parse(outcome.body);
       clearPrefetchCache?.();
-      applyQueryUpdates(getResource, _params, options?.updates, json);
+      if (options.updates) {
+        (await loadOrNull())?.applyQueryUpdates(getResource, _params, options.updates, json);
+      }
       options?.onSuccess?.(json);
       setState("done");
       return json;
     } catch (error) {
       release();
+      const failure = await withErrorHelpers(error as MutationError);
       setState("error");
-      options?.onError?.(withMutationErrorHelpers(error as MutationError));
+      options?.onError?.(failure);
       return;
     }
   };
@@ -591,11 +604,24 @@ export function useUpload<
   };
 }
 
-/**
- * `X-Gemi-Socket` with this tab's broadcast socket id, while one is open, so
- * a controller's `Broadcast.toOthers(req)` skips the tab that made the change.
- */
-function socketIdHeader(): Record<string, string> {
-  const id = currentSocketId();
-  return id ? { [SOCKET_ID_HEADER]: id } : {};
+
+// `./mutationExtras`, or `null` when it could not be loaded (a chunk gone
+// after a deploy, no network).
+function loadOrNull() {
+  return loadLazy(mutationExtras).catch(() => null);
+}
+
+// `error.list()` and `error.field(name)` on what the hooks hand over. If
+// their module could not be loaded, stand-ins that only know the fallback
+// keep `error.list()` in a render from throwing.
+async function withErrorHelpers<T>(error: T): Promise<WithMutationErrorHelpers<T>> {
+  const extras = await loadOrNull();
+  if (extras) return extras.withMutationErrorHelpers(error);
+  if (isObject(error) && Object.isExtensible(error) && !("list" in error)) {
+    Object.defineProperties(error, {
+      list: { value: (fallback = "Something went wrong. Try again.") => [fallback] },
+      field: { value: () => [] },
+    });
+  }
+  return error as WithMutationErrorHelpers<T>;
 }
