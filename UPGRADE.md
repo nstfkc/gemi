@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.132 to 0.133
 
 ## ORM: a `Json` field's `@default("[]")` is stored as an array, not a string (#926)
 
