@@ -9,12 +9,8 @@ import { RateLimitExceededError } from "../http/RateLimitMiddleware";
 import { ValidationError } from "../http/Router";
 import { unhandledErrorResponse } from "../server/unhandledError";
 import { Form } from "./Mutation";
-import {
-  isValidationError,
-  mutationErrorField,
-  mutationErrorList,
-  withMutationErrorHelpers,
-} from "./MutationError";
+import { isValidationError, mutationErrorField, mutationErrorList } from "./MutationError";
+import { withMutationErrorHelpers } from "./mutationErrorHelpers";
 import { QueryError } from "./QueryError";
 import { useMutation, useUpload } from "./useMutation";
 
@@ -187,6 +183,46 @@ describe("the standalone helpers", () => {
   test("anything else gives the fallback", () => {
     for (const value of [undefined, null, "boom", 42, new Error("boom")]) {
       expect(mutationErrorList(value)).toEqual([FALLBACK]);
+    }
+  });
+});
+
+describe("the hooks' helpers and the standalone ones agree", () => {
+  // `list` and `field` on the hooks' errors come from `./mutationErrorHelpers`,
+  // loaded on first use, and repeat `mutationErrorList` / `mutationErrorField`
+  // rather than import them (#915). Every case through both.
+  const values = () => [
+    { kind: "validation_error", messages: { title: ["Required", ""], body: ["Too short"] } },
+    { kind: "validation_error", messages: {} },
+    { kind: "validation_error" },
+    { kind: "form_error", message: "This slug is taken", status: 409 },
+    { kind: "permission", message: "Staff only", status: 403 },
+    { kind: "server_error", message: "boom", status: 500 },
+    { kind: "gone", code: 7, status: 410 },
+    { kind: "x", message: "", status: 422 },
+    new QueryError("/posts", "k", 400, {
+      error: { kind: "validation_error", messages: { q: ["Too long"] } },
+    }),
+    new QueryError("/posts", "k", 403, { error: { kind: "permission", message: "No" } }),
+    new QueryError("/posts", "k", 502, null),
+    new TypeError("Failed to fetch"),
+    new SyntaxError("Unexpected token <"),
+  ];
+
+  test("list, with and without a fallback", () => {
+    for (const value of values()) {
+      const helped = withMutationErrorHelpers(value) as { list(fallback?: string): string[] };
+      expect(helped.list()).toEqual(mutationErrorList(value));
+      expect(helped.list("Could not save.")).toEqual(mutationErrorList(value, "Could not save."));
+    }
+  });
+
+  test("field", () => {
+    for (const value of values()) {
+      const helped = withMutationErrorHelpers(value) as { field(name: string): string[] };
+      for (const name of ["title", "body", "q", "missing"]) {
+        expect(helped.field(name)).toEqual(mutationErrorField(value, name));
+      }
     }
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { fetchBlob, fetchText, filenameOf } from "./fetchFile";
+import { fetchBlob, fetchText } from "./fetchFile";
+import { filenameOf } from "./fetchFileRequest";
 import { mutationErrorList } from "./MutationError";
 import { QueryError } from "./QueryError";
 import { isRetryableQueryError } from "./retryPolicy";

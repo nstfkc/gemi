@@ -1,3 +1,21 @@
+# Unreleased
+
+## Client: mutation extras, cache writes and `fetchBlob` load on first use (#915)
+
+**Nothing to migrate.** Code added to `gemi/client` since 0.122 that only some pages use is no longer in every route's entry chunk. An app's bundler puts whatever `gemi/client` reaches statically in the entry chunk, so these now load with a dynamic `import()`, as the realtime socket did in 0.129. The public API is unchanged.
+
+- **`error.list()` / `error.field(name)`, `updates` and `useSetQueryData()`** are one small chunk. It starts loading when the first mutation hook on a page (or `useSetQueryData`) mounts.
+- **`fetchBlob` / `fetchText`** load their request code on the first call.
+- **`useQuery({ live })`** loads the socket client from its own lazy chunk, so the client's loader is no longer in the entry chunk of an app that never calls `useChannel`.
+
+Fixture app (Vite 8), gzip of the entry chunk: −0.4 KB for an app with queries and mutations and no realtime, which is +0.8 KB over 0.122 instead of +1.2 KB. An app that downloads files saves another 0.3 KB. The PR has the table.
+
+Timing that changed:
+
+- The mutation hooks now hand over a result (`onSuccess`, `onError`, `error`, `data`) a few microtasks after the response is read. Before, they did it synchronously after the response was read. If a request settles before the chunk has arrived, the result waits for the chunk. A test that awaits `trigger()` or uses `waitFor` sees no difference.
+- A `setQueryData` call made before the chunk has arrived, such as one during the first render, is written once the chunk has arrived, in call order.
+- If the chunk cannot be loaded (usually after a deploy), errors are handed over without `list` and `field`. A success with `updates` still calls `onSuccess`, but nothing is written into the cache. `init`'s chunk-load recovery reloads the page, as it does for any other chunk.
+
 # Upgrading from 0.128.0 to 0.129.0
 
 ## Client: the realtime socket and `useSubscription`'s connection load on first use (#891)

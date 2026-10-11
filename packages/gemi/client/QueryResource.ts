@@ -113,20 +113,7 @@ export class QueryResource {
       // Idempotent re-hydration (e.g. StrictMode's double invoke).
       if (current?.hasData && current.data === data) continue;
 
-      store.set(variantKey, {
-        loading: false,
-        data,
-        hasData: true,
-        error: null,
-        version: now,
-      });
-      this.staleVariants.delete(variantKey);
-      this.lastFetchRecord.set(variantKey, now);
-      this.failures.delete(variantKey);
-      this.cancelRetry(variantKey);
-      // Wake a reader suspended on this variant — the payload the server just
-      // shipped is the answer it was waiting on.
-      this.settle(variantKey);
+      this.fill(store, variantKey, data, now);
       changed = true;
     }
 
@@ -424,7 +411,7 @@ export class QueryResource {
     }
   }
 
-  private dropHttpCache(variantKey: string) {
+  dropHttpCache(variantKey: string) {
     const cacheKey = [
       typeof window !== "undefined" && window.location?.origin
         ? window.location.origin
@@ -471,32 +458,22 @@ export class QueryResource {
     this.resolveVariant(variantKey, false, false);
   }
 
-  /**
-   * Write data the server just produced (a mutation's answer) into a
-   * variant, with no refetch: unlike `mutate`, the value is not a guess to
-   * reconcile. The variant counts as freshly fetched, so its `staleTime`
-   * starts again, and a GET already on the wire for it is dropped when it
-   * lands, since it may carry the data from before the write. A reader
-   * suspended on the variant wakes up with it (#897).
-   */
-  set(variantKey: string, data: any) {
-    this.dropHttpCache(variantKey);
-    const now = Date.now();
-    this.markApplied(variantKey);
+  // `data` straight from the server into `store` (the caller publishes it):
+  // fresh as of `now`, with no failures or retry left, and a reader suspended
+  // on the variant woken up, since this is the answer it was waiting on.
+  // Not private: `setVariant` in `./queryUpdates` uses it, and the two below.
+  fill(store: Map<string, State>, variantKey: string, data: any, now: number) {
+    store.set(variantKey, {
+      loading: false,
+      data,
+      hasData: true,
+      error: null,
+      version: now,
+    });
     this.staleVariants.delete(variantKey);
     this.lastFetchRecord.set(variantKey, now);
     this.failures.delete(variantKey);
     this.cancelRetry(variantKey);
-    const store = this.store.getValue();
-    this.store.next(
-      store.set(variantKey, {
-        loading: false,
-        data,
-        hasData: true,
-        error: null,
-        version: now,
-      }),
-    );
     this.settle(variantKey);
   }
 
@@ -505,7 +482,7 @@ export class QueryResource {
   }
 
   /** Supersede every request for this variant that is already on the wire. */
-  private markApplied(variantKey: string) {
+  markApplied(variantKey: string) {
     this.applied.set(variantKey, this.seq);
   }
 

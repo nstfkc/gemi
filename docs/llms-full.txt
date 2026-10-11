@@ -5725,6 +5725,12 @@ same object as before. The type is `WithMutationErrorHelpers<MutationError | E>`
 route's typed error whose body has a `list` or `field` key keeps its own value under
 that key, without the helper.
 
+The code behind the helpers is not in your entry chunk: it loads when the first
+mutation hook on the page mounts, and a request that fails before it has arrived
+waits for it (one small chunk, normally there long before any answer). If it cannot
+be loaded, usually after a deploy, the error is handed over without the helpers;
+`init`'s chunk-load recovery reloads the page as for any other chunk.
+
 `mutationErrorList(error, fallback?)` and `mutationErrorField(error, name)` do the
 same for any value: an error you kept, or a `useQuery` `QueryError`, whose body they
 read.
@@ -5829,6 +5835,7 @@ They are plain async functions, not hooks, so you can call them from an event ha
 - **Options:** `params`, `search` (an object, where `null` and `undefined` values are left out, or a `URLSearchParams`), `signal`, and `init` for anything else `fetch` takes (`headers`, `cache`, `credentials`). The request is always a `GET` to `/api` + the path.
 - **Result:** `{ blob, filename, response }` from `fetchBlob`, `{ text, filename, response }` from `fetchText`. `filename` is the name in the response's `Content-Disposition` (the UTF-8 `filename*` form first, then `filename`), or `null` when there is none. A stream route's `name` ends up there.
 - **Errors:** a non-2xx response rejects with the same `QueryError` (`status`, `body`, `retryAfter`) that `useQuery` throws. `body` is the parsed JSON error, or `null` when the body was not JSON, so `mutationErrorList(error, fallback)`, `mutationErrorField` and `isRetryableQueryError` work on it. A network failure rejects with the browser's `TypeError`, and an aborted `signal` with its `AbortError`.
+- **Loading:** the request code loads on the first call, so a route that never downloads a file does not carry it. If that chunk cannot be loaded the call rejects with the load error.
 
 The paths come from the `FileRPC` interface, which `gemi.d.ts` fills in from your `ApiRouter` (`CreateFileRPC` from `gemi/http`). While it is empty, for example in a package without the app's types, any path compiles.
 
@@ -5943,6 +5950,11 @@ setQueryData(
 
 A value replaces the variant's data (and seeds it when nothing is cached); a
 function updates what is cached and skips a variant with nothing cached.
+
+The cache writes, here and in `updates`, load with the mutation hooks' other code
+when the first hook (or `useSetQueryData`) mounts, so they are not in your entry
+chunk. A `setQueryData` call made before they have arrived, during the first render
+for instance, is written once they have, in call order.
 
 `useMutate` and `useSetQueryData` differ in what they trust: `useMutate` writes
 an optimistic guess and refetches to reconcile it, `useSetQueryData` and

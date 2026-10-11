@@ -217,7 +217,7 @@ test("a chunk the recovery handled leaves the hook closed, and the load is not k
 
 test("a live query whose chunk the recovery handled stays closed, without an unhandled rejection", async () => {
   vi.stubGlobal("WebSocket", MockSocket);
-  const live = vi.spyOn(loader.lazyModules, "live").mockResolvedValue(undefined as never);
+  const live = vi.spyOn(loader.liveModule, "load").mockResolvedValue(undefined as never);
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ n: 1 }), headers: new Headers() })),
