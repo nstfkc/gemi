@@ -21,6 +21,14 @@ protected async checkUpload(file, req, { body }) {
 
 An app that noted the upload's body in `authorizeRequest` (a `WeakMap` keyed by the request) to read it back in `attachmentDestination` can drop that and read `body` here instead. A check is not a reservation: two uploads checked at once both see the old usage.
 
+## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
+
+**New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
+
+- `Auth.user()` is unchanged: it never resolves to `null` and throws `AuthenticationError` (401, or a redirect to sign-in for a view). Its docs now say so.
+- Replace hand-rolled wrappers (`Auth.user().catch(...)` returning `null` on `AuthenticationError`) with `Auth.userOrNull()`.
+- Only "nobody is signed in" becomes `null`. An error from the session lookup itself (a database outage, say) still throws, where `.catch(() => null)` would have served the page as signed out.
+
 ## Mutation errors: `error.list()` and `error.field(name)` (#890)
 
 **New, nothing to migrate.** Every error the mutation hooks hand over (`error` and the `onError` argument of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form onError>`) carries two helpers. See [Data Fetching: Messages to show](docs/data-fetching.md#messages-to-show-errorlist-and-errorfieldname).
