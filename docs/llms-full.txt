@@ -1895,7 +1895,7 @@ To name the file, force a download, or add headers, spread the read and set what
 
 Returning a `Response` yourself opts out of all of the above and is passed through untouched.
 
-Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
+Stream and file routes are left out of the generated RPC types that `useQuery` and the mutation hooks read, since those hooks parse JSON. Download them on the client with [`fetchBlob` or `fetchText`](./data-fetching.md#downloading-files-fetchblob-and-fetchtext), whose paths are typed from these routes.
 
 A stream (or `this.file(...)`) route can share its path with other methods: put it under `get` in a method map. The `GET` and `HEAD` behave as above, and the other methods are typed as usual:
 
@@ -5800,6 +5800,35 @@ once the upload succeeds, `"error"` when it fails, and back to `"idle"` after a
 upload failed (reported through `onError`) or it was cancelled. A cancel is not an
 error: `onCanceled` runs and `onError` does not. See [File Storage](./file-storage.md)
 for the server side.
+
+### Downloading files: `fetchBlob` and `fetchText`
+
+Routes served by [`this.stream(...)` or `this.file(...)`](./routing.md#streaming-and-range-requests) answer bytes, not JSON, so `useQuery` cannot read them. `fetchBlob` and `fetchText` can, and their paths are typed from your api the same way `useQuery`'s are: only `GET` paths backed by a stream or file route compile, and a path with `:params` requires `params`.
+
+```tsx
+import { fetchBlob, mutationErrorList } from "gemi/client";
+
+async function download(pageId: string) {
+  try {
+    const { blob, filename } = await fetchBlob("/pages/:pageId/post/image", {
+      params: { pageId },
+      search: { format: "png", scale: 2 },
+    });
+    const file = new File([blob], filename ?? "post.png", { type: blob.type });
+    // save or share `file`
+  } catch (error) {
+    toast(mutationErrorList(error, "The picture couldn't be made.")[0]);
+  }
+}
+```
+
+They are plain async functions, not hooks, so you can call them from an event handler.
+
+- **Options:** `params`, `search` (an object, where `null` and `undefined` values are left out, or a `URLSearchParams`), `signal`, and `init` for anything else `fetch` takes (`headers`, `cache`, `credentials`). The request is always a `GET` to `/api` + the path.
+- **Result:** `{ blob, filename, response }` from `fetchBlob`, `{ text, filename, response }` from `fetchText`. `filename` is the name in the response's `Content-Disposition` (the UTF-8 `filename*` form first, then `filename`), or `null` when there is none. A stream route's `name` ends up there.
+- **Errors:** a non-2xx response rejects with the same `QueryError` (`status`, `body`, `retryAfter`) that `useQuery` throws. `body` is the parsed JSON error, or `null` when the body was not JSON, so `mutationErrorList(error, fallback)`, `mutationErrorField` and `isRetryableQueryError` work on it. A network failure rejects with the browser's `TypeError`, and an aborted `signal` with its `AbortError`.
+
+The paths come from the `FileRPC` interface, which `gemi.d.ts` fills in from your `ApiRouter` (`CreateFileRPC` from `gemi/http`). While it is empty, for example in a package without the app's types, any path compiles.
 
 ## Updating queries from elsewhere: `useMutate`
 

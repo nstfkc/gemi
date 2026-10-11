@@ -205,7 +205,7 @@ To name the file, force a download, or add headers, spread the read and set what
 
 Returning a `Response` yourself opts out of all of the above and is passed through untouched.
 
-Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
+Stream and file routes are left out of the generated RPC types that `useQuery` and the mutation hooks read, since those hooks parse JSON. Download them on the client with [`fetchBlob` or `fetchText`](./data-fetching.md#downloading-files-fetchblob-and-fetchtext), whose paths are typed from these routes.
 
 A stream (or `this.file(...)`) route can share its path with other methods: put it under `get` in a method map. The `GET` and `HEAD` behave as above, and the other methods are typed as usual:
 
