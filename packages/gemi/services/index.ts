@@ -484,6 +484,7 @@ export {
   defineLogConfig,
   logConfigDefaults,
   type LogConfig,
+  type LogConsoleFormat,
 } from "./logging/config";
 export {
   defineQueueConfig,

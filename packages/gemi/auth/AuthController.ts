@@ -195,6 +195,17 @@ class ResetPasswordRequest extends HttpRequest<
   };
 }
 
+/**
+ * A 404 for a route whose flow the app switched off (`auth.password`,
+ * `auth.magicLink`, #879), thrown before the body is read: a validation error
+ * would tell a client the route is there.
+ */
+function requireFlow(flow: "password" | "magicLink") {
+  if (app(AuthManager).config[flow] === false) {
+    throw new RequestBreakerError("Not found", { status: 404 });
+  }
+}
+
 export class AuthController extends Controller {
   async me() {
     const user = await Auth.user();
@@ -207,6 +218,7 @@ export class AuthController extends Controller {
   }
 
   async verifyEmail(req = new HttpRequest<{ token: string }>()) {
+    requireFlow("password");
     const input = await req.input();
     const { userProvider } = app(AuthManager);
 
@@ -275,6 +287,7 @@ export class AuthController extends Controller {
    * showed "Invalid pin"; a rate limit is the middleware's 429.
    */
   private async verifyPinRequest(req: HttpRequest<{ email: string; pin: string }>) {
+    requireFlow("magicLink");
     const auth = app(AuthManager);
     const input = await req.input();
     const { email: rawEmail, pin: rawPin } = input.toJSON();
@@ -343,6 +356,7 @@ export class AuthController extends Controller {
   }
 
   async signInV2(req = new SignInRequest()) {
+    requireFlow("password");
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -390,6 +404,7 @@ export class AuthController extends Controller {
   }
 
   async signIn(req = new SignInRequest()) {
+    requireFlow("password");
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -437,6 +452,7 @@ export class AuthController extends Controller {
   }
 
   async signUp() {
+    requireFlow("password");
     const auth = app(AuthManager);
     const { userProvider, config } = auth;
     const req = new config.signUpRequest();
@@ -591,6 +607,7 @@ export class AuthController extends Controller {
   }
 
   async forgotPassword(req = new ForgotPasswordRequest()) {
+    requireFlow("password");
     const input = await req.input();
     const email = emailInput(input.get("email"));
 
@@ -624,6 +641,7 @@ export class AuthController extends Controller {
   }
 
   async resetPassword(req = new ResetPasswordRequest()) {
+    requireFlow("password");
     const { userProvider, config } = app(AuthManager);
     const input = await req.input();
     const { password, token: rawToken } = input.toJSON();
@@ -681,6 +699,7 @@ export class AuthController extends Controller {
   async changePassword(
     req = new HttpRequest<{ oldPassword: string; newPassword: string }>(),
   ) {
+    requireFlow("password");
     const { userProvider, config } = app(AuthManager);
     const user = await Auth.user();
     const input = await req.input();
@@ -1220,6 +1239,7 @@ export class AuthController extends Controller {
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
+    requireFlow("magicLink");
     const input = await req.input();
     const email = foldEmail(input.get("email"));
     const auth = app(AuthManager);

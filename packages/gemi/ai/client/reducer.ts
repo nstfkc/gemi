@@ -373,8 +373,10 @@ function reduce<T extends ToolShapes, O>(
 
     case "message-id": {
       // The client's own copy of its turn, renamed to the id the server stored
-      // it under (#466). Only the id: the copy is what the user typed and is
-      // already on screen, and the server never sends the turn itself.
+      // it under (#466). Only the id changes: the copy is what the user typed
+      // and is already on screen, and the server never sends the turn itself.
+      // The client's key for it stays (#818): `localId` is what a UI keys the
+      // element by, and the rename must not remount it.
       //
       // A no-op when nothing is under `localId` — a replay after the rename,
       // or a client attached from elsewhere that never held the copy. If the
@@ -391,10 +393,20 @@ function reduce<T extends ToolShapes, O>(
         if (!event.message || state.messages.some((m) => m.id === event.messageId)) return state;
         return { ...state, messages: [...state.messages, event.message] };
       }
+      // When the server's copy is already here and the local one goes, the key
+      // and the app's `metadata` move onto the copy that stays, so the element
+      // the user is looking at is still the one it was.
+      const local = state.messages[index]!;
+      const kept = {
+        localId: local.localId ?? local.id,
+        ...(local.metadata ? { metadata: local.metadata } : {}),
+      };
       const messages = state.messages.some((message) => message.id === event.messageId)
-        ? state.messages.filter((_, i) => i !== index)
+        ? state.messages
+            .filter((_, i) => i !== index)
+            .map((message) => (message.id === event.messageId ? { ...message, ...kept } : message))
         : state.messages.map((message, i) =>
-            i === index ? { ...message, id: event.messageId } : message,
+            i === index ? { ...message, ...kept, id: event.messageId } : message,
           );
       return { ...state, messages };
     }

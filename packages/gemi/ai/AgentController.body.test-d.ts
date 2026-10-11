@@ -10,7 +10,7 @@ import {
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
 import { ApiRouter } from "../http/ApiRouter";
-import type { UseChatParams } from "./useChat";
+import type { SendMessageOptions, UseChatParams } from "./useChat";
 
 /**
  * **The body an app sends with every turn, typed from the controller down to
@@ -202,6 +202,34 @@ describe("useChat reads it back off the route", () => {
       body: { whatever: 1, nested: { ok: true } },
     };
     void params;
+  });
+});
+
+describe("sendMessage's per-send body (#818)", () => {
+  test("is a partial of the declared body, merged over the hook's", () => {
+    expectTypeOf<SendMessageOptions<"/controller-body">["body"]>().toEqualTypeOf<
+      Partial<PageBody> | undefined
+    >();
+    const options: SendMessageOptions<"/controller-body"> = { body: { selectedComponent: "hero" } };
+    void options;
+  });
+
+  test("so a field the controller does not declare is refused", () => {
+    const options: SendMessageOptions<"/controller-body"> = {
+      body: {
+        // @ts-expect-error `tenantId` is not part of this controller's body.
+        tenantId: "t1",
+      },
+    };
+    void options;
+  });
+
+  test("a route with no declared body takes anything, metadata included", () => {
+    const options: SendMessageOptions<"/controller-body-plain"> = {
+      body: { auto: true },
+      metadata: { auto: true },
+    };
+    void options;
   });
 });
 

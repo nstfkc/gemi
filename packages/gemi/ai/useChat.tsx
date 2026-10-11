@@ -246,8 +246,12 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * The one way to advance the conversation. A string is shorthand for
    * `{ text }`; answers to pending calls go in the same turn, and may travel
    * with text.
+   *
+   * `options` belong to this send alone (#818): `body` is merged over the
+   * hook's `body` for this request, and `metadata` is kept on the message this
+   * send adds. See `SendMessageOptions`.
    */
-  sendMessage(turn: ClientTurn | string): Promise<void>;
+  sendMessage(turn: ClientTurn | string, options?: SendMessageOptions<P>): Promise<void>;
   /**
    * Explicit cancel — a closed tab no longer stops a run, so this is what does.
    *
@@ -389,6 +393,35 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
     downgraded?: "no_scope";
   }>;
 }
+
+/**
+ * The second argument to `sendMessage()`: what belongs to this one send (#818).
+ *
+ * For what changes from message to message, where the hook's `body` describes
+ * the chat: the node a queued message was written about, or a flag on a turn
+ * the app sends on the user's behalf. Without it an app re-renders the hook
+ * with a different `body` just before sending, and has to make sure the send
+ * reads that render's.
+ */
+export type SendMessageOptions<P extends keyof AgentRoutes> = {
+  /**
+   * Merged over the hook's `body` for this request only: a key given here
+   * replaces the hook's value for it, and the others are sent as usual. The
+   * next send goes back to the hook's `body`. The envelope rules of
+   * `UseChatParams.body` hold here too: `turn`, `clientRunId`, `threadId` and
+   * `messages` are the framework's. Not used by `attach()`, whose uploads send
+   * the hook's `body`, and not remembered by `regenerate()`.
+   */
+  body?: Partial<BodyOf<P>>;
+  /**
+   * Kept on the message this send adds, as `message.metadata`, and on it after
+   * the server renames it. For telling the app's own kinds of message apart in
+   * the transcript. Client-only: never sent, never stored, so a thread read
+   * back from the server does not have it. A send that adds no message (only
+   * answers) has nowhere to keep it.
+   */
+  metadata?: Record<string, unknown>;
+};
 
 /** The second argument to `attach()`. */
 export type AttachOptions = {
@@ -667,7 +700,8 @@ function turnFrom(message: AgentMessage): ClientTurn {
 }
 
 /**
- * The transcript as the server needs it, without the progress logs.
+ * The transcript as the server needs it, without the progress logs or the
+ * client-only `localId` and `metadata`.
  *
  * In stateless mode `send` posts the whole history on *every* turn, so anything
  * that accumulates on a message is paid for again on each one. `progress` is
@@ -683,7 +717,11 @@ function turnFrom(message: AgentMessage): ClientTurn {
  * shapes the request body only, so a UI still renders every yield it received.
  */
 function forWire(messages: AgentMessage[]): AgentMessage[] {
-  return messages.map((message) => {
+  return messages.map((full) => {
+    // The client's own key and the app's notes on a message it sent (#818):
+    // client-only, and nothing the server should be handed back.
+    const { localId: _localId, metadata: _metadata, ...stripped } = full;
+    const message = full.localId !== undefined || full.metadata !== undefined ? stripped : full;
     // Identity for the overwhelming majority of messages, which have neither —
     // `nested` counts because a sub-agent's own yields are the same dead weight
     // one level down.
@@ -981,8 +1019,23 @@ export function useChat<P extends keyof AgentRoutes>(
   );
 
   const send = useCallback(
-    async (turn: ClientTurn, options: { regenerate?: boolean } = {}) => {
-      const { base: url, extraBody: body } = requestRef.current;
+    async (
+      turn: ClientTurn,
+      options: {
+        regenerate?: boolean;
+        body?: Record<string, unknown>;
+        metadata?: Record<string, unknown>;
+      } = {},
+    ) => {
+      const { base: url, extraBody } = requestRef.current;
+      // This send's own fields over the hook's (#818), read now rather than
+      // through a render, so a send never goes out with another's.
+      const body = options.body
+        ? {
+            ...(extraBody as Record<string, unknown> | undefined),
+            ...options.body,
+          }
+        : extraBody;
       // One run at a time per hook. A second send while the first is streaming
       // is a user who changed their mind, not a request to interleave two
       // assistants into one transcript.
@@ -1038,12 +1091,16 @@ export function useChat<P extends keyof AgentRoutes>(
           ? [
               {
                 id: ownId,
+                // What the UI keys the message by, which the rename to the
+                // server's id leaves alone (#818).
+                localId: ownId,
                 role: "user",
                 content: [
                   ...(turn.text ? [{ type: "text" as const, text: turn.text }] : []),
                   ...(turn.files ?? []).map((file) => ({ type: "file" as const, ...file })),
                 ],
                 createdAt: new Date().toISOString(),
+                ...(options.metadata ? { metadata: options.metadata } : {}),
               },
             ]
           : [];
@@ -1128,7 +1185,11 @@ export function useChat<P extends keyof AgentRoutes>(
   );
 
   const sendMessage = useCallback(
-    (turn: ClientTurn | string) => send(typeof turn === "string" ? { text: turn } : turn),
+    (turn: ClientTurn | string, options: SendMessageOptions<P> = {}) =>
+      send(typeof turn === "string" ? { text: turn } : turn, {
+        ...(options.body ? { body: options.body as Record<string, unknown> } : {}),
+        ...(options.metadata ? { metadata: options.metadata } : {}),
+      }),
     [send],
   );
 
@@ -1295,7 +1356,13 @@ export function useChat<P extends keyof AgentRoutes>(
     }
     if (userIndex === -1) return;
 
-    const turn = turnFrom(messages[userIndex]!);
+    const question = messages[userIndex]!;
+    // Under the key it was shown under, when this client sent it (#818): the
+    // question is taken out and put back, and should not remount for it.
+    const turn: ClientTurn = {
+      ...turnFrom(question),
+      ...(question.localId ? { localId: question.localId } : {}),
+    };
     // The user turn goes too, because `send` re-appends it. Keeping it here and
     // sending it again would show the question twice.
     commit({
@@ -1304,7 +1371,11 @@ export function useChat<P extends keyof AgentRoutes>(
       pending: [],
       error: null,
     });
-    await send(turn, { regenerate: true });
+    // Its `metadata` goes with it: the same question, the same kind of turn.
+    await send(turn, {
+      regenerate: true,
+      ...(question.metadata ? { metadata: question.metadata } : {}),
+    });
   }, [commit, send]);
 
   const setMessages = useCallback(
