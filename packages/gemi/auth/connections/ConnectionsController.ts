@@ -3,6 +3,7 @@ import { Redirect } from "../../facades/Redirect";
 import { app } from "../../foundation/app";
 import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
+import { configuredAppOrigin } from "../../utils/appOrigin";
 import { INTENDED_URL_PARAM, isSecureRequest, safeRedirectPath } from "../../utils/intendedUrl";
 import { AuthManager } from "../AuthManager";
 import {
@@ -136,6 +137,6 @@ function connectionKey(provider: string): string {
 
 function redirectUri(req: HttpRequest<any, any>, provider: string, configured: string | undefined): string {
   if (configured) return configured;
-  const origin = process.env.HOST_NAME || new URL(req.rawRequest.url).origin;
-  return `${origin.replace(/\/$/, "")}/auth/connections/${encodeURIComponent(provider)}/callback`;
+  const origin = configuredAppOrigin() ?? new URL(req.rawRequest.url).origin;
+  return `${origin}/auth/connections/${encodeURIComponent(provider)}/callback`;
 }

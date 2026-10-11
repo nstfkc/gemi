@@ -1,4 +1,5 @@
 import { type MetaFont, type NormalizedFont, normalizeFonts } from "../client/fonts";
+import { configuredAppOrigin } from "../utils/appOrigin";
 
 export type { MetaFont };
 
@@ -118,8 +119,8 @@ export class Metadata {
     let _image = image;
     let _twitterImage = twitterImage;
     if (image && !image.startsWith("http")) {
-      _image = `${process.env.HOST_NAME}${image}`;
-      _twitterImage = `${process.env.HOST_NAME}${twitterImage}`;
+      _image = `${configuredAppOrigin()}${image}`;
+      _twitterImage = `${configuredAppOrigin()}${twitterImage}`;
     }
     this.content.openGraph = Object.fromEntries(
       Object.entries({

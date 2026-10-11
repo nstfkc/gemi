@@ -14,6 +14,7 @@ import {
   OAuthProvider,
   type OAuthProfile,
 } from "./OAuthProvider";
+import { configuredAppOrigin } from "../../utils/appOrigin";
 
 export interface InstagramOAuthProviderConfig extends InstagramEndpoints {
   /** The Instagram app id. Default `process.env.INSTAGRAM_CLIENT_ID`. */
@@ -67,9 +68,9 @@ export class InstagramOAuthProvider extends OAuthProvider {
     };
   }
 
-  /** `HOST_NAME` + `redirectPath`, the same for the authorization and the exchange. */
+  /** The app origin (`HOST_NAME`, else `APP_URL`) + `redirectPath`, the same for the authorization and the exchange. */
   redirectUri() {
-    return `${process.env.HOST_NAME ?? ""}${this.config.redirectPath}`;
+    return `${configuredAppOrigin() ?? ""}${this.config.redirectPath}`;
   }
 
   getRedirectUrl(_req?: HttpRequest, ctx?: OAuthAuthorizationContext) {

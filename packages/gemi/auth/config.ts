@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { HttpRequest } from "../http/HttpRequest";
 import type { SessionWithUser, User } from "./types";
+import type { FeatureKey } from "../client/rpc";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
 import type { ConnectionStore } from "./connections/ConnectionStore";
 import type { ProviderConnection } from "./connections/ConnectionManager";
@@ -202,7 +203,21 @@ export interface AuthConfig {
   migrateLegacySession?: LegacySessionMigrator | null;
 
   signUpRequest?: new () => HttpRequest<any, any>;
-  oauthProviders?: Record<string, OAuthProvider>;
+  /**
+   * The OAuth sign-ins, by the name in `/auth/oauth/<name>`. An entry is a
+   * provider, or `{ provider, feature }` to put it behind a feature flag
+   * (#885): while the feature is off for the request, `/auth/oauth/<name>` and
+   * its callback answer 404 and `Auth.oauthProviders()` leaves it out, so
+   * turning it on is a switch in the `FeatureFlag` table, not a deploy.
+   *
+   * ```ts
+   * oauthProviders: {
+   *   google: new GoogleOAuthProvider(),
+   *   instagram: { provider: new InstagramOAuthProvider(), feature: "instagram-sign-in" },
+   * },
+   * ```
+   */
+  oauthProviders?: Record<string, OAuthProviderEntry>;
   /**
    * Where a failed OAuth callback sends the browser, with the reason as
    * `?error=` (`access_denied`, `invalid_state`, `email_not_verified`, …) and
@@ -441,7 +456,66 @@ export async function verifyPasswordHash(
   }
 }
 
-export function defineAuthConfig(config: AuthConfig): AuthConfig {
+/**
+ * One `oauthProviders` entry: a provider, or a provider behind a feature flag.
+ * See `AuthConfig.oauthProviders`.
+ */
+export type OAuthProviderEntry =
+  | OAuthProvider
+  | {
+      provider: OAuthProvider;
+      /**
+       * The `app/features` key the provider is offered behind, evaluated per
+       * request. Off: its sign-in routes answer 404 and `Auth.oauthProviders()`
+       * leaves it out.
+       */
+      feature?: FeatureKey;
+    };
+
+/** Splits an `oauthProviders` entry into its provider and its feature gate. */
+export function oauthProviderEntry(entry: OAuthProviderEntry | undefined): {
+  provider: OAuthProvider;
+  feature?: string;
+} | null {
+  if (!entry) return null;
+  if (typeof (entry as OAuthProvider).getRedirectUrl === "function") {
+    return { provider: entry as OAuthProvider };
+  }
+  const { provider, feature } = entry as { provider: OAuthProvider; feature?: string };
+  return { provider, ...(feature !== undefined ? { feature } : {}) };
+}
+
+/**
+ * Refuses an `oauthProviders` entry that is neither a provider nor a
+ * `{ provider, feature }`, at boot rather than at the first sign-in.
+ */
+export function checkOAuthProviders(providers: Record<string, OAuthProviderEntry> | undefined) {
+  for (const [name, entry] of Object.entries(providers ?? {})) {
+    if (typeof (entry as OAuthProvider)?.getRedirectUrl === "function") continue;
+    const wrapped = entry as { provider?: OAuthProvider; feature?: unknown } | null;
+    if (typeof wrapped?.provider?.getRedirectUrl !== "function") {
+      throw new Error(
+        `auth.oauthProviders.${name} must be an OAuthProvider, or { provider, feature } with an OAuthProvider.`,
+      );
+    }
+    if (
+      wrapped.feature !== undefined &&
+      (typeof wrapped.feature !== "string" || wrapped.feature === "")
+    ) {
+      throw new Error(`auth.oauthProviders.${name}.feature must be a feature key from app/features.`);
+    }
+  }
+}
+
+/**
+ * Returns the config as written, so reading it back keeps what was put in:
+ * `defineAuthConfig({ oauthProviders: { google: new GoogleOAuthProvider() } })
+ * .oauthProviders.google` is a `GoogleOAuthProvider`, not an
+ * `OAuthProviderEntry`. A key `AuthConfig` does not know is still an error.
+ */
+export function defineAuthConfig<const T extends AuthConfig>(
+  config: T & { [K in Exclude<keyof T, keyof AuthConfig>]: never },
+): T {
   return config;
 }
 

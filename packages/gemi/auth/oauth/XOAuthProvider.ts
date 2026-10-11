@@ -7,6 +7,7 @@ import {
   OAuthProvider,
   type OAuthProfile,
 } from "./OAuthProvider";
+import { configuredAppOrigin } from "../../utils/appOrigin";
 
 type Config = {
   clientId: string;
@@ -36,7 +37,7 @@ export class XOAuthProvider extends OAuthProvider {
   }
 
   redirectUri() {
-    return `${process.env.HOST_NAME ?? ""}${this.config.redirectPath}`;
+    return `${configuredAppOrigin() ?? ""}${this.config.redirectPath}`;
   }
 
   /**

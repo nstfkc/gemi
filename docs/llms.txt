@@ -53,7 +53,8 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 - [Services](https://nstfkc.github.io/gemi/services.md): your own singletons — the Service base class, `services` on the Kernel, async `boot()`, and constructor-default injection.
 - [Features](https://nstfkc.github.io/gemi/feature-flags.md): features declared in `app/features` and switched on from the database — `defineFeature`, `when` targeting, deterministic percentage rollouts with nothing stored, the Features facade, useFeature, and route gating.
-- [Facades](https://nstfkc.github.io/gemi/facades.md): reference for Auth, Redirect, Lang, Storage, Query, Url, Log, Meta, Cookie, and Redis.
+- [Facades](https://nstfkc.github.io/gemi/facades.md): reference for Auth, Redirect, Lang, Storage, Query, Url, Log, Meta, Cookie, Redis, and Cache.
+- [Cache](https://nstfkc.github.io/gemi/cache.md): the Cache facade — get/set/has/delete/pull with a TTL (`"5m"`, `"24h"`), `remember` with one compute per key per process, tags flushed together on any store, values JSON-encoded on every store, `app/config/cache.ts` (`store: "memory" | "redis"`, default `ttl`), `MemoryCacheStore` (per process, LRU) and `RedisCacheStore` (shared, prefixed), and writing a `CacheStore`.
 - [File Storage](https://nstfkc.github.io/gemi/file-storage.md): the Storage facade, filesystem/S3 drivers, image optimization, and the Image component.
 - [Email](https://nstfkc.github.io/gemi/email.md): the Email class, jsx-email templates, the Resend driver, localization and scheduling.
 - [Jobs & Queues](https://nstfkc.github.io/gemi/jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.

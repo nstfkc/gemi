@@ -108,6 +108,15 @@ export interface Config<T> {
    * `suspense: false`.
    */
   suspense?: boolean;
+  /**
+   * Polls while it returns a delay in ms: after data lands, the query refetches
+   * that long later; `0` stops. `duration` is the delay it returned last (`0`
+   * at first), for backoff. It is read from the current render after every
+   * commit, so it can depend on props and state too
+   * (`(d) => (d.active || building ? 2000 : 0)`): a stopped poll restarts as
+   * soon as it returns a delay again, and a pending one is cancelled when it
+   * returns `0`. Keep it pure and cheap.
+   */
   refetchUntil?: (data: T, duration: number) => number;
   /**
    * A broadcast channel that keeps this query fresh: its events and resyncs
@@ -352,10 +361,24 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     null,
   );
   const fetchedRef = useRef(!lazy);
-  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const refetchUntilDurationRef = useRef(0);
+  // `refetchUntil`'s poll: the pending timer, the last delay it returned
+  // (handed back as `duration`), the snapshot/variant it was last evaluated
+  // against, and whether a poll's refetch is on the wire.
+  const pollRef = useRef<{
+    timer: ReturnType<typeof setTimeout> | null;
+    duration: number;
+    snapshot: unknown;
+    resource: unknown;
+    variantKey: string | null;
+    awaiting: boolean;
+  }>({
+    timer: null,
+    duration: 0,
+    snapshot: undefined,
+    resource: null,
+    variantKey: null,
+    awaiting: false,
+  });
   const prefetchedRef = useRef(false);
   // Focus revalidation eligibility, deliberately *not* `fetchedRef`: that one
   // is flipped by `prefetch()` too, and a hover prefetch is documented as
@@ -537,29 +560,70 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     return () => window.removeEventListener("online", onOnline);
   }, [resource, variantKey]);
 
+  // `refetchUntil` runs after every commit, not only when the data changes,
+  // so the predicate always sees the current render's closure: one that also
+  // reads props or state (`d.active || building`) restarts a stopped poll, or
+  // cancels a pending one, as soon as that state changes. New data clears the
+  // pending timer and asks the predicate again, as before. On a plain
+  // re-render a pending timer is kept, so frequent renders never push the
+  // next refetch back.
   useEffect(() => {
-    const cfg = configRef.current;
-    if (!cfg.refetchUntil || liveOpen) return;
-    if (snapshot && !snapshot.loading && snapshot.hasData && !snapshot.error) {
-      const nextDuration = cfg.refetchUntil(
-        snapshot.data,
-        refetchUntilDurationRef.current,
-      );
-      if (nextDuration > 0) {
-        refetchUntilDurationRef.current = nextDuration;
-        refetchUntilTimerRef.current = setTimeout(() => {
-          resource.refetch(variantKey);
-        }, nextDuration);
-      } else {
-        refetchUntilDurationRef.current = 0;
-      }
-    }
-    return () => {
-      if (refetchUntilTimerRef.current) {
-        clearTimeout(refetchUntilTimerRef.current);
-      }
+    const poll = pollRef.current;
+    const clear = () => {
+      if (poll.timer) clearTimeout(poll.timer);
+      poll.timer = null;
     };
-  }, [snapshot, resource, variantKey, liveOpen]);
+    if (
+      poll.snapshot !== snapshot ||
+      poll.resource !== resource ||
+      poll.variantKey !== variantKey
+    ) {
+      clear();
+      poll.awaiting = false;
+      poll.snapshot = snapshot;
+      poll.resource = resource;
+      poll.variantKey = variantKey;
+    }
+    const refetchUntil = configRef.current.refetchUntil;
+    if (
+      !refetchUntil ||
+      liveOpen ||
+      !snapshot ||
+      snapshot.loading ||
+      !snapshot.hasData ||
+      snapshot.error
+    ) {
+      clear();
+      return;
+    }
+    // The poll's own refetch is on the wire; its answer re-runs this.
+    if (poll.awaiting) return;
+    const nextDuration = refetchUntil(snapshot.data, poll.duration);
+    if (!(nextDuration > 0)) {
+      clear();
+      poll.duration = 0;
+      return;
+    }
+    if (poll.timer) return;
+    poll.duration = nextDuration;
+    poll.timer = setTimeout(() => {
+      poll.timer = null;
+      poll.awaiting = true;
+      resource.refetch(variantKey);
+    }, nextDuration);
+  });
+
+  useEffect(
+    () => () => {
+      const poll = pollRef.current;
+      if (poll.timer) clearTimeout(poll.timer);
+      poll.timer = null;
+      // A StrictMode remount re-runs the effect above with the same snapshot.
+      poll.snapshot = undefined;
+      poll.awaiting = false;
+    },
+    [],
+  );
 
   const handleReload = useCallback(() => {
     if (configRef.current.debug) {

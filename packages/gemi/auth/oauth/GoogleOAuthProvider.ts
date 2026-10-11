@@ -6,6 +6,7 @@ import {
   OAuthProvider,
   type OAuthProfile,
 } from "./OAuthProvider";
+import { configuredAppOrigin } from "../../utils/appOrigin";
 
 type Config = {
   clientId: string;
@@ -45,9 +46,9 @@ export class GoogleOAuthProvider extends OAuthProvider {
     this.config = { ...defaultConfig, ...config };
   }
 
-  /** `HOST_NAME` + `redirectPath`, the same for the authorization and the exchange. */
+  /** The app origin (`HOST_NAME`, else `APP_URL`) + `redirectPath`, the same for the authorization and the exchange. */
   redirectUri() {
-    return `${process.env.HOST_NAME ?? ""}${this.config.redirectPath}`;
+    return `${configuredAppOrigin() ?? ""}${this.config.redirectPath}`;
   }
 
   getRedirectUrl(_req?: HttpRequest, ctx?: OAuthAuthorizationContext) {

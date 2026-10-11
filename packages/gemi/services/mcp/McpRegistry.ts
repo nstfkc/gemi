@@ -6,6 +6,7 @@ import type { User } from "../../auth/types";
 import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
 import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
 import { ToolError } from "../../ai/redact";
+import { featureOn } from "../features/gate";
 import { s, type AnySchema, type JSONSchema, type Schema } from "../../ai/Schema";
 import type { RouteSource } from "../../http/ApiRouter";
 import type { HttpRequest } from "../../http/HttpRequest";
@@ -123,6 +124,12 @@ export type McpRemoteFileOptions = {
 export type McpRegistryOptions = {
   /** Remote callers' file arguments. See `McpRemoteFileOptions`. */
   files?: McpRemoteFileOptions;
+  /**
+   * Answers whether a tool's `feature` is on for the ambient request (#885).
+   * Defaults to `Features.enabled` through the container; a test passes its
+   * own.
+   */
+  featureOn?: (key: string) => boolean | Promise<boolean>;
 };
 
 /** What `execute` takes beside the call itself. */
@@ -229,6 +236,12 @@ interface McpToolDescriptorBase {
   readonly annotations: Readonly<McpToolAnnotations>;
   readonly tags: readonly string[];
   readonly requiresApproval: boolean;
+  /**
+   * The meta's `feature`: the `app/features` key the tool is offered behind
+   * (#885). Absent when it has none. `available` and `execute` apply it;
+   * `list` and `descriptors` do not.
+   */
+  readonly feature?: string;
 }
 
 /** A route exposed with `fromApiRoute`. */
@@ -405,6 +418,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   /** Each scope, resolved to the names of the tools it reaches. */
   private readonly scopeTools = new Map<string, { description: string; tools: Set<string> }>();
   private readonly files: { maxBytes: number; fetch: SafeFetchOptions | null };
+  private readonly featureOn: (key: string) => boolean | Promise<boolean>;
 
   constructor(
     private readonly router: McpRouter<any>,
@@ -415,6 +429,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     options: McpRegistryOptions = {},
   ) {
     this.files = remoteFileOptions(options.files);
+    this.featureOn = options.featureOn ?? featureOn;
     for (const [name, declaration] of Object.entries(router.routes ?? {})) {
       this.plans.set(
         name,
@@ -443,6 +458,20 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     for (const [name, plan] of this.plans) {
       if (!plan.remote || !this.grants(caller.principal, name)) continue;
       if (passes(plan.remote, filter)) out.push(plan.remote);
+    }
+    return out;
+  }
+
+  /**
+   * `list`, narrowed to the tools whose `feature` is on for the ambient
+   * request (#885): what the remote endpoint's `tools/list` answers. A tool
+   * with no `feature` is always in it. Evaluated in the caller's request
+   * context, so a feature's `when` sees the signed-in user.
+   */
+  async available(caller: McpCaller, filter?: McpToolFilter): Promise<McpToolDescriptor[]> {
+    const out: McpToolDescriptor[] = [];
+    for (const descriptor of this.list(caller, filter)) {
+      if (await this.isOn(descriptor)) out.push(descriptor);
     }
     return out;
   }
@@ -523,6 +552,16 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   ): Promise<unknown> {
     assertCaller(caller);
     const found = this.plans.get(name);
+    // Behind a feature that is off for this request (#885). Worded like a tool
+    // that does not exist, for a remote caller as its listing leaves it out; a
+    // local agent built its tool list once, so its model reads the same
+    // sentence as an error it can act on.
+    if (found && !(await this.isOn(found.descriptor))) {
+      if (caller.kind === "remote") {
+        throw new McpCallRefusedError(`There is no tool named "${name}".`, "unknown-tool");
+      }
+      throw new McpToolError(`There is no tool named "${name}".`, 404);
+    }
     if (caller.kind === "remote") {
       // Worded like a tool that does not exist, so a client cannot tell a
       // tool it may not see from one there is none of.
@@ -635,6 +674,10 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     return await this.project(plan, call, response);
   }
 
+  private async isOn(descriptor: McpToolDescriptor): Promise<boolean> {
+    return descriptor.feature === undefined || (await this.featureOn(descriptor.feature)) === true;
+  }
+
   // --- building ------------------------------------------------------------
 
   private plan(name: string, declaration: McpRouteDeclaration): Plan {
@@ -650,6 +693,9 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       );
     }
     const { method, url, meta } = declaration;
+    if (meta.feature !== undefined && (typeof meta.feature !== "string" || meta.feature === "")) {
+      throw new Error(`${where}: feature must be a feature key from app/features.`);
+    }
     if (url.startsWith("/__gemi__")) {
       throw new Error(`${where} is a framework route, not an app route.`);
     }
@@ -787,6 +833,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       annotations,
       tags: Object.freeze([...(meta.tags ?? [])]),
       requiresApproval: meta.requiresApproval === true,
+      ...(meta.feature !== undefined ? { feature: meta.feature } : {}),
       ...(entry.source ? { source: entry.source } : {}),
     });
     const remotelyCallable = fileFields.every((file) => file.binder === "input");

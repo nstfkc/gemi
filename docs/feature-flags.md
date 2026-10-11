@@ -332,6 +332,16 @@ A gated route renders a real 404 when the feature is off, rather than a 403 — 
 
 The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
 
+### Beyond view routes
+
+Some things are mounted from config rather than declared as routes, and take a `feature` option of their own:
+
+- the remote MCP endpoint: `route.mcp.remote.feature` (see [MCP: switching it with a feature flag](./mcp.md#switching-it-with-a-feature-flag))
+- an OAuth sign-in provider: `oauthProviders: { name: { provider, feature } }` (see [Authentication](./authentication.md#a-provider-behind-a-feature-flag))
+- an MCP tool: `feature` in `fromApiRoute`'s meta (see [MCP: behind a feature flag](./mcp.md#behind-a-feature-flag))
+
+While the feature is off, the endpoint and the provider's routes answer 404 and the tool is hidden from remote callers.
+
 ### A rollout is not access control
 
 Gate on `active`, or on a `when` that reads something the visitor cannot choose — the signed-in user, most obviously. Not on a `rollout`.

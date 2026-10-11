@@ -1,4 +1,48 @@
-# Unreleased
+# Upgrading from 0.124.0 to 0.125.0
+
+## Feature flags for the remote MCP endpoint, OAuth providers and MCP tools (#885)
+
+**New, nothing to migrate.** Three things that were boot-time config can now be switched with an `app/features` flag, so turning them on is a row in `FeatureFlag` and not a deploy. Nothing changes for an app that does not set `feature`. See [Feature flags: beyond view routes](docs/feature-flags.md#beyond-view-routes).
+
+- **`route.mcp.remote.feature`**: while the feature is off, the endpoint and its OAuth endpoints (metadata, registration, authorize, consent, token, revoke) fall through to the app's routes (a 404), as with `enabled: false`. `enabled: true` is still required and still checked at boot. The feature is evaluated only for the endpoint's path, paths under it, and `/.well-known/...`, before any credential is read. With `feature` set, a custom resolver's `handle()` is only asked about those paths.
+- **`oauthProviders: { name: { provider, feature } }`**: an entry can now be `{ provider, feature }` as well as a provider. While the feature is off, `/auth/oauth/<name>` and its callback answer 404. New: `Auth.oauthProviders()` returns the names of the providers that are on for this request, in config order. New type export `OAuthProviderEntry` from `gemi/services`. `defineAuthConfig` now returns the config as written (its parameter is `const T extends AuthConfig`), so `auth.oauthProviders!.google!.getRedirectUrl(...)` keeps compiling and gives the provider you put in; unknown keys are still a type error. Only code that reads providers off a value typed as `AuthConfig` (not the `defineAuthConfig` result) sees the wider `OAuthProviderEntry`; unwrap it there.
+- **`feature` in `fromApiRoute`'s meta**: while it is off, remote `tools/list` leaves the tool out and `tools/call` answers `Unknown tool`. A local agent's tools (`toAgentTools`) are built once, so the tool stays listed there, but a call is refused with `There is no tool named "<name>".` before the route runs. New: `McpRegistry.available(caller, filter?)` (async), which is `list()` narrowed by features, and `McpToolDescriptor.feature`. `list()` and `descriptors()` are unchanged.
+- `server.version` is not affected by any flag. If you derive it from tool names, hash `registry.descriptors()` (every declared tool).
+
+## Cache: `Cache` facade, memory and Redis stores (#496)
+
+**New, nothing to migrate.** A first-class cache: `get` / `set` / `has` / `delete` / `pull` with a TTL, `remember(key, ttl, compute)`, and `tags(...)` whose `flush()` drops a group of values on any store. See [Cache](docs/cache.md).
+
+- **`Cache`** from `gemi/facades`, fronting `CacheManager` (token `cache`), bound by the new `CacheServiceProvider`, which is in `frameworkProviders`.
+- **`app/config/cache.ts`** with `defineCacheConfig` (optional): `store: "memory" | "redis" | CacheStore | (app) => CacheStore` (default `"memory"`), `ttl` (default `null`, no expiry), `memory: { maxEntries }` (default `10000`), `redis: { prefix }` (default `"gemi:cache:"`). The `"redis"` store uses the app's Redis connection (`app/config/redis.ts` / `REDIS_URL`).
+- TTLs are a `Duration`: milliseconds or `"30s"`, `"5m"`, `"24h"`, `"7d"`.
+- Values are JSON-encoded on every store, the memory one included: a `Date` comes back as a string, and `undefined` cannot be stored (it means a miss).
+- New exports from `gemi/services`: `CacheManager`, `TaggedCache`, `CacheTtl`, `CacheStore`, `MemoryCacheStore`, `RedisCacheStore`, `CacheRedisClient`, the option types, `CacheServiceProvider`, `defineCacheConfig`, `cacheConfigDefaults`, `CacheConfig`.
+- An app with a hand-rolled in-process cache (an LRU `Map` with expiry) can replace it with `new CacheManager({ store: new MemoryCacheStore({ maxEntries }), ttl })`, or with the app's `Cache` to share it across instances once the store is `"redis"`.
+
+## `useQuery`: `refetchUntil` sees the current render's state (#902)
+
+**Nothing to migrate.** `refetchUntil` is now read from the current render after every commit of the component, not only when the query's data changes. A predicate can read props and state directly (`(d) => (d.active || building ? 2000 : 0)`), so mirror refs kept only for `refetchUntil` can go. See [Data Fetching: Polling until something is done](docs/data-fetching.md#polling-until-something-is-done-refetchuntil).
+
+Behaviour changes:
+
+- The predicate runs on every commit, not once per data change. Keep it pure and cheap.
+- A stopped poll restarts when a re-render makes the predicate return a delay again; before, it stayed stopped until the data changed (or a manual `refetch()`).
+- A pending poll is cancelled when a re-render makes the predicate return `0`; before, it fired once more.
+- A re-render with the same data keeps a pending poll's timer. When the data changes, the pending timer is replaced as before.
+
+## `Url.origin()`: the app's public origin in one place (#905)
+
+**New, plus two small behaviour changes.** `Url.origin(fallback?)` from `gemi/facades` returns the app's public origin, e.g. `https://example.com`: `HOST_NAME`, else `APP_URL`, trimmed and without a trailing `/`. It throws when neither is set and no `fallback` is given, or when the value is not an absolute `http(s)` URL. It is read on every call, so a test sets it with `vi.stubEnv("HOST_NAME", ...)`. See [The app's public origin](docs/configuration.md#the-apps-public-origin).
+
+gemi's own reads of `HOST_NAME` now go through the same resolver: `Url.absolute`, `Url.forDomain` outside a request, the Google / Instagram / X OAuth `redirect_uri`, the connections callback default and relative `Meta.openGraph` images. They keep their behaviour when nothing is set (no new errors).
+
+Behaviour changes:
+
+- **A trailing `/` on `HOST_NAME` is dropped** in those URLs, so `HOST_NAME=https://example.com/` no longer produces `https://example.com//...`. If you registered an OAuth redirect URI with a doubled slash to match, register the single-slash one.
+- **`APP_URL` is used when `HOST_NAME` is unset.** An app that sets only `APP_URL` gets absolute URLs and OAuth redirect URIs from it instead of an empty or `undefined` prefix. When both are set, `HOST_NAME` wins, as before.
+
+To adopt: replace hand-written helpers such as `(process.env.APP_URL ?? process.env.HOST_NAME ?? "http://localhost:5173").replace(/\/$/, "")` with `Url.origin("http://localhost:5173")`, and `(process.env.HOST_NAME ?? "").replace(/\/$/, "")` with `Url.origin()`.
 
 ## Server: a built-in health route and an event-loop liveness signal (#48)
 

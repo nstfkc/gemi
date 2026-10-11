@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { canonicalize, purposeKey } from "../../../ai/signing";
 import { MemoryNonceStore, type NonceStore } from "../../../ai/store/Nonces";
+import type { FeatureKey } from "../../../client/rpc";
 import { HttpRequest } from "../../../http/HttpRequest";
 import { clientIp } from "../../../http/RateLimitMiddleware";
 import type { ProgressUpdate } from "../../../http/modelOriginated";
@@ -36,6 +37,7 @@ import {
   type LegacyVersion,
 } from "./protocol";
 import { sign, verify } from "./signedState";
+import { featureOn } from "../../features/gate";
 
 /**
  * `route.mcp.remote`: the MCP endpoint remote clients connect to (#762).
@@ -46,6 +48,27 @@ export type McpRemoteHttpConfig = {
    * read, until an app turns it on.
    */
   enabled?: boolean;
+  /**
+   * Serves the endpoint only while this `app/features` flag is on (#885), so
+   * turning it on or off is a switch in the `FeatureFlag` table rather than a
+   * deploy. `enabled` still has to be `true`: it is what builds and checks the
+   * endpoint at boot (`url`, `resolvers`, `SECRET`), whatever the flag says.
+   *
+   * Off: the endpoint and every resolver endpoint — the OAuth metadata,
+   * registration, authorize, consent, token and revoke — answer as they do
+   * with `enabled: false`, falling through to the app's routes (a 404).
+   *
+   * Asked only for the paths the endpoint can own: its path, the paths under
+   * it, and `/.well-known/…`, so the rest of the app's traffic never
+   * evaluates it. With `feature` set, a custom resolver's `handle()` is asked
+   * only for those paths too. It is evaluated before any credential is read,
+   * so there is no user: use it as an on/off switch — a `when` sees an
+   * anonymous request.
+   *
+   * `server.version` does not change with it, nor with the features of
+   * individual tools: see `server`.
+   */
+  feature?: FeatureKey;
   /**
    * The endpoint's canonical URL, like `"https://example.com/mcp"`: where it
    * is served (its path), which host it answers on, and the OAuth `resource`
@@ -76,7 +99,17 @@ export type McpRemoteHttpConfig = {
   rateLimit?: { limit: number; window: number } | false;
   /** The largest request body accepted, in bytes. Default: room for one file of `files.maxBytes` as base64, plus 1 MiB. */
   maxBodyBytes?: number;
-  /** What `initialize` and `server/discover` say about the server. */
+  /**
+   * What `initialize` and `server/discover` say about the server.
+   *
+   * `version` is sent as given. gemi does not fold feature state into it — not
+   * the endpoint's `feature`, nor a tool's — because tools behind a `when` are
+   * per user: two callers would be told different versions of one server,
+   * and a client comparing them would read a flag as a deploy. A flip reaches
+   * clients through `tools/list`, which is cached privately for 60 s. An app
+   * that derives `version` from its tool names should hash every declared tool
+   * (`registry.descriptors()`), not the ones a caller is shown.
+   */
   server?: { name?: string; version?: string; instructions?: string };
   /**
    * Where single-use approvals are spent. The default remembers them in
@@ -158,6 +191,9 @@ export class McpHttpServer {
   private readonly instructions?: string;
   private readonly nonces: NonceStore;
   private readonly approvalTimeoutMs: number;
+  /** `feature`: the flag the endpoint is served behind, if any (#885). */
+  private readonly feature?: string;
+  private readonly featureOn: (key: string) => boolean | Promise<boolean>;
   /** Legacy elicitations waiting for the client's answer, by the request id they were sent under. */
   private readonly pending = new Map<
     string,
@@ -169,6 +205,7 @@ export class McpHttpServer {
   constructor(
     private readonly registry: McpRegistry,
     config: McpRemoteHttpConfig,
+    options: { featureOn?: (key: string) => boolean | Promise<boolean> } = {},
   ) {
     if (typeof config.url !== "string") {
       throw new Error(
@@ -212,6 +249,13 @@ export class McpHttpServer {
     this.instructions = config.server?.instructions;
     this.nonces = config.nonces ?? new MemoryNonceStore();
     this.approvalTimeoutMs = config.approvalTimeoutMs ?? APPROVAL_TTL;
+    if (config.feature !== undefined) {
+      if (typeof config.feature !== "string" || config.feature === "") {
+        throw new Error("route.mcp.remote.feature must be a feature key from app/features.");
+      }
+      this.feature = config.feature;
+    }
+    this.featureOn = options.featureOn ?? featureOn;
     for (const resolver of resolvers) resolver.boot?.(this.context);
   }
 
@@ -231,6 +275,12 @@ export class McpHttpServer {
   async handle(req: Request): Promise<Response | null> {
     const url = new URL(req.url);
     if (url.host !== this.endpoint.host) return null;
+    if (this.feature !== undefined) {
+      // Only for a path the endpoint or its resolvers can own, so the app's
+      // own pages never pay for the evaluation (#885).
+      if (!this.ownsPath(url.pathname)) return null;
+      if ((await this.featureOn(this.feature)) !== true) return null;
+    }
     for (const resolver of this.resolvers) {
       const answered = await resolver.handle?.(req, this.context);
       if (answered) return answered;
@@ -264,6 +314,17 @@ export class McpHttpServer {
       return withHeaders(new Response(null, { status: 405, headers: { Allow: "POST, OPTIONS" } }), cors);
     }
     return withHeaders(await this.post(req), cors);
+  }
+
+  /** The endpoint's path, a path under it, or `/.well-known/…`. */
+  private ownsPath(pathname: string): boolean {
+    const base = this.endpoint.pathname.replace(/\/$/, "");
+    return (
+      pathname === this.endpoint.pathname ||
+      pathname === base ||
+      pathname.startsWith(`${base}/`) ||
+      pathname.startsWith("/.well-known/")
+    );
   }
 
   // --- the request ---------------------------------------------------------
@@ -436,8 +497,9 @@ export class McpHttpServer {
         });
       case "tools/list":
         return this.complete({
-          tools: this.registry.list(call.caller).map((tool) => toolJson(tool, true)),
-          // The list is the credential's: its scopes decide it.
+          tools: (await this.registry.available(call.caller)).map((tool) => toolJson(tool, true)),
+          // The list is the credential's: its scopes decide it, and the
+          // features its tools sit behind, evaluated as its user (#885).
           ttlMs: 60_000,
           cacheScope: "private",
         });
@@ -453,7 +515,7 @@ export class McpHttpServer {
       case "ping":
         return {};
       case "tools/list":
-        return { tools: this.registry.list(call.caller).map((tool) => toolJson(tool, false)) };
+        return { tools: (await this.registry.available(call.caller)).map((tool) => toolJson(tool, false)) };
       case "tools/call":
         return await this.callTool(call);
       default:
@@ -564,10 +626,11 @@ export class McpHttpServer {
       throw new JsonRpcError(ErrorCode.InvalidParams, "tools/call needs a tool name.");
     }
     const args = params.arguments ?? {};
-    const tool = this.registry.list(caller, { names: [name] })[0];
+    const tool = (await this.registry.available(caller, { names: [name] }))[0];
     if (!tool) {
-      // A tool this credential cannot see is answered as one that does not
-      // exist, as the registry would.
+      // A tool this credential cannot see, or one behind a feature that is
+      // off (#885), is answered as one that does not exist, as the registry
+      // would.
       throw new JsonRpcError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
     }
 
