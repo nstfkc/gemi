@@ -305,11 +305,19 @@ export type {
   VoiceLiveRuns,
   VoiceRequestRecord,
   VoiceSummary,
+  VoiceToolCallRecord,
   VoiceTranscriptLine,
   VoiceTurnController,
   VoiceTranscriptionUsage,
   VoiceUsageInfo,
 } from "./VoiceBridge";
+export { mcpVoiceTools } from "./voiceMcp";
+export type {
+  VoiceMcpOptions,
+  VoiceToolCall,
+  VoiceToolHandler,
+  VoiceToolRunInfo,
+} from "./voiceMcp";
 export { defaultVoiceStore, MemoryVoiceSessionStore } from "./voiceStore";
 export type { VoiceSessionRecord, VoiceSessionStore } from "./voiceStore";
 export type { VoiceConfig, VoiceSessionOptions, VoiceStartContext } from "./voiceConfig";

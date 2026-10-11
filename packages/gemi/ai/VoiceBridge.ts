@@ -9,6 +9,8 @@ import type {
   PendingToolCall,
   Usage,
 } from "./types";
+import { ToolError } from "./redact";
+import type { VoiceToolHandler } from "./voiceMcp";
 import type { VoiceSessionStore } from "./voiceStore";
 import type { VoiceEndReason } from "./voice/wire";
 
@@ -91,6 +93,15 @@ export type VoiceLimits = {
   /** When the vendor refuses the hangup, how long the sideband is kept open
    *  (still metering) waiting for the vendor to end the call. Default 30 s. */
   hangupGraceMs?: number;
+  /** A `tools` / MCP call's timeout. Default 60 s. */
+  toolTimeoutMs?: number;
+  /** `tools` / MCP calls allowed per rolling minute; more are answered
+   *  `busy`. Default 20. */
+  maxToolCallsPerMinute?: number;
+  /** A tool's output is cut to this many characters of JSON before the voice
+   *  model sees it: every character is billed again on each response.
+   *  Default 8000. */
+  toolOutputChars?: number;
 };
 
 /** Lines the voice says before the bridge hangs up. `null` hangs up silently. */
@@ -124,6 +135,15 @@ export type VoiceTranscriptionUsage = { usage: Usage; seconds: number };
 
 export type VoiceTranscriptLine = { role: "user" | "assistant"; text: string; at: number };
 
+/** One `tools` / MCP call and how it went. */
+export type VoiceToolCallRecord = {
+  name: string;
+  status: "running" | "done" | "failed" | "refused" | "busy";
+  durationMs?: number;
+  /** For `failed` / `refused`: what the model was told. */
+  message?: string;
+};
+
 /** One delegated request and how it went. */
 export type VoiceRequestRecord = {
   request: string;
@@ -149,6 +169,8 @@ export type VoiceSummary = {
   /** What was said, from the vendor's transcripts. The app decides what to keep. */
   transcript: VoiceTranscriptLine[];
   requests: VoiceRequestRecord[];
+  /** Each `tools` / MCP call. */
+  toolCalls: VoiceToolCallRecord[];
   /** `error` events the vendor sent, in order. */
   errors: { code?: string; message: string }[];
 };
@@ -218,6 +240,16 @@ export type VoiceBridgeParams<Body extends object = Record<string, unknown>> = {
   onEnd?: (summary: VoiceSummary) => void | Promise<void>;
   /** Every sideband event, for logs. */
   onEvent?: (event: RealtimeEvent) => void;
+  /**
+   * Tools the bridge runs in this process when the voice calls them, beside
+   * the delegate: the app's MCP tools (`mcpVoiceTools`), or its own. Their
+   * definitions must also be in the session's `tools` (`this.voice()` adds
+   * them).
+   */
+  tools?: VoiceToolHandler[];
+  /** After each `tools` call, in the same hook chain as `onUsage`. Throw
+   *  `VoiceHangup` to end the call. */
+  onToolCall?: (call: VoiceToolCallRecord, info: VoiceUsageInfo) => void | Promise<void>;
 };
 
 export const DEFAULT_DELEGATE_NAME = "ask_agent";
@@ -230,6 +262,9 @@ const DEFAULT_LIMITS = {
   closingLineMs: 10_000,
   tickMs: 60_000,
   hangupGraceMs: 30_000,
+  toolTimeoutMs: 60_000,
+  maxToolCallsPerMinute: 20,
+  toolOutputChars: 8_000,
 } satisfies Required<VoiceLimits>;
 
 const DEFAULT_LINES = {
@@ -323,6 +358,10 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
   private pendingCreate?: string;
   private transcript: VoiceTranscriptLine[] = [];
   private requests: VoiceRequestRecord[] = [];
+  private toolCalls: VoiceToolCallRecord[] = [];
+  private toolHandlers = new Map<string, VoiceToolHandler>();
+  private toolsRunning = 0;
+  private toolCallTimes: number[] = [];
   private errors: VoiceSummary["errors"] = [];
   private running?: Job;
   private queue: Job[] = [];
@@ -363,6 +402,13 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
     this.limits = { ...DEFAULT_LIMITS, ...definedOnly(params.limits) };
     this.lines = { ...DEFAULT_LINES, ...definedOnly(params.lines) };
     this.delegateName = params.delegate?.name ?? DEFAULT_DELEGATE_NAME;
+    const reserved = new Set(voiceTools(params.delegate).map((tool) => tool.name));
+    for (const handler of params.tools ?? []) {
+      if (reserved.has(handler.tool.name) || this.toolHandlers.has(handler.tool.name)) {
+        throw new Error(`VoiceBridge: two tools are named "${handler.tool.name}".`);
+      }
+      this.toolHandlers.set(handler.tool.name, handler);
+    }
 
     if ("realtime" in params.call) {
       const { realtime, callId } = params.call;
@@ -530,6 +576,8 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
         callId,
       });
     }
+    const handler = this.toolHandlers.get(name);
+    if (handler) return void this.runTool(callId, handler, args);
     switch (name) {
       case "stop_work": {
         const running = this.running;
@@ -665,6 +713,89 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
     }
   }
 
+  /**
+   * A `tools` / MCP call. It runs beside the voice (the event loop goes on),
+   * under the per-minute limit and its timeout, and its output goes back as
+   * the call's `function_call_output`. A failure's message reaches the model
+   * only when it is a `ToolError`'s.
+   */
+  private async runTool(
+    callId: string,
+    handler: VoiceToolHandler,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const name = handler.tool.name;
+    const now = Date.now();
+    this.toolCallTimes = this.toolCallTimes.filter((at) => now - at < 60_000);
+    if (this.toolCallTimes.length >= this.limits.maxToolCallsPerMinute) {
+      const record: VoiceToolCallRecord = { name, status: "busy" };
+      this.toolCalls.push(record);
+      this.answer(callId, {
+        status: "busy",
+        message: "Too many tool calls in the last minute. Tell the user to wait a moment.",
+      });
+      return;
+    }
+    this.toolCallTimes.push(now);
+
+    const record: VoiceToolCallRecord = { name, status: "running" };
+    this.toolCalls.push(record);
+    this.toolsRunning += 1;
+    this.pauseIdle();
+    const abort = new AbortController();
+    const timeoutMs = handler.timeoutMs ?? this.limits.toolTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let payload: Record<string, unknown>;
+    try {
+      const output = await Promise.race([
+        handler.run(args, { sessionId: this.sessionId, signal: abort.signal }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            // The refusal first: a tool that answers its abort must not win the race.
+            reject(new ToolError(`"${name}" took longer than ${Math.round(timeoutMs / 1000)} s.`));
+            abort.abort();
+          }, timeoutMs);
+        }),
+      ]);
+      record.status = "done";
+      payload = { status: "done", output: this.clip(output) };
+    } catch (error) {
+      if (error instanceof VoiceHangup) {
+        record.status = "refused";
+        record.message = error.message;
+        void this.end("usage", error.line ?? null);
+        return;
+      }
+      const message = error instanceof ToolError ? error.message : "The tool failed.";
+      if (!(error instanceof ToolError)) {
+        console.error(`[gemi/ai] the voice tool "${name}" threw.`, error);
+      }
+      record.status = "failed";
+      record.message = message;
+      payload = { status: "failed", message };
+    } finally {
+      clearTimeout(timer);
+      record.durationMs = Date.now() - now;
+      this.toolsRunning -= 1;
+      this.touch();
+    }
+    const info = this.info();
+    this.hook(() => this.params.onToolCall?.({ ...record }, info));
+    if (!this.ending) this.answer(callId, payload);
+  }
+
+  /** A tool's output, cut to `toolOutputChars` of JSON. */
+  private clip(output: unknown): unknown {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+    if (json === undefined || json.length <= this.limits.toolOutputChars) return output;
+    return `${json.slice(0, this.limits.toolOutputChars)}… (cut: ${json.length} characters in all)`;
+  }
+
   /** A run already going on the thread (a typed message) is waited for, not
    *  superseded. */
   private async waitForThread(waited = new Set<string>()): Promise<boolean> {
@@ -773,7 +904,7 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
   private touch(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
-    if (this.running || this.ending) return;
+    if (this.running || this.toolsRunning > 0 || this.ending) return;
     this.idleTimer = setTimeout(
       () => void this.end("idle", this.lines.idle),
       this.limits.idleTimeoutMs,
@@ -869,6 +1000,7 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
       transcription: this.transcription,
       transcript: this.transcript,
       requests: this.requests,
+      toolCalls: this.toolCalls,
       errors: this.errors,
     };
     live.delete(this.sessionId);

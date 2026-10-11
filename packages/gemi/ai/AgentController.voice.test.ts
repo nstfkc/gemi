@@ -7,7 +7,10 @@ import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
 import { ApiRouter } from "../http/ApiRouter";
 import { createFlatApiRoutes } from "../services/router/createFlatApiRoutes";
-import { Agent } from "./Agent";
+import { Agent, AgentTool } from "./Agent";
+import { McpRouter } from "../http/McpRouter";
+import { McpRegistry } from "../services/mcp/McpRegistry";
+import { s } from "./Schema";
 import {
   AgentController,
   type AuthorizeRequestParams,
@@ -40,6 +43,8 @@ const finish = (): ProviderEvent => ({
 
 type PageBody = { pageId: string };
 
+let extraOptions: Record<string, unknown> = {};
+
 const realFetch = globalThis.fetch;
 let fetches: { url: string; method?: string; body?: any }[] = [];
 let createStatus = 201;
@@ -48,6 +53,7 @@ beforeEach(() => {
   FakeSocket.all = [];
   fetches = [];
   createStatus = 201;
+  extraOptions = {};
   globalThis.fetch = vi.fn(async (url: any, init: any) => {
     fetches.push({ url: String(url), method: init?.method, body: init?.body });
     if (String(url).endsWith("/realtime/calls")) {
@@ -94,6 +100,7 @@ function setup(options: { voice?: boolean } = {}) {
         session: { instructions: "Be the page builder's voice.", voice: "marin" },
         contextNote: (body) => `The user is on page ${body.pageId}.`,
         onEnd: (summary) => void seen.ends.push(summary),
+        ...extraOptions,
       };
     },
   };
@@ -379,5 +386,77 @@ describe("ApiRouter.voice()", () => {
           routes = { "/v": this.voice(NotAnAgent) };
         })(),
     ).toThrow("this.voice() takes an AgentController class, and got NotAnAgent.");
+  });
+});
+
+describe("voice with the app's MCP tools", () => {
+  test("start's mcp adds the registry's tools to the session, and a call runs in-process as the user", async () => {
+    const ran: unknown[] = [];
+    const listPages = AgentTool.create({
+      name: "list_pages",
+      description: "List the site's pages.",
+      inputSchema: s.object({ siteId: s.string() }),
+      execute: async (input) => {
+        ran.push({ input, user: (RequestContext.getStore() as any)?.user });
+        return [{ path: "/about" }];
+      },
+    });
+    class SiteMcp extends McpRouter<any> {
+      routes = { list_pages: this.fromTool(listPages, { remote: { context: () => ({}) as any } }) };
+    }
+    extraOptions = { mcp: { registry: new McpRegistry(new SiteMcp(), {} as any) } };
+
+    const { store, call } = setup();
+    const { threadId } = await store.createThread({ userId: 1 });
+    const started = (await call("voiceStart", { sdp: OFFER, threadId, pageId: "p" })) as any;
+    const session = JSON.parse(String((fetches[0]!.body as FormData).get("session")));
+    expect(session.tools.map((t: { name: string }) => t.name)).toEqual([
+      "ask_agent",
+      "stop_work",
+      "work_status",
+      "answer_question",
+      "list_pages",
+    ]);
+    // nothing about the MCP caller is in what the vendor (and so the browser) gets
+    expect(JSON.stringify(session)).not.toMatch(/authorization|server_url|voice:/);
+
+    await flush();
+    const socket = FakeSocket.last();
+    socket.serverOpen();
+    socket.serverSend({
+      type: "response.function_call_arguments.done",
+      response_id: "r1",
+      item_id: "i1",
+      call_id: "call_mcp",
+      name: "list_pages",
+      arguments: JSON.stringify({ siteId: "site_1" }),
+    });
+    await vi.waitFor(() =>
+      expect(socket.sent.some((e) => e.item?.call_id === "call_mcp")).toBe(true),
+    );
+    const output = socket.sent.find((e) => e.item?.call_id === "call_mcp");
+    expect(JSON.parse(output.item.output)).toEqual({
+      status: "done",
+      output: [{ path: "/about" }],
+    });
+    expect(ran).toEqual([{ input: { siteId: "site_1" }, user: { id: 1 } }]);
+    await call("voiceEnd", undefined, { sessionId: started.sessionId });
+  });
+
+  test("an anonymous session with mcp fails to start, and onEnd refunds", async () => {
+    extraOptions = { mcp: { registry: {} as any } };
+    const { store, seen, call } = setup();
+    const { threadId } = await store.createThread({ userId: null as any });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failed = (await call(
+      "voiceStart",
+      { sdp: OFFER, threadId, pageId: "p" },
+      {},
+      null,
+    )) as Response;
+    spy.mockRestore();
+    expect(failed.status).toBe(500);
+    expect(fetches).toEqual([]);
+    expect(seen.ends.map((s) => s.reason)).toEqual(["start_failed"]);
   });
 });

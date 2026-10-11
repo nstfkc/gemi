@@ -8344,6 +8344,60 @@ The app's `body` keys must not be named `sdp`, `threadId` or `pushToTalk`. The r
 
   What actually protects you is that every response's usage is metered on the sideband, plus the limits and billing in `start`, `onUsage`, `onTranscriptionUsage` and `onTick`. Tool calls also run only on the server, through the controller's checks.
 
+### The app's MCP tools
+
+The voice can call your MCP server's tools directly, alongside delegating to the agent. That's useful for quick reads and small edits that don't need a full agent turn. Return `mcp` from `start`:
+
+```typescript
+import { app } from "gemi/foundation";
+import { McpRegistry } from "gemi/services";
+import { ToolError } from "gemi/ai";
+
+start: async ({ body, user }) => ({
+  session: { instructions: voiceFrontPrompt(body) },
+  mcp: {
+    registry: app(McpRegistry),
+    filter: { tags: ["pages"] },
+    scopes: ["site:read", "site:write"], // default: every scope the router declares
+    authorize: ({ input }) => {
+      if ((input as { siteId?: string }).siteId !== body.siteId) {
+        throw new ToolError("You can only work on the site that's open.");
+      }
+    },
+  },
+  onToolCall: async (call) => {
+    if (call.status === "done") await chargeToolCall(user, call.name);
+  },
+}),
+```
+
+`this.voice()` lists the tools inside the starting request, adds them to the session, and the bridge runs each call on the server.
+
+**How a call runs.** The voice model calls a plain function tool. The bridge receives the call on the sideband and runs it through `McpRegistry.execute` in this process. The caller is a remote principal built from the user `start` saw: `{ user, via: "voice", id: "voice:<sessionId>", scopes }`.
+
+- The registry's remote rules apply. Only tools exposed to remote callers (`remote` on a native tool) and reached by `scopes` are listed or callable, and features are checked per call.
+- The route runs as that user. Nothing of the browser's own request crosses over.
+- Tools with `requiresApproval` are left out, because a voice call has no approval screen.
+- MCP tools need a signed-in user. A session without one fails to start (`start_failed`).
+
+**Limits and metering.** Calls go through `authorize` first. Then the bridge applies its limits:
+
+| Option | Default | |
+|---|---|---|
+| `limits.maxToolCallsPerMinute` | 20 | More calls are answered `busy`. |
+| `limits.toolTimeoutMs` | 60 s | The call's signal is aborted and the model is told it took too long. |
+| `limits.toolOutputChars` | 8000 | The output's JSON is cut, because the voice model is billed for it on every later response. |
+
+- `onToolCall(record, info)` runs after each call, in the same hook chain as `onUsage`. Throw `VoiceHangup` from it, or from `authorize`, to end the call.
+- `summary.toolCalls` lists every call.
+- A `ToolError`'s message reaches the model. Any other failure reads "The tool failed." and is logged.
+- The routes charge their normal prices, as they would for any caller.
+- Long work still belongs to the agent (`ask_agent`), so its progress shows in the chat.
+
+**Why not the Realtime API's native `mcp` tool.** The native tool has the vendor call your `/mcp` endpoint with an `authorization` value carried in the session. The browser holds the call's data channel, which delivers `session.created` and `session.updated` with the session's tools. Neither vendor documents that the `mcp` tool's `authorization` or `headers` are left out of those events, so a token there must be assumed visible to the browser. The native tool also runs calls at the vendor, where the server can't refuse, rate-limit or meter them first, and the endpoint has to be reachable from the internet. Bridging through the sideband avoids all of that: no token is minted, so none can reach the browser.
+
+`tools` (a list of `{ tool, run(input, { sessionId, signal }), timeoutMs? }`) does the same for the app's own in-process tools. `mcpVoiceTools(options, { user, sessionId })` builds the MCP list for a bridge you start yourself.
+
 ### More than one instance
 
 A session's record (`callId`, `threadId`, owner, `body`, end) lives in `voiceStore`, a `VoiceSessionStore` with `create`, `get` and `update`. The default `MemoryVoiceSessionStore` is per process. With more than one instance, assign a shared store:

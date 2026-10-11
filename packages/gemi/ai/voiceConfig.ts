@@ -1,6 +1,7 @@
 import type { HttpRequest } from "../http/HttpRequest";
 import type { RealtimeClient, RealtimeSession } from "./providers/realtime";
 import type { VoiceBridgeParams, VoiceDelegate } from "./VoiceBridge";
+import type { VoiceMcpOptions } from "./voiceMcp";
 
 /**
  * What an `AgentController` sets for `this.voice(Controller)` (#921):
@@ -57,8 +58,24 @@ export type VoiceStartContext<Body extends object> = {
 /** One session's options, from `VoiceConfig.start`. */
 export type VoiceSessionOptions<Body extends object> = Pick<
   VoiceBridgeParams<Body>,
-  "limits" | "lines" | "progress" | "contextNote" | "onUsage" | "onTick" | "onEnd" | "onEvent"
+  | "limits"
+  | "lines"
+  | "progress"
+  | "contextNote"
+  | "onUsage"
+  | "onTranscriptionUsage"
+  | "onTick"
+  | "onToolCall"
+  | "onEnd"
+  | "onEvent"
+  | "tools"
 > & {
+  /**
+   * The app's MCP tools in this call, run in this process as the signed-in
+   * user (see `mcpVoiceTools`): no token is minted, and none reaches the
+   * browser. Their definitions are added to `session.tools`.
+   */
+  mcp?: VoiceMcpOptions;
   /** The thread delegated turns go to, when it is not the client's. Checked
    *  with `authorizeRequest` like the client's. */
   threadId?: string;

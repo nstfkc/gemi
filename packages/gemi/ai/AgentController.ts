@@ -74,6 +74,7 @@ import { RealtimeRequestError, type RealtimeSession } from "./providers/realtime
 import type { VoiceConfig } from "./voiceConfig";
 import { defaultVoiceStore, type VoiceSessionRecord, type VoiceSessionStore } from "./voiceStore";
 import { emptyUsage } from "./runtime";
+import { mcpVoiceTools } from "./voiceMcp";
 import { DEFAULT_DELEGATE_NAME, VoiceBridge, voiceTools } from "./VoiceBridge";
 import type { VoiceStartResponse } from "./voice/wire";
 import type {
@@ -2141,6 +2142,7 @@ export abstract class AgentController<
           transcription: { usage: emptyUsage(), seconds: 0 },
           transcript: [],
           requests: [],
+          toolCalls: [],
           errors: [],
         });
       } catch (onEndError) {
@@ -2166,9 +2168,30 @@ export abstract class AgentController<
       throw error;
     }
 
+    // The id first: an MCP principal is keyed to the session.
+    const sessionId = crypto.randomUUID();
+    let toolHandlers = options.tools ?? [];
+    try {
+      if (options.mcp) {
+        toolHandlers = [
+          ...toolHandlers,
+          ...(await mcpVoiceTools(options.mcp, { user, sessionId })),
+        ];
+      }
+    } catch (error) {
+      await failed(error);
+      return jsonResponse(500, {
+        code: "voice_unavailable",
+        message: "Voice isn't available right now.",
+      });
+    }
     const session: RealtimeSession = {
       ...options.session,
-      tools: [...voiceTools(voice.delegate), ...(options.session?.tools ?? [])],
+      tools: [
+        ...voiceTools(voice.delegate),
+        ...(options.session?.tools ?? []),
+        ...toolHandlers.map((handler) => handler.tool),
+      ],
       ...(pushToTalk === true ? { turnDetection: null } : {}),
     };
     let call: { sdpAnswer: string; callId: string };
@@ -2189,7 +2212,6 @@ export abstract class AgentController<
     callId = call.callId;
 
     try {
-      const sessionId = crypto.randomUUID();
       await this.voiceStore.create({
         id: sessionId,
         callId: call.callId,
@@ -2198,9 +2220,17 @@ export abstract class AgentController<
         body: body as Record<string, unknown>,
         startedAt,
       });
-      const { threadId: _thread, session: _session, safetyIdentifier: _safety, ...hooks } = options;
+      const {
+        threadId: _thread,
+        session: _session,
+        safetyIdentifier: _safety,
+        mcp: _mcp,
+        tools: _tools,
+        ...hooks
+      } = options;
       const bridge = VoiceBridge.start<Body>({
         ...hooks,
+        tools: toolHandlers,
         controller: this.constructor as unknown as VoiceBridgeController<Body>,
         threadId,
         user,

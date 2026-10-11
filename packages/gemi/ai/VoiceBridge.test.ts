@@ -5,6 +5,7 @@ import { FakeSocket, fakeSocketFactory } from "./providers/__fixtures__/fakeSock
 import { openAITarget } from "./providers/endpoints";
 import { RealtimeClient } from "./providers/realtime";
 import type { AgentStreamEvent, PendingToolCall } from "./types";
+import { ToolError } from "./redact";
 import { VoiceBridge, VoiceHangup, voiceTools, type VoiceBridgeParams } from "./VoiceBridge";
 import { MemoryVoiceSessionStore } from "./voiceStore";
 
@@ -711,5 +712,131 @@ describe("VoiceBridge: review fixes", () => {
     const summary = await ending;
     expect(summary.usage.inputTokens).toBe(7);
     expect(summary.errors).toContainEqual(expect.objectContaining({ code: "hangup_failed" }));
+  });
+});
+
+describe("VoiceBridge: in-process tools (MCP)", () => {
+  const callTool = (
+    t: Awaited<ReturnType<typeof setup>>,
+    callId: string,
+    name: string,
+    args: unknown,
+  ) =>
+    t.send({
+      type: "response.function_call_arguments.done",
+      response_id: "r",
+      item_id: `i_${callId}`,
+      call_id: callId,
+      name,
+      arguments: JSON.stringify(args),
+    });
+
+  test("a tool call runs beside the voice, answers its output, and reaches onToolCall", async () => {
+    const calls: any[] = [];
+    const toolCalls: any[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const t = await setup({
+      tools: [
+        {
+          tool: { name: "list_pages", description: "List pages." },
+          run: async (input, info) => {
+            calls.push({ input, sessionId: info.sessionId });
+            await gate;
+            return [{ path: "/about" }];
+          },
+        },
+      ],
+      onToolCall: (call) => void toolCalls.push(call),
+    });
+    await callTool(t, "c1", "list_pages", { siteId: "s" });
+    expect(calls).toEqual([{ input: { siteId: "s" }, sessionId: t.bridge.sessionId }]);
+    // the event loop is not held: another call is answered meanwhile
+    await callTool(t, "c2", "work_status", {});
+    expect(outputs(t.sent()).map((o) => o.call)).toEqual(["c2"]);
+    release();
+    await flush();
+    expect(outputs(t.sent()).at(-1)).toEqual({
+      call: "c1",
+      status: "done",
+      output: [{ path: "/about" }],
+    });
+    expect(toolCalls).toEqual([
+      { name: "list_pages", status: "done", durationMs: expect.any(Number) },
+    ]);
+    const summary = await t.bridge.end();
+    expect(summary.toolCalls).toEqual(toolCalls);
+  });
+
+  test("a ToolError's message reaches the model, any other failure does not; long outputs are cut", async () => {
+    const t = await setup({
+      limits: { toolOutputChars: 20 },
+      tools: [
+        {
+          tool: { name: "refuse" },
+          run: async () => {
+            throw new ToolError("Only this session's site.");
+          },
+        },
+        {
+          tool: { name: "crash" },
+          run: async () => {
+            throw new Error("db password is hunter2");
+          },
+        },
+        { tool: { name: "big" }, run: async () => "x".repeat(100) },
+      ],
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await callTool(t, "c1", "refuse", {});
+    await callTool(t, "c2", "crash", {});
+    await callTool(t, "c3", "big", {});
+    spy.mockRestore();
+    const out = outputs(t.sent());
+    expect(out[0]).toEqual({ call: "c1", status: "failed", message: "Only this session's site." });
+    expect(out[1]).toEqual({ call: "c2", status: "failed", message: "The tool failed." });
+    expect(out[2].output).toMatch(/^"x{19}… \(cut: 102 characters in all\)$/);
+    await t.bridge.end();
+  });
+
+  test("the per-minute limit answers busy, and a slow tool times out", async () => {
+    const t = await setup({
+      limits: { maxToolCallsPerMinute: 2, toolTimeoutMs: 30 },
+      tools: [
+        { tool: { name: "quick" }, run: async () => "ok" },
+        {
+          tool: { name: "slow" },
+          run: (_input, info) =>
+            new Promise((resolve) => info.signal.addEventListener("abort", () => resolve("late"))),
+        },
+      ],
+    });
+    await callTool(t, "c1", "quick", {});
+    await callTool(t, "c2", "slow", {});
+    await callTool(t, "c3", "quick", {});
+    await vi.waitFor(() => expect(outputs(t.sent())).toHaveLength(3));
+    const byCall = Object.fromEntries(outputs(t.sent()).map((o) => [o.call, o]));
+    expect(byCall.c1.status).toBe("done");
+    expect(byCall.c3.status).toBe("busy");
+    expect(byCall.c2).toMatchObject({
+      status: "failed",
+      message: expect.stringMatching(/took longer/),
+    });
+    await t.bridge.end();
+  });
+
+  test("a tool named like a voice tool is refused when the bridge starts", () => {
+    const realtime = new RealtimeClient(openAITarget({ apiKey: "k" }), {
+      model: "m",
+      webSocket: fakeSocketFactory,
+    });
+    expect(() =>
+      VoiceBridge.start({
+        controller: fakeController().controller,
+        threadId: "t",
+        call: { realtime, callId: "rtc_x" },
+        tools: [{ tool: { name: "stop_work" }, run: async () => null }],
+      }),
+    ).toThrow(/two tools are named "stop_work"/);
   });
 });
