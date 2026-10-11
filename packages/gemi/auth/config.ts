@@ -466,8 +466,8 @@ export type OAuthProviderEntry =
       provider: OAuthProvider;
       /**
        * The `app/features` key the provider is offered behind, evaluated per
-       * request. Off: its sign-in routes answer 404, as for a provider that is
-       * not configured.
+       * request. Off: its sign-in routes answer 404 and `Auth.oauthProviders()`
+       * leaves it out.
        */
       feature?: FeatureKey;
     };

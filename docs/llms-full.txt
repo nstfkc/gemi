@@ -3602,6 +3602,23 @@ export class AppMcpRouter extends McpRouter<RPC> {
 
 Hints are advice to the client, never a defence: authorization is the route's middleware.
 
+### Behind a feature flag
+
+`feature` offers a tool only while an [`app/features`](./feature-flags.md) flag is on for the request:
+
+```ts
+read_domain: this.fromApiRoute("GET", "/sites/:siteId/domain", {
+  description: "The site's custom domain",
+  feature: "custom-domains",
+  params: { siteId: bindSite },
+}),
+```
+
+- **Remote callers:** while it is off, `tools/list` leaves the tool out and `tools/call` answers `Unknown tool: read_domain`, the same answer as for a tool the caller's scopes do not reach. It is evaluated per request as the credential's user, so a feature's `when` can target users.
+- **Local agents:** `toAgentTools` builds an agent's tools once, so a gated tool stays in the agent's list. A call to it while the feature is off is refused before the route runs, with an error the model reads: `There is no tool named "read_domain".`
+- `await registry.available(caller, filter?)` is `list()` narrowed by features. `list()` and `descriptors()` do not apply them, and each descriptor's `feature` names its key.
+- **`server.version` does not change** when a feature flips. Tools behind a `when` differ per user, so a version derived from what one caller sees would give two callers of the same server different versions. Clients get the change from `tools/list`, which modern clients cache privately for 60 seconds. If you derive `version` from your tool names, hash every declared tool (`registry.descriptors()`), not just the ones a caller sees.
+
 ## Remote access
 
 Enable the endpoint in `app/config/route.ts`, with at least one caller resolver:
@@ -3640,8 +3657,26 @@ export default {
 - **`rateLimit`**: each credential's budget at the endpoint, default `{ limit: 600, window: 60 }` requests; `false` turns it off.
 - **`maxBodyBytes`**, **`server`** (`name`, `version`, `instructions`), **`nonces`**, **`approvalTimeoutMs`**: see below.
 - **`files`**: how remote callers send files (below).
+- **`feature`**: serves the endpoint only while this [feature](./feature-flags.md) is on (below).
 
 The endpoint is answered ahead of routing, after the global middleware, so no route can shadow it.
+
+### Switching it with a feature flag
+
+`enabled` is read once at boot. To turn the endpoint on and off without a deploy, keep `enabled: true` and add `feature`:
+
+```ts
+remote: {
+  enabled: true,
+  feature: "mcp-remote", // defineFeature({ serverOnly: true }) in app/features
+  url: "https://example.com/mcp",
+  resolvers: [oauth],
+},
+```
+
+While the feature is off, the endpoint and its resolvers' endpoints (the OAuth metadata, client registration, authorize, consent, token and revoke) answer as they do with `enabled: false`: the request falls through to the app's routes, usually a 404. The boot still checks `url`, `resolvers` and `SECRET`, so switching the feature on never surfaces a configuration error.
+
+The feature is evaluated only for paths the endpoint can own: its path, paths under it, and `/.well-known/...`. Other traffic never evaluates it. With `feature` set, a custom resolver's `handle()` is also only asked about those paths. The check runs before any credential is read, so there is no user to target. Use the feature as an on/off switch, and declare it `serverOnly` so it stays out of every page's payload.
 
 ### Who the caller is
 
@@ -10761,7 +10796,7 @@ a binding into the container, and a facade resolves it.**
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
+| `oauthProviders` | `Record<string, OAuthProvider \| { provider, feature }>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route), each optionally behind a feature flag. See [OAuth](#oauth) and [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
 | `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
 | `oauthCompleteProfilePath` | `string \| null` | `null` | Where a successful OAuth sign-in sends a user who has no email (see [Providers without an email](#providers-without-an-email)), with the intended page as `?redirect=`. `null` sends them on like everyone else. |
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
@@ -11565,6 +11600,35 @@ class AcmeOAuthProvider extends OAuthProvider {
 }
 ```
 
+### A provider behind a feature flag
+
+To switch a provider on or off without a deploy, give its entry a [`feature`](./feature-flags.md):
+
+```typescript
+export default defineAuthConfig({
+  oauthProviders: {
+    google: new GoogleOAuthProvider(),
+    instagram: {
+      provider: new InstagramOAuthProvider({ redirectPath: "/auth/oauth/instagram/callback" }),
+      feature: "instagram-sign-in",
+    },
+  },
+});
+```
+
+The feature is evaluated per request. While it is off, `/auth/oauth/instagram` and its
+callback answer 404 before any cookie is written or read, and `Auth.oauthProviders()` leaves
+the provider out. Build the sign-in page's buttons from that list rather than from a
+constant:
+
+```typescript
+// a view route's handler
+return { signInProviders: await Auth.oauthProviders() }; // ["google"] while it is off
+```
+
+A plain provider entry is never gated. An entry that is neither a provider nor
+`{ provider, feature }` fails the boot.
+
 ### State and PKCE
 
 Every round trip is tied to the browser that started it. `/auth/oauth/:provider` mints a random
@@ -12095,6 +12159,7 @@ current user and session.
 | `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
+| `Auth.oauthProviders()` | `Promise<string[]>` | The names of the OAuth sign-in providers that are on for this request, in `oauthProviders` order. A provider whose `feature` is off is left out. See [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
 
 ```typescript
 import { Auth } from "gemi/facades";
@@ -13565,6 +13630,16 @@ Still evaluated on the server and never in the payload. `useFeature("project-nig
 A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
 
 The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
+
+### Beyond view routes
+
+Some things are mounted from config rather than declared as routes, and take a `feature` option of their own:
+
+- the remote MCP endpoint: `route.mcp.remote.feature` (see [MCP: switching it with a feature flag](./mcp.md#switching-it-with-a-feature-flag))
+- an OAuth sign-in provider: `oauthProviders: { name: { provider, feature } }` (see [Authentication](./authentication.md#a-provider-behind-a-feature-flag))
+- an MCP tool: `feature` in `fromApiRoute`'s meta (see [MCP: behind a feature flag](./mcp.md#behind-a-feature-flag))
+
+While the feature is off, the endpoint and the provider's routes answer 404 and the tool is hidden from remote callers.
 
 ### A rollout is not access control
 

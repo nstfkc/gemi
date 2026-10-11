@@ -44,6 +44,23 @@ export class AppMcpRouter extends McpRouter<RPC> {
 
 Hints are advice to the client, never a defence: authorization is the route's middleware.
 
+### Behind a feature flag
+
+`feature` offers a tool only while an [`app/features`](./feature-flags.md) flag is on for the request:
+
+```ts
+read_domain: this.fromApiRoute("GET", "/sites/:siteId/domain", {
+  description: "The site's custom domain",
+  feature: "custom-domains",
+  params: { siteId: bindSite },
+}),
+```
+
+- **Remote callers:** while it is off, `tools/list` leaves the tool out and `tools/call` answers `Unknown tool: read_domain`, the same answer as for a tool the caller's scopes do not reach. It is evaluated per request as the credential's user, so a feature's `when` can target users.
+- **Local agents:** `toAgentTools` builds an agent's tools once, so a gated tool stays in the agent's list. A call to it while the feature is off is refused before the route runs, with an error the model reads: `There is no tool named "read_domain".`
+- `await registry.available(caller, filter?)` is `list()` narrowed by features. `list()` and `descriptors()` do not apply them, and each descriptor's `feature` names its key.
+- **`server.version` does not change** when a feature flips. Tools behind a `when` differ per user, so a version derived from what one caller sees would give two callers of the same server different versions. Clients get the change from `tools/list`, which modern clients cache privately for 60 seconds. If you derive `version` from your tool names, hash every declared tool (`registry.descriptors()`), not just the ones a caller sees.
+
 ## Remote access
 
 Enable the endpoint in `app/config/route.ts`, with at least one caller resolver:
@@ -82,8 +99,26 @@ export default {
 - **`rateLimit`**: each credential's budget at the endpoint, default `{ limit: 600, window: 60 }` requests; `false` turns it off.
 - **`maxBodyBytes`**, **`server`** (`name`, `version`, `instructions`), **`nonces`**, **`approvalTimeoutMs`**: see below.
 - **`files`**: how remote callers send files (below).
+- **`feature`**: serves the endpoint only while this [feature](./feature-flags.md) is on (below).
 
 The endpoint is answered ahead of routing, after the global middleware, so no route can shadow it.
+
+### Switching it with a feature flag
+
+`enabled` is read once at boot. To turn the endpoint on and off without a deploy, keep `enabled: true` and add `feature`:
+
+```ts
+remote: {
+  enabled: true,
+  feature: "mcp-remote", // defineFeature({ serverOnly: true }) in app/features
+  url: "https://example.com/mcp",
+  resolvers: [oauth],
+},
+```
+
+While the feature is off, the endpoint and its resolvers' endpoints (the OAuth metadata, client registration, authorize, consent, token and revoke) answer as they do with `enabled: false`: the request falls through to the app's routes, usually a 404. The boot still checks `url`, `resolvers` and `SECRET`, so switching the feature on never surfaces a configuration error.
+
+The feature is evaluated only for paths the endpoint can own: its path, paths under it, and `/.well-known/...`. Other traffic never evaluates it. With `feature` set, a custom resolver's `handle()` is also only asked about those paths. The check runs before any credential is read, so there is no user to target. Use the feature as an on/off switch, and declare it `serverOnly` so it stays out of every page's payload.
 
 ### Who the caller is
 
