@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.124.0 to 0.125.0
 
 ## Feature flags for the remote MCP endpoint, OAuth providers and MCP tools (#885)
 
