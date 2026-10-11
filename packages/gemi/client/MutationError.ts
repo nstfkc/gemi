@@ -313,3 +313,110 @@ export function isHttpError<E, S extends number>(
 ): error is HttpErrorWithStatus<E, S> {
   return isObject(error) && !(error instanceof Error) && error.status === status;
 }
+
+/**
+ * What every error the mutation hooks hand over carries (issue #890): the
+ * messages to show a person, without flattening `messages` by hand.
+ */
+export interface MutationErrorHelpers {
+  /**
+   * The failure in words, as a flat list that is never empty: a validation
+   * error's messages, every field's in the order the server sent them; the
+   * `message` of any other error the server meant for a person (a form error,
+   * a refusal, a route's typed error); else `[fallback]` — for a server error,
+   * whose message is an exception's under `gemi dev`, and for the browser's
+   * own errors (no answer, an answer that was not JSON).
+   *
+   * `fallback` defaults to `"Something went wrong. Try again."`.
+   */
+  list(fallback?: string): string[];
+  /** A validation error's messages for the field `name`; `[]` otherwise. */
+  field(name: string): string[];
+}
+
+/**
+ * `T` with the helpers, member by member. A member that has a `list` or
+ * `field` of its own — a route's typed error body with a `field` key — keeps
+ * it, and does not get that helper.
+ */
+export type WithMutationErrorHelpers<T> = T extends object
+  ? T & Omit<MutationErrorHelpers, keyof T>
+  : T;
+
+const FALLBACK_MESSAGE = "Something went wrong. Try again.";
+
+// A `QueryError`'s refusal, read as the mutation hooks read a body. Read by
+// shape, not `instanceof`, so a copy of the class from another bundle works.
+function unwrapQueryError(error: unknown): unknown {
+  if (error instanceof Error && error.name === "QueryError" && "body" in error) {
+    const { body, status } = error as Error & { body: unknown; status: number };
+    return body == null ? error : mutationErrorFromBody(body, status);
+  }
+  return error;
+}
+
+/**
+ * `error.list(fallback)` for any value: an error kept from a mutation, a
+ * `useQuery` `QueryError` (its body is read), or anything else.
+ */
+export function mutationErrorList(
+  error: unknown,
+  fallback: string = FALLBACK_MESSAGE,
+): string[] {
+  const value = unwrapQueryError(error);
+  if (isValidationError(value)) {
+    const messages = Object.values(value.messages ?? {})
+      .flat()
+      .filter((message) => typeof message === "string" && message !== "");
+    return messages.length > 0 ? messages : [fallback];
+  }
+  if (
+    isObject(value) &&
+    !(value instanceof Error) &&
+    value.kind !== "server_error" &&
+    typeof value.message === "string" &&
+    value.message !== ""
+  ) {
+    return [value.message];
+  }
+  return [fallback];
+}
+
+/**
+ * `error.field(name)` for any value: a validation error's messages for
+ * `name` (a `QueryError`'s body is read), `[]` for anything else.
+ */
+export function mutationErrorField(error: unknown, name: string): string[] {
+  const value = unwrapQueryError(error);
+  if (!isValidationError(value)) return [];
+  const messages = value.messages?.[name];
+  return Array.isArray(messages) ? [...messages] : [];
+}
+
+/**
+ * Puts `list` and `field` on an error the hooks hand over, as non-enumerable
+ * properties, so `toEqual`, a spread and `JSON.stringify` see the same object
+ * as before. A key the error already has is left alone; a primitive or a
+ * frozen value is returned as it is.
+ *
+ * @internal
+ */
+export function withMutationErrorHelpers<T>(error: T): WithMutationErrorHelpers<T> {
+  if (!isObject(error) || !Object.isExtensible(error)) {
+    return error as WithMutationErrorHelpers<T>;
+  }
+  const helpers: MutationErrorHelpers = {
+    list: (fallback) => mutationErrorList(error, fallback),
+    field: (name) => mutationErrorField(error, name),
+  };
+  for (const key of ["list", "field"] as const) {
+    if (key in error) continue;
+    Object.defineProperty(error, key, {
+      value: helpers[key],
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    });
+  }
+  return error as WithMutationErrorHelpers<T>;
+}

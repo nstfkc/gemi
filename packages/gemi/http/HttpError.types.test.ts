@@ -21,7 +21,11 @@ import { ApiRouter, type CreateRPC } from "./ApiRouter";
 import { HttpResponse, httpError } from "./HttpResponse";
 import { useMutation, usePost } from "../client/useMutation";
 import { Form } from "../client/Mutation";
-import { isHttpError, type MutationError } from "../client/MutationError";
+import {
+  isHttpError,
+  type MutationError,
+  type WithMutationErrorHelpers,
+} from "../client/MutationError";
 import { Query } from "../facades/Prefetch";
 
 type Equal<A, B> =
@@ -122,15 +126,38 @@ const snippets = {
   noTypedErrors: `
     export function f() {
       const { error } = usePost("/plain");
-      assert<Equal<typeof error, MutationError | null>>();
+      assert<Equal<typeof error, WithMutationErrorHelpers<MutationError> | null>>();
     }`,
   oldHandlersCompile: `
     export function f() {
       usePost("/import", {}, { onError: (error: MutationError) => console.log(error) });
-      return createElement(Form<"/import", "POST">, {
-        action: "/import",
-        onError: (error: MutationError) => console.log(error),
-      });
+    }`,
+  // In JSX, as apps write it: \`<Form>\` infers its error type from the
+  // handler, so one annotated \`MutationError\` fits (#890).
+  oldHandlersCompileForm: `
+    export function f() {
+      return <Form action="/import" onError={(error: MutationError) => console.log(error)} />;
+    }`,
+  formJsxTypedErrors: `
+    export function f() {
+      return (
+        <Form
+          action="/import"
+          onError={(error) => {
+            // Not \`error.field()\`: the "taken" body has a \`field\` of its own.
+            const messages: string[] = error.list();
+            if (error instanceof Error) return messages;
+            if (error.kind === "gone") {
+              const status: 410 = error.status;
+              return status;
+            }
+            if (error.kind === "taken") {
+              const field: "slug" = error.field;
+              return field;
+            }
+          }}
+        />
+      );
     }`,
   isHttpErrorUntyped: `
     export function f(error: unknown, known: MutationError) {
@@ -153,7 +180,7 @@ let diagnostics: Record<Snippet, string[]>;
 beforeAll(() => {
   const files = new Map(
     Object.entries(snippets).map(([name, body]) => [
-      path.join(HTTP, `__http_error_${name}__.ts`),
+      path.join(HTTP, `__http_error_${name}__.tsx`),
       prelude + body,
     ]),
   );
@@ -183,7 +210,7 @@ beforeAll(() => {
       ts
         .getPreEmitDiagnostics(
           program,
-          program.getSourceFile(path.join(HTTP, `__http_error_${name}__.ts`)),
+          program.getSourceFile(path.join(HTTP, `__http_error_${name}__.tsx`)),
         )
         .map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
     ]),
@@ -221,6 +248,11 @@ describe("typed errors (#665)", () => {
 
   test("handlers typed (error: MutationError) still compile", () => {
     expect(diagnostics.oldHandlersCompile).toEqual([]);
+    expect(diagnostics.oldHandlersCompileForm).toEqual([]);
+  });
+
+  test("<Form> in JSX gives the route's typed errors, with list() (#890)", () => {
+    expect(diagnostics.formJsxTypedErrors).toEqual([]);
   });
 
   test("isHttpError on an unknown or untyped error narrows to the status, not never", () => {
