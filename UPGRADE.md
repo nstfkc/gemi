@@ -1,3 +1,14 @@
+# Unreleased
+
+## Domains: the client's IP address from a trusted proxy's header (#917)
+
+**New, nothing to migrate.** `route.domains.trustProxy` takes `clientIpHeader`, for a proxy whose request to the app is a new one (a Cloudflare Worker's `fetch()`), so the client's address is not in `X-Forwarded-For`. On a request that carries `trustProxy.secret`, the header's first entry becomes the only entry of `X-Forwarded-For` (with `X-Real-IP` dropped). This happens before the global middleware, the socket upgrade and routing, so `clientIp(req)` and every rate limit see the visitor rather than the proxy. See [The client's address](docs/domains.md#the-clients-address).
+
+- `clientIpHeader` requires `secret`. Without one the boot fails, because a client that reaches the app directly would otherwise pick its own address. It must also differ from `hostHeader` and `secret.header`.
+- A request without the secret, or with a header that is missing or is not an IPv4/IPv6 address, keeps the address `GEMI_TRUST_PROXY` chose.
+- The proxy must set the header from its own knowledge of the client, e.g. `X-Client-IP` from `CF-Connecting-IP`, and must not append to a value the visitor sent.
+- New public method `App.applyTrustedClientIp(req)`, which `gemi start` and `gemi dev` call. A custom `Bun.serve` around `app.fetch` gets the same behaviour from `fetch`, since `fetch` calls it as well.
+
 # Upgrading from 0.129 to 0.130
 
 ## Client: mutation extras, cache writes and `fetchBlob` load on first use (#915)

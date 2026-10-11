@@ -351,6 +351,8 @@ GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
 
 Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
 
+Some proxies make a new request to the app, such as a Cloudflare Worker calling `fetch()`, so the client's address is not in `X-Forwarded-For` at all. If the proxy sends the address in a header of its own, name that header with [`route.domains.trustProxy.clientIpHeader`](./domains.md#the-clients-address). It is trusted only together with the proxy's secret, and it takes precedence over `GEMI_TRUST_PROXY`.
+
 ## Idle connections: `SERVER_IDLE_TIMEOUT`
 
 Bun closes a connection that has been silent for `SERVER_IDLE_TIMEOUT` seconds, and a request whose

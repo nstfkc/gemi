@@ -81,6 +81,18 @@ export class App {
     return this.kernel.sockets.call(this.kernel);
   }
 
+  /**
+   * Applies `route.domains.trustProxy.clientIpHeader`: on a request that
+   * carries the proxy's secret, the address that header names becomes the
+   * one in `X-Forwarded-For`. The servers call it right after settling
+   * `X-Forwarded-For` (`GEMI_TRUST_PROXY`) and before anything reads it —
+   * the socket upgrade and the global middleware included. `fetch` calls it
+   * too, for a caller that is not one of the servers. Idempotent.
+   */
+  public applyTrustedClientIp(req: Request) {
+    this.kernel.domains().resolver?.applyClientIp(req);
+  }
+
   public getRouteManifest() {
     return this.kernel.viewRoutes().routeManifest;
   }
@@ -120,6 +132,8 @@ export class App {
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {
+      // Repeated from the servers, for a caller that is not one of them.
+      this.applyTrustedClientIp(req);
       // Run here too for a caller that is not one of the servers, a test or an
       // app's own `Bun.serve`, so the list is not skipped by calling `fetch`.
       const gated = this.globallyGated.has(req);

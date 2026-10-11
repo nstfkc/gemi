@@ -1162,6 +1162,8 @@ GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
 
 Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
 
+Some proxies make a new request to the app, such as a Cloudflare Worker calling `fetch()`, so the client's address is not in `X-Forwarded-For` at all. If the proxy sends the address in a header of its own, name that header with [`route.domains.trustProxy.clientIpHeader`](./domains.md#the-clients-address). It is trusted only together with the proxy's secret, and it takes precedence over `GEMI_TRUST_PROXY`.
+
 ## Idle connections: `SERVER_IDLE_TIMEOUT`
 
 Bun closes a connection that has been silent for `SERVER_IDLE_TIMEOUT` seconds, and a request whose
@@ -2144,7 +2146,7 @@ export default defineRouteConfig({
 | Field | Type | Purpose |
 | --- | --- | --- |
 | `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
-| `trustProxy` | `boolean \| { hostHeader?, secret? }` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. See [Behind a proxy](#behind-a-proxy). |
+| `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? }` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
@@ -2157,8 +2159,8 @@ export default defineRouteConfig({
 A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
 path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
 that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, `ask` on an app whose
-param group has no `exists`, a `trustProxy` header that is not a header name, and a `trustProxy.secret.value`
-under 16 characters or unset.
+param group has no `exists`, a `trustProxy` header that is not a header name, a `trustProxy.secret.value`
+under 16 characters or unset, and a `trustProxy.clientIpHeader` without a `secret`.
 
 ## How a host is matched
 
@@ -2295,6 +2297,36 @@ Without `secret`, the platform's direct address is a way around the CDN: anyone 
 The secret header is still visible to the app's own code. A `proxy()` route leaves it out of the headers it forwards upstream, but it forwards the client's other headers as before.
 
 When the host header is absent or does not parse, the request's own `Host` is used. That lets one deploy be reached both through the CDN and directly on its own domains.
+
+### The client's address
+
+A proxy that makes a new request to the app, such as a Cloudflare Worker calling `fetch()`, does not pass the client's address on in `X-Forwarded-For`. The platform behind it appends the Worker's own address, so with [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) set, `clientIp(req)` returns one of a few Cloudflare addresses for every visitor. Every visitor then shares one rate-limit bucket.
+
+The proxy knows the address (`CF-Connecting-IP` in a Worker) and can send it in a header of its own. `clientIpHeader` names that header:
+
+```ts
+domains: {
+  root: "example.com",
+  trustProxy: {
+    hostHeader: "x-original-host",
+    clientIpHeader: "x-client-ip",
+    secret: { header: "x-proxy-secret", value: process.env.PROXY_SECRET! },
+  },
+  // …
+}
+```
+
+```js
+// The Worker
+headers.set("X-Client-IP", request.headers.get("CF-Connecting-IP") ?? "");
+headers.set("X-Proxy-Secret", env.PROXY_SECRET);
+```
+
+On a request that carries the secret, the first comma-separated entry of `clientIpHeader` becomes the client's address. gemi writes it into `X-Forwarded-For` as the only entry and drops `X-Real-IP`, as `gemi start` does. This happens before the global middleware, the broadcast socket upgrade and routing, so `clientIp(req)`, [rate limits](./middleware.md#rate-limiting), one-time-code limits, the MCP endpoints and `broadcast.maxConnectionsPerIp` see the visitor. Your code does not change.
+
+- **It requires `secret`.** A host the client forges is one it could have sent anyway, but a forged address chooses its own rate-limit bucket. A `clientIpHeader` without a `secret` fails the boot.
+- Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. Requests that reach the app directly keep working as before.
+- It must be a header name, and it must differ from `hostHeader` and `secret.header`. The proxy has to **set** the header, not append to it, so a value the visitor sent cannot get through.
 
 ## On-demand TLS for custom domains
 
