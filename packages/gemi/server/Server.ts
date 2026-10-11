@@ -1,6 +1,7 @@
 import { App } from "../app";
 import { Kernel } from "../kernel";
 import { projectRoot } from "../support/discover";
+import { healthSettings, serveHealth, startLivenessSampler } from "./health";
 import { DevGeneration, devRetireDefaults, replaceDevGeneration } from "./devReload";
 import {
   drain,
@@ -60,6 +61,16 @@ export class Server {
     // started as.
     const production = process.env.NODE_ENV === "production";
 
+    // Read before the boot, so a bad `GEMI_HEALTH_PATH` fails the deploy at
+    // once. The route is served in both modes; the lag sampler runs only in
+    // production, where a `bun --hot` reload or a Vite compile cannot stall
+    // the loop and read as an outage.
+    const health = healthSettings();
+    if (production) startLivenessSampler(health);
+    // The outermost layer: a probe is answered ahead of the app's
+    // instrumentation and the shutdown refusal (#48).
+    const instrumentation = serveHealth(this.instrumentation, health.paths);
+
     if (production) {
       // Before the boot, not just before listening: the whole start-up is a
       // window in which a signal can arrive, and the slow part of it is the
@@ -102,7 +113,7 @@ export class Server {
     // should load in the other environment.
     if (production) {
       const { httpProd } = await import("./httpProd.js");
-      this.server = await httpProd(this.app, this.instrumentation.bind(this));
+      this.server = await httpProd(this.app, instrumentation);
     } else {
       // Dev only: reload `.env` into process.env on change so config edits take
       // effect without restarting the dev server (Bun reads `.env` only at
@@ -112,7 +123,7 @@ export class Server {
       watchEnv();
       const { httpDev } = await import("./httpDev.js");
       const generation = new DevGeneration(this.app);
-      this.server = await httpDev(this.app, generation.track(this.instrumentation.bind(this)));
+      this.server = await httpDev(this.app, generation.track(instrumentation));
       // Only now, with the new fetch handler live, has the application this
       // reload replaced stopped receiving requests; it is shut down once the
       // ones it is serving finish (#652). Not awaited, so the reload is not

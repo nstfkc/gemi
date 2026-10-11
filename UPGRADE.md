@@ -9,6 +9,32 @@
 - **`feature` in `fromApiRoute`'s meta**: while it is off, remote `tools/list` leaves the tool out and `tools/call` answers `Unknown tool`. A local agent's tools (`toAgentTools`) are built once, so the tool stays listed there, but a call is refused with `There is no tool named "<name>".` before the route runs. New: `McpRegistry.available(caller, filter?)` (async), which is `list()` narrowed by features, and `McpToolDescriptor.feature`. `list()` and `descriptors()` are unchanged.
 - `server.version` is not affected by any flag. If you derive it from tool names, hash `registry.descriptors()` (every declared tool).
 
+## Server: a built-in health route and an event-loop liveness signal (#48)
+
+**New, one reserved path.** gemi now answers load-balancer health probes itself, and reports whether the process's event loop is stalling. See [Health checks](docs/configuration.md#health-checks).
+
+- **`/__gemi__/health`** answers `200 ok` while healthy, `503 degraded` while the event loop is stalling, and `503 shutting down` while draining (with `Connection: close`). It sends `Cache-Control: no-store`, answers `GET` and `HEAD` (`405` otherwise), and never includes numbers in the body. It runs before global middleware, the router, domain routing and your instrumentation, so it needs no credentials and answers on any host.
+- **`liveness()`** from `gemi/server` returns `{ healthy, shuttingDown, lagMs, consecutiveBreaches }`, with new type `Liveness`.
+- In production the server samples event-loop lag every `GEMI_HEALTH_INTERVAL_MS` (500). `GEMI_HEALTH_BREACHES` (3) samples in a row over `GEMI_HEALTH_MAX_LAG_MS` (1000) make it degraded, and the first sample under the threshold makes it healthy again. One log line is written per change of verdict. No sampler runs in development.
+- `GEMI_HEALTH_PATH` sets the path or paths (comma-separated) or turns the route off (`off`). A path without a leading `/` fails the boot.
+
+Behaviour changes:
+
+- **`/__gemi__/health` is now answered by gemi**, ahead of the app. An app route at that exact path (unlikely) is no longer reached. Set `GEMI_HEALTH_PATH` to move gemi's route, or `off`.
+- A path listed in `GEMI_HEALTH_PATH` takes precedence over an app route on the same path. Nothing changes unless you set it.
+
+To adopt: point the platform's health check at `/__gemi__/health` (Azure App Service `health_check_path`, Front Door probe path, Kubernetes `livenessProbe`/`readinessProbe`, Fly `http_service.checks`), or set `GEMI_HEALTH_PATH` to the path the platform already probes and delete the app's own health route. With a probe in place, set `GEMI_SHUTDOWN_DELAY` to the probe interval times its failure threshold so a draining instance is pulled before its listener closes.
+
+## Agents: start a turn from server code, `AgentController.startTurn` (#839)
+
+**New, nothing to migrate.** A queue job, a command or an MCP tool can start an agent turn on a thread, as a given user, with no browser request. It runs through the controller like a `useChat` turn and is stored on the thread like one. See [AI Server Turns](docs/ai-server-turns.md).
+
+- **`ChatController.startTurn({ threadId, text | turn, user, body })`** (static, on your concrete controller class). `body` is typed as the controller's `Body`. It answers an `AgentTurn` once the run has started: `runId`, `threadId`, `run` (the `AgentRun`), `stop()` and `result()`. `result()` is the run's `AgentRunResult` plus `threadId`, `text` (the last assistant message's text) and `pending` (the calls waiting for an answer when `finishReason` is `"awaiting-input"`), and settles after the transcript is stored and the hooks ran.
+- The turn runs in a request scope of its own whose user is `user`: `authorizeRequest` (`route: "stream"`), `resource`, `runOwner`, `maxConcurrentRuns`, the thread lock, `instructions()`, `context()`, the hooks and the tools' `ctx` see it as they see a chat turn. The route's middleware does not run.
+- A turn the route would refuse throws **`AgentTurnError`** (new export from `gemi/ai`) with `status`, `code` and `kind`. An error thrown by `authorizeRequest` is thrown as it is.
+- Approvals are not answered for you: they stay on the thread for the user, or the caller answers them with another `startTurn({ turn: { toolResults } })`.
+- New types from `gemi/ai`: `AgentTurn`, `AgentTurnParams`, `AgentTurnResult`.
+
 ## `RateLimiter.enforce`: consume, and refuse with a 429 (#882)
 
 **New, nothing to migrate.** `RateLimiter.enforce(key, { limit, window, cost }, message?)` (from `gemi/facades`, and on the `RateLimiter` service) consumes like `consume` and, over budget, throws `RateLimitExceededError`: the `rate-limit` middleware's 429, with `Retry-After` and `X-RateLimit-*` headers, recognised by `isRateLimitError`. `message` is a string or a function of the `RateLimitResult` (its `retryAfter` is in ms); the default is "Rate limit exceeded". Within budget it returns the result. It replaces the usual `if (!allowed) throw new RequestBreakerError(message, { status: 429 })`, which answered no `Retry-After`. See [Limiting outside of middleware](docs/middleware.md#limiting-outside-of-middleware).
