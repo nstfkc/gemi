@@ -20,10 +20,9 @@ function state(): ShutdownState {
  * True from the moment this server process has been told to stop — before it
  * stops accepting connections — until it exits.
  *
- * gemi has no health endpoint of its own, so taking an instance out of a load
- * balancer is the app's health route's job: answer it with a `503` while this
- * is true, and the platform's probe pulls the instance while the in-flight
- * requests are still draining. Every response sent in that window also carries
+ * gemi's built-in health route (`./health`) answers `503` while this is true,
+ * and so should an app's own health route, so the platform's probe pulls the
+ * instance while the in-flight requests are still draining. Every response sent in that window also carries
  * `Connection: close`, so a client that honours it opens its next request on a
  * new connection — one the load balancer can route elsewhere — instead of
  * reusing this one.

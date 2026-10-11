@@ -1,5 +1,21 @@
 # Unreleased
 
+## Server: a built-in health route and an event-loop liveness signal (#48)
+
+**New, one reserved path.** gemi now answers load-balancer health probes itself, and reports whether the process's event loop is stalling. See [Health checks](docs/configuration.md#health-checks).
+
+- **`/__gemi__/health`** answers `200 ok` while healthy, `503 degraded` while the event loop is stalling, and `503 shutting down` while draining (with `Connection: close`). It sends `Cache-Control: no-store`, answers `GET` and `HEAD` (`405` otherwise), and never includes numbers in the body. It runs before global middleware, the router, domain routing and your instrumentation, so it needs no credentials and answers on any host.
+- **`liveness()`** from `gemi/server` returns `{ healthy, shuttingDown, lagMs, consecutiveBreaches }`, with new type `Liveness`.
+- In production the server samples event-loop lag every `GEMI_HEALTH_INTERVAL_MS` (500). `GEMI_HEALTH_BREACHES` (3) samples in a row over `GEMI_HEALTH_MAX_LAG_MS` (1000) make it degraded, and the first sample under the threshold makes it healthy again. One log line is written per change of verdict. No sampler runs in development.
+- `GEMI_HEALTH_PATH` sets the path or paths (comma-separated) or turns the route off (`off`). A path without a leading `/` fails the boot.
+
+Behaviour changes:
+
+- **`/__gemi__/health` is now answered by gemi**, ahead of the app. An app route at that exact path (unlikely) is no longer reached. Set `GEMI_HEALTH_PATH` to move gemi's route, or `off`.
+- A path listed in `GEMI_HEALTH_PATH` takes precedence over an app route on the same path. Nothing changes unless you set it.
+
+To adopt: point the platform's health check at `/__gemi__/health` (Azure App Service `health_check_path`, Front Door probe path, Kubernetes `livenessProbe`/`readinessProbe`, Fly `http_service.checks`), or set `GEMI_HEALTH_PATH` to the path the platform already probes and delete the app's own health route. With a probe in place, set `GEMI_SHUTDOWN_DELAY` to the probe interval times its failure threshold so a draining instance is pulled before its listener closes.
+
 ## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
 
 **New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).

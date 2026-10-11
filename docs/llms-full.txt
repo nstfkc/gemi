@@ -1196,24 +1196,24 @@ The defaults add up to 25 seconds, under the 30 that Kubernetes, Azure Container
 
 ### Taking the instance out of rotation
 
-gemi has no health endpoint of its own, so "unhealthy" is whatever your health route says. Answer `503` while the server is draining:
+Point your platform's health probe at gemi's [built-in health route](#health-checks), `/__gemi__/health`. It answers `503` from step 1 on, so the load balancer stops routing to the instance while the in-flight requests drain. Then set `GEMI_SHUTDOWN_DELAY` to at least your probe's interval times its failure threshold, and keep it inside `GEMI_SHUTDOWN_TIMEOUT`. Leave it at `0` where no probe watches the instance.
+
+An app that wrote its own health route can keep it. To answer `503` while draining, check `isShuttingDown()` from `gemi/server`, or `liveness().healthy`, which also covers a stalled event loop:
 
 ```typescript
 import { ApiRouter } from "gemi/http";
-import { isShuttingDown } from "gemi/server";
+import { liveness } from "gemi/server";
 
 export default class extends ApiRouter {
   routes = {
     "/health": this.get(() =>
-      isShuttingDown()
-        ? new Response(JSON.stringify({ status: "draining" }), { status: 503 })
-        : { status: "ok" },
+      liveness().healthy
+        ? { status: "ok" }
+        : new Response(JSON.stringify({ status: "unavailable" }), { status: 503 }),
     ),
   };
 }
 ```
-
-Then set `GEMI_SHUTDOWN_DELAY` to at least your probe's interval times its failure threshold, and keep it inside `GEMI_SHUTDOWN_TIMEOUT`. Leave it at `0` where no probe watches the instance.
 
 ### Cleaning up in a provider
 
@@ -1250,6 +1250,42 @@ process.on("SIGTERM", async () => {
 ```
 
 `gemi dev` installs no listener: `bun --hot` re-runs the server on every change, and a Ctrl+C in development stops at once.
+
+## Health checks
+
+gemi answers a load balancer's health probe itself, at `/__gemi__/health`, in production and in development:
+
+| Status | Body | When |
+| --- | --- | --- |
+| `200` | `ok` | The process is serving. |
+| `503` | `degraded` | The event loop has been stalling (production only, see below). |
+| `503` | `shutting down` | The server is [draining](#graceful-shutdown). The response also carries `Connection: close`. |
+
+The status code is what a probe should check. The body is a single word and never includes a number, because the route is unauthenticated and live load figures would let anyone measure an instance as it degrades. The numbers go to the server log instead, as one line each time the verdict changes:
+
+```text
+[gemi] Health: degraded (event-loop lag 1840ms, 3 samples in a row over 1000ms).
+[gemi] Health: recovered (event-loop lag 4ms).
+```
+
+The route answers `GET` and `HEAD` (`405` for anything else) with `Cache-Control: no-store`. It is handled before your global middleware, the router, [domain routing](./domains.md) and your instrumentation, so it needs no credentials, answers on any host the probe uses (the server's IP address included), and probes don't show up in your traces.
+
+**What "degraded" means.** In production the server checks every `GEMI_HEALTH_INTERVAL_MS` how late its timer fired, which is how long the event loop was blocked. A sample later than `GEMI_HEALTH_MAX_LAG_MS` is a breach, and `GEMI_HEALTH_BREACHES` breaches in a row make the instance degraded, so a single garbage-collection pause doesn't take it out of rotation. The first sample under the threshold makes it healthy again. The check deliberately ignores the database and every other dependency: if a shared database has a blip, a check that included it would report every instance unhealthy at once, leaving the load balancer nowhere to send traffic. In development no sampler runs, because Vite compiles and `bun --hot` reloads block the loop as a matter of course, so the route answers `503` only while shutting down.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `GEMI_HEALTH_PATH` | `/__gemi__/health` | The path or paths the route answers on, comma-separated (`/health,/healthz`). It replaces the default and takes precedence over an app route on the same path. `off` turns the route off. A path that doesn't start with `/` fails the boot. |
+| `GEMI_HEALTH_INTERVAL_MS` | `500` | How often the event loop is sampled. |
+| `GEMI_HEALTH_MAX_LAG_MS` | `1000` | A sample later than this is a breach. |
+| `GEMI_HEALTH_BREACHES` | `3` | Breaches in a row before the instance is degraded. |
+
+The same verdict is available in code, for your own route, logs or metrics:
+
+```typescript
+import { liveness } from "gemi/server";
+
+const { healthy, shuttingDown, lagMs, consecutiveBreaches } = liveness();
+```
 
 ## `app/preload.ts`
 
@@ -2114,8 +2150,10 @@ under 16 characters or unset.
 4. Whatever is left gets a `404` with the body `Unknown host`. The same happens to a subdomain of `root` that nothing matches: `a.b.example.com`, or an `exists` that said no.
 
 > **Note:** with `route.domains` declared, **every** request needs a known host, including a load
-> balancer's health check sent to the server's IP address. Point health checks at the root host,
-> or answer them from a global middleware, which runs before host matching.
+> balancer's health check sent to the server's IP address. gemi's [built-in health
+> route](./configuration.md#health-checks), `/__gemi__/health`, is answered before host matching,
+> so point probes at it. For your own health route, use the root host or answer it from a global
+> middleware, which also runs before host matching.
 
 ## Reading the domain in a handler
 
