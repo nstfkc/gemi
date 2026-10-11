@@ -310,6 +310,9 @@ export type {
   ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,
+  UploadCheckFile,
+  UploadContext,
+  UploadRefusal,
   UploadResult,
 } from "./AgentController";
 

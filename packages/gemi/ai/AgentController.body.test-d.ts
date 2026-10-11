@@ -6,6 +6,8 @@ import {
   AgentController,
   type AgentRouteRPC,
   type AuthorizeRequestParams,
+  type UploadCheckFile,
+  type UploadContext,
 } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
@@ -283,5 +285,49 @@ describe("the body in attachmentScope and authorizeRequest", () => {
       }
     }
     expectTypeOf<Old>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+  });
+});
+
+/**
+ * #836. `checkUpload` and `attachmentDestination` get the upload's body, typed
+ * as the controller's `Body`, and two-argument `attachmentDestination`
+ * overrides keep compiling.
+ */
+describe("the body in checkUpload and attachmentDestination", () => {
+  test("checkUpload gets the file and a typed body, and may refuse", () => {
+    class Quota extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected async checkUpload(
+        file: UploadCheckFile,
+        _req: HttpRequest<any, any>,
+        { body, threadId }: UploadContext<PageBody>,
+      ) {
+        expectTypeOf(body.pageId).toEqualTypeOf<string>();
+        expectTypeOf(threadId).toEqualTypeOf<string | undefined>();
+        if (file.size > 10) return { code: "storage_full", message: "Full." };
+      }
+    }
+    expectTypeOf<Quota>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+  });
+
+  test("attachmentDestination's third argument is optional and typed", () => {
+    class WithBody extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected attachmentDestination(
+        _file: File,
+        _req: HttpRequest<any, any>,
+        extra?: UploadContext<PageBody>,
+      ) {
+        return extra?.body.pageId ? ("storage" as const) : ("both" as const);
+      }
+    }
+    class TwoArgs extends AgentController<typeof pageAgent, PageBody> {
+      agent = pageAgent;
+      protected attachmentDestination(file: File, _req: HttpRequest<any, any>) {
+        return file.type.startsWith("image/") ? ("both" as const) : ("storage" as const);
+      }
+    }
+    expectTypeOf<WithBody>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
+    expectTypeOf<TwoArgs>().toMatchTypeOf<AgentController<typeof pageAgent, PageBody>>();
   });
 });
