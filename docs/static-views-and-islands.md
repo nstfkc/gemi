@@ -314,6 +314,9 @@ runtime instead of the loader. Allow it with `STATIC_NAVIGATION_CSP_HASH`,
 also from `gemi/services`; the runtime fetches pages from your own origin, so
 `connect-src` needs `'self'`.
 
+A [document script](#document-script) is allowed by its own hash,
+`await documentScriptCspHash(name)`.
+
 ### Testing
 
 Add the island transform to `vitest.config.ts`, next to the request plugin, so
@@ -355,7 +358,9 @@ test("the menu's links stay on the page", async () => {
 `back()` goes back a history entry, `requests` lists every fetch (prefetches
 included) and `fullLoads` every full load the runtime asked for. Pass the
 island modules by their entry URL in `islands` to hydrate them too; they
-hydrate asynchronously, so wrap what follows in `act`.
+hydrate asynchronously, so wrap what follows in `act`. Pass
+`documentScript: true` to run the page's [document script](#document-script)
+once before the runtime starts, as a browser does.
 
 ## Client-side navigation
 
@@ -392,7 +397,7 @@ in instead of loading it:
   CDN or a log can tell the two apart. Redirects are followed; the address bar
   shows where they end.
 - **When it's a full load instead.** Each navigable page carries
-  `<meta name="gemi-static" content="<layout>|<build>|<version>">`. The next page
+  `<meta name="gemi-static" content="<layout>|<build>|<script>|<version>">`. The next page
   is swapped in only when its marker and its document-level stylesheets are the
   same as the current page's: the `<style>`s and `<link rel="stylesheet">`s in
   the head and directly in `<body>`, and every `<link rel="stylesheet">`
@@ -414,7 +419,7 @@ in instead of loading it:
   unmounted, so their effects clean up (a menu's scroll lock, say); the new
   page's islands hydrate on their own `load` schedule, with eager islands'
   `modulepreload`s added to the head. Inline `<script>`s in the new body don't
-  run; use the events below.
+  run; use the events below, or a [document script](#document-script).
 - **History and scroll.** Each navigation is a history entry. Back and forward
   swap the entry's page back in (from the cache below when it's fresh) and
   restore its scroll position. A new page starts at the top, or at the link's
@@ -475,6 +480,79 @@ export default function Analytics() {
   return null;
 }
 ```
+
+## Document script
+
+Some code belongs to the document rather than to a component: a delegated
+listener on `document` that counts link clicks, say. It should run once when
+the browser loads the page, keep working when `navigation` swaps the next page
+in, never run a second time, and be allowed by a strict CSP. A static view's
+`script` is that:
+
+```typescript
+// app/views/site/clicks.script.ts — plain browser TypeScript, imports allowed
+import { send } from "./beacon";
+
+document.addEventListener(
+  "click",
+  (event) => {
+    const link = (event.target as Element).closest("a[href]");
+    if (link) send((link as HTMLAnchorElement).href);
+  },
+  { capture: true },
+);
+```
+
+```typescript
+this.view("site/PublishedSite", [PublishedSiteController, "show"]).static({
+  layout: "site/SiteLayout",
+  navigation: { version: (req) => publicationIdFor(req) },
+  script: "site/clicks",
+});
+```
+
+- **The file.** `script: "site/clicks"` is `app/views/site/clicks.script.ts`
+  (or `.js`), a path under `app/views` as `layout` is. The `.script` suffix
+  keeps the file out of the views, which are `.tsx`.
+- **Bundled.** `gemi build` bundles every `app/views/**/*.script.{ts,js}` for the
+  browser, with its imports inlined, minified and wrapped in a function so
+  nothing leaks into the page's scope. The result goes into
+  `dist/server/document-scripts.json`, which `gemi start` reads. In dev, and in
+  tests through `app.fetch`, the file is bundled from source on each render, so
+  an edit shows on the next load. A file that doesn't bundle fails the build. So
+  does output containing `</script` or `<!--`, which would end the inline
+  element: write `"<\/script>"`.
+- **In the document.** It's inlined once, as
+  `<script type="module" data-gemi-script="site/clicks">`, at the end of the
+  `<head>`. A module script runs once, after the page has been parsed and
+  before the navigation runtime, so it sees the first `gemi:page-load`.
+- **Across navigation.** The script's name is part of the page's
+  `gemi-static` marker. A page is swapped in only when it needs the script
+  that is already running, and the swap never touches the head's scripts, so
+  the script doesn't run again. A link to a page with another script, or with
+  none, is a full page load. To act on each page, listen for `gemi:page-load`.
+- **Per request.** `script` can be a function, `(req) => name | null` (or a
+  promise of one), called after the handler, as `version` is. `null` or
+  `undefined` means no script.
+
+  ```typescript
+  script: (req) => (siteFor(req).analytics ? "site/clicks" : null),
+  ```
+
+- **CSP.** `documentScriptCspHash(name)` from `gemi/services` resolves to
+  `'sha256-…'` of exactly the inlined text, for `script-src`:
+
+  ```typescript
+  import { STATIC_NAVIGATION_CSP_HASH, documentScriptCspHash } from "gemi/services";
+
+  const policy = `script-src 'self' ${STATIC_NAVIGATION_CSP_HASH} ${await documentScriptCspHash("site/clicks")}`;
+  ```
+
+  The page is one cacheable body for every visitor, so the script is allowed by
+  hash, not by a per-request nonce. In dev the hash follows the source.
+- A name with no file fails the render with an error that names the file it
+  looked for. The option has no effect on hydrated views, which have
+  `useEffect`.
 
 ## How much it ships
 

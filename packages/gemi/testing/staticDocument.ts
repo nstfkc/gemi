@@ -34,6 +34,12 @@ export interface StaticDocumentOptions {
    * with React, as `<module>?gemi-island` would.
    */
   islands?: Record<string, Record<string, unknown>>;
+  /**
+   * Run the page's document script (`.static({ script })`) once, before the
+   * runtime starts, as the browser would. Off by default. Scripts of pages
+   * swapped in later never run, as in the browser.
+   */
+  documentScript?: boolean;
 }
 
 /** How a navigation ended. */
@@ -81,8 +87,8 @@ const hydrate = new Function(
  * page.dispose();
  * ```
  *
- * The document's own scripts do not run (the helper runs the runtime itself),
- * and a link the runtime leaves alone is not followed. Islands hydrate
+ * The document's own scripts do not run (the helper runs the runtime itself,
+ * and the document script with `documentScript: true`), and a link the runtime leaves alone is not followed. Islands hydrate
  * asynchronously, as in a browser: wrap what follows in `act`, or wait for it.
  */
 export function renderStaticDocument(
@@ -104,6 +110,9 @@ export function renderStaticDocument(
 
   history.replaceState(null, "", options.url ?? "/");
   const parsed = new DOMParser().parseFromString(html, "text/html");
+  const documentScript = options.documentScript
+    ? parsed.querySelector("head > script[data-gemi-script]")?.textContent
+    : undefined;
   for (const script of Array.from(parsed.querySelectorAll("script"))) {
     if (!/json/.test(script.type)) script.remove();
   }
@@ -180,6 +189,9 @@ export function renderStaticDocument(
   window.scrollTo = () => {};
   const scrollIntoView = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = function () {};
+
+  // A head module script runs before the runtime at the end of the body.
+  if (documentScript) new Function(documentScript)();
 
   const source = STATIC_NAVIGATION_SOURCE.replace("import(", "__import(");
   new Function("__import", "location", "fetch", source)(importIsland, location, fetch);

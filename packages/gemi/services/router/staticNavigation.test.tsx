@@ -140,7 +140,7 @@ describe(".static({ navigation })", () => {
     const html = await fetchHtml("/nav");
     const head = html.match(/<head>(.*?)<\/head>/s)![1]!;
 
-    expect(head).toContain('<meta name="gemi-static" content="site/Layout|build-1|"/>');
+    expect(head).toContain('<meta name="gemi-static" content="site/Layout|build-1||"/>');
     expect(scripts(html)).toEqual([STATIC_NAVIGATION_SOURCE]);
     expect(html).not.toContain(`id="gemi-islands"`);
     expect(html).not.toContain('rel="modulepreload"');
@@ -154,23 +154,23 @@ describe(".static({ navigation })", () => {
 
     expect(versions).toBe(before + 1);
     expect(html).toContain(
-      '<meta name="gemi-static" content="site/Layout|build-1|pub-7|&quot;&lt;x>&quot;" data-prefetch="none"/>',
+      '<meta name="gemi-static" content="site/Layout|build-1||pub-7|&quot;&lt;x>&quot;" data-prefetch="none"/>',
     );
   });
 
   test("islands come with their table, preloads and the runtime in place of the loader", async () => {
     const html = await fetchHtml("/menu");
 
-    expect(html).toContain('<meta name="gemi-static" content="|build-1|"/>');
+    expect(html).toContain('<meta name="gemi-static" content="|build-1||"/>');
     expect(html).toContain('<link rel="modulepreload" href="/assets/NavMenu.js"/>');
     expect(html).toContain('<script type="application/json" id="gemi-islands">');
     expect(scripts(html)).toEqual([STATIC_NAVIGATION_SOURCE]);
     expect(html).not.toContain(ISLAND_LOADER_SOURCE);
   });
 
-  test("without a build id (a test's render params) the identity still has its three parts", async () => {
+  test("without a build id (a test's render params) the identity still has its four parts", async () => {
     const html = await fetchHtml("/nav", { buildId: undefined });
-    expect(html).toContain('content="site/Layout||"');
+    expect(html).toContain('content="site/Layout|||"');
   });
 });
 

@@ -658,3 +658,53 @@ describe("prefetch", () => {
     expect(handle.requests).toEqual([]);
   });
 });
+
+describe("a document script (#919)", () => {
+  // What `.static({ script })` puts at the end of the head: counts its runs,
+  // and the clicks its one delegated listener sees.
+  const script = () =>
+    `<script type="module" data-gemi-script="site/clicks">` +
+    `window.__runs=(window.__runs||0)+1;` +
+    `document.addEventListener("click",()=>{window.__clicks=(window.__clicks||0)+1},{capture:true});` +
+    `</script>`;
+  const IDENTITY = "site/Layout|b1|site/clicks|";
+  const withScript = (title: string, body: string) =>
+    page({ title, body, identity: IDENTITY, head: script() });
+
+  afterEach(() => {
+    delete (window as any).__runs;
+    delete (window as any).__clicks;
+  });
+
+  test("runs once, and keeps running across swaps without running again", async () => {
+    const b = await withScript("B", nav('<a href="/a">a</a>'));
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>'), identity: IDENTITY, head: script() },
+      { documentScript: true, pages: { "/b": b, "/a": await withScript("A", nav('<a href="/b">b</a>')) } },
+    );
+    expect((window as any).__runs).toBe(1);
+
+    expect((await doc.navigate("/b")).kind).toBe("swap");
+    expect((await doc.navigate("/a")).kind).toBe("swap");
+
+    expect((window as any).__runs).toBe(1);
+    expect((window as any).__clicks).toBe(2);
+  });
+
+  test("a page without it (another identity) is a full load, not a swap", async () => {
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>'), identity: IDENTITY, head: script() },
+      {
+        documentScript: true,
+        pages: { "/b": await page({ title: "B", body: "<main>B</main>", identity: "site/Layout|b1||" }) },
+      },
+    );
+
+    expect(await doc.navigate("/b")).toEqual({ kind: "full-load", url: `${ORIGIN}/b` });
+  });
+
+  test("does not run unless asked", async () => {
+    await start({ title: "A", body: "<main>A</main>", head: script() });
+    expect((window as any).__runs).toBeUndefined();
+  });
+});

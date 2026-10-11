@@ -8,6 +8,7 @@ import {
 import { htmlSafeJson } from "./streamQueryInjection";
 import { ISLAND_LOADER_SOURCE } from "../../internal/islandRuntime";
 import { STATIC_NAVIGATION_SOURCE } from "../../internal/staticNavigationRuntime";
+import { DOCUMENT_SCRIPT_ATTRIBUTE } from "./documentScript";
 
 export { ISLAND_LOADER_SOURCE, STATIC_NAVIGATION_SOURCE };
 
@@ -80,6 +81,12 @@ export interface StaticNavigationMarker {
   prefetch: "intent" | "none";
 }
 
+/** A document script to inline: its name and bundled source (#919). */
+export interface DocumentScript {
+  name: string;
+  source: string;
+}
+
 /**
  * Adds the client runtime to a settled static document.
  *
@@ -94,6 +101,11 @@ export interface StaticNavigationMarker {
  *
  * Without a resolver (a test rendering through `app.fetch`), no island table
  * is injected and nothing is logged.
+ *
+ * A `script` (`.static({ script })`) is inlined at the end of the head as a
+ * module script, whatever else the page has. The navigation runtime leaves
+ * the head's scripts alone when it swaps a page in, so it runs once per
+ * document.
  */
 export function injectIslands(
   html: string,
@@ -101,6 +113,7 @@ export function injectIslands(
   resolveIsland: IslandResolver | undefined,
   dev: boolean,
   navigation?: StaticNavigationMarker,
+  script?: DocumentScript,
 ): string {
   const preloads = new Set<string>();
   let entries: ({ s: string; e: string; l: string } | null)[] = [];
@@ -123,9 +136,13 @@ export function injectIslands(
     });
   }
   const hasIslands = entries.some((entry) => entry !== null);
+  // The source's text is exactly what `documentScriptCspHash` hashes.
+  const documentScript = script
+    ? `<script type="module" ${DOCUMENT_SCRIPT_ATTRIBUTE}="${attr(script.name)}">${script.source}</script>`
+    : "";
 
   if (!hasIslands && !navigation) {
-    return html;
+    return insertBefore(html, "</head>", documentScript, false);
   }
 
   const identity = navigation
@@ -135,7 +152,8 @@ export function injectIslands(
     : "";
   const head =
     identity +
-    [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("");
+    [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("") +
+    documentScript;
   const source = navigation ? STATIC_NAVIGATION_SOURCE : ISLAND_LOADER_SOURCE;
   const body =
     (hasIslands

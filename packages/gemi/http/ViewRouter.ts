@@ -338,6 +338,27 @@ export interface StaticViewOptions {
    * `true` is `{}`: the defaults below.
    */
   navigation?: boolean | StaticNavigationOptions;
+  /**
+   * A document script (#919): a small browser script, inlined once in the
+   * page's `<head>`, that runs once per document and keeps running across
+   * `navigation` swaps — a delegated listener on `document`, say.
+   *
+   * The name is a path under `app/views` without the suffix: `"site/clicks"`
+   * is `app/views/site/clicks.script.ts` (or `.js`). It is bundled (imports
+   * included) and minified by `gemi build`, and from source in dev. Allow it
+   * under a strict CSP with `documentScriptCspHash(name)` from
+   * `gemi/services`.
+   *
+   * A function picks it per request, after the handler; `null` or
+   * `undefined` means none. The name is part of the page's navigation
+   * identity, so a swap only happens between pages with the same script (or
+   * none), and the script never runs twice in one document.
+   */
+  script?:
+    | string
+    | ((
+        req: HttpRequest<any, any>,
+      ) => string | null | undefined | Promise<string | null | undefined>);
 }
 
 /** `.static({ navigation: { … } })`. */
