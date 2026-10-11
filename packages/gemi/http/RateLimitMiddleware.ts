@@ -1,37 +1,11 @@
 import { app } from "../foundation/app";
 import { RateLimiter } from "../services/rate-limiter/RateLimiter";
-import type { RateLimitResult } from "../services/rate-limiter/types";
-import { refusal, RequestBreakerError } from "./Error";
+import { RateLimitExceededError, rateLimitHeaders } from "./RateLimitExceededError";
 import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { dispatchedClientAddress, dispatchedGrant } from "./modelOriginated";
 
-export class RateLimitExceededError extends RequestBreakerError {
-  constructor(result?: RateLimitResult) {
-    super("Rate limit exceeded");
-    const headers = {
-      "Content-Type": "application/json",
-      ...(result ? rateLimitHeaders(result) : {}),
-    };
-
-    this.payload = {
-      api: {
-        status: 429,
-        data: {
-          error: refusal("rate_limit", "Rate limit exceeded", 429),
-        },
-        headers,
-      },
-      view: {
-        error: {
-          message: "Rate limit exceeded",
-        },
-        status: 429,
-        headers,
-      },
-    };
-  }
-}
+export { RateLimitExceededError };
 
 export interface RateLimitMiddlewareConfig {
   /** Requests allowed per window. The DSL parameter wins over this. */
@@ -178,24 +152,6 @@ export function clientIp(req: HttpRequest) {
   }
 
   return req.headers.get("x-real-ip")?.trim() || "unknown";
-}
-
-function rateLimitHeaders(result: RateLimitResult): Record<string, string> {
-  const headers: Record<string, string> = {
-    "X-RateLimit-Limit": String(result.limit),
-    "X-RateLimit-Remaining": String(result.remaining),
-    "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1000)),
-  };
-
-  if (!result.allowed) {
-    // Seconds, and never `0` — a `Retry-After: 0` invites an immediate retry
-    // that is certain to be rejected again.
-    headers["Retry-After"] = String(
-      Math.max(1, Math.ceil(result.retryAfter / 1000)),
-    );
-  }
-
-  return headers;
 }
 
 function toPositiveNumber(value: string | number | undefined) {

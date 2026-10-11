@@ -67,7 +67,7 @@ export {
 } from "./rate-limiter/drivers/RedisRateLimiterDriver";
 export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";
 export type { ConsumeParams, RateLimitResult } from "./rate-limiter/types";
-export type { ConsumeOptions } from "./rate-limiter/RateLimiter";
+export type { ConsumeOptions, RateLimitMessage } from "./rate-limiter/RateLimiter";
 
 // Email
 export { MailServiceProvider } from "./email/MailServiceProvider";

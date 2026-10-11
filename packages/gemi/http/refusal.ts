@@ -30,7 +30,7 @@ export type RefusalKind =
   | "not_found"
   /** A `Range` the object cannot satisfy (416). */
   | "range_not_satisfiable"
-  /** `RateLimitMiddleware` refused the request (429). */
+  /** `RateLimitMiddleware` or `RateLimiter.enforce` refused the request (429). */
   | "rate_limit"
   /** An unhandled exception (500). */
   | "server_error"
@@ -44,6 +44,11 @@ export type Refusal<K extends RefusalKind = Exclude<RefusalKind, "validation_err
   kind: K;
   message: string;
   status: number;
+  /**
+   * `rate_limit` only: milliseconds until a retry can succeed, when the
+   * limiter knew (the `rate-limit` middleware, `RateLimiter.enforce`).
+   */
+  retryAfter?: number;
 };
 
 /**
