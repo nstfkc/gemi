@@ -22,6 +22,7 @@ let loaded: typeof mutationExtras.current;
 beforeEach(async () => {
   loaded = mutationExtras.current ?? (await loadLazy(mutationExtras));
   mutationExtras.current = null;
+  mutationExtras.loading = null;
 });
 
 afterEach(() => {
@@ -29,6 +30,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   mutationExtras.current = loaded;
+  mutationExtras.loading = null;
 });
 
 function Providers(props: PropsWithChildren) {
@@ -144,4 +146,52 @@ test("useSetQueryData: a write made before they arrive lands once they have, in 
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   expect(screen.getByText("[1,2,3]")).toBeDefined();
+});
+
+test("callers while it loads share one load", async () => {
+  const load = vi.spyOn(mutationExtras, "load");
+  renderHook(() => {
+    useMutation("POST" as never, "/posts" as never);
+    useSetQueryData();
+  });
+  await act(() => Promise.all([loadLazy(mutationExtras), loadLazy(mutationExtras)]));
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+test("a request superseded while it waits for them writes nothing", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  vi.spyOn(mutationExtras, "load").mockImplementation(async () => {
+    await gate;
+    return loaded!;
+  });
+  const answers = [[1, 2], [9]];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      const body = answers.shift();
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }),
+  );
+  const onSuccess = vi.fn();
+  let save!: () => Promise<unknown>;
+  function View() {
+    const { data } = useQuery("/todos" as never, {} as never, { suspense: false } as never);
+    const mutation = useMutation("POST" as never, "/todos" as never, {} as never, {
+      updates: [{ path: "/todos" }],
+      onSuccess,
+    } as never);
+    save = () => mutation.trigger();
+    return <p>{JSON.stringify(data)}</p>;
+  }
+  render(<View />, { wrapper: Providers });
+  await act(async () => {
+    const first = save();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = save();
+    release();
+    await Promise.all([first, second]);
+  });
+  expect(onSuccess.mock.calls).toEqual([[[9]]]);
+  expect(screen.getByText("[9]")).toBeDefined();
 });

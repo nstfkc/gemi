@@ -24,14 +24,25 @@ export function loadedModule<T>(module: T | undefined): T {
 export interface LazyModule<M> {
   current: M | null;
   load: () => Promise<M | undefined>;
+  /** The load in flight, shared by every caller until it settles. */
+  loading?: Promise<M> | null;
 }
 
 /**
- * The module, loading it if it is not there yet. A failed load is not kept:
+ * The module, loading it if it is not there yet. Callers while it loads share
+ * one load, so their callbacks run in call order. A failed load is not kept:
  * the next call runs `import()` again.
  */
 export function loadLazy<M>(lazy: LazyModule<M>): Promise<M> {
-  return lazy.current
-    ? Promise.resolve(lazy.current)
-    : lazy.load().then((module) => (lazy.current = loadedModule(module)));
+  if (lazy.current) return Promise.resolve(lazy.current);
+  return (lazy.loading ??= lazy.load().then(
+    (module) => {
+      lazy.loading = null;
+      return (lazy.current = loadedModule(module));
+    },
+    (error: unknown) => {
+      lazy.loading = null;
+      throw error;
+    },
+  ));
 }

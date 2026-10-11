@@ -291,6 +291,9 @@ export function useMutation<
       const error = response.ok
         ? null
         : await withErrorHelpers<MutationError | E>(mutationErrorFromBody(data, response.status));
+      // Loaded before the check below, so a request superseded while it waits
+      // for the module writes nothing.
+      const extras = response.ok && options.updates ? await loadOrNull() : null;
 
       // A superseded request has nothing left to say: a newer submit is what
       // the user is waiting on, and its state is the state on screen.
@@ -313,9 +316,7 @@ export function useMutation<
       }
 
       clearPrefetchCache?.();
-      if (options.updates) {
-        (await loadOrNull())?.applyQueryUpdates(getResource, _params, options.updates, data);
-      }
+      extras?.applyQueryUpdates(getResource, _params, options.updates, data);
       options.onSuccess(data);
       call.onSuccess?.(data);
 
