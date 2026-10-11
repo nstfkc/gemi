@@ -44,6 +44,20 @@ mutate(
 );
 ```
 
+**When the mutation answers with the data, write the answer.** If the response
+is (or contains) what another query holds, pass `updates` to the mutation hook:
+the answer is written into that query before `onSuccess`, with no refetch at
+all. `useSetQueryData()` does the same by hand.
+
+```tsx
+const move = usePost("/pages/:pageId/assets/move", { params: { pageId } }, {
+  updates: [{ path: "/pages/:pageId/assets", params: { pageId } }],
+});
+const create = usePost("/todos", {}, {
+  updates: [{ path: "/todos", data: (created, todos) => [...todos, created] }],
+});
+```
+
 **Refetch, don't guess, when the server derives the value.** If a write changes
 counts, totals, credit balances or anything else computed server-side, call
 `mutate()` with no callback — it refetches without an optimistic write, which is
