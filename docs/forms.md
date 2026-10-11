@@ -198,9 +198,17 @@ import { Form, isPermissionError, isValidationError } from "gemi/client";
 </Form>;
 ```
 
+To show the failure in words, `error.list(fallback)` gives its messages as a list
+(a validation error's, field by field, or the server's message, else `fallback`), and
+`error.field(name)` gives one field's validation messages:
+
+```tsx
+<Form action="/todos" onError={(error) => toast(error.list("Could not save.")[0])}>
+```
+
 `onError` also receives the route's typed errors, the bodies its handler answers
 with `HttpResponse.error` / `httpError`. The error types, the full list of guards,
-`isHttpError` and `mutationErrorKind` are in [Data Fetching](./data-fetching.md#errors).
+`isHttpError`, `mutationErrorKind` and the helpers are in [Data Fetching](./data-fetching.md#errors).
 
 ### `FormFieldContainer`
 

@@ -54,6 +54,8 @@ export {
   isNetworkError,
   isHttpError,
   mutationErrorKind,
+  mutationErrorList,
+  mutationErrorField,
 } from "./MutationError";
 export type {
   MutationError,
@@ -65,6 +67,8 @@ export type {
   MutationRefusalKind,
   MutationMessageError,
   HttpErrorWithStatus,
+  MutationErrorHelpers,
+  WithMutationErrorHelpers,
 } from "./MutationError";
 export type { RefusalKind } from "../http/refusal";
 export {
