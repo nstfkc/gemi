@@ -21,6 +21,11 @@ import type { VoiceBridgeParams, VoiceDelegate } from "./VoiceBridge";
  *   };
  * }
  * ```
+ *
+ * `start` must enforce the abuse limits: gemi has no per-user concurrency cap
+ * or rate limit for voice.
+ *
+ * @experimental Not yet verified against a live Azure or OpenAI call.
  */
 export type VoiceConfig<Body extends object = Record<string, unknown>> = {
   /** A provider's realtime client, e.g. `AzureOpenAIProvider.model("gpt-realtime-mini").realtime`. */

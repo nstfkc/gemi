@@ -73,6 +73,7 @@ import type { Schema } from "./Schema";
 import { RealtimeRequestError, type RealtimeSession } from "./providers/realtime";
 import type { VoiceConfig } from "./voiceConfig";
 import { defaultVoiceStore, type VoiceSessionRecord, type VoiceSessionStore } from "./voiceStore";
+import { emptyUsage } from "./runtime";
 import { DEFAULT_DELEGATE_NAME, VoiceBridge, voiceTools } from "./VoiceBridge";
 import type { VoiceStartResponse } from "./voice/wire";
 import type {
@@ -2068,32 +2069,6 @@ export abstract class AgentController<
   }
 
   /**
-   * `POST /<path>/files` — takes an attachment and answers the handles for it.
-   *
-   * `fileId` IS STILL IN THE ANSWER AND STILL MEANS THE SAME THING: the
-   * provider's id for the file, the thing a `FilePart` carries, unchanged. It
-   * has to stay, because it is what makes vision work and what
-   * `useChat.uploadFile` already reads; `attachmentId` is added beside it rather
-   * than in place of it. The two are not interchangeable, and swapping them
-   * would reach the vendor as a file id it has never issued — so
-   * `toResponsesInput` rejects a `gemi_att_` prefix in `FilePart.fileId` with a
-   * sentence saying so, rather than leaving it to whatever the vendor answers
-   * (not measured).
-   *
-   * `fileId` is absent exactly when the file did not go to the provider, which
-   * only happens when the app or the client asked for that. `attachmentId` is
-   * absent when there was no scope to file the record under — see
-   * `attachmentScope` — and the answer then carries `downgraded: "no_scope"`,
-   * which is the only thing separating that case from a controller that chose
-   * `"provider"` on purpose. Both answer `destination: "provider"`, because both
-   * are true about where the bytes went.
-   *
-   * ORDER: storage first, then the provider. If the second one fails the request
-   * fails either way, so the only question is where the orphan is left, and an
-   * orphan in our own bucket is ours to sweep on a schedule we set, while an
-   * orphan at the vendor sits under a retention policy that is not ours.
-   */
-  /**
    * `POST /<voice route>` (#921): starts a voice call in front of this agent.
    *
    * Takes the browser's SDP offer (`sdp`), the chat's `threadId`, `pushToTalk`
@@ -2104,9 +2079,14 @@ export abstract class AgentController<
    * its sideband in this process. Answers the vendor's SDP answer and the
    * session's id.
    *
-   * A vendor failure answers 502 (429 when the vendor rate-limited us) with
-   * code `voice_unavailable`, after calling the session's `onEnd` with reason
-   * `start_failed`, so an app that charged in `start` can refund.
+   * Every failure after `start` has run calls the session's `onEnd` with
+   * reason `start_failed`, so an app that charged in `start` can refund: no
+   * thread (400), a refused thread (the `authorizeRequest` error), a vendor
+   * failure (502, or 429 when the vendor rate-limited us, code
+   * `voice_unavailable`), and a failure after the vendor call exists (500),
+   * which also hangs that call up.
+   *
+   * @experimental Not yet verified against a live Azure or OpenAI call.
    */
   async voiceStart(
     req: HttpRequest<any, any> = new HttpRequest(),
@@ -2134,16 +2114,56 @@ export abstract class AgentController<
       user,
       pushToTalk: pushToTalk === true,
     });
+    const startedAt = Date.now();
+    // From here on `start` has run, and may have charged: every way out that
+    // is not a running bridge calls `onEnd` with `start_failed` (so the charge
+    // can be refunded), and a vendor call that exists by then is hung up, so
+    // nothing is left running with nobody metering it.
+    let callId: string | undefined;
+    const failed = async (error: unknown): Promise<void> => {
+      if (error !== undefined) console.error("[gemi/ai] a voice session could not start.", error);
+      if (callId) {
+        await voice.realtime.hangup(callId).catch((hangupError) => {
+          console.error("[gemi/ai] a voice call that failed to start could not be hung up.", hangupError);
+        });
+      }
+      try {
+        await options.onEnd?.({
+          sessionId: "",
+          ...(callId ? { callId } : {}),
+          threadId: options.threadId ?? clientThreadId ?? "",
+          reason: "start_failed",
+          startedAt,
+          endedAt: Date.now(),
+          durationMs: 0,
+          seconds: 0,
+          usage: emptyUsage(),
+          transcription: { usage: emptyUsage(), seconds: 0 },
+          transcript: [],
+          requests: [],
+          errors: [],
+        });
+      } catch (onEndError) {
+        console.error("[gemi/ai] a voice session's onEnd threw.", onEndError);
+      }
+    };
+
     const threadId = options.threadId ?? clientThreadId;
     if (!threadId) {
+      await failed(undefined);
       return jsonResponse(400, {
         code: "invalid_request",
         message:
           "A voice session needs a thread: send `threadId`, or answer one from `voice.start`.",
       });
     }
-    if (threadId !== clientThreadId) {
-      await this.authorizeRequest(req, { route: "stream", threadId, body });
+    try {
+      if (threadId !== clientThreadId) {
+        await this.authorizeRequest(req, { route: "stream", threadId, body });
+      }
+    } catch (error) {
+      await failed(undefined);
+      throw error;
     }
 
     const session: RealtimeSession = {
@@ -2151,7 +2171,6 @@ export abstract class AgentController<
       tools: [...voiceTools(voice.delegate), ...(options.session?.tools ?? [])],
       ...(pushToTalk === true ? { turnDetection: null } : {}),
     };
-    const startedAt = Date.now();
     let call: { sdpAnswer: string; callId: string };
     try {
       call = await voice.realtime.createCall({
@@ -2160,61 +2179,53 @@ export abstract class AgentController<
         safetyIdentifier: options.safetyIdentifier,
       });
     } catch (error) {
-      console.error("[gemi/ai] a voice call could not be created.", error);
-      try {
-        await options.onEnd?.({
-          sessionId: "",
-          threadId,
-          reason: "start_failed",
-          startedAt,
-          endedAt: Date.now(),
-          durationMs: 0,
-          seconds: 0,
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-          transcript: [],
-          requests: [],
-          errors: [],
-        });
-      } catch {
-        // The answer is the same either way.
-      }
+      await failed(error);
       const limited = error instanceof RealtimeRequestError && error.code === "rate_limited";
       return jsonResponse(limited ? 429 : 502, {
         code: "voice_unavailable",
         message: "Voice isn't available right now.",
       });
     }
+    callId = call.callId;
 
-    const sessionId = crypto.randomUUID();
-    await this.voiceStore.create({
-      id: sessionId,
-      callId: call.callId,
-      threadId,
-      owner: await this.runOwner(req),
-      body: body as Record<string, unknown>,
-      startedAt,
-    });
-    const { threadId: _thread, session: _session, safetyIdentifier: _safety, ...hooks } = options;
-    const bridge = VoiceBridge.start<Body>({
-      ...hooks,
-      controller: this.constructor as unknown as VoiceBridgeController<Body>,
-      threadId,
-      user,
-      body,
-      call: { realtime: voice.realtime, callId: call.callId },
-      sessionId,
-      store: this.voiceStore,
-      liveRuns: this.liveRuns,
-      delegate: voice.delegate,
-      session,
-    });
-    return {
-      sessionId: bridge.sessionId,
-      sdp: call.sdpAnswer,
-      threadId,
-      delegate: voice.delegate?.name ?? DEFAULT_DELEGATE_NAME,
-      endsAt: startedAt + (options.limits?.maxDurationMs ?? 15 * 60_000),
-    };
+    try {
+      const sessionId = crypto.randomUUID();
+      await this.voiceStore.create({
+        id: sessionId,
+        callId: call.callId,
+        threadId,
+        owner: await this.runOwner(req),
+        body: body as Record<string, unknown>,
+        startedAt,
+      });
+      const { threadId: _thread, session: _session, safetyIdentifier: _safety, ...hooks } = options;
+      const bridge = VoiceBridge.start<Body>({
+        ...hooks,
+        controller: this.constructor as unknown as VoiceBridgeController<Body>,
+        threadId,
+        user,
+        body,
+        call: { realtime: voice.realtime, callId: call.callId },
+        sessionId,
+        store: this.voiceStore,
+        liveRuns: this.liveRuns,
+        delegate: voice.delegate,
+        session,
+      });
+      return {
+        sessionId: bridge.sessionId,
+        sdp: call.sdpAnswer,
+        threadId,
+        delegate: voice.delegate?.name ?? DEFAULT_DELEGATE_NAME,
+        endsAt: startedAt + (options.limits?.maxDurationMs ?? 15 * 60_000),
+      };
+    } catch (error) {
+      await failed(error);
+      return jsonResponse(500, {
+        code: "voice_unavailable",
+        message: "Voice isn't available right now.",
+      });
+    }
   }
 
   /**
@@ -2282,6 +2293,32 @@ export abstract class AgentController<
     return record;
   }
 
+  /**
+   * `POST /<path>/files` — takes an attachment and answers the handles for it.
+   *
+   * `fileId` IS STILL IN THE ANSWER AND STILL MEANS THE SAME THING: the
+   * provider's id for the file, the thing a `FilePart` carries, unchanged. It
+   * has to stay, because it is what makes vision work and what
+   * `useChat.uploadFile` already reads; `attachmentId` is added beside it rather
+   * than in place of it. The two are not interchangeable, and swapping them
+   * would reach the vendor as a file id it has never issued — so
+   * `toResponsesInput` rejects a `gemi_att_` prefix in `FilePart.fileId` with a
+   * sentence saying so, rather than leaving it to whatever the vendor answers
+   * (not measured).
+   *
+   * `fileId` is absent exactly when the file did not go to the provider, which
+   * only happens when the app or the client asked for that. `attachmentId` is
+   * absent when there was no scope to file the record under — see
+   * `attachmentScope` — and the answer then carries `downgraded: "no_scope"`,
+   * which is the only thing separating that case from a controller that chose
+   * `"provider"` on purpose. Both answer `destination: "provider"`, because both
+   * are true about where the bytes went.
+   *
+   * ORDER: storage first, then the provider. If the second one fails the request
+   * fails either way, so the only question is where the orphan is left, and an
+   * orphan in our own bucket is ours to sweep on a schedule we set, while an
+   * orphan at the vendor sits under a retention policy that is not ours.
+   */
   async upload(req: HttpRequest<any, any> = new HttpRequest()): Promise<UploadResult> {
     const form = await req.rawRequest.formData();
     const file = form.get("file");

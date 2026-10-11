@@ -23,8 +23,9 @@ export default defineConfig({
         "ai/client/index": resolve(__dirname, "ai/client/index.ts"),
         // `gemi/ai/voice` — `useVoiceSession` (#921). Its own entry so an app
         // that never uses voice never bundles it, and in this build for the
-        // same shared-chunk reason (`client/useParams`). Its peer-connection
-        // code is a further dynamic chunk, `voiceCall`.
+        // same shared-chunk reason. Its peer-connection code is in the same
+        // module graph (no nested dynamic chunk), so it loads with the view
+        // that uses it.
         "ai/voice/index": resolve(__dirname, "ai/voice/index.ts"),
       },
       formats: ["es"],

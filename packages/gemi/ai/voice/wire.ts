@@ -72,7 +72,8 @@ export type VoiceEndReason =
   | "idle"
   /** `onUsage` or `onTick` threw a `VoiceHangup`. */
   | "usage"
-  /** A client changed the session's instructions, model or tools. */
+  /** A `session.updated` showed instructions or tool names other than the
+   *  session's: a speed bump against casual edits, not a security boundary. */
   | "session_tampered"
   /** The call could not be started. */
   | "start_failed"

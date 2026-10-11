@@ -173,7 +173,8 @@ describe("VoiceBridge: delegation", () => {
   });
 
   test("progress: tool calls become quiet notes, throttled, and never a response", async () => {
-    const t = await setup({ limits: { progressIntervalMs: 50 } });
+    // wide enough that a loaded CI machine's flushes stay inside it
+    const t = await setup({ limits: { progressIntervalMs: 400 } });
     await t.delegate("call_1", "Build the page.");
     const turn = t.turns[0]!;
     const part = (id: string, name: string) =>
@@ -192,11 +193,14 @@ describe("VoiceBridge: delegation", () => {
     expect(notes().map((e) => e.item.content[0].text)).toEqual([
       'Progress on "Build the page.": running addSection',
     ]);
-    await new Promise((r) => setTimeout(r, 70));
-    expect(notes().map((e) => e.item.content[0].text)).toEqual([
-      'Progress on "Build the page.": running addSection',
-      'Progress on "Build the page.": drawing 3 pictures',
-    ]);
+    await vi.waitFor(
+      () =>
+        expect(notes().map((e) => e.item.content[0].text)).toEqual([
+          'Progress on "Build the page.": running addSection',
+          'Progress on "Build the page.": drawing 3 pictures',
+        ]),
+      { timeout: 3_000, interval: 50 },
+    );
     expect(t.types()).not.toContain("response.create");
     turn.settle({ text: "Built." });
     await flush();
@@ -436,6 +440,7 @@ describe("VoiceBridge: limits, usage and the end", () => {
     const closing = t.sent().at(-1);
     expect(closing).toEqual({
       type: "response.create",
+      event_id: expect.any(String),
       response: {
         instructions: 'Say exactly this to the user, and nothing else: "You\'re out of credits."',
         tool_choice: "none",
@@ -525,5 +530,186 @@ describe("VoiceBridge: limits, usage and the end", () => {
     await t.delegate("c1", "a");
     await t.bridge.end();
     expect(t.turns[0]!.stopped).toBe(false);
+  });
+});
+
+describe("VoiceBridge: review fixes", () => {
+  const workStatus = (t: Awaited<ReturnType<typeof setup>>, callId: string) =>
+    t.send({
+      type: "response.function_call_arguments.done",
+      response_id: "r",
+      item_id: `i_${callId}`,
+      call_id: callId,
+      name: "work_status",
+      arguments: "{}",
+    });
+
+  test("the tamper guard accepts a session that already holds the voice tools (this.voice()'s), and still catches a new tool", async () => {
+    const t = await setup({
+      session: { instructions: "Be the builder.", tools: voiceTools(), turnDetection: null },
+    });
+    // what the vendor echoes after the hook's push-to-talk session.update
+    await t.send({
+      type: "session.updated",
+      session: {
+        instructions: "Be the builder.",
+        tools: voiceTools().map((tool) => ({ type: "function", name: tool.name })),
+        audio: { input: { turn_detection: null } },
+      },
+    });
+    expect(t.ends).toHaveLength(0);
+    await t.send({
+      type: "session.updated",
+      session: {
+        instructions: "Be the builder.",
+        tools: [...voiceTools(), { name: "delete_everything" }].map((tool) => ({
+          name: tool.name,
+        })),
+      },
+    });
+    expect((await t.bridge.ended).reason).toBe("session_tampered");
+  });
+
+  test("transcription usage is summed apart from response usage and reaches onTranscriptionUsage", async () => {
+    const seen: any[] = [];
+    const t = await setup({
+      onTranscriptionUsage: (usage, info) => void seen.push({ usage, info }),
+    });
+    await t.send({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "u1",
+      transcript: "Make it darker.",
+      usage: {
+        type: "tokens",
+        input_tokens: 30,
+        output_tokens: 4,
+        total_tokens: 34,
+        input_token_details: { audio_tokens: 30 },
+      },
+    });
+    await t.send({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "u2",
+      transcript: "Thanks.",
+      usage: { type: "duration", seconds: 1.5 },
+    });
+    expect(seen.map((s) => s.usage)).toEqual([
+      { usage: { inputTokens: 30, outputTokens: 4, totalTokens: 34, audioInputTokens: 30 } },
+      { seconds: 1.5 },
+    ]);
+    const summary = await t.bridge.end();
+    expect(summary.transcription).toEqual({
+      usage: { inputTokens: 30, outputTokens: 4, totalTokens: 34, audioInputTokens: 30 },
+      seconds: 1.5,
+    });
+    expect(summary.usage.inputTokens).toBe(0);
+  });
+
+  test("a refused response.create does not leave the bridge waiting for a response that never comes", async () => {
+    const t = await setup();
+    await workStatus(t, "c1");
+    const creates = () => t.sent().filter((e) => e.type === "response.create");
+    expect(creates()).toHaveLength(1);
+    await t.send({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_value",
+        message: "no",
+        event_id: creates()[0].event_id,
+      },
+    });
+    await workStatus(t, "c2");
+    expect(creates()).toHaveLength(2);
+
+    // "already has an active response": asked again once that one is done
+    await t.send({
+      type: "error",
+      error: {
+        code: "conversation_already_has_active_response",
+        message: "busy",
+        event_id: creates()[1].event_id,
+      },
+    });
+    expect(creates()).toHaveLength(2);
+    await t.send({ type: "response.done", response: { id: "r_other", status: "completed" } });
+    expect(creates()).toHaveLength(3);
+    await t.bridge.end();
+  });
+
+  test("the closing line waits for the cancelled response, then plays its own to the end", async () => {
+    const t = await setup({ limits: { closingLineMs: 5_000 } });
+    await t.send({ type: "response.created", response: { id: "r1" } });
+    let ended = false;
+    const ending = t.bridge.end("hangup", "Bye.").then((summary) => ((ended = true), summary));
+    await flush();
+    expect(t.sent().at(-1)).toMatchObject({ type: "response.cancel" });
+    expect(t.types()).not.toContain("response.create");
+
+    // the cancelled response's own events do not count as the line's
+    await t.send({ type: "output_audio_buffer.stopped", response_id: "r1" });
+    await t.send({ type: "response.done", response: { id: "r1", status: "cancelled" } });
+    expect(t.sent().at(-1)).toMatchObject({
+      type: "response.create",
+      response: { instructions: expect.stringContaining("Bye.") },
+    });
+    await t.send({ type: "response.created", response: { id: "r2" } });
+    await t.send({ type: "output_audio_buffer.stopped", response_id: "r1" });
+    await t.send({ type: "response.done", response: { id: "r2", status: "completed" } });
+    expect(ended).toBe(false);
+    await t.send({ type: "output_audio_buffer.stopped", response_id: "r2" });
+    expect((await ending).reason).toBe("hangup");
+  });
+
+  test("stop_work before the turn started: it is never started", async () => {
+    let finishTyped!: () => void;
+    const typed = new Promise<void>((r) => (finishTyped = r));
+    const t = await setup({
+      liveRuns: {
+        find: async () => ({ runId: "run_typed" }),
+        get: () => ({ result: () => typed }),
+      },
+    });
+    await t.delegate("c1", "make it dark");
+    await t.send({
+      type: "response.function_call_arguments.done",
+      response_id: "r",
+      item_id: "i_c2",
+      call_id: "c2",
+      name: "stop_work",
+      arguments: "{}",
+    });
+    finishTyped();
+    await flush();
+    expect(t.turns).toHaveLength(0);
+    expect(outputs(t.sent())).toEqual([
+      { call: "c2", stopped: true, dropped: 0 },
+      { call: "c1", status: "stopped" },
+    ]);
+    await t.bridge.end();
+  });
+
+  test("a refused hangup keeps metering until the vendor ends the call", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { code: "404", message: "Resource not found" } }), {
+          status: 404,
+        }),
+    ) as unknown as typeof fetch;
+    const t = await setup({ limits: { hangupGraceMs: 5_000 } });
+    const ending = t.bridge.end();
+    await flush();
+    await t.send({
+      type: "response.done",
+      response: {
+        id: "r9",
+        status: "completed",
+        usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+      },
+    });
+    t.socket.serverClose(1000, "call ended");
+    const summary = await ending;
+    expect(summary.usage.inputTokens).toBe(7);
+    expect(summary.errors).toContainEqual(expect.objectContaining({ code: "hangup_failed" }));
   });
 });

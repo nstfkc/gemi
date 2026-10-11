@@ -124,14 +124,23 @@ export async function startVoiceCall(options: VoiceCallOptions): Promise<VoiceCa
     if (pc.connectionState === "closed") close();
   });
 
+  // Events sent before the data channel opens (push-to-talk pressed at once)
+  // wait for it rather than being dropped.
+  const outbox: string[] = [];
+  channel.addEventListener("open", () => {
+    for (const data of outbox.splice(0)) channel.send(data);
+  });
   const send = (event: Record<string, unknown>) => {
-    if (channel.readyState === "open") channel.send(JSON.stringify(event));
+    const data = JSON.stringify(event);
+    if (channel.readyState === "open") channel.send(data);
+    else if (channel.readyState === "connecting") outbox.push(data);
   };
-  const request = (method: string, url: string, payload?: unknown) =>
+  const request = (method: string, url: string, payload?: unknown, init: RequestInit = {}) =>
     fetch(url, {
       method,
       headers: { "Content-Type": "application/json", ...options.headers },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+      ...init,
     });
 
   let started: VoiceStartResponse;
@@ -210,7 +219,9 @@ export async function startVoiceCall(options: VoiceCallOptions): Promise<VoiceCa
     },
     async end() {
       try {
-        await request("DELETE", sessionUrl);
+        // `keepalive`, so a hang-up sent as the tab closes still reaches the
+        // route: minutes are billed until it does.
+        await request("DELETE", sessionUrl, undefined, { keepalive: true });
       } finally {
         close();
       }

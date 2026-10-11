@@ -536,6 +536,8 @@ export class ApiRouter {
    * the enclosing router's `middlewares` guard them as they guard `agent()`'s.
    * One key for the client: `useVoiceSession("/chat/voice")` from
    * `gemi/ai/voice`.
+   *
+   * @experimental Not yet verified against a live Azure or OpenAI call.
    */
   public voice<T extends object>(Controller: T): VoiceRoute<T> {
     if ((Controller as { kind?: unknown }).kind !== "agent-controller") {

@@ -307,6 +307,7 @@ export type {
   VoiceSummary,
   VoiceTranscriptLine,
   VoiceTurnController,
+  VoiceTranscriptionUsage,
   VoiceUsageInfo,
 } from "./VoiceBridge";
 export { defaultVoiceStore, MemoryVoiceSessionStore } from "./voiceStore";

@@ -88,6 +88,9 @@ function setup(options: { voice?: boolean } = {}) {
       seen.starts.push({ body: context.body, threadId: context.threadId, user: context.user });
       if ((context.body as any).broke) throw new InsufficientPermissionsError();
       return {
+        ...((context.body as any).otherThread
+          ? { threadId: (context.body as any).otherThread }
+          : {}),
         session: { instructions: "Be the page builder's voice.", voice: "marin" },
         contextNote: (body) => `The user is on page ${body.pageId}.`,
         onEnd: (summary) => void seen.ends.push(summary),
@@ -107,6 +110,7 @@ function setup(options: { voice?: boolean } = {}) {
       params: AuthorizeRequestParams<PageBody>,
     ) {
       seen.authorize.push(params);
+      if (params.threadId === "forbidden") throw new InsufficientPermissionsError();
     }
 
     instructions(_req: HttpRequest<any, any>, { body }: { body: PageBody }) {
@@ -298,7 +302,56 @@ describe("AgentController voice routes", () => {
     const failed = (await call("voiceStart", { sdp: OFFER, threadId, pageId: "p" })) as Response;
     expect(failed.status).toBe(502);
     expect((await failed.json()).error.code).toBe("voice_unavailable");
+    // the thread-less start and the vendor failure both ran `start`, so both refund
+    expect(seen.ends.map((s) => s.reason)).toEqual(["start_failed", "start_failed"]);
+  });
+
+  test("push-to-talk toggled mid-call: the vendor's session.updated echo does not end the call", async () => {
+    const { store, voiceStore, seen, call } = setup();
+    const { threadId } = await store.createThread({ userId: 1 });
+    const started = (await call("voiceStart", { sdp: OFFER, threadId, pageId: "p" })) as any;
+    const session = JSON.parse(String((fetches[0]!.body as FormData).get("session")));
+    await flush();
+    const socket = FakeSocket.last();
+    socket.serverOpen();
+    // the hook's setPushToTalk(true) sends session.update; the vendor echoes the whole session
+    socket.serverSend({
+      type: "session.updated",
+      session: { ...session, audio: { input: { turn_detection: null } } },
+    });
+    await flush();
+    expect(seen.ends).toEqual([]);
+    expect((await voiceStore.get(started.sessionId))!.endedAt).toBeUndefined();
+    await call("voiceEnd", undefined, { sessionId: started.sessionId });
+    expect(seen.ends.map((s) => s.reason)).toEqual(["hangup"]);
+  });
+
+  test("a failure after start ran calls onEnd(start_failed); one after the vendor call exists also hangs it up", async () => {
+    const { store, voiceStore, seen, call } = setup();
+    const { threadId } = await store.createThread({ userId: 1 });
+
+    // the thread `start` answered is refused
+    await expect(
+      call("voiceStart", { sdp: OFFER, threadId, pageId: "p", otherThread: "forbidden" }),
+    ).rejects.toBeInstanceOf(InsufficientPermissionsError);
     expect(seen.ends.map((s) => s.reason)).toEqual(["start_failed"]);
+    expect(fetches).toEqual([]);
+
+    // the store fails after the vendor created the call
+    voiceStore.create = async () => {
+      throw new Error("database down");
+    };
+    const failed = (await call("voiceStart", { sdp: OFFER, threadId, pageId: "p" })) as Response;
+    expect(failed.status).toBe(500);
+    expect(fetches.map((f) => f.url)).toEqual([
+      "https://api.openai.com/v1/realtime/calls",
+      "https://api.openai.com/v1/realtime/calls/rtc_42/hangup",
+    ]);
+    expect(seen.ends.map((s) => [s.reason, s.callId])).toEqual([
+      ["start_failed", undefined],
+      ["start_failed", "rtc_42"],
+    ]);
+    expect(FakeSocket.all).toHaveLength(0);
   });
 });
 

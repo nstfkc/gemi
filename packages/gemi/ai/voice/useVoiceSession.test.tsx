@@ -66,7 +66,7 @@ class FakePeer {
   }
 }
 
-let requests: { url: string; method: string; body?: any }[] = [];
+let requests: { url: string; method: string; body?: any; keepalive?: boolean }[] = [];
 let startStatus = 200;
 
 beforeEach(() => {
@@ -92,6 +92,7 @@ beforeEach(() => {
       url: String(url),
       method: init.method,
       body: init.body && JSON.parse(init.body),
+      keepalive: init.keepalive,
     });
     if (init.method === "POST") {
       return startStatus === 200
@@ -198,7 +199,11 @@ describe("useVoiceSession", () => {
     });
 
     await act(() => result.current.end());
-    expect(requests.at(-1)).toMatchObject({ url: "/api/chat/voice/s1", method: "DELETE" });
+    expect(requests.at(-1)).toMatchObject({
+      url: "/api/chat/voice/s1",
+      method: "DELETE",
+      keepalive: true,
+    });
     expect(pcs[0]!.closed).toBe(true);
     expect(track.stopped).toBe(true);
     expect(result.current.status).toBe("ended");
@@ -227,6 +232,13 @@ describe("useVoiceSession", () => {
     await act(() => result.current.start());
     expect(result.current.error).toMatchObject({ code: "microphone_denied" });
     expect(requests).toEqual([]);
+  });
+
+  test("a second start() while the first is in flight starts nothing", async () => {
+    const { result } = hook();
+    await act(() => Promise.all([result.current.start(), result.current.start()]));
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+    expect(pcs).toHaveLength(1);
   });
 
   test("unmounting ends the call", async () => {

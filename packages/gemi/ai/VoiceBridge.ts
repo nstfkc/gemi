@@ -15,6 +15,9 @@ import type { VoiceEndReason } from "./voice/wire";
 /**
  * A voice front for an `AgentController` (#921).
  *
+ * @experimental Not yet verified against a live Azure or OpenAI call; names and
+ * behaviour may change in a minor release.
+ *
  * THE SHAPE. A realtime voice model talks to the user; the agent the app
  * already has does the work. The voice model gets one delegate tool
  * (`ask_agent({ request })` by default) and three small ones (`stop_work`,
@@ -42,8 +45,14 @@ import type { VoiceEndReason } from "./voice/wire";
  *   `startTurn({ turn: { toolResults } })`.
  * - One turn at a time. A second request is queued (up to `maxQueued`) and
  *   answered at once with `queued`, so the voice can say "after this one"; a run
- *   already going on the thread (a typed message) is waited for, never
- *   superseded.
+ *   already going on the thread (a typed message) is waited for, and looked
+ *   for again right before `startTurn`. `liveRuns` is per process, so a run on
+ *   another instance is not seen, and a typed message that starts in the
+ *   instant between that last look and `startTurn` is superseded, as two typed
+ *   messages would be.
+ * - Delegated turns run as the `user` captured when the call started, for the
+ *   whole call. A sign-out mid-call is seen only when `authorizeRequest`
+ *   refuses a turn.
  * - Barge-in stays the vendor's (server VAD cancels the spoken response) and
  *   never stops the work. Only `stop_work` does.
  *
@@ -79,6 +88,9 @@ export type VoiceLimits = {
   closingLineMs?: number;
   /** How often `onTick` is called. Default one minute. */
   tickMs?: number;
+  /** When the vendor refuses the hangup, how long the sideband is kept open
+   *  (still metering) waiting for the vendor to end the call. Default 30 s. */
+  hangupGraceMs?: number;
 };
 
 /** Lines the voice says before the bridge hangs up. `null` hangs up silently. */
@@ -101,7 +113,14 @@ export type VoiceUsageInfo = {
   total: Usage;
   /** Since the bridge started. */
   elapsedMs: number;
+  /** Transcription so far: billed apart from `total`, at the transcription
+   *  model's rates. */
+  transcription: VoiceTranscriptionUsage;
 };
+
+/** Input transcription's usage: tokens for a token-billed model, seconds for a
+ *  duration-billed one. */
+export type VoiceTranscriptionUsage = { usage: Usage; seconds: number };
 
 export type VoiceTranscriptLine = { role: "user" | "assistant"; text: string; at: number };
 
@@ -123,7 +142,10 @@ export type VoiceSummary = {
   durationMs: number;
   /** Whole seconds, rounded up: what a per-second or per-minute price reads. */
   seconds: number;
+  /** The voice model's responses (`response.done`). */
   usage: Usage;
+  /** Input transcription, billed separately from `usage`. */
+  transcription: VoiceTranscriptionUsage;
   /** What was said, from the vendor's transcripts. The app decides what to keep. */
   transcript: VoiceTranscriptLine[];
   requests: VoiceRequestRecord[];
@@ -179,8 +201,17 @@ export type VoiceBridgeParams<Body extends object = Record<string, unknown>> = {
   /** A note for the voice when `setBody` changes the body ("The user selected
    *  the hero section."). */
   contextNote?: (body: Body) => string | null | undefined;
-  /** After each response, with its usage. Throw `VoiceHangup` to end the call. */
+  /** After each response, with its usage. Throw `VoiceHangup` to end the call.
+   *  Hooks run in order, off the event loop: a slow one does not delay the
+   *  call's tool handling. */
   onUsage?: (usage: Usage, info: VoiceUsageInfo) => void | Promise<void>;
+  /** After each transcribed utterance, with its usage (`usage` for a
+   *  token-billed model, `seconds` for a duration-billed one). Throw
+   *  `VoiceHangup` to end the call. */
+  onTranscriptionUsage?: (
+    usage: { usage?: Usage; seconds?: number },
+    info: VoiceUsageInfo,
+  ) => void | Promise<void>;
   /** Every `tickMs`, for time-based metering. Throw `VoiceHangup` to end the call. */
   onTick?: (info: VoiceUsageInfo) => void | Promise<void>;
   /** Once, when the call has ended. */
@@ -198,6 +229,7 @@ const DEFAULT_LIMITS = {
   progressIntervalMs: 4_000,
   closingLineMs: 10_000,
   tickMs: 60_000,
+  hangupGraceMs: 30_000,
 } satisfies Required<VoiceLimits>;
 
 const DEFAULT_LINES = {
@@ -260,6 +292,8 @@ type Job = {
   /** The function call to answer when the job ends; `undefined` once answered. */
   callId?: string;
   handle?: AgentTurn;
+  /** `stop_work` arrived before the turn started: it is not started. */
+  stopRequested?: boolean;
 };
 
 /** Live bridges in this process, by session id. */
@@ -282,6 +316,11 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
 
   private body: Body;
   private usage: Usage = emptyUsage();
+  private transcription: VoiceTranscriptionUsage = { usage: emptyUsage(), seconds: 0 };
+  /** Hooks run one after another, off the event loop. */
+  private hooks: Promise<void> = Promise.resolve();
+  /** The `event_id` of the bridge's own `response.create` not yet answered. */
+  private pendingCreate?: string;
   private transcript: VoiceTranscriptLine[] = [];
   private requests: VoiceRequestRecord[] = [];
   private errors: VoiceSummary["errors"] = [];
@@ -386,24 +425,48 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
         return;
       case "response.created":
         this.responseActive = true;
+        this.pendingCreate = undefined;
         this.touch();
         return;
       case "response.done": {
         this.responseActive = false;
         if (this.responseWanted && !this.ending) {
           this.responseWanted = false;
-          this.sideband.createResponse();
+          this.createResponse();
         }
         const usage = (event as { usage?: Usage }).usage;
         if (usage) {
           this.usage = addUsage(this.usage, usage);
-          await this.hook(() => this.params.onUsage?.(usage, this.info()));
+          const info = this.info();
+          this.hook(() => this.params.onUsage?.(usage, info));
         }
         return;
       }
-      case "conversation.item.input_audio_transcription.completed":
-        this.say("user", String((event as { transcript?: unknown }).transcript ?? ""));
+      case "conversation.item.input_audio_transcription.completed": {
+        const done = event as {
+          transcript?: unknown;
+          transcriptionUsage?: Usage;
+          transcriptionSeconds?: number;
+        };
+        this.say("user", String(done.transcript ?? ""));
+        if (done.transcriptionUsage || done.transcriptionSeconds !== undefined) {
+          this.transcription = {
+            usage: done.transcriptionUsage
+              ? addUsage(this.transcription.usage, done.transcriptionUsage)
+              : this.transcription.usage,
+            seconds: this.transcription.seconds + (done.transcriptionSeconds ?? 0),
+          };
+          const info = this.info();
+          const usage = {
+            ...(done.transcriptionUsage ? { usage: done.transcriptionUsage } : {}),
+            ...(done.transcriptionSeconds !== undefined
+              ? { seconds: done.transcriptionSeconds }
+              : {}),
+          };
+          this.hook(() => this.params.onTranscriptionUsage?.(usage, info));
+        }
         return;
+      }
       case "response.output_audio_transcript.done":
         this.say("assistant", String((event as { transcript?: unknown }).transcript ?? ""));
         return;
@@ -422,8 +485,21 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
         }
         return;
       case "error": {
-        const error = (event as { error?: { code?: string; message?: string } }).error;
+        const error = (event as { error?: { code?: string; message?: string; event_id?: string } })
+          .error;
         this.errors.push({ code: error?.code, message: String(error?.message ?? "") });
+        // The vendor refused the bridge's own `response.create`: no response
+        // will start, so stop waiting for one — or, when one is already
+        // running, ask again once it is done.
+        if (this.pendingCreate && error?.event_id === this.pendingCreate) {
+          this.pendingCreate = undefined;
+          if (error.code === "conversation_already_has_active_response") {
+            this.responseActive = true;
+            this.responseWanted = true;
+          } else {
+            this.responseActive = false;
+          }
+        }
         return;
       }
       case "sideband.closed": {
@@ -456,10 +532,13 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
     }
     switch (name) {
       case "stop_work": {
-        const wasRunning = Boolean(this.running?.handle);
-        this.running?.handle?.stop({ reason: "Stopped by voice." });
+        const running = this.running;
+        if (running) {
+          running.stopRequested = true;
+          running.handle?.stop({ reason: "Stopped by voice." });
+        }
         const dropped = this.dropQueue();
-        return this.answer(callId, { stopped: wasRunning, dropped });
+        return this.answer(callId, { stopped: Boolean(running), dropped });
       }
       case "work_status":
         return this.answer(callId, {
@@ -519,8 +598,19 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
     this.lastProgress = undefined;
     this.pauseIdle();
     try {
-      await this.waitForThread();
+      const waited = new Set<string>();
+      await this.waitForThread(waited);
       const body = await this.latestBody();
+      // Looked for again: a typed message may have started while the body was
+      // read. The window left is the one `find` takes.
+      while (!job.stopRequested && (await this.waitForThread(waited))) {
+        // waited for one more
+      }
+      if (job.stopRequested || this.ending) {
+        job.record.status = "dropped";
+        this.complete(job, { status: "stopped" });
+        return;
+      }
       let turn: AgentTurn;
       try {
         turn = await this.params.controller.startTurn({
@@ -577,12 +667,16 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
 
   /** A run already going on the thread (a typed message) is waited for, not
    *  superseded. */
-  private async waitForThread(): Promise<void> {
+  private async waitForThread(waited = new Set<string>()): Promise<boolean> {
     const runs = this.params.liveRuns;
-    if (!runs) return;
+    if (!runs) return false;
     const found = await runs.find({ threadId: this.threadId });
-    const run = found ? runs.get(found.runId) : null;
-    if (run) await run.result().catch(() => undefined);
+    // A run already waited for counts as over, even if a store still lists it.
+    const run = found && !waited.has(found.runId) ? runs.get(found.runId) : null;
+    if (!found || !run) return false;
+    waited.add(found.runId);
+    await run.result().catch(() => undefined);
+    return true;
   }
 
   private async latestBody(): Promise<Body> {
@@ -632,7 +726,14 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
       return;
     }
     this.responseActive = true;
-    this.sideband.createResponse();
+    this.createResponse();
+  }
+
+  /** `response.create` with an `event_id`, so a refusal can be told apart. */
+  private createResponse(): void {
+    const eventId = `gemi_voice_${crypto.randomUUID()}`;
+    this.pendingCreate = eventId;
+    this.sideband.send({ type: "response.create", event_id: eventId });
   }
 
   private questions() {
@@ -685,24 +786,34 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
   }
 
   private info(): VoiceUsageInfo {
-    return { sessionId: this.sessionId, total: this.usage, elapsedMs: Date.now() - this.startedAt };
+    return {
+      sessionId: this.sessionId,
+      total: this.usage,
+      elapsedMs: Date.now() - this.startedAt,
+      transcription: this.transcription,
+    };
   }
 
-  private async tick(): Promise<void> {
+  private tick(): void {
     if (this.ending) return;
-    await this.hook(() => this.params.onTick?.(this.info()));
+    const info = this.info();
+    this.hook(() => this.params.onTick?.(info));
   }
 
-  private async hook(fn: () => void | Promise<void>): Promise<void> {
-    try {
-      await fn();
-    } catch (error) {
-      if (error instanceof VoiceHangup) void this.end("usage", error.line ?? null);
-      else {
-        console.error("[gemi/ai] a voice hook threw; ending the call.", error);
-        void this.end("error", this.lines.error);
+  /** Runs an app hook after the ones before it, without holding up the
+   *  sideband's events. */
+  private hook(fn: () => void | Promise<void>): void {
+    this.hooks = this.hooks.then(async () => {
+      try {
+        await fn();
+      } catch (error) {
+        if (error instanceof VoiceHangup) void this.end("usage", error.line ?? null);
+        else {
+          console.error("[gemi/ai] a voice hook threw; ending the call.", error);
+          void this.end("error", this.lines.error);
+        }
       }
-    }
+    });
   }
 
   private tampered(session: Record<string, any> | undefined): boolean {
@@ -716,15 +827,13 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
       return true;
     }
     if (Array.isArray(session.tools)) {
-      const want = [...voiceTools(this.params.delegate), ...(expected.tools ?? [])]
-        .map((tool) => tool.name)
-        .sort()
-        .join(",");
-      const got = session.tools
-        .map((tool: { name?: unknown }) => String(tool?.name))
-        .sort()
-        .join(",");
-      if (want !== got) return true;
+      // `expected.tools` already holds the voice tools when the session came
+      // from `this.voice()`, and not when an app passed its own: a set either way.
+      const want = new Set(
+        [...voiceTools(this.params.delegate), ...(expected.tools ?? [])].map((tool) => tool.name),
+      );
+      const got = new Set(session.tools.map((tool: { name?: unknown }) => String(tool?.name)));
+      if (want.size !== got.size || [...want].some((name) => !got.has(name))) return true;
     }
     return false;
   }
@@ -740,8 +849,10 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
 
     const open = reason !== "call_ended" && reason !== "sideband_lost";
     if (line && open) await this.closingLine(line);
-    if (reason !== "call_ended") await this.hangupCall().catch(() => undefined);
+    if (reason !== "call_ended") await this.hangUp();
     else this.sideband.close();
+    // Hooks queued before the end (the last response's usage) finish first.
+    await this.hooks;
 
     const endedAt = Date.now();
     const durationMs = endedAt - this.startedAt;
@@ -755,6 +866,7 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
       durationMs,
       seconds: Math.ceil(durationMs / 1000),
       usage: this.usage,
+      transcription: this.transcription,
       transcript: this.transcript,
       requests: this.requests,
       errors: this.errors,
@@ -773,28 +885,99 @@ export class VoiceBridge<Body extends object = Record<string, unknown>> {
   }
 
   /**
-   * Says `line` and waits for it to finish playing: the response's
-   * `response.done`, then the browser's `output_audio_buffer.stopped` (WebRTC),
-   * or `closingLineMs`, whichever is first.
+   * Hangs the call up. When the vendor refuses, the sideband stays open (it is
+   * what meters the call) until the vendor ends the call or `hangupGraceMs`
+   * passes, so usage that arrives meanwhile is still counted.
+   */
+  private async hangUp(): Promise<void> {
+    try {
+      await this.hangupCall();
+    } catch (error) {
+      console.error("[gemi/ai] a voice call could not be hung up; waiting for the vendor.", error);
+      this.errors.push({
+        code: "hangup_failed",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.sideband.closed,
+        new Promise((resolve) => (timer = setTimeout(resolve, this.limits.hangupGraceMs))),
+      ]);
+      clearTimeout(timer);
+      this.sideband.close();
+    }
+  }
+
+  /**
+   * Says `line` and waits for it to finish playing, or `closingLineMs`,
+   * whichever is first.
+   *
+   * A response still running is cancelled first, and its own `response.done`
+   * is waited for before the line is asked for: a `response.create` sent
+   * while one is active is refused, and the cancelled response's audio events
+   * must not count as the line's. The line's response is then matched by id:
+   * its `response.done`, then `output_audio_buffer.stopped` for it (a
+   * WebRTC event; if the sideband does not get it, `closingLineMs` ends the
+   * wait).
    */
   private async closingLine(line: string): Promise<void> {
     await new Promise<void>((resolve) => {
-      let done = false;
+      const eventId = `gemi_voice_closing_${crypto.randomUUID()}`;
+      const cancelId = `gemi_voice_cancel_${crypto.randomUUID()}`;
+      let stage: "cancelling" | "asked" | "playing" = this.responseActive ? "cancelling" : "asked";
+      let lineResponse: string | undefined;
       const timer = setTimeout(finish, this.limits.closingLineMs);
       function finish() {
         clearTimeout(timer);
         resolve();
       }
-      this.closingWaiter = (event) => {
-        if (event.type === "response.done") done = true;
-        else if (event.type === "output_audio_buffer.stopped" && done) finish();
-        else if (event.type === "sideband.closed") finish();
+      const ask = () => {
+        stage = "asked";
+        this.sideband.send({
+          type: "response.create",
+          event_id: eventId,
+          response: {
+            instructions: `Say exactly this to the user, and nothing else: "${line}"`,
+            tool_choice: "none",
+          },
+        });
       };
-      if (this.responseActive) this.sideband.cancelResponse();
-      this.sideband.createResponse({
-        instructions: `Say exactly this to the user, and nothing else: "${line}"`,
-        toolChoice: "none",
-      });
+      this.closingWaiter = (event) => {
+        const e = event as {
+          type: string;
+          response?: { id?: string };
+          response_id?: string;
+          error?: { event_id?: string };
+        };
+        if (e.type === "sideband.closed") return finish();
+        if (stage === "cancelling") {
+          // Done (cancelled), or the cancel refused because nothing was active.
+          if (
+            e.type === "response.done" ||
+            (e.type === "error" && e.error?.event_id === cancelId)
+          ) {
+            ask();
+          }
+          return;
+        }
+        if (e.type === "error" && e.error?.event_id === eventId) return finish();
+        if (e.type === "response.created" && !lineResponse) {
+          lineResponse = e.response?.id;
+          return;
+        }
+        const ours = (id?: string) => !lineResponse || !id || id === lineResponse;
+        if (e.type === "response.done" && ours(e.response?.id)) stage = "playing";
+        else if (
+          e.type === "output_audio_buffer.stopped" &&
+          stage === "playing" &&
+          ours(e.response_id)
+        ) {
+          finish();
+        }
+      };
+      if (stage === "cancelling")
+        this.sideband.send({ type: "response.cancel", event_id: cancelId });
+      else ask();
     });
     this.closingWaiter = undefined;
   }

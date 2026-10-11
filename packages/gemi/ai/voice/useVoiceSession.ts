@@ -77,6 +77,8 @@ export type UseVoiceSessionResult<P extends keyof VoiceRoutes> = {
  * Import it from `gemi/ai/voice`, an entry of its own, so an app that never
  * uses voice never bundles it, and use it from a view or a dynamically imported
  * component, so its code is not in the entry chunk.
+ *
+ * @experimental Not yet verified against a live call.
  */
 export function useVoiceSession<P extends keyof VoiceRoutes>(
   path: P,
@@ -101,6 +103,8 @@ export function useVoiceSession<P extends keyof VoiceRoutes>(
   const [pushToTalk, setPushToTalkState] = useState(params.pushToTalk === true);
   const [call, setCall] = useState<VoiceCall | null>(null);
   const callRef = useRef<VoiceCall | null>(null);
+  /** A `start()` in flight: a second click must not start a second call. */
+  const startingRef = useRef(false);
   const latest = useRef(params);
   latest.current = params;
   const delegateRef = useRef("ask_agent");
@@ -117,7 +121,8 @@ export function useVoiceSession<P extends keyof VoiceRoutes>(
   }, []);
 
   const start = useCallback(async () => {
-    if (callRef.current) return;
+    if (callRef.current || startingRef.current) return;
+    startingRef.current = true;
     setError(null);
     setState({ ...initialVoiceState(), phase: "connecting" });
     try {
@@ -164,6 +169,8 @@ export function useVoiceSession<P extends keyof VoiceRoutes>(
       setState((current) => ({ ...current, phase: "ended" }));
       setError(reported);
       latest.current.onError?.(reported);
+    } finally {
+      startingRef.current = false;
     }
   }, [url, pushToTalk]);
 
