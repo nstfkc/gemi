@@ -1,3 +1,17 @@
+# Unreleased
+
+## Log: a console sink (#881)
+
+**New option, one behaviour change in development.** `Log.*` can now also write each entry to stdout (`debug`, `info`, `notice`) or stderr (`warning` and above), so it reaches platform logs such as Railway's. See [Log: console output](docs/facades.md#console-output).
+
+- **Config:** `console` in `defineLogConfig`: `true` (every level), a `LogLevel` (that level and above) or `false`. `consoleFormat`: `"json"` (one JSON object per line, metadata keys at the top level, then `timestamp`, `level`, `message`) or `"text"`. New type export `LogConsoleFormat` from `gemi/services`.
+- Console lines carry the caller's metadata plus, inside a request, its `method` and `path` only, never headers, query string or body. An `Error` in the metadata keeps its message and stack. The file sink and `onLogCreated` are unchanged.
+
+Behaviour change:
+
+- **In development** (`NODE_ENV=development`, which `gemi dev` sets) the sink is **on by default** with `"text"` lines, so `Log.*` calls now print in the `gemi dev` terminal. Set `console: false` to keep the old silence.
+- **In production and tests nothing changes**: the sink is off unless you set `console`. To get `Log` into Railway's logs, set e.g. `console: "info"` (or `true`) in `app/config/log.ts`.
+
 # Upgrading from 0.123.0 to 0.124.0
 
 ## Broadcasting: the Redis pub/sub driver (#874)

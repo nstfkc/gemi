@@ -12,6 +12,7 @@ async function exists(path: string): Promise<boolean> {
 import { RequestContext } from "../../http/requestContext";
 import { projectRoot } from "../../support/discover";
 import type { LogConfig } from "./config";
+import { consoleThreshold, writeConsoleLine } from "./consoleSink";
 import type { LogEntry, LogLevel } from "./types";
 
 export class LogManager {
@@ -40,7 +41,11 @@ export class LogManager {
     return `${projectRoot()}/storage/logs`;
   }
 
-  constructor(public config: Required<LogConfig>) {}
+  private readonly consoleThreshold: number;
+
+  constructor(public config: Required<LogConfig>) {
+    this.consoleThreshold = consoleThreshold(config.console);
+  }
 
   /**
    * Idempotent. `LogServiceProvider.boot()` calls this so the storage
@@ -133,7 +138,15 @@ export class LogManager {
 
     const reqCtx = RequestContext.getStore();
     let requestMetadata = {};
+    // The console sink gets the request's method and path only: platform logs
+    // are read by more people than the log files, and the headers carry the
+    // session cookie and `Authorization`.
+    let consoleRequestMetadata = {};
     if (reqCtx) {
+      consoleRequestMetadata = {
+        method: reqCtx.req.rawRequest.method,
+        path: new URL(reqCtx.req.rawRequest.url).pathname,
+      };
       requestMetadata = {
         url: reqCtx.req.rawRequest.url,
         method: reqCtx.req.rawRequest.method,
@@ -149,6 +162,18 @@ export class LogManager {
       message,
       metadata: { ...requestMetadata, ...metadata },
     };
+
+    if (this.consoleThreshold !== -1) {
+      writeConsoleLine(
+        {
+          timestamp: logObject.timestamp,
+          level,
+          message,
+          metadata: { ...consoleRequestMetadata, ...metadata },
+        },
+        { threshold: this.consoleThreshold, format: this.config.consoleFormat },
+      );
+    }
 
     let log = "";
     try {
