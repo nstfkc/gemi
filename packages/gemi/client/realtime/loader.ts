@@ -44,20 +44,39 @@ export function loadedRealtimeClient(): RealtimeClient | null {
 }
 
 /**
+ * What a lazy `import()` resolved to, or a thrown error when it is missing.
+ * Vite's preload helper resolves the `import()` to `undefined` instead of
+ * rejecting when a `vite:preloadError` listener handled the failure (`init`'s
+ * chunk-load recovery does, as it starts a reload): treated as a failed load.
+ */
+export function loadedModule<T>(module: T | undefined): T {
+  if (!module) throw new Error("[gemi] A lazily loaded chunk is unavailable.");
+  return module;
+}
+
+/** The lazily loaded modules. Replaceable in tests, to simulate a failed load. */
+export const lazyModules = {
+  client: () => import("./RealtimeClient.js"),
+  live: () => import("./live.js"),
+};
+
+/**
  * The tab's client, loading its module and creating it on first use. `null`
  * on the server. A failed load (a chunk gone after a deploy, the network) is
- * not cached: the next subscription tries again.
+ * not kept, so a later subscription calls `import()` again; whether that
+ * fetches anew is up to the browser, and the usual recovery is `init`'s
+ * reload.
  */
 export function loadRealtimeClient(): Promise<RealtimeClient> | null {
   if (typeof window === "undefined") return null;
   if (instance) return Promise.resolve(instance);
-  loading ??= import("./RealtimeClient.js").then(
-    ({ RealtimeClient }) => (instance ??= new RealtimeClient(configured)),
-    (error: unknown) => {
+  loading ??= lazyModules
+    .client()
+    .then((module) => (instance ??= new (loadedModule(module).RealtimeClient)(configured)))
+    .catch((error: unknown) => {
       loading = null;
       throw error;
-    },
-  );
+    });
   return loading;
 }
 
@@ -95,11 +114,10 @@ export function followLive(
   if (liveModule && socket) {
     start(liveModule, socket);
   } else {
-    Promise.all([liveModule ?? import("./live.js"), socket ?? loadRealtimeClient()]).then(
-      ([module, socket]) => start(module, socket),
+    Promise.all([liveModule ?? lazyModules.live(), socket ?? loadRealtimeClient()])
+      .then(([module, socket]) => start(loadedModule(module), socket))
       // A failed load leaves the channel closed, so the query keeps polling.
-      () => {},
-    );
+      .catch(() => {});
   }
   return () => {
     cancelled = true;

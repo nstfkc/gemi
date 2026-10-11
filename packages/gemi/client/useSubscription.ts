@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeFeedEvent } from "../services/change-feed/ChangeFeedDriver";
 import type { ChangeFeedResponse } from "../services/change-feed/wire";
 import { applyParams } from "../utils/applyParams";
+import { loadedModule } from "./realtime/loader";
 import type { SubscriptionState } from "./subscriptionStream";
 import type { UrlParser } from "./types";
 import type { Data, GetRPC } from "./useQuery";
@@ -40,6 +41,11 @@ export type SubscriptionConfig<D> = {
    * is shown again. Default `true`.
    */
   pauseWhenHidden?: boolean;
+};
+
+/** `./subscriptionStream`, loaded on first use. Replaceable in tests. */
+export const streamModule = {
+  load: () => import("./subscriptionStream.js"),
 };
 
 /**
@@ -103,8 +109,10 @@ export function useSubscription<T extends keyof GetRPC>(
     // The connection is loaded on first use; see `./subscriptionStream`.
     let stopped = false;
     let stop: (() => void) | null = null;
-    import("./subscriptionStream.js").then(
-      ({ follow }) => {
+    streamModule
+      .load()
+      .then((module) => {
+        const { follow } = loadedModule(module);
         if (stopped) return;
         stop = follow({
           endpoint,
@@ -113,14 +121,13 @@ export function useSubscription<T extends keyof GetRPC>(
           callbacks: callbacks as { current: SubscriptionConfig<unknown> },
           setState,
         });
-      },
-      (error: unknown) => {
+      })
+      .catch((error: unknown) => {
         // A chunk that will not load (usually a deploy; `init`'s chunk-load
         // recovery reloads the page for it) or a module that failed to
         // evaluate: no connection to retry.
         if (!stopped) setState((s) => ({ ...s, status: "closed", error: error as Error }));
-      },
-    );
+      });
     return () => {
       stopped = true;
       stop?.();

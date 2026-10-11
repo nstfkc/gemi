@@ -46,6 +46,7 @@ class MockSocket {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   cleanup();
   loader.loadedRealtimeClient()?.dispose();
   vi.unstubAllGlobals();
@@ -157,4 +158,84 @@ test("a live query loads its subscription on first use and refetches on an event
     await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBe(before + 2));
   });
   await vi.waitFor(() => expect(screen.getByText("n1")).toBeDefined());
+});
+
+test("two hooks that mount during one load share it: one import, one socket", async () => {
+  vi.stubGlobal("WebSocket", MockSocket);
+  const client = vi.spyOn(loader.lazyModules, "client");
+  function View({ pattern }: { pattern: string }) {
+    return <p>{useChannel(pattern as any, {}, { onResync() {} }).status}</p>;
+  }
+  render(
+    <>
+      <View pattern="user" />
+      <View pattern="status" />
+    </>,
+  );
+  await act(async () => {
+    await vi.waitFor(() => expect(MockSocket.instances).toHaveLength(1));
+  });
+  act(() => {
+    MockSocket.instances[0]!.readyState = 1;
+    MockSocket.instances[0]!.onopen?.();
+  });
+  expect(client).toHaveBeenCalledTimes(1);
+  expect(MockSocket.instances).toHaveLength(1);
+  expect(MockSocket.instances[0]!.sent).toEqual([
+    { op: "sub", id: "1", ch: "user" },
+    { op: "sub", id: "2", ch: "status" },
+  ]);
+});
+
+// Vite's preload helper resolves the `import()` to `undefined` when `init`'s
+// chunk-load recovery handled the failure (it reloads the page). An unhandled
+// rejection would fail the run.
+test("a chunk the recovery handled leaves the hook closed, and the load is not kept", async () => {
+  vi.stubGlobal("WebSocket", MockSocket);
+  const client = vi
+    .spyOn(loader.lazyModules, "client")
+    .mockResolvedValueOnce(undefined as never);
+  function View() {
+    return <p>{useChannel("user" as any, {}, { onResync() {} }).status}</p>;
+  }
+  const view = render(<View />);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(screen.getByText("closed")).toBeDefined();
+  expect(MockSocket.instances).toHaveLength(0);
+  expect(loader.loadedRealtimeClient()).toBeNull();
+  view.unmount();
+
+  // Not cached: the next subscription imports again, and this time connects.
+  render(<View />);
+  await act(async () => {
+    await vi.waitFor(() => expect(MockSocket.instances).toHaveLength(1));
+  });
+  expect(client).toHaveBeenCalledTimes(2);
+});
+
+test("a live query whose chunk the recovery handled stays closed, without an unhandled rejection", async () => {
+  vi.stubGlobal("WebSocket", MockSocket);
+  const live = vi.spyOn(loader.lazyModules, "live").mockResolvedValue(undefined as never);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ n: 1 }), headers: new Headers() })),
+  );
+  function View() {
+    const { data } = useQuery("/me" as any, {}, { live: "user" as any });
+    return <p>{`n${(data as { n: number }).n}`}</p>;
+  }
+  render(
+    <QueryManagerProvider>
+      <RouteStateProvider state={{ prefetchedData: { "/me": { "": { n: 0 } } } } as any}>
+        <View />
+      </RouteStateProvider>
+    </QueryManagerProvider>,
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(live).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("n0")).toBeDefined();
 });

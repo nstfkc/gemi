@@ -66,7 +66,7 @@ export function useChannelSubscription(
     } else {
       const pending = loadRealtimeClient();
       if (!pending) return;
-      // A failed load leaves the hook `closed`; the next mount tries again.
+      // A failed load leaves the hook `closed` (see `loadRealtimeClient`).
       pending.then(subscribe, () => {});
     }
     return () => {

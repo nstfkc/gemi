@@ -408,4 +408,22 @@ describe("the published client, built into an app", () => {
       expect(holders.length, `no lazy chunk contains "${marker}"`).toBeGreaterThan(0);
     }
   });
+
+  test("loads `useQuery`'s live subscription lazily too", async () => {
+    // `client/realtime/live.ts` has no string of its own to look for, so this
+    // goes by the manifest: the gemi chunk it is built into must be a dynamic
+    // entry of the app's build, not something the entry imports statically.
+    const manifest: Record<
+      string,
+      { file: string; src?: string; isEntry?: boolean; isDynamicEntry?: boolean; imports?: string[] }
+    > = await Bun.file(join(fixture, "web-dist/.vite/manifest.json")).json();
+    const live = Object.entries(manifest).find(([key]) =>
+      /node_modules\/gemi\/dist\/chunks\/live-[^/]+\.js$/.test(key),
+    );
+    expect(live, `no chunk built from gemi's live module:\n${Object.keys(manifest).join("\n")}`).toBeDefined();
+    expect(live![1].isDynamicEntry).toBe(true);
+    const entry = Object.entries(manifest).find(([, chunk]) => chunk.isEntry)!;
+    expect(live![1].file).not.toBe(entry[1].file);
+    expect(entry[1].imports ?? []).not.toContain(live![0]);
+  });
 });
