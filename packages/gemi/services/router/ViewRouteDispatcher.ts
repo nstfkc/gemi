@@ -474,10 +474,9 @@ export class ViewRouteDispatcher {
     });
 
     try {
-      // `.static({ navigation })`: what the runtime compares before swapping
-      // a fetched page in. Inside the `try`, so a `version` or `script` that
-      // throws still completes the request (the `finally`) like a failed render.
       // `.static({ script })` (#919): picked after the handler, like `version`.
+      // Inside the `try`, as `version` is, so one that throws (or names no
+      // file) still completes the request (the `finally`) like a failed render.
       let script: DocumentScript | undefined;
       const scriptName =
         typeof staticView.script === "function"
@@ -486,6 +485,8 @@ export class ViewRouteDispatcher {
       if (scriptName) {
         script = { name: scriptName, source: await documentScriptSource(scriptName) };
       }
+      // `.static({ navigation })`: what the runtime compares before swapping
+      // a fetched page in.
       let navigation: StaticNavigationMarker | undefined;
       if (staticView.navigation) {
         const options = staticView.navigation === true ? {} : staticView.navigation;
