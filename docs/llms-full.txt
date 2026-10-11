@@ -5390,7 +5390,9 @@ These hooks return:
 
 Options mirror the query hooks — `{ params, search }` in the second argument (e.g.
 `usePatch("/todos/:id", { params: { id } })`), and a config object (`onSuccess`,
-`onError`, `onCanceled`, `autoInvalidate`, `concurrency`) in the third.
+`onError`, `onCanceled`, `autoInvalidate`, `concurrency`, `updates`) in the third.
+`updates` writes the answer into other queries without a refetch; see
+[Writing a mutation's answer into a query](#writing-a-mutations-answer-into-a-query-updates).
 
 ### What `trigger` resolves to
 
@@ -5668,6 +5670,78 @@ stale. Only the variants something is rendering refetch now; the rest refetch
 the next time they are read — even under `staleTime: Infinity`, and bypassing the
 browser's HTTP cache — so a path with dozens of cached searches does not put
 dozens of requests on the wire.
+
+## Writing a mutation's answer into a query: `updates`
+
+When a mutation answers with data another query holds, write it straight into
+that query's cache instead of refetching. `updates` on `useMutation`,
+`usePost`/`usePut`/`usePatch`/`useDelete` and `useUpload` lists the queries the
+answer goes into:
+
+```tsx
+import { usePost } from "gemi/client";
+
+// The answer is the assets query's data: written as is.
+const move = usePost(
+  "/pages/:pageId/assets/entries/move",
+  { params: { pageId } },
+  { updates: [{ path: "/pages/:pageId/assets", params: { pageId } }] },
+);
+
+// The answer is part of it: `data` builds the next value.
+const create = usePost("/todos", {}, {
+  updates: [
+    {
+      path: "/todos",
+      search: (search) => !search.has("query"),
+      data: (created, todos) => [...todos, created],
+    },
+  ],
+});
+```
+
+Each entry is `{ path, params?, search?, data? }`:
+
+- `path`, `params` and `search` name the query the way `useMutate` does: `search`
+  is one variant (an object) or a predicate over every cached variant of the path.
+  `params` are merged over the current route's, as `useQuery` merges them.
+- Without `data`, the answer is written as is. That only type-checks when the
+  answer is the path's data. `data(answer, current)` is typed from the path and
+  returns the next value; it is skipped for a variant with nothing cached.
+
+The write happens on a 2xx only, before `onSuccess`, and a request superseded in
+`"latest"` mode writes nothing. **Nothing is refetched**: the written variant
+counts as freshly fetched (its `staleTime` starts again), and a GET for it that
+was already on the wire is dropped when it lands, so it cannot put the older data
+back. A value written to a single variant that is not cached yet seeds it, so a
+query mounted later reads it without a request; a predicate only reaches variants
+that are cached.
+
+### `useSetQueryData`
+
+The same write, by hand, for when the data is not the answer of one mutation
+hook:
+
+```tsx
+import { useSetQueryData } from "gemi/client";
+
+const setQueryData = useSetQueryData();
+
+setQueryData({ path: "/pages/:pageId/assets", params: { pageId } }, assets);
+setQueryData(
+  { path: "/todos", search: () => true },
+  (todos) => todos.filter((todo) => todo.id !== removed.id),
+);
+```
+
+A value replaces the variant's data (and seeds it when nothing is cached); a
+function updates what is cached and skips a variant with nothing cached.
+
+`useMutate` and `useSetQueryData` differ in what they trust: `useMutate` writes
+an optimistic guess and refetches to reconcile it, `useSetQueryData` and
+`updates` write data the server already answered with and do not refetch. When
+the server derives values the answer doesn't carry (counts, totals), use
+`useMutate` or refetch instead.
 
 ## Type safety
 
