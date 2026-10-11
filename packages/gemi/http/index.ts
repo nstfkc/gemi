@@ -1,5 +1,10 @@
 export { Controller, ResourceController } from "./Controller";
-export { ApiRouter, type ControllerRouteHandler, type CreateRPC } from "./ApiRouter";
+export {
+  ApiRouter,
+  type ControllerRouteHandler,
+  type CreateFileRPC,
+  type CreateRPC,
+} from "./ApiRouter";
 export {
   ChannelRouter,
   ChannelDeclaration,

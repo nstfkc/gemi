@@ -11,6 +11,19 @@
 - New exports from `gemi/services`: `RunManager`, `RunFailure`, `RunNotFoundError`, `MemoryRunStore`, `DatabaseRunStore`, `createRunsTableStatements`, `isFinalRunStatus`, `FINAL_RUN_STATUSES`, `OPEN_RUN_STATUSES`, `RunsServiceProvider`, `defineRunsConfig`, and the types `RunRecord`, `RunStatus`, `RunProgress`, `RunError`, `RunFilter`, `RunStore`, `NewRunRecord`, `RunUpdate`, `CreateRunOptions`, `RunHandle`, `RunWaitOptions`, `RunsConfig`, `DatabaseRunStoreOptions`.
 - To adopt in place of a hand-rolled status table (a build/import row with status, progress JSON, error, deadline and a sweep) and a polling wait: create the run where the work is requested, pass `run.id` to the job and wrap its body in `Runs.execute`, replace the polling loop with `Runs.wait`, and the client's polling with `Runs.stream` + `useSubscription`.
 
+# Upgrading from 0.126.0 to 0.127.0
+
+## Client: typed `fetchBlob` and `fetchText` for stream and file routes (#907)
+
+**New, nothing to migrate.** A route served by `this.stream(...)` or `this.file(...)` can now be downloaded on the client with a typed path, instead of a hand-written `fetch`. See [Data Fetching: Downloading files](docs/data-fetching.md#downloading-files-fetchblob-and-fetchtext).
+
+- **`fetchBlob(path, { params, search, signal, init })`** and **`fetchText(...)`** from `gemi/client` resolve to `{ blob | text, filename, response }`. `filename` is read from `Content-Disposition` (`filename*` first), or `null`.
+- `path` only accepts `GET` paths backed by a stream or file route (including a verb map's `get: this.stream(...)` and nested routers), and `params` is required when the path has params.
+- A non-2xx rejects with a `QueryError` (`status`, JSON `body` or `null`, `retryAfter`), the same error `useQuery` throws, so `mutationErrorList(error, fallback)` gives its message. A network failure or abort rejects with `fetch`'s own error.
+- New types: `FileRPC` (filled in by `gemi.d.ts`), `FilePath`, `FetchFileOptions`, `FetchedBlob` and `FetchedText` from `gemi/client`, and `CreateFileRPC` from `gemi/http`.
+- `RPC` is unchanged: stream and file routes are still not `useQuery` paths.
+- To adopt it, replace hand-written downloads such as ``fetch(`/api/pages/${id}/post/image?format=png`)`` with `fetchBlob("/pages/:pageId/post/image", { params: { pageId: id }, search: { format: "png" } })`, and read the error message with `mutationErrorList(error, fallback)` instead of reading the body yourself.
+
 # Upgrading from 0.124.0 to 0.125.0
 
 ## Feature flags for the remote MCP endpoint, OAuth providers and MCP tools (#885)

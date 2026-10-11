@@ -13,6 +13,7 @@ import { describe, expectTypeOf, test } from "vitest";
 import {
   ApiRouter,
   type ApiRoutes,
+  type CreateFileRPC,
   type CreateRPC,
   type FileHandler,
   type RouteHandler,
@@ -156,6 +157,49 @@ describe("verb maps with a stream or file get (#707)", () => {
     expectTypeOf<{ get: StreamHandler; delete: RouteHandler<"DELETE", any, any, any> }>().toExtend<
       ApiRoutes[string]
     >();
+  });
+});
+
+describe("CreateFileRPC (#907)", () => {
+  type Files = CreateFileRPC<Root>;
+
+  test("lists stream and file routes by path, with their kind", () => {
+    expectTypeOf<Files["/download"]>().toEqualTypeOf<"file">();
+    expectTypeOf<Files["/video"]>().toEqualTypeOf<"stream">();
+    expectTypeOf<Files["/video-guarded"]>().toEqualTypeOf<"stream">();
+    expectTypeOf<Files["/report"]>().toEqualTypeOf<"stream">();
+  });
+
+  test("lists a verb map's stream or file get", () => {
+    expectTypeOf<Files["/assets/:fileId"]>().toEqualTypeOf<"stream">();
+    expectTypeOf<Files["/reports/:id"]>().toEqualTypeOf<"file">();
+  });
+
+  test("leaves JSON routes out", () => {
+    expectTypeOf<keyof Files>().toEqualTypeOf<
+      "/download" | "/video" | "/video-guarded" | "/report" | "/assets/:fileId" | "/reports/:id"
+    >();
+  });
+
+  test("prefixes a nested router's file routes", () => {
+    class Files2 extends ApiRouter {
+      routes = {
+        "/:id/image": this.stream(() => null),
+        "/:id": this.get(() => ({ id: 1 })),
+      };
+    }
+    class R extends ApiRouter {
+      routes = {
+        "/pages": Files2,
+        "/(group)/post/image": this.stream(() => null),
+      };
+    }
+    expectTypeOf<keyof CreateFileRPC<R>>().toEqualTypeOf<"/pages/:id/image" | "/post/image">();
+  });
+
+  test("does not change CreateRPC", () => {
+    expectTypeOf<"GET:/video">().not.toExtend<Keys>();
+    expectTypeOf<"/video">().not.toExtend<Keys>();
   });
 });
 
