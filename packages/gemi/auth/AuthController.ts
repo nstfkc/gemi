@@ -6,6 +6,7 @@ import { HttpRequest } from "../http/HttpRequest";
 import { ValidationError } from "../http";
 import { AuthorizationError } from "../http/errors";
 import { RequestBreakerError } from "../http/Error";
+import { enabledOAuthProvider } from "./oauth/providers";
 import { enforceCodeRateLimits, foldEmail, normalizeEmail } from "./oneTimeCode";
 import type { AuthConfig, AuthenticatedArgs } from "./config";
 import { Auth } from "../facades";
@@ -739,10 +740,14 @@ export class AuthController extends Controller {
 
   async oauthRedirect(req = new HttpRequest()) {
     const { provider } = req.params;
-    const oauthProvider =
-      app(AuthManager).config.oauthProviders[provider as string];
+    const providers = app(AuthManager).config.oauthProviders;
+    const configured = Object.hasOwn(providers, provider as string);
+    const oauthProvider = await enabledOAuthProvider(providers, provider as string);
 
     if (!oauthProvider) {
+      // Configured, but switched off by its `feature` for this request (#885):
+      // a 404, before any cookie is written, so the route reads as absent.
+      if (configured) throw new RequestBreakerError("Not found", { status: 404 });
       throw new Error(`Invalid provider: ${provider}`);
     }
 
@@ -792,7 +797,13 @@ export class AuthController extends Controller {
     const { provider } = req.params;
     const auth = app(AuthManager);
     const { userProvider, config } = auth;
-    const oauthProvider = config.oauthProviders[provider as string];
+    const configured = Object.hasOwn(config.oauthProviders, provider as string);
+    const oauthProvider = await enabledOAuthProvider(config.oauthProviders, provider as string);
+    // Configured, but switched off by its `feature` for this request (#885):
+    // a 404, before the round trip's cookie is read or cleared.
+    if (configured && !oauthProvider) {
+      throw new RequestBreakerError("Not found", { status: 404 });
+    }
 
     // Read and delete the round trip's cookie first, whatever happens next:
     // a state is good for one callback.

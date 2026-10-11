@@ -539,6 +539,7 @@ export {
   type EmailCodeConfig,
   type EmailCodeSendArgs,
   type LegacySessionMigrator,
+  type OAuthProviderEntry,
 } from "../auth/config";
 export {
   defineTranslationConfig,

@@ -11,10 +11,13 @@ import {
 } from "./oneTimeCode";
 import {
   authConfigDefaults,
+  checkOAuthProviders,
   emailCodeDefaults,
   type AuthConfig,
   type LegacySessionMigrator,
 } from "./config";
+import type { OAuthProvider } from "./oauth/OAuthProvider";
+import { enabledOAuthProvider, enabledOAuthProviderNames } from "./oauth/providers";
 import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
 import { app } from "../foundation/app";
@@ -79,6 +82,7 @@ export class AuthManager {
     config: AuthConfig = {},
     provider: UserProvider<any> = new UserProvider(),
   ) {
+    checkOAuthProviders(config.oauthProviders);
     this.config = {
       ...withDefaults(authConfigDefaults(config), config),
       // Nested, so the shallow merge above would drop the defaults of every
@@ -86,6 +90,22 @@ export class AuthManager {
       emailCode: emailCodeDefaults(config.emailCode),
     };
     this.provider = provider;
+  }
+
+  /**
+   * The OAuth sign-in provider `name` names, or `null` when there is none or
+   * its `feature` is off for this request (#885) — the two answer alike.
+   */
+  async oauthProvider(name: string): Promise<OAuthProvider | null> {
+    return await enabledOAuthProvider(this.config.oauthProviders, name);
+  }
+
+  /**
+   * The names of the OAuth sign-in providers that are on for this request, in
+   * the order `oauthProviders` declares them: the buttons a sign-in page shows.
+   */
+  async oauthProviderNames(): Promise<string[]> {
+    return await enabledOAuthProviderNames(this.config.oauthProviders);
   }
 
   /**

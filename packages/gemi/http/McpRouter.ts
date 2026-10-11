@@ -1,5 +1,6 @@
 import type { ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
+import type { FeatureKey } from "../client/rpc";
 import type { UrlParser } from "../client/types";
 import type { Prettify } from "../utils/type";
 import type {
@@ -326,6 +327,15 @@ type MetaBase<T> = {
    * that must be confirmed sets `requiresApproval` instead.
    */
   annotations?: McpToolAnnotations;
+  /**
+   * Offers the tool only while this `app/features` flag is on for the
+   * request (#885). Off: a remote `tools/list` leaves it out and a call is
+   * answered as for a tool that does not exist; a local agent that holds it
+   * (`toAgentTools` builds its tools once) has the call refused with an error
+   * the model reads. Evaluated per call, as the signed-in user — for a remote
+   * caller, the user its credential resolved to.
+   */
+  feature?: FeatureKey;
 };
 
 /**
@@ -500,6 +510,7 @@ export type McpRouteMetaRuntime = {
   requiresApproval?: boolean;
   title?: string;
   annotations?: McpToolAnnotations;
+  feature?: string;
   params?: Record<string, McpParamDeclaration>;
   files?: Record<string, McpFileBinder | "input">;
   result?: McpResultProjection;
