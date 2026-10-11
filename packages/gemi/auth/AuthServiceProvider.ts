@@ -1,5 +1,5 @@
 import { ServiceProvider } from "../support/ServiceProvider";
-import type { AuthConfig } from "./config";
+import { checkAuthFlowSwitches, type AuthConfig } from "./config";
 import { AuthManager } from "./AuthManager";
 import { ConnectionManager } from "./connections/ConnectionManager";
 
@@ -16,5 +16,10 @@ export class AuthServiceProvider extends ServiceProvider {
         store: config.connectionStore ?? undefined,
       });
     });
+  }
+
+  /** A misspelt route switch fails the boot, not the first sign-in. */
+  boot() {
+    checkAuthFlowSwitches(this.app.config.get<AuthConfig>("auth", {}));
   }
 }

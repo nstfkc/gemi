@@ -129,6 +129,23 @@ export interface AuthConfig {
   basePath?: string;
   verifyEmail?: boolean;
   /**
+   * The email + password routes. Default `true`. `false` answers 404 on
+   * `POST /auth/sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`,
+   * `reset-password`, `change-password` and `verify-email`, before the body
+   * is read, for an app that signs in only with email codes or OAuth (#879).
+   * Nothing else changes: sign-out, `/auth/me`, email codes and OAuth keep
+   * working, and so do `verifyPassword` and `hashPassword` for an app that
+   * calls them itself.
+   */
+  password?: boolean;
+  /**
+   * The magic-link + PIN pair. Default `true`. `false` answers 404 on
+   * `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`
+   * (#879). The `/auth/sign-in/magic-link` page stays: it takes the link
+   * `emailCode.send` is handed, and the ones `Auth.createMagicLink` issues.
+   */
+  magicLink?: boolean;
+  /**
    * Where a signed-in user goes when there is no intended URL to return to —
    * the fallback of `Auth.intendedUrl()` and of the OAuth callback's
    * `redirectTo`.
@@ -349,6 +366,20 @@ function checkEmailCodeNumber(name: string, value: number, min: number, max = In
   }
 }
 
+/**
+ * Throws on a `password` or `magicLink` that is not a boolean: `"false"` would
+ * leave the routes on. Run at boot by `AuthServiceProvider`, and again when
+ * the config is merged.
+ */
+export function checkAuthFlowSwitches(config: AuthConfig | null = {}) {
+  for (const name of ["password", "magicLink"] as const) {
+    const value: unknown = config?.[name];
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new Error(`auth.${name} must be true or false, got ${JSON.stringify(value)}`);
+    }
+  }
+}
+
 export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailCodeConfig> {
   const length = config.length ?? 6;
   const expiresInMinutes = config.expiresInMinutes ?? 10;
@@ -419,9 +450,12 @@ export function defineAuthConfig(config: AuthConfig): AuthConfig {
 export function authConfigDefaults(
   config: AuthConfig = {},
 ): Required<AuthConfig> {
+  checkAuthFlowSwitches(config);
   return {
     basePath: "/auth",
     verifyEmail: true,
+    password: true,
+    magicLink: true,
     redirectPath: "/dashboard",
     signInPath: "/auth/sign-in",
 
