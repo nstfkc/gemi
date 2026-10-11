@@ -14,6 +14,14 @@ Type changes:
 - **`McpToolDescriptor` is now a union** of `McpRouteToolDescriptor` (`kind: "route"`, with `method`, `url` and `source`) and `McpNativeToolDescriptor` (`kind: "tool"`, no `method` or `url`). Every descriptor has a new `kind` field. Code that reads `descriptor.method` or `descriptor.url` from `McpRegistry.descriptors()` or `list()` now gets `McpMethod | undefined` and `string | undefined`. Check `descriptor.kind === "route"` first to narrow. A test that compares a whole descriptor with `toEqual` now also sees `kind`.
 - `McpRouter.routes` is typed `Record<string, McpRouteDeclaration | McpToolDeclaration>`.
 
+## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
+
+**New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
+
+- `Auth.user()` is unchanged: it never resolves to `null` and throws `AuthenticationError` (401, or a redirect to sign-in for a view). Its docs now say so.
+- Replace hand-rolled wrappers (`Auth.user().catch(...)` returning `null` on `AuthenticationError`) with `Auth.userOrNull()`.
+- Only "nobody is signed in" becomes `null`. An error from the session lookup itself (a database outage, say) still throws, where `.catch(() => null)` would have served the page as signed out.
+
 ## Mutation errors: `error.list()` and `error.field(name)` (#890)
 
 **New, nothing to migrate.** Every error the mutation hooks hand over (`error` and the `onError` argument of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form onError>`) carries two helpers. See [Data Fetching: Messages to show](docs/data-fetching.md#messages-to-show-errorlist-and-errorfieldname).
