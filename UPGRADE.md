@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.126.0 to 0.127.0
 
 ## Client: typed `fetchBlob` and `fetchText` for stream and file routes (#907)
 
