@@ -19,6 +19,7 @@ import { QueueServiceProvider } from "../services/queue/QueueServiceProvider";
 import { RateLimiterServiceProvider } from "../services/rate-limiter/RateLimiterServiceProvider";
 import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
 import { RouteServiceProvider } from "../services/router/RouteServiceProvider";
+import { RunsServiceProvider } from "../services/runs/RunsServiceProvider";
 
 /**
  * The providers every gemi app boots with, in registration order. Twenty
@@ -65,5 +66,6 @@ export const frameworkProviders: ServiceProviderConstructor[] = [
   RateLimiterServiceProvider,
   ScheduleServiceProvider,
   ChangeFeedServiceProvider,
+  RunsServiceProvider,
   BroadcastServiceProvider,
 ];
