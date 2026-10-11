@@ -271,6 +271,7 @@ export default defineMiddlewareConfig({
 | `filesystem` | `defineFilesystemConfig` | `gemi/services` |
 | `queue` | `defineQueueConfig` | `gemi/services` |
 | `redis` | `defineRedisConfig` | `gemi/services` |
+| `cache` | `defineCacheConfig` | `gemi/services` |
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |

@@ -409,6 +409,24 @@ export {
   discoverListeners,
 } from "./discovery";
 
+// Cache (#496)
+export { CacheServiceProvider } from "./cache/CacheServiceProvider";
+export {
+  CacheManager,
+  TaggedCache,
+  type CacheTtl,
+} from "./cache/CacheManager";
+export type { CacheStore } from "./cache/CacheStore";
+export {
+  MemoryCacheStore,
+  type MemoryCacheStoreOptions,
+} from "./cache/MemoryCacheStore";
+export {
+  RedisCacheStore,
+  type CacheRedisClient,
+  type RedisCacheStoreOptions,
+} from "./cache/RedisCacheStore";
+
 // Redis
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
 export { RedisManager } from "./redis/RedisManager";
@@ -529,6 +547,11 @@ export {
   redisConfigDefaults,
   type RedisConfig,
 } from "./redis/config";
+export {
+  defineCacheConfig,
+  cacheConfigDefaults,
+  type CacheConfig,
+} from "./cache/config";
 export {
   defineFeaturesConfig,
   featuresConfigDefaults,

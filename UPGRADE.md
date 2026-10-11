@@ -9,6 +9,17 @@
 - **`feature` in `fromApiRoute`'s meta**: while it is off, remote `tools/list` leaves the tool out and `tools/call` answers `Unknown tool`. A local agent's tools (`toAgentTools`) are built once, so the tool stays listed there, but a call is refused with `There is no tool named "<name>".` before the route runs. New: `McpRegistry.available(caller, filter?)` (async), which is `list()` narrowed by features, and `McpToolDescriptor.feature`. `list()` and `descriptors()` are unchanged.
 - `server.version` is not affected by any flag. If you derive it from tool names, hash `registry.descriptors()` (every declared tool).
 
+## Cache: `Cache` facade, memory and Redis stores (#496)
+
+**New, nothing to migrate.** A first-class cache: `get` / `set` / `has` / `delete` / `pull` with a TTL, `remember(key, ttl, compute)`, and `tags(...)` whose `flush()` drops a group of values on any store. See [Cache](docs/cache.md).
+
+- **`Cache`** from `gemi/facades`, fronting `CacheManager` (token `cache`), bound by the new `CacheServiceProvider`, which is in `frameworkProviders`.
+- **`app/config/cache.ts`** with `defineCacheConfig` (optional): `store: "memory" | "redis" | CacheStore | (app) => CacheStore` (default `"memory"`), `ttl` (default `null`, no expiry), `memory: { maxEntries }` (default `10000`), `redis: { prefix }` (default `"gemi:cache:"`). The `"redis"` store uses the app's Redis connection (`app/config/redis.ts` / `REDIS_URL`).
+- TTLs are a `Duration`: milliseconds or `"30s"`, `"5m"`, `"24h"`, `"7d"`.
+- Values are JSON-encoded on every store, the memory one included: a `Date` comes back as a string, and `undefined` cannot be stored (it means a miss).
+- New exports from `gemi/services`: `CacheManager`, `TaggedCache`, `CacheTtl`, `CacheStore`, `MemoryCacheStore`, `RedisCacheStore`, `CacheRedisClient`, the option types, `CacheServiceProvider`, `defineCacheConfig`, `cacheConfigDefaults`, `CacheConfig`.
+- An app with a hand-rolled in-process cache (an LRU `Map` with expiry) can replace it with `new CacheManager({ store: new MemoryCacheStore({ maxEntries }), ttl })`, or with the app's `Cache` to share it across instances once the store is `"redis"`.
+
 ## Server: a built-in health route and an event-loop liveness signal (#48)
 
 **New, one reserved path.** gemi now answers load-balancer health probes itself, and reports whether the process's event loop is stalling. See [Health checks](docs/configuration.md#health-checks).
