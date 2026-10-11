@@ -21,6 +21,8 @@ export type {
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
+export { fetchBlob, fetchText } from "./fetchFile";
+export type { FetchedBlob, FetchedText, FetchFileOptions, FilePath } from "./fetchFile";
 export { useSetQueryData } from "./useSetQueryData";
 export type { QueryTarget, QueryUpdate } from "./useSetQueryData";
 export { useSubscription } from "./useSubscription";
@@ -115,6 +117,7 @@ export { createRoot } from "./createRoot";
 
 export type {
   RPC,
+  FileRPC,
   ViewRPC,
   I18nDictionary,
   BroadcastRPC,

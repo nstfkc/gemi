@@ -5,6 +5,17 @@ export interface RPC extends CreateRPC<AuthApiRouter, "/auth"> {}
 
 export interface ViewRPC {}
 
+/**
+ * The application's file routes: the path of every `GET` its api serves with
+ * `this.stream(...)` or `this.file(...)`, to `"stream"` or `"file"`. What
+ * `fetchBlob` and `fetchText` take.
+ *
+ * Generated from the app's `ApiRouter` by the framework's own `gemi.d.ts`
+ * (`CreateFileRPC`), the way `RPC` is. Empty for an app without file routes or
+ * without the app's types, and then those functions take any path.
+ */
+export interface FileRPC {}
+
 export interface I18nDictionary {}
 
 /**
