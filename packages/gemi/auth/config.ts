@@ -507,7 +507,15 @@ export function checkOAuthProviders(providers: Record<string, OAuthProviderEntry
   }
 }
 
-export function defineAuthConfig(config: AuthConfig): AuthConfig {
+/**
+ * Returns the config as written, so reading it back keeps what was put in:
+ * `defineAuthConfig({ oauthProviders: { google: new GoogleOAuthProvider() } })
+ * .oauthProviders.google` is a `GoogleOAuthProvider`, not an
+ * `OAuthProviderEntry`. A key `AuthConfig` does not know is still an error.
+ */
+export function defineAuthConfig<const T extends AuthConfig>(
+  config: T & { [K in Exclude<keyof T, keyof AuthConfig>]: never },
+): T {
   return config;
 }
 

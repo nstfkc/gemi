@@ -42,8 +42,9 @@ export default defineAuthConfig({
 });
 ```
 
-`defineAuthConfig` is an identity function — it exists purely so your editor types the object
-as `AuthConfig`. Every field is optional; anything you omit falls back to the framework
+`defineAuthConfig` is an identity function — it exists purely so your editor checks the object
+against `AuthConfig` (unknown keys are an error). It returns the object's own type, so reading a
+provider back (`auth.oauthProviders.google`) gives the `GoogleOAuthProvider` you put in. Every field is optional; anything you omit falls back to the framework
 default.
 
 Wire the slice into the [Kernel](./project-structure.md) under the `auth` key:
