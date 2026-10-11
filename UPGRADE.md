@@ -1,5 +1,14 @@
 # Unreleased
 
+## Mutations write their answer into other queries: `updates` and `useSetQueryData` (#897)
+
+**New, nothing to migrate.** A mutation that answers with data another query holds can write it into that query's cache with no refetch. See [Data Fetching: Writing a mutation's answer into a query](docs/data-fetching.md#writing-a-mutations-answer-into-a-query-updates).
+
+- **`updates`** in the config of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete` and `useUpload`: `[{ path, params?, search?, data? }]`. Without `data` the answer is written as is (type-checked against the path's data); `data(answer, current)` builds the next value. Applied on a 2xx, before `onSuccess`.
+- **`useSetQueryData()`** from `gemi/client`: `setQueryData({ path, params?, search? }, valueOrFn)`, typed like `useMutate` but with no refetch. New type exports `QueryTarget` and `QueryUpdate`.
+- The written variant counts as freshly fetched, and a GET for it already on the wire is dropped when it lands. `useMutate` is unchanged: it still writes and then refetches.
+- Apps that wrote a mutation's answer with `useMutate` in `onSuccess` (one GET too many per write) can move it to `updates`.
+
 ## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
 
 **New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
