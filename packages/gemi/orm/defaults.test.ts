@@ -576,6 +576,59 @@ describe("clientSideValue produces one field's value", () => {
     ).toBe(false);
   });
 
+  /**
+   * #926. The DMMF hands a Json default over as its source text, and the
+   * artifact records it verbatim — so `"[]"` here is exactly what a generated
+   * `schema.ts` carries. Passed through, it was JSON-encoded a second time and
+   * stored as the JSON string `"[]"`.
+   */
+  test.each([
+    ["[]", []],
+    ["{}", {}],
+    ['{"a":1,"b":[true,null]}', { a: 1, b: [true, null] }],
+    ['"hi"', "hi"],
+    ["1", 1],
+    ["null", null],
+  ])("a Json default %s is the value it spells", (text, parsed) => {
+    const json = field({ type: "Json", default: { kind: "value", value: text } });
+
+    expect(clientSideValue(json, now)).toEqual(parsed);
+  });
+
+  test("a Json default is a fresh object per call", () => {
+    const json = field({ type: "Json", default: { kind: "value", value: "[]" } });
+
+    expect(clientSideValue(json, now)).not.toBe(clientSideValue(json, now));
+  });
+
+  test("a Json[] default parses each element", () => {
+    const list = field({
+      type: "Json",
+      isList: true,
+      default: { kind: "value", value: ['{"a":1}', "[]"] },
+    });
+
+    expect(clientSideValue(list, now)).toEqual([{ a: 1 }, []]);
+  });
+
+  test("a hand-written, already-parsed Json default is passed through", () => {
+    const json = field({ type: "Json", default: { kind: "value", value: [1] } });
+
+    expect(clientSideValue(json, now)).toEqual([1]);
+  });
+
+  test("an invalid Json default names the column", () => {
+    const json = field({ type: "Json", default: { kind: "value", value: "[" } });
+
+    expect(() => clientSideValue(json, now)).toThrow(/Json field .* not valid JSON/);
+  });
+
+  test("a String default that looks like JSON stays a string", () => {
+    const text = field({ type: "String", default: { kind: "value", value: "[]" } });
+
+    expect(clientSideValue(text, now)).toBe("[]");
+  });
+
   test.each(["autoincrement", "dbgenerated"] as const)(
     "%s is the database's business",
     (kind) => {

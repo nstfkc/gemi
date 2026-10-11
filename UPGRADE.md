@@ -1,3 +1,23 @@
+# Unreleased
+
+## ORM: a `Json` field's `@default("[]")` is stored as an array, not a string (#926)
+
+**A bug fix that changes what gets written. Rows already written need a one-off fix.** A `Json` field with a literal default, such as `items Json @default("[]")` or `body Json @default("{}")`, was stored as a JSON **string** (`"[]"`, `jsonb_typeof` = `string`) whenever a write left the field out. Prisma's generated schema gives the default as its text, and gemi JSON-encoded that text like any other Json value. Now the text is parsed first, so the column holds `[]` or `{}`, as with Prisma. This covers `create`, `createMany`, `upsert`'s create branch and nested creates, on Postgres and SQLite, and each element of a `Json[]` default on Postgres.
+
+- **No regenerate needed.** `schema.ts` still records the default's text. Only the runtime reads it differently, so upgrading gemi is enough.
+- **Fix the rows written before the upgrade.** Reading such a column through gemi gives back the string `"[]"`, not an array, and SQL such as `jsonb_array_elements(col)` fails with `cannot extract elements from a scalar`. For each `Json` column with a literal default, find the rows that hold a string and replace each with the JSON it contains:
+
+  ```sql
+  -- Postgres
+  update "Thing" set "items" = ("items" #>> '{}')::jsonb where jsonb_typeof("items") = 'string';
+
+  -- SQLite
+  update "Thing" set "items" = json("items" ->> '$') where json_type("items") = 'text';
+  ```
+
+  This also changes any row where the app deliberately stored a JSON string whose text happens to be JSON. If a column can legitimately hold strings, narrow the `where` to the defaults, e.g. `and "items" #>> '{}' in ('[]', '{}')`.
+- Other defaults (`autoincrement()`, `now()`, `dbgenerated(...)`, `cuid()`/`uuid()`/`nanoid()`/`ulid()`, enum and other scalar literals) are unchanged. A `String` default that looks like JSON (`@default("[]")` on a `String`) is still the two-character string.
+
 # Upgrading from 0.131 to 0.132
 
 ## AI: realtime voice calls on the OpenAI and Azure providers (#921, part 1)
