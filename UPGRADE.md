@@ -1,5 +1,15 @@
 # Unreleased
 
+## Agents: start a turn from server code, `AgentController.startTurn` (#839)
+
+**New, nothing to migrate.** A queue job, a command or an MCP tool can start an agent turn on a thread, as a given user, with no browser request. It runs through the controller like a `useChat` turn and is stored on the thread like one. See [AI Server Turns](docs/ai-server-turns.md).
+
+- **`ChatController.startTurn({ threadId, text | turn, user, body })`** (static, on your concrete controller class). `body` is typed as the controller's `Body`. It answers an `AgentTurn` once the run has started: `runId`, `threadId`, `run` (the `AgentRun`), `stop()` and `result()`. `result()` is the run's `AgentRunResult` plus `threadId`, `text` (the last assistant message's text) and `pending` (the calls waiting for an answer when `finishReason` is `"awaiting-input"`), and settles after the transcript is stored and the hooks ran.
+- The turn runs in a request scope of its own whose user is `user`: `authorizeRequest` (`route: "stream"`), `resource`, `runOwner`, `maxConcurrentRuns`, the thread lock, `instructions()`, `context()`, the hooks and the tools' `ctx` see it as they see a chat turn. The route's middleware does not run.
+- A turn the route would refuse throws **`AgentTurnError`** (new export from `gemi/ai`) with `status`, `code` and `kind`. An error thrown by `authorizeRequest` is thrown as it is.
+- Approvals are not answered for you: they stay on the thread for the user, or the caller answers them with another `startTurn({ turn: { toolResults } })`.
+- New types from `gemi/ai`: `AgentTurn`, `AgentTurnParams`, `AgentTurnResult`.
+
 ## Typed per-request state: `req.state` and `stateKey` (#887)
 
 **New, nothing to migrate.** A middleware can hand what it resolved to the handler, and an agent turn's `context()` can hand what it decided to its hooks, so you no longer need `WeakMap<HttpRequest, ...>` side maps. See [Middleware: passing values to the handler](docs/middleware.md#passing-values-to-the-handler-reqstate).
