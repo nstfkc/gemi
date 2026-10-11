@@ -5499,6 +5499,49 @@ const titleErrors = isValidationError(error) ? error.messages.title : [];
 `"authentication"`, `"permission"`, `"csrf"`, `"not_found"`, `"rate_limit"`,
 `"server"`, `"network"` or `"unknown"` — for a `switch` over all of them.
 
+#### Messages to show: `error.list()` and `error.field(name)`
+
+Every error the hooks hand over (`error`, and the value `onError` receives, on
+`useMutation` and its shorthands, `useUpload` and `<Form onError>`) carries two
+helpers, so you don't flatten `messages` by hand:
+
+```tsx
+const { trigger, error } = usePost("/todos", {}, {
+  onError(error) {
+    toast(error.list("Could not add the todo.")[0]);
+  },
+});
+
+const titleErrors = error?.field("title") ?? []; // ["Required"]
+```
+
+- `error.list(fallback?)` is the failure in words, as a list that is never empty: a
+  validation error's messages, every field's in the order the server sent them; the
+  `message` of any other error the server meant for a person (a form error, a refusal,
+  a route's typed error with a `message`); otherwise `[fallback]`. A server error (its
+  message is the exception's under `gemi dev`), an answer that was not JSON and no
+  answer at all give the fallback. `fallback` defaults to
+  `"Something went wrong. Try again."`.
+- `error.field(name)` is a validation error's messages for one field, and `[]` for
+  any other field or error.
+
+The helpers are non-enumerable, so `toEqual`, a spread and `JSON.stringify` see the
+same object as before. The type is `WithMutationErrorHelpers<MutationError | E>`;
+`MutationError` itself has no helpers, so a value you build by hand still fits it. A
+route's typed error whose body has a `list` or `field` key keeps its own value under
+that key, without the helper.
+
+`mutationErrorList(error, fallback?)` and `mutationErrorField(error, name)` do the
+same for any value: an error you kept, or a `useQuery` `QueryError`, whose body they
+read.
+
+```tsx
+import { mutationErrorList, useQuery } from "gemi/client";
+
+const { error } = useQuery("/todos", {}, { suspense: false });
+if (error) return <p>{mutationErrorList(error, "Could not load your todos.")[0]}</p>;
+```
+
 The guards read `kind`, so a refusal thrown with a message of its own is classified
 like the default one. A server older than 0.85 sent most refusals as a bare string;
 the client wraps those into the same object, using the response's status, so a new
@@ -5865,9 +5908,17 @@ import { Form, isPermissionError, isValidationError } from "gemi/client";
 </Form>;
 ```
 
+To show the failure in words, `error.list(fallback)` gives its messages as a list
+(a validation error's, field by field, or the server's message, else `fallback`), and
+`error.field(name)` gives one field's validation messages:
+
+```tsx
+<Form action="/todos" onError={(error) => toast(error.list("Could not save.")[0])}>
+```
+
 `onError` also receives the route's typed errors, the bodies its handler answers
 with `HttpResponse.error` / `httpError`. The error types, the full list of guards,
-`isHttpError` and `mutationErrorKind` are in [Data Fetching](./data-fetching.md#errors).
+`isHttpError`, `mutationErrorKind` and the helpers are in [Data Fetching](./data-fetching.md#errors).
 
 ### `FormFieldContainer`
 
@@ -12037,7 +12088,8 @@ current user and session.
 
 | Method | Returns | Description |
 | --- | --- | --- |
-| `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
+| `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Never resolves to `null`: throws `AuthenticationError` if not signed in.** |
+| `Auth.userOrNull()` | `Promise<User \| null>` | The same lookup, but `null` for a signed-out visitor. For routes that serve both. An error from the lookup itself (e.g. the database is down) still throws. |
 | `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
 | `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
 | `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
@@ -12072,7 +12124,13 @@ which doubles as its own container token.
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
 > that's fine (the framework turns it into a 401 / redirect). So do `Auth.guard(...)` and
 > `Auth.guardSafe(...)`, which call it first: `guardSafe` returns `false` only for a signed-in
-> user the predicate refuses. On a route that may have no session, catch `AuthenticationError`.
+> user the predicate refuses. On a route that may have no session, use `Auth.userOrNull()`
+> rather than catching `AuthenticationError`:
+>
+> ```typescript
+> const user = await Auth.userOrNull(); // User | null
+> return { greeting: user ? `Hi ${user.email}` : "Welcome" };
+> ```
 
 See [Authorization](./authorization.md) for role checks.
 
@@ -12291,7 +12349,7 @@ for example in the sign-in page's loader, to send an already-signed-in visitor o
 
 ```typescript
 "/sign-in": this.view("auth/SignIn", async () => {
-  const user = await Auth.user().catch(() => null);
+  const user = await Auth.userOrNull();
   if (user) {
     // `as any`: the target is a runtime path, not a typed route.
     Redirect.to(Auth.intendedUrl() as any);
@@ -13662,7 +13720,8 @@ const mail = app(MailManager); // typed MailManager
 
 `Auth` reads and authorizes the current user. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
-- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none. The same rule as the `auth` middleware: a user middleware already put on the request context, else the session named by the `access_token` cookie or, failing that, the `access_token` header. See [Who counts as signed in](./middleware.md#who-counts-as-signed-in).
+- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none; it never resolves to `null`. The same rule as the `auth` middleware: a user middleware already put on the request context, else the session named by the `access_token` cookie or, failing that, the `access_token` header. See [Who counts as signed in](./middleware.md#who-counts-as-signed-in).
+- `Auth.userOrNull()` — `Promise<User | null>`. The same lookup as `Auth.user()`, but `null` when nobody is signed in, for a route that serves signed-out visitors too. Use it instead of catching `AuthenticationError`. An error from the lookup itself still throws.
 - `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
 - `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`.
 - `Auth.authenticate(email)` — creates a session for the given email.

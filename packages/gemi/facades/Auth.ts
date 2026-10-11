@@ -16,8 +16,10 @@ export class Auth extends Facade {
   }
 
   /**
-   * The signed-in user, or an `AuthenticationError` — a 401, and a redirect to
-   * sign-in for a view.
+   * The signed-in user. **Never resolves to `null`:** with no user it throws
+   * `AuthenticationError` — a 401, and a redirect to sign-in for a view — which
+   * the framework answers for you. On a route that also serves signed-out
+   * visitors, use `Auth.userOrNull()` instead of catching it.
    *
    * Agrees with the `auth` middleware on who that is, so a route with it and a
    * route without it see the same user:
@@ -30,26 +32,43 @@ export class Auth extends Facade {
    *   context for the rest of the request.
    */
   static async user(): Promise<User> {
-    const requestContextStore = RequestContext.getStore();
-
-    let user: User | null = requestContextStore?.user;
-
-    if (!user) {
-      user = await sessionUser(this.getFacadeRoot(), requestContextStore?.req);
-      if (user) {
-        requestContextStore?.setUser(user);
-      }
-    }
-
+    const user = await Auth.userOrNull();
     if (user) {
       return user;
     }
     throw new AuthenticationError({
       redirectTo: signInLocation(
-        requestContextStore?.req,
+        RequestContext.getStore()?.req,
         this.getFacadeRoot().config.signInPath,
       ),
     });
+  }
+
+  /**
+   * The signed-in user, or `null` for a signed-out visitor — the same lookup
+   * as `Auth.user()`, for a route that serves both:
+   *
+   * ```ts
+   * const user = await Auth.userOrNull();
+   * if (user) Redirect.to("/dashboard");
+   * ```
+   *
+   * Only "nobody is signed in" becomes `null`. An error from the lookup itself,
+   * such as the database being down, still throws, so an outage is not served
+   * as a signed-out page.
+   */
+  static async userOrNull(): Promise<User | null> {
+    const requestContextStore = RequestContext.getStore();
+
+    if (requestContextStore?.user) {
+      return requestContextStore.user;
+    }
+
+    const user = await sessionUser(this.getFacadeRoot(), requestContextStore?.req);
+    if (user) {
+      requestContextStore?.setUser(user);
+    }
+    return user;
   }
 
   /**
