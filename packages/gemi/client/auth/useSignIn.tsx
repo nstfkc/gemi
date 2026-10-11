@@ -1,6 +1,6 @@
 import { usePost } from "../useMutation";
 import { useFrameworkQuery } from "../useQuery";
-import { reconnectRealtime } from "../realtime/RealtimeClient";
+import { reconnectRealtime } from "../realtime/loader";
 
 interface UseSignInArgs {
   onSuccess?: (data: any) => void;

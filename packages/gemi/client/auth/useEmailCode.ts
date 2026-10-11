@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePost } from "../useMutation";
 import { useFrameworkQuery } from "../useQuery";
-import { reconnectRealtime } from "../realtime/RealtimeClient";
+import { reconnectRealtime } from "../realtime/loader";
 
 interface UseEmailCodeArgs {
   /** After `verify` signs in. `isNewUser` is true when the account was just created. */

@@ -1,11 +1,11 @@
 import { buildTopic, topicMatches } from "../../services/broadcast/channels";
 import type { DeniedCode } from "../../services/broadcast/protocol";
-import {
-  channelKey,
-  type ChannelListener,
-  type ChannelParamValues,
-  type ChannelStatus,
-  type RealtimeSocket,
+import { channelKey } from "./loader";
+import type {
+  ChannelListener,
+  ChannelParamValues,
+  ChannelStatus,
+  RealtimeSocket,
 } from "./RealtimeClient";
 
 export interface FakeSubscription {

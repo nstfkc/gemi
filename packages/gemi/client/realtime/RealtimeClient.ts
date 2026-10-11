@@ -7,6 +7,7 @@ import {
   type DeniedCode,
   type ServerFrame,
 } from "../../services/broadcast/protocol";
+import { channelKey } from "./loader";
 
 /**
  * Where a channel subscription stands, as the hooks report it.
@@ -101,15 +102,11 @@ interface Entry {
   retries: number;
 }
 
-/** `pattern` and its params, canonical: two hooks on one channel share a `sub`. */
-export function channelKey(pattern: string, params: ChannelParamValues): string {
-  const sorted = Object.keys(params)
-    .sort()
-    .map((key) => [key, String(params[key])]);
-  return `${pattern}\u0000${JSON.stringify(sorted)}`;
-}
 
 /**
+ * Loaded on demand: import it as a type only, and reach the instance through
+ * `./loader` (`loadRealtimeClient`), so it stays out of the entry chunk.
+ *
  * The tab's one WebSocket to the app (`gemi.v1`), multiplexing every channel
  * the mounted hooks subscribe to.
  *
@@ -617,40 +614,4 @@ function reportListenerError(error: unknown) {
   setTimeout(() => {
     throw error;
   });
-}
-
-let configured: RealtimeOptions = {};
-let instance: RealtimeClient | null = null;
-
-/**
- * Sets the socket options (`init({ realtime })` calls it). Takes effect on
- * the next connection.
- */
-export function configureRealtime(options: RealtimeOptions = {}) {
-  configured = { ...configured, ...options };
-  instance?.configure(configured);
-}
-
-/** The tab's client, created on first use. `null` on the server. */
-export function getRealtimeClient(): RealtimeClient | null {
-  if (typeof window === "undefined") return null;
-  instance ??= new RealtimeClient(configured);
-  return instance;
-}
-
-/**
- * Reconnects the tab's socket, if it has one, so its channels are authorized
- * as the current session. The auth hooks call it after signing in or out.
- * Never creates the client.
- */
-export function reconnectRealtime() {
-  instance?.reconnect();
-}
-
-/**
- * The open socket's id, for the `X-Gemi-Socket` header, or `null`. Never
- * creates the client.
- */
-export function currentSocketId(): string | null {
-  return instance?.socketId ?? null;
 }

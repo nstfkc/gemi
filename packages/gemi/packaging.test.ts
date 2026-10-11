@@ -106,6 +106,52 @@ export function undeclared() {
   "package.json": `{ "name": "packaging-fixture", "private": true }\n`,
 };
 
+/**
+ * A browser app built with Vite against the installed package, for what
+ * lands in the entry chunk every route loads (#891). `main.tsx` is the entry
+ * and uses neither realtime hook; one lazily loaded view follows a channel and
+ * another a `ChangeFeed`. Outside `app/` so `tsc` above never sees it.
+ */
+const CLIENT_FIXTURE = {
+  "web/main.tsx": `import { init, Link, useQuery } from "gemi/client";
+
+function RootLayout({ children }: { children?: unknown }) {
+  const { data } = useQuery("/health");
+  return <body><Link href="/">home</Link>{String(data)}{children as never}</body>;
+}
+
+(window as any).views = {
+  Plain: () => import("./Plain"),
+  Live: () => import("./Live"),
+  Feed: () => import("./Feed"),
+};
+init(RootLayout);
+`,
+  "web/Plain.tsx": `import { usePost, useQuery } from "gemi/client";
+
+export default function Plain() {
+  const { data } = useQuery("/health");
+  const save = usePost("/health" as never);
+  return <button onClick={() => save.trigger({} as never)}>{String(data)}</button>;
+}
+`,
+  "web/Live.tsx": `import { useChannel, useQuery } from "gemi/client";
+
+export default function Live() {
+  const { status } = useChannel("site" as never, {}, { onResync() {} });
+  const { data } = useQuery("/health", {}, { live: "site" as never });
+  return <p>{status}{String(data)}</p>;
+}
+`,
+  "web/Feed.tsx": `import { useSubscription } from "gemi/client";
+
+export default function Feed() {
+  const { status } = useSubscription("/health" as never, {}, { onChange: console.log });
+  return <p>{status}</p>;
+}
+`,
+};
+
 const PACKAGE_ROOT = import.meta.dirname;
 const REPO_ROOT = join(PACKAGE_ROOT, "../..");
 const TSC = join(PACKAGE_ROOT, "node_modules/typescript/bin/tsc");
@@ -139,13 +185,13 @@ beforeAll(async () => {
   // is needed to compile; the other two are here because gemi's own `.d.ts`
   // files reference them, and while `skipLibCheck` hides that, borrowing them
   // keeps the fixture honest about what an app has.
-  for (const dependency of ["typescript", "react", "@types"]) {
+  for (const dependency of ["typescript", "react", "react-dom", "@types"]) {
     const target = join(PACKAGE_ROOT, "node_modules", dependency);
     expect(existsSync(target), `cannot link missing ${target}`).toBe(true);
     await symlink(target, join(fixture, "node_modules", dependency));
   }
 
-  for (const [path, contents] of Object.entries(FIXTURE)) {
+  for (const [path, contents] of Object.entries({ ...FIXTURE, ...CLIENT_FIXTURE })) {
     const absolute = join(fixture, path);
     await mkdir(join(absolute, ".."), { recursive: true });
     await writeFile(absolute, contents);
@@ -199,6 +245,19 @@ beforeAll(async () => {
 
   const server = await $`${TSC} --noEmit -p tsconfig.server.json`.cwd(fixture).nothrow().quiet();
   serverDiagnostics = server.text();
+
+  // `configFile: false`: the fixture's own build, not this package's.
+  const { build } = await import("vite");
+  await build({
+    root: join(fixture, "web"),
+    configFile: false,
+    logLevel: "silent",
+    build: {
+      outDir: join(fixture, "web-dist"),
+      manifest: true,
+      rollupOptions: { input: join(fixture, "web/main.tsx") },
+    },
+  });
 }, 600_000);
 
 afterAll(async () => {
@@ -303,5 +362,50 @@ describe("the published package, installed into an app", () => {
       complaints,
       `useQuery("/definitely-not-a-route") should be an error, but tsc exited ${exitCode} saying:\n${diagnostics || "(nothing)"}`,
     ).not.toBe("");
+  });
+});
+
+describe("the published client, built into an app", () => {
+  /**
+   * The realtime socket and `useSubscription`'s SSE connection are loaded on
+   * first use, with a dynamic `import()` (#891). A value import of
+   * `client/realtime/RealtimeClient` or `client/subscriptionStream` from
+   * anything the entry reaches puts it back in every route's entry chunk,
+   * which no unit test would notice: an app's bundler places a module by what
+   * statically reaches it, and its entry reaches all of `gemi/client`.
+   */
+  const MARKERS = {
+    socket: ["gemi.v1", "__gemi/socket", "hiddenDisconnectMs"],
+    subscription: ["Last-Event-ID", "text/event-stream"],
+  };
+
+  async function chunks() {
+    const out = join(fixture, "web-dist");
+    const manifest = await Bun.file(join(out, ".vite/manifest.json")).json();
+    const entry = (Object.values(manifest) as Array<{ file: string; isEntry?: boolean }>).find(
+      (chunk) => chunk.isEntry,
+    );
+    expect(entry, "the fixture build produced no entry chunk").toBeDefined();
+    const files = (await $`find ${out} -name "*.js"`.quiet()).text().trim().split("\n");
+    const code = new Map<string, string>();
+    for (const file of files) code.set(file, await Bun.file(file).text());
+    return { entry: code.get(join(out, entry!.file))!, code };
+  }
+
+  test("keeps the socket client and the SSE reader out of the entry chunk", async () => {
+    const { entry } = await chunks();
+    for (const marker of [...MARKERS.socket, ...MARKERS.subscription]) {
+      expect(entry.includes(marker), `the entry chunk contains "${marker}"`).toBe(false);
+    }
+  });
+
+  test("still ships both, in chunks of their own", async () => {
+    // The liveness check for the one above: markers that are in no chunk at
+    // all would pass it while measuring nothing.
+    const { entry, code } = await chunks();
+    for (const marker of [...MARKERS.socket, ...MARKERS.subscription]) {
+      const holders = [...code].filter(([, text]) => text !== entry && text.includes(marker));
+      expect(holders.length, `no lazy chunk contains "${marker}"`).toBeGreaterThan(0);
+    }
   });
 });

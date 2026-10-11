@@ -36,7 +36,7 @@ export type {
   UseChannelConfig,
   UseChannelOptions,
 } from "./useChannel";
-export { configureRealtime } from "./realtime/RealtimeClient";
+export { configureRealtime } from "./realtime/loader";
 export type { RealtimeOptions } from "./realtime/RealtimeClient";
 export type {
   SubscriptionConfig,

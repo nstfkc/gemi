@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 
 import { QueryManagerProvider } from "./QueryManagerContext";
 import { RouteStateProvider, type PageData, type RouteState } from "./RouteStateContext";
-import { currentSocketId, getRealtimeClient } from "./realtime/RealtimeClient";
+import { currentSocketId, loadedRealtimeClient, loadRealtimeClient } from "./realtime/loader";
 import { useChannel, useChannelInvalidate } from "./useChannel";
 import { useQuery } from "./useQuery";
 
@@ -29,7 +29,8 @@ describe("channel hooks on the server", () => {
     );
     expect(html).toContain("closed/closed/true");
     expect(WebSocketSpy).not.toHaveBeenCalled();
-    expect(getRealtimeClient()).toBeNull();
+    expect(loadRealtimeClient()).toBeNull();
+    expect(loadedRealtimeClient()).toBeNull();
     expect(currentSocketId()).toBeNull();
     vi.unstubAllGlobals();
   });

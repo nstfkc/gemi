@@ -14,7 +14,8 @@ vi.mock("../orm/context", () => ({
 }));
 
 import { ChangeFeedManager } from "../services/change-feed/ChangeFeedManager";
-import { readEvents, useSubscription } from "./useSubscription";
+import { readEvents } from "./subscriptionStream";
+import { useSubscription } from "./useSubscription";
 
 /**
  * The hook against the real `ChangeFeed.stream`: `fetch` is stubbed to hand
