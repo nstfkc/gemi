@@ -33,11 +33,18 @@ import {
 import { ThemeProvider } from "../client/ThemeProvider";
 import type { ClientFeatureKey } from "../client/rpc";
 import { FakeSocket } from "../client/realtime/FakeSocket";
+import * as live from "../client/realtime/live";
+import { provideLiveModule } from "../client/realtime/loader";
 import { RealtimeContext } from "../client/realtime/RealtimeContext";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
 import { applyParams } from "../utils/applyParams";
 import { Subject } from "../utils/Subject";
 import { toVariantKey } from "../utils/variantKey";
+
+// A live query loads its subscription on first use in an app (#891). Under
+// `<Page>` it is here already, so a query on the `FakeSocket` subscribes in
+// its effect and a test sees events without waiting for a module to load.
+provideLiveModule(live);
 
 /**
  * A dictionary as `Dictionary.create` produces it: a name and a

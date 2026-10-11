@@ -39,8 +39,7 @@ export const BROADCAST_PROTOCOL = "gemi.v1";
 /** The default endpoint, `defineBroadcastConfig({ path })`. */
 export const DEFAULT_SOCKET_PATH = "/__gemi/socket";
 
-/** The request header a client sends its socket id in, for `toOthers`. */
-export const SOCKET_ID_HEADER = "x-gemi-socket";
+export { SOCKET_ID_HEADER } from "./socketHeader";
 
 /** What a subscription id may look like. */
 export const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{1,32}$/;

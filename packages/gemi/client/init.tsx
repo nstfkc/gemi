@@ -10,7 +10,8 @@ import {
   recoverFromChunkLoadError,
   type ChunkLoadRecoveryOptions,
 } from "./chunkLoadRecovery";
-import { configureRealtime, type RealtimeOptions } from "./realtime/RealtimeClient";
+import { configureRealtime } from "./realtime/loader";
+import type { RealtimeOptions } from "./realtime/RealtimeClient";
 
 export interface InitOptions {
   /**

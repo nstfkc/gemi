@@ -1,6 +1,6 @@
 import { useMutate } from "../useMutate";
 import { usePost } from "../useMutation";
-import { reconnectRealtime } from "../realtime/RealtimeClient";
+import { reconnectRealtime } from "../realtime/loader";
 
 interface UseSignOutArgs {
   onSuccess?: () => void;

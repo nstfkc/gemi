@@ -1,3 +1,12 @@
+# Unreleased
+
+## Client: the realtime socket and `useSubscription`'s connection load on first use (#891)
+
+**Nothing to migrate.** The WebSocket client behind `useChannel`, `useChannelInvalidate` and `useQuery({ live })`, and the SSE connection behind `useSubscription`, are now separate chunks loaded by the first hook that needs them, not part of every route's entry chunk (about 2.5 KB gzip less per route for an app that uses no realtime).
+
+- One observable difference: in the browser, a page's first channel subscription reports `closed` for one chunk load before `connecting`. Once loaded, later subscriptions go straight to `connecting`, as before. Tests under `<Page>` from `gemi/testing` are unaffected: they subscribe on the `FakeSocket` at once.
+- A realtime chunk that fails to load (usually a deploy) leaves channel hooks `closed`, so `live` queries keep polling, and `useSubscription` `closed` with its `error` set. `init`'s chunk-load recovery reloads the page as for any other chunk.
+
 # Upgrading from 0.127.0 to 0.128.0
 
 ## Runs: tracked background runs with status, progress, deadline and wait (#908)

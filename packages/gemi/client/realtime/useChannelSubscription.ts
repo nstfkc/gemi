@@ -1,11 +1,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import type { DeniedCode } from "../../services/broadcast/protocol";
-import {
-  channelKey,
-  getRealtimeClient,
-  type ChannelParamValues,
-  type ChannelStatus,
-} from "./RealtimeClient";
+import type { ChannelParamValues, ChannelStatus, RealtimeSocket } from "./RealtimeClient";
+import { channelKey, loadedRealtimeClient, loadRealtimeClient } from "./loader";
 import { RealtimeContext } from "./RealtimeContext";
 
 export interface ChannelState {
@@ -48,18 +44,34 @@ export function useChannelSubscription(
       setState(IDLE);
       return;
     }
-    const socket = provided ?? getRealtimeClient();
-    if (!socket) return;
-    const release = socket.subscribe(pattern, paramsRef.current, {
-      onEvent: (event, data) => handlersRef.current.onEvent?.(event, data),
-      onResync: () => handlersRef.current.onResync?.(),
-      onStatus: (status, code) =>
-        setState((previous) =>
-          previous.status === status && previous.code === code ? previous : { status, code },
-        ),
-    });
+    let release: (() => void) | null = null;
+    let cancelled = false;
+    const subscribe = (socket: RealtimeSocket) => {
+      if (cancelled) return;
+      release = socket.subscribe(pattern, paramsRef.current, {
+        onEvent: (event, data) => handlersRef.current.onEvent?.(event, data),
+        onResync: () => handlersRef.current.onResync?.(),
+        onStatus: (status, code) =>
+          setState((previous) =>
+            previous.status === status && previous.code === code ? previous : { status, code },
+          ),
+      });
+    };
+    // The tab's client is loaded on the first subscription (see `./loader`);
+    // once loaded, later ones subscribe synchronously, as a provided socket
+    // does. Until it arrives the status stays `closed`.
+    const socket = provided ?? loadedRealtimeClient();
+    if (socket) {
+      subscribe(socket);
+    } else {
+      const pending = loadRealtimeClient();
+      if (!pending) return;
+      // A failed load leaves the hook `closed` (see `loadRealtimeClient`).
+      pending.then(subscribe, () => {});
+    }
     return () => {
-      release();
+      cancelled = true;
+      release?.();
       setState(CLOSED);
     };
     // `key` stands for `pattern` and `params`.

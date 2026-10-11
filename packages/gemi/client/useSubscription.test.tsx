@@ -14,7 +14,8 @@ vi.mock("../orm/context", () => ({
 }));
 
 import { ChangeFeedManager } from "../services/change-feed/ChangeFeedManager";
-import { readEvents, useSubscription } from "./useSubscription";
+import { readEvents } from "./subscriptionStream";
+import { streamModule, useSubscription } from "./useSubscription";
 
 /**
  * The hook against the real `ChangeFeed.stream`: `fetch` is stubbed to hand
@@ -39,6 +40,7 @@ function serve(respond?: (request: Request) => Response | undefined) {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   cleanup();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -199,6 +201,44 @@ describe("useSubscription", () => {
     view.unmount();
     await tick();
     expect(manager.subscriptions).toBe(0);
+  });
+});
+
+describe("useSubscription's lazy connection", () => {
+  test("unmounted before its code loads, it never connects", async () => {
+    serve();
+    let resolve!: (module: Awaited<ReturnType<typeof streamModule.load>>) => void;
+    const load = vi
+      .spyOn(streamModule, "load")
+      .mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    const seen: Seen = { changes: [], resets: [] };
+    const view = render(<Follow seen={seen} />);
+    view.unmount();
+    resolve(await import("./subscriptionStream"));
+    await tick();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveLength(0);
+    expect(manager.subscriptions).toBe(0);
+  });
+
+  test("a chunk the recovery handled (the import resolves to undefined) closes it with an error", async () => {
+    // Vite's preload helper does that when `init`'s chunk-load recovery
+    // handled the failure. An unhandled rejection would fail the run.
+    serve();
+    vi.spyOn(streamModule, "load").mockResolvedValueOnce(undefined as never);
+    const seen: Seen = { changes: [], resets: [] };
+    let error: Error | null = null;
+    function Probe() {
+      const state = useSubscription("/sites/:siteId/changes" as never, { params: { siteId: "s1" } } as never);
+      seen.status = state.status;
+      error = state.error;
+      return null;
+    }
+    render(<Probe />);
+    await tick();
+    expect(seen.status).toBe("closed");
+    expect(error).toBeInstanceOf(Error);
+    expect(requests).toHaveLength(0);
   });
 });
 

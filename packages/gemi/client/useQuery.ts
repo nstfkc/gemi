@@ -4,6 +4,7 @@ import {
   useDeferredValue,
   useEffect,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 import type { RPC } from "./rpc";
@@ -28,8 +29,9 @@ import {
   type RetryDelayOption,
   type RetryOption,
 } from "./retryPolicy";
-import { resolveLiveChannel, type LiveChannel } from "./useChannel";
-import { useChannelSubscription, useCoalesced } from "./realtime/useChannelSubscription";
+import type { LiveChannel } from "./realtime/live";
+import { followLive } from "./realtime/loader";
+import { RealtimeContext } from "./realtime/RealtimeContext";
 
 /**
  * A DOM event or React's synthetic one. Never a plain object, so a cached
@@ -342,22 +344,18 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
 
   // `live`: the channel's events and resyncs refetch every cached variant of
   // this path (the rendered ones now), and polling pauses while it is open.
-  const liveChannel = resolveLiveChannel(config.live);
+  // `followLive` loads the subscription on first use (#891), so a page whose
+  // queries are not live carries none of it. Keyed on the option's value: an
+  // inline `live` object is a new one every render.
+  const realtime = useContext(RealtimeContext);
+  const [liveOpen, setLiveOpen] = useState(false);
   const liveResourceRef = useRef(resource);
   liveResourceRef.current = resource;
-  const refreshLive = useCallback(() => {
-    const target = liveResourceRef.current;
-    for (const key of target.variantKeys()) target.invalidate(key);
-  }, []);
-  const refreshLiveOnEvent = useCoalesced(refreshLive);
-  const liveState = useChannelSubscription(
-    liveChannel?.pattern ?? null,
-    liveChannel?.params ?? {},
-    // A burst of events is one refetch (see `useCoalesced`).
-    { onEvent: refreshLiveOnEvent, onResync: refreshLive },
-    liveChannel !== null,
-  );
-  const liveOpen = liveState.status === "open";
+  const liveKey = config.live ? JSON.stringify(config.live) : null;
+  useEffect(() => {
+    if (liveKey === null) return;
+    return followLive(realtime, JSON.parse(liveKey), () => liveResourceRef.current, setLiveOpen);
+  }, [realtime, liveKey]);
 
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,

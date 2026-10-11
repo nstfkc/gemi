@@ -11,8 +11,8 @@ import {
   type MutationError,
   type WithMutationErrorHelpers,
 } from "./MutationError";
-import { currentSocketId } from "./realtime/RealtimeClient";
-import { SOCKET_ID_HEADER } from "../services/broadcast/protocol";
+import { currentSocketId } from "./realtime/loader";
+import { SOCKET_ID_HEADER } from "../services/broadcast/socketHeader";
 import { QueryManagerContext } from "./QueryManagerContext";
 import { applyQueryUpdates, type QueryUpdate } from "./useSetQueryData";
 
