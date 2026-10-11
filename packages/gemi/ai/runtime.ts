@@ -47,20 +47,25 @@ export function addUsage(total: Usage, next: Usage | undefined): Usage {
     outputTokens: total.outputTokens + (next.outputTokens ?? 0),
     totalTokens: total.totalTokens + (next.totalTokens ?? 0),
   };
-  if (next.reasoningTokens !== undefined || total.reasoningTokens !== undefined) {
-    merged.reasoningTokens = (total.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0);
-  }
-  if (next.cachedInputTokens !== undefined || total.cachedInputTokens !== undefined) {
-    merged.cachedInputTokens = (total.cachedInputTokens ?? 0) + (next.cachedInputTokens ?? 0);
-  }
-  if (next.imageInputTokens !== undefined || total.imageInputTokens !== undefined) {
-    merged.imageInputTokens = (total.imageInputTokens ?? 0) + (next.imageInputTokens ?? 0);
-  }
-  if (next.imageOutputTokens !== undefined || total.imageOutputTokens !== undefined) {
-    merged.imageOutputTokens = (total.imageOutputTokens ?? 0) + (next.imageOutputTokens ?? 0);
+  // A breakdown stays absent until either side reports it, so a text run's
+  // usage does not grow fields it never measured.
+  for (const key of USAGE_BREAKDOWNS) {
+    if (next[key] !== undefined || total[key] !== undefined) {
+      merged[key] = (total[key] ?? 0) + (next[key] ?? 0);
+    }
   }
   return merged;
 }
+
+const USAGE_BREAKDOWNS = [
+  "reasoningTokens",
+  "cachedInputTokens",
+  "imageInputTokens",
+  "imageOutputTokens",
+  "audioInputTokens",
+  "cachedAudioInputTokens",
+  "audioOutputTokens",
+] as const satisfies readonly (keyof Usage)[];
 
 // --- structured output -----------------------------------------------------
 

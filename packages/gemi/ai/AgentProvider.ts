@@ -7,6 +7,7 @@ import {
 } from "./providers/call";
 import { capabilitiesForModel } from "./providers/capabilities";
 import {
+  azureRealtimeTarget,
   azureTarget,
   openAITarget,
   type AzureConfig,
@@ -14,6 +15,7 @@ import {
 } from "./providers/endpoints";
 import { normalizeProviderError } from "./providers/errors";
 import { sentFiles } from "./providers/fileRejection";
+import { RealtimeClient, DEFAULT_REALTIME_TIMEOUT_MS } from "./providers/realtime";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
@@ -298,6 +300,20 @@ export class OpenAIProvider extends AgentProvider {
   protected endpoint(): ResponsesEndpoint {
     return responsesEndpoint(openAITarget(this.config));
   }
+
+  /**
+   * Realtime (voice) calls on this provider's account: `createCall`,
+   * `clientSecret`, `sideband` and `hangup`. The provider's model is the call's
+   * default model, so build it with a realtime one
+   * (`OpenAIProvider.model("gpt-realtime-mini").realtime`). See
+   * `providers/realtime.ts`.
+   */
+  get realtime(): RealtimeClient {
+    return new RealtimeClient(
+      openAITarget(this.config, { timeoutMs: DEFAULT_REALTIME_TIMEOUT_MS }),
+      { model: this.model },
+    );
+  }
 }
 
 /**
@@ -364,5 +380,18 @@ export class AzureOpenAIProvider extends AgentProvider {
 
   protected endpoint(): ResponsesEndpoint {
     return responsesEndpoint(azureTarget(this.config));
+  }
+
+  /**
+   * Realtime (voice) calls on this Azure resource, on its GA
+   * `/openai/v1/realtime` surface whatever `apiVersion` says (see
+   * `azureRealtimeTarget`). The deployment is the call's default model, as it
+   * is a text call's.
+   */
+  get realtime(): RealtimeClient {
+    return new RealtimeClient(
+      azureRealtimeTarget(this.config, { timeoutMs: DEFAULT_REALTIME_TIMEOUT_MS }),
+      { model: this.deployment() },
+    );
   }
 }

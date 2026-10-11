@@ -260,6 +260,32 @@ export type {
   ProviderToolSpec,
 } from "./AgentProvider";
 
+// --- realtime (voice) calls ------------------------------------------------
+//
+// `OpenAIProvider#realtime` / `AzureOpenAIProvider#realtime` return a
+// `RealtimeClient`; these are its types. See `providers/realtime.ts`.
+export { RealtimeClient, RealtimeRequestError, toRealtimeUsage } from "./providers/realtime";
+export type {
+  ClientSecret,
+  ClientSecretParams,
+  CreateCallParams,
+  CreateCallResult,
+  RealtimeSession,
+  RealtimeTool,
+  RealtimeTurnDetection,
+} from "./providers/realtime";
+export { RealtimeSideband } from "./providers/sideband";
+export type {
+  RealtimeClientEvent,
+  RealtimeErrorDetail,
+  RealtimeEvent,
+  RealtimeResponseOptions,
+  RealtimeServerEvent,
+  RealtimeSidebandOptions,
+  WebSocketFactory,
+  WebSocketLike,
+} from "./providers/sideband";
+
 // --- the controller, its stores and the route it mounts -------------------
 export {
   AgentController,

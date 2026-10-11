@@ -221,3 +221,29 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 }
+
+/**
+ * Azure's realtime surface, which is the GA `/openai/v1` one regardless of the
+ * configured api-version.
+ *
+ * WHY NOT `azureTarget`. A dated api-version routes `azureTarget` to the older
+ * `/openai/...` path (see `azurePath`), and that path has no `realtime/calls`:
+ * the WebRTC "unified interface", the client secrets and the call's sideband
+ * socket are documented on `/openai/v1/realtime/...` only, and the documented
+ * URLs carry no `api-version` at all. An app that pinned a dated version for
+ * its Responses calls must not lose voice for it, so this target ignores the
+ * version and keeps everything else — the resource base and, above all, the
+ * per-request credential — from the one place that resolves them.
+ *
+ * NOT YET MEASURED against a real Azure realtime deployment (there was none to
+ * measure when this was written). The shape follows Azure's GA realtime
+ * documentation; when a deployment exists, the transcripts belong here as they
+ * do on `azureBase`.
+ */
+export function azureRealtimeTarget(
+  config: AzureConfig,
+  defaults: TargetDefaults = {},
+): ProviderTarget {
+  const target = azureTarget(config, defaults);
+  return { ...target, base: `${azureResourceBase(config)}/v1`, query: "" };
+}
