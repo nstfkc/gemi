@@ -155,8 +155,10 @@ function jsonDefault(field: FieldSchema, value: unknown): unknown {
   // `@default("null")` is the JSON value null, which the database's own
   // default (`'null'::jsonb`) stores as such. A bare `null` here would be
   // encoded as SQL NULL instead, and fail a NOT NULL column.
+  // Only for the text `"null"`: a hand-written `value: null` keeps meaning
+  // what it meant before.
   const parsed = parseJsonDefault(field, value);
-  return parsed === null ? JsonNull : parsed;
+  return parsed === null && typeof value === "string" ? JsonNull : parsed;
 }
 
 function parseJsonDefault(field: FieldSchema, value: unknown): unknown {
