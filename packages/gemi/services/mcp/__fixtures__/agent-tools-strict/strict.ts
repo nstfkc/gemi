@@ -237,3 +237,48 @@ expectTypeOf<Plain["collections"]["input"]>().toEqualTypeOf<{
 expectTypeOf<Plain["collections"]["output"]>().toEqualTypeOf<{
   collections: { id: string; name: string; items: number }[];
 }>();
+
+// --- a native tool in the registry (#759) -------------------------------------
+
+class NativeMcpRouter extends McpRouter<Routes> {
+  routes = {
+    "build-page": this.fromTool(buildPage, {
+      tags: ["pages"],
+      remote: {
+        context: () => ({}),
+        // The yield's type, read off the tool.
+        progress: (value, n) => ({ progress: n, message: value.step }),
+      },
+    }),
+    collections: this.fromApiRoute("GET", "/pages/:pageId/collections", {
+      description: "List the page's collections, whole",
+      tags: ["collections"],
+      params: { pageId: "input" },
+    }),
+  };
+}
+
+type Native = McpToolShapesOf<NativeMcpRouter>;
+expectTypeOf<keyof Native>().toEqualTypeOf<"build-page" | "collections">();
+expectTypeOf<Native["build-page"]["input"]>().toEqualTypeOf<{ prompt: string }>();
+expectTypeOf<Native["build-page"]["output"]>().toEqualTypeOf<{ html: string }>();
+expectTypeOf<Native["build-page"]["progress"]>().toEqualTypeOf<{
+  step: "drafting";
+}>();
+// Filtered by tag, as a route is.
+expectTypeOf<
+  keyof McpToolShapesOf<NativeMcpRouter, { tags: ["pages"] }>
+>().toEqualTypeOf<"build-page">();
+
+class BadNativeMcpRouter extends McpRouter<Routes> {
+  routes = {
+    "build-page": this.fromTool(buildPage, {
+      remote: {
+        context: () => ({}),
+        // @ts-expect-error the yield has no `label`
+        progress: (value) => ({ progress: 1, message: value.label }),
+      },
+    }),
+  };
+}
+export { BadNativeMcpRouter };
