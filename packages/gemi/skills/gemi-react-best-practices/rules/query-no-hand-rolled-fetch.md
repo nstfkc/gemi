@@ -52,6 +52,20 @@ Mutation errors arrive as tagged objects — `validation_error` (with per-field
 `insufficient_permissions` — so a controller should `throw new ValidationError(...)`
 rather than inventing a per-endpoint error shape.
 
+**Downloading a file from a `this.stream(...)` or `this.file(...)` route goes through
+`fetchBlob` / `fetchText`, not a raw `fetch`.** The path and params are typed, the
+`Content-Disposition` file name is read for you, and a failure rejects with a
+`QueryError` that `mutationErrorList(error, fallback)` turns into a message:
+
+```tsx
+import { fetchBlob } from "gemi/client";
+
+const { blob, filename } = await fetchBlob("/pages/:pageId/post/image", {
+  params: { pageId },
+  search: { format: "png" },
+});
+```
+
 **The one documented exception is file upload.** `useUpload` is XHR-based (it needs
 progress events). That is also why it cannot be intercepted by MSW under happy-dom:
 a client file post that needs to be unit-testable should use `usePost` with

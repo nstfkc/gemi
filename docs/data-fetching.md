@@ -829,6 +829,35 @@ upload failed (reported through `onError`) or it was cancelled. A cancel is not 
 error: `onCanceled` runs and `onError` does not. See [File Storage](./file-storage.md)
 for the server side.
 
+### Downloading files: `fetchBlob` and `fetchText`
+
+Routes served by [`this.stream(...)` or `this.file(...)`](./routing.md#streaming-and-range-requests) answer bytes, not JSON, so `useQuery` cannot read them. `fetchBlob` and `fetchText` can, and their paths are typed from your api the same way `useQuery`'s are: only `GET` paths backed by a stream or file route compile, and a path with `:params` requires `params`.
+
+```tsx
+import { fetchBlob, mutationErrorList } from "gemi/client";
+
+async function download(pageId: string) {
+  try {
+    const { blob, filename } = await fetchBlob("/pages/:pageId/post/image", {
+      params: { pageId },
+      search: { format: "png", scale: 2 },
+    });
+    const file = new File([blob], filename ?? "post.png", { type: blob.type });
+    // save or share `file`
+  } catch (error) {
+    toast(mutationErrorList(error, "The picture couldn't be made.")[0]);
+  }
+}
+```
+
+They are plain async functions, not hooks, so you can call them from an event handler.
+
+- **Options:** `params`, `search` (an object, where `null` and `undefined` values are left out, or a `URLSearchParams`), `signal`, and `init` for anything else `fetch` takes (`headers`, `cache`, `credentials`). The request is always a `GET` to `/api` + the path.
+- **Result:** `{ blob, filename, response }` from `fetchBlob`, `{ text, filename, response }` from `fetchText`. `filename` is the name in the response's `Content-Disposition` (the UTF-8 `filename*` form first, then `filename`), or `null` when there is none. A stream route's `name` ends up there.
+- **Errors:** a non-2xx response rejects with the same `QueryError` (`status`, `body`, `retryAfter`) that `useQuery` throws. `body` is the parsed JSON error, or `null` when the body was not JSON, so `mutationErrorList(error, fallback)`, `mutationErrorField` and `isRetryableQueryError` work on it. A network failure rejects with the browser's `TypeError`, and an aborted `signal` with its `AbortError`.
+
+The paths come from the `FileRPC` interface, which `gemi.d.ts` fills in from your `ApiRouter` (`CreateFileRPC` from `gemi/http`). While it is empty, for example in a package without the app's types, any path compiles.
+
 ## Updating queries from elsewhere: `useMutate`
 
 `useMutate` returns a function to update **any** query's cache by path — useful

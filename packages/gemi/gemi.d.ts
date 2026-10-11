@@ -8,6 +8,7 @@ import type {
   ApiRouter,
   ChannelRouter,
   CreateBroadcastRPC,
+  CreateFileRPC,
   CreateRPC,
   CreateViewRPC,
   ViewRouter,
@@ -47,6 +48,8 @@ type IsAny<T> = 0 extends 1 & T ? true : false;
 
 type AppRPC<T> = IsAny<T> extends true ? {} : T extends ApiRouter ? CreateRPC<T> : {};
 
+type AppFileRPC<T> = IsAny<T> extends true ? {} : T extends ApiRouter ? CreateFileRPC<T> : {};
+
 type AppViewRPC<T> = IsAny<T> extends true ? {} : T extends ViewRouter ? CreateViewRPC<T> : {};
 
 type AppBroadcastRPC<T> =
@@ -59,6 +62,7 @@ type AppFeatureMap<T> =
 
 declare module "gemi/client" {
   export interface RPC extends AppRPC<Api> {}
+  export interface FileRPC extends AppFileRPC<Api> {}
   export interface ViewRPC extends AppViewRPC<View> {}
   export interface BroadcastRPC extends AppBroadcastRPC<Channels> {}
   export interface I18nDictionary extends AppDictionary<typeof I18nComponents> {}

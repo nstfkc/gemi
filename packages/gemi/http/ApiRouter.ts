@@ -226,6 +226,13 @@ export class FileHandler {
    * does not.
    */
   declare middleware: (middlewareList: string[]) => FileHandler;
+
+  /**
+   * Types only, never set: what `CreateFileRPC` finds a file route by, so
+   * `fetchBlob`/`fetchText` can take its path. It does not make the route a
+   * `RouteHandler`, so `CreateRPC` still leaves it out.
+   */
+  declare readonly __fileRoute: "file";
 }
 
 /**
@@ -270,9 +277,11 @@ export class StreamRouteHandler extends RouteHandler<"GET", any, any, any> {
 }
 
 /**
- * Structurally `{}` at the type level, exactly like `FileHandler`, so a stream
- * route stays out of the generated RPC client types — a typed JSON client has
- * no way to consume a byte stream. At runtime it is a `StreamRouteHandler`.
+ * Not a `RouteHandler` at the type level, exactly like `FileHandler`, so a
+ * stream route stays out of the generated RPC client types — a typed JSON
+ * client has no way to consume a byte stream. `CreateFileRPC` lists it
+ * instead, for `fetchBlob`/`fetchText`. At runtime it is a
+ * `StreamRouteHandler`.
  */
 export class StreamHandler {
   constructor(...args: ConstructorParameters<typeof StreamRouteHandler>) {
@@ -287,6 +296,9 @@ export class StreamHandler {
    * does not.
    */
   declare middleware: (middlewareList: string[]) => StreamHandler;
+
+  /** Types only, never set: see `FileHandler.__fileRoute`. */
+  declare readonly __fileRoute: "stream";
 }
 
 /**
@@ -724,4 +736,48 @@ type RouteParser<
  */
 export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
   [E in RouteParser<T["routes"], Prefix> as E["key"]]: RouteValue<E["route"]>;
+};
+
+/** A path's `get` in a verb map, when it is a stream or file route. */
+type FileVerbEntry<T, Path extends string> = T extends { get?: infer G }
+  ? NonNullable<G> extends { readonly __fileRoute: infer Kind }
+    ? RouteEntry<Path, Kind>
+    : never
+  : never;
+
+type FileRouteParser<
+  T extends ApiRoutes,
+  Prefix extends PropertyKey = "",
+  K extends keyof T = keyof T,
+> = K extends any
+  ? T[K] extends AgentRoute<any>
+    ? never
+    : T[K] extends ResourceRoutes<any>
+      ? never
+      : T[K] extends { readonly __fileRoute: infer Kind }
+        ? RouteEntry<ParsePrefixAndKey<Prefix, K>, Kind>
+        : T[K] extends RouteHandler<any, any, any, any>
+          ? never
+          : T[K] extends new () => ApiRouter
+            ? FileRouteParser<InstanceType<T[K]>["routes"], ParsePrefixAndKey<Prefix, K>>
+            : T[K] extends RouteHandlers
+              ? FileVerbEntry<T[K], `${Prefix & string}${K extends "/" ? "" : K & string}`>
+              : never
+  : never;
+
+/**
+ * The api's file routes, for `fetchBlob` and `fetchText` from `gemi/client`:
+ * the path of every `GET` served by `this.stream(...)` or `this.file(...)` —
+ * on its own path or as a verb map's `get`, in nested routers too — to
+ * `"stream"` or `"file"`. The paths are spelled as `CreateRPC` spells its
+ * `GET:` keys, without the method.
+ *
+ * Separate from `CreateRPC`, which leaves these routes out: a JSON hook
+ * (`useQuery`) can't read their bytes, and the RPC map's keys are what the
+ * IDE plugin and `McpRoutes` read.
+ */
+export type CreateFileRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
+  [E in FileRouteParser<T["routes"], Prefix> as E extends { key: infer Key extends PropertyKey }
+    ? Key
+    : never]: E extends { route: infer Kind } ? Kind : never;
 };
