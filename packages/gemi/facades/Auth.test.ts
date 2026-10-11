@@ -226,3 +226,70 @@ describe("Auth.user reads the access_token header (#587)", () => {
     expect(getSession).not.toHaveBeenCalled();
   });
 });
+
+describe("Auth.userOrNull (#880)", () => {
+  test("a signed-out visitor is null, not an AuthenticationError", async () => {
+    await expect(inRequest(null, () => Auth.userOrNull())).resolves.toBeNull();
+  });
+
+  test("no token is null without a lookup", async () => {
+    const getSession = vi.fn();
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({ getSession } as any);
+    const req = { cookies: { get: () => undefined }, headers: new Headers() } as any;
+
+    await expect(RequestContext.run(req, () => Auth.userOrNull())).resolves.toBeNull();
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
+  test("a signed-in user is returned, and Auth.user() then reuses it", async () => {
+    const getSession = vi.fn(async () => ({ user }));
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+      config: { signInPath: "/auth/sign-in" },
+      getSession,
+    } as any);
+
+    const [first, second] = await RequestContext.run(fakeRequest(), async () => [
+      await Auth.userOrNull(),
+      await Auth.user(),
+    ]);
+
+    expect(first).toBe(user);
+    expect(second).toBe(user);
+    expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  test("a user already on the request context is returned without a lookup", async () => {
+    const getSession = vi.fn();
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({ getSession } as any);
+
+    const found = await RequestContext.run(fakeRequest(), async () => {
+      RequestContext.getStore()!.setUser(user);
+      return Auth.userOrNull();
+    });
+
+    expect(found).toBe(user);
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
+  test("a failing lookup propagates instead of reading as signed out", async () => {
+    const outage = new Error("connection refused");
+    vi.spyOn(Auth, "getFacadeRoot").mockReturnValue({
+      getSession: async () => {
+        throw outage;
+      },
+    } as any);
+
+    const error = await RequestContext.run(fakeRequest(), () => Auth.userOrNull()).catch(
+      (e) => e,
+    );
+
+    expect(error).toBe(outage);
+  });
+
+  test("Auth.user() still throws AuthenticationError with the sign-in redirect", async () => {
+    const error = await inRequest(null, () => Auth.user()).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect(error.payload.api.status).toBe(401);
+  });
+});
