@@ -2,6 +2,7 @@ import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
 import { refusal, RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
+import { RequestContext } from "../http/requestContext";
 import { mediaType } from "../http/mediaType";
 import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
@@ -254,6 +255,115 @@ export type AgentHookContext = {
   threadId?: string;
 };
 
+/**
+ * What `AgentController.startTurn` takes (#839).
+ */
+export type AgentTurnParams<Body extends object = Record<string, unknown>> = {
+  /** The thread the turn is stored on, as a turn from `useChat` would be. */
+  threadId: string;
+  /** The user's message. Shorthand for `turn: { text }`, and wins over `turn.text`. */
+  text?: string;
+  /**
+   * The whole turn, for files or answers: `{ text, files, toolResults }`, as
+   * `useChat` sends it. Neither `text` nor `turn` is a turn with nothing in
+   * it, which lets the model continue the thread.
+   */
+  turn?: ClientTurn;
+  /**
+   * Who the turn runs as: `req.ctx().user` for `authorizeRequest`, `runOwner`,
+   * `context()`, the hooks and every tool, as the authentication middleware
+   * would have set it. Absent or `null` is an anonymous turn.
+   */
+  user?: unknown;
+  /** What `useChat`'s `body` option would send: `instructions()`, `context()` and `ctx.body` read it. */
+  body?: Body;
+};
+
+/** A turn `AgentController.startTurn` started. */
+export type AgentTurn = {
+  runId: string;
+  threadId: string;
+  /** The run: iterate it (or its `frames()`) to follow the turn as it goes. */
+  run: AgentRun;
+  /** What the chat's stop button does. */
+  stop(params?: { reason?: string }): void;
+  /**
+   * Settles when the run has ended, its transcript is stored and the
+   * controller's hooks have run (or `hookHoldMs` has passed). Rejects only if
+   * the run itself does; a failed model call resolves with `finishReason:
+   * "error"` and `error`, as `AgentRun.result()` does.
+   */
+  result(): Promise<AgentTurnResult>;
+};
+
+/** What `AgentTurn.result()` answers: the run's result, and what a caller reads off it. */
+export type AgentTurnResult = AgentRunResult<ToolShapes, unknown> & {
+  threadId: string;
+  /** The text of the run's last assistant message; `""` when it wrote none. */
+  text: string;
+  /**
+   * The calls waiting for an answer when `finishReason` is
+   * `"awaiting-input"`, and `[]` otherwise. They stay on the thread, signed
+   * for the turn's `runOwner`: that user can answer them in the chat, or the
+   * caller can with another `startTurn({ turn: { toolResults } })`.
+   */
+  pending: PendingToolCall[];
+};
+
+/**
+ * A turn `startTurn` could not start: what the route would have answered,
+ * thrown. `status` and `code` are the route's (`404` `thread_not_found`,
+ * `429` `too_many_runs`, `403` for another owner's run or file...).
+ */
+export class AgentTurnError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly kind?: string;
+
+  constructor(message: string, params: { status: number; code?: string; kind?: string }) {
+    super(message);
+    this.name = "AgentTurnError";
+    this.status = params.status;
+    this.code = params.code;
+    this.kind = params.kind;
+  }
+
+  /** @internal Reads a refusal `stream` answered. */
+  static async from(response: Response): Promise<AgentTurnError> {
+    let error: Record<string, unknown> = {};
+    try {
+      const parsed = (await response.json()) as { error?: Record<string, unknown> };
+      if (parsed?.error && typeof parsed.error === "object") error = parsed.error;
+    } catch {
+      // Not a JSON refusal: the status says what there is to say.
+    }
+    const text = (key: string) => (typeof error[key] === "string" ? (error[key] as string) : undefined);
+    return new AgentTurnError(
+      text("message") ?? `The agent turn was refused with status ${response.status}.`,
+      { status: response.status, code: text("code"), kind: text("kind") },
+    );
+  }
+}
+
+/** `Body` of a controller instance type, as `AgentRouteRPC` reads it. */
+type ControllerBody<C> = C extends { [BODY]?: infer B }
+  ? B extends object
+    ? B
+    : Record<string, unknown>
+  : Record<string, unknown>;
+
+/** The text of the last assistant message among `messages`, or `""`. */
+function lastAssistantText(messages: AgentMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    return message.content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+  }
+  return "";
+}
+
 /** What `AgentController.attachmentLimits` answers. Both optional. */
 export type AttachmentLimits = {
   /** The largest file accepted, in bytes. */
@@ -372,6 +482,21 @@ const threadLocks = new Map<string, Promise<void>>();
  * the map has evicted is not kept alive here for a promise nobody will ask for.
  */
 const persisted = new WeakMap<AgentRun, Promise<void>>();
+
+/**
+ * The run a `startTurn` request started, by that request (#839). `stream`
+ * answers a `Response`, which is what a route needs; `startTurn` needs the run
+ * itself and the promise that its hooks are done, and this is how it gets them
+ * without `stream` growing a second return shape. Weak, so a request nobody
+ * reads back leaves nothing behind.
+ */
+const serverTurns = new WeakMap<
+  HttpRequest<any, any>,
+  { run: AgentRun; hooks: Promise<void> } | null
+>();
+
+/** The URL of the request `startTurn` builds. Nothing routes to it. */
+const SERVER_TURN_URL = "http://gemi.internal/__gemi/agent-turn";
 
 /**
  * Turns read but not yet registered, by the client's name for them.
@@ -916,6 +1041,113 @@ export abstract class AgentController<
   }
 
   /**
+   * STARTS A TURN FROM SERVER CODE (#839): a queue job, a command, an MCP
+   * tool, a webhook. No browser and no route: the turn goes through this
+   * controller's `stream` as a `useChat` turn would, on a request built here,
+   * so the agent, the store, `authorizeRequest` and `resource`, `runOwner`,
+   * `maxConcurrentRuns`, the thread's lock, `instructions()`, `context()`,
+   * the hooks and the tools' `ctx` (`threadId`, `ctx.jobs`, `ctx.generate`)
+   * are the same as for a turn from the chat.
+   *
+   * ```ts
+   * const turn = await ChatController.startTurn({
+   *   threadId,
+   *   text: "Make the hero darker",
+   *   user,                 // req.ctx().user for the turn
+   *   body: { siteId },     // what useChat's `body` option would send
+   * });
+   * const { text, finishReason, pending } = await turn.result();
+   * ```
+   *
+   * The route's middleware does not run: the caller is server code and names
+   * the user itself (`null` or absent is an anonymous turn). A turn the route
+   * would refuse throws an `AgentTurnError` with the status and code it would
+   * have answered; a request breaker thrown by `authorizeRequest` is thrown
+   * as it is.
+   *
+   * The run lives in the process that called this, like every run. From a
+   * queue job, await `result()` so the worker does not move on without it.
+   */
+  static async startTurn<C extends AgentController<any, any>>(
+    this: new () => C,
+    params: AgentTurnParams<ControllerBody<C>>,
+  ): Promise<AgentTurn> {
+    const { threadId } = params;
+    if (typeof threadId !== "string" || threadId === "") {
+      throw new TypeError(
+        "AgentController.startTurn needs a `threadId`: a server turn is stored on a thread. Create one with the store's `createThread`.",
+      );
+    }
+    const turn: ClientTurn = {
+      ...params.turn,
+      ...(params.text !== undefined ? { text: params.text } : {}),
+    };
+    // The app's fields first, so none of them can take the place of the
+    // envelope's.
+    const payload = { ...(params.body as object | undefined), threadId, turn };
+    const req = new HttpRequest<any, any>(
+      new Request(SERVER_TURN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+      {},
+      "api",
+      new URL(SERVER_TURN_URL).pathname,
+    );
+    const controller = new this();
+    // Marks the request as `startTurn`'s, so only its run is kept here.
+    serverTurns.set(req, null);
+    // A request scope of its own, carrying the caller's user, whether or not
+    // this is called from inside another request: the run is not that
+    // request's, and must not end with it or read its user.
+    const response = await RequestContext.run(req, () => controller.stream(req), {
+      user: params.user ?? null,
+    });
+
+    const started = serverTurns.get(req);
+    if (!started) {
+      throw await AgentTurnError.from(response);
+    }
+    serverTurns.delete(req);
+    // Nobody reads the stream; the run goes on without it (see `toResponse`).
+    response.body?.cancel().catch(noop);
+
+    const { run, hooks } = started;
+    let pending: PendingToolCall[] = [];
+    // The pending calls are on the `awaiting-input` event, not on the result.
+    // The run's frames are buffered from the start, so this misses nothing.
+    const watched = (async () => {
+      for await (const event of run) {
+        if (event.type === "awaiting-input") pending = event.pending as PendingToolCall[];
+      }
+    })().catch(noop);
+
+    let result: Promise<AgentTurnResult> | undefined;
+    return {
+      runId: run.runId,
+      threadId,
+      run,
+      stop: (stopParams) => run.stop(stopParams),
+      result: () =>
+        (result ??= (async () => {
+          const outcome = await run.result();
+          // After the transcript is stored and the hooks are done (or
+          // `hookHoldMs` passed), so a caller that reads the thread next sees
+          // this turn in it.
+          await Promise.all([hooks, watched]);
+          const messages = outcome.messages as AgentMessage[];
+          return {
+            ...outcome,
+            threadId,
+            text: lastAssistantText(messages),
+            pending: outcome.finishReason === "awaiting-input" ? pending : [],
+          };
+        })()),
+    };
+  }
+
+  /**
    * `POST /<path>` — one route for every client turn. A first message, an
    * approval, an answer to a question and a client tool's result are all just
    * the next turn, so none of them gets an endpoint of its own.
@@ -1228,6 +1460,7 @@ export abstract class AgentController<
       // waits only for the store, so a slow hook is not a slow next turn.
       const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal, early);
       persisted.set(run, stored);
+      if (serverTurns.has(req)) serverTurns.set(req, { run, hooks });
       // Registered now, while the request is certainly open: `waitUntil` is
       // ignored once it has ended, and the run settling can end it before a
       // single hook has been called.
