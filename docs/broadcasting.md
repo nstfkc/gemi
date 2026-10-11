@@ -135,7 +135,7 @@ SiteChanged.dispatch(site, { pages: ["/about"] });
 
 ## On the client
 
-The hooks come from `gemi/client`. They share one WebSocket per tab, opened by the first hook that mounts and closed a few seconds after the last one unmounts. Subscriptions to the same channel and params are shared too.
+The hooks come from `gemi/client`. They share one WebSocket per tab, opened by the first hook that mounts and closed a few seconds after the last one unmounts. Subscriptions to the same channel and params are shared too. The socket client itself is loaded on demand, by the first hook that subscribes: a page that subscribes to nothing does not download it.
 
 ### `useChannelInvalidate`: the common case
 

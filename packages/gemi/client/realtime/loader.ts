@@ -7,13 +7,15 @@ import type {
   RealtimeSocket,
 } from "./RealtimeClient";
 
-// The part of the realtime client every page carries: `gemi/client`'s entry
-// reaches it through `useQuery`, `useMutation`, `init` and the auth hooks. `RealtimeClient` itself
-// (the socket, the `gemi.v1` protocol, reconnects, heartbeats) is loaded with a
-// dynamic `import()` the first time a channel hook subscribes, so an app or a
-// route that never subscribes downloads none of it. Only type imports from
-// `./RealtimeClient` here: a value import would put the whole module back in
-// the entry chunk. `client-bundle` in `packaging.test.ts` checks that.
+// The part of the realtime client every page carries: `gemi/client` reaches
+// it through `useQuery`, `useMutation`, `init` and the auth hooks. The client
+// itself (`./RealtimeClient`: the socket, the `gemi.v1` protocol, reconnects,
+// heartbeats) and `useQuery`'s live subscription (`./live`) are loaded with a
+// dynamic `import()` the first time something subscribes, so an app or a
+// route that never subscribes downloads none of it (#891). Only type imports
+// from those two here: a value import would put them back in the entry chunk,
+// which "the published client, built into an app" in `packaging.test.ts`
+// checks.
 
 /** `pattern` and its params, canonical: two hooks on one channel share a `sub`. */
 export function channelKey(pattern: string, params: ChannelParamValues): string {

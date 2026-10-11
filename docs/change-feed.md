@@ -100,6 +100,7 @@ const { status, cursor, error } = useSubscription(
 - A `4xx` other than `408` and `429` stops it.
 - The callbacks may change between renders without reconnecting.
 - The route's `data` type comes from the `T` of `ChangeFeed.stream<T>()`.
+- The connection code is loaded when the hook first connects, so a page that never calls it does not download it.
 
 ## On the server: `ChangeFeed.subscribe`
 

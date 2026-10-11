@@ -102,11 +102,7 @@ interface Entry {
   retries: number;
 }
 
-
 /**
- * Loaded on demand: import it as a type only, and reach the instance through
- * `./loader` (`loadRealtimeClient`), so it stays out of the entry chunk.
- *
  * The tab's one WebSocket to the app (`gemi.v1`), multiplexing every channel
  * the mounted hooks subscribe to.
  *
@@ -117,6 +113,10 @@ interface Entry {
  * when shown. Every `subscribed` ack and every `gap` resyncs the
  * subscription (coalesced to one per 2 s), because events are volatile: a
  * client that may have missed one refetches over HTTP.
+ *
+ * Loaded on first use (#891): import this module as a type only, and reach
+ * the tab's instance through `./loader`, or it lands in every route's entry
+ * chunk.
  */
 export class RealtimeClient implements RealtimeSocket {
   private options: Required<RealtimeOptions>;
