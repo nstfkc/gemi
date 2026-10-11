@@ -563,6 +563,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "12"
 
+      # The run store's compare-and-set, listing, clock-based sweep and prune,
+      # and a run written inside a transaction that rolls back (#908).
+      - name: Run store on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/runs/DatabaseRunStore.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "10"
+
       # `DB.schema()` reads a different catalog per dialect, and the servers
       # are already here. The filter selects nothing at all if the URLs go
       # missing, which would read as a pass, so the suite is told to fail

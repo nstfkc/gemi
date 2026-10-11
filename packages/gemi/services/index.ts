@@ -263,6 +263,36 @@ export type {
   ChangeFeedResponse,
   StreamOptions as ChangeFeedStreamOptions,
 } from "./change-feed/stream";
+// Runs: tracked background runs with status, progress and deadline (#908).
+export { RunsServiceProvider } from "./runs/RunsServiceProvider";
+export {
+  RunManager,
+  RunFailure,
+  RunNotFoundError,
+  type CreateRunOptions,
+  type RunHandle,
+  type WaitOptions as RunWaitOptions,
+} from "./runs/RunManager";
+export {
+  MemoryRunStore,
+  FINAL_RUN_STATUSES,
+  OPEN_RUN_STATUSES,
+  isFinalRunStatus,
+  type NewRunRecord,
+  type RunError,
+  type RunFilter,
+  type RunProgress,
+  type RunRecord,
+  type RunStatus,
+  type RunStore,
+  type RunUpdate,
+} from "./runs/RunStore";
+export {
+  DatabaseRunStore,
+  createRunsTableStatements,
+  type DatabaseRunStoreOptions,
+} from "./runs/DatabaseRunStore";
+export { defineRunsConfig, type RunsConfig } from "./runs/config";
 // Broadcasting: volatile, real-time push to WebSocket clients (#874).
 export { BroadcastServiceProvider } from "./broadcast/BroadcastServiceProvider";
 export {
