@@ -14,6 +14,18 @@ Behaviour changes:
 - **Types:** the hooks' `error` is `WithMutationErrorHelpers<MutationError | E> | null`, so an exact-type assertion such as `Equal<typeof error, MutationError | null>` no longer holds. `<Form>` has a third type parameter, the route's error type, inferred from `onError` in JSX, so `<Form onError={(error: MutationError) => …}>` still compiles on a route with typed errors. With explicit type arguments (`Form<"/route", "POST">`) on such a route, a handler annotated `(error: MutationError)` no longer fits: drop the annotation, or annotate it with the route's error type.
 - **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
 
+## Log: a console sink (#881)
+
+**New option, one behaviour change in development.** `Log.*` can now also write each entry to stdout (`debug`, `info`, `notice`) or stderr (`warning` and above), so it reaches platform logs such as Railway's. See [Log: console output](docs/facades.md#console-output).
+
+- **Config:** `console` in `defineLogConfig`: `true` (every level), a `LogLevel` (that level and above) or `false`. `consoleFormat`: `"json"` (one JSON object per line, metadata keys at the top level, then `timestamp`, `level`, `message`) or `"text"`. New type export `LogConsoleFormat` from `gemi/services`.
+- Console lines carry the caller's metadata plus, inside a request, its `method` and `path` only, never headers, query string or body. An `Error` in the metadata keeps its message and stack. The file sink and `onLogCreated` are unchanged.
+
+Behaviour change:
+
+- **In development** (`NODE_ENV=development`, which `gemi dev` sets) the sink is **on by default** with `"text"` lines, so `Log.*` calls now print in the `gemi dev` terminal. Set `console: false` to keep the old silence.
+- **In production and tests nothing changes**: the sink is off unless you set `console`. To get `Log` into Railway's logs, set e.g. `console: "info"` (or `true`) in `app/config/log.ts`.
+
 ## Typed per-request state: `req.state` and `stateKey` (#887)
 
 **New, nothing to migrate.** A middleware can hand what it resolved to the handler, and an agent turn's `context()` can hand what it decided to its hooks, so you no longer need `WeakMap<HttpRequest, ...>` side maps. See [Middleware: passing values to the handler](docs/middleware.md#passing-values-to-the-handler-reqstate).
