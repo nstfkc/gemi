@@ -811,7 +811,12 @@ describe("regenerate", () => {
    *  replace its stored answer; stateless trims its own and says nothing. */
   test("asks the server to replace its answer on a thread, and only there", async () => {
     const initialMessages = [
-      { id: "u1", role: "user" as const, content: [{ type: "text" as const, text: "say hi" }], createdAt: "" },
+      {
+        id: "u1",
+        role: "user" as const,
+        content: [{ type: "text" as const, text: "say hi" }],
+        createdAt: "",
+      },
       {
         id: "a1",
         role: "assistant" as const,
@@ -2874,5 +2879,144 @@ describe("reattachOnFocus (#778)", () => {
       window.dispatchEvent(new Event("focus"));
     });
     expect(calls()).toHaveLength(0);
+  });
+});
+
+/** #818: what belongs to one send, and a key that outlives the id swap. */
+describe("per-send options and the client's key", () => {
+  const renaming = (localId: string): AgentStreamFrame[] => [
+    ANSWER[0]!,
+    { seq: 1, event: { type: "message-id", localId, messageId: "msg_server" } },
+    ...ANSWER.slice(1).map((frame) => ({ ...frame, seq: frame.seq + 1 })),
+  ];
+
+  test("a send's body is merged over the hook's for that send only", async () => {
+    const { box } = mount({
+      attach: false,
+      body: { pageId: "p1", selectedNode: "n_hook" },
+    });
+    await act(async () => {
+      await box.api.sendMessage("queued one", {
+        body: { selectedNode: "n_queued", auto: true },
+      });
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.sendMessage("typed now");
+    });
+
+    expect(bodyOf(0)).toMatchObject({
+      pageId: "p1",
+      selectedNode: "n_queued",
+      auto: true,
+    });
+    expect(bodyOf(1)).toMatchObject({ pageId: "p1", selectedNode: "n_hook" });
+    expect("auto" in bodyOf(1)).toBe(false);
+  });
+
+  test("a send's body works without a hook body, and cannot take the envelope", async () => {
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hi", {
+        body: {
+          selectedNode: "n_1",
+          threadId: "th_fake",
+          turn: { text: "other" },
+        },
+      });
+    });
+    const sent = rawBodyOf(0);
+    expect(sent.selectedNode).toBe("n_1");
+    expect("threadId" in sent).toBe(false);
+    expect(sent.turn.text).toBe("hi");
+  });
+
+  test("metadata is kept on the sent message, client-side only", async () => {
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("Build my page.", { metadata: { auto: true } });
+    });
+    expect(box.api.messages[0]!.metadata).toEqual({ auto: true });
+    expect(JSON.stringify(rawBodyOf(0))).not.toContain("metadata");
+  });
+
+  test("the sent message keeps its localId, and its metadata, after the server renames it", async () => {
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    const { box } = mount({ attach: false });
+    let sending!: Promise<void>;
+    await act(async () => {
+      sending = box.api.sendMessage("hello", { metadata: { auto: true } });
+    });
+    const localId = rawBodyOf(0).turn.localId;
+    expect(box.api.messages[0]).toMatchObject({ id: localId, localId });
+
+    await act(async () => {
+      run.push(...renaming(localId));
+      run.close();
+      await sending;
+    });
+    expect(box.api.messages[0]).toMatchObject({
+      id: "msg_server",
+      localId,
+      metadata: { auto: true },
+    });
+    // What a list keys by is the same before and after.
+    expect(box.api.messages[0]!.localId ?? box.api.messages[0]!.id).toBe(localId);
+    expect(box.api.messages[1]!.localId ?? box.api.messages[1]!.id).toBe("m1");
+  });
+
+  test("a stateless history posted back leaves localId and metadata behind", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(
+      streamed(
+        ANSWER.map((f) =>
+          f.event.type === "run-start" ? { ...f, event: { ...f.event, threadId: undefined } } : f,
+        ) as AgentStreamFrame[],
+      ),
+    );
+    await act(async () => {
+      await box.api.sendMessage("first", { metadata: { auto: true } });
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.sendMessage("second");
+    });
+    const posted = bodyOf(1).messages as Record<string, unknown>[];
+    expect(posted).toHaveLength(2);
+    expect("localId" in posted[0]!).toBe(false);
+    expect("metadata" in posted[0]!).toBe(false);
+  });
+
+  test("regenerate re-sends the question under its key, with its metadata", async () => {
+    const { box } = mount({
+      attach: false,
+      initialMessages: [
+        {
+          id: "msg_q",
+          localId: "local_q",
+          metadata: { auto: true },
+          role: "user",
+          content: [{ type: "text", text: "say hi" }],
+          createdAt: "",
+        },
+        {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "no" }],
+          createdAt: "",
+          finishReason: "stop",
+        },
+      ],
+    });
+    await act(async () => {
+      await box.api.regenerate();
+    });
+    expect(rawBodyOf(0).turn).toEqual({ text: "say hi", localId: "local_q" });
+    expect(box.api.messages[0]).toMatchObject({
+      id: "local_q",
+      localId: "local_q",
+      metadata: { auto: true },
+    });
   });
 });
