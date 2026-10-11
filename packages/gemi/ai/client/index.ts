@@ -26,6 +26,7 @@ export type {
   AgentRequestBody,
   AgentStopBody,
   ChatStatus,
+  SendMessageOptions,
   UseChatParams,
   UseChatResult,
 } from "../useChat";
