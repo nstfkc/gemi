@@ -680,6 +680,49 @@ const titleErrors = isValidationError(error) ? error.messages.title : [];
 `"authentication"`, `"permission"`, `"csrf"`, `"not_found"`, `"rate_limit"`,
 `"server"`, `"network"` or `"unknown"` — for a `switch` over all of them.
 
+#### Messages to show: `error.list()` and `error.field(name)`
+
+Every error the hooks hand over (`error`, and the value `onError` receives, on
+`useMutation` and its shorthands, `useUpload` and `<Form onError>`) carries two
+helpers, so you don't flatten `messages` by hand:
+
+```tsx
+const { trigger, error } = usePost("/todos", {}, {
+  onError(error) {
+    toast(error.list("Could not add the todo.")[0]);
+  },
+});
+
+const titleErrors = error?.field("title") ?? []; // ["Required"]
+```
+
+- `error.list(fallback?)` is the failure in words, as a list that is never empty: a
+  validation error's messages, every field's in the order the server sent them; the
+  `message` of any other error the server meant for a person (a form error, a refusal,
+  a route's typed error with a `message`); otherwise `[fallback]`. A server error (its
+  message is the exception's under `gemi dev`), an answer that was not JSON and no
+  answer at all give the fallback. `fallback` defaults to
+  `"Something went wrong. Try again."`.
+- `error.field(name)` is a validation error's messages for one field, and `[]` for
+  any other field or error.
+
+The helpers are non-enumerable, so `toEqual`, a spread and `JSON.stringify` see the
+same object as before. The type is `WithMutationErrorHelpers<MutationError | E>`;
+`MutationError` itself has no helpers, so a value you build by hand still fits it. A
+route's typed error whose body has a `list` or `field` key keeps its own value under
+that key, without the helper.
+
+`mutationErrorList(error, fallback?)` and `mutationErrorField(error, name)` do the
+same for any value: an error you kept, or a `useQuery` `QueryError`, whose body they
+read.
+
+```tsx
+import { mutationErrorList, useQuery } from "gemi/client";
+
+const { error } = useQuery("/todos", {}, { suspense: false });
+if (error) return <p>{mutationErrorList(error, "Could not load your todos.")[0]}</p>;
+```
+
 The guards read `kind`, so a refusal thrown with a message of its own is classified
 like the default one. A server older than 0.85 sent most refusals as a bare string;
 the client wraps those into the same object, using the response's status, so a new
