@@ -10,6 +10,20 @@
 - Approvals are not answered for you: they stay on the thread for the user, or the caller answers them with another `startTurn({ turn: { toolResults } })`.
 - New types from `gemi/ai`: `AgentTurn`, `AgentTurnParams`, `AgentTurnResult`.
 
+## Mutation errors: `error.list()` and `error.field(name)` (#890)
+
+**New, nothing to migrate.** Every error the mutation hooks hand over (`error` and the `onError` argument of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form onError>`) carries two helpers. See [Data Fetching: Messages to show](docs/data-fetching.md#messages-to-show-errorlist-and-errorfieldname).
+
+- **`error.list(fallback?)`**: the failure in words, never empty. A validation error's messages, every field's in the server's order; else the `message` of a form error, a refusal or a route's typed error; else `[fallback]` (a server error, an answer that was not JSON, no answer). `fallback` defaults to `"Something went wrong. Try again."`.
+- **`error.field(name)`**: a validation error's messages for one field, `[]` otherwise.
+- **`mutationErrorList(error, fallback?)` / `mutationErrorField(error, name)`** from `gemi/client` do the same for any value, including a `useQuery` `QueryError` (its body is read). They replace app-level `Object.values(error.messages).flat()` helpers.
+- New exported types `MutationErrorHelpers` and `WithMutationErrorHelpers<T>`. The hooks' `error` and `onError` parameter are now `WithMutationErrorHelpers<MutationError | E>`, a subtype of what they were: handlers typed `(error: MutationError) => …` still compile, and `MutationError` itself is unchanged.
+
+Behaviour changes:
+
+- **Types:** the hooks' `error` is `WithMutationErrorHelpers<MutationError | E> | null`, so an exact-type assertion such as `Equal<typeof error, MutationError | null>` no longer holds. `<Form>` has a third type parameter, the route's error type, inferred from `onError` in JSX, so `<Form onError={(error: MutationError) => …}>` still compiles on a route with typed errors. With explicit type arguments (`Form<"/route", "POST">`) on such a route, a handler annotated `(error: MutationError)` no longer fits: drop the annotation, or annotate it with the route's error type.
+- **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
+
 ## Auth: switch off the password and magic-link routes (#879)
 
 **New, nothing to migrate.** Two `defineAuthConfig` options let an app that signs in only with email codes or OAuth turn off the built-in routes it doesn't use, so it no longer needs a middleware that answers 404 for them. See [Switching flows off](docs/authentication.md#switching-flows-off).

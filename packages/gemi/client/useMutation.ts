@@ -5,7 +5,12 @@ import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
-import { mutationErrorFromBody, type MutationError } from "./MutationError";
+import {
+  mutationErrorFromBody,
+  withMutationErrorHelpers,
+  type MutationError,
+  type WithMutationErrorHelpers,
+} from "./MutationError";
 import { currentSocketId } from "./realtime/RealtimeClient";
 import { SOCKET_ID_HEADER } from "../services/broadcast/protocol";
 
@@ -54,10 +59,12 @@ type Config<T, E = never> = {
    * A `MutationError`, or one of the route's typed errors (`E`): the bodies
    * its handler answers with `HttpResponse.error` / `httpError`.
    *
+   * It carries `error.list()` and `error.field(name)`.
+   *
    * Method syntax, so a handler written as `(error: MutationError) => …`
    * before the route had typed errors still compiles.
    */
-  onError(error: MutationError | E): void;
+  onError(error: WithMutationErrorHelpers<MutationError | E>): void;
   onCanceled?: () => void;
   concurrency?: MutationConcurrency;
 };
@@ -68,7 +75,7 @@ type Config<T, E = never> = {
  */
 export type MutationCallConfig<T, E = never> = {
   onSuccess?: (data: T) => void;
-  onError?(error: MutationError | E): void;
+  onError?(error: WithMutationErrorHelpers<MutationError | E>): void;
 };
 
 const defaultOptions: Config<any> = {
@@ -103,7 +110,8 @@ type ParseParams<T> = UrlParser<`${T & string}`>;
 
 type State<T, E = never> = {
   data: T | null;
-  error: MutationError | E | null;
+  // With `list()` and `field(name)`.
+  error: WithMutationErrorHelpers<MutationError | E> | null;
   loading: boolean;
   // Requests on the wire, superseded ones included.
   pending: number;
@@ -276,7 +284,9 @@ export function useMutation<
         // `(error: MutationError) => void`, and the envelope has no `kind` to
         // branch on. A body without one — an app's own `HttpResponse.json` —
         // is handed over whole.
-        const error = mutationErrorFromBody(data, response.status);
+        const error = withMutationErrorHelpers(
+          mutationErrorFromBody(data, response.status),
+        ) as WithMutationErrorHelpers<MutationError | E>;
 
         // `data` is the last result the caller was given, and a rejected
         // submit did not replace it — the same reason the pending state above
@@ -312,12 +322,13 @@ export function useMutation<
       }
       // A `TypeError` from `fetch` (no answer) or a `SyntaxError` from
       // `response.json()` (an answer that was not JSON) — both `Error`s.
-      options.onError(error as MutationError);
-      call.onError?.(error as MutationError);
+      const failure = withMutationErrorHelpers(error as MutationError);
+      options.onError(failure);
+      call.onError?.(failure);
       // A parallel call's failure doesn't take back another call's result.
       settle((prev) => ({
         data: parallel ? prev.data : null,
-        error: error as MutationError,
+        error: failure,
       }));
     }
   }
@@ -529,7 +540,7 @@ export function useUpload<
       }
 
       if (outcome.status < 200 || outcome.status > 299) {
-        let error: MutationError = {
+        let error: MutationError | E = {
           kind: "server_error",
           message: outcome.statusText,
           status: outcome.status,
@@ -543,7 +554,7 @@ export function useUpload<
           // Not JSON: a proxy's error page, say.
         }
         setState("error");
-        options?.onError?.(error);
+        options?.onError?.(withMutationErrorHelpers(error));
         return;
       }
       const json = JSON.parse(outcome.body);
@@ -554,7 +565,7 @@ export function useUpload<
     } catch (error) {
       release();
       setState("error");
-      options?.onError?.(error as MutationError);
+      options?.onError?.(withMutationErrorHelpers(error as MutationError));
       return;
     }
   };
