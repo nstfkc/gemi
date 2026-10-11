@@ -20,12 +20,15 @@ export {
   McpModelParam,
   type McpModelParamOptions,
   type McpModelParamResolver,
+  type McpNativeToolMeta,
+  type McpNativeToolRemote,
   type McpParamBinder,
   type McpParamDeclaration,
   type McpRouteMeta,
   type McpRoutes,
   type McpToolInput,
   type McpToolOutput,
+  McpToolDeclaration,
 } from "./McpRouter";
 export type { McpGrant, ProgressUpdate } from "./modelOriginated";
 export {
