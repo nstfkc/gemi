@@ -1,6 +1,6 @@
 # MCP Server
 
-An `McpRouter` exposes API routes as [Model Context Protocol](https://modelcontextprotocol.io) tools. Each tool is a route: a call is dispatched through the route's own middleware as the calling user, so a tool can never do what that user could not do with a direct request. The router's design (addressing, params, files, results) is in the [McpRouter RFC](https://github.com/nstfkc/gemi/blob/main/packages/gemi/rfc/mcp-router.md).
+An `McpRouter` exposes API routes as [Model Context Protocol](https://modelcontextprotocol.io) tools, beside [native tools](#native-tools) the app registers itself. Each route tool is a route: a call is dispatched through the route's own middleware as the calling user, so a tool can never do what that user could not do with a direct request. The router's design (addressing, params, files, results) is in the [McpRouter RFC](https://github.com/nstfkc/gemi/blob/main/packages/gemi/rfc/mcp-router.md).
 
 The same tools serve two kinds of caller:
 
@@ -43,6 +43,56 @@ export class AppMcpRouter extends McpRouter<RPC> {
 ```
 
 Hints are advice to the client, never a defence: authorization is the route's middleware.
+
+## Native tools
+
+Some operations are not one route: a tool that composes several routes, runs a model itself, or reports progress while it works. Register the `AgentTool` you already have with `fromTool`, and it is listed, filtered, scoped and projected beside the routes:
+
+```ts
+import { AgentTool, s } from "gemi/ai";
+import { McpRouter } from "gemi/http";
+import { McpRegistry, mcpCallOf } from "gemi/services";
+import { app } from "gemi/foundation";
+
+const buildPage = AgentTool.create({
+  name: "buildPage",
+  description: "Build a page from a prompt",
+  inputSchema: s.object({ prompt: s.string() }),
+  outputSchema: s.object({ path: s.string() }),
+  async *execute({ prompt }, ctx) {
+    yield { progress: 1, total: 2, message: "Drafting" };
+    const call = mcpCallOf(ctx)!;
+    // Runs the composed route as the same caller, held to its scopes when remote.
+    const pages = await app(McpRegistry).execute(call.caller, "list-pages", {}, ctx);
+    const draft = await ctx.generate({ provider, instructions: "...", prompt, output: pageSchema });
+    // ...
+    return { path: "/new" };
+  },
+});
+
+export class AppMcpRouter extends McpRouter<RPC> {
+  routes = {
+    "list-pages": this.fromApiRoute("GET", "/pages", { description: "List the site's pages", tags: ["read"] }),
+    "build-page": this.fromTool(buildPage, {
+      tags: ["write"],
+      title: "Build a page",
+      // Without `remote`, only the app's own agents get the tool.
+      remote: {
+        context: ({ caller }) => ({ userId: caller.req.ctx().user.id }),
+      },
+    }),
+  };
+}
+```
+
+- The `routes` key is the tool's name. The input and output schemas, `requiresApproval`, `timeoutMs` and `async` come from the tool. The meta can set `description` (overrides the tool's), `tags`, `title`, `annotations` (no verb defaults: only what you write) and `requiresApproval: true`. `false` on a tool that requires approval fails the boot.
+- The tool must be a server tool with a fixed `inputSchema`. A client tool, or one whose schema is resolved per run, fails the boot.
+- **For the app's agents** (`toAgentTools`), the tool runs with the run's own `ToolContext`, as if the agent held it directly: its yields are `tool-progress`, `ctx.jobs` starts background jobs, and a `ToolError` reaches the model.
+- **For a remote client**, the tool is listed and callable only when the meta has `remote`, and only for scopes that reach it. `requiresApproval` asks through the same elicitation as a route. The tool runs with a `ToolContext` built for the call: `context` is what `remote.context(call)` answers, `body` is `{}`, `runId` is fresh, there is no `threadId`, and `signal` aborts when the client cancels or the tool's `timeoutMs` passes. `ctx.generate` works. `ctx.attachments`, `generateImage`, `editImage`, `runAgent` and `jobs` throw a sentence saying a remote call has none, because there is no run, thread or attachment store behind it.
+- Yields become `notifications/progress`. A yield with a numeric `progress` is sent as it is, a string as the message, and anything else as one step. `remote.progress(value, n)` maps each yield yourself (answer `undefined` to skip one).
+- **A native tool is its own authorization.** A route tool goes through the route's middleware, but a native tool runs its own code, so it can do whatever that code does. Before you add `remote`, make sure the tool (or `remote.context`) checks what the caller may do. `call.caller.principal` holds the credential's user and scopes. A route the tool composes through `registry.execute(call.caller, ...)` is still dispatched through that route's middleware and held to the caller's scopes.
+- A `ToolError` is an error result the model reads. Any other throw is logged and answered "failed on the server". When the tool has an `outputSchema`, its answer is parsed with it and sent as `structuredContent`.
+- `mcpCallOf(ctx)` answers the call (caller, request, tool, input) inside a native tool called through the registry. It answers `undefined` when the agent holds the tool directly, or when the run was not started inside a request.
 
 ## Remote access
 

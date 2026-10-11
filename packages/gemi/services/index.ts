@@ -104,6 +104,7 @@ export {
   McpCallRefusedError,
   McpRegistry,
   McpToolError,
+  mcpCallOf,
   type McpCaller,
   type McpCallContext,
   type McpExecuteOptions,
@@ -113,6 +114,8 @@ export {
   type McpScope,
   type McpCredentials,
   type McpToolAnnotations,
+  type McpNativeToolDescriptor,
+  type McpRouteToolDescriptor,
   type McpToolDescriptor,
   type McpToolFilter,
 } from "./mcp/McpRegistry";

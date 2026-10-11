@@ -11,6 +11,20 @@ Behaviour change:
 
 - **A 429 from the limiter now carries `retryAfter`** (milliseconds) in its `error`: `{ kind: "rate_limit", message, status: 429, retryAfter }`. That covers the `rate-limit` middleware and the one-time-code limiter as well as `enforce`. The field is additive; `MutationRefusal` has an optional `retryAfter?: number`. A test that compares a limiter 429's body with `toEqual` needs the field added.
 
+## MCP: native tools in the registry, `fromTool` (#759)
+
+**New, nothing to migrate for apps that only read tool names, tags or schemas.** An `AgentTool` can be registered in an `McpRouter` beside the routes, so one tool definition serves the app's agents and, when you opt in, remote MCP clients. See [MCP: native tools](docs/mcp.md#native-tools).
+
+- **`this.fromTool(tool, meta?)`** in an `McpRouter`. The meta takes `description`, `tags`, `title`, `annotations`, `requiresApproval` and `remote: { context(call), progress? }`. Without `remote`, the tool is local only (the app's agents).
+- **`mcpCallOf(ctx)`** from `gemi/services`: the `McpCallContext` of a native tool call made through the registry, so a composite tool can run the routes it composes as the same caller.
+- `toAgentTools` projects native tools like routes (bare or in namespaces, typed with their input, output and progress), carrying the tool's `timeoutMs` and `async`.
+- New exports: `McpToolDeclaration`, `McpNativeToolMeta` and `McpNativeToolRemote` from `gemi/http`, and `McpRouteToolDescriptor` and `McpNativeToolDescriptor` from `gemi/services`.
+
+Type changes:
+
+- **`McpToolDescriptor` is now a union** of `McpRouteToolDescriptor` (`kind: "route"`, with `method`, `url` and `source`) and `McpNativeToolDescriptor` (`kind: "tool"`, no `method` or `url`). Every descriptor has a new `kind` field. Code that reads `descriptor.method` or `descriptor.url` from `McpRegistry.descriptors()` or `list()` now gets `McpMethod | undefined` and `string | undefined`. Check `descriptor.kind === "route"` first to narrow. A test that compares a whole descriptor with `toEqual` now also sees `kind`.
+- `McpRouter.routes` is typed `Record<string, McpRouteDeclaration | McpToolDeclaration>`.
+
 ## Mutations write their answer into other queries: `updates` and `useSetQueryData` (#897)
 
 **New, nothing to migrate.** A mutation that answers with data another query holds can write it into that query's cache with no refetch. See [Data Fetching: Writing a mutation's answer into a query](docs/data-fetching.md#writing-a-mutations-answer-into-a-query-updates).
