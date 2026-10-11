@@ -1,5 +1,16 @@
 # Unreleased
 
+## `RateLimiter.enforce`: consume, and refuse with a 429 (#882)
+
+**New, nothing to migrate.** `RateLimiter.enforce(key, { limit, window, cost }, message?)` (from `gemi/facades`, and on the `RateLimiter` service) consumes like `consume` and, over budget, throws `RateLimitExceededError`: the `rate-limit` middleware's 429, with `Retry-After` and `X-RateLimit-*` headers, recognised by `isRateLimitError`. `message` is a string or a function of the `RateLimitResult` (its `retryAfter` is in ms); the default is "Rate limit exceeded". Within budget it returns the result. It replaces the usual `if (!allowed) throw new RequestBreakerError(message, { status: 429 })`, which answered no `Retry-After`. See [Limiting outside of middleware](docs/middleware.md#limiting-outside-of-middleware).
+
+- `RateLimitExceededError(result?, message?)` takes an optional message, and exposes `result` and `retryAfter` (ms).
+- New type export from `gemi/services`: `RateLimitMessage`.
+
+Behaviour change:
+
+- **A 429 from the limiter now carries `retryAfter`** (milliseconds) in its `error`: `{ kind: "rate_limit", message, status: 429, retryAfter }`. That covers the `rate-limit` middleware and the one-time-code limiter as well as `enforce`. The field is additive; `MutationRefusal` has an optional `retryAfter?: number`. A test that compares a limiter 429's body with `toEqual` needs the field added.
+
 ## Agent uploads: `checkUpload`, and the body for `attachmentDestination` (#836)
 
 **New, nothing to migrate.** Two additions on `AgentController` for an app that enforces a rule about an upload *and its subject* at once, such as a storage quota per site whose id is only in the client's `body`:

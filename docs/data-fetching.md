@@ -659,7 +659,7 @@ refusal is an object with a `kind`, its `message` and its `status`:
 | `InsufficientPermissionsError` or a policy denial (403) | `{ kind: "permission", message, status: 403 }` | `isPermissionError` |
 | A missing or stale CSRF token (403) | `{ kind: "csrf", message, status: 403 }` | `isCsrfError` |
 | A missing record, file or route (404) | `{ kind: "not_found", message, status: 404 }` | `isNotFoundError` |
-| `RateLimitMiddleware` refused it (429) | `{ kind: "rate_limit", message, status: 429 }` | `isRateLimitError` |
+| `RateLimitMiddleware` or `RateLimiter.enforce` refused it (429) | `{ kind: "rate_limit", message, status: 429, retryAfter? }` (`retryAfter` in ms) | `isRateLimitError` |
 | The server failed (500; under `gemi dev` the message is the exception's) | `{ kind: "server_error", message, status: 500 }` | `isServerError` |
 | A failed `useUpload` whose body was not JSON | `{ kind: "server_error", message, status }` | `isServerError` |
 | The answer was not JSON (a proxy's error page) | a `SyntaxError` | `isServerError` |

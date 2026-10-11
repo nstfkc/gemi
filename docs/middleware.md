@@ -652,6 +652,20 @@ if (!allowed) {
 
 Pass `cost` to charge a request more than one unit — useful when a single call does far more work than the others sharing its budget.
 
+To refuse the request instead of handling the result yourself, use `RateLimiter.enforce(key, options, message?)`. It consumes the same way and, over budget, throws `RateLimitExceededError`: the same 429 the `rate-limit` middleware answers, with `Retry-After` and `X-RateLimit-*` headers, and `isRateLimitError` recognises it on the client. Within budget it returns the result.
+
+```typescript
+await RateLimiter.enforce(`publish:${user.id}`, { limit: 10, window: 3600 }, "You can publish 10 times an hour.");
+
+// The message can be built from the result; `retryAfter` is in milliseconds.
+await RateLimiter.enforce(`render:${user.id}`, { limit: 5, window: 3600 }, ({ retryAfter }) => {
+  const minutes = Math.max(1, Math.ceil(retryAfter / 60_000));
+  return `Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+});
+```
+
+The answer's body is `{ error: { kind: "rate_limit", message, status: 429, retryAfter } }`, `retryAfter` in milliseconds; the middleware's own 429 carries it too. Without a message it says "Rate limit exceeded".
+
 ## See also
 
 - [Authentication](./authentication.md) — how `auth` establishes the session and current user.
