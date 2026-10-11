@@ -9,6 +9,14 @@
 - The proxy must set the header from its own knowledge of the client, e.g. `X-Client-IP` from `CF-Connecting-IP`, and must not append to a value the visitor sent.
 - New public method `App.applyTrustedClientIp(req)`, which `gemi start` and `gemi dev` call. A custom `Bun.serve` around `app.fetch` gets the same behaviour from `fetch`, since `fetch` calls it as well.
 
+## Static views: a document script (#919)
+
+**New, nothing to migrate.** `.static({ script: "site/clicks" })` inlines `app/views/site/clicks.script.ts` once at the end of the page's `<head>`. The file is bundled for the browser (imports inlined, minified, wrapped in an IIFE) by `gemi build` into `dist/server/document-scripts.json`, and from source in dev and tests. As a module script it runs once per document, and with `navigation` it keeps running across swaps without running again. `script` may be a function `(req) => name | null`, called after the handler. `documentScriptCspHash(name)` from `gemi/services` gives its `'sha256-…'` for a strict `script-src`. See [Document script](docs/static-views-and-islands.md#document-script).
+
+- **The `gemi-static` marker has a fourth part.** It is now `<layout>|<build>|<script>|<version>` (the script slot is empty without one). The runtime only compares markers for equality, so nothing changes for an app, but a test that asserts the marker's exact text needs the extra `|`: `site/Layout|build-1|` is now `site/Layout|build-1||`.
+- `gemi build` writes `dist/server/document-scripts.json` (`{}` without scripts). A file that does not bundle, or whose output contains `</script` or `<!--`, fails the build.
+- `renderStaticDocument` (from `gemi/testing`) takes `documentScript: true` to run the page's document script once before the runtime, as a browser does.
+
 # Upgrading from 0.129 to 0.130
 
 ## Client: mutation extras, cache writes and `fetchBlob` load on first use (#915)

@@ -45,9 +45,11 @@ import { StaticRenderContext, createStaticRenderCollector } from "../../client/i
 import {
   injectIslands,
   spliceIslandSlots,
+  type DocumentScript,
   type IslandResolver,
   type StaticNavigationMarker,
 } from "./staticDocument";
+import { documentScriptSource } from "./documentScript";
 import { applyStaticCacheControl, staticCookiePolicy } from "./staticCache";
 
 /**
@@ -473,16 +475,31 @@ export class ViewRouteDispatcher {
 
     try {
       // `.static({ navigation })`: what the runtime compares before swapping
-      // a fetched page in. Inside the `try`, so a `version` that throws still
-      // completes the request (the `finally`) like a failed render.
+      // a fetched page in. Inside the `try`, so a `version` or `script` that
+      // throws still completes the request (the `finally`) like a failed render.
+      // `.static({ script })` (#919): picked after the handler, like `version`.
+      let script: DocumentScript | undefined;
+      const scriptName =
+        typeof staticView.script === "function"
+          ? await runInRequestScope(() => (staticView.script as Function)(req))
+          : staticView.script;
+      if (scriptName) {
+        script = { name: scriptName, source: await documentScriptSource(scriptName) };
+      }
       let navigation: StaticNavigationMarker | undefined;
       if (staticView.navigation) {
         const options = staticView.navigation === true ? {} : staticView.navigation;
         const version = options.version
           ? String(await runInRequestScope(() => options.version!(req)))
           : "";
+        // The script is part of the identity: a page is swapped in only when
+        // the script it needs is the one already running, so it never runs
+        // twice in one document and never goes missing.
+        // `version` goes last: it is the only part that may hold a `|`.
         navigation = {
-          identity: [staticView.layout ?? "", args.buildId ?? "", version].join("|"),
+          identity: [staticView.layout ?? "", args.buildId ?? "", script?.name ?? "", version].join(
+            "|",
+          ),
           prefetch: options.prefetch === "none" ? "none" : "intent",
         };
       }
@@ -522,6 +539,7 @@ export class ViewRouteDispatcher {
           args.resolveIsland,
           process.env.NODE_ENV !== "production",
           navigation,
+          script,
         ),
         { status: 200, headers },
       );

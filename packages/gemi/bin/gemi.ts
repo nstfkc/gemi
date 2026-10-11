@@ -4,6 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
+import {
+  DOCUMENT_SCRIPTS_MANIFEST,
+  bundleDocumentScripts,
+} from "../services/router/documentScript";
 import { runMigrate } from "./migrate";
 import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
@@ -259,6 +263,17 @@ withStatsOptions(
   if (!serverBuild.success) {
     for (const message of serverBuild.logs) console.error(message);
     process.exit(1);
+  }
+
+  // Static views' document scripts (`.static({ script })`, #919), bundled
+  // once here so `gemi start` inlines them without bundling anything.
+  const documentScripts = await bundleDocumentScripts(appDir);
+  await Bun.write(
+    path.join(rootDir, "dist", "server", DOCUMENT_SCRIPTS_MANIFEST),
+    JSON.stringify(documentScripts),
+  );
+  if (Object.keys(documentScripts).length > 0) {
+    console.log(`Bundled ${Object.keys(documentScripts).length} document script(s).`);
   }
 
   // `--json` or `--markdown` alone asks for the stats too.
