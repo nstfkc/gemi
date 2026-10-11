@@ -8204,9 +8204,9 @@ The socket is Bun's `WebSocket`, which accepts headers. Tests pass `webSocket: (
 | `cachedAudioInputTokens` | `input_token_details.cached_tokens_details.audio_tokens` |
 | `audioOutputTokens` | `output_token_details.audio_tokens` |
 
-`cachedInputTokens` is `input_token_details.cached_tokens`.
+`cachedInputTokens` is `input_token_details.cached_tokens`. To price a response, subtract the audio shares from the totals for the text part, and the cached audio share from `audioInputTokens` for the uncached audio. `toRealtimeUsage(raw)` maps a raw vendor `usage` object, for usage you read some other way.
 
-**Transcription is billed separately.** With `transcription` on, each user utterance's transcription carries its own usage, at the transcription model's rates, and it never appears in `response.done`. The sideband maps it onto `transcriptionUsage` or `transcriptionSeconds` (see above). Add it to your meter as well, or a call with captions under-reports its cost. To price a response, subtract the audio shares from the totals for the text part, and the cached audio share from `audioInputTokens` for the uncached audio. `toRealtimeUsage(raw)` maps a raw vendor `usage` object, for usage you read some other way.
+**Transcription is billed separately.** With `transcription` on, each user utterance's transcription carries its own usage, at the transcription model's rates, and it never appears in `response.done`. The sideband maps it onto `transcriptionUsage` or `transcriptionSeconds` (see above). Add it to your meter as well, or a call with captions under-reports its cost.
 
 ---
 
