@@ -5000,6 +5000,7 @@ const { data } = useQuery("/feed", {}, {
   focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
   lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
+  refetchUntil: (d) => (d.active ? 2000 : 0), // poll while it returns a delay (see below)
 });
 ```
 
@@ -5041,6 +5042,42 @@ Three things keep it from firing more than it should:
 A `lazy` query only becomes eligible once something has explicitly fetched it —
 `trigger()`, `refetch()` or `mutate()`. `prefetch()` deliberately does not
 count: it is "fetch once" for data the user may never look at.
+
+### Polling until something is done: `refetchUntil`
+
+`refetchUntil(data, duration)` polls while it returns a delay in ms: once data
+lands, the query refetches that long later and asks again; `0` stops.
+`duration` is the delay it returned last (`0` at first), for backoff:
+
+```tsx
+const { data: job } = useQuery("/jobs/:jobId", { params }, {
+  refetchUntil: (job) => (job.status === "running" ? 2000 : 0),
+});
+
+// Backoff: 1s, 2s, 4s, … capped at 30s.
+useQuery("/exports/:id", { params }, {
+  refetchUntil: (d, duration) =>
+    d.ready ? 0 : Math.min(duration ? duration * 2 : 1000, 30_000),
+});
+```
+
+The predicate is read from the current render after every commit, so it can
+depend on props and state as well as the data. No mirror ref is needed:
+
+```tsx
+const { data: pictures } = useQuery("/pages/:pageId/pictures", { params }, {
+  refetchUntil: (p) => (p.drawing.length > 0 || post.building ? 2000 : 0),
+});
+```
+
+- When the state it reads makes it return a delay again, a stopped poll
+  restarts; when it returns `0`, a pending poll is cancelled.
+- A re-render with the same data keeps a pending poll's timer, so frequent
+  renders never push the next refetch back.
+- Nothing is scheduled while the poll's refetch is on the wire, while the query
+  is loading or failed, or while a [`live`](./broadcasting.md) channel is open.
+
+Since it runs on every render of the component, keep it pure and cheap.
 
 ### Failed queries and retries
 
