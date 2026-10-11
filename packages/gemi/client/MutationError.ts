@@ -64,6 +64,11 @@ export interface MutationRefusal<K extends MutationRefusalKind = MutationRefusal
   kind: K;
   message: string;
   status: number;
+  /**
+   * `rate_limit` only: milliseconds until a retry can succeed, when the
+   * server's limiter knew (the `rate-limit` middleware, `RateLimiter.enforce`).
+   */
+  retryAfter?: number;
 }
 
 /**
@@ -244,7 +249,10 @@ export function isNotFoundError(
   return kindOf(error) === "not_found";
 }
 
-/** `RateLimitMiddleware` refused the request (429). */
+/**
+ * `RateLimitMiddleware` or `RateLimiter.enforce` refused the request (429).
+ * `retryAfter` (ms) says when to try again, when the server sent it.
+ */
 export function isRateLimitError(
   error: unknown,
 ): error is MutationRefusal<"rate_limit"> {

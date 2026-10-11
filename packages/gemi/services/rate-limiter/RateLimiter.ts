@@ -1,3 +1,4 @@
+import { RateLimitExceededError } from "../../http/RateLimitExceededError";
 import type { RateLimiterConfig } from "./config";
 import type { RateLimiterDriver } from "./drivers/RateLimiterDriver";
 import type { RateLimitResult } from "./types";
@@ -10,6 +11,12 @@ export interface ConsumeOptions {
   /** How much this call costs. Defaults to `1`. */
   cost?: number;
 }
+
+/**
+ * What a refusal from `enforce` says: a string, or one built from the result
+ * that refused it (`retryAfter` is in milliseconds).
+ */
+export type RateLimitMessage = string | ((result: RateLimitResult) => string);
 
 export class RateLimiter {
   static token = "ratelimiter";
@@ -50,6 +57,27 @@ export class RateLimiter {
       window: window * 1000,
       cost,
     });
+  }
+
+  /**
+   * `consume`, refusing the request when it does not fit: over budget it throws
+   * `RateLimitExceededError`, the same 429 the `rate-limit` middleware answers
+   * (`Retry-After` and `X-RateLimit-*` headers, `{ error: { kind: "rate_limit",
+   * message, status: 429, retryAfter } }`). Within budget it returns the result.
+   */
+  async enforce(
+    key: string,
+    options: ConsumeOptions = {},
+    message?: RateLimitMessage,
+  ): Promise<RateLimitResult> {
+    const result = await this.consume(key, options);
+    if (!result.allowed) {
+      throw new RateLimitExceededError(
+        result,
+        typeof message === "function" ? message(result) : message,
+      );
+    }
+    return result;
   }
 }
 
