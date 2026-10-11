@@ -1,4 +1,4 @@
-import type { ToolContext } from "../ai/Agent";
+import type { AgentContext, AgentTool, AnyAgentTool, ToolContext } from "../ai/Agent";
 import type { AnySchema, Infer, Schema } from "../ai/Schema";
 import type { UrlParser } from "../client/types";
 import type { Prettify } from "../utils/type";
@@ -10,6 +10,7 @@ import type {
 } from "../services/mcp/McpRegistry";
 import type { ApiRouterHandler } from "./ApiRouter";
 import type { HttpRequest } from "./HttpRequest";
+import type { ProgressUpdate } from "./modelOriginated";
 
 /**
  * The app's API routes, as `fromApiRoute` sees them: the same
@@ -532,6 +533,91 @@ export class McpRouteDeclaration<
   ) {}
 }
 
+// --- native tools (#759) -----------------------------------------------------
+
+/**
+ * How a native tool runs for a remote MCP client. Its presence is the opt-in:
+ * a native tool without it is the local agents' only, never listed to a remote
+ * caller and refused as unknown when one names it.
+ */
+export type McpNativeToolRemote<Progress = unknown> = {
+  /**
+   * The `AgentContext` the tool's `ctx.context` is for a remote call, built
+   * from the call: `caller.principal` is the credential's user and scopes,
+   * `req` the request to the MCP endpoint (its `req.ctx().user` is that same
+   * user), `input` the parsed arguments. `call.ctx` is absent here: it is what
+   * this builds.
+   *
+   * It is the server deciding what the call is for, as `AgentController.context()`
+   * does for a chat, so it must not be read off the arguments without the
+   * same check a route would make. A throw is the server's failure, logged.
+   */
+  context: (call: McpCallContext) => AgentContext | Promise<AgentContext>;
+  /**
+   * Turns one of the tool's yields into an MCP progress notification, or
+   * `undefined` to send none for it. `n` counts the yields, from 1.
+   *
+   * Without it, a yield with a numeric `progress` is sent as it is (with its
+   * `total` and `message`), a string is sent as the message, and anything
+   * else as `{ progress: n }`, with its `message` when it has a string one.
+   */
+  progress?: (value: Progress, n: number) => ProgressUpdate | undefined;
+};
+
+/** What `McpRouter.fromTool` takes beside the tool. Everything is optional. */
+export type McpNativeToolMeta<T = readonly string[], Progress = unknown> = {
+  /** Overrides the tool's own description, for the registry's audience. */
+  description?: string;
+  /** As for a route: the filter's, the namespaces' and the scopes' tags. */
+  tags?: T;
+  /** A name for a client to show. The model is still given the `routes` key. */
+  title?: string;
+  /**
+   * MCP's hints, exactly as written: a native tool has no verb to imply any,
+   * so an unannotated one is what MCP assumes — not read-only, possibly
+   * destructive.
+   */
+  annotations?: McpToolAnnotations;
+  /**
+   * `true` asks the user before the tool runs even when the tool itself does
+   * not. A tool that requires approval keeps requiring it: `false` there is
+   * refused at boot rather than quietly dropping the question.
+   */
+  requiresApproval?: boolean;
+  /** Lets a remote MCP client list and call the tool. See `McpNativeToolRemote`. */
+  remote?: McpNativeToolRemote<Progress>;
+};
+
+/** The runtime shape of a native tool's meta, generics erased. */
+export type McpNativeToolMetaRuntime = {
+  description?: string;
+  tags?: readonly string[];
+  title?: string;
+  annotations?: McpToolAnnotations;
+  requiresApproval?: boolean;
+  remote?: McpNativeToolRemote<any>;
+};
+
+/**
+ * One native tool: what `fromTool` returns and `routes` holds beside the
+ * route declarations. Plain data, resolved by the registry at boot.
+ */
+export class McpToolDeclaration<
+  Input = unknown,
+  Output = unknown,
+  Tags extends readonly string[] = readonly string[],
+  Progress = never,
+> {
+  readonly __internal_brand = "McpTool";
+  /** Types only, never set: what `toAgentTools` reads off a typed router. */
+  declare readonly __tool?: { input: Input; output: Output; tags: Tags; progress: Progress };
+
+  constructor(
+    readonly tool: AnyAgentTool,
+    readonly meta: McpNativeToolMetaRuntime,
+  ) {}
+}
+
 /**
  * Which of an app's API routes a model may call, declared by reference.
  *
@@ -563,7 +649,7 @@ export class McpRouteDeclaration<
 export class McpRouter<R = McpRoutes> {
   static __brand = "McpRouter";
 
-  routes: Record<string, McpRouteDeclaration> = {};
+  routes: Record<string, McpRouteDeclaration | McpToolDeclaration<any, any, any, any>> = {};
 
   /**
    * The scopes a remote caller's credential can carry, and the tools each one
@@ -647,6 +733,47 @@ export class McpRouter<R = McpRoutes> {
     options: McpModelParamOptions<S, As>,
   ): McpModelParam<Infer<S>, As> {
     return new McpModelParam(options.as, options.input, options.bind);
+  }
+
+  /**
+   * Registers an `AgentTool` as a tool of the registry (#759): an operation
+   * that is not one route — it composes several, runs a model, or reports
+   * progress while it works — listed, filtered, scoped and projected beside the
+   * routes.
+   *
+   * ```ts
+   * routes = {
+   *   "build-page": this.fromTool(buildPageTool, {
+   *     tags: ["pages"],
+   *     remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) },
+   *   }),
+   * };
+   * ```
+   *
+   * The `routes` key is the tool's name, as for a route. Its input schema,
+   * output schema, `requiresApproval`, `timeoutMs` and `async` are the tool's.
+   * It must be a server tool with a fixed `inputSchema`: the registry lists
+   * one schema to every caller, so a per-run schema is refused at boot.
+   *
+   * For an agent in this server (`toAgentTools`) the tool runs with the run's
+   * own `ToolContext`, exactly as if the agent held it directly: its yields
+   * are `tool-progress`, its jobs are background jobs. For a remote MCP client
+   * it runs only when `remote` is set. See `McpNativeToolRemote`.
+   *
+   * Inside, `mcpCallOf(ctx)` answers the call — the caller included — so a
+   * composite tool can run the routes it composes as the same caller:
+   * `registry.execute(mcpCallOf(ctx)!.caller, "list-pages", args, ctx)`.
+   */
+  fromTool<
+    I,
+    O,
+    Pr = never,
+    const T extends readonly string[] = readonly [],
+  >(
+    tool: AgentTool<string, I, O, Pr>,
+    meta: McpNativeToolMeta<T, Pr> = {},
+  ): McpToolDeclaration<I, O, T, Pr> {
+    return new McpToolDeclaration(tool as AnyAgentTool, meta as McpNativeToolMetaRuntime);
   }
 
   fromApiRoute<

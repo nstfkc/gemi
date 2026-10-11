@@ -6,7 +6,11 @@ import {
   type ToolShapesOf,
 } from "../../ai/Agent";
 import { ToolError } from "../../ai/redact";
-import type { McpRouteDeclaration, McpRouter } from "../../http/McpRouter";
+import type {
+  McpRouteDeclaration,
+  McpRouter,
+  McpToolDeclaration,
+} from "../../http/McpRouter";
 import { RequestContext } from "../../http/requestContext";
 import type { McpRegistry, McpToolDescriptor, McpToolFilter } from "./McpRegistry";
 
@@ -46,6 +50,14 @@ export type ToAgentToolsOptions = {
 
 type RoutesOf<R> = R extends { routes: infer T } ? T : never;
 
+/** What a declaration types its tool as: a route's or a native tool's (#759). */
+type ToolTypesOf<D> =
+  D extends McpRouteDeclaration<any, any, infer I, infer O, infer T>
+    ? { input: I; output: O; tags: T; progress: never }
+    : D extends McpToolDeclaration<infer I, infer O, infer T, infer P>
+      ? { input: I; output: O; tags: T; progress: P }
+      : never;
+
 /** Whether a filter's field narrows by literals, rather than by `string`s. */
 type LiteralsOf<L> = L extends readonly (infer X)[] ? (string extends X ? never : X) : never;
 
@@ -64,7 +76,7 @@ type Passes<N, D, F> =
       F extends { tags: readonly string[] }
       ? [LiteralsOf<F["tags"]>] extends [never]
         ? true
-        : D extends McpRouteDeclaration<any, any, any, any, infer T>
+        : ToolTypesOf<D> extends { tags: infer T extends readonly string[] }
           ? string extends T[number]
             ? true
             : [Extract<T[number], LiteralsOf<F["tags"]>>] extends [never]
@@ -85,8 +97,12 @@ export type McpAgentTool<R extends McpRouter<any>, F = {}> =
     ? AnyAgentTool
     : {
         [N in keyof RoutesOf<R> & string]: Passes<N, RoutesOf<R>[N], F> extends true
-          ? RoutesOf<R>[N] extends McpRouteDeclaration<any, any, infer I, infer O, any>
-            ? AgentTool<N, I, O, never>
+          ? ToolTypesOf<RoutesOf<R>[N]> extends {
+              input: infer I;
+              output: infer O;
+              progress: infer P;
+            }
+            ? AgentTool<N, I, O, P>
             : never
           : never;
       }[keyof RoutesOf<R> & string];
@@ -269,6 +285,7 @@ function agentTool(
   descriptor: McpToolDescriptor,
   deferred: boolean,
 ): AnyAgentTool {
+  if (descriptor.kind === "tool") return nativeAgentTool(registry, descriptor, deferred);
   return AgentTool.create({
     name: descriptor.name,
     description: descriptor.description,
@@ -285,5 +302,37 @@ function agentTool(
       }
       return registry.execute({ kind: "local", req }, descriptor.name, input, ctx);
     },
+  });
+}
+
+/**
+ * A native tool (#759), projected back to an `AgentTool` under its `routes`
+ * key. Its `execute` hands the run's own `ToolContext` to the registered tool
+ * and returns what that returns — so its yields are `tool-progress`, its job
+ * handle a background job — with `mcpCallOf(ctx)` naming the local caller.
+ *
+ * Unlike a route, it needs no request to run: a run started from a job
+ * executes it as the agent would have executed the tool directly, with
+ * `mcpCallOf(ctx)` answering `undefined`.
+ */
+function nativeAgentTool(
+  registry: McpRegistry,
+  descriptor: McpToolDescriptor,
+  deferred: boolean,
+): AnyAgentTool {
+  const native = registry.nativeTool(descriptor.name);
+  return AgentTool.create({
+    name: descriptor.name,
+    description: descriptor.description,
+    inputSchema: descriptor.inputSchema,
+    ...(descriptor.outputSchema ? { outputSchema: descriptor.outputSchema } : {}),
+    requiresApproval: descriptor.requiresApproval,
+    deferred,
+    ...(native.timeoutMs !== undefined ? { timeoutMs: native.timeoutMs } : {}),
+    ...(native.async ? { async: native.async } : {}),
+    execute: ((input: unknown, ctx) => {
+      const req = RequestContext.getStore()?.req;
+      return registry.startNative(req ? { kind: "local", req } : undefined, descriptor.name, input, ctx);
+    }) as NonNullable<AnyAgentTool["execute"]>,
   });
 }
