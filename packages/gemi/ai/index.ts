@@ -293,6 +293,36 @@ export type {
   WebSocketLike,
 } from "./providers/sideband";
 
+// --- voice in front of an agent (#921) ---------------------------------------
+//
+// The server half. The browser half is `useVoiceSession` from `gemi/ai/voice`.
+export { DEFAULT_DELEGATE_NAME, VoiceBridge, VoiceHangup, voiceTools } from "./VoiceBridge";
+export type {
+  VoiceBridgeParams,
+  VoiceDelegate,
+  VoiceLimits,
+  VoiceLines,
+  VoiceLiveRuns,
+  VoiceRequestRecord,
+  VoiceSummary,
+  VoiceToolCallRecord,
+  VoiceTranscriptLine,
+  VoiceTurnController,
+  VoiceTranscriptionUsage,
+  VoiceUsageInfo,
+} from "./VoiceBridge";
+export { mcpVoiceTools } from "./voiceMcp";
+export type {
+  VoiceMcpOptions,
+  VoiceToolCall,
+  VoiceToolHandler,
+  VoiceToolRunInfo,
+} from "./voiceMcp";
+export { defaultVoiceStore, MemoryVoiceSessionStore } from "./voiceStore";
+export type { VoiceSessionRecord, VoiceSessionStore } from "./voiceStore";
+export type { VoiceConfig, VoiceSessionOptions, VoiceStartContext } from "./voiceConfig";
+export type { VoiceEndReason, VoiceStartResponse } from "./voice/wire";
+
 // --- the controller, its stores and the route it mounts -------------------
 export {
   AgentController,
@@ -315,6 +345,12 @@ export {
   RedisNonceStore,
   RedisReceiptStore,
   ScopedAttachments,
+} from "./AgentController";
+export type {
+  VoiceMiddlewareConfig,
+  VoiceRoute,
+  VoiceRouteMethod,
+  VoiceRouteRPC,
 } from "./AgentController";
 export type {
   AgentHookContext,

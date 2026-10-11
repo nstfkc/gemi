@@ -101,6 +101,28 @@ describe("gemi/ai/client", () => {
   });
 });
 
+describe("gemi/ai/voice", () => {
+  test("reaches no module that holds a key, a secret or a tool's execute", () => {
+    const graph = reaches("ai/voice/index.ts");
+    expect(SERVER_ONLY.filter((file) => graph.has(file))).toEqual([]);
+    expect([...graph].filter((file) => file.startsWith("ai/providers/"))).toEqual([]);
+    expect(graph).not.toContain("ai/VoiceBridge.ts");
+  });
+
+  test("reaches the hook, its reducer and the peer connection, so the walk is not vacuous", () => {
+    const graph = reaches("ai/voice/index.ts");
+    expect(graph).toContain("ai/voice/useVoiceSession.ts");
+    expect(graph).toContain("ai/voice/state.ts");
+    expect(graph).toContain("ai/voice/voiceCall.ts");
+  });
+
+  test("is not reached from gemi/ai/client, gemi/client or gemi/ai", () => {
+    for (const entry of ["ai/client/index.ts", "client/index.ts", "ai/index.ts"]) {
+      expect(reaches(entry)).not.toContain("ai/voice/useVoiceSession.ts");
+    }
+  });
+});
+
 describe("gemi/ai", () => {
   test("reaches the server module it is the entry for", () => {
     const graph = reaches("ai/index.ts");
@@ -125,6 +147,7 @@ describe("the ai entries in the exports map", () => {
   test("publishes both halves", () => {
     expect(pkg.exports["./ai"]).toBe("./ai/index.ts");
     expect(pkg.exports["./ai/client"]).toBe("./ai/client/index.ts");
+    expect(pkg.exports["./ai/voice"]).toBe("./ai/voice/index.ts");
   });
 
   /**
@@ -139,5 +162,6 @@ describe("the ai entries in the exports map", () => {
     expect(readFileSync(join(PKG, "vite.client.config.mts"), "utf8")).toContain(
       '"ai/client/index"',
     );
+    expect(readFileSync(join(PKG, "vite.client.config.mts"), "utf8")).toContain('"ai/voice/index"');
   });
 });

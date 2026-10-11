@@ -162,3 +162,254 @@ The socket is Bun's `WebSocket`, which accepts headers. Tests pass `webSocket: (
 `cachedInputTokens` is `input_token_details.cached_tokens`. To price a response, subtract the audio shares from the totals for the text part, and the cached audio share from `audioInputTokens` for the uncached audio. `toRealtimeUsage(raw)` maps a raw vendor `usage` object, for usage you read some other way.
 
 **Transcription is billed separately.** With `transcription` on, each user utterance's transcription carries its own usage, at the transcription model's rates, and it never appears in `response.done`. The sideband maps it onto `transcriptionUsage` or `transcriptionSeconds` (see above). Add it to your meter as well, or a call with captions under-reports its cost.
+
+## Voice in front of an agent
+
+Most apps don't want a second assistant with its own tools. They want to talk to the agent they already have. `this.voice(Controller)` and `useVoiceSession` do that: a realtime voice model talks to the user, and every piece of real work is delegated to your `AgentController` as a turn on the chat's thread.
+
+> **Experimental.** `this.voice()`, `VoiceBridge`, `VoiceConfig` and `gemi/ai/voice` may change in a minor release until a live call has run on Azure and on OpenAI.
+
+```
+browser ──WebRTC──▶ voice model ── ask_agent({ request }) ──▶ sideband (your server)
+                                                                  │
+                                       Controller.startTurn({ threadId, text, user, body })
+                                                                  │
+                                    the agent's turn, stored on the thread like a typed message
+```
+
+The voice model gets four tools:
+
+| Tool | What the bridge does |
+|---|---|
+| `ask_agent({ request })` | Runs `startTurn({ threadId, text: request, user, body })`. The name is configurable (`delegate.name`). |
+| `stop_work()` | Stops the running turn (what the chat's stop button does) and drops queued requests. |
+| `work_status()` | Answers what is running (with its latest progress), what is queued, and any open question. |
+| `answer_question({ answer, approve? })` | Answers a turn that ended `awaiting-input`, with `startTurn({ turn: { toolResults } })`. |
+
+Delegated turns go through the controller exactly like a typed message: `authorizeRequest`, `resource`, `runOwner`, `maxConcurrentRuns`, `instructions()`, `context()`, hooks, tools and store. The chat panel shows them as they run.
+
+### The controller
+
+Set `voice` on the controller and mount the route:
+
+```typescript
+import { AgentController, AzureOpenAIProvider, VoiceHangup } from "gemi/ai";
+import type { VoiceConfig } from "gemi/ai";
+
+type PageBody = { pageId: string; selectedNode?: string };
+
+export class PageBuilderController extends AgentController<typeof siteAgent, PageBody> {
+  agent = siteAgent;
+
+  voice: VoiceConfig<PageBody> = {
+    realtime: AzureOpenAIProvider.model("gpt-realtime-mini").realtime,
+    delegate: { name: "ask_builder" },
+    start: async ({ req, body, threadId, user }) => {
+      await chargeFirstBlock(user); // throw to refuse (402, 429…) before the call exists
+      return {
+        session: {
+          instructions: voiceFrontPrompt(body),
+          voice: "marin",
+          turnDetection: { type: "semantic_vad" },
+          transcription: { model: "gpt-4o-mini-transcribe" },
+          noiseReduction: "near_field",
+        },
+        safetyIdentifier: hashUserId(user),
+        limits: { maxDurationMs: 15 * 60_000, idleTimeoutMs: 2 * 60_000 },
+        contextNote: (next) => (next.selectedNode ? `The user selected ${next.selectedNode}.` : null),
+        onTick: async ({ elapsedMs }) => {
+          if (!(await chargeNextBlockIfDue(user, elapsedMs))) {
+            throw new VoiceHangup("You're out of credits. Buy a pack to keep talking.");
+          }
+        },
+        onUsage: (usage, { total }) => recordUsage(total),
+        onEnd: (summary) => settleVoiceSession(user, summary),
+      };
+    },
+  };
+}
+```
+
+```typescript
+import { ApiRouter } from "gemi/http";
+
+export class Api extends ApiRouter {
+  routes = {
+    "/page-builder": this.agent(PageBuilderController),
+    "/page-builder/voice": this.voice(PageBuilderController),
+  };
+}
+```
+
+`this.voice(Controller)` mounts three routes. The enclosing router's `middlewares` guard them, and `.middleware({ start, update, end })` adds more per route:
+
+| Route | Method | What it does |
+|---|---|---|
+| `POST /page-builder/voice` | `voiceStart` | Takes the browser's `sdp`, `threadId`, `pushToTalk` and the app's `body`. Runs `authorizeRequest` and then `voice.start`, creates the call with the server's key (the bridge's tools are added to `session.tools`), records the session in `voiceStore`, and starts a `VoiceBridge` on its sideband. Answers `{ sessionId, sdp, threadId, delegate, endsAt }`. |
+| `PATCH /page-builder/voice/:sessionId` | `voiceUpdate` | Takes a new `body`, such as the current selection or the open page. The next delegated turn gets it, and `contextNote` tells the voice. |
+| `DELETE /page-builder/voice/:sessionId` | `voiceEnd` | Hangs up. On the instance holding the bridge, `onEnd` runs before the answer. |
+
+All three call `authorizeRequest` with `route: "stream"` and the session's `threadId` and `body`. Every delegated turn is a `stream` turn on that thread, so the same check applies. A `PATCH` or `DELETE` from a caller whose `runOwner` differs from the one that started the session gets a 403. An unknown session gets a 404, and a `PATCH` to an ended session gets a 409 (`voice_ended`).
+
+The thread is the client's `threadId`, or the `threadId` that `start` returns (which is checked with `authorizeRequest` as well).
+
+Once `start` has run, every failure calls `onEnd` with reason `start_failed`, so a charge made in `start` can be refunded:
+
+- no thread from either source: 400.
+- the thread `start` returned is refused: `authorizeRequest`'s error.
+- `createCall` fails: 502, or 429 when the vendor rate-limited, with code `voice_unavailable`.
+- anything fails after the vendor call exists (`runOwner`, `voiceStore.create`): 500. The vendor call is also hung up, so it isn't left running with nobody metering it.
+
+**`start` is where abuse limits go, and it must enforce them.** gemi has no per-user concurrency cap or rate limit for voice. Check in `start` that the user has no other live session (`voiceStore` holds them), cap calls per hour, and charge or reserve credit. Throw to refuse (a 402 or 429 error) before the call exists.
+
+The app's `body` keys must not be named `sdp`, `threadId` or `pushToTalk`. The route reads those itself, and the hook's values win.
+
+### What the bridge does
+
+- **One turn at a time.** A request that arrives while a turn is running is queued (up to `limits.maxQueued`, default 3) and answered at once with `status: "queued"`, so the voice can say "after this one". When the queue is full, the answer is `status: "busy"`. A run already going on the thread, such as a typed message, is waited for, and looked for again right before `startTurn`. Two limits remain. `liveRuns` is per process, so a run on another instance isn't seen. And a typed message that starts in the instant between that last look and `startTurn` is superseded, as one typed message supersedes another. `stop_work` before a request has started means it never starts.
+- **The user is captured once.** Delegated turns run as the user `start` saw, for the whole call. A sign-out or revoked access mid-call is seen only when `authorizeRequest` refuses a turn.
+- **Outcomes.** When a turn ends, the delegate call's output is `{ status: "done", text }`, `{ status: "needs_input", questions }`, `{ status: "failed", message }`, `{ status: "stopped" }` or `{ status: "refused", message }` (an `AgentTurnError` from `startTurn`). Then the voice is asked to respond, so it speaks the outcome. For a request that was answered `queued`, the outcome arrives as a note instead. If a response is still in flight, the bridge waits for it to finish before asking for another.
+- **Progress.** While a turn runs, each tool call (and a string, or a `message` / `label` / `title` that a tool yields) becomes a quiet `system` note in the voice conversation, at most one per `limits.progressIntervalMs` (default 4 s). Pass `progress(event)` to summarise the run's events yourself.
+- **Barge-in** stays native: server VAD cancels the spoken response but never the work. Only `stop_work` stops a turn.
+- **Questions.** A turn that ends `awaiting-input` hands its pending calls to the voice. `answer_question` answers a `question` call with the spoken answer. It approves an `approval` call only when `approve: true`, and otherwise denies it with the answer as the reason. It denies a `client` call, since it can't run in a voice call.
+- **The end.** Ending the call doesn't stop a running turn. The turn belongs to the thread, and the chat shows how it ends.
+
+### Limits, metering and the end
+
+| Option | Default | |
+|---|---|---|
+| `limits.maxDurationMs` | 15 minutes | Says `lines.maxDuration`, then hangs up (`max_duration`). |
+| `limits.idleTimeoutMs` | 2 minutes | No speech, no response and no running work: says `lines.idle`, then hangs up (`idle`). |
+| `limits.tickMs` | 1 minute | How often `onTick` is called. |
+| `limits.closingLineMs` | 10 s | The longest a closing line may play before the hang-up. |
+| `limits.hangupGraceMs` | 30 s | When the vendor refuses the hang-up, how long the sideband stays open (still metering) waiting for the vendor to end the call. The refusal is recorded in `errors` as `hangup_failed`. |
+
+- **Closing lines.** A response still playing is cancelled first, and its `response.done` is awaited before the line is requested. The line's own `response.done` and then `output_audio_buffer.stopped` end the wait. `output_audio_buffer.*` are documented as WebRTC events. If the sideband doesn't receive them, every closing line waits the full `closingLineMs`.
+- `onUsage(usage, { total, elapsedMs, sessionId, transcription })` runs after each `response.done` that carries usage, including the audio token fields.
+- `onTranscriptionUsage({ usage?, seconds? }, info)` runs after each transcribed user utterance. Transcription is billed apart from responses, at the transcription model's rates: `usage` for a token-billed model, `seconds` for a duration-billed one. `info.transcription` holds the running totals.
+- `onTick(info)` runs every `tickMs`, for time-based billing.
+- Hooks run one after another, but outside the sideband's event loop, so a slow billing write doesn't hold up tool calls.
+- Throw `new VoiceHangup(line)` from any of them to have the voice say `line` and hang up (reason `usage`). Any other error ends the call with reason `error`.
+- `onEnd(summary)` runs once. `summary` has `reason`, `startedAt`, `endedAt`, `durationMs`, `seconds` (rounded up), `usage` (responses), `transcription` (`{ usage, seconds }`), `transcript` (the vendor's transcripts of what was said, `{ role, text, at }`), `requests` (each delegated request, its status and `runId`) and `errors`. Your app decides what to keep: nothing is stored by gemi.
+- End reasons are `hangup`, `call_ended` (the vendor ended the call, for example because the browser left), `sideband_lost` (the call is hung up so it isn't left unmetered), `max_duration`, `idle`, `usage`, `session_tampered`, `start_failed` and `error`.
+- **Tampering: a speed bump, not a boundary.** The browser can send `session.update` on its data channel. If a `session.updated` arrives whose instructions or tool *names* differ from the ones the session was created with, the bridge hangs up (`session_tampered`). Turning voice activity detection on or off (push-to-talk) is allowed.
+  - The check doesn't cover tool descriptions or parameters, `tool_choice`, `max_output_tokens`, the voice or the transcription model.
+  - A client can also send `response.create` with per-response instructions or tools, which never produces a `session.updated`.
+  - On OpenAI the data channel hands the browser the full instructions anyway.
+
+  What actually protects you is that every response's usage is metered on the sideband, plus the limits and billing in `start`, `onUsage`, `onTranscriptionUsage` and `onTick`. Tool calls also run only on the server, through the controller's checks.
+
+### The app's MCP tools
+
+The voice can call your MCP server's tools directly, alongside delegating to the agent. That's useful for quick reads and small edits that don't need a full agent turn. Return `mcp` from `start`:
+
+```typescript
+import { app } from "gemi/foundation";
+import { McpRegistry } from "gemi/services";
+import { ToolError } from "gemi/ai";
+
+start: async ({ body, user }) => ({
+  session: { instructions: voiceFrontPrompt(body) },
+  mcp: {
+    registry: app(McpRegistry),
+    filter: { tags: ["pages"] },
+    scopes: ["site:read", "site:write"], // default: every scope the router declares
+    authorize: ({ input }) => {
+      if ((input as { siteId?: string }).siteId !== body.siteId) {
+        throw new ToolError("You can only work on the site that's open.");
+      }
+    },
+  },
+  onToolCall: async (call) => {
+    if (call.status === "done") await chargeToolCall(user, call.name);
+  },
+}),
+```
+
+`this.voice()` lists the tools inside the starting request, adds them to the session, and the bridge runs each call on the server.
+
+**How a call runs.** The voice model calls a plain function tool. The bridge receives the call on the sideband and runs it through `McpRegistry.execute` in this process. The caller is a remote principal built from the user `start` saw: `{ user, via: "voice", id: "voice:<sessionId>", scopes }`.
+
+- The registry's remote rules apply. Only tools exposed to remote callers (`remote` on a native tool) and reached by `scopes` are listed or callable, and features are checked per call.
+- The route runs as that user. Nothing of the browser's own request crosses over.
+- Tools with `requiresApproval` are left out, because a voice call has no approval screen.
+- MCP tools need a signed-in user. A session without one fails to start (`start_failed`).
+
+**Limits and metering.** Calls go through `authorize` first. Then the bridge applies its limits:
+
+| Option | Default | |
+|---|---|---|
+| `limits.maxToolCallsPerMinute` | 20 | More calls are answered `busy`. |
+| `limits.toolTimeoutMs` | 60 s | The call's signal is aborted and the model is told it took too long. |
+| `limits.toolOutputChars` | 8000 | The output's JSON is cut, because the voice model is billed for it on every later response. |
+
+- `onToolCall(record, info)` runs after each call, in the same hook chain as `onUsage`. Throw `VoiceHangup` from it, or from `authorize`, to end the call.
+- `summary.toolCalls` lists every call.
+- A `ToolError`'s message reaches the model. Any other failure reads "The tool failed." and is logged.
+- The routes charge their normal prices, as they would for any caller.
+- Long work still belongs to the agent (`ask_agent`), so its progress shows in the chat.
+
+**Why not the Realtime API's native `mcp` tool.** The native tool has the vendor call your `/mcp` endpoint with an `authorization` value carried in the session. The browser holds the call's data channel, which delivers `session.created` and `session.updated` with the session's tools. Neither vendor documents that the `mcp` tool's `authorization` or `headers` are left out of those events, so a token there must be assumed visible to the browser. The native tool also runs calls at the vendor, where the server can't refuse, rate-limit or meter them first, and the endpoint has to be reachable from the internet. Bridging through the sideband avoids all of that: no token is minted, so none can reach the browser.
+
+`tools` (a list of `{ tool, run(input, { sessionId, signal }), timeoutMs? }`) does the same for the app's own in-process tools. `mcpVoiceTools(options, { user, sessionId })` builds the MCP list for a bridge you start yourself.
+
+### More than one instance
+
+A session's record (`callId`, `threadId`, owner, `body`, end) lives in `voiceStore`, a `VoiceSessionStore` with `create`, `get` and `update`. The default `MemoryVoiceSessionStore` is per process. With more than one instance, assign a shared store:
+
+- A `PATCH` on another instance writes the store, and the bridge reads the latest `body` before every delegated turn. `contextNote` fires only on the instance that holds the bridge.
+- A `DELETE` on another instance hangs the call up at the vendor. The holder's sideband sees the call end and runs `onEnd` (`call_ended`).
+- A sideband that drops is re-opened by `callId` (see above). The bridge itself lives in the process that started it: on shutdown, call `VoiceBridge.endAll("Voice paused. Tap the microphone to resume.")`.
+
+### Without the route
+
+`VoiceBridge.start({ controller, threadId, user, body, call: { realtime, callId }, ... })` runs the bridge on a call you created yourself (`controller` is the controller class, or anything with `startTurn`). `voiceTools(delegate)` returns the four tools for the session. `bridge.setBody(body)`, `bridge.end(reason?, line?)` and `bridge.ended` (the summary) are its handles.
+
+## The browser: `useVoiceSession`
+
+`useVoiceSession` comes from `gemi/ai/voice`, an entry of its own. An app that doesn't use voice never bundles it, and when it is used from a view or a dynamically imported component, it isn't in the entry chunk. It uses no vendor SDK, only `getUserMedia` and a raw `RTCPeerConnection`.
+
+```tsx
+import { useVoiceSession } from "gemi/ai/voice";
+
+export function VoiceButton({ threadId, pageId }: { threadId: string; pageId: string }) {
+  const voice = useVoiceSession("/page-builder/voice", { threadId, body: { pageId } });
+
+  if (voice.status === "idle" || voice.status === "ended") {
+    return <button onClick={() => voice.start()}>Talk</button>;
+  }
+  return (
+    <div>
+      <span aria-live="polite">{voice.status}</span>
+      {voice.captions.slice(-2).map((line) => (
+        <p key={line.id}>{line.text}</p>
+      ))}
+      <button aria-pressed={voice.muted} onClick={() => voice.mute()}>Mute</button>
+      <button onClick={() => voice.end()}>End</button>
+    </div>
+  );
+}
+```
+
+| | |
+|---|---|
+| `status` | `idle`, `connecting`, `listening`, `thinking`, `speaking`, `working` (a delegated request is running and the voice is quiet) or `ended` |
+| `captions` | The last 20 lines, the user's and the voice's: `{ id, role, text, final }` |
+| `error` | Why the call couldn't start or ended early. `code` is `microphone_denied`, `unsupported`, or the route's error code (`out_of_credits`, `voice_unavailable`…), and `status` is the route's HTTP status. |
+| `start()` | Asks for the microphone and starts the call. Call it from a click: browsers allow the microphone and audio playback only after a user gesture. |
+| `end()` | Hangs up through the route. Unmounting does too. |
+| `mute(on?)`, `muted` | Turns the microphone track off. |
+| `setPushToTalk(on)`, `press()`, `release()` | Push-to-talk turns voice activity detection off. `press` opens the microphone, and `release` commits the turn and asks for an answer. The `pushToTalk` option starts the call that way. |
+| `setBody(body)` | `PATCH`es the session's body, such as the selection, for the next delegated request. |
+| `sessionId`, `endsAt` | The session's id, and when the server will end the call at the latest. |
+
+The options are `threadId`, `body` (typed from the controller's `Body`), `pushToTalk`, `params` (values for `:params` in the route path), `headers`, `onError` and `onEnd`.
+
+`start()` while a start is already in flight does nothing, and `end()` (or unmounting) sends its `DELETE` with `keepalive`, so a hang-up sent as the tab closes still reaches the route.
+
+> **Status: experimental.** The route, the bridge and the hook are tested against a fake vendor that follows the documented protocol, a real controller and agent, and faked browser media APIs. These haven't been checked on a live call:
+>
+> - whether the browser's data channel receives the `function_call_output` items the sideband adds (they end `working`);
+> - whether the sideband receives `output_audio_buffer.*`;
+> - how the model behaves with a function call left open for minutes;
+> - Azure's support for the `call_id` sideband and the hang-up route.
