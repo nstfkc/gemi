@@ -6,6 +6,7 @@
 
 - One observable difference: in the browser, a page's first channel subscription reports `closed` for one chunk load before `connecting`. Once loaded, later subscriptions go straight to `connecting`, as before. Tests under `<Page>` from `gemi/testing` are unaffected: they subscribe on the `FakeSocket` at once.
 - A realtime chunk that fails to load (usually a deploy) leaves channel hooks `closed`, so `live` queries keep polling, and `useSubscription` `closed` with its `error` set. `init`'s chunk-load recovery reloads the page as for any other chunk.
+
 # Upgrading from 0.127.0 to 0.128.0
 
 ## Runs: tracked background runs with status, progress, deadline and wait (#908)
