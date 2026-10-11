@@ -13766,6 +13766,30 @@ Log.info("Order created", { orderId, total });
 Log.error("Payment failed", { orderId, reason });
 ```
 
+Every entry is appended as a JSON line to `storage/logs/*.log` and handed to `onLogCreated`. It can also be written to the process's output, which is what platform log viewers (Railway, Fly, Docker, the `gemi dev` terminal) collect.
+
+### Console output
+
+`console` in `app/config/log.ts` turns on the console sink: `debug`, `info` and `notice` go to stdout, `warning` and above to stderr, one line per entry.
+
+```typescript
+// app/config/log.ts
+import { defineLogConfig } from "gemi/services";
+
+export default defineLogConfig({
+  // true: every level. A level: that level and above. false: off.
+  console: process.env.NODE_ENV === "production" ? "info" : true,
+  // "json" (one JSON object per line) or "text" (a readable line).
+  consoleFormat: "json",
+});
+```
+
+- **Defaults:** on with `"text"` lines when `NODE_ENV` is `"development"` (`gemi dev`); off with `"json"` lines otherwise. Set `console` explicitly to log to stdout in production.
+- **`"json"`** writes `{"orderId":7,"timestamp":"…","level":"error","message":"Payment failed"}`: the metadata keys at the top level, then `timestamp`, `level` and `message`, which win over metadata keys of the same name. Railway and most log platforms parse such lines into structured, filterable fields.
+- **`"text"`** writes `2026-10-11T09:00:00.000Z ERROR Payment failed {"orderId":7}`.
+- An `Error` in the metadata is written with its `name`, `message`, `stack` and `cause`, so `Log.error("Payment failed", { err })` keeps the stack.
+- Inside a request, a console line carries the request's `method` and `path`, never its headers, query string or body. The file sink and `onLogCreated` keep the full request metadata as before.
+
 ## Meta
 
 `Meta` sets page metadata for the current request — used during SSR to populate `<head>` tags and Open Graph data. It writes to the request context, not to a container binding.
@@ -13878,6 +13902,7 @@ import { defineLogConfig } from "gemi/services";
 
 export default defineLogConfig({
   maxFileSize: 1024 * 1024 * 10,
+  console: "info", // also write to stdout/stderr, see Log above
   onLogCreated: async (entry) => {
     if (entry.level === "error") await notifySlack(entry);
   },
