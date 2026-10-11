@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.130 to 0.131
 
 ## Domains: the client's IP address from a trusted proxy's header (#917)
 
