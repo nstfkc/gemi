@@ -1,5 +1,13 @@
 # Unreleased
 
+## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
+
+**New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
+
+- `Auth.user()` is unchanged: it never resolves to `null` and throws `AuthenticationError` (401, or a redirect to sign-in for a view). Its docs now say so.
+- Replace hand-rolled wrappers (`Auth.user().catch(...)` returning `null` on `AuthenticationError`) with `Auth.userOrNull()`.
+- Only "nobody is signed in" becomes `null`. An error from the session lookup itself (a database outage, say) still throws, where `.catch(() => null)` would have served the page as signed out.
+
 ## Auth: switch off the password and magic-link routes (#879)
 
 **New, nothing to migrate.** Two `defineAuthConfig` options let an app that signs in only with email codes or OAuth turn off the built-in routes it doesn't use, so it no longer needs a middleware that answers 404 for them. See [Switching flows off](docs/authentication.md#switching-flows-off).
