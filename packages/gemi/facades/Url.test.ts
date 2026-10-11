@@ -78,6 +78,11 @@ describe("configuredAppOrigin", () => {
     expect(configuredAppOrigin()).toBeUndefined();
   });
 
+  test("a value that is only slashes counts as unset", () => {
+    env({ HOST_NAME: "/", APP_URL: "https://app.example.com" });
+    expect(configuredAppOrigin()).toBe("https://app.example.com");
+  });
+
   test("normalises like Url.origin but does not validate", () => {
     env({ HOST_NAME: "example.com/" });
     expect(configuredAppOrigin()).toBe("example.com");

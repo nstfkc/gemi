@@ -11,9 +11,9 @@
  */
 export function configuredAppOrigin(): string | undefined {
   for (const name of ["HOST_NAME", "APP_URL"] as const) {
-    const value = process.env[name]?.trim();
+    const value = process.env[name]?.trim().replace(/\/+$/, "");
     if (value) {
-      return value.replace(/\/+$/, "");
+      return value;
     }
   }
   return undefined;
@@ -26,7 +26,7 @@ export function configuredAppOrigin(): string | undefined {
  */
 export function appOrigin(fallback?: string): string {
   const configured = configuredAppOrigin();
-  const source = configured === undefined ? "fallback" : process.env.HOST_NAME?.trim() ? "HOST_NAME" : "APP_URL";
+  const source = configured === undefined ? "fallback" : configured === process.env.HOST_NAME?.trim().replace(/\/+$/, "") ? "HOST_NAME" : "APP_URL";
   const value = configured ?? fallback?.trim().replace(/\/+$/, "");
   if (!value) {
     throw new Error(
