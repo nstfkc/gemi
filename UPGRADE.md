@@ -20,6 +20,17 @@
 - New exports from `gemi/services`: `CacheManager`, `TaggedCache`, `CacheTtl`, `CacheStore`, `MemoryCacheStore`, `RedisCacheStore`, `CacheRedisClient`, the option types, `CacheServiceProvider`, `defineCacheConfig`, `cacheConfigDefaults`, `CacheConfig`.
 - An app with a hand-rolled in-process cache (an LRU `Map` with expiry) can replace it with `new CacheManager({ store: new MemoryCacheStore({ maxEntries }), ttl })`, or with the app's `Cache` to share it across instances once the store is `"redis"`.
 
+## `useQuery`: `refetchUntil` sees the current render's state (#902)
+
+**Nothing to migrate.** `refetchUntil` is now read from the current render after every commit of the component, not only when the query's data changes. A predicate can read props and state directly (`(d) => (d.active || building ? 2000 : 0)`), so mirror refs kept only for `refetchUntil` can go. See [Data Fetching: Polling until something is done](docs/data-fetching.md#polling-until-something-is-done-refetchuntil).
+
+Behaviour changes:
+
+- The predicate runs on every commit, not once per data change. Keep it pure and cheap.
+- A stopped poll restarts when a re-render makes the predicate return a delay again; before, it stayed stopped until the data changed (or a manual `refetch()`).
+- A pending poll is cancelled when a re-render makes the predicate return `0`; before, it fired once more.
+- A re-render with the same data keeps a pending poll's timer. When the data changes, the pending timer is replaced as before.
+
 ## Server: a built-in health route and an event-loop liveness signal (#48)
 
 **New, one reserved path.** gemi now answers load-balancer health probes itself, and reports whether the process's event loop is stalling. See [Health checks](docs/configuration.md#health-checks).
