@@ -5548,6 +5548,49 @@ const titleErrors = isValidationError(error) ? error.messages.title : [];
 `"authentication"`, `"permission"`, `"csrf"`, `"not_found"`, `"rate_limit"`,
 `"server"`, `"network"` or `"unknown"` — for a `switch` over all of them.
 
+#### Messages to show: `error.list()` and `error.field(name)`
+
+Every error the hooks hand over (`error`, and the value `onError` receives, on
+`useMutation` and its shorthands, `useUpload` and `<Form onError>`) carries two
+helpers, so you don't flatten `messages` by hand:
+
+```tsx
+const { trigger, error } = usePost("/todos", {}, {
+  onError(error) {
+    toast(error.list("Could not add the todo.")[0]);
+  },
+});
+
+const titleErrors = error?.field("title") ?? []; // ["Required"]
+```
+
+- `error.list(fallback?)` is the failure in words, as a list that is never empty: a
+  validation error's messages, every field's in the order the server sent them; the
+  `message` of any other error the server meant for a person (a form error, a refusal,
+  a route's typed error with a `message`); otherwise `[fallback]`. A server error (its
+  message is the exception's under `gemi dev`), an answer that was not JSON and no
+  answer at all give the fallback. `fallback` defaults to
+  `"Something went wrong. Try again."`.
+- `error.field(name)` is a validation error's messages for one field, and `[]` for
+  any other field or error.
+
+The helpers are non-enumerable, so `toEqual`, a spread and `JSON.stringify` see the
+same object as before. The type is `WithMutationErrorHelpers<MutationError | E>`;
+`MutationError` itself has no helpers, so a value you build by hand still fits it. A
+route's typed error whose body has a `list` or `field` key keeps its own value under
+that key, without the helper.
+
+`mutationErrorList(error, fallback?)` and `mutationErrorField(error, name)` do the
+same for any value: an error you kept, or a `useQuery` `QueryError`, whose body they
+read.
+
+```tsx
+import { mutationErrorList, useQuery } from "gemi/client";
+
+const { error } = useQuery("/todos", {}, { suspense: false });
+if (error) return <p>{mutationErrorList(error, "Could not load your todos.")[0]}</p>;
+```
+
 The guards read `kind`, so a refusal thrown with a message of its own is classified
 like the default one. A server older than 0.85 sent most refusals as a bare string;
 the client wraps those into the same object, using the response's status, so a new
@@ -5914,9 +5957,17 @@ import { Form, isPermissionError, isValidationError } from "gemi/client";
 </Form>;
 ```
 
+To show the failure in words, `error.list(fallback)` gives its messages as a list
+(a validation error's, field by field, or the server's message, else `fallback`), and
+`error.field(name)` gives one field's validation messages:
+
+```tsx
+<Form action="/todos" onError={(error) => toast(error.list("Could not save.")[0])}>
+```
+
 `onError` also receives the route's typed errors, the bodies its handler answers
 with `HttpResponse.error` / `httpError`. The error types, the full list of guards,
-`isHttpError` and `mutationErrorKind` are in [Data Fetching](./data-fetching.md#errors).
+`isHttpError`, `mutationErrorKind` and the helpers are in [Data Fetching](./data-fetching.md#errors).
 
 ### `FormFieldContainer`
 
@@ -10765,6 +10816,8 @@ a binding into the container, and a facade resolves it.**
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
 | `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
+| `password` | `boolean` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. See [Switching flows off](#switching-flows-off). |
+| `magicLink` | `boolean` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. See [Switching flows off](#switching-flows-off). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
@@ -11435,6 +11488,40 @@ issued for one address never matches another's row, and rotating `SECRET` invali
 ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
 perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
 with `generateCode` rather than writing `MagicLinkToken` yourself.
+
+## Switching flows off
+
+Every app gets the email + password and magic-link + PIN routes under `/auth`. An app that
+signs in only with [email codes](#email-codes-sign-up-or-sign-in) or [OAuth](#oauth) turns
+off the ones it doesn't use, so that, for example, nobody can register an address with a
+password through `/auth/sign-up` before its owner has signed in:
+
+```typescript
+// app/config/auth.ts
+export default defineAuthConfig({
+  password: false,
+  magicLink: false,
+  emailCode: { enabled: true, createUser: true, send },
+  oauthProviders: { google },
+});
+```
+
+| Switch | `POST` routes that answer 404 when `false` |
+| --- | --- |
+| `password` | `/auth/sign-in`, `/auth/sign-in-v2`, `/auth/sign-up`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/change-password`, `/auth/verify-email` |
+| `magicLink` | `/auth/magic-link`, `/auth/sign-in-with-pin`, `/auth/sign-in-with-pin-v2` |
+
+Both default to `true`. A switched-off route answers `404` with
+`{ error: { kind: "not_found", ... } }` before it reads the body, so a client can't tell it
+from a route that doesn't exist. It does the same whether the request comes over HTTP or
+through `dispatchAs`. The routes stay registered under `/auth`, so an app route at the same
+path is still not served.
+
+Nothing else changes. `/auth/sign-out`, `/auth/me`, the email-code routes, OAuth and
+connections keep working. The `/auth/sign-in/magic-link` page also stays, because it takes
+the link `emailCode.send` is handed and the links `Auth.createMagicLink` issues.
+`hashPassword` and `verifyPassword` stay available to an app that calls them itself. A value
+that isn't `true` or `false` (say `"false"`) fails the boot.
 
 ## OAuth
 

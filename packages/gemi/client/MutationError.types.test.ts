@@ -25,6 +25,7 @@ import {
   isValidationError,
   mutationErrorKind,
   type MutationError,
+  type WithMutationErrorHelpers,
 } from "./MutationError";
 const route = "/auth/sign-out" as const;
 `;
@@ -87,6 +88,47 @@ const snippets = {
       // @ts-expect-error a refusal is never a bare string since 0.88
       const s: string = error;
       return [notString, s];
+    }`,
+  helpersOnHookError: `
+    export function f(): string[] {
+      const { error } = usePost(route);
+      if (!error) return [];
+      return [...error.list(), ...error.list("Could not save."), ...error.field("email")];
+    }`,
+  helpersInOnError: `
+    export function f() {
+      return usePost(route, {}, {
+        onError: (error) => {
+          const first: string | undefined = error.list()[0];
+          const field: string[] = error.field("email");
+          return [first, field];
+        },
+      });
+    }`,
+  helpersOnFormOnError: `
+    export const el = createElement(Form<typeof route, "POST">, {
+      action: route,
+      onError: (error) => console.log(error.list(), error.field("email")),
+    });`,
+  helpersKeepNarrowing: `
+    export function f(): string[] {
+      const { error } = usePost(route);
+      if (isValidationError(error)) {
+        const messages: Record<string, string[]> = error.messages;
+        return [...Object.keys(messages), ...error.list()];
+      }
+      return [];
+    }`,
+  helpersNotOnMutationError: `
+    export function f(error: MutationError) {
+      // @ts-expect-error a MutationError built by hand need not carry them
+      return error.list();
+    }`,
+  helpersSkipOwnKeys: `
+    type Own = WithMutationErrorHelpers<{ field: string; message: string }>;
+    export function f(error: Own): string {
+      const own: string = error.field;
+      return own + error.list().join();
     }`,
   exhaustiveKind: `
     export function f(error: MutationError): string {
@@ -183,6 +225,24 @@ describe("mutation errors under strict", () => {
 
   test("a MutationError is never a string", () => {
     expect(diagnostics.neverAString).toEqual([]);
+  });
+
+  test("the hooks' error and onError carry list() and field() (#890)", () => {
+    expect(diagnostics.helpersOnHookError).toEqual([]);
+    expect(diagnostics.helpersInOnError).toEqual([]);
+    expect(diagnostics.helpersOnFormOnError).toEqual([]);
+  });
+
+  test("the guards still narrow an error with the helpers", () => {
+    expect(diagnostics.helpersKeepNarrowing).toEqual([]);
+  });
+
+  test("MutationError itself is unchanged", () => {
+    expect(diagnostics.helpersNotOnMutationError).toEqual([]);
+  });
+
+  test("a body's own field keeps its type", () => {
+    expect(diagnostics.helpersSkipOwnKeys).toEqual([]);
   });
 
   test("mutationErrorKind's answers can be switched over exhaustively", () => {

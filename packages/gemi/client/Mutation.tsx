@@ -20,6 +20,7 @@ import {
   isFormError,
   isValidationError,
   type MutationError,
+  type WithMutationErrorHelpers,
 } from "./MutationError";
 
 type Any = any;
@@ -91,6 +92,7 @@ type FormSubmitEvent = Parameters<
 interface FormProps<
   M extends keyof Methods,
   K extends keyof Methods[M],
+  E = ErrorMethods[M][K & keyof ErrorMethods[M]],
 > extends Omit<ComponentProps<"form">, "action" | "onError"> {
   method?: M;
   action: K;
@@ -100,13 +102,14 @@ interface FormProps<
    * the route's typed errors (the bodies its handler answers with
    * `HttpResponse.error` / `httpError`); narrow it with `isValidationError`,
    * `isPermissionError`, `isHttpError` and the other guards from
-   * `gemi/client`. Validation and form errors are already rendered by
-   * `<ValidationErrors>` and `<FormError>`.
+   * `gemi/client`, or read it with `error.list()` / `error.field(name)`.
+   * Validation and form errors are already rendered by `<ValidationErrors>`
+   * and `<FormError>`.
    */
   // Method syntax, so a handler typed `(error: MutationError, form) => …`
   // still compiles for a route that has typed errors.
   onError?(
-    error: MutationError | ErrorMethods[M][K & keyof ErrorMethods[M]],
+    error: WithMutationErrorHelpers<MutationError | E>,
     form: HTMLFormElement,
   ): void;
   /**
@@ -129,7 +132,8 @@ interface FormProps<
 export function Form<
   K extends keyof Methods[T],
   T extends keyof Methods = "POST",
->(props: FormProps<T, K>) {
+  E = ErrorMethods[T][K & keyof ErrorMethods[T]],
+>(props: FormProps<T, K, E>) {
   const _params = useParams();
   const {
     method = "POST",
