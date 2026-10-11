@@ -1053,6 +1053,19 @@ EMAIL_DEBUG=true
 # BUCKET_NAME=
 ```
 
+### The app's public origin
+
+`HOST_NAME` is the address the app is reached at from outside, e.g. `https://example.com` (`APP_URL` is accepted as an alias when `HOST_NAME` is unset). gemi uses it for `Url.absolute`, `Url.forDomain` outside a request, the OAuth `redirect_uri`s, the connections callback and relative `Meta` Open Graph images. Read it in your own code with `Url.origin()` from `gemi/facades` rather than `process.env`:
+
+```typescript
+import { Url } from "gemi/facades";
+
+const returnUrl = `${Url.origin()}/billing`;
+const devFriendly = Url.origin("http://localhost:5173"); // the fallback applies only when neither variable is set
+```
+
+The value is trimmed and its trailing `/` dropped, and a path is kept (`https://example.com/app`). `Url.origin()` throws when nothing is configured (and no fallback is given) or when the value is not an absolute `http(s)` URL, so a bad deploy config fails at the first link instead of producing one. It is read on every call, so tests set it with `vi.stubEnv("HOST_NAME", ...)`.
+
 ### `.env` file precedence
 
 gemi loads the standard Bun/dotenv set, in increasing precedence (later overrides earlier):
@@ -2213,7 +2226,7 @@ Url.forDomain({ subdomain: "acme" }, "/projects/:id", { id: project.id });
 // "https://acme.example.com/projects/42"
 ```
 
-Outside a request, in a job or an email, `Url.forDomain` takes the protocol from `HOST_NAME`.
+Outside a request, in a job or an email, `Url.forDomain` takes the protocol from the app origin, `Url.origin()` (`HOST_NAME`, else `APP_URL`).
 
 ## Sessions across subdomains
 
@@ -14226,10 +14239,11 @@ const stats = await Query.instant("/dashboard/stats");
 
 ## Url
 
-`Url` generates URLs for your typed view routes, applying route params.
+`Url` generates URLs for your typed view routes, applying route params, and gives you the app's public origin.
 
+- `Url.origin(fallback?)` — the app's public origin, e.g. `https://example.com`: `HOST_NAME`, else `APP_URL`, trimmed and without a trailing `/`. Use it for links that leave the app and are not view routes (payment return URLs, webhook URLs you register, links in emails). Throws when neither variable is set and no `fallback` is given, or when the value is not an absolute `http(s)` URL.
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
-- `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+- `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with the app origin (`HOST_NAME`, else `APP_URL`).
 - `Url.forDomain(target, path, params?)` — a fully-qualified URL on another `route.domains` host (`{ subdomain: "acme" }` or `{ host }`). See [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
 ```typescript
@@ -14237,9 +14251,13 @@ import { Url } from "gemi/facades";
 
 Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
+
+Url.origin(); // "https://app.example.com"
+`${Url.origin()}/billing/return`; // a path that is not a view route
+Url.origin("http://localhost:5173"); // with a default for when nothing is configured
 ```
 
-> **Note:** `Url.absolute` resolves nothing from the container — it reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md). `Url.forDomain` reads `route.domains`.
+> **Note:** `Url.origin` and `Url.absolute` resolve nothing from the container. They read `HOST_NAME` (or `APP_URL`) from the environment on every call, so a test sets the origin with `vi.stubEnv("HOST_NAME", "https://example.test")` and no other setup. See [Configuration](./configuration.md#the-apps-public-origin). `Url.forDomain` reads `route.domains`.
 
 ## Log
 

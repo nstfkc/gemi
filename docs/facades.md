@@ -183,10 +183,11 @@ const stats = await Query.instant("/dashboard/stats");
 
 ## Url
 
-`Url` generates URLs for your typed view routes, applying route params.
+`Url` generates URLs for your typed view routes, applying route params, and gives you the app's public origin.
 
+- `Url.origin(fallback?)` — the app's public origin, e.g. `https://example.com`: `HOST_NAME`, else `APP_URL`, trimmed and without a trailing `/`. Use it for links that leave the app and are not view routes (payment return URLs, webhook URLs you register, links in emails). Throws when neither variable is set and no `fallback` is given, or when the value is not an absolute `http(s)` URL.
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
-- `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+- `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with the app origin (`HOST_NAME`, else `APP_URL`).
 - `Url.forDomain(target, path, params?)` — a fully-qualified URL on another `route.domains` host (`{ subdomain: "acme" }` or `{ host }`). See [Subdomains & Custom Domains](./domains.md#linking-across-hosts).
 
 ```typescript
@@ -194,9 +195,13 @@ import { Url } from "gemi/facades";
 
 Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
+
+Url.origin(); // "https://app.example.com"
+`${Url.origin()}/billing/return`; // a path that is not a view route
+Url.origin("http://localhost:5173"); // with a default for when nothing is configured
 ```
 
-> **Note:** `Url.absolute` resolves nothing from the container — it reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md). `Url.forDomain` reads `route.domains`.
+> **Note:** `Url.origin` and `Url.absolute` resolve nothing from the container. They read `HOST_NAME` (or `APP_URL`) from the environment on every call, so a test sets the origin with `vi.stubEnv("HOST_NAME", "https://example.test")` and no other setup. See [Configuration](./configuration.md#the-apps-public-origin). `Url.forDomain` reads `route.domains`.
 
 ## Log
 
