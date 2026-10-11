@@ -471,6 +471,35 @@ export class QueryResource {
     this.resolveVariant(variantKey, false, false);
   }
 
+  /**
+   * Write data the server just produced (a mutation's answer) into a
+   * variant, with no refetch: unlike `mutate`, the value is not a guess to
+   * reconcile. The variant counts as freshly fetched, so its `staleTime`
+   * starts again, and a GET already on the wire for it is dropped when it
+   * lands, since it may carry the data from before the write. A reader
+   * suspended on the variant wakes up with it (#897).
+   */
+  set(variantKey: string, data: any) {
+    this.dropHttpCache(variantKey);
+    const now = Date.now();
+    this.markApplied(variantKey);
+    this.staleVariants.delete(variantKey);
+    this.lastFetchRecord.set(variantKey, now);
+    this.failures.delete(variantKey);
+    this.cancelRetry(variantKey);
+    const store = this.store.getValue();
+    this.store.next(
+      store.set(variantKey, {
+        loading: false,
+        data,
+        hasData: true,
+        error: null,
+        version: now,
+      }),
+    );
+    this.settle(variantKey);
+  }
+
   refetch(variantKey: string) {
     this.resolveVariant(variantKey, false, false);
   }
