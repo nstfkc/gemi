@@ -42,8 +42,9 @@ export default defineAuthConfig({
 });
 ```
 
-`defineAuthConfig` is an identity function — it exists purely so your editor types the object
-as `AuthConfig`. Every field is optional; anything you omit falls back to the framework
+`defineAuthConfig` is an identity function — it exists purely so your editor checks the object
+against `AuthConfig` (unknown keys are an error). It returns the object's own type, so reading a
+provider back (`auth.oauthProviders.google`) gives the `GoogleOAuthProvider` you put in. Every field is optional; anything you omit falls back to the framework
 default.
 
 Wire the slice into the [Kernel](./project-structure.md) under the `auth` key:
@@ -71,7 +72,7 @@ a binding into the container, and a facade resolves it.**
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
+| `oauthProviders` | `Record<string, OAuthProvider \| { provider, feature }>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route), each optionally behind a feature flag. See [OAuth](#oauth) and [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
 | `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
 | `oauthCompleteProfilePath` | `string \| null` | `null` | Where a successful OAuth sign-in sends a user who has no email (see [Providers without an email](#providers-without-an-email)), with the intended page as `?redirect=`. `null` sends them on like everyone else. |
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
@@ -875,6 +876,35 @@ class AcmeOAuthProvider extends OAuthProvider {
 }
 ```
 
+### A provider behind a feature flag
+
+To switch a provider on or off without a deploy, give its entry a [`feature`](./feature-flags.md):
+
+```typescript
+export default defineAuthConfig({
+  oauthProviders: {
+    google: new GoogleOAuthProvider(),
+    instagram: {
+      provider: new InstagramOAuthProvider({ redirectPath: "/auth/oauth/instagram/callback" }),
+      feature: "instagram-sign-in",
+    },
+  },
+});
+```
+
+The feature is evaluated per request. While it is off, `/auth/oauth/instagram` and its
+callback answer 404 before any cookie is written or read, and `Auth.oauthProviders()` leaves
+the provider out. Build the sign-in page's buttons from that list rather than from a
+constant:
+
+```typescript
+// a view route's handler
+return { signInProviders: await Auth.oauthProviders() }; // ["google"] while it is off
+```
+
+A plain provider entry is never gated. An entry that is neither a provider nor
+`{ provider, feature }` fails the boot.
+
 ### State and PKCE
 
 Every round trip is tied to the browser that started it. `/auth/oauth/:provider` mints a random
@@ -1405,6 +1435,7 @@ current user and session.
 | `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
+| `Auth.oauthProviders()` | `Promise<string[]>` | The names of the OAuth sign-in providers that are on for this request, in `oauthProviders` order. A provider whose `feature` is off is left out. See [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
 
 ```typescript
 import { Auth } from "gemi/facades";

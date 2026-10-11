@@ -128,6 +128,20 @@ export class Auth extends Facade {
     return await container.authenticate(email);
   }
 
+  /**
+   * The OAuth sign-in providers that are on for this request, by name, in the
+   * order `auth.oauthProviders` declares them — what a sign-in page renders
+   * its "Continue with …" buttons from. A provider behind a `feature` that is
+   * off for this request is left out (#885).
+   *
+   * ```ts
+   * return { signInProviders: await Auth.oauthProviders() }; // ["google", "instagram"]
+   * ```
+   */
+  static async oauthProviders(): Promise<string[]> {
+    return await this.getFacadeRoot().oauthProviderNames();
+  }
+
   static async createMagicLink(email: string) {
     const container = this.getFacadeRoot();
     return await container.createMagicLinkToken(email);
