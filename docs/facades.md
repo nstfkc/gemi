@@ -333,6 +333,22 @@ export default class extends Kernel {
 
 See [Configuration](./configuration.md) and [Project Structure](./project-structure.md).
 
+## Cache
+
+`Cache` fronts `CacheManager` (token `cache`): values kept for a while, in memory or in Redis (`app/config/cache.ts`).
+
+- `Cache.get(key)`, `Cache.set(key, value, ttl?)`, `Cache.has(key)`, `Cache.delete(key)`, `Cache.pull(key)`, `Cache.flush()`.
+- `Cache.remember(key, ttl, compute)` — the cached value, or `compute`'s, stored.
+- `Cache.tags(...tags)` — the same methods on values that `Cache.tags(...).flush()` drops together.
+
+```typescript
+import { Cache } from "gemi/facades";
+
+const plan = await Cache.remember(`plan:${hash}`, "24h", () => planner.plan(input));
+```
+
+See [Cache](./cache.md).
+
 ## Hooks are config, not provider methods
 
 Laravel puts a lot of per-subsystem customization in a provider's `boot()`. gemi deliberately does not: subsystem hooks are **callbacks on the config slice**, so they sit next to the settings they modify and require no provider at all.

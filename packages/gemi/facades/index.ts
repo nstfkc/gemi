@@ -14,6 +14,7 @@ export { Log } from "./Log";
 export { Meta } from "./Meta";
 export { Cookie } from "./Cookie";
 export { Redis } from "./Redis";
+export { Cache } from "./Cache";
 export { RateLimiter } from "./RateLimiter";
 export { Lock } from "./Lock";
 export { Crypt } from "./Crypt";

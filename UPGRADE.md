@@ -1,5 +1,16 @@
 # Unreleased
 
+## Cache: `Cache` facade, memory and Redis stores (#496)
+
+**New, nothing to migrate.** A first-class cache: `get` / `set` / `has` / `delete` / `pull` with a TTL, `remember(key, ttl, compute)`, and `tags(...)` whose `flush()` drops a group of values on any store. See [Cache](docs/cache.md).
+
+- **`Cache`** from `gemi/facades`, fronting `CacheManager` (token `cache`), bound by the new `CacheServiceProvider`, which is in `frameworkProviders`.
+- **`app/config/cache.ts`** with `defineCacheConfig` (optional): `store: "memory" | "redis" | CacheStore | (app) => CacheStore` (default `"memory"`), `ttl` (default `null`, no expiry), `memory: { maxEntries }` (default `10000`), `redis: { prefix }` (default `"gemi:cache:"`). The `"redis"` store uses the app's Redis connection (`app/config/redis.ts` / `REDIS_URL`).
+- TTLs are a `Duration`: milliseconds or `"30s"`, `"5m"`, `"24h"`, `"7d"`.
+- Values are JSON-encoded on every store, the memory one included: a `Date` comes back as a string, and `undefined` cannot be stored (it means a miss).
+- New exports from `gemi/services`: `CacheManager`, `TaggedCache`, `CacheTtl`, `CacheStore`, `MemoryCacheStore`, `RedisCacheStore`, `CacheRedisClient`, the option types, `CacheServiceProvider`, `defineCacheConfig`, `cacheConfigDefaults`, `CacheConfig`.
+- An app with a hand-rolled in-process cache (an LRU `Map` with expiry) can replace it with `new CacheManager({ store: new MemoryCacheStore({ maxEntries }), ttl })`, or with the app's `Cache` to share it across instances once the store is `"redis"`.
+
 ## MCP: native tools in the registry, `fromTool` (#759)
 
 **New, nothing to migrate for apps that only read tool names, tags or schemas.** An `AgentTool` can be registered in an `McpRouter` beside the routes, so one tool definition serves the app's agents and, when you opt in, remote MCP clients. See [MCP: native tools](docs/mcp.md#native-tools).
