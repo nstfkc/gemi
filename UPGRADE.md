@@ -1,5 +1,14 @@
 # Unreleased
 
+## Auth: switch off the password and magic-link routes (#879)
+
+**New, nothing to migrate.** Two `defineAuthConfig` options let an app that signs in only with email codes or OAuth turn off the built-in routes it doesn't use, so it no longer needs a middleware that answers 404 for them. See [Switching flows off](docs/authentication.md#switching-flows-off).
+
+- **`password: false`** answers 404 on `POST /auth/sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password` and `verify-email`.
+- **`magicLink: false`** answers 404 on `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`.
+- Both default to `true`, so an app that sets neither behaves as before. A switched-off route answers 404 before it reads the body. Sign-out, `/auth/me`, email codes, OAuth and the `/auth/sign-in/magic-link` page are not affected. A value that isn't a boolean fails the boot.
+- An app that answered 404 for these paths in its own middleware, and set `verifyPassword: async () => false`, can drop both.
+
 ## Log: a console sink (#881)
 
 **New option, one behaviour change in development.** `Log.*` can now also write each entry to stdout (`debug`, `info`, `notice`) or stderr (`warning` and above), so it reaches platform logs such as Railway's. See [Log: console output](docs/facades.md#console-output).
