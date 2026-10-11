@@ -1,6 +1,14 @@
-import type { ChannelParamValues, RealtimeClient, RealtimeOptions } from "./RealtimeClient";
+import type { QueryResource } from "../QueryResource";
+import type { LiveChannel } from "./live";
+import type {
+  ChannelParamValues,
+  RealtimeClient,
+  RealtimeOptions,
+  RealtimeSocket,
+} from "./RealtimeClient";
 
-// The part of the realtime client every page carries. `RealtimeClient` itself
+// The part of the realtime client every page carries: `gemi/client`'s entry
+// reaches it through `useQuery`, `useMutation`, `init` and the auth hooks. `RealtimeClient` itself
 // (the socket, the `gemi.v1` protocol, reconnects, heartbeats) is loaded with a
 // dynamic `import()` the first time a channel hook subscribes, so an app or a
 // route that never subscribes downloads none of it. Only type imports from
@@ -49,6 +57,53 @@ export function loadRealtimeClient(): Promise<RealtimeClient> | null {
     },
   );
   return loading;
+}
+
+type LiveModule = typeof import("./live");
+let liveModule: LiveModule | null = null;
+
+/**
+ * Makes `./live` available without loading it: `<Page>` in `gemi/testing`
+ * passes it, so a live query on a provided socket subscribes during its
+ * effect, as it did before the module was split out.
+ */
+export function provideLiveModule(module: LiveModule) {
+  liveModule = module;
+}
+
+/**
+ * Follows `useQuery`'s `live` channel until the returned function is called.
+ * `./live` and the socket client are loaded on first use, so `useQuery`
+ * carries only this; once both are loaded later queries subscribe at once.
+ * `setOpen` reports `false` until the channel is open.
+ */
+export function followLive(
+  provided: RealtimeSocket | null,
+  live: LiveChannel,
+  resource: () => QueryResource,
+  setOpen: (open: boolean) => void,
+): () => void {
+  let cancelled = false;
+  let stop: (() => void) | null = null;
+  const start = (module: LiveModule, socket: RealtimeSocket | null) => {
+    liveModule = module;
+    if (!cancelled && socket) stop = module.subscribeLive(socket, live, resource, setOpen);
+  };
+  const socket = provided ?? instance;
+  if (liveModule && socket) {
+    start(liveModule, socket);
+  } else {
+    Promise.all([liveModule ?? import("./live.js"), socket ?? loadRealtimeClient()]).then(
+      ([module, socket]) => start(module, socket),
+      // A failed load leaves the channel closed, so the query keeps polling.
+      () => {},
+    );
+  }
+  return () => {
+    cancelled = true;
+    stop?.();
+    setOpen(false);
+  };
 }
 
 /**

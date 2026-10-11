@@ -10,11 +10,17 @@ import { cleanup, render, screen } from "@testing-library/react";
 // that finds it already loaded would not exercise the load.
 let loader: typeof import("./loader");
 let useChannel: typeof import("../useChannel").useChannel;
+let useQuery: typeof import("../useQuery").useQuery;
+let QueryManagerProvider: typeof import("../QueryManagerContext").QueryManagerProvider;
+let RouteStateProvider: typeof import("../RouteStateContext").RouteStateProvider;
 
 beforeEach(async () => {
   vi.resetModules();
   loader = await import("./loader");
   ({ useChannel } = await import("../useChannel"));
+  ({ useQuery } = await import("../useQuery"));
+  ({ QueryManagerProvider } = await import("../QueryManagerContext"));
+  ({ RouteStateProvider } = await import("../RouteStateContext"));
 });
 
 class MockSocket {
@@ -104,4 +110,51 @@ test("a hook unmounted while the client loads never subscribes", async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   expect(MockSocket.instances).toHaveLength(0);
+});
+
+test("a live query loads its subscription on first use and refetches on an event", async () => {
+  vi.stubGlobal("WebSocket", MockSocket);
+  const fetchMock = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ n: 1 }),
+    headers: new Headers(),
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  function View() {
+    const { data } = useQuery("/me" as any, {}, { live: "user" as any });
+    return <p>{`n${(data as { n: number }).n}`}</p>;
+  }
+  render(
+    <QueryManagerProvider>
+      <RouteStateProvider
+        state={{ prefetchedData: { "/me": { "": { n: 0 } } } } as any}
+      >
+        <View />
+      </RouteStateProvider>
+    </QueryManagerProvider>,
+  );
+  expect(screen.getByText("n0")).toBeDefined();
+
+  await act(async () => {
+    await vi.waitFor(() => expect(MockSocket.instances).toHaveLength(1));
+  });
+  const ws = MockSocket.instances[0]!;
+  act(() => {
+    ws.readyState = 1;
+    ws.onopen?.();
+    ws.receive({ op: "hello", socketId: "sock_abcdefgh12", tag: "t1", heartbeatMs: 25_000 });
+  });
+  expect(ws.sent).toEqual([{ op: "sub", id: "1", ch: "user" }]);
+  const before = fetchMock.mock.calls.length;
+  act(() => ws.receive({ op: "subscribed", id: "1", t: "user.1" }));
+  // The ack resyncs: the query refetches at once.
+  await act(async () => {
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBe(before + 1));
+  });
+  act(() => ws.receive({ op: "ev", t: "user.1", ev: "changed" }));
+  await act(async () => {
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBe(before + 2));
+  });
+  await vi.waitFor(() => expect(screen.getByText("n1")).toBeDefined());
 });

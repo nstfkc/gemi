@@ -170,22 +170,4 @@ export function useChannelInvalidate<P extends ChannelPattern>(
   );
 }
 
-/**
- * `useQuery`'s `live` option: the channel whose events and resyncs refetch
- * the query. A pattern without params (`"user"`), `[pattern, params]`, or
- * `{ channel, params }`.
- */
-export type LiveChannel =
-  | ChannelPattern
-  | readonly [ChannelPattern, ChannelParamValues]
-  | { channel: ChannelPattern; params?: ChannelParamValues };
-
-export function resolveLiveChannel(
-  live: LiveChannel | null | undefined | false,
-): { pattern: string; params: ChannelParamValues } | null {
-  if (!live) return null;
-  if (typeof live === "string") return { pattern: live, params: {} };
-  if (Array.isArray(live)) return { pattern: live[0], params: live[1] ?? {} };
-  const object = live as { channel: string; params?: ChannelParamValues };
-  return { pattern: object.channel, params: object.params ?? {} };
-}
+export type { LiveChannel } from "./realtime/live";
