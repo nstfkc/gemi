@@ -9,6 +9,7 @@ import { Kernel } from "../kernel";
 import { Repository } from "../support/Repository";
 import { ServiceProvider } from "../support/ServiceProvider";
 import { Server } from "./Server";
+import { liveness, resetLiveness } from "./health";
 import { resetShuttingDown } from "./shutdown";
 
 // `start()` needs a built `dist/` (production) or Vite (development), so this
@@ -37,6 +38,7 @@ class TestKernel extends Kernel {
 afterEach(() => {
   calls.length = 0;
   resetShuttingDown();
+  resetLiveness();
   Application.setInstance(undefined);
   vi.restoreAllMocks();
 });
@@ -122,6 +124,51 @@ describe("Server.start", () => {
       expect(after.headers.get("Connection")).toBe("close");
       expect(after.headers.get("X-Instrumented")).toBeNull();
       expect(reached).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("Server.start and the health route (#48)", () => {
+  test("answers the probe ahead of the app's instrumentation, and starts the sampler in production", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ROOT_DIR", process.env.ROOT_DIR);
+    vi.stubEnv("GEMI_HEALTH_PATH", "/healthz");
+    vi.stubEnv("GEMI_HEALTH_INTERVAL_MS", "10");
+    vi.spyOn(App.prototype, "waitForBoot").mockResolvedValue(undefined);
+    const setInterval = vi.spyOn(globalThis, "setInterval");
+    try {
+      const instrumented = vi.fn((req: Request, next: (req: Request) => Promise<Response>) =>
+        next(req),
+      );
+      const server = new Server({
+        kernel: TestKernel,
+        handleSignals: false,
+        instrumentation: instrumented,
+      });
+      await server.start();
+      expect(setInterval).toHaveBeenCalledWith(expect.any(Function), 10);
+
+      const reached = vi.fn(async () => new Response("app"));
+      const probe = await httpProd.instrumentation!(new Request("http://app/healthz"), reached);
+      expect(probe.status).toBe(200);
+      expect(await probe.text()).toBe("ok");
+      expect(instrumented).not.toHaveBeenCalled();
+      expect(reached).not.toHaveBeenCalled();
+
+      const page = await httpProd.instrumentation!(new Request("http://app/"), reached);
+      expect(await page.text()).toBe("app");
+      expect(instrumented).toHaveBeenCalledTimes(1);
+
+      const stopping = server.stop();
+      const draining = await httpProd.instrumentation!(new Request("http://app/healthz"), reached);
+      expect(draining.status).toBe(503);
+      expect(draining.headers.get("Connection")).toBe("close");
+      expect(liveness().shuttingDown).toBe(true);
+      listening.release();
+      await stopping;
     } finally {
       vi.unstubAllEnvs();
     }
