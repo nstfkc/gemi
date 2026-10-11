@@ -8,6 +8,13 @@
 - **`useSetQueryData()`** from `gemi/client`: `setQueryData({ path, params?, search? }, valueOrFn)`, typed like `useMutate` but with no refetch. New type exports `QueryTarget` and `QueryUpdate`.
 - The written variant counts as freshly fetched, and a GET for it already on the wire is dropped when it lands. `useMutate` is unchanged: it still writes and then refetches.
 - Apps that wrote a mutation's answer with `useMutate` in `onSuccess` (one GET too many per write) can move it to `updates`.
+## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
+
+**New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
+
+- `Auth.user()` is unchanged: it never resolves to `null` and throws `AuthenticationError` (401, or a redirect to sign-in for a view). Its docs now say so.
+- Replace hand-rolled wrappers (`Auth.user().catch(...)` returning `null` on `AuthenticationError`) with `Auth.userOrNull()`.
+- Only "nobody is signed in" becomes `null`. An error from the session lookup itself (a database outage, say) still throws, where `.catch(() => null)` would have served the page as signed out.
 
 ## Mutation errors: `error.list()` and `error.field(name)` (#890)
 
