@@ -14,6 +14,16 @@ Behaviour changes:
 - **Types:** the hooks' `error` is `WithMutationErrorHelpers<MutationError | E> | null`, so an exact-type assertion such as `Equal<typeof error, MutationError | null>` no longer holds. `<Form>` has a third type parameter, the route's error type, inferred from `onError` in JSX, so `<Form onError={(error: MutationError) => …}>` still compiles on a route with typed errors. With explicit type arguments (`Form<"/route", "POST">`) on such a route, a handler annotated `(error: MutationError)` no longer fits: drop the annotation, or annotate it with the route's error type.
 - **The error objects gain two non-enumerable own properties, `list` and `field`.** `Object.keys`, spreading, `JSON.stringify` and `toEqual` see the same object as before; `"list" in error` is now `true`. A route's typed error body that already has a `list` or `field` key keeps its own value. An `Error` thrown from your `onSuccess` and reported through `onError` gets them too.
 
+## Typed per-request state: `req.state` and `stateKey` (#887)
+
+**New, nothing to migrate.** A middleware can hand what it resolved to the handler, and an agent turn's `context()` can hand what it decided to its hooks, so you no longer need `WeakMap<HttpRequest, ...>` side maps. See [Middleware: passing values to the handler](docs/middleware.md#passing-values-to-the-handler-reqstate).
+
+- New exports from `gemi/http`: `stateKey<T>(name)`, `RequestState`, `MissingRequestStateError` and the `StateKey<T>` type.
+- **`req.state`** on every `HttpRequest` has `get(key)` (`T | undefined`), `require(key)` (`T`, or throws `MissingRequestStateError`, which the server answers with a 500), `set(key, value)`, `has(key)` and `delete(key)`. Keys compare by identity. The name is only used in messages.
+- Every `HttpRequest` built for one request shares one state: the middleware's `this.req`, the handler's `req = new HttpRequest()`, and custom request classes. State set in a global middleware is carried into the route's request, as the user is. Other requests (an in-process tool call, a server-side query during a page render, the request answering an approval) start empty.
+- **Agents:** a turn is one request, so `ctx.req.state` in `onMessage`, `onStreamComplete`, `onError` and `onAwaitingInput` holds what `authorizeRequest()`, `instructions()` or `context()` set. `AgentHookContext` gets no new field.
+- If a custom `HttpRequest` subclass of yours declares its own `state` member, rename it. `state` is now a built-in property and your member would shadow it.
+
 ## `useChat`: per-send body and metadata, and a stable key on sent messages (#818)
 
 **New, nothing to migrate.**
