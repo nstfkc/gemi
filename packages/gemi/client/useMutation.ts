@@ -13,6 +13,8 @@ import {
 } from "./MutationError";
 import { currentSocketId } from "./realtime/RealtimeClient";
 import { SOCKET_ID_HEADER } from "../services/broadcast/protocol";
+import { QueryManagerContext } from "./QueryManagerContext";
+import { applyQueryUpdates, type QueryUpdate } from "./useSetQueryData";
 
 type Methods = {
   POST: {
@@ -67,6 +69,13 @@ type Config<T, E = never> = {
   onError(error: WithMutationErrorHelpers<MutationError | E>): void;
   onCanceled?: () => void;
   concurrency?: MutationConcurrency;
+  /**
+   * Queries the answer is written into on success, before `onSuccess`, with
+   * no refetch: `{ path, params?, search?, data? }`. Without `data` the
+   * answer is written as is; `data(answer, current)` builds the next value
+   * from it and what is cached (#897).
+   */
+  updates?: ReadonlyArray<QueryUpdate<T>>;
 };
 
 /**
@@ -135,6 +144,7 @@ export function useMutation<
   // A write may have moved the data behind any page warmed ahead of a click,
   // and a prefetched payload is committed wholesale — into the query cache too.
   const { clearPrefetchCache } = useContext(ClientRouterContext);
+  const { getResource } = useContext(QueryManagerContext);
   const [state, setState] = useState<State<T, E>>({
     data: null,
     error: null,
@@ -167,7 +177,7 @@ export function useMutation<
   // `options.onSuccess(data)` on `undefined` and reported its own `TypeError`
   // through `onError`.
   const [inputs = {}, config] = args ?? [];
-  const options: Config<T, E> = { ...defaultOptions, ...config };
+  const options = { ...defaultOptions, ...config } as Config<T, E>;
 
   // Resolves `undefined` rather than rejecting whenever there is no result to
   // hand back: a non-2xx response or a network failure (both already reported
@@ -299,6 +309,7 @@ export function useMutation<
       }
 
       clearPrefetchCache?.();
+      applyQueryUpdates(getResource, _params, options.updates, data);
       options.onSuccess(data);
       call.onSuccess?.(data);
 
@@ -436,6 +447,7 @@ export function useUpload<
   const [progress, setProgress] = useState(0);
   const _params = useParams();
   const { clearPrefetchCache } = useContext(ClientRouterContext);
+  const { getResource } = useContext(QueryManagerContext);
   const abortRef = useRef<VoidFunction | null>(null);
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
@@ -559,6 +571,7 @@ export function useUpload<
       }
       const json = JSON.parse(outcome.body);
       clearPrefetchCache?.();
+      applyQueryUpdates(getResource, _params, options?.updates, json);
       options?.onSuccess?.(json);
       setState("done");
       return json;

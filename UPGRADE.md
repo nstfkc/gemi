@@ -1,5 +1,14 @@
 # Unreleased
 
+## Mutations write their answer into other queries: `updates` and `useSetQueryData` (#897)
+
+**New, nothing to migrate.** A mutation that answers with data another query holds can write it into that query's cache with no refetch. See [Data Fetching: Writing a mutation's answer into a query](docs/data-fetching.md#writing-a-mutations-answer-into-a-query-updates).
+
+- **`updates`** in the config of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete` and `useUpload`: `[{ path, params?, search?, data? }]`. Without `data` the answer is written as is (type-checked against the path's data); `data(answer, current)` builds the next value. Applied on a 2xx, before `onSuccess`.
+- **`useSetQueryData()`** from `gemi/client`: `setQueryData({ path, params?, search? }, valueOrFn)`, typed like `useMutate` but with no refetch. New type exports `QueryTarget` and `QueryUpdate`.
+- The written variant counts as freshly fetched, and a GET for it already on the wire is dropped when it lands. `useMutate` is unchanged: it still writes and then refetches.
+- Apps that wrote a mutation's answer with `useMutate` in `onSuccess` (one GET too many per write) can move it to `updates`.
+
 ## Mutation errors: `error.list()` and `error.field(name)` (#890)
 
 **New, nothing to migrate.** Every error the mutation hooks hand over (`error` and the `onError` argument of `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete`, `useUpload` and `<Form onError>`) carries two helpers. See [Data Fetching: Messages to show](docs/data-fetching.md#messages-to-show-errorlist-and-errorfieldname).
