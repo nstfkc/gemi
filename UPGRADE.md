@@ -8,6 +8,7 @@
 - **`useSetQueryData()`** from `gemi/client`: `setQueryData({ path, params?, search? }, valueOrFn)`, typed like `useMutate` but with no refetch. New type exports `QueryTarget` and `QueryUpdate`.
 - The written variant counts as freshly fetched, and a GET for it already on the wire is dropped when it lands. `useMutate` is unchanged: it still writes and then refetches.
 - Apps that wrote a mutation's answer with `useMutate` in `onSuccess` (one GET too many per write) can move it to `updates`.
+
 ## Auth: `Auth.userOrNull()` for routes that serve signed-out visitors (#880)
 
 **New, nothing to migrate.** `Auth.userOrNull()` returns `Promise<User | null>`: the same lookup as `Auth.user()` (a user already on the request context, else the `access_token` cookie or header), but `null` when nobody is signed in. See [The Auth facade](docs/authentication.md).
