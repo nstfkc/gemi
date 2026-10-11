@@ -1,3 +1,4 @@
+import { JsonNull } from "./json-null";
 import {
   NANOID_DEFAULT_LENGTH,
   type DefaultKind,
@@ -120,10 +121,58 @@ export function clientSideValue(field: FieldSchema, now: Date): unknown {
     case "now":
       return now;
     case "value":
-      return spec.value;
+      return field.type === "Json" ? jsonDefault(field, spec.value) : spec.value;
     default:
       // autoincrement / dbgenerated — the database's business.
       return undefined;
+  }
+}
+
+/**
+ * A `Json` field's literal default, as the value it stands for (#926).
+ *
+ * Prisma's DMMF records a Json default as its **source text**:
+ * `@default("[]")` arrives as the string `"[]"`, and a `Json[]`'s
+ * `@default(["{\"a\":1}"])` as an array of such strings. The generator copies
+ * that into the artifact verbatim, and the dialect then JSON-encodes the field
+ * like any other Json value — so the column stored the JSON *string* `"[]"`
+ * (`jsonb_typeof` = `string`) where Prisma's database default stores an array.
+ *
+ * Parsed here rather than in the generator so the fix reaches an app on
+ * upgrade, with its committed `schema.ts` as it is: the artifact keeps saying
+ * what the DMMF said, and only the runtime's reading of it changes. Parsed per
+ * call, which also hands every row its own object rather than one shared,
+ * mutable default.
+ *
+ * A non-string is taken as already parsed — a hand-written spec can say
+ * `value: []` — so the only input this reads differently is a string, and a
+ * string in a Json default always comes from the DMMF.
+ */
+function jsonDefault(field: FieldSchema, value: unknown): unknown {
+  if (field.isList && Array.isArray(value)) {
+    return value.map((element) => parseJsonDefault(field, element));
+  }
+  // `@default("null")` is the JSON value null, which the database's own
+  // default (`'null'::jsonb`) stores as such. A bare `null` here would be
+  // encoded as SQL NULL instead, and fail a NOT NULL column.
+  // Only for the text `"null"`: a hand-written `value: null` keeps meaning
+  // what it meant before.
+  const parsed = parseJsonDefault(field, value);
+  return parsed === null && typeof value === "string" ? JsonNull : parsed;
+}
+
+function parseJsonDefault(field: FieldSchema, value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    // Prisma refuses an invalid Json default at validation, so this is a
+    // hand-edited artifact; name the column rather than throw a bare
+    // SyntaxError from inside an insert.
+    throw new Error(
+      `gemi ORM: the @default of the Json field '${field.name}' (column ` +
+        `'${field.column}') is not valid JSON: ${JSON.stringify(value)}.`,
+    );
   }
 }
 
