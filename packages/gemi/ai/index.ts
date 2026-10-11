@@ -263,6 +263,7 @@ export type {
 // --- the controller, its stores and the route it mounts -------------------
 export {
   AgentController,
+  AgentTurnError,
   AttachmentNotFoundError,
   defaultAgentStore,
   defaultAttachmentStore,
@@ -289,6 +290,9 @@ export type {
   AgentRouteMethod,
   AgentRouteRPC,
   AgentStore,
+  AgentTurn,
+  AgentTurnParams,
+  AgentTurnResult,
   Attachment,
   AttachmentDestination,
   AttachmentLimits,
