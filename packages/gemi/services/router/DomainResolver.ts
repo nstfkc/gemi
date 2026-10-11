@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { CustomDomainConfig, DomainGroupConfig, DomainsConfig } from "./config";
 
 /** The group key the apex itself is served under. */
@@ -44,9 +45,10 @@ export function secretMatches(given: string | null, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** `trustProxy` in one shape: which header, and the secret that unlocks it. */
+/** `trustProxy` in one shape: which headers, and the secret that unlocks them. */
 interface HostTrust {
   header: string;
+  clientIpHeader: string | null;
   secret: { header: string; value: string } | null;
 }
 
@@ -55,10 +57,11 @@ function hostTrustOf(trustProxy: DomainsConfig["trustProxy"]): HostTrust | null 
     return null;
   }
   if (trustProxy === true) {
-    return { header: DEFAULT_HOST_HEADER, secret: null };
+    return { header: DEFAULT_HOST_HEADER, clientIpHeader: null, secret: null };
   }
   return {
     header: (trustProxy.hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase(),
+    clientIpHeader: trustProxy.clientIpHeader?.toLowerCase() ?? null,
     secret: trustProxy.secret
       ? { header: trustProxy.secret.header.toLowerCase(), value: trustProxy.secret.value }
       : null,
@@ -69,7 +72,7 @@ function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
   if (!trustProxy || trustProxy === true) {
     return;
   }
-  const { hostHeader, secret } = trustProxy;
+  const { hostHeader, clientIpHeader, secret } = trustProxy;
   // One header, not a list: every header gemi reads the host from is one a
   // client may have got through, so each has to be one the proxy overwrites.
   if (
@@ -79,6 +82,31 @@ function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
     throw new Error(
       `\`route.domains.trustProxy.hostHeader\` must be a single header name, e.g. "x-forwarded-host". Got ${JSON.stringify(hostHeader)}.`,
     );
+  }
+  if (clientIpHeader !== undefined) {
+    if (typeof clientIpHeader !== "string" || !HEADER_NAME.test(clientIpHeader)) {
+      throw new Error(
+        `\`route.domains.trustProxy.clientIpHeader\` must be a single header name, e.g. "x-client-ip". Got ${JSON.stringify(clientIpHeader)}.`,
+      );
+    }
+    // Unlike the host, a forged address is not one the client "could have
+    // sent anyway": it picks the rate-limit bucket. Only a proxy that proves
+    // itself may name it.
+    if (!secret) {
+      throw new Error(
+        "`route.domains.trustProxy.clientIpHeader` needs `secret`: without proof the proxy sent it, any client that reaches the app directly picks its own address.",
+      );
+    }
+    if (clientIpHeader.toLowerCase() === (hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase()) {
+      throw new Error(
+        "`route.domains.trustProxy.clientIpHeader` names the same header as `hostHeader`.",
+      );
+    }
+    if (typeof secret.header === "string" && clientIpHeader.toLowerCase() === secret.header.toLowerCase()) {
+      throw new Error(
+        "`route.domains.trustProxy.clientIpHeader` names the same header as `secret.header`.",
+      );
+    }
   }
   if (!secret) {
     return;
@@ -263,6 +291,38 @@ export class DomainResolver {
       return null;
     }
     return req.headers.get(trust.header)?.split(",")[0]?.trim() || null;
+  }
+
+  /**
+   * The client address `trustProxy.clientIpHeader` names — its first entry —
+   * or `null` when no such header is configured, the secret is missing or
+   * wrong, or the header is absent or not an IPv4/IPv6 address.
+   */
+  trustedClientIp(req: Request): string | null {
+    const trust = this.hostTrust;
+    // `clientIpHeader` cannot be configured without `secret` (boot check).
+    if (!trust?.clientIpHeader || !trust.secret) {
+      return null;
+    }
+    if (!secretMatches(req.headers.get(trust.secret.header), trust.secret.value)) {
+      return null;
+    }
+    const ip = req.headers.get(trust.clientIpHeader)?.split(",")[0]?.trim();
+    return ip && isIP(ip) ? ip : null;
+  }
+
+  /**
+   * Makes `trustedClientIp(req)`, when there is one, the address the rest of
+   * gemi reads: the only entry of `X-Forwarded-For`, with `X-Real-IP` dropped
+   * (as `gemi start` leaves them). Otherwise leaves `req` alone. Idempotent.
+   */
+  applyClientIp(req: Request): void {
+    const ip = this.trustedClientIp(req);
+    if (!ip) {
+      return;
+    }
+    req.headers.set("x-forwarded-for", ip);
+    req.headers.delete("x-real-ip");
   }
 
   /** The hostname the request is addressed to, honouring `trustProxy`. */

@@ -165,7 +165,8 @@ export interface CustomDomainConfig {
 
 /**
  * `route.domains.trustProxy` in its long form: which header carries the host
- * the client addressed, and what proves the proxy sent it.
+ * the client addressed, which one its IP address, and what proves the proxy
+ * sent them.
  */
 export interface TrustProxyConfig {
   /**
@@ -181,7 +182,23 @@ export interface TrustProxyConfig {
   hostHeader?: string;
 
   /**
-   * Trusts `hostHeader` only on a request that carries this header with this
+   * A header the proxy writes the client's IP address into, e.g.
+   * `"x-client-ip"` set from Cloudflare's `CF-Connecting-IP`. On a request
+   * that carries `secret`, its first entry replaces the address
+   * `GEMI_TRUST_PROXY` settled on: gemi writes it into `X-Forwarded-For` (and
+   * drops `X-Real-IP`) before the global middleware runs, so `clientIp(req)`
+   * and every rate limit keyed on it see the visitor rather than the proxy.
+   *
+   * For a proxy whose request to the app is a new one (a Worker's `fetch()`),
+   * so the client's address is not in `X-Forwarded-For` at all. Requires
+   * `secret`: without proof the proxy sent it, any client that reaches the
+   * app directly could pick its own address. A missing header, or one that
+   * is not an IPv4/IPv6 address, changes nothing.
+   */
+  clientIpHeader?: string;
+
+  /**
+   * Trusts `hostHeader` and `clientIpHeader` only on a request that carries this header with this
    * value — a shared secret the proxy adds, so a client that reaches the app
    * directly, around the proxy, cannot name its own host. Without it the
    * request is routed by its own host, exactly as with `trustProxy` left out.
@@ -207,9 +224,9 @@ export interface DomainsConfig {
    * request URL. Only set it behind a proxy that overwrites that header, or a
    * client picks its own host.
    *
-   * `true` reads `X-Forwarded-Host`. An object names the header, and can make
-   * trusting it depend on a shared secret the proxy sends — see
-   * {@link TrustProxyConfig}.
+   * `true` reads `X-Forwarded-Host`. An object names the header, can make
+   * trusting it depend on a shared secret the proxy sends, and can name a
+   * header that carries the client's IP address — see {@link TrustProxyConfig}.
    *
    * The scheme is read from `X-Forwarded-Proto` whether or not this is set.
    */

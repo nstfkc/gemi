@@ -58,6 +58,14 @@ class AppKernel extends Kernel {
         root: createRoot(() => createElement("div")),
         rootRouter: class extends ViewRouter {},
       },
+      // The client's address from a proxy that proves itself (#917).
+      domains: {
+        root: "localhost",
+        trustProxy: {
+          clientIpHeader: "x-client-ip",
+          secret: { header: "x-proxy-secret", value: "proxy-secret-long-enough" },
+        },
+      },
     },
   };
 }
@@ -406,6 +414,28 @@ describe("httpProd and X-Forwarded-For (#8)", () => {
 
   test("sets it from the socket when the client sent none", async () => {
     await get("/api/ping", THROUGH_FRONT_DOOR);
+
+    expect(seen?.forwardedFor).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
+  });
+});
+
+describe("httpProd and trustProxy.clientIpHeader (#917)", () => {
+  test("a proxy with the secret names the client, before the global middleware runs", async () => {
+    const res = await get("/api/ping", {
+      ...THROUGH_FRONT_DOOR,
+      "x-forwarded-for": "6.6.6.6",
+      "x-real-ip": "7.7.7.7",
+      "x-client-ip": "203.0.113.9",
+      "x-proxy-secret": "proxy-secret-long-enough",
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen?.forwardedFor).toBe("203.0.113.9");
+    expect(seen?.realIp).toBeNull();
+  });
+
+  test("without the secret the header is ignored", async () => {
+    await get("/api/ping", { ...THROUGH_FRONT_DOOR, "x-client-ip": "203.0.113.9" });
 
     expect(seen?.forwardedFor).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
   });

@@ -177,6 +177,9 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       if (relayPort !== null && isHmrUpgrade(req)) {
         return upgradeHmr(req, server, relayPort);
       }
+      // As `gemi start` does, before the socket upgrade and the global
+      // middleware read the client address.
+      app.applyTrustedClientIp(req);
       if (sockets?.matches(req)) {
         return sockets.upgrade(req, server);
       }

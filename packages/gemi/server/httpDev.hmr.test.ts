@@ -59,7 +59,11 @@ vi.mock("./banner", () => ({ printStartupBanner: vi.fn() }));
 
 // `sockets` is the broadcast endpoint: none unless a test sets one.
 let sockets: any = null;
-const app = { devAllowedHosts: () => true, sockets: () => sockets } as any;
+const app = {
+  devAllowedHosts: () => true,
+  sockets: () => sockets,
+  applyTrustedClientIp: () => {},
+} as any;
 const instrumentation = {} as any;
 
 async function startDev() {

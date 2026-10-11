@@ -323,6 +323,44 @@ describe("assertValidDomainsConfig", () => {
       },
       /needs a header of its own/,
     ],
+    [
+      "a client IP header without a secret",
+      { root: "example.com", trustProxy: { clientIpHeader: "x-client-ip" } },
+      /needs `secret`/,
+    ],
+    [
+      "a client IP header that is not a header name",
+      {
+        root: "example.com",
+        trustProxy: {
+          clientIpHeader: "x client ip",
+          secret: { header: "x-proxy-secret", value: PROXY_SECRET },
+        },
+      },
+      /clientIpHeader` must be a single header name/,
+    ],
+    [
+      "a client IP header that is the host header",
+      {
+        root: "example.com",
+        trustProxy: {
+          clientIpHeader: "X-Forwarded-Host",
+          secret: { header: "x-proxy-secret", value: PROXY_SECRET },
+        },
+      },
+      /same header as `hostHeader`/,
+    ],
+    [
+      "a client IP header that is the secret header",
+      {
+        root: "example.com",
+        trustProxy: {
+          clientIpHeader: "x-proxy-secret",
+          secret: { header: "X-Proxy-Secret", value: PROXY_SECRET },
+        },
+      },
+      /same header as `secret.header`/,
+    ],
   ];
 
   for (const [name, config, message] of cases) {
@@ -656,5 +694,80 @@ describe("trustProxy with a host header of its own", () => {
     expect(withSecret().proxySecretHeader).toBe("x-kyte-proxy-secret");
     expect(withHeader().proxySecretHeader).toBeNull();
     expect(resolver({ trustProxy: true }).proxySecretHeader).toBeNull();
+  });
+});
+
+describe("trustProxy.clientIpHeader (#917)", () => {
+  const trusted = () =>
+    resolver({
+      trustProxy: {
+        hostHeader: "x-original-host",
+        clientIpHeader: "X-Client-IP",
+        secret: { header: "x-proxy-secret", value: PROXY_SECRET },
+      },
+    });
+  const fromProxy = (headers: Record<string, string>) =>
+    req("http://app.up.railway.app/", { "x-proxy-secret": PROXY_SECRET, ...headers });
+
+  test("with the secret, the header's first entry is the client and replaces X-Forwarded-For", () => {
+    const request = fromProxy({
+      "x-client-ip": " 203.0.113.9 , 10.0.0.1",
+      "x-forwarded-for": "104.28.0.1",
+      "x-real-ip": "104.28.0.1",
+    });
+
+    expect(trusted().trustedClientIp(request)).toBe("203.0.113.9");
+    trusted().applyClientIp(request);
+    expect(request.headers.get("x-forwarded-for")).toBe("203.0.113.9");
+    expect(request.headers.get("x-real-ip")).toBeNull();
+  });
+
+  test("accepts IPv6", () => {
+    expect(trusted().trustedClientIp(fromProxy({ "x-client-ip": "2001:db8::1" }))).toBe(
+      "2001:db8::1",
+    );
+  });
+
+  test("without the secret, or with a wrong one, nothing changes", () => {
+    for (const request of [
+      req("http://app.up.railway.app/", { "x-client-ip": "203.0.113.9", "x-forwarded-for": "1.2.3.4" }),
+      req("http://app.up.railway.app/", {
+        "x-client-ip": "203.0.113.9",
+        "x-forwarded-for": "1.2.3.4",
+        "x-proxy-secret": "proxy-secret-long-enougX",
+      }),
+    ]) {
+      expect(trusted().trustedClientIp(request)).toBeNull();
+      trusted().applyClientIp(request);
+      expect(request.headers.get("x-forwarded-for")).toBe("1.2.3.4");
+    }
+  });
+
+  test("a missing header or one that is not an address changes nothing", () => {
+    for (const value of [undefined, "", "unknown", "203.0.113.9:443", "<script>"]) {
+      const request = fromProxy({
+        "x-forwarded-for": "1.2.3.4",
+        ...(value === undefined ? {} : { "x-client-ip": value }),
+      });
+      expect(trusted().trustedClientIp(request)).toBeNull();
+      trusted().applyClientIp(request);
+      expect(request.headers.get("x-forwarded-for")).toBe("1.2.3.4");
+    }
+  });
+
+  test("is off unless configured", () => {
+    const request = fromProxy({ "x-client-ip": "203.0.113.9" });
+    expect(resolver().trustedClientIp(request)).toBeNull();
+    expect(resolver({ trustProxy: true }).trustedClientIp(request)).toBeNull();
+    expect(
+      resolver({
+        trustProxy: { secret: { header: "x-proxy-secret", value: PROXY_SECRET } },
+      }).trustedClientIp(request),
+    ).toBeNull();
+  });
+
+  test("still routes by the forwarded host alongside it", async () => {
+    const request = fromProxy({ "x-original-host": "acme.example.com", "x-client-ip": "203.0.113.9" });
+    expect(await trusted().resolve(request)).toMatchObject({ group: ":tenant", params: { tenant: "acme" } });
   });
 });

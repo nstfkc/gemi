@@ -328,6 +328,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // `requestIP` is null for closed/unix sockets — guard so it never
       // throws before the request is handled.
       applyForwardedTrust(req.headers, server.requestIP(req)?.address ?? null, forwardedTrust);
+      // A proxy that proves itself with `route.domains.trustProxy.secret` may
+      // name the client in `clientIpHeader`, which then wins.
+      app.applyTrustedClientIp(req);
       // Ahead of the instrumentation: an upgrade is not a response to trace,
       // and the hub runs the global middleware itself.
       if (sockets?.matches(req)) {
