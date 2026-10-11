@@ -264,12 +264,19 @@ export type {
 //
 // `OpenAIProvider#realtime` / `AzureOpenAIProvider#realtime` return a
 // `RealtimeClient`; these are its types. See `providers/realtime.ts`.
-export { RealtimeClient, RealtimeRequestError, toRealtimeUsage } from "./providers/realtime";
+// Experimental until a live call has run on Azure and OpenAI (#921).
+export {
+  isCallNotFound,
+  RealtimeClient,
+  RealtimeRequestError,
+  toRealtimeUsage,
+} from "./providers/realtime";
 export type {
   ClientSecret,
   ClientSecretParams,
   CreateCallParams,
   CreateCallResult,
+  RealtimeCallFlow,
   RealtimeSession,
   RealtimeTool,
   RealtimeTurnDetection,

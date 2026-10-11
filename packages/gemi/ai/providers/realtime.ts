@@ -9,13 +9,21 @@ import { RealtimeSideband, type RealtimeSidebandOptions, type WebSocketFactory }
  * Realtime (voice) calls on OpenAI's Realtime API and Azure OpenAI's GA
  * `/openai/v1/realtime` surface (#921).
  *
+ * EXPERIMENTAL until a live call has run on Azure and on OpenAI: the request
+ * shapes below follow the vendors' documentation and are tested against
+ * fixtures only. Names and defaults may change in a minor release.
+ *
  * THE SHAPE, and why the server holds every key. The browser makes a WebRTC
  * SDP offer and posts it to the app's own route. The route posts that offer,
  * together with the session config (model, instructions, tools, voice, turn
  * detection, transcription), to `/realtime/calls` with the **server's**
  * credential, and hands back the vendor's SDP answer. So no key or ephemeral
- * secret reaches the browser, and the browser cannot choose the model or the
- * prompt when the call starts. The server then opens the call's sideband —
+ * secret reaches the browser, and the browser does not choose the model or the
+ * prompt when the call starts. It can still read the session (the data channel
+ * delivers `session.created` with the instructions and tool schemas) and send
+ * its own `session.update` / `response.create`, so instructions must hold no
+ * secrets, and metering on the sideband, not the prompt, is what bounds a
+ * misbehaving client. The server then opens the call's sideband —
  * `wss://…/realtime?call_id=…` — and that is where tool calls run and usage
  * arrives, which is why metering never has to trust the browser.
  *
@@ -27,6 +35,11 @@ import { RealtimeSideband, type RealtimeSidebandOptions, type WebSocketFactory }
  *
  *   POST {base}/realtime/calls                 multipart: sdp, session (JSON)
  *        → 201, body: the SDP answer, `Location: …/realtime/calls/{call_id}`
+ *        (the "unified" flow: OpenAI's documented server-side shape)
+ *   POST {base}/realtime/calls                 application/sdp: the raw offer,
+ *        `Authorization: Bearer <ephemeral secret>` → 201 + `Location`
+ *        (the "ephemeral" flow: Azure's documented server-proxied shape; the
+ *        session goes into the client secret, minted server-side first)
  *   POST {base}/realtime/client_secrets        { expires_after, session }
  *        → { value, expires_at, session }
  *   POST {base}/realtime/calls/{call_id}/hangup
@@ -235,9 +248,36 @@ export class RealtimeRequestError extends Error {
 
 // --- the client ------------------------------------------------------------
 
+/**
+ * How `createCall` talks to the vendor. Both run server-side, and neither hands
+ * the browser a credential.
+ *
+ * - `"unified"`: one multipart POST (`sdp` + `session`) with the server's key.
+ *   OpenAI documents this one.
+ * - `"ephemeral"`: mint a short-lived client secret carrying the session, then
+ *   POST the raw SDP (`application/sdp`) with that secret as the Bearer. Azure
+ *   documents this one ("Azure OpenAI expects application/sdp, not form
+ *   data"), so it is Azure's default. The secret is used once, by the server,
+ *   and dropped.
+ */
+export type RealtimeCallFlow = "unified" | "ephemeral";
+
+/** How long the secret behind an `"ephemeral"` call lives: it only has to
+ *  outlast one POST. The vendor's minimum is 10 s. */
+const EPHEMERAL_CALL_SECRET_SECONDS = 60;
+
 export type CreateCallParams = {
   /** The browser's SDP offer, verbatim. */
   sdp: string;
+  /** Overrides the client's flow for this call. */
+  flow?: RealtimeCallFlow;
+  /**
+   * Azure only: `?webrtcfilter=on`, which limits what the browser's data
+   * channel receives (no instructions, no function calls, no `response.done`).
+   * Keeps the prompt private, but the browser then cannot show "working" from
+   * the events alone.
+   */
+  webrtcFilter?: boolean;
   session?: RealtimeSession;
   /**
    * A stable, non-identifying id for the end user (e.g. a hash of their id),
@@ -273,6 +313,9 @@ export type ClientSecret = {
 export type RealtimeClientOptions = {
   /** The model a call uses when its session names none. The deployment, on Azure. */
   model: string;
+  /** `"unified"` by default; `AzureOpenAIProvider` passes `"ephemeral"`. See
+   *  `RealtimeCallFlow`. */
+  callFlow?: RealtimeCallFlow;
   /** Injected by tests. Defaults to the global `fetch`. */
   fetchImpl?: FetchLike;
   /** Injected by tests. Defaults to the global `WebSocket` (Bun's, which takes
@@ -285,6 +328,8 @@ export type RealtimeClientOptions = {
  * `AzureOpenAIProvider#realtime` return one of these, built on the provider's
  * resolved `ProviderTarget`, so the host, the credential and Azure's `/openai`
  * handling come from `endpoints.ts`.
+ *
+ * @experimental Not yet verified against a live Azure or OpenAI call.
  */
 export class RealtimeClient {
   readonly model: string;
@@ -317,15 +362,30 @@ export class RealtimeClient {
    * A 429 or 5xx is retried, since those say no call was made.
    */
   async createCall(params: CreateCallParams): Promise<CreateCallResult> {
-    const form = new FormData();
-    form.set("sdp", params.sdp);
-    form.set("session", JSON.stringify(toVendorSession(params.session ?? {}, this.model)));
-    const headers = await this.target.headers();
+    const flow = params.flow ?? this.options.callFlow ?? "unified";
+    let headers: Record<string, string>;
+    let body: BodyInit;
+    if (flow === "ephemeral") {
+      const secret = await this.clientSecret({
+        session: params.session,
+        ttlSeconds: EPHEMERAL_CALL_SECRET_SECONDS,
+        signal: params.signal,
+      });
+      headers = { authorization: `Bearer ${secret.value}`, "content-type": "application/sdp" };
+      body = params.sdp;
+    } else {
+      const form = new FormData();
+      form.set("sdp", params.sdp);
+      form.set("session", JSON.stringify(toVendorSession(params.session ?? {}, this.model)));
+      headers = await this.target.headers();
+      body = form;
+    }
     if (params.safetyIdentifier) headers["OpenAI-Safety-Identifier"] = params.safetyIdentifier;
 
+    const url = this.url("/calls");
     const response = await this.request(
-      this.url("/calls"),
-      { method: "POST", headers, body: form },
+      params.webrtcFilter ? `${url}${url.includes("?") ? "&" : "?"}webrtcfilter=on` : url,
+      { method: "POST", headers, body },
       params.signal,
     );
     const sdpAnswer = await response.text();
@@ -382,9 +442,13 @@ export class RealtimeClient {
 
   /**
    * Ends a call for everyone: the browser's peer connection closes and so does
-   * any sideband. Idempotent in practice — a call that already ended answers
-   * 404, which is swallowed, because "make sure it is over" is what a caller
-   * means.
+   * any sideband.
+   *
+   * A 404 counts as "already over" only when its body says the *call* was not
+   * found. Any other 404 — a route the vendor does not have (Azure does not
+   * document `/hangup`), a wrong deployment — throws, because treating it as
+   * success would let the caller drop the sideband, the only thing metering
+   * the call, while the call goes on.
    */
   async hangup(callId: string, options: { signal?: AbortSignal } = {}): Promise<void> {
     try {
@@ -394,7 +458,7 @@ export class RealtimeClient {
         options.signal,
       );
     } catch (error) {
-      if (error instanceof RealtimeRequestError && error.status === 404) return;
+      if (isCallNotFound(error, callId)) return;
       throw error;
     }
   }
@@ -431,6 +495,22 @@ export class RealtimeClient {
       });
     }
   }
+}
+
+/**
+ * A hangup's 404 that names the call, not the route: an error body whose code
+ * or message is about the call (or its id). A bare 404, or "Resource not
+ * found", is a route the vendor does not serve.
+ */
+export function isCallNotFound(error: unknown, callId: string): boolean {
+  if (!(error instanceof RealtimeRequestError) || error.status !== 404) return false;
+  const body: any = error.cause instanceof ProviderHttpError ? error.cause.body : undefined;
+  const detail = body?.error ?? body;
+  const code = String(detail?.code ?? "").toLowerCase();
+  const message = String(detail?.message ?? "").toLowerCase();
+  if (code.includes("call")) return true;
+  if (message.includes(callId.toLowerCase())) return true;
+  return /\bcall\b/.test(message) && /not (be )?found|does not exist|no longer|ended/.test(message);
 }
 
 /** `Location: /v1/realtime/calls/rtc_123` → `rtc_123`. */

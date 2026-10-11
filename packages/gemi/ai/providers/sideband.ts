@@ -54,6 +54,14 @@ export type RealtimeServerEvent =
       type: "conversation.item.input_audio_transcription.completed";
       item_id: string;
       transcript: string;
+      /** The vendor's, verbatim: `{ type: "tokens", … }` or `{ type: "duration", seconds }`. */
+      usage?: Record<string, any>;
+      /** gemi's: a token-billed transcription's usage, mapped (audio tokens in
+       *  `audioInputTokens`). Billed apart from `response.done`'s, at the
+       *  transcription model's rates. */
+      transcriptionUsage?: Usage;
+      /** gemi's: a duration-billed transcription's seconds. */
+      transcriptionSeconds?: number;
     }
   | { type: "response.created"; response: Record<string, any> }
   | {
@@ -129,6 +137,14 @@ export function parseRealtimeEvent(data: unknown): RealtimeEvent | undefined {
   if (renamed) event.type = renamed;
   if (event.type === "response.done" && event.response?.usage) {
     event.usage = toRealtimeUsage(event.response.usage);
+  }
+  if (event.type === "conversation.item.input_audio_transcription.completed" && event.usage) {
+    if (event.usage.type === "duration") {
+      const seconds = Number(event.usage.seconds);
+      if (Number.isFinite(seconds)) event.transcriptionSeconds = seconds;
+    } else {
+      event.transcriptionUsage = toRealtimeUsage(event.usage);
+    }
   }
   return event as RealtimeEvent;
 }
@@ -218,6 +234,7 @@ export class RealtimeSideband implements AsyncIterable<RealtimeEvent> {
 
   private readonly init: SidebandInit;
   private socket?: WebSocketLike;
+  private finalEvent?: Extract<RealtimeServerEvent, { type: "sideband.closed" }>;
   private outbox: string[] = [];
   private subscribers = new Set<Subscriber>();
   private listeners = new Set<(event: RealtimeEvent) => void>();
@@ -363,13 +380,23 @@ export class RealtimeSideband implements AsyncIterable<RealtimeEvent> {
     else this.finish(code, reason, true);
   }
 
-  /** Ends the call for everyone, then closes the socket. */
+  /**
+   * Ends the call for everyone, then closes the socket.
+   *
+   * When the vendor refuses the hangup, the socket stays open and the error is
+   * thrown: the call may still be running, and this socket is what meters it.
+   * The caller decides whether to retry or to wait for the vendor to close it.
+   * A sideband the vendor already closed normally (the call is over) needs no
+   * hangup, so its failure is ignored.
+   */
   async hangup(): Promise<void> {
     try {
       await this.init.hangup();
-    } finally {
-      this.close(1000, "hangup");
+    } catch (error) {
+      if (this.finalEvent && !this.finalEvent.byClient && this.finalEvent.code === 1000) return;
+      throw error;
     }
+    this.close(1000, "hangup");
   }
 
   // --- internals -----------------------------------------------------------
@@ -426,6 +453,7 @@ export class RealtimeSideband implements AsyncIterable<RealtimeEvent> {
     this.finished = true;
     this.outbox.length = 0;
     const event = { type: "sideband.closed" as const, code, reason, byClient };
+    this.finalEvent = event;
     this.emit(event);
     for (const sub of this.subscribers) {
       sub.done = true;

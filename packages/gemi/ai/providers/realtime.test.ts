@@ -49,6 +49,20 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Azure's documented server-proxied flow: client_secrets, then calls. */
+function azureVendor(url: string): Response {
+  if (url.includes("/client_secrets")) {
+    return new Response(
+      JSON.stringify({ value: "ek_azure", expires_at: 1790000060, session: {} }),
+      { status: 200 },
+    );
+  }
+  return new Response(SDP_ANSWER, {
+    status: 201,
+    headers: { location: "/openai/v1/realtime/calls/rtc_az1", "content-type": "application/sdp" },
+  });
+}
+
 function headersOf(call: Call): Record<string, string> {
   return call.init.headers as Record<string, string>;
 }
@@ -113,8 +127,8 @@ describe("RealtimeClient.createCall", () => {
     });
   });
 
-  test("Azure: the GA /openai/v1 path whatever the api-version, the deployment as the model, and api-key", async () => {
-    const calls = stubFetch();
+  test("Azure: the documented flow by default — a client secret minted with api-key on /openai/v1 whatever the api-version, then the raw SDP with that secret", async () => {
+    const calls = stubFetch(azureVendor);
     const realtime = AzureOpenAIProvider.model("gpt-realtime-mini", {
       endpoint: "https://res.openai.azure.com/openai",
       apiKey: "az-key",
@@ -122,17 +136,53 @@ describe("RealtimeClient.createCall", () => {
       deployment: "voice-prod",
     }).realtime;
 
-    await realtime.createCall({ sdp: OFFER });
+    const result = await realtime.createCall({
+      sdp: OFFER,
+      safetyIdentifier: "user-hash",
+      session: { instructions: "Be brief." },
+    });
+    expect(result).toEqual({ sdpAnswer: SDP_ANSWER, callId: "rtc_az1" });
 
-    expect(calls[0]!.url).toBe("https://res.openai.azure.com/openai/v1/realtime/calls");
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://res.openai.azure.com/openai/v1/realtime/client_secrets",
+      "https://res.openai.azure.com/openai/v1/realtime/calls",
+    ]);
     expect(headersOf(calls[0]!)["api-key"]).toBe("az-key");
-    expect(headersOf(calls[0]!).authorization).toBeUndefined();
+    expect(JSON.parse(String(calls[0]!.init.body)).session).toEqual({
+      type: "realtime",
+      model: "voice-prod",
+      instructions: "Be brief.",
+    });
+    // the call itself: the ephemeral secret, never the resource key
+    const callHeaders = headersOf(calls[1]!);
+    expect(callHeaders.authorization).toBe("Bearer ek_azure");
+    expect(callHeaders["api-key"]).toBeUndefined();
+    expect(callHeaders["content-type"]).toBe("application/sdp");
+    expect(callHeaders["OpenAI-Safety-Identifier"]).toBe("user-hash");
+    expect(calls[1]!.init.body).toBe(OFFER);
+  });
+
+  test("Azure: the unified multipart shape on request, and webrtcfilter=on", async () => {
+    const calls = stubFetch(azureVendor);
+    const realtime = AzureOpenAIProvider.model("gpt-realtime-mini", {
+      endpoint: "https://res.openai.azure.com",
+      apiKey: "az-key",
+      deployment: "voice-prod",
+    }).realtime;
+
+    await realtime.createCall({ sdp: OFFER, flow: "unified", webrtcFilter: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://res.openai.azure.com/openai/v1/realtime/calls?webrtcfilter=on",
+    );
+    expect(headersOf(calls[0]!)["api-key"]).toBe("az-key");
     const session = JSON.parse(String((calls[0]!.init.body as FormData).get("session")));
     expect(session).toEqual({ type: "realtime", model: "voice-prod" });
   });
 
   test("Azure with Entra: a token minted per request", async () => {
-    const calls = stubFetch();
+    const calls = stubFetch(azureVendor);
     let n = 0;
     const realtime = AzureOpenAIProvider.model("gpt-realtime-mini", {
       resourceName: "res",
@@ -142,9 +192,12 @@ describe("RealtimeClient.createCall", () => {
     await realtime.createCall({ sdp: OFFER });
     await realtime.createCall({ sdp: OFFER });
 
-    expect(calls[0]!.url).toBe("https://res.cognitiveservices.azure.com/openai/v1/realtime/calls");
+    expect(calls[0]!.url).toBe(
+      "https://res.cognitiveservices.azure.com/openai/v1/realtime/client_secrets",
+    );
     expect(headersOf(calls[0]!).authorization).toBe("Bearer token-1");
-    expect(headersOf(calls[1]!).authorization).toBe("Bearer token-2");
+    expect(headersOf(calls[1]!).authorization).toBe("Bearer ek_azure");
+    expect(headersOf(calls[2]!).authorization).toBe("Bearer token-2");
   });
 
   test("a session's model overrides the provider's", async () => {
@@ -248,9 +301,9 @@ describe("RealtimeClient.clientSecret / hangup", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("hangup posts to the call, and a call that already ended is not an error", async () => {
-    let status = 200;
-    const calls = stubFetch(() => new Response(null, { status }));
+  test("hangup posts to the call, and a 404 that says the call is gone is not an error", async () => {
+    let answer = () => new Response(null, { status: 200 });
+    const calls = stubFetch(() => answer());
     const realtime = AzureOpenAIProvider.model("gpt-realtime-mini", {
       endpoint: "https://res.openai.azure.com",
       apiKey: "k",
@@ -259,8 +312,33 @@ describe("RealtimeClient.clientSecret / hangup", () => {
     expect(calls[0]!.url).toBe(
       "https://res.openai.azure.com/openai/v1/realtime/calls/rtc_1/hangup",
     );
-    status = 404;
+    answer = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "call_not_found",
+            message: "Call rtc_1 not found.",
+            type: "invalid_request_error",
+          },
+        }),
+        { status: 404 },
+      );
     await expect(realtime.hangup("rtc_1")).resolves.toBeUndefined();
+  });
+
+  test("a route-level 404 on hangup is an error, not 'already over'", async () => {
+    let answer = () =>
+      new Response(JSON.stringify({ error: { code: "404", message: "Resource not found" } }), {
+        status: 404,
+      });
+    stubFetch(() => answer());
+    const realtime = AzureOpenAIProvider.model("gpt-realtime-mini", {
+      endpoint: "https://res.openai.azure.com",
+      apiKey: "k",
+    }).realtime;
+    await expect(realtime.hangup("rtc_1")).rejects.toMatchObject({ status: 404 });
+    answer = () => new Response(null, { status: 404 });
+    await expect(realtime.hangup("rtc_1")).rejects.toBeInstanceOf(RealtimeRequestError);
   });
 });
 
@@ -579,6 +657,60 @@ describe("RealtimeSideband", () => {
     // nothing is sent after the end
     sideband.addNote("late");
     expect(FakeSocket.all[0]!.sent).toEqual([]);
+  });
+
+  test("a refused hangup keeps the sideband open, since the call may still be running", async () => {
+    FakeSocket.all = [];
+    stubFetch(() => new Response(null, { status: 404 }));
+    const sideband = OpenAIProvider.model("m", { apiKey: "k" }).realtime.sideband("rtc_1", {
+      webSocket: factory,
+    });
+    await flush();
+    FakeSocket.all[0]!.serverOpen();
+    await expect(sideband.hangup()).rejects.toBeInstanceOf(RealtimeRequestError);
+    expect(FakeSocket.all[0]!.closedWith).toBeUndefined();
+    sideband.addNote("still metering");
+    expect(FakeSocket.all[0]!.sent).toHaveLength(1);
+
+    // once the vendor has closed it normally, the call is over and a refused
+    // hangup is moot
+    FakeSocket.all[0]!.serverClose(1000, "call ended");
+    await sideband.closed;
+    await expect(sideband.hangup()).resolves.toBeUndefined();
+  });
+
+  test("transcription usage is mapped apart from response usage: tokens or seconds", () => {
+    const tokens = parseRealtimeEvent(
+      JSON.stringify({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "u1",
+        transcript: "Hi.",
+        usage: {
+          type: "tokens",
+          input_tokens: 40,
+          output_tokens: 5,
+          total_tokens: 45,
+          input_token_details: { text_tokens: 0, audio_tokens: 40 },
+        },
+      }),
+    ) as any;
+    expect(tokens.transcriptionUsage).toEqual({
+      inputTokens: 40,
+      outputTokens: 5,
+      totalTokens: 45,
+      audioInputTokens: 40,
+    });
+    expect(tokens.usage.type).toBe("tokens");
+    const duration = parseRealtimeEvent(
+      JSON.stringify({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "u2",
+        transcript: "Hi.",
+        usage: { type: "duration", seconds: 2.5 },
+      }),
+    ) as any;
+    expect(duration.transcriptionSeconds).toBe(2.5);
+    expect(duration.transcriptionUsage).toBeUndefined();
   });
 
   test("parseRealtimeEvent ignores frames that are not events", () => {

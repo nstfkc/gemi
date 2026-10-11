@@ -307,6 +307,8 @@ export class OpenAIProvider extends AgentProvider {
    * default model, so build it with a realtime one
    * (`OpenAIProvider.model("gpt-realtime-mini").realtime`). See
    * `providers/realtime.ts`.
+   *
+   * @experimental Not yet verified against a live call.
    */
   get realtime(): RealtimeClient {
     return new RealtimeClient(
@@ -387,11 +389,18 @@ export class AzureOpenAIProvider extends AgentProvider {
    * `/openai/v1/realtime` surface whatever `apiVersion` says (see
    * `azureRealtimeTarget`). The deployment is the call's default model, as it
    * is a text call's.
+   *
+   * Calls use Azure's documented server-proxied flow by default: a client
+   * secret minted with the resource's credential, then the raw SDP posted with
+   * that secret (`callFlow: "ephemeral"`), all server-side. Pass
+   * `createCall({ flow: "unified" })` to try the multipart shape instead.
+   *
+   * @experimental Not yet verified against a live Azure call.
    */
   get realtime(): RealtimeClient {
     return new RealtimeClient(
       azureRealtimeTarget(this.config, { timeoutMs: DEFAULT_REALTIME_TIMEOUT_MS }),
-      { model: this.deployment() },
+      { model: this.deployment(), callFlow: "ephemeral" },
     );
   }
 }

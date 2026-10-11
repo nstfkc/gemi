@@ -2,13 +2,19 @@
 
 ## AI: realtime voice calls on the OpenAI and Azure providers (#921, part 1)
 
-**New, nothing to migrate.** `OpenAIProvider#realtime` and `AzureOpenAIProvider#realtime` return a `RealtimeClient` for the Realtime API's WebRTC calls, using the provider's existing host and credential resolution. See [AI Voice](docs/ai-voice.md).
+**New and experimental, nothing to migrate.** `OpenAIProvider#realtime` and `AzureOpenAIProvider#realtime` return a `RealtimeClient` for the Realtime API's WebRTC calls, using the provider's existing host and credential resolution. See [AI Voice](docs/ai-voice.md). **This API is experimental** until a live call has run on Azure and on OpenAI. It's tested against fixtures written from the vendors' documentation only, and names and defaults may change in a minor release.
 
-- `createCall({ sdp, session, safetyIdentifier })` posts the browser's SDP offer and the session config to `/realtime/calls` with the server's key, and answers `{ sdpAnswer, callId }`. `clientSecret({ session, ttlSeconds })` mints an ephemeral secret, and `hangup(callId)` ends a call.
+- `createCall({ sdp, session, safetyIdentifier, flow, webrtcFilter })` starts the call server-side from the browser's SDP offer and answers `{ sdpAnswer, callId }`.
+  - OpenAI defaults to the `"unified"` flow: one multipart POST to `/realtime/calls` with the server's key.
+  - Azure defaults to its documented `"ephemeral"` flow: a client secret is minted server-side, then the raw SDP is posted with that secret. No secret reaches the browser.
+  - `webrtcFilter` adds Azure's `?webrtcfilter=on`.
+- `clientSecret({ session, ttlSeconds })` mints an ephemeral secret.
+- `hangup(callId)` ends a call. A 404 counts as "already over" only when its body says the call wasn't found. If the vendor refuses `RealtimeSideband#hangup()`, the sideband stays open (still metering) and the error is thrown.
 - `sideband(callId)` opens the call's server-side control WebSocket (`RealtimeSideband`): typed vendor events (`for await` or `on()`), `addNote`, `functionOutput`, `createResponse`, `cancelResponse`, `updateSession`, `send`, `hangup` and `close`, with reconnect by `callId` after an abnormal close.
 - On Azure, realtime always uses the GA `/openai/v1/realtime` path with no `api-version`, even when `apiVersion` pins a dated version. **Not yet verified against a live Azure realtime deployment**; it follows Azure's GA documentation.
 - `Usage` gains `audioInputTokens`, `cachedAudioInputTokens` and `audioOutputTokens` (breakdowns of the totals, like `imageInputTokens`). A realtime `response.done` maps onto them, and `toRealtimeUsage` maps a raw vendor `usage`.
-- New exports from `gemi/ai`: `RealtimeClient`, `RealtimeSideband`, `RealtimeRequestError`, `toRealtimeUsage`, and the types `RealtimeSession`, `RealtimeTool`, `RealtimeTurnDetection`, `CreateCallParams`, `CreateCallResult`, `ClientSecret`, `ClientSecretParams`, `RealtimeEvent`, `RealtimeServerEvent`, `RealtimeClientEvent`, `RealtimeErrorDetail`, `RealtimeResponseOptions`, `RealtimeSidebandOptions`, `WebSocketFactory`, `WebSocketLike`.
+- `conversation.item.input_audio_transcription.completed` gains `transcriptionUsage` (token-billed) or `transcriptionSeconds` (duration-billed). Transcription is billed separately from `response.done`.
+- New exports from `gemi/ai`: `RealtimeClient`, `RealtimeSideband`, `RealtimeRequestError`, `toRealtimeUsage`, `isCallNotFound`, and the types `RealtimeCallFlow`, `RealtimeSession`, `RealtimeTool`, `RealtimeTurnDetection`, `CreateCallParams`, `CreateCallResult`, `ClientSecret`, `ClientSecretParams`, `RealtimeEvent`, `RealtimeServerEvent`, `RealtimeClientEvent`, `RealtimeErrorDetail`, `RealtimeResponseOptions`, `RealtimeSidebandOptions`, `WebSocketFactory`, `WebSocketLike`.
 
 # Upgrading from 0.130 to 0.131
 
