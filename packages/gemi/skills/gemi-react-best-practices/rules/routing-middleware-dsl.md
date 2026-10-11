@@ -59,7 +59,8 @@ a route cannot cancel it with `-name`.
 **Rate-limit buckets are per client IP *and* route path**, so `/api/search` and
 `/api/upload` hold separate budgets — a shared limit needs a configured `key`
 function, and a budget outside a route uses the `RateLimiter` facade
-(`RateLimiter.consume(key, { limit, window })`).
+(`RateLimiter.consume(key, { limit, window })`, or `RateLimiter.enforce(key,
+{ limit, window }, message)` to throw the middleware's 429 over budget).
 
 Reference: `app/config/middleware.ts`, `app/http/routes/view.ts`
 <https://nstfkc.github.io/gemi/middleware.md>
