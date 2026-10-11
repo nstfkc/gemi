@@ -6,6 +6,7 @@ import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import {
+  isObject,
   mutationErrorFromBody,
   type MutationError,
   type WithMutationErrorHelpers,
@@ -611,8 +612,16 @@ function loadOrNull() {
 }
 
 // `error.list()` and `error.field(name)` on what the hooks hand over. If
-// their module could not be loaded, the error is handed over without them.
+// their module could not be loaded, stand-ins that only know the fallback
+// keep `error.list()` in a render from throwing.
 async function withErrorHelpers<T>(error: T): Promise<WithMutationErrorHelpers<T>> {
   const extras = await loadOrNull();
-  return (extras ? extras.withMutationErrorHelpers(error) : error) as WithMutationErrorHelpers<T>;
+  if (extras) return extras.withMutationErrorHelpers(error);
+  if (isObject(error) && Object.isExtensible(error) && !("list" in error)) {
+    Object.defineProperties(error, {
+      list: { value: (fallback = "Something went wrong. Try again.") => [fallback] },
+      field: { value: () => [] },
+    });
+  }
+  return error as WithMutationErrorHelpers<T>;
 }

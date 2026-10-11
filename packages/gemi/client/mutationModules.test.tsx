@@ -86,7 +86,7 @@ test("an error that settles before they arrive waits for them", async () => {
   expect(result.current.error).toBe(error);
 });
 
-test("if they cannot be loaded, the error is handed over without them and a success still lands", async () => {
+test("if they cannot be loaded, the error gets stand-in helpers and a success still lands", async () => {
   // As Vite's preload helper resolves a chunk whose failure `init`'s recovery
   // handled.
   vi.spyOn(mutationExtras, "load").mockResolvedValue(undefined);
@@ -98,7 +98,12 @@ test("if they cannot be loaded, the error is handed over without them and a succ
   await act(() => failing.result.current.trigger());
   const [error] = onError.mock.calls[0];
   expect(error).toEqual({ kind: "form_error", message: "Taken", status: 409 });
-  expect("list" in error).toBe(false);
+  // Stand-ins that only know the fallback, so `error.list()` in a render
+  // does not throw.
+  expect(error.list()).toEqual(["Something went wrong. Try again."]);
+  expect(error.list("x")).toEqual(["x"]);
+  expect(error.field("a")).toEqual([]);
+  expect(Object.keys(error)).toEqual(["kind", "message", "status"]);
 
   // `updates` cannot be written without them; `onSuccess` still runs.
   const onSuccess = vi.fn();

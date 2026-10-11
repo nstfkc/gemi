@@ -422,9 +422,11 @@ describe("the published client, built into an app", () => {
   const MARKERS = {
     socket: ["gemi.v1", "__gemi/socket", "hiddenDisconnectMs"],
     subscription: ["Last-Event-ID", "text/event-stream"],
-    // `error.list()`'s fallback (`mutationErrorList` has it too, which the
-    // fixture never calls) and `fetchBlob`'s request (#915).
-    mutationExtras: ["Something went wrong. Try again."],
+    // The error helpers' validation check (`mutationErrorList` has it too,
+    // which the fixture never calls) and the cache writes' walk over a
+    // resource's variants (#915). Not `error.list()`'s fallback message: the
+    // hooks keep it in the entry for when this chunk cannot be loaded.
+    mutationExtras: ["validation_error", ".variantKeys()"],
     fileRequest: ["content-disposition"],
   };
   const ALL_MARKERS = Object.values(MARKERS).flat();

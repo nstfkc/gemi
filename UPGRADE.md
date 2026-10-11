@@ -8,13 +8,13 @@
 - **`fetchBlob` / `fetchText`** load their request code on the first call.
 - **`useQuery({ live })`** loads the socket client from its own lazy chunk, so the client's loader is no longer in the entry chunk of an app that never calls `useChannel`.
 
-Fixture app (Vite 8), gzip of the entry chunk: −0.5 KB for an app with queries and mutations and no realtime, which is +0.7 KB over 0.122 instead of +1.2 KB. An app that also uses `useSubscription` is back at the 0.122 size (+0.06 KB). An app that downloads files saves another 0.3 KB. The PR has the table.
+Fixture app (Vite 8), gzip of the entry chunk: −0.4 KB for an app with queries and mutations and no realtime, which is +0.8 KB over 0.122 instead of +1.2 KB. An app that also uses `useSubscription` is about at the 0.122 size (+0.13 KB). An app that downloads files saves another 0.3 KB. The PR has the table.
 
 Timing that changed:
 
 - The mutation hooks now hand over a result (`onSuccess`, `onError`, `error`, `data`) a few microtasks after the response is read. Before, they did it synchronously after the response was read. If a request settles before the chunk has arrived, the result waits for the chunk. A test that awaits `trigger()` or uses `waitFor` sees no difference.
 - A `setQueryData` call made before the chunk has arrived, such as one during the first render, is written once the chunk has arrived, in call order.
-- If the chunk cannot be loaded (usually after a deploy), errors are handed over without `list` and `field`. A success with `updates` still calls `onSuccess`, but nothing is written into the cache. `init`'s chunk-load recovery reloads the page, as it does for any other chunk.
+- If the chunk cannot be loaded (usually after a deploy), errors still have `list` and `field`, but only stand-ins: `error.list(fallback?)` returns `[fallback]` (by default `"Something went wrong. Try again."`) and `error.field(name)` returns `[]`, so a form shows the generic message instead of the server's. A success with `updates` still calls `onSuccess`, but nothing is written into the cache. `init`'s chunk-load recovery reloads the page when it can, as it does for any other chunk.
 
 # Upgrading from 0.128.0 to 0.129.0
 
