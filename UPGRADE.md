@@ -16,6 +16,16 @@ Behaviour changes:
 
 To adopt: point the platform's health check at `/__gemi__/health` (Azure App Service `health_check_path`, Front Door probe path, Kubernetes `livenessProbe`/`readinessProbe`, Fly `http_service.checks`), or set `GEMI_HEALTH_PATH` to the path the platform already probes and delete the app's own health route. With a probe in place, set `GEMI_SHUTDOWN_DELAY` to the probe interval times its failure threshold so a draining instance is pulled before its listener closes.
 
+## Agents: start a turn from server code, `AgentController.startTurn` (#839)
+
+**New, nothing to migrate.** A queue job, a command or an MCP tool can start an agent turn on a thread, as a given user, with no browser request. It runs through the controller like a `useChat` turn and is stored on the thread like one. See [AI Server Turns](docs/ai-server-turns.md).
+
+- **`ChatController.startTurn({ threadId, text | turn, user, body })`** (static, on your concrete controller class). `body` is typed as the controller's `Body`. It answers an `AgentTurn` once the run has started: `runId`, `threadId`, `run` (the `AgentRun`), `stop()` and `result()`. `result()` is the run's `AgentRunResult` plus `threadId`, `text` (the last assistant message's text) and `pending` (the calls waiting for an answer when `finishReason` is `"awaiting-input"`), and settles after the transcript is stored and the hooks ran.
+- The turn runs in a request scope of its own whose user is `user`: `authorizeRequest` (`route: "stream"`), `resource`, `runOwner`, `maxConcurrentRuns`, the thread lock, `instructions()`, `context()`, the hooks and the tools' `ctx` see it as they see a chat turn. The route's middleware does not run.
+- A turn the route would refuse throws **`AgentTurnError`** (new export from `gemi/ai`) with `status`, `code` and `kind`. An error thrown by `authorizeRequest` is thrown as it is.
+- Approvals are not answered for you: they stay on the thread for the user, or the caller answers them with another `startTurn({ turn: { toolResults } })`.
+- New types from `gemi/ai`: `AgentTurn`, `AgentTurnParams`, `AgentTurnResult`.
+
 ## `RateLimiter.enforce`: consume, and refuse with a 429 (#882)
 
 **New, nothing to migrate.** `RateLimiter.enforce(key, { limit, window, cost }, message?)` (from `gemi/facades`, and on the `RateLimiter` service) consumes like `consume` and, over budget, throws `RateLimitExceededError`: the `rate-limit` middleware's 429, with `Retry-After` and `X-RateLimit-*` headers, recognised by `isRateLimitError`. `message` is a string or a function of the `RateLimitResult` (its `retryAfter` is in ms); the default is "Rate limit exceeded". Within budget it returns the result. It replaces the usual `if (!allowed) throw new RequestBreakerError(message, { status: 429 })`, which answered no `Retry-After`. See [Limiting outside of middleware](docs/middleware.md#limiting-outside-of-middleware).
