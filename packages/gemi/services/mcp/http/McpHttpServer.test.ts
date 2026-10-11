@@ -3,6 +3,7 @@ import { createElement } from "react";
 
 process.env.SECRET ??= "mcp-http-test-secret";
 
+import { AgentTool } from "../../../ai/Agent";
 import { s } from "../../../ai/Schema";
 import { App } from "../../../app/App";
 import { createRoot } from "../../../client/createRoot";
@@ -64,6 +65,19 @@ class Api extends ApiRouter {
   };
 }
 
+/** A native tool (#759): yields progress, and answers as the caller. */
+const build = AgentTool.create({
+  name: "build",
+  description: "Build a page",
+  inputSchema: s.object({ title: s.string() }),
+  outputSchema: s.object({ built: s.string(), by: s.number() }),
+  async *execute(input, ctx) {
+    yield "Drafting";
+    yield { progress: 2, total: 2, message: "Done" };
+    return { built: input.title, by: (ctx.context as any).userId };
+  },
+});
+
 class Mcp extends McpRouter<CreateRPC<Api>> {
   scopes = {
     "site:read": { description: "Read your site", tags: ["read"] },
@@ -86,6 +100,11 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       tags: ["write"],
     }),
     slow: this.fromApiRoute("POST", "/slow", { description: "Takes a while", tags: ["write"] }),
+    build: this.fromTool(build, {
+      tags: ["write"],
+      remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
+    }),
+    "build-locally": this.fromTool(build, { tags: ["write"] }),
   };
 }
 
@@ -412,7 +431,7 @@ describe("a modern client (2026-07-28)", () => {
   test("tools/list answers what the key's scopes reach, with schemas and annotations", async () => {
     const all = (await (await modern("tools/list")).json()).result;
     expect(all).toMatchObject({ resultType: "complete", cacheScope: "private" });
-    expect(all.tools.map((tool: any) => tool.name)).toEqual(["whoami", "list-pages", "delete-page", "slow"]);
+    expect(all.tools.map((tool: any) => tool.name)).toEqual(["whoami", "list-pages", "delete-page", "slow", "build"]);
     const listPages = all.tools.find((tool: any) => tool.name === "list-pages");
     expect(listPages).toMatchObject({
       title: "List pages",
@@ -540,6 +559,31 @@ describe("a modern client (2026-07-28)", () => {
     expect(messages[1].params).toEqual({ progressToken: "p1", progress: 3, total: 3 });
     expect(messages[2].result.structuredContent).toBeUndefined();
     expect(JSON.parse(messages[2].result.content[0].text)).toEqual({ done: true });
+  });
+
+  test("a native tool's yields are progress notifications, and its answer structured content", async () => {
+    const res = await modern("tools/call", {
+      name: "build",
+      arguments: { title: "Home" },
+      _meta: { progressToken: "p2" },
+    });
+    const messages = await events(res);
+    expect(messages.map((m) => m.method ?? "result")).toEqual([
+      "notifications/progress",
+      "notifications/progress",
+      "result",
+    ]);
+    expect(messages[0].params).toEqual({ progressToken: "p2", progress: 1, message: "Drafting" });
+    expect(messages[1].params).toEqual({ progressToken: "p2", progress: 2, total: 2, message: "Done" });
+    expect(messages[2].result.structuredContent).toEqual({ built: "Home", by: ALICE.id });
+    expect(messages[2].result.isError).toBe(false);
+  });
+
+  test("a native tool without remote is not there for a remote client", async () => {
+    const { error } = await (
+      await modern("tools/call", { name: "build-locally", arguments: { title: "Home" } })
+    ).json();
+    expect(error.message).toBe("Unknown tool: build-locally");
   });
 
   test("without a progressToken a report goes nowhere and the call answers JSON", async () => {
@@ -708,7 +752,7 @@ describe("a legacy client (initialize, Mcp-Session-Id)", () => {
     const { session } = await initialize();
     expect((await legacy(session, { jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
     const list = await (await legacy(session, { jsonrpc: "2.0", id: 1, method: "tools/list" })).json();
-    expect(list.result.tools.map((tool: any) => tool.name)).toEqual(["whoami", "list-pages", "delete-page", "slow"]);
+    expect(list.result.tools.map((tool: any) => tool.name)).toEqual(["whoami", "list-pages", "delete-page", "slow", "build"]);
     expect(list.result).not.toHaveProperty("resultType");
     expect(list.result.tools.find((t: any) => t.name === "list-pages").annotations).toMatchObject({
       title: "List pages",
