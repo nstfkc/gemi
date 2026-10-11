@@ -97,6 +97,9 @@ export type RealtimeTurnDetection =
  * does not need a gemi release.
  */
 export type RealtimeSession = {
+  /** A voice-agent session, the default. See `TranscriptionSession` for
+   *  speech-to-text only. */
+  type?: "realtime";
   /** Defaults to the provider's model (the deployment, on Azure). */
   model?: string;
   instructions?: string;
@@ -119,19 +122,126 @@ export type RealtimeSession = {
   vendor?: Record<string, unknown>;
 };
 
+// --- transcription sessions -------------------------------------------------
+
+/** OpenAI's recommended live speech-to-text model (realtime transcription
+ *  guide, 10-2026): partial deltas as speech arrives, the final transcript on
+ *  `input_audio_buffer.commit`. */
+export const DEFAULT_TRANSCRIPTION_MODEL = "gpt-live-transcribe";
+
+/** How long the model waits before emitting text: lower gives earlier
+ *  partials, higher gives the model more audio and fewer errors. */
+export type TranscriptionDelay = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+/**
+ * A transcription session (`session.type: "transcription"`): the user's audio
+ * in, transcript deltas and final transcripts out, no spoken or written
+ * answer. Mapped by `toVendorSession` onto the vendor's
+ * `RealtimeTranscriptionSessionCreateRequest`, which has no top-level `model`:
+ * the model is the transcription's (`audio.input.transcription.model`).
+ *
+ * With `gpt-live-transcribe` there is no server-side turn detection (neither
+ * `server_vad` nor `semantic_vad`), so `turnDetection` defaults to `null` and
+ * the client commits each turn (`input_audio_buffer.commit`) when it hears the
+ * user stop — what `useLiveTranscription` in `gemi/ai/voice` does.
+ *
+ * @experimental Follows OpenAI's realtime transcription guide; not yet run
+ * against a live session, and not confirmed on Azure.
+ */
+export type TranscriptionSession = {
+  type: "transcription";
+  /** Default `gpt-live-transcribe`. On Azure, the transcription deployment. */
+  model?: string;
+  /** Expected input languages (ISO 639-1 such as `en`, `tr`, or the selected
+   *  ISO 639-3 / `zh-*` codes the vendor lists). `gpt-live-transcribe` and
+   *  `gpt-transcribe` read this one. */
+  languages?: string[];
+  /** The single-language hint older models (`gpt-4o-transcribe`,
+   *  `whisper-1`) read. Never together with `languages`. */
+  language?: string;
+  /** What the recording is about, in a sentence or two. */
+  prompt?: string;
+  /** Product names, acronyms and other literal terms likely to be said: hints,
+   *  not required output. One line each, without `<` or `>`. */
+  keywords?: string[];
+  /** Latency against accuracy. See `TranscriptionDelay`. */
+  delay?: TranscriptionDelay;
+  noiseReduction?: "near_field" | "far_field" | null;
+  /** `null` by default (the client commits). Only for models that support
+   *  server-side detection; `gpt-live-transcribe` does not. */
+  turnDetection?: RealtimeTurnDetection | null;
+  /** Adds `item.input_audio_transcription.logprobs` to `include`, for models
+   *  that return them. */
+  logprobs?: boolean;
+  /** Merged into the vendor's session object last. */
+  vendor?: Record<string, unknown>;
+};
+
+/** Either kind of session `createCall`, `clientSecret` and the sideband's
+ *  `updateSession` take. */
+export type AnyRealtimeSession = RealtimeSession | TranscriptionSession;
+
+function isTranscriptionSession(session: AnyRealtimeSession): session is TranscriptionSession {
+  return session.type === "transcription";
+}
+
+/** gemi's transcription session onto the vendor's. Refuses, before any
+ *  request, what the vendor documents it rejects. */
+export function toVendorTranscriptionSession(
+  session: TranscriptionSession,
+): Record<string, unknown> {
+  if (session.language !== undefined && session.languages !== undefined) {
+    throw new TypeError(
+      "A transcription session takes `languages` or `language`, not both (gpt-live-transcribe reads `languages`).",
+    );
+  }
+  for (const keyword of session.keywords ?? []) {
+    if (/[<>\r\n]/.test(keyword)) {
+      throw new TypeError(
+        `Transcription keywords must be one line without "<" or ">", got ${JSON.stringify(keyword)}.`,
+      );
+    }
+  }
+  const transcription: Record<string, unknown> = {
+    model: session.model ?? DEFAULT_TRANSCRIPTION_MODEL,
+  };
+  if (session.prompt !== undefined) transcription.prompt = session.prompt;
+  if (session.keywords?.length) transcription.keywords = session.keywords;
+  if (session.languages?.length) transcription.languages = session.languages;
+  if (session.language !== undefined) transcription.language = session.language;
+  if (session.delay !== undefined) transcription.delay = session.delay;
+
+  const input: Record<string, unknown> = {
+    transcription,
+    turn_detection: session.turnDetection ? vendorTurnDetection(session.turnDetection) : null,
+  };
+  if (session.noiseReduction !== undefined) {
+    input.noise_reduction = session.noiseReduction && { type: session.noiseReduction };
+  }
+  const out: Record<string, unknown> = { type: "transcription", audio: { input } };
+  if (session.logprobs) out.include = ["item.input_audio_transcription.logprobs"];
+  return { ...out, ...session.vendor };
+}
+
 function toolParameters(parameters: RealtimeTool["parameters"]): unknown {
   if (!parameters) return { type: "object", properties: {} };
   return isSchema(parameters) ? parameters.toJSONSchema() : parameters;
 }
 
 /**
- * gemi's session onto the vendor's.
+ * gemi's session onto the vendor's. A `TranscriptionSession` goes to
+ * `toVendorTranscriptionSession` (its model is the transcription's, so the
+ * provider's realtime model is not used).
  *
  * `model` is written only when there is one: a `session.update` on a live call
  * must not try to change the model, and `createCall` always passes the
  * provider's.
  */
-export function toVendorSession(session: RealtimeSession, model?: string): Record<string, unknown> {
+export function toVendorSession(
+  session: AnyRealtimeSession,
+  model?: string,
+): Record<string, unknown> {
+  if (isTranscriptionSession(session)) return toVendorTranscriptionSession(session);
   const out: Record<string, unknown> = { type: "realtime" };
   const resolvedModel = session.model ?? model;
   if (resolvedModel) out.model = resolvedModel;
@@ -278,7 +388,9 @@ export type CreateCallParams = {
    * the events alone.
    */
   webrtcFilter?: boolean;
-  session?: RealtimeSession;
+  /** A voice-agent session, or `{ type: "transcription", … }` for
+   *  speech-to-text only. */
+  session?: AnyRealtimeSession;
   /**
    * A stable, non-identifying id for the end user (e.g. a hash of their id),
    * sent as `OpenAI-Safety-Identifier` so abuse is attributed to a user and not
@@ -296,9 +408,13 @@ export type CreateCallResult = {
 };
 
 export type ClientSecretParams = {
-  session?: RealtimeSession;
+  /** A voice-agent session, or `{ type: "transcription", … }`. */
+  session?: AnyRealtimeSession;
   /** 10–7200, default 600. */
   ttlSeconds?: number;
+  /** Sent as `OpenAI-Safety-Identifier`. The vendor binds it to the secret,
+   *  so the browser need not send it when it connects. */
+  safetyIdentifier?: string;
   signal?: AbortSignal;
 };
 
@@ -308,6 +424,10 @@ export type ClientSecret = {
   expiresAt: number;
   /** The session the vendor resolved, verbatim. */
   session: unknown;
+  /** Where a browser holding this secret posts its SDP offer
+   *  (`Authorization: Bearer <value>`, `Content-Type: application/sdp`):
+   *  `…/realtime/calls` on this provider's host. */
+  callsUrl: string;
 };
 
 export type RealtimeClientOptions = {
@@ -416,7 +536,11 @@ export class RealtimeClient {
         `ttlSeconds must be a whole number from ${CLIENT_SECRET_MIN_SECONDS} to ${CLIENT_SECRET_MAX_SECONDS}, got ${seconds}.`,
       );
     }
-    const headers = { ...(await this.target.headers()), "content-type": "application/json" };
+    const headers: Record<string, string> = {
+      ...(await this.target.headers()),
+      "content-type": "application/json",
+    };
+    if (params.safetyIdentifier) headers["OpenAI-Safety-Identifier"] = params.safetyIdentifier;
     const response = await this.request(
       this.url("/client_secrets"),
       {
@@ -437,7 +561,12 @@ export class RealtimeClient {
         retryable: false,
       });
     }
-    return { value: json.value, expiresAt: Number(json.expires_at ?? 0), session: json.session };
+    return {
+      value: json.value,
+      expiresAt: Number(json.expires_at ?? 0),
+      session: json.session,
+      callsUrl: this.url("/calls"),
+    };
   }
 
   /**

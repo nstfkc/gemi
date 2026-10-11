@@ -1,5 +1,5 @@
 import type { Usage } from "../types";
-import type { RealtimeSession } from "./realtime";
+import type { AnyRealtimeSession } from "./realtime";
 import { toRealtimeUsage, toVendorSession } from "./realtime";
 
 /**
@@ -62,6 +62,12 @@ export type RealtimeServerEvent =
       transcriptionUsage?: Usage;
       /** gemi's: a duration-billed transcription's seconds. */
       transcriptionSeconds?: number;
+    }
+  | {
+      type: "conversation.item.input_audio_transcription.failed";
+      item_id: string;
+      content_index?: number;
+      error: RealtimeErrorDetail;
     }
   | { type: "response.created"; response: Record<string, any> }
   | {
@@ -274,7 +280,7 @@ export class RealtimeSideband implements AsyncIterable<RealtimeEvent> {
     else this.outbox.push(data);
   }
 
-  updateSession(session: RealtimeSession): void {
+  updateSession(session: AnyRealtimeSession): void {
     this.send({ type: "session.update", session: toVendorSession(session) });
   }
 

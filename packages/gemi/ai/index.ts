@@ -266,12 +266,14 @@ export type {
 // `RealtimeClient`; these are its types. See `providers/realtime.ts`.
 // Experimental until a live call has run on Azure and OpenAI (#921).
 export {
+  DEFAULT_TRANSCRIPTION_MODEL,
   isCallNotFound,
   RealtimeClient,
   RealtimeRequestError,
   toRealtimeUsage,
 } from "./providers/realtime";
 export type {
+  AnyRealtimeSession,
   ClientSecret,
   ClientSecretParams,
   CreateCallParams,
@@ -280,6 +282,8 @@ export type {
   RealtimeSession,
   RealtimeTool,
   RealtimeTurnDetection,
+  TranscriptionDelay,
+  TranscriptionSession,
 } from "./providers/realtime";
 export { RealtimeSideband } from "./providers/sideband";
 export type {

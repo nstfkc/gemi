@@ -1,3 +1,15 @@
+# Upgrading from 0.133 to 0.134
+
+## AI: live transcription — transcription sessions and `useLiveTranscription` (#929)
+
+**New and experimental, nothing to migrate.** See [AI Voice → Live transcription](docs/ai-voice.md#live-transcription). It is tested against fakes only, and names and defaults may change in a minor release.
+
+- `realtime.clientSecret()` and `realtime.createCall()` take a `TranscriptionSession` (`{ type: "transcription", model?, languages?, language?, prompt?, keywords?, delay?, noiseReduction?, turnDetection?, logprobs?, vendor? }`) as well as a `RealtimeSession`. The model defaults to `gpt-live-transcribe`, and turn detection to `null`, since that model has none server-side. So do `toVendorSession` and the sideband's `updateSession`.
+- `ClientSecret` gains `callsUrl`, where a browser holding the secret posts its SDP. `clientSecret()` takes `safetyIdentifier`.
+- `RealtimeServerEvent` gains `conversation.item.input_audio_transcription.failed`.
+- `gemi/ai/voice` adds `useLiveTranscription(source, options)`: microphone → WebRTC → live `partial`, final `turns`, end of speech detected in the browser (a built-in energy detector, `silenceMs` default 350, or your own through `vad`), plus `commit()`, `stop({ flush })`, `level` and `error`. It also exports `createEnergyVad`.
+- New exports from `gemi/ai`: `DEFAULT_TRANSCRIPTION_MODEL` and the types `TranscriptionSession`, `TranscriptionDelay` and `AnyRealtimeSession`.
+
 # Upgrading from 0.132 to 0.133
 
 ## ORM: a `Json` field's `@default("[]")` is stored as an array, not a string (#926)

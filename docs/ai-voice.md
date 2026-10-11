@@ -413,3 +413,159 @@ The options are `threadId`, `body` (typed from the controller's `Body`), `pushTo
 > - whether the sideband receives `output_audio_buffer.*`;
 > - how the model behaves with a function call left open for minutes;
 > - Azure's support for the `call_id` sideband and the hang-up route.
+
+## Live transcription
+
+Speech to text while the user talks, with no spoken answer: a **transcription session** (`session.type: "transcription"`) on OpenAI's Realtime API. The browser streams the microphone over WebRTC, the live text grows as the user speaks, and when they stop the browser commits the turn and the final transcript arrives. Use it for voice commands and dictation, where the app decides what to do with the text.
+
+```
+browser ──WebRTC audio──▶ OpenAI (gpt-live-transcribe)
+   │  ▲ data channel: transcript deltas, then the final per committed turn
+   │  └──────────── input_audio_buffer.commit when the user stops (browser VAD)
+   ▼
+your route ── clientSecret({ session: { type: "transcription" } }) ── ephemeral secret
+```
+
+> **Experimental.** This follows OpenAI's realtime transcription guide and the `client_secrets` reference (checked October 2026). It is tested against fakes only: no live session has run yet. On Azure the request is the same and goes through the same `RealtimeClient`, but Azure's support for transcription sessions is unconfirmed.
+
+### The server: a transcription secret
+
+`clientSecret` and `createCall` take a `TranscriptionSession` as well as a `RealtimeSession`:
+
+```typescript
+import { OpenAIProvider } from "gemi/ai";
+import { HttpRequest } from "gemi/http";
+
+const realtime = OpenAIProvider.model("gpt-live-transcribe").realtime;
+
+export async function voiceToken(req: HttpRequest) {
+  await enforceVoiceLimits(req); // your caps: minutes per day, one session at a time
+  const { value, expiresAt, callsUrl } = await realtime.clientSecret({
+    ttlSeconds: 60,
+    safetyIdentifier: await hashUserId(req),
+    session: {
+      type: "transcription",
+      languages: ["en", "tr"],
+      prompt: "Voice commands for a website builder.",
+      keywords: ["hero", "navbar", "fager"],
+      delay: "low",
+    },
+  });
+  return { value, expiresAt, callsUrl };
+}
+```
+
+| `TranscriptionSession` field | Vendor field | |
+|---|---|---|
+| `type: "transcription"` | `type` | Required: it marks the session as a transcription session. |
+| `model` | `audio.input.transcription.model` | Default `gpt-live-transcribe`. On Azure, the transcription deployment. A transcription session has no top-level `model`, so the provider's model isn't used. |
+| `languages` | `…transcription.languages` | Expected languages (`en`, `tr`, …). `gpt-live-transcribe` reads this one. |
+| `language` | `…transcription.language` | The single hint that older models (`gpt-4o-transcribe`, `whisper-1`) read. Passing both `language` and `languages` throws. |
+| `prompt` | `…transcription.prompt` | What the audio is about. |
+| `keywords` | `…transcription.keywords` | Literal terms likely to be said. Each must fit on one line without `<` or `>`, or the call throws before any request. |
+| `delay` | `…transcription.delay` | `minimal`, `low`, `medium`, `high` or `xhigh`. A lower delay gives earlier partials; a higher one gives better accuracy. Benchmark with real audio. |
+| `noiseReduction` | `audio.input.noise_reduction` | `"near_field"`, `"far_field"` or `null`. |
+| `turnDetection` | `audio.input.turn_detection` | `null` by default. `gpt-live-transcribe` supports neither `server_vad` nor `semantic_vad`, so the client commits each turn. |
+| `logprobs` | `include: ["item.input_audio_transcription.logprobs"]` | For models that return them. |
+| `vendor` | merged last | Any other field. |
+
+`ClientSecret.callsUrl` is where the browser posts its SDP offer with the secret: `https://api.openai.com/v1/realtime/calls`, or `https://<resource>/openai/v1/realtime/calls` on Azure. `safetyIdentifier` is sent as `OpenAI-Safety-Identifier` when the secret is minted, and the vendor binds it to the secret. A secret can start several sessions until it expires, so keep `ttlSeconds` short and enforce your limits in the route.
+
+### The browser: `useLiveTranscription`
+
+From `gemi/ai/voice`, so only the views that use it load it. It uses no vendor SDK.
+
+```tsx
+import { useLiveTranscription } from "gemi/ai/voice";
+
+export function VoiceMode() {
+  const live = useLiveTranscription("/api/voice/token", {
+    silenceMs: 350,
+    onFinal: (turn) => runCommand(turn.text),
+  });
+
+  return (
+    <div>
+      <button onClick={() => (live.status === "idle" ? live.start() : live.stop({ flush: true }))}>
+        {live.status === "idle" ? "Voice" : "Stop"}
+      </button>
+      <meter value={live.level} />
+      <p aria-live="polite">{live.partial}</p>
+      {live.error && <p role="alert">{live.error.message}</p>}
+    </div>
+  );
+}
+```
+
+`useLiveTranscription(source, options)`. `source` is the URL of the app's token route, which is POSTed `options.body` as JSON and answers `{ value, callsUrl? }`. It can also be a function that returns the token.
+
+| | |
+|---|---|
+| `status` | `idle`, `connecting` or `listening` (the data channel is open). |
+| `partial` | The live text of the turn in progress, built from the transcript deltas. |
+| `turns` | Finished turns, oldest first (the last 50): `{ id, text, seconds? }`. `id` is the vendor's `item_id`, and turns are ordered by item even when completions arrive out of order. `seconds` is the audio duration the vendor billed, when it reports one. |
+| `speaking`, `level` | What the end-of-speech detector hears, and the microphone level from 0 to 1. |
+| `error` | The last failure. `code` is `microphone_denied`, `microphone_unavailable`, `unsupported`, `connection_failed`, the route's `error.code` (with `status`), or the vendor's. A vendor `error` event is shown without closing the session. An empty commit is ignored. |
+| `start()` | Asks for the microphone and fetches the token in parallel, then connects. Call it from a click. While a session is starting or live it does nothing. |
+| `stop({ flush?, timeoutMs? })` | Releases the microphone, the peer connection and the audio graph. With `flush: true`, speech in progress is committed first and its final transcript is awaited (up to `timeoutMs`, default 1500). Unmounting stops too. |
+| `commit()` | Ends the turn now, for push-to-talk or a send button. |
+| `mute(on?)`, `muted` | Turns the microphone track off. |
+| `reset()` | Clears `turns` and `partial`. |
+
+The callbacks are `onPartial(text)`, `onFinal(turn)`, `onSpeechStart()`, `onSpeechEnd()` and `onError(error)`.
+
+**End of speech.** OpenAI's live transcription model has no server-side turn detection, so the hook detects the end of speech in the browser and sends `input_audio_buffer.commit`. Only a turn that had speech in it is committed. The options are:
+
+- `vad: "energy"` (default) uses a built-in energy detector over a Web Audio analyser. It learns the room's noise floor while nobody speaks, opens a turn after `energy.minSpeechMs` (default 120) of sound above the floor, and ends it after `silenceMs` (default 350) of quiet, with hysteresis so a soft syllable doesn't end the turn. It is a few hundred bytes and needs no model files. That suits a close microphone with the browser's noise suppression on.
+- `vad: (stream, { speechStart, speechEnd }) => ({ stop })` plugs in your own detector on the same stream, such as Silero through `@ricky0123/vad-web`. Use one in noisy rooms. It costs an ONNX runtime and model files served from your origin, which is why gemi doesn't bundle it:
+
+  ```typescript
+  import { MicVAD } from "@ricky0123/vad-web";
+
+  const silero = async (stream: MediaStream, events: { speechStart(): void; speechEnd(): void }) => {
+    const vad = await MicVAD.new({
+      getStream: async () => stream,
+      // The stream is shared with the WebRTC call: the hook stops its tracks,
+      // vad-web's default pause would stop them early.
+      pauseStream: async () => {},
+      onSpeechStart: () => events.speechStart(),
+      onSpeechEnd: () => events.speechEnd(),
+      redemptionMs: 350,
+    });
+    return { stop: () => void vad.destroy() };
+  };
+  // useLiveTranscription("/api/voice/token", { vad: silero })
+  ```
+- `vad: false`: turns end only on `commit()`.
+
+The meter (`level`) runs in every case.
+
+### Metering
+
+A transcription is billed by audio duration. Each `conversation.item.input_audio_transcription.completed` carries `usage: { type: "duration", seconds }`, which the hook shows as `turn.seconds`. **Don't bill from the browser.** With a secret, the session is the browser's: the server never learns its call id, so it can't open a sideband. Two ways to meter:
+
+- **Cap and count on the server.** Mint secrets only within a daily minute cap, and count the minutes a session may run.
+- **Hold the call on the server** with `connect: "sdp"`. The hook posts `{ sdp, ...body }` to the route, and the route answers `{ sdp }`. The route creates the call itself and meters it on the sideband, which maps each completion's duration onto `transcriptionSeconds`:
+
+  ```typescript
+  export async function voiceCall(req: HttpRequest<{ sdp: string }>) {
+    const { sdp } = await req.input();
+    const { sdpAnswer, callId } = await realtime.createCall({
+      sdp,
+      session: { type: "transcription", languages: ["en", "tr"] },
+    });
+    void (async () => {
+      for await (const event of realtime.sideband(callId)) {
+        if (event.type === "conversation.item.input_audio_transcription.completed") {
+          await recordVoiceSeconds(req, event.transcriptionSeconds ?? 0);
+        }
+      }
+    })();
+    return { sdp: sdpAnswer };
+  }
+  // useLiveTranscription("/api/voice/call", { connect: "sdp" })
+  ```
+
+  Whether OpenAI serves a sideband for transcription sessions hasn't been checked on a live call.
+
+Not checked on a live session yet: transcription sessions over WebRTC with `gpt-live-transcribe` end to end, how soon after a commit the final arrives, and what Azure supports.

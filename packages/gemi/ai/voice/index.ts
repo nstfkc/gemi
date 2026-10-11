@@ -21,3 +21,20 @@
 export { useVoiceSession } from "./useVoiceSession";
 export type { UseVoiceSessionParams, UseVoiceSessionResult } from "./useVoiceSession";
 export type { VoiceCaption, VoiceStatus } from "./wire";
+
+// Live speech-to-text (#929): a transcription session, no spoken answer.
+export { useLiveTranscription } from "./useLiveTranscription";
+export type {
+  LiveTranscriptionStatus,
+  UseLiveTranscriptionOptions,
+  UseLiveTranscriptionResult,
+} from "./useLiveTranscription";
+export { createEnergyVad, DEFAULT_SILENCE_MS } from "./energyVad";
+export type { EnergyVad, EnergyVadOptions } from "./energyVad";
+export { OPENAI_REALTIME_CALLS_URL } from "./liveTranscription";
+export type {
+  LiveTranscriptionError,
+  LiveTranscriptionToken,
+  VoiceActivityDetector,
+} from "./liveTranscription";
+export type { TranscriptTurn } from "./transcriptionState";
