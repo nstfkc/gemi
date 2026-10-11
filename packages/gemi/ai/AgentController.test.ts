@@ -3608,3 +3608,142 @@ describe("nonces (#445)", () => {
     }
   });
 });
+
+/**
+ * #836: an app's own rule about one upload and its subject (a storage quota per
+ * site named in `body`) gets the file and the body together, and refuses with
+ * the same 422 shape as `attachmentLimits`.
+ */
+describe("AgentController.checkUpload", () => {
+  type PageBody = { pageId?: string };
+
+  function quotaChat(opts: { cap?: number; throws?: unknown } = {}) {
+    const run = new StubAgentRun("run_836");
+    const { agent, uploads } = stubAgent(run);
+    const checked: unknown[][] = [];
+    const destinations: unknown[][] = [];
+    class Chat extends AgentController<any, PageBody> {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage: FakeStorage = new FakeStorage();
+
+      attachmentScope() {
+        return { key: "org:acme" };
+      }
+      attachmentLimits() {
+        return { maxBytes: 100 };
+      }
+      protected checkUpload(
+        f: { name: string; size: number; mimeType: string },
+        _req: HttpRequest<any, any>,
+        ctx: { body: PageBody; threadId?: string },
+      ) {
+        checked.push([f, ctx]);
+        if (opts.throws) throw opts.throws;
+        if (opts.cap !== undefined && f.size > opts.cap) {
+          return { code: "storage_full", message: `Page ${ctx.body.pageId} is full.` };
+        }
+      }
+      protected attachmentDestination(
+        f: File,
+        _req: HttpRequest<any, any>,
+        extra?: { body: PageBody; threadId?: string },
+      ) {
+        destinations.push([f.name, extra]);
+        return "both" as const;
+      }
+    }
+    return { controller: new Chat(), uploads, checked, destinations };
+  }
+
+  function upload(f: File, fields: Record<string, string> = {}) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields)) form.set(key, value);
+    return uploadRequest(f, form);
+  }
+
+  test("gets the file and the body, and attachmentDestination gets the same context", async () => {
+    const { controller, checked, destinations, uploads } = quotaChat({ cap: 10 });
+    const result = await controller.upload(
+      upload(file("a.png", "image/png", "PNG"), { body: JSON.stringify({ pageId: "pg_1" }) }),
+    );
+
+    const ctx = { body: { pageId: "pg_1" }, threadId: undefined };
+    expect(checked).toEqual([[{ name: "a.png", size: 3, mimeType: "image/png" }, ctx]]);
+    expect(destinations).toEqual([["a.png", ctx]]);
+    expect(result.attachmentId).toMatch(/^gemi_att_/);
+    expect(uploads).toHaveLength(1);
+  });
+
+  test("a refusal is a 422 with the app's code, and nothing is stored or uploaded", async () => {
+    const { controller, uploads, destinations } = quotaChat({ cap: 2 });
+    const error = await controller
+      .upload(
+        upload(file("a.png", "image/png", "PNG"), { body: JSON.stringify({ pageId: "pg_1" }) }),
+      )
+      .catch((err) => err);
+
+    expect(error.payload.api).toEqual({
+      status: 422,
+      data: { error: { code: "storage_full", message: "Page pg_1 is full." } },
+    });
+    expect(uploads).toHaveLength(0);
+    expect(destinations).toEqual([]);
+    expect(controller.attachmentStorage.objects.size).toBe(0);
+  });
+
+  test("a refusal without a code answers upload_refused", async () => {
+    const run = new StubAgentRun("run_836b");
+    const { agent } = stubAgent(run);
+    class Chat extends ScopedChat(agent) {
+      checkUpload() {
+        return { message: "No." };
+      }
+    }
+    const error = await new Chat()
+      .upload(uploadRequest(file("a.png", "image/png", "PNG")))
+      .catch((err) => err);
+    expect(error.payload.api.data).toEqual({ error: { code: "upload_refused", message: "No." } });
+  });
+
+  test("runs after attachmentLimits: a file over the limit never reaches it", async () => {
+    const { controller, checked } = quotaChat();
+    const error = await controller
+      .upload(upload(file("big.bin", "application/octet-stream", "x".repeat(101))))
+      .catch((err) => err);
+    expect(error.payload.api.data.error.code).toBe("file_too_large");
+    expect(checked).toEqual([]);
+  });
+
+  test("threadId is passed only for a thread the store knows", async () => {
+    const { controller, checked } = quotaChat();
+    const { threadId } = await controller.store.createThread({});
+    await controller.upload(upload(file("a.png", "image/png", "PNG"), { threadId }));
+    await controller.upload(upload(file("b.png", "image/png", "PNG"), { threadId: "thr_invented" }));
+
+    expect(checked.map((call) => (call[1] as { threadId?: string }).threadId)).toEqual([
+      threadId,
+      undefined,
+    ]);
+  });
+
+  test("a thrown request breaker is answered as itself", async () => {
+    const { controller, uploads } = quotaChat({
+      throws: new InsufficientPermissionsError(),
+    });
+    const error = await controller
+      .upload(upload(file("a.png", "image/png", "PNG")))
+      .catch((err) => err);
+    expect(error).toBeInstanceOf(InsufficientPermissionsError);
+    expect(uploads).toHaveLength(0);
+  });
+
+  test("the default accepts every file", async () => {
+    const run = new StubAgentRun("run_836c");
+    const { agent, uploads } = stubAgent(run);
+    const controller = new (ScopedChat(agent))();
+    await controller.upload(uploadRequest(file("a.png", "image/png", "PNG")));
+    expect(uploads).toHaveLength(1);
+  });
+});

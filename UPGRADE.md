@@ -16,6 +16,27 @@ Behaviour changes:
 
 To adopt: point the platform's health check at `/__gemi__/health` (Azure App Service `health_check_path`, Front Door probe path, Kubernetes `livenessProbe`/`readinessProbe`, Fly `http_service.checks`), or set `GEMI_HEALTH_PATH` to the path the platform already probes and delete the app's own health route. With a probe in place, set `GEMI_SHUTDOWN_DELAY` to the probe interval times its failure threshold so a draining instance is pulled before its listener closes.
 
+## Agent uploads: `checkUpload`, and the body for `attachmentDestination` (#836)
+
+**New, nothing to migrate.** Two additions on `AgentController` for an app that enforces a rule about an upload *and its subject* at once, such as a storage quota per site whose id is only in the client's `body`:
+
+- **`checkUpload(file, req, { body, threadId })`**: a new hook on `POST /<path>/files`, called once per upload after `authorizeRequest` and `attachmentLimits` and before anything is stored or sent to the provider. `file` is `{ name, size, mimeType }`; `body` is the client's `body` option, as `attachmentScope` gets it; `threadId` is set only for a thread the store knows. Return nothing to accept the file, or `{ code?, message }` to refuse it: the route answers **422** `{ error: { code, message } }` (`code` defaults to `"upload_refused"`), and `useChat().attach()` rejects with an `AttachError` carrying both. A thrown `RequestBreakerError` is answered as itself. The default accepts every file, so nothing changes until an app overrides it.
+- **`attachmentDestination(file, req, { body, threadId })`**: the same context as an optional third argument. Overrides written as `attachmentDestination(file, req)` keep working.
+- New type exports from `gemi/ai`: `UploadCheckFile`, `UploadContext`, `UploadRefusal`.
+
+```ts
+protected async checkUpload(file, req, { body }) {
+  if (typeof body.pageId !== "string") return;
+  const page = await Page.findFirst({ where: { publicId: body.pageId } });
+  if (!page) return;
+  if ((await storageUsedBy(page)) + file.size > capFor(page)) {
+    return { code: "storage_full", message: "This site's storage is full." };
+  }
+}
+```
+
+An app that noted the upload's body in `authorizeRequest` (a `WeakMap` keyed by the request) to read it back in `attachmentDestination` can drop that and read `body` here instead. A check is not a reservation: two uploads checked at once both see the old usage.
+
 ## MCP: native tools in the registry, `fromTool` (#759)
 
 **New, nothing to migrate for apps that only read tool names, tags or schemas.** An `AgentTool` can be registered in an `McpRouter` beside the routes, so one tool definition serves the app's agents and, when you opt in, remote MCP clients. See [MCP: native tools](docs/mcp.md#native-tools).

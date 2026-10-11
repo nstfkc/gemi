@@ -438,7 +438,8 @@ export type AttachOptions = {
  *
  * `code` is the server's when it sent one — `unsupported_file_type`,
  * `file_too_large`, `file_rejected` and `invalid_request` from
- * `AgentController.upload`, or a framework refusal's `kind` such as
+ * `AgentController.upload`, the app's own from `checkUpload` (`upload_refused`
+ * when it gave none), or a framework refusal's `kind` such as
  * `authentication` — and otherwise `upload_failed` (an answer that was
  * not JSON, `status` says which) or `network_error` (no answer at all). A
  * string rather than a union, because an app's own `attachmentDestination`
