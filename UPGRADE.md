@@ -8,7 +8,7 @@
 - **`fetchBlob` / `fetchText`** load their request code on the first call.
 - **`useQuery({ live })`** loads the socket client from its own lazy chunk, so the client's loader is no longer in the entry chunk of an app that never calls `useChannel`.
 
-Fixture app (Vite 8), gzip of the entry chunk: −0.5 KB for an app with queries and mutations and no realtime, which is +0.7 KB over 0.122 instead of +1.2 KB. An app that also uses `useSubscription` is back at the 0.122 size (+0.04 KB). An app that downloads files saves another 0.3 KB. The PR has the table.
+Fixture app (Vite 8), gzip of the entry chunk: −0.5 KB for an app with queries and mutations and no realtime, which is +0.7 KB over 0.122 instead of +1.2 KB. An app that also uses `useSubscription` is back at the 0.122 size (+0.06 KB). An app that downloads files saves another 0.3 KB. The PR has the table.
 
 Timing that changed:
 
