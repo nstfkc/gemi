@@ -1,3 +1,16 @@
+# Unreleased
+
+## Runs: tracked background runs with status, progress, deadline and wait (#908)
+
+**New, nothing to migrate.** A `Runs` facade for background work that something waits on: a small record (`pending` → `running` → `completed` / `failed` / `cancelled` / `timed_out`, plus progress, result, error and an optional deadline) whose every change is published to the change feed channel `gemi:run:<id>`, so waiting is a subscription rather than a polling loop. See [Runs](docs/runs.md).
+
+- **`Runs`** from `gemi/facades`, fronting `RunManager` (token `runs`), bound by the new `RunsServiceProvider`, which is in `frameworkProviders` (after `ChangeFeedServiceProvider`).
+- `Runs.create` / `get` / `list`; compare-and-set `start` / `progress` / `complete` / `fail` / `cancel` (each resolves to `null` once the run has ended); `Runs.execute(id, fn)` for a job's body (settles the run, `RunFailure` for a user-readable failure, `run.signal` aborts on cancel or deadline); `Runs.wait(id, { timeout })`, `Runs.subscribe(id)`, `Runs.stream(req, id)` (SSE, read with `useSubscription`), `Runs.cursor`, `Runs.channel`; `Runs.sweep()` and `Runs.prune(olderThan)` for a cron job.
+- **`app/config/runs.ts`** with `defineRunsConfig` (optional): `store: "memory" | "database" | RunStore | (app) => RunStore` (default `"memory"`, one process, not durable), `sweepLimit` (default `500`). `"database"` uses the `gemi_runs` table on the default connection: add the Prisma model from the docs, or call `DatabaseRunStore.createTable()`.
+- Waiting across instances needs a shared change feed (`changeFeed.driver: "database"`); otherwise a waiter on another instance sees the change at its 30-second re-read.
+- New exports from `gemi/services`: `RunManager`, `RunFailure`, `RunNotFoundError`, `MemoryRunStore`, `DatabaseRunStore`, `createRunsTableStatements`, `isFinalRunStatus`, `FINAL_RUN_STATUSES`, `OPEN_RUN_STATUSES`, `RunsServiceProvider`, `defineRunsConfig`, and the types `RunRecord`, `RunStatus`, `RunProgress`, `RunError`, `RunFilter`, `RunStore`, `NewRunRecord`, `RunUpdate`, `CreateRunOptions`, `RunHandle`, `RunWaitOptions`, `RunsConfig`, `DatabaseRunStoreOptions`.
+- To adopt in place of a hand-rolled status table (a build/import row with status, progress JSON, error, deadline and a sweep) and a polling wait: create the run where the work is requested, pass `run.id` to the job and wrap its body in `Runs.execute`, replace the polling loop with `Runs.wait`, and the client's polling with `Runs.stream` + `useSubscription`.
+
 # Upgrading from 0.124.0 to 0.125.0
 
 ## Feature flags for the remote MCP endpoint, OAuth providers and MCP tools (#885)
