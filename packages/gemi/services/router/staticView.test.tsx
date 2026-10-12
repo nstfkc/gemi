@@ -47,7 +47,8 @@ const ContactForm = island(
       </form>
     ),
   }),
-  { export: "ContactForm", load: "visible" },
+  // Lazy: its dynamic imports are not preloaded either.
+  { export: "ContactForm", load: "visible", preloadDynamic: true },
 );
 
 /** A page component used as an island's child: it needs the page's context. */
@@ -70,6 +71,7 @@ const Outer = island(
       </section>
     ),
   }),
+  { preloadDynamic: true },
 );
 
 /** Not tagged by the plugin: a test (or an app) that does not run it. */
@@ -179,17 +181,23 @@ class TestKernel extends Kernel {
 
 const app = new App({ kernel: TestKernel });
 
-const islandAssets: Record<string, { src: string; preload: string[] }> = {
+const islandAssets: Record<string, { src: string; preload: string[]; dynamicPreload?: string[] }> = {
   "app/views/site/NavMenu.tsx": {
     src: "/assets/NavMenu.js",
     preload: ["/assets/NavMenu.js", "/assets/react-dom.js", "/assets/icons.js"],
+    dynamicPreload: ["/assets/NavMenu-lazy.js"],
   },
   "app/views/site/forms.tsx": {
     src: "/assets/forms.js",
     preload: ["/assets/forms.js", "/assets/react-dom.js"],
+    dynamicPreload: ["/assets/forms-lazy.js"],
   },
   "app/views/site/Inner.tsx": { src: "/assets/Inner.js", preload: ["/assets/Inner.js"] },
-  "app/views/site/Outer.tsx": { src: "/assets/Outer.js", preload: ["/assets/Outer.js"] },
+  "app/views/site/Outer.tsx": {
+    src: "/assets/Outer.js",
+    preload: ["/assets/Outer.js"],
+    dynamicPreload: ["/assets/playback.js", "/assets/motion.js"],
+  },
 };
 
 const styleCalls: { views: string[]; options?: { static?: boolean; layout?: string } }[] = [];
@@ -390,6 +398,20 @@ describe("islands in a static view", () => {
     expect(head).toContain('<link rel="modulepreload" href="/assets/icons.js"/>');
     expect(html).not.toContain('modulepreload" href="/assets/forms.js"');
     expect(html).not.toContain('modulepreload" href="/assets/Inner.js"');
+  });
+
+  test("preload an eager island's dynamic imports only with preloadDynamic", async () => {
+    const html = await (await fetchDocument("/site")).text();
+    const head = html.slice(0, html.indexOf("</head>"));
+
+    // Outer asks for them.
+    expect(head).toContain('<link rel="modulepreload" href="/assets/playback.js"/>');
+    expect(head).toContain('<link rel="modulepreload" href="/assets/motion.js"/>');
+    // NavMenu doesn't; the ContactForm does, but is lazy.
+    expect(html).not.toContain("/assets/NavMenu-lazy.js");
+    expect(html).not.toContain("/assets/forms-lazy.js");
+    // The island table is unchanged by the option.
+    expect(islandTable(html).i).toContainEqual({ s: "/assets/Outer.js", e: "default", l: "eager" });
   });
 
   test("serialise props escaped, so they cannot break out of the attribute", async () => {

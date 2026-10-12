@@ -15,9 +15,10 @@ export { ISLAND_LOADER_SOURCE, STATIC_NAVIGATION_SOURCE };
 /**
  * Where an island's entry is served from: `src` is imported by the loader,
  * `preload` is every chunk that import pulls in (itself first), React
- * included.
+ * included. `dynamicPreload` is what the entry's code loads lazily, preloaded
+ * for an eager island with `preloadDynamic`.
  */
-export type IslandAsset = { src: string; preload: string[] };
+export type IslandAsset = { src: string; preload: string[]; dynamicPreload?: string[] };
 
 /** Maps an island module's build key (`app/views/site/Counter.tsx`) to its entry. */
 export type IslandResolver = (moduleKey: string) => IslandAsset | undefined;
@@ -96,8 +97,9 @@ export interface DocumentScript {
  * the `<meta name="gemi-static">` that identifies it.
  *
  * Eager islands get `modulepreload`s in the head for their entry's whole
- * static import closure (React included); lazy ones are fetched when their
- * schedule fires, so nothing about them is announced up front.
+ * static import closure (React included), plus its dynamic imports with
+ * `preloadDynamic`; lazy ones are fetched when their schedule fires, so
+ * nothing about them is announced up front.
  *
  * Without a resolver (a test rendering through `app.fetch`), no island table
  * is injected and nothing is logged.
@@ -131,6 +133,9 @@ export function injectIslands(
       }
       if (island.load === "eager") {
         for (const href of asset.preload) preloads.add(href);
+        if (island.preloadDynamic) {
+          for (const href of asset.dynamicPreload ?? []) preloads.add(href);
+        }
       }
       return { s: asset.src, e: island.export, l: island.load };
     });
