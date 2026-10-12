@@ -106,6 +106,22 @@ describe("gemiIslandPlugin", () => {
     ]);
   });
 
+  test("resolves the island module's dynamic imports for preloadDynamic", async () => {
+    await writeFile(
+      join(dir, "app/site/Counter.js"),
+      `export default function Counter() { import("./playback.js"); return "COUNTER_COMPONENT"; }\n`,
+    );
+    await writeFile(join(dir, "app/site/playback.js"), `export const play = () => "PLAYBACK";\n`);
+    const { manifest } = await buildApp(false);
+
+    const counter = createIslandResolver(manifest)("app/site/Counter.js")!;
+    const playback = `/${manifest["app/site/playback.js"].file}`;
+    expect(counter.dynamicPreload).toEqual([playback]);
+    expect(counter.preload).not.toContain(playback);
+    const chunk = await readFile(join(dir, "dist/client", playback), "utf8");
+    expect(chunk).toContain("PLAYBACK");
+  });
+
   test("renders the component on the server without a dynamic import", async () => {
     const { code } = await buildApp(true);
 

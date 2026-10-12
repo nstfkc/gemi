@@ -81,6 +81,52 @@ export function collectModulePreloads(
 }
 
 /**
+ * The chunks the static import closure of `entryKey` loads lazily, each with
+ * its own static closure, minus what that closure already has: every
+ * `import()` in the entry's code (and its static dependencies'), one level
+ * deep. An island with `preloadDynamic` gets these preloaded too (#932).
+ *
+ * Dynamic imports into `node_modules` are left out: those are a library's own
+ * lazy pieces (gemi's client loads a few on first use), not the app's.
+ */
+export function collectDynamicPreloads(
+  manifest: ViteManifest,
+  entryKey: string,
+  assetBase: string = DEFAULT_ASSET_BASE,
+): string[] {
+  const seen = new Set(collectModulePreloads(manifest, entryKey, assetBase));
+  const targets: string[] = [];
+  const visited = new Set<string>();
+
+  const walk = (key: string) => {
+    if (visited.has(key)) return;
+    visited.add(key);
+    const chunk = manifest[key];
+    if (!chunk) return;
+    for (const target of chunk.dynamicImports ?? []) {
+      if (!/(^|\/)node_modules\//.test(target) && !targets.includes(target)) {
+        targets.push(target);
+      }
+    }
+    for (const imported of chunk.imports ?? []) {
+      walk(imported);
+    }
+  };
+  walk(entryKey);
+
+  const urls: string[] = [];
+  for (const target of targets) {
+    for (const url of collectModulePreloads(manifest, target, assetBase)) {
+      if (!seen.has(url)) {
+        seen.add(url);
+        urls.push(url);
+      }
+    }
+  }
+  return urls;
+}
+
+/**
  * Every CSS file the static import closure of `entryKey` carries, in import
  * order and without repeats. Vite lists a chunk's CSS on that chunk only, not
  * on the entries that import it, so a page with no client router to load the
@@ -115,14 +161,18 @@ export function collectCss(manifest: ViteManifest, entryKey: string): string[] {
  * Where a static page's islands load from: each island module's entry
  * (`<key>?gemi-island`, the module plus the hydrate function), with the
  * chunks importing it pulls in, itself first. React and `react-dom/client`
- * are among those. `undefined` for a module the client build has no island
- * entry for.
+ * are among those. `dynamicPreload` is what the entry loads lazily (see
+ * `collectDynamicPreloads`), for an island with `preloadDynamic`.
+ * `undefined` for a module the client build has no island entry for.
  */
 export function createIslandResolver(
   manifest: ViteManifest,
   assetBase: string = DEFAULT_ASSET_BASE,
-): (moduleKey: string) => { src: string; preload: string[] } | undefined {
-  const cache = new Map<string, { src: string; preload: string[] } | undefined>();
+): (moduleKey: string) => { src: string; preload: string[]; dynamicPreload: string[] } | undefined {
+  const cache = new Map<
+    string,
+    { src: string; preload: string[]; dynamicPreload: string[] } | undefined
+  >();
   return (moduleKey) => {
     if (!cache.has(moduleKey)) {
       const key = `${moduleKey}${ISLAND_ENTRY_QUERY}`;
@@ -130,7 +180,11 @@ export function createIslandResolver(
       cache.set(
         moduleKey,
         file
-          ? { src: assetUrl(file, assetBase), preload: collectModulePreloads(manifest, key, assetBase) }
+          ? {
+              src: assetUrl(file, assetBase),
+              preload: collectModulePreloads(manifest, key, assetBase),
+              dynamicPreload: collectDynamicPreloads(manifest, key, assetBase),
+            }
           : undefined,
       );
     }

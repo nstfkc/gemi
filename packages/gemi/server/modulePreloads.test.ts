@@ -170,7 +170,42 @@ describe("createIslandResolver", () => {
         "https://cdn.example.com/assets/react-2.js",
         "https://cdn.example.com/assets/client-4.js",
       ],
+      dynamicPreload: [],
     });
+  });
+
+  test("lists what the entry's closure imports dynamically, with its static closure", () => {
+    const resolve = createIslandResolver({
+      "app/site/Motion.tsx?gemi-island": { file: "assets/Motion-entry.js", imports: ["_Motion.js"] },
+      // Where the island module landed: shared with the views that render it inline.
+      "_Motion.js": {
+        file: "assets/Motion.js",
+        imports: ["_react.js", "_gemi.js"],
+        dynamicImports: ["app/site/playback.ts", "app/site/util-lazy.ts"],
+      },
+      "_react.js": { file: "assets/react.js" },
+      // A library's own lazy pieces are not the island's.
+      "_gemi.js": {
+        file: "assets/gemi.js",
+        dynamicImports: ["node_modules/gemi/dist/client/mutationExtras.js"],
+      },
+      "node_modules/gemi/dist/client/mutationExtras.js": { file: "assets/mutationExtras.js" },
+      "app/site/playback.ts": {
+        file: "assets/playback.js",
+        imports: ["_motion.js", "_react.js"],
+        // One level deep: playback's own lazy chunks stay lazy.
+        dynamicImports: ["app/site/deeper.ts"],
+      },
+      "_motion.js": { file: "assets/motion.js" },
+      "app/site/util-lazy.ts": { file: "assets/util-lazy.js", imports: ["_Motion.js"] },
+      "app/site/deeper.ts": { file: "assets/deeper.js" },
+    });
+
+    expect(resolve("app/site/Motion.tsx")!.dynamicPreload).toEqual([
+      "/assets/playback.js",
+      "/assets/motion.js",
+      "/assets/util-lazy.js",
+    ]);
   });
 
   test("has nothing for a module without an island entry", () => {

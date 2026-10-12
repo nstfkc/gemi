@@ -28,6 +28,14 @@ export interface IslandOptions {
   load?: IslandLoad;
   /** Which export of the module is the component. Defaults to `"default"`. */
   export?: string;
+  /**
+   * Also `modulepreload` the chunks the island's code loads with `import()`,
+   * on static pages that render it, so a lazy piece it needs right after
+   * hydrating (an animation runtime, say) arrives with it instead of one
+   * round trip later. Applies to `"eager"` islands only; hydrated views are
+   * unaffected. Defaults to `false`.
+   */
+  preloadDynamic?: boolean;
 }
 
 /**
@@ -49,6 +57,8 @@ export interface IslandEntry {
   module: string | undefined;
   export: string;
   load: IslandLoad;
+  /** Preload the entry's dynamic imports too: set when any island of the module asks. */
+  preloadDynamic?: boolean;
 }
 
 interface IslandInstance {
@@ -220,6 +230,7 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
   }
   const exportName = options.export ?? "default";
   const load: IslandLoad = options.load ?? "eager";
+  const preloadDynamic = options.preloadDynamic === true ? true : undefined;
   const key = loader[ISLAND_MODULE_KEY];
   const label = `island(${key ?? "() => import(…)"}${exportName === "default" ? "" : `#${exportName}`})`;
 
@@ -245,7 +256,12 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
       (entry) =>
         key !== undefined && entry.module === key && entry.export === exportName && entry.load === load,
     );
-    return known !== -1 ? known : collector.islands.push({ module: key, export: exportName, load }) - 1;
+    if (known !== -1) {
+      // Another island() call with the same entry may be the one asking.
+      if (preloadDynamic) collector.islands[known].preloadDynamic = true;
+      return known;
+    }
+    return collector.islands.push({ module: key, export: exportName, load, preloadDynamic }) - 1;
   };
 
   const start = (collector: StaticRenderCollector, props: Record<string, unknown>): IslandInstance => {

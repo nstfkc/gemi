@@ -289,6 +289,33 @@ that root.
 |---|---|---|
 | `load` | `"eager"` | When the island hydrates. `"eager"`: as soon as the page has parsed, with `modulepreload`s for its chunks in the head. `"idle"`: on `requestIdleCallback`. `"visible"`: when the island's content first scrolls into view (the marker has no box of its own, so its child elements are observed). Lazy islands aren't preloaded. |
 | `export` | `"default"` | Which export of the module is the component. |
+| `preloadDynamic` | `false` | Also `modulepreload` the chunks the island's code loads with `import()`, so a lazy piece it needs right after hydrating arrives with it instead of one round trip later. See below. |
+
+#### Preloading an island's lazy chunks
+
+An island can keep a heavy piece out of its own chunk with a dynamic
+`import()` and load it after hydrating. That keeps the piece out of every
+hydrated view that renders the island inline, but on a static page the browser
+only discovers the chunk once the island's code has run: one more round trip
+before the island is fully working. `preloadDynamic: true` announces those
+chunks up front, on the static pages that render the island:
+
+```tsx
+export const Motion = island(() => import("./MotionRuntime"), { preloadDynamic: true });
+
+// MotionRuntime.tsx
+useEffect(() => {
+  import("./motionPlayback").then(({ play }) => play(ref.current));
+}, []);
+```
+
+The head then gets a `modulepreload` for each chunk the island's static code
+(the module and what it imports) loads with `import()`, along with each
+chunk's own static imports. It goes one level deep: what those chunks import
+lazily stays lazy. Dynamic imports inside `node_modules` (a library's own lazy
+pieces) are left out. It applies to `"eager"` islands only, since a lazy
+island announces nothing up front, and changes nothing in hydrated views or in
+dev.
 
 ### Content Security Policy
 
