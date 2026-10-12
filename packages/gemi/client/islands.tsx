@@ -57,7 +57,7 @@ export interface IslandEntry {
   module: string | undefined;
   export: string;
   load: IslandLoad;
-  /** Preload the entry's dynamic imports too: set when any island of the module asks. */
+  /** Preload the entry's dynamic imports too: set when any island() call sharing this entry asks. */
   preloadDynamic?: boolean;
 }
 
