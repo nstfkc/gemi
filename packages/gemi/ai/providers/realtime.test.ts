@@ -281,6 +281,7 @@ describe("RealtimeClient.clientSecret / hangup", () => {
       value: "ek_123",
       expiresAt: 1790000600,
       session: { type: "realtime" },
+      callsUrl: "https://api.openai.com/v1/realtime/calls",
     });
     expect(calls[0]!.url).toBe("https://api.openai.com/v1/realtime/client_secrets");
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({

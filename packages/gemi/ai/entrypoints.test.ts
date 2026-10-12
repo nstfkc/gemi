@@ -114,11 +114,15 @@ describe("gemi/ai/voice", () => {
     expect(graph).toContain("ai/voice/useVoiceSession.ts");
     expect(graph).toContain("ai/voice/state.ts");
     expect(graph).toContain("ai/voice/voiceCall.ts");
+    expect(graph).toContain("ai/voice/useLiveTranscription.ts");
+    expect(graph).toContain("ai/voice/liveTranscription.ts");
+    expect(graph).toContain("ai/voice/energyVad.ts");
   });
 
   test("is not reached from gemi/ai/client, gemi/client or gemi/ai", () => {
     for (const entry of ["ai/client/index.ts", "client/index.ts", "ai/index.ts"]) {
       expect(reaches(entry)).not.toContain("ai/voice/useVoiceSession.ts");
+      expect(reaches(entry)).not.toContain("ai/voice/useLiveTranscription.ts");
     }
   });
 });

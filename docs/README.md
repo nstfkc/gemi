@@ -52,7 +52,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep`: sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
 - **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 - **[AI Server Turns](./ai-server-turns.md)** — `AgentController.startTurn`: an agent turn started from a queue job, a command or an MCP tool, run through the controller and stored on the thread like a chat turn; `AgentTurnError`, pending approvals, and where the run lives.
-- **[AI Voice](./ai-voice.md)** — realtime voice calls (`provider.realtime`: `createCall`, `sideband`, `hangup`, `clientSecret`) on OpenAI and Azure OpenAI, and voice in front of an agent: `this.voice(Controller)`, the `VoiceBridge` delegating to `startTurn`, and `useVoiceSession` from `gemi/ai/voice`.
+- **[AI Voice](./ai-voice.md)** — realtime voice calls (`provider.realtime`: `createCall`, `sideband`, `hangup`, `clientSecret`) on OpenAI and Azure OpenAI, and voice in front of an agent: `this.voice(Controller)`, the `VoiceBridge` delegating to `startTurn`, and `useVoiceSession` from `gemi/ai/voice`; live transcription (transcription sessions with `gpt-live-transcribe`, `useLiveTranscription` with browser end-of-speech detection).
 
 ### Data
 - **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
