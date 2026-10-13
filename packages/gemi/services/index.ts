@@ -597,6 +597,7 @@ export {
   type EmailCodeSendArgs,
   type LegacySessionMigrator,
   type OAuthProviderEntry,
+  type UserCreatedContext,
 } from "../auth/config";
 export {
   defineTranslationConfig,

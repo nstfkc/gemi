@@ -29,8 +29,8 @@ const auth = {
     oauthProviders: {} as Record<string, any>,
     onSignIn: async () => {},
     onSignUp: async () => {},
-    onUserCreated: async (user: unknown) => {
-      seen.userCreated.push(user);
+    onUserCreated: async (user: unknown, context: unknown) => {
+      seen.userCreated.push({ user, context });
     },
   },
   userProvider: {
@@ -181,6 +181,8 @@ describe("InstagramOAuthProvider", () => {
     expect(seen.socialAccounts[0]).toMatchObject({ provider: "instagram", providerId: IG_ID, userId: 99, username: "acme" });
     expect(seen.socialAccounts[0].email).toBeUndefined();
     expect(seen.userCreated).toHaveLength(1);
+    // OAuth carries nothing the application's form sent.
+    expect(seen.userCreated[0].context).toEqual({ method: "oauth", input: {} });
     expect(seen.sessions[0]).toEqual({ email: null, id: 99 });
   });
 
