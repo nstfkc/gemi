@@ -374,9 +374,7 @@ function recordOf(row: Row): AgentMemoryRecord {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     lastUsedAt:
-      row.last_used_at === null || row.last_used_at === undefined
-        ? null
-        : Number(row.last_used_at),
+      row.last_used_at === null || row.last_used_at === undefined ? null : Number(row.last_used_at),
     expiresAt:
       row.expires_at === null || row.expires_at === undefined ? null : Number(row.expires_at),
   };

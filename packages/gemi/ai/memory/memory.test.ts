@@ -205,7 +205,10 @@ describe("the <memory> block", () => {
 describe("what a write may not contain", () => {
   test.each([
     ["my key is sk-proj-abcdefghijklmnopqrstuvwxyz123456", "an API key"],
-    ["token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "a token"],
+    [
+      "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+      "a token",
+    ],
     ["card 4111 1111 1111 1111 exp 12/29", "a card number"],
     ["IBAN DE89 3704 0044 0532 0130 00", "a bank account number (IBAN)"],
     ["The password is hunter22", "a password"],
@@ -429,7 +432,10 @@ describe("an agent with memory", () => {
   });
 
   test("forget deletes a note of the run's scopes; another scope's id reads as unknown", async () => {
-    const { record: mine } = await AgentMemories.put("project:1", { kind: "fact", content: "Mine." });
+    const { record: mine } = await AgentMemories.put("project:1", {
+      kind: "fact",
+      content: "Mine.",
+    });
     const { record: theirs } = await AgentMemories.put("project:2", {
       kind: "fact",
       content: "Theirs.",
@@ -520,7 +526,10 @@ describe("an agent with memory", () => {
     await AgentMemories.put("project:1", { kind: "fact", content: "One." });
     await AgentMemories.put("project:1", { kind: "fact", content: "Two." });
     const { agent } = agentWith(
-      [callTool("c1", "remember", { scope: "project", kind: "fact", content: "Three." }), say("ok")],
+      [
+        callTool("c1", "remember", { scope: "project", kind: "fact", content: "Three." }),
+        say("ok"),
+      ],
       { ...declared, limits: { maxPerScope: 2 } },
     );
     const result = await agent
@@ -590,9 +599,10 @@ describe("an agent with memory", () => {
       .stream({ messages: [], turn: { text: "x" }, memory: { scopes: { project: "project:1" } } })
       .result();
     expect(result.finishReason).toBe("awaiting-input");
-    expect(
-      memoryTools(approval.provider.calls[0]!.tools)!.map((tool) => tool.name),
-    ).toEqual(["remember", "recall"]);
+    expect(memoryTools(approval.provider.calls[0]!.tools)!.map((tool) => tool.name)).toEqual([
+      "remember",
+      "recall",
+    ]);
     expect((await AgentMemories.list("project:1")).map((memory) => memory.content)).toEqual([
       "Fact.",
     ]);
@@ -600,7 +610,10 @@ describe("an agent with memory", () => {
 
   test("maxTokens: the agent's, overridden per run, and 0 for no block", async () => {
     for (let i = 0; i < 40; i++) {
-      await AgentMemories.put("project:1", { kind: "fact", content: `Fact number ${i} ${"y".repeat(60)}` });
+      await AgentMemories.put("project:1", {
+        kind: "fact",
+        content: `Fact number ${i} ${"y".repeat(60)}`,
+      });
     }
     const small = agentWith([say("a"), say("b")], { ...declared, maxTokens: 100 });
     await small.agent
@@ -629,7 +642,10 @@ describe("an agent with memory", () => {
 
   test("a thread label is the run's thread unless the caller says otherwise", async () => {
     const { provider, agent } = agentWith(
-      [callTool("c1", "remember", { scope: "thread", kind: "note", content: "Draft 2 is live." }), say("ok")],
+      [
+        callTool("c1", "remember", { scope: "thread", kind: "note", content: "Draft 2 is live." }),
+        say("ok"),
+      ],
       { scopes: { thread: { description: "Notes for this conversation.", kinds: ["note"] } } },
     );
     await agent.stream({ messages: [], turn: { text: "x" }, threadId: "t1" }).result();
@@ -649,8 +665,15 @@ describe("an agent with memory", () => {
       content: "Warm photos.",
       tags: ["pictures"],
     });
-    await AgentMemories.put("project:1", { kind: "preference", content: "Short copy.", tags: ["copy"] });
-    const { record: foreign } = await AgentMemories.put("project:2", { kind: "fact", content: "No." });
+    await AgentMemories.put("project:1", {
+      kind: "preference",
+      content: "Short copy.",
+      tags: ["copy"],
+    });
+    const { record: foreign } = await AgentMemories.put("project:2", {
+      kind: "fact",
+      content: "No.",
+    });
     const seen: unknown[] = [];
     const pictures = AgentTool.create({
       name: "pictures",
@@ -694,7 +717,11 @@ describe("an agent with memory", () => {
   test("a sub-run gets the parent's keys for the labels its own agent declares", async () => {
     await AgentMemories.put("user:1", { kind: "fact", content: "Writes in German." });
     const subProvider = fakeProvider(
-      callTool("s1", "remember", { scope: "user", kind: "preference", content: "Likes short answers." }),
+      callTool("s1", "remember", {
+        scope: "user",
+        kind: "preference",
+        content: "Likes short answers.",
+      }),
       say("done"),
     );
     const writer = Agent.create({
@@ -738,9 +765,7 @@ describe("an agent with memory", () => {
 
   test("Agent.create refuses a declaration that cannot work", () => {
     const provider = fakeProvider();
-    expect(() => Agent.create({ name: "a", provider, memory: { scopes: {} } })).toThrow(
-      /no scope/,
-    );
+    expect(() => Agent.create({ name: "a", provider, memory: { scopes: {} } })).toThrow(/no scope/);
     expect(() =>
       Agent.create({ name: "a", provider, memory: { scopes: { Project: { description: "x" } } } }),
     ).toThrow(/lowercase/);
@@ -786,9 +811,13 @@ describe("AgentMemories, the app's API", () => {
     expect(action).toBe("added");
     expect(record).toMatchObject({ pinned: true, version: 1, source: { by: "user" } });
 
-    const updated = await AgentMemories.update(record.id, { content: "Likes bold designs." }, {
-      version: 1,
-    });
+    const updated = await AgentMemories.update(
+      record.id,
+      { content: "Likes bold designs." },
+      {
+        version: 1,
+      },
+    );
     expect(updated).toMatchObject({ content: "Likes bold designs.", version: 2, pinned: true });
     await expect(
       AgentMemories.update(record.id, { content: "Stale edit." }, { version: 1 }),
@@ -887,10 +916,10 @@ describe("AgentController.memoryScopes", () => {
   test("resolves the turn's scopes from the server, and null switches a label off", async () => {
     await AgentMemories.put("project:p1", { kind: "fact", content: "Open 8–16." });
     await AgentMemories.put("user:u1", { kind: "fact", content: "Writes in German." });
-    const { provider, asked, Chat } = setup(
-      [say("a"), say("b")],
-      (body) => ({ project: `project:${body.pageId}`, user: body.off ? null : "user:u1" }),
-    );
+    const { provider, asked, Chat } = setup([say("a"), say("b")], (body) => ({
+      project: `project:${body.pageId}`,
+      user: body.off ? null : "user:u1",
+    }));
     await turn(Chat, { turn: { text: "hi" }, pageId: "p1" });
     expect(asked).toEqual([{ pageId: "p1" }]);
     expect(provider.calls[0]!.systemPrompt).toContain("Open 8–16.");

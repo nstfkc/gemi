@@ -310,11 +310,11 @@ export function memoryToolSchema(
           .describe(
             'A stable slot for a fact that changes, e.g. "business.hours" or "brand.voice": saving with the same key replaces what is there.',
           ),
-        replaces: s
-          .string()
+        replaces: s.string().optional().describe("The id of a note this one corrects or replaces."),
+        tags: s
+          .array(s.string())
           .optional()
-          .describe("The id of a note this one corrects or replaces."),
-        tags: s.array(s.string()).optional().describe("Short labels, if the instructions ask for them."),
+          .describe("Short labels, if the instructions ask for them."),
       });
     case "forget":
       return s.object({
@@ -326,7 +326,10 @@ export function memoryToolSchema(
         query: s.string().describe("Words to look for."),
         scope: s.enum(scopes).optional().describe("Only this scope."),
         kinds: s.array(s.string()).optional().describe("Only these kinds."),
-        limit: s.number().optional().describe(`At most this many. Default ${DEFAULT_RECALL_LIMIT}.`),
+        limit: s
+          .number()
+          .optional()
+          .describe(`At most this many. Default ${DEFAULT_RECALL_LIMIT}.`),
       });
   }
 }
@@ -411,7 +414,8 @@ type ToolAccess = {
 /** The internal half of `ctx.memory`, for the built-in tools. */
 export function memoryToolAccess(memory: ToolMemory): ToolAccess {
   const access = (memory as ToolMemory & { [MEMORY_TOOL_ACCESS]?: ToolAccess })[MEMORY_TOOL_ACCESS];
-  if (!access) throw new ToolError("There is no memory in this conversation.", { retryable: false });
+  if (!access)
+    throw new ToolError("There is no memory in this conversation.", { retryable: false });
   return access;
 }
 
@@ -482,7 +486,11 @@ export class RunMemory {
   }
 
   /** The `<memory>` block for the run, or `null` when it has none. */
-  async block(params: { maxTokens: number; recall: boolean; tools: boolean }): Promise<string | null> {
+  async block(params: {
+    maxTokens: number;
+    recall: boolean;
+    tools: boolean;
+  }): Promise<string | null> {
     const context = this.options?.context;
     if (context === false || this.labels.length === 0 || params.maxTokens <= 0) return null;
     const keys = this.labels.map((label) => this.keys.get(label)!);
@@ -682,7 +690,8 @@ export class RunMemory {
         { retryable: false },
       );
     }
-    const key = params.key === undefined || params.key === null || params.key === "" ? null : params.key;
+    const key =
+      params.key === undefined || params.key === null || params.key === "" ? null : params.key;
     if (key !== null && !MEMORY_KEY_PATTERN.test(key)) {
       throw new ToolError(
         `"${key}" is not a usable key: letters, digits and . _ : - only, at most 100 characters.`,

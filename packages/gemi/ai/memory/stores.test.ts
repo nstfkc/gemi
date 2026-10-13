@@ -171,10 +171,9 @@ for (const backend of backends) {
         );
         ids.push(record.id);
       }
-      expect((await store.list(["project:1"], { kinds: ["preference"] })).map((m) => m.id)).toEqual([
-        ids[1],
-        ids[3],
-      ]);
+      expect((await store.list(["project:1"], { kinds: ["preference"] })).map((m) => m.id)).toEqual(
+        [ids[1], ids[3]],
+      );
       expect(await store.list(["project:1"], { kinds: [] })).toEqual([]);
       expect((await store.list(["project:1"], { tags: ["pictures"] })).map((m) => m.id)).toEqual([
         ids[0],
@@ -191,12 +190,13 @@ for (const backend of backends) {
 
     test("a keyed write replaces the memory at its key, or answers unchanged", async () => {
       const { store } = await backend.prepare();
-      const first = await store.upsert(
-        newMemory({ key: "business.hours", content: "Open 8–16." }),
-      );
+      const first = await store.upsert(newMemory({ key: "business.hours", content: "Open 8–16." }));
       expect(first.action).toBe("added");
       const same = await store.upsert(newMemory({ key: "business.hours", content: "Open 8–16." }));
-      expect(same).toMatchObject({ action: "unchanged", record: { id: first.record.id, version: 1 } });
+      expect(same).toMatchObject({
+        action: "unchanged",
+        record: { id: first.record.id, version: 1 },
+      });
 
       const changed = await store.upsert(
         newMemory({ key: "business.hours", content: "Open 9–17.", pinned: true, tags: [] }),
@@ -237,7 +237,13 @@ for (const backend of backends) {
       expect(await store.update(record.id, { content: "Stale." }, 2)).toBeNull();
       const updated = await store.update(
         record.id,
-        { content: "Changed.", pinned: true, tags: ["x"], key: "slot", expiresAt: 4_102_444_800_000 },
+        {
+          content: "Changed.",
+          pinned: true,
+          tags: ["x"],
+          key: "slot",
+          expiresAt: 4_102_444_800_000,
+        },
         1,
       );
       expect(updated).toMatchObject({
@@ -280,9 +286,10 @@ for (const backend of backends) {
       const gone = await store.upsert(newMemory({ expiresAt: Date.now() - 60_000 }));
       const live = await store.upsert(newMemory({ expiresAt: Date.now() + 3_600_000 }));
       expect((await store.list(["project:1"])).map((m) => m.id)).toEqual([live.record.id]);
-      expect(
-        (await store.list(["project:1"], { includeExpired: true })).map((m) => m.id),
-      ).toEqual([gone.record.id, live.record.id]);
+      expect((await store.list(["project:1"], { includeExpired: true })).map((m) => m.id)).toEqual([
+        gone.record.id,
+        live.record.id,
+      ]);
       expect(await store.count("project:1")).toBe(1);
       expect(await store.prune!(Date.now())).toBe(1);
       expect(await store.get(gone.record.id)).toBeNull();

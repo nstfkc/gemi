@@ -84,7 +84,8 @@ export function rankMemories(
       terms.forEach((_, t) => {
         const tf = frequencies[at]![t]!;
         if (tf === 0) return;
-        score += idf[t]! * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + (b * doc.length) / averageLength)));
+        score +=
+          idf[t]! * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + (b * doc.length) / averageLength)));
       });
       if (score === 0) return { record, score };
       // A few hundredths at most: enough to order two equally good matches,

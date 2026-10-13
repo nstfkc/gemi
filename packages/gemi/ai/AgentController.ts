@@ -11,9 +11,9 @@ import type {
   AgentContext,
   AgentRun,
   AgentRunResult,
+  AgentToolShapes,
   AnyAgent,
   PrepareStepContext,
-  AgentToolShapes,
   PrepareStepResult,
   ToolShapesOf,
 } from "./Agent";

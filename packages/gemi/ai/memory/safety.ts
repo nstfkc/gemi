@@ -11,7 +11,10 @@
 
 const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: "a private key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { name: "an API key", pattern: /\b(?:sk|pk|rk)[-_](?:live|test|proj|ant)?[-_]?[A-Za-z0-9_-]{16,}/ },
+  {
+    name: "an API key",
+    pattern: /\b(?:sk|pk|rk)[-_](?:live|test|proj|ant)?[-_]?[A-Za-z0-9_-]{16,}/,
+  },
   { name: "an API key", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/ },
   { name: "an API key", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/ },
   { name: "an API key", pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}/ },
