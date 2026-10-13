@@ -175,6 +175,7 @@ export type {
   AgentMemoryWriteAction,
   AgentMemoryWriteEvent,
   AgentRunMemoryParams,
+  AppManagedResult,
   DatabaseAgentMemoryStoreOptions,
   ForgetInput,
   ForgetResult,

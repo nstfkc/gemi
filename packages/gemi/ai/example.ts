@@ -319,7 +319,13 @@ function Chat({ threadId }: { threadId: string }) {
       // The memory tools' parts are typed because the agent declares
       // `memory`: a "Saved to memory · Undo" receipt reads the note and its id,
       // and Undo calls an app route that runs `AgentMemories.delete(id)`.
-      if (part.type === "tool-result" && part.name === "remember" && part.status === "ok") {
+      // `app-managed` means nothing was saved (the note is the app's).
+      if (
+        part.type === "tool-result" &&
+        part.name === "remember" &&
+        part.status === "ok" &&
+        part.output.action !== "app-managed"
+      ) {
         const saved: { id: string; content: string } = part.output;
         const action: "added" | "updated" | "unchanged" = part.output.action;
         void [saved, action];

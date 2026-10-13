@@ -395,6 +395,7 @@ describe("an agent with memory", () => {
     const { record: old } = await AgentMemories.put("project:1", {
       kind: "fact",
       content: "Her name is Zeynep Ozturk.",
+      source: { by: "user" },
     });
     const { record: elsewhere } = await AgentMemories.put("project:2", {
       kind: "fact",
@@ -435,6 +436,7 @@ describe("an agent with memory", () => {
     const { record: mine } = await AgentMemories.put("project:1", {
       kind: "fact",
       content: "Mine.",
+      source: { by: "agent" },
     });
     const { record: theirs } = await AgentMemories.put("project:2", {
       kind: "fact",
@@ -468,6 +470,90 @@ describe("an agent with memory", () => {
     expect(events).toEqual([
       expect.objectContaining({ action: "deleted", by: "agent", reason: "outdated" }),
     ]);
+  });
+
+  test("the app's notes are not the model's to change, unless the scope says so", async () => {
+    const { record: hours } = await AgentMemories.put("project:1", {
+      kind: "fact",
+      content: "Open Tue–Sun 8–16.",
+      key: "business.hours",
+    });
+    const { record: name } = await AgentMemories.put("project:1", {
+      kind: "fact",
+      content: "The business is called Simit Sarayı.",
+    });
+    const script = () => [
+      [
+        call("c1", "remember", {
+          scope: "project",
+          kind: "fact",
+          content: "Open every day 9–17.",
+          key: "business.hours",
+        }),
+        call("c2", "remember", {
+          scope: "project",
+          kind: "fact",
+          content: "The business is called Simit Evi.",
+          replaces: name.id,
+        }),
+        call("c3", "forget", { id: name.id }),
+        call("c4", "remember", {
+          scope: "project",
+          kind: "fact",
+          content: "Closed on public holidays.",
+        }),
+        finish(),
+      ],
+      say("ok"),
+    ];
+
+    const { agent } = agentWith(script());
+    const result = await agent
+      .stream({ messages: [], turn: { text: "x" }, memory: { scopes: { project: "project:1" } } })
+      .result();
+    const [keyed, replaced, forgot, added] = ["c1", "c2", "c3", "c4"].map((id) =>
+      resultOf(result.messages as AgentMessage[], id),
+    );
+    expect(keyed).toMatchObject({
+      status: "ok",
+      output: {
+        id: hours.id,
+        scope: "project",
+        content: "Open Tue–Sun 8–16.",
+        key: "business.hours",
+        action: "app-managed",
+        message: expect.stringContaining("managed by the app"),
+      },
+    });
+    expect(replaced.output).toMatchObject({ id: name.id, action: "app-managed" });
+    expect(forgot.output).toMatchObject({ id: name.id, action: "app-managed" });
+    expect(added.output).toMatchObject({ action: "added" });
+    expect(await AgentMemories.get(hours.id)).toMatchObject({
+      content: "Open Tue–Sun 8–16.",
+      version: 1,
+    });
+    expect((await AgentMemories.get(name.id))!.content).toBe(
+      "The business is called Simit Sarayı.",
+    );
+    // Turned down, not written: only the new note went to the store and counts.
+    expect(
+      fake.writes.filter((write) => "record" in write && write.record.source.by === "agent"),
+    ).toHaveLength(1);
+
+    // A scope that opts in lets the model correct them like its own.
+    const optedIn: AgentMemoryOptions = {
+      scopes: { project: { description: "This business.", replaceAppNotes: true } },
+    };
+    const { agent: open } = agentWith(script(), optedIn);
+    const second = await open
+      .stream({ messages: [], turn: { text: "x" }, memory: { scopes: { project: "project:1" } } })
+      .result();
+    const actions = ["c1", "c2", "c3"].map(
+      (id) => resultOf(second.messages as AgentMessage[], id).output.action,
+    );
+    expect(actions).toEqual(["updated", "updated", "forgotten"]);
+    expect((await AgentMemories.get(hours.id))!.content).toBe("Open every day 9–17.");
+    expect(await AgentMemories.get(name.id)).toBeNull();
   });
 
   test("recall searches the run's scopes only and answers labels, not keys", async () => {

@@ -59,8 +59,13 @@ describe("memory tool shapes", () => {
     type Part = ToolResultPart<Shapes>;
     const part = {} as Part;
     if (part.name === "remember" && part.status === "ok") {
-      expectTypeOf(part.output.action).toEqualTypeOf<"added" | "updated" | "unchanged">();
+      expectTypeOf(part.output.action).toEqualTypeOf<
+        "added" | "updated" | "unchanged" | "app-managed"
+      >();
       expectTypeOf(part.output.id).toEqualTypeOf<string>();
+      if (part.output.action === "app-managed") {
+        expectTypeOf(part.output.message).toEqualTypeOf<string>();
+      }
     }
   });
 

@@ -40,6 +40,15 @@ export type AgentMemoryScopeOptions = {
   write?: boolean;
   /** The kinds the model may write here. Default `fact`, `preference` and `note`. */
   kinds?: readonly string[];
+  /**
+   * Whether the model may change or delete a note the app wrote here
+   * (`source.by: "app"`, from `AgentMemories.put` or a tool's
+   * `ctx.memory.remember`). Default `false`: those notes are the app's, and a
+   * `remember` with the same `key` (or `replaces` naming one), or a `forget`
+   * of one, is turned down with `action: "app-managed"` and the note is left
+   * as it is. `true` lets the model correct them like its own notes.
+   */
+  replaceAppNotes?: boolean;
 };
 
 /** A built-in tool: on, off, or on behind the user's approval. */
@@ -233,20 +242,40 @@ export type RememberInput = {
  * `scope` is the label, never the key. Undo calls the app's own route, which
  * calls `AgentMemories.delete(id)`.
  */
-export type RememberResult = {
+export type RememberResult =
+  | {
+      id: string;
+      /** The label, e.g. `project`. */
+      scope: string;
+      kind: string;
+      content: string;
+      key: string | null;
+      action: AgentMemoryWriteAction;
+    }
+  | AppManagedResult;
+
+/**
+ * A `remember` or `forget` that would have changed a note the app wrote,
+ * in a scope without `replaceAppNotes`. Nothing was written: the fields
+ * describe the app's note as it stands, and `message` tells the model why.
+ * A UI shows nothing (there is nothing to undo).
+ */
+export type AppManagedResult = {
   id: string;
-  /** The label, e.g. `project`. */
   scope: string;
   kind: string;
   content: string;
   key: string | null;
-  action: AgentMemoryWriteAction;
+  action: "app-managed";
+  message: string;
 };
 
 export type ForgetInput = { id: string; reason?: string };
 
 /** What `forget` answers. */
-export type ForgetResult = { id: string; scope: string; content: string; action: "forgotten" };
+export type ForgetResult =
+  | { id: string; scope: string; content: string; action: "forgotten" }
+  | AppManagedResult;
 
 export type RecallInput = {
   query: string;
@@ -530,6 +559,7 @@ export class RunMemory {
           { by: "app", ...source },
           { modelWrite: false },
         );
+        if ("appManaged" in result) throw new Error("unreachable: the app's own write");
         return { record: result.record, action: result.action };
       },
       forget: async (id) => {
@@ -552,6 +582,7 @@ export class RunMemory {
             { by: "agent", ...source },
             { modelWrite: true },
           );
+          if ("appManaged" in result) return this.appManaged(result.appManaged, "change");
           return {
             id: result.record.id,
             scope: input.scope,
@@ -564,6 +595,7 @@ export class RunMemory {
         forget: async (input) => {
           const record = await this.find(input.id, this.writableLabels());
           if (!record) throw notFound(input.id);
+          if (this.isAppManaged(record)) return this.appManaged(record, "delete");
           this.spend();
           await deleteMemories([record.id], "agent", input.reason);
           return {
@@ -619,6 +651,25 @@ export class RunMemory {
     return undefined;
   }
 
+  /** A note the app wrote, in a scope where the model may not change those. */
+  private isAppManaged(record: AgentMemoryRecord): boolean {
+    if (record.source.by !== "app") return false;
+    const label = this.labelOf(record.scope);
+    return label === undefined || this.options?.scopes[label]?.replaceAppNotes !== true;
+  }
+
+  private appManaged(record: AgentMemoryRecord, verb: "change" | "delete"): AppManagedResult {
+    return {
+      id: record.id,
+      scope: this.labelOf(record.scope)!,
+      kind: record.kind,
+      content: record.content,
+      key: record.key,
+      action: "app-managed",
+      message: `Not saved: this note is managed by the app, and you may not ${verb} it. If the user wants it different, tell them to change it in the app. To keep an extra detail, save a new note without this key.`,
+    };
+  }
+
   private kindsFor(label: string): readonly string[] {
     return this.options?.scopes[label]?.kinds ?? DEFAULT_MEMORY_TOOL_KINDS;
   }
@@ -661,7 +712,10 @@ export class RunMemory {
     },
     source: { by: AgentMemorySource["by"]; messageId?: string },
     mode: { modelWrite: boolean },
-  ): Promise<{ record: AgentMemoryRecord; action: AgentMemoryWriteAction }> {
+  ): Promise<
+    | { record: AgentMemoryRecord; action: AgentMemoryWriteAction }
+    | { appManaged: AgentMemoryRecord }
+  > {
     const scopeKey = this.keyOf(params.scope);
     if (mode.modelWrite) {
       if (!this.writableLabels().includes(params.scope)) {
@@ -708,6 +762,7 @@ export class RunMemory {
     if (params.replaces !== undefined && params.replaces !== null && params.replaces !== "") {
       const target = await this.find(params.replaces, [params.scope]);
       if (!target) throw notFound(params.replaces);
+      if (mode.modelWrite && this.isAppManaged(target)) return { appManaged: target };
       replaces = target;
     }
 
@@ -715,6 +770,7 @@ export class RunMemory {
     if (!replaces) {
       const existing = await store.list([scopeKey]);
       const keyed = key === null ? undefined : existing.find((record) => record.key === key);
+      if (keyed && mode.modelWrite && this.isAppManaged(keyed)) return { appManaged: keyed };
       if (!keyed) {
         // The same note saved again, worded the same: nothing to write.
         const same = existing.find(

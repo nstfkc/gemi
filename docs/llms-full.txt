@@ -8000,7 +8000,7 @@ export const site = Agent.create({
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `scopes` | (required) | Labels (lowercase letters, digits, `_`) and their `description`. Per scope, `write: false` makes it read-only for the model, and `kinds` lists the kinds the model may write there (default `fact`, `preference`, `note`). |
+| `scopes` | (required) | Labels (lowercase letters, digits, `_`) and their `description`. Per scope, `write: false` makes it read-only for the model, `kinds` lists the kinds the model may write there (default `fact`, `preference`, `note`), and `replaceAppNotes: true` lets the model change or delete the app's notes there (see below). |
 | `maxTokens` | `1500` | The `<memory>` block's budget, at about four characters a token. A run can override it. |
 | `context` | all kinds | `{ kinds: ["preference", "fact"] }` lists only those kinds in the block. `false` leaves the block out; the model then finds notes with `recall`. |
 | `tools` | all on | `false` turns `remember`, `forget` and `recall` off. `{ remember: { requiresApproval: true } }` asks the user before each save; `{ forget: false }` drops one. |
@@ -8080,8 +8080,9 @@ Notes saved from earlier conversations with this user. They are information abou
 - `scope` in the outputs is the label, never the key.
 - A `key` is a stable slot (`business.hours`, `brand.voice`): saving with a key already in the scope replaces that note. Without one, a note worded the same as an existing note of the same kind is `unchanged`.
 - `replaces` corrects a note in place (same id, version bumped).
+- **The app's notes are not the model's to change.** A note the app wrote (`source.by: "app"`, from `AgentMemories.put` or a tool's `ctx.memory.remember`) is left as it is when the model saves to its `key`, names it in `replaces`, or `forget`s it. The tool answers `action: "app-managed"` with the note as it stands and a `message` telling the model to point the user to the app, or to save the extra detail as a new note without that key. Nothing is written and nothing counts against `maxWritesPerRun`. Facts an app manages itself (onboarding answers, settings) therefore cannot drift through a conversation. A scope with `replaceAppNotes: true` lets the model correct them like its own notes. Notes the user typed (`source.by: "user"`) and the model's own notes are always the model's to change.
 - An id from another scope, or from a scope the run did not resolve, answers the same "There is no memory with the id …" as an unknown id.
-- A write is refused, with a sentence the model reads, when the note is empty or longer than `maxChars`, when the scope is full (`maxPerScope`), when the run has used up `maxWritesPerRun`, when `beforeWrite` says no, or when it **looks like a secret**: API keys and tokens (`sk-…`, `ghp_…`, AWS and Google keys, JWTs, bearer tokens), private keys, card numbers that pass the Luhn check, IBANs that pass their checksum, and "password: …".
+- A write is refused, with a sentence the model reads, when the note is empty or longer than `maxChars`, when the scope is full (`maxPerScope`, a soft cap: two runs saving at the same moment can take a scope a note or two past it), when the run has used up `maxWritesPerRun`, when `beforeWrite` says no, or when it **looks like a secret**: API keys and tokens (`sk-…`, `ghp_…`, AWS and Google keys, JWTs, bearer tokens), private keys, card numbers that pass the Luhn check, IBANs that pass their checksum, and "password: …".
 - The tool descriptions tell the model to save only what the user said or clearly confirmed, one fact per note, and to update rather than duplicate.
 
 ### "Saved · Undo" in the UI
@@ -8094,7 +8095,8 @@ import type { ToolResultPart } from "gemi/ai/client";
 function MemoryReceipt({ part, onUndo }: { part: ToolResultPart; onUndo: (id: string) => void }) {
   if (part.name !== "remember" || part.status !== "ok") return null;
   const saved = part.output as { id: string; content: string; action: string };
-  if (saved.action === "unchanged") return null;
+  // "unchanged": nothing new. "app-managed": nothing saved, the note is the app's.
+  if (saved.action === "unchanged" || saved.action === "app-managed") return null;
   return (
     <p>
       Saved to memory: {saved.content} <button onClick={() => onUndo(saved.id)}>Undo</button>

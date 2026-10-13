@@ -33,6 +33,7 @@ export {
   type AgentMemoryScopes,
   type AgentMemoryToolOption,
   type AgentRunMemoryParams,
+  type AppManagedResult,
   DEFAULT_MEMORY_LIMITS,
   type ForgetInput,
   type ForgetResult,
