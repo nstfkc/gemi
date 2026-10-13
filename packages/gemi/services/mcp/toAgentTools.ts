@@ -326,7 +326,8 @@ function nativeAgentTool(
     description: descriptor.description,
     inputSchema: descriptor.inputSchema,
     ...(descriptor.outputSchema ? { outputSchema: descriptor.outputSchema } : {}),
-    requiresApproval: descriptor.requiresApproval,
+    // The tool's own function, when it decides per call (#944).
+    requiresApproval: registry.nativeApproval(descriptor.name),
     deferred,
     ...(native.timeoutMs !== undefined ? { timeoutMs: native.timeoutMs } : {}),
     ...(native.async ? { async: native.async } : {}),

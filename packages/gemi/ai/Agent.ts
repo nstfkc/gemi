@@ -615,6 +615,51 @@ export type ToolInputSchema<Input> =
   | ((ctx: ToolSchemaContext) => Schema<Input> | Promise<Schema<Input>>);
 
 /**
+ * What a `requiresApproval` function is given beside the call's input: the
+ * run's caller and request body, the same `context` and `body` the tool's
+ * `execute` gets, and which call of the run this is.
+ */
+export interface ToolApprovalContext {
+  context: AgentContext;
+  /** CLIENT-CONTROLLED, exactly as `ToolContext.body` is. */
+  body: Record<string, unknown>;
+  runId: string;
+  threadId?: string;
+  toolCallId: string;
+  /** Which step of the tool loop this is, starting at 1. */
+  step: number;
+  /** 0 at the top, 1 inside a sub-agent started by `ctx.runAgent`, and so on. */
+  readonly depth: number;
+  /** Aborted with the run (or, for a remote MCP call, with the call). */
+  signal: AbortSignal;
+}
+
+/**
+ * Whether a server tool asks the user before it runs (#944).
+ *
+ * `true` asks before every call, `false` (the default) never asks. The
+ * function form decides per call, from the call's parsed input and the run:
+ * answer `false` and the tool runs straight away, in this run, like a tool
+ * that never asks; answer `true` and the run ends `awaiting-input` with the
+ * call pending, as `true` does. It is how "always allow" belongs next to the
+ * tool, on the server, rather than in a browser that approves the moment the
+ * question arrives.
+ *
+ * It runs after the input is validated and before the call is signed, so an
+ * approval still covers the call that was asked about. Only `false` skips the
+ * question: a function that throws, or answers anything else, asks — it fails
+ * closed. It may be called more than once for one call (an MCP client's call
+ * evaluates it before the elicitation and again when it executes), so keep it
+ * free of side effects.
+ *
+ * Answering a pending call does not call it again: the user was asked, and
+ * their answer stands even if the setting changed in between.
+ */
+export type ToolApproval<Input> =
+  | boolean
+  | ((input: Input, ctx: ToolApprovalContext) => boolean | Promise<boolean>);
+
+/**
  * A tool either resolves once, or yields progress and then returns.
  *
  * The generator form exists because a tool that takes twenty seconds is the
@@ -702,7 +747,8 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
   | (ToolDefinitionBase<Name, Input, Output> & {
       answeredBy?: "server";
       execute: ToolExecute<Input, Output, Progress>;
-      requiresApproval?: boolean;
+      /** Ask the user first: always, never, or per call. See `ToolApproval`. */
+      requiresApproval?: ToolApproval<Input>;
     })
   | (ToolDefinitionBase<Name, Input, Output> & {
       answeredBy: "client";
@@ -739,7 +785,20 @@ export class AgentTool<
   readonly description: string;
   readonly inputSchema: ToolInputSchema<Input>;
   readonly outputSchema?: Schema<Output>;
+  /**
+   * Whether a call of this tool may ask the user first: `true` for
+   * `requiresApproval: true` and for the function form, which can. Whether a
+   * given call does is `approvalPredicate`'s answer, when there is one.
+   */
   readonly requiresApproval: boolean;
+  /**
+   * The function form of `requiresApproval`, deciding per call. Absent for a
+   * tool that always or never asks. See `ToolApproval`.
+   */
+  readonly approvalPredicate?: (
+    input: Input,
+    ctx: ToolApprovalContext,
+  ) => boolean | Promise<boolean>;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
@@ -761,7 +820,11 @@ export class AgentTool<
     this.description = params.description;
     this.inputSchema = params.inputSchema;
     this.outputSchema = params.outputSchema;
-    this.requiresApproval = params.requiresApproval === true;
+    this.requiresApproval =
+      params.requiresApproval === true || typeof params.requiresApproval === "function";
+    if (typeof params.requiresApproval === "function") {
+      this.approvalPredicate = params.requiresApproval;
+    }
     this.deferred = params.deferred === true;
     this.answeredBy = params.answeredBy === "client" ? "client" : "server";
     this.execute = params.execute ?? undefined;
@@ -788,6 +851,15 @@ export class AgentTool<
     }
     if (params.async?.deadlineMs !== undefined) {
       assertDuration(params.async.deadlineMs, `The tool "${params.name}"`, "async.deadlineMs");
+    }
+    if (
+      params.requiresApproval !== undefined &&
+      typeof params.requiresApproval !== "boolean" &&
+      typeof params.requiresApproval !== "function"
+    ) {
+      throw new Error(
+        `The tool "${params.name}" has a requiresApproval that is neither a boolean nor a function.`,
+      );
     }
     if (params.async && params.answeredBy === "client") {
       throw new Error(
@@ -3467,7 +3539,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // guess at what the first parse produced.
       call.input = parsed.value;
 
-      const kind = pendingKind(resolved.tool);
+      let kind = pendingKind(resolved.tool);
+      // A tool that decides per call (#944). Answered `false`, the call runs
+      // now like any other server tool: never pending, never signed, so it
+      // needs no nonce and leaves no receipt.
+      if (
+        kind === "approval" &&
+        resolved.tool.approvalPredicate &&
+        !(await this.asksApproval(resolved.tool, call, parsed.value, step))
+      ) {
+        kind = null;
+      }
       if (kind) {
         if (this.onPending === "deny") {
           this.addResult(message, this.deniedByPolicy(call));
@@ -3522,6 +3604,44 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.controller.signal,
     );
     return pending;
+  }
+
+  /**
+   * A per-call `requiresApproval`'s answer for one call. Fails closed: only
+   * `false` skips the question, and a function that throws asks (logged, for
+   * the app). Raced against the run's signal, so a `stop()` is not held up by
+   * a function that never settles.
+   */
+  private async asksApproval(
+    tool: AnyAgentTool,
+    call: ToolCallPart,
+    input: unknown,
+    step: number,
+  ): Promise<boolean> {
+    const ctx: ToolApprovalContext = {
+      context: this.context,
+      body: this.params.body ?? {},
+      runId: this.runId,
+      threadId: this.params.threadId,
+      toolCallId: call.toolCallId,
+      step,
+      depth: this.depth,
+      signal: this.controller.signal,
+    };
+    try {
+      const answer = await raceAbort(
+        Promise.resolve().then(() => tool.approvalPredicate!(input, ctx)),
+        this.controller.signal,
+      );
+      return answer !== false;
+    } catch (error) {
+      if (error instanceof RunAborted) throw error;
+      this.writeLog(
+        `[gemi/ai] agent "${this.config.name}": the requiresApproval of "${tool.name}" threw, so the call asks the user`,
+        { error, toolCallId: call.toolCallId },
+      );
+      return true;
+    }
   }
 
   /**

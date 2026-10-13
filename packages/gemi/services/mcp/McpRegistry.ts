@@ -1,4 +1,4 @@
-import type { AnyAgentTool, ToolContext } from "../../ai/Agent";
+import type { AnyAgentTool, ToolApproval, ToolApprovalContext, ToolContext } from "../../ai/Agent";
 import { generateWithin, type GenerateParams } from "../../ai/generate";
 import { isJobHandle, toolJobs } from "../../ai/jobs/AgentJob";
 import { noToolMemory } from "../../ai/memory/runMemory";
@@ -569,7 +569,13 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       if (!found?.remote || !this.grants(caller.principal, name)) {
         throw new McpCallRefusedError(`There is no tool named "${name}".`, "unknown-tool");
       }
-      if (found.descriptor.requiresApproval && options.approved !== true) {
+      // A native tool that decides per call (#944) is held to its own answer
+      // in `executeNative`, once the remote context it is asked with exists.
+      if (
+        found.descriptor.requiresApproval &&
+        options.approved !== true &&
+        !conditionalApproval(found)
+      ) {
         throw new McpCallRefusedError(
           `"${name}" needs the user's approval, and this call does not have it.`,
           "approval-required",
@@ -1017,6 +1023,59 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
   }
 
   /**
+   * Whether a remote caller's call of `name` with `args` must ask the user
+   * first (#944): the descriptor's `requiresApproval`, unless the tool is a
+   * native one whose `requiresApproval` is a function, which is then asked
+   * with the call's parsed input and a context built by the meta's
+   * `remote.context`, as `execute` would build it. Fails closed: invalid
+   * arguments, a context that cannot be built and a function that throws all
+   * answer `true`.
+   *
+   * The transport asks this before eliciting, and `execute` asks the function
+   * again unless the call is `approved`, so a transport that skipped this
+   * cannot run a call the function would have asked about.
+   */
+  async approvalRequired(
+    caller: McpCaller,
+    name: string,
+    args: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const found = this.plans.get(name);
+    if (!found) return true;
+    if (!conditionalApproval(found)) return found.descriptor.requiresApproval;
+    const plan = found as NativePlan;
+    if (caller.kind !== "remote" || !plan.meta.remote) return true;
+    const parsed = plan.descriptor.inputSchema.safeParse(args);
+    if (parsed.ok === false) return true;
+    const call: McpCallContext = { caller, req: caller.req, tool: plan.descriptor, input: parsed.value };
+    let context: ToolContext["context"];
+    try {
+      context = await this.bind(plan, "the remote context", () => plan.meta.remote!.context(call));
+    } catch {
+      return true;
+    }
+    if (typeof context !== "object" || context === null) return true;
+    const signal = options.signal ?? new AbortController().signal;
+    return asksApproval(plan, parsed.value, approvalContext(remoteToolContext(plan, context, signal)));
+  }
+
+  /**
+   * The native tool `name`'s approval as an in-process agent sees it: the
+   * meta's `requiresApproval: true` asks always, else the tool's own,
+   * function form included (#944).
+   *
+   * @internal For `toAgentTools`.
+   */
+  nativeApproval(name: string): ToolApproval<any> {
+    const plan = this.plans.get(name);
+    if (plan?.kind !== "tool") {
+      throw new Error(`McpRegistry: there is no native tool named "${name}".`);
+    }
+    return conditionalApproval(plan) ?? plan.descriptor.requiresApproval;
+  }
+
+  /**
    * The `AgentTool` registered as the native tool `name`.
    *
    * @internal For `toAgentTools`, which carries its `timeoutMs` and `async`.
@@ -1139,6 +1198,16 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
           ? signals[0]
           : AbortSignal.any(signals);
     const remoteCtx = remoteToolContext(plan, context, signal);
+    if (
+      !options.approved &&
+      conditionalApproval(plan) &&
+      (await asksApproval(plan, call.input, approvalContext(remoteCtx)))
+    ) {
+      throw new McpCallRefusedError(
+        `"${name}" needs the user's approval, and this call does not have it.`,
+        "approval-required",
+      );
+    }
 
     let output: unknown;
     try {
@@ -1618,6 +1687,42 @@ function remoteToolContext(
     }),
     memory: noToolMemory(),
   };
+}
+
+/**
+ * The function a native tool decides its approval with per call (#944), or
+ * `undefined` when it asks always or never. The meta's `requiresApproval:
+ * true` overrides it: that tool asks every time.
+ */
+function conditionalApproval(plan: Plan | NativePlan): AnyAgentTool["approvalPredicate"] {
+  if (plan.kind !== "tool" || plan.meta.requiresApproval === true) return undefined;
+  return plan.tool.approvalPredicate;
+}
+
+function approvalContext(ctx: ToolContext): ToolApprovalContext {
+  return {
+    context: ctx.context,
+    body: ctx.body,
+    runId: ctx.runId,
+    threadId: ctx.threadId,
+    toolCallId: ctx.toolCallId,
+    step: ctx.step,
+    depth: ctx.depth,
+    signal: ctx.signal,
+  };
+}
+
+/** The function's answer, failing closed: only `false` runs without asking. */
+async function asksApproval(plan: NativePlan, input: unknown, ctx: ToolApprovalContext): Promise<boolean> {
+  try {
+    return (await plan.tool.approvalPredicate!(input, ctx)) !== false;
+  } catch (error) {
+    console.error(
+      `[gemi/mcp] The requiresApproval of "${plan.descriptor.name}" threw, so the call asks the user:`,
+      error,
+    );
+    return true;
+  }
 }
 
 /**

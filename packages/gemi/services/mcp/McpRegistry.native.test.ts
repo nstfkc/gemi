@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+// Signs the pending call an in-process approval leaves.
+process.env.SECRET ??= "mcp-native-test-secret";
 import { createElement } from "react";
 
 import { Agent, AgentTool, ToolNamespace, type AgentStreamEvent } from "../../ai/Agent";
@@ -133,8 +136,27 @@ const misc = AgentTool.create({
   },
 });
 
+/** Asks unless `allow` says otherwise (#944). */
+let allow: (input: { count: number }, ctx: any) => boolean | Promise<boolean> = () => true;
+const asked: { input: unknown; context: unknown; runId: string }[] = [];
+const drawn: number[] = [];
+const draw = AgentTool.create({
+  name: "draw",
+  description: "Draw pictures",
+  inputSchema: s.object({ count: s.number() }),
+  requiresApproval: (input, ctx) => {
+    asked.push({ input, context: ctx.context, runId: ctx.runId });
+    return allow(input, ctx);
+  },
+  async execute(input) {
+    drawn.push(input.count);
+    return `drew ${input.count}`;
+  },
+});
+
 class Mcp extends McpRouter<CreateRPC<Api>> {
   scopes = {
+    "site:draw": { description: "Draw", names: ["draw", "draw-always-asks"] },
     "site:read": { description: "Read your site", tags: ["read"] },
     "site:build": { description: "Build your site", tags: ["build"] },
     "site:misc": { description: "Everything else", names: ["confirm", "misc"] },
@@ -156,6 +178,13 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
     "local-only": this.fromTool(localOnly, { tags: ["build"] }),
     confirm: this.fromTool(confirm, {
       description: "Confirm the thing",
+      remote: { context: () => ({}) as any },
+    }),
+    draw: this.fromTool(draw, {
+      remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
+    }),
+    "draw-always-asks": this.fromTool(draw, {
+      requiresApproval: true,
       remote: { context: () => ({}) as any },
     }),
     misc: this.fromTool(misc, {
@@ -263,6 +292,9 @@ async function asRemote<T>(
 
 beforeEach(() => {
   seen.length = 0;
+  asked.length = 0;
+  drawn.length = 0;
+  allow = () => true;
   handled.length = 0;
   behave = async () => "fine";
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -562,5 +594,115 @@ describe("for a remote caller", () => {
     await expect(
       asRemote((caller, registry) => registry.execute(caller, "summarize-site", { focus: 1 })),
     ).rejects.toThrow(/Invalid arguments for "summarize-site"/);
+  });
+});
+
+describe("requiresApproval decided per call (#944)", () => {
+  const drawer = () => principal({ scopes: ["site:draw"] });
+
+  test("the descriptor reads as one that may ask; the meta's true overrides the function", async () => {
+    await app.waitForBoot();
+    const registry = resolve(McpRegistry);
+    expect(registry.descriptors({ names: ["draw"] })[0].requiresApproval).toBe(true);
+    const byName = Object.fromEntries(toAgentTools(registry).map((tool) => [tool.name, tool]));
+    expect(byName.draw.requiresApproval).toBe(true);
+    expect(byName.draw.approvalPredicate).toBeTypeOf("function");
+    expect(byName["draw-always-asks"].requiresApproval).toBe(true);
+    expect(byName["draw-always-asks"].approvalPredicate).toBeUndefined();
+  });
+
+  test("an in-process agent runs it straight away when the function answers false", async () => {
+    allow = () => false;
+    const { result, events } = await runTool("draw", { count: 2 });
+    expect(result).toMatchObject({ status: "ok", output: "drew 2" });
+    expect(events.find((event) => event.type === "awaiting-input")).toBeUndefined();
+    expect(asked).toEqual([expect.objectContaining({ input: { count: 2 }, context: { from: "run" } })]);
+  });
+
+  test("an in-process agent pends it when the function answers true", async () => {
+    const { result, events } = await runTool("draw", { count: 2 });
+    expect(result).toBeUndefined();
+    expect(drawn).toEqual([]);
+    expect(events.find((event) => event.type === "awaiting-input")).toMatchObject({
+      pending: [{ name: "draw", kind: "approval" }],
+    });
+  });
+
+  test("a remote call is asked with the context the meta builds, and runs unapproved on false", async () => {
+    allow = (_input, ctx) => ctx.context.userId !== BOB.id;
+    const needed = await asRemote(
+      (caller, registry) => registry.approvalRequired(caller, "draw", { count: 3 }),
+      drawer(),
+    );
+    expect(needed).toBe(false);
+    expect(asked[0]).toMatchObject({ input: { count: 3 }, context: { userId: BOB.id } });
+    expect(asked[0].runId).toMatch(/^mcp_/);
+
+    const value = await asRemote((caller, registry) => registry.execute(caller, "draw", { count: 3 }), drawer());
+    expect(value).toBe("drew 3");
+    expect(drawn).toEqual([3]);
+  });
+
+  test("a remote call the function asks about is refused without approval, and runs with it", async () => {
+    const needed = await asRemote(
+      (caller, registry) => registry.approvalRequired(caller, "draw", { count: 1 }),
+      drawer(),
+    );
+    expect(needed).toBe(true);
+    await expect(
+      asRemote((caller, registry) => registry.execute(caller, "draw", { count: 1 }), drawer()),
+    ).rejects.toMatchObject({ reason: "approval-required" });
+    expect(drawn).toEqual([]);
+
+    asked.length = 0;
+    const value = await asRemote(
+      (caller, registry) => registry.execute(caller, "draw", { count: 1 }, undefined, { approved: true }),
+      drawer(),
+    );
+    expect(value).toBe("drew 1");
+    // An approved call is not asked again.
+    expect(asked).toEqual([]);
+  });
+
+  test("a function that throws fails closed for a remote call", async () => {
+    allow = () => {
+      throw new Error("settings store down");
+    };
+    expect(
+      await asRemote((caller, registry) => registry.approvalRequired(caller, "draw", { count: 1 }), drawer()),
+    ).toBe(true);
+    await expect(
+      asRemote((caller, registry) => registry.execute(caller, "draw", { count: 1 }), drawer()),
+    ).rejects.toMatchObject({ reason: "approval-required" });
+    expect(drawn).toEqual([]);
+  });
+
+  test("invalid arguments ask rather than run the function", async () => {
+    allow = () => false;
+    expect(
+      await asRemote((caller, registry) => registry.approvalRequired(caller, "draw", { count: "x" }), drawer()),
+    ).toBe(true);
+    expect(asked).toEqual([]);
+  });
+
+  test("the meta's requiresApproval: true asks every time, without calling the function", async () => {
+    allow = () => false;
+    expect(
+      await asRemote(
+        (caller, registry) => registry.approvalRequired(caller, "draw-always-asks", { count: 1 }),
+        drawer(),
+      ),
+    ).toBe(true);
+    await expect(
+      asRemote((caller, registry) => registry.execute(caller, "draw-always-asks", { count: 1 }), drawer()),
+    ).rejects.toMatchObject({ reason: "approval-required" });
+    expect(asked).toEqual([]);
+  });
+
+  test("a tool that always or never asks answers its descriptor", async () => {
+    expect(await asRemote((caller, registry) => registry.approvalRequired(caller, "confirm", {}))).toBe(true);
+    expect(
+      await asRemote((caller, registry) => registry.approvalRequired(caller, "summarize-site", { focus: "x" })),
+    ).toBe(false);
   });
 });
