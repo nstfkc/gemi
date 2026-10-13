@@ -85,12 +85,15 @@ export function imagesEndpoint(target: ProviderTarget): ImagesEndpoint {
 export class ImageRequestError extends Error {
   readonly code: AgentError["code"];
   readonly retryable: boolean;
+  /** For a retryable `rate_limited`: the wait the provider asked for, in ms. */
+  readonly retryAfter?: number;
 
   constructor(error: AgentError, options: { cause?: unknown } = {}) {
     super(error.message, options);
     this.name = "ImageRequestError";
     this.code = error.code;
     this.retryable = error.retryable;
+    if (error.retryAfter !== undefined) this.retryAfter = error.retryAfter;
   }
 }
 

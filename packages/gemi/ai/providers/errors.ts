@@ -13,13 +13,16 @@ export class ProviderHttpError extends Error {
   readonly status: number;
   readonly body: unknown;
   readonly requestId?: string;
+  /** The response's `Retry-After`, in milliseconds, when it had one. */
+  readonly retryAfter?: number;
 
-  constructor(status: number, body: unknown, requestId?: string) {
+  constructor(status: number, body: unknown, requestId?: string, retryAfter?: number) {
     super(`Provider request failed with status ${status}: ${describeBody(body)}`);
     this.name = "ProviderHttpError";
     this.status = status;
     this.body = body;
     this.requestId = requestId;
+    if (retryAfter !== undefined) this.retryAfter = retryAfter;
   }
 }
 
@@ -98,7 +101,7 @@ export function normalizeProviderError(error: unknown): AgentError {
   }
 
   if (error instanceof ProviderHttpError) {
-    return fromStatus(error.status, errorBody(error.body), error.message);
+    return fromStatus(error.status, errorBody(error.body), error.message, error.retryAfter);
   }
 
   // `fetch` rejects with a TypeError for DNS failures, refused connections and
@@ -122,18 +125,32 @@ function fromStatus(
   status: number,
   body: OpenAIErrorBody | null,
   fallbackMessage: string,
+  retryAfterHeader?: number,
 ): AgentError {
   const message = body?.message ?? fallbackMessage;
   const code = (body?.code ?? "").toLowerCase();
   const type = (body?.type ?? "").toLowerCase();
-  const haystack = `${code} ${type} ${message}`.toLowerCase();
+  // URLs are dropped before matching: Azure's ordinary rate-limit 429 ends
+  // with "visit: https://aka.ms/oai/quotaincrease", and a link in a message is
+  // advice, not the diagnosis.
+  const haystack = `${code} ${type} ${message}`.toLowerCase().replace(/https?:\/\/\S+/g, "");
 
   if (status === 429) {
     // A spent quota answers 429 and will answer 429 for the rest of the month.
     // Retrying it is how a run turns one billing problem into `maxRetries`
-    // billing problems and a much later error message.
-    const outOfCredit = code === "insufficient_quota" || haystack.includes("quota");
-    return { code: "rate_limited", message, retryable: !outOfCredit };
+    // billing problems and a much later error message. A code that names a
+    // rate limit is believed over any wording, though: Azure's
+    // `RateLimitReached` asks for a retry in so many seconds.
+    const outOfCredit =
+      !RATE_LIMIT_CODES.has(code) && (code === "insufficient_quota" || haystack.includes("quota"));
+    if (outOfCredit) return { code: "rate_limited", message, retryable: false };
+    const retryAfter = retryAfterHeader ?? retryAfterFromMessage(message);
+    return {
+      code: "rate_limited",
+      message,
+      retryable: true,
+      ...(retryAfter !== undefined ? { retryAfter } : {}),
+    };
   }
 
   if (status >= 500 || status === 408 || status === 409) {
@@ -157,6 +174,21 @@ function fromStatus(
   return { code: "provider_error", message, retryable: false };
 }
 
+/** Body codes that say "too many requests right now", never "out of credit". */
+const RATE_LIMIT_CODES = new Set(["ratelimitreached", "rate_limit_exceeded", "too_many_requests"]);
+
+/**
+ * "Please retry after 30 seconds", as Azure words it in a 429 that may come
+ * without a `Retry-After` header. Milliseconds, or undefined when the message
+ * does not say.
+ */
+export function retryAfterFromMessage(message: string): number | undefined {
+  const match = /retry after (\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s)\b/i.exec(message);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return /^m(s|illi)/i.test(match[2]!) ? value : value * 1000;
+}
+
 function isContextLength(haystack: string): boolean {
   return (
     haystack.includes("context_length_exceeded") ||
@@ -171,7 +203,12 @@ function isContentFilter(haystack: string): boolean {
     haystack.includes("content_filter") ||
     haystack.includes("content_policy_violation") ||
     haystack.includes("responsibleaipolicyviolation") ||
-    haystack.includes("content management policy")
+    haystack.includes("content management policy") ||
+    // The image models' refusal: `code: "moderation_blocked"`, "Your request
+    // was rejected by the safety system ... safety_violations=[...]".
+    haystack.includes("moderation_blocked") ||
+    haystack.includes("rejected by the safety system") ||
+    haystack.includes("safety_violations")
   );
 }
 

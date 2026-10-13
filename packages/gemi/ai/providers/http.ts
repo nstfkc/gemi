@@ -223,6 +223,7 @@ export async function requestWithRetry(
       response.status,
       body,
       response.headers.get("x-request-id") ?? undefined,
+      parseRetryAfter(response.headers.get("retry-after"), now()),
     );
 
     if (attempt === maxRetries || !shouldRetry(response.status, error)) throw error;
@@ -230,8 +231,12 @@ export async function requestWithRetry(
     // Bounded, because `Retry-After` is a number the server chooses and a daily
     // quota answers it in hours. Sleeping through that holds the run open for
     // the whole window; waking early costs one request that gets the same 429
-    // and a longer, still-bounded backoff after it.
-    const retryAfter = parseRetryAfter(response.headers.get("retry-after"), now());
+    // and a longer, still-bounded backoff after it. Without the header, a 429
+    // whose message names the wait (Azure: "Please retry after 30 seconds")
+    // is believed too.
+    const retryAfter =
+      error.retryAfter ??
+      (response.status === 429 ? normalizeProviderError(error).retryAfter : undefined);
     await wait(
       retryAfter === undefined
         ? backoffDelayMs(attempt, random)

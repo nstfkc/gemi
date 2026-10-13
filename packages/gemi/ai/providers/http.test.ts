@@ -134,6 +134,37 @@ describe("requestWithRetry()", () => {
     expect(h.slept).toEqual([500]);
   });
 
+  /** nstfkc/gemi#938: Azure's S0 429, which links to `quotaincrease` and asks
+   *  for 30 seconds in its message rather than a header. */
+  test("Azure's rate-limit 429 is retried after the wait its message names", async () => {
+    const azure = JSON.stringify({
+      error: {
+        code: "RateLimitReached",
+        message:
+          "Your requests to gpt-image-2 have exceeded the call rate limit for your current AIServices S0 pricing tier. Please retry after 3 seconds. To increase your default rate limit, visit: https://aka.ms/oai/quotaincrease.",
+      },
+    });
+    const h = harness([res(429, azure), res(200, "ok")]);
+    expect((await h.run()).status).toBe(200);
+    expect(h.slept).toEqual([3000]);
+  });
+
+  test("a Retry-After header still wins over the message", async () => {
+    const azure = JSON.stringify({
+      error: { code: "RateLimitReached", message: "Please retry after 30 seconds." },
+    });
+    const h = harness([res(429, azure, { "retry-after": "2" }), res(200, "ok")]);
+    expect((await h.run()).status).toBe(200);
+    expect(h.slept).toEqual([2000]);
+  });
+
+  test("the thrown error carries the Retry-After it was given", async () => {
+    const h = harness([res(429, "{}", { "retry-after": "4" })]);
+    const error = await h.run(0).catch((e) => e);
+    expect(error).toBeInstanceOf(ProviderHttpError);
+    expect(error.retryAfter).toBe(4000);
+  });
+
   /**
    * A daily quota answers `Retry-After` in hours. Sitting through it holds the
    * run — and the user's cancelled stream — open for the whole window, so the

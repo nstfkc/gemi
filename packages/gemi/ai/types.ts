@@ -106,6 +106,10 @@ export type AgentErrorCode =
   | "provider_error"
   | "rate_limited"
   | "context_length_exceeded"
+  /** The provider's safety system refused the request or its output: Azure's
+   *  content filter, OpenAI's `content_policy_violation`, or an image model's
+   *  `moderation_blocked`. Not retryable as is; an app may reword and try
+   *  again. */
   | "content_filtered"
   | "tool_error"
   | "invalid_tool_input"
@@ -132,6 +136,10 @@ export type AgentError = {
   message: string;
   toolCallId?: string;
   retryable: boolean;
+  /** For a retryable `rate_limited`: how long the provider asked to wait, in
+   *  milliseconds, from its `Retry-After` header or, failing that, a "retry
+   *  after N seconds" in its message. Absent when the provider did not say. */
+  retryAfter?: number;
 };
 
 // --- content parts -------------------------------------------------------
