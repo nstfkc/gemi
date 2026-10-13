@@ -563,6 +563,15 @@ jobs:
         env:
           VITEST_MIN_PASSED: "12"
 
+      # The agent memory store's keyed upsert under a race, compare-and-set,
+      # paging, expiry and search, against the same contract the in-memory
+      # store runs (#936).
+      - name: Agent memory store on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" ai/memory/stores.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "18"
+
       # The run store's compare-and-set, listing, clock-based sweep and prune,
       # and a run written inside a transaction that rolls back (#908).
       - name: Run store on Postgres and MySQL

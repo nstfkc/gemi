@@ -1,3 +1,19 @@
+# Unreleased
+
+## AI: agent memory across conversations (#936, phase 1)
+
+**New, opt-in, nothing to migrate.** Agents can keep short, scoped notes across conversations. See [AI Memory](docs/ai-memory.md).
+
+- `Agent.create({ memory: { scopes, maxTokens?, context?, tools?, limits? } })` declares scope labels (`project`, `user`, …) with descriptions. The model only ever names a label.
+- `AgentController.memoryScopes(req, { body })` resolves the labels to the app's scope keys for each turn (`useChat`, `startTurn` and voice). The default is `{}`, so memory stays off until a controller resolves a label, and a label answered `null` is off for that turn, with no block and no tools. `protected memoryMaxTokens` sets the block's budget per controller. Outside a controller, use `Agent.stream({ memory: { scopes, maxTokens? } })`. A sub-run gets the parent's keys for the labels its agent declares.
+- The run appends a `<memory>` block to the system prompt: pinned notes first, a stable order, a token budget (1,500 by default), framed as data and tag-escaped.
+- The built-in `remember`, `forget` and `recall` tools are in a reserved `memory` namespace and need no approval by default (`tools: { remember: { requiresApproval: true } }` opts in). Their results are typed on the client (`part.name === "remember"`, `part.output.id`). Limits: 500 characters a note, 200 notes a scope and 10 writes a run. Writes that look like secrets are refused. `recall` is keyword search. The model cannot change or delete a note the app wrote (`source.by: "app"`): such a `remember` or `forget` answers `action: "app-managed"` and writes nothing, unless the scope sets `replaceAppNotes: true`.
+- **An agent that declares `memory`** cannot also have a namespace named `memory`, or a tool of its own named `remember`, `forget` or `recall` (unless that built-in tool is turned off). Agents without `memory` are unaffected.
+- `ToolContext` gains `memory` (`ctx.memory`): `list`, `recall`, `get`, `remember` and `forget` by label, scoped to the run. Code that builds a `ToolContext` by hand (a test calling `tool.execute` directly, say) has to add a `memory` member.
+- `AgentMemories` is the app's API: `use(store, { beforeWrite, onWrite })`, `list`, `get`, `search`, `put`, `update` (compare-and-set with `{ version }`, throws `AgentMemoryConflictError`), `delete`, `deleteScope`, `export` and `fake()` (a `FakeAgentMemoryStore` with `assertRemembered`, `assertForgotten` and `assertNothingRemembered`). Deletes are hard.
+- The stores are `InMemoryAgentMemoryStore` (the default, not durable) and `DatabaseAgentMemoryStore` (SQLite, Postgres and MySQL, table `gemi_agent_memories`). Create the table with the Prisma model in the docs or `store.createTable()`.
+- New types: `AgentToolShapes<typeof agent>` (an agent's tool shapes including the memory tools) and `MemoryToolShapes`. `AnyAgent` is now `Agent<any, any, any, any>`, since `Agent` takes a fourth type parameter for its memory declaration.
+
 # Upgrading from 0.133 to 0.134
 
 ## AI: live transcription — transcription sessions and `useLiveTranscription` (#929)

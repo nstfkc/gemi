@@ -26,6 +26,25 @@ import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
 import { isJobHandle, type JobHandle, type RunJobs, type ToolJobs, toolJobs } from "./jobs/AgentJob";
 import type { AgentJobsOptions } from "./jobs/contextBlock";
+import { DEFAULT_MEMORY_MAX_TOKENS } from "./memory/contextBlock";
+import {
+  assertMemoryOptions,
+  FORGET_DESCRIPTION,
+  MEMORY_NAMESPACE,
+  MEMORY_NAMESPACE_DESCRIPTION,
+  MEMORY_TOOL_NAMES,
+  memoryToolAccess,
+  memoryToolSchema,
+  memoryToolsEnabled,
+  type AgentMemoryOptions,
+  type AgentRunMemoryParams,
+  type MemoryToolShapes,
+  type MemoryWriteCounter,
+  RECALL_DESCRIPTION,
+  REMEMBER_DESCRIPTION,
+  RunMemory,
+  type ToolMemory,
+} from "./memory/runMemory";
 import {
   executionReceiptId,
   spendNestedRun,
@@ -369,6 +388,15 @@ export interface ToolContext {
    * model reads as the tool's error. See `ToolJobs`.
    */
   jobs: ToolJobs;
+
+  /**
+   * The run's memory (#936), by scope label: `ctx.memory.list("project")`,
+   * `ctx.memory.remember({ scope: "project", … })`. Only the labels the
+   * agent declares and the run resolved; none of the methods takes a key.
+   * Always present: in a run without memory every label answers "No …
+   * memory in this conversation". See `ToolMemory`.
+   */
+  memory: ToolMemory;
 }
 
 /** What an image parked by a tool answers. See `ToolContext.generateImage`. */
@@ -1094,6 +1122,7 @@ export interface CreateAgentParams<
   T extends readonly ToolEntry[],
   S extends readonly Skill[],
   O extends Schema<any> | undefined,
+  M extends AgentMemoryOptions | false = false,
 > {
   name: string;
   /** The system prompt. Per-request additions belong on the controller, which
@@ -1221,6 +1250,16 @@ export interface CreateAgentParams<
    * default, `false` for none. See `AgentJobsOptions`.
    */
   jobs?: AgentJobsOptions;
+  /**
+   * Memory across conversations (#936): the scopes this agent remembers in
+   * (labels the model sees, resolved to keys per run on the server), the
+   * `<memory>` block added to the system prompt, and the built-in
+   * `remember` / `forget` / `recall` tools in the reserved `memory`
+   * namespace. Off unless the run resolves a scope:
+   * `AgentController.memoryScopes()`, or `memory` on `Agent.stream`. See
+   * `AgentMemoryOptions` and docs/ai-memory.md.
+   */
+  memory?: M;
 }
 
 /**
@@ -1436,6 +1475,15 @@ interface AgentStreamParamsBase {
    */
   attachments?: ScopedAttachments | null;
   /**
+   * The run's memory scopes (#936): the agent's labels resolved to keys,
+   * e.g. `{ project: "project:clx…", user: null }`, and optionally the
+   * `<memory>` block's budget for this run. Decided on the server, never
+   * read from the client. A label left out, or `null`, is off for the run.
+   * `AgentController` sets this from `memoryScopes()`. Handed down to a
+   * sub-run, which uses the labels its own agent declares.
+   */
+  memory?: AgentRunMemoryParams;
+  /**
    * Lets this run's tools start background jobs with `ctx.jobs` (#461).
    * `AgentController` passes it on a threaded turn: a job settles into the
    * thread, so a run with no thread has nowhere to put the result. Without it
@@ -1485,6 +1533,8 @@ export type NestedContext = {
    * make the whole subtree refuse rather than to check at the top.
    */
   onPending: "escalate" | "deny";
+  /** The root run's count of memory writes, shared down the tree (#936). */
+  memoryWrites?: MemoryWriteCounter;
 };
 
 /**
@@ -1622,6 +1672,8 @@ type ResolvedTool = {
 /** What a run needs from its agent, resolved once at `Agent.create`. */
 type RunConfig = {
   name: string;
+  /** The agent's `memory`, when it declares one. */
+  memory?: AgentMemoryOptions;
   instructions?: string;
   provider: AgentProvider;
   registry: Map<string, ResolvedTool>;
@@ -1645,6 +1697,24 @@ type RunConfig = {
 };
 
 const DEFAULT_MAX_STEPS = 8;
+
+/** Phantom: carries an agent's `memory` declaration in its type, for its tool shapes. */
+declare const AGENT_MEMORY: unique symbol;
+
+/**
+ * An agent's tool shapes: its tools', plus `remember`, `forget` and `recall`
+ * when it declares `memory` with its tools on (#936).
+ */
+export type AgentToolShapes<A extends AnyAgent> = ToolShapesWithMemory<
+  A["tools"],
+  Exclude<A[typeof AGENT_MEMORY], undefined>
+>;
+
+type ToolShapesWithMemory<T extends readonly ToolEntry[], M> = [M] extends [false]
+  ? ToolShapesOf<T>
+  : [M] extends [{ tools: false }]
+    ? ToolShapesOf<T>
+    : ToolShapesOf<T> & MemoryToolShapes;
 /** Three is enough for "agent, sub-agent, specialist" and small enough that a
  *  runaway tree is a readable error rather than a stack trace. */
 const DEFAULT_MAX_DEPTH = 3;
@@ -1653,6 +1723,7 @@ export class Agent<
   T extends readonly ToolEntry[] = readonly ToolEntry[],
   S extends readonly Skill[] = readonly Skill[],
   O extends Schema<any> | undefined = undefined,
+  M extends AgentMemoryOptions | false = false,
 > {
   readonly name: string;
   readonly tools: T;
@@ -1671,10 +1742,13 @@ export class Agent<
   readonly maxRunDurationMs: number | null;
   /** See `CreateAgentParams.jobs`. */
   readonly jobs: AgentJobsOptions;
+  /** See `CreateAgentParams.memory`. `undefined` for an agent without memory. */
+  readonly memory: AgentMemoryOptions | undefined;
+  declare readonly [AGENT_MEMORY]?: M;
 
   private readonly config: RunConfig;
 
-  private constructor(params: CreateAgentParams<T, S, O>) {
+  private constructor(params: CreateAgentParams<T, S, O, M>) {
     this.name = params.name;
     this.instructions = params.instructions;
     this.provider = params.provider;
@@ -1685,12 +1759,14 @@ export class Agent<
     this.maxDepth = params.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.reasoning = params.reasoning;
     this.jobs = params.jobs ?? {};
+    this.memory = params.memory ? (params.memory as AgentMemoryOptions) : undefined;
     const limit = normalizeDuration(params.maxRunDurationMs);
     this.maxRunDurationMs = limit === undefined ? DEFAULT_MAX_RUN_DURATION_MS : limit;
 
-    const { registry, providerTools } = lowerTools(this.tools, this.skills);
+    const { registry, providerTools } = lowerTools(this.tools, this.skills, this.memory);
     this.config = {
       name: this.name,
+      memory: this.memory,
       instructions: this.instructions,
       provider: this.provider,
       registry,
@@ -1712,7 +1788,8 @@ export class Agent<
     const T extends readonly ToolEntry[],
     const S extends readonly Skill[],
     O extends Schema<any> | undefined = undefined,
-  >(params: CreateAgentParams<T, S, O>): Agent<T, S, O> {
+    const M extends AgentMemoryOptions | false = false,
+  >(params: CreateAgentParams<T, S, O, M>): Agent<T, S, O, M> {
     if (params.output) {
       assertObjectRoot(params.output as Schema<any>, `The agent "${params.name}"`, "output");
     }
@@ -1725,10 +1802,11 @@ export class Agent<
         `The agent "${params.name}" sets \`jobs.contextBlock.max\` to ${String(block.max)}, but it has to be a whole number above 0. Use \`contextBlock: false\` for no block.`,
       );
     }
+    if (params.memory) assertMemoryOptions(params.name, params.memory as AgentMemoryOptions);
     return new Agent(params);
   }
 
-  stream(params: AgentStreamParams): AgentRun<ToolShapesOf<T>, OutputOf<O>> {
+  stream(params: AgentStreamParams): AgentRun<ToolShapesWithMemory<T, M>, OutputOf<O>> {
     const config: RunConfig = {
       ...this.config,
       provider: params.provider ?? this.config.provider,
@@ -1755,13 +1833,23 @@ export class Agent<
         "maxRunDurationMs",
       );
     }
-    return new AgentRunImpl(config, params) as unknown as AgentRun<ToolShapesOf<T>, OutputOf<O>>;
+    if (params.memory?.maxTokens !== undefined) {
+      if (!(Number.isInteger(params.memory.maxTokens) && params.memory.maxTokens >= 0)) {
+        throw new Error(
+          `Agent.stream for "${this.name}" sets \`memory.maxTokens\` to ${String(params.memory.maxTokens)}, but it has to be a whole number of at least 0.`,
+        );
+      }
+    }
+    return new AgentRunImpl(config, params) as unknown as AgentRun<
+      ToolShapesWithMemory<T, M>,
+      OutputOf<O>
+    >;
   }
 }
 
 export type OutputOf<O> = O extends Schema<any> ? Infer<O> : never;
 
-export type AnyAgent = Agent<any, any, any>;
+export type AnyAgent = Agent<any, any, any, any>;
 
 // --- lowering ------------------------------------------------------------
 
@@ -1800,6 +1888,7 @@ function staticInputSchema(tool: AnyAgentTool): Schema<any> | undefined {
 function lowerTools(
   entries: readonly ToolEntry[],
   skills: readonly Skill[],
+  memory?: AgentMemoryOptions,
 ): {
   registry: Map<string, ResolvedTool>;
   providerTools: (ProviderToolSpec | ProviderToolNamespace)[];
@@ -1821,6 +1910,11 @@ function lowerTools(
       if (entry.name === SKILLS_NAMESPACE) {
         throw new Error(
           `"${SKILLS_NAMESPACE}" is reserved for the namespace skills are lowered into. Rename the namespace — silently shadowing it would make every skill unreachable with no error to read.`,
+        );
+      }
+      if (memory && entry.name === MEMORY_NAMESPACE) {
+        throw new Error(
+          `"${MEMORY_NAMESPACE}" is reserved for the namespace the memory tools are lowered into. Rename the namespace.`,
         );
       }
       const members: ProviderToolSpec[] = [];
@@ -1874,7 +1968,85 @@ function lowerTools(
     });
   }
 
+  const memoryTools = memory ? builtInMemoryTools(memory) : [];
+  if (memoryTools.length > 0) {
+    const members: ProviderToolSpec[] = [];
+    for (const tool of memoryTools) {
+      if (registry.has(tool.name)) {
+        throw new Error(
+          `The tool "${tool.name}" clashes with the built-in memory tool of that name, which this agent gets because it declares \`memory\`. Rename the tool, or turn the built-in one off with \`memory.tools\`.`,
+        );
+      }
+      const resolved = {
+        tool,
+        namespace: MEMORY_NAMESPACE,
+        deferred: false,
+        inputSchema: staticInputSchema(tool),
+      };
+      register(resolved);
+      members.push(toolSpec(resolved));
+    }
+    // Swapped per run for one built from the run's own labels, or dropped
+    // when the run resolves none (`AgentRunImpl.prepareMemory`).
+    providerTools.push({
+      name: MEMORY_NAMESPACE,
+      description: MEMORY_NAMESPACE_DESCRIPTION,
+      tools: members,
+    });
+  }
+
   return { registry, providerTools };
+}
+
+/**
+ * The built-in memory tools a declaration turns on (#936). Made per agent
+ * rather than shared, since whether one asks for approval is the agent's
+ * choice. Their schemas here list every declared label; a run narrows them
+ * to the labels it resolved.
+ */
+function builtInMemoryTools(memory: AgentMemoryOptions): AnyAgentTool[] {
+  const enabled = memoryToolsEnabled(memory);
+  const labels = Object.keys(memory.scopes);
+  const writable = labels.filter((label) => memory.scopes[label]!.write !== false);
+  const kinds = [
+    ...new Set(
+      writable.flatMap((label) => memory.scopes[label]!.kinds ?? ["fact", "preference", "note"]),
+    ),
+  ];
+  const tools: AnyAgentTool[] = [];
+  if (enabled.remember && writable.length > 0) {
+    tools.push(
+      AgentTool.create({
+        name: "remember",
+        description: REMEMBER_DESCRIPTION,
+        inputSchema: memoryToolSchema("remember", { scopes: writable, descriptions: "", kinds }),
+        requiresApproval: enabled.remember.requiresApproval,
+        execute: (input: any, ctx) => memoryToolAccess(ctx.memory).remember(input),
+      }) as unknown as AnyAgentTool,
+    );
+  }
+  if (enabled.forget && writable.length > 0) {
+    tools.push(
+      AgentTool.create({
+        name: "forget",
+        description: FORGET_DESCRIPTION,
+        inputSchema: memoryToolSchema("forget", { scopes: writable, descriptions: "", kinds }),
+        requiresApproval: enabled.forget.requiresApproval,
+        execute: (input: any, ctx) => memoryToolAccess(ctx.memory).forget(input),
+      }) as unknown as AnyAgentTool,
+    );
+  }
+  if (enabled.recall) {
+    tools.push(
+      AgentTool.create({
+        name: "recall",
+        description: RECALL_DESCRIPTION,
+        inputSchema: memoryToolSchema("recall", { scopes: labels, descriptions: "", kinds }),
+        execute: (input: any, ctx) => memoryToolAccess(ctx.memory).recall(input),
+      }) as unknown as AnyAgentTool,
+    );
+  }
+  return tools;
 }
 
 /** The zero-parameter tool a skill becomes. */
@@ -2323,6 +2495,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * by tool call id. See `queueShown`.
    */
   private readonly shownQueue = new Map<string, AgentMessage[]>();
+  /**
+   * The run's memory (#936): its labels resolved to keys, and what
+   * `ctx.memory` and the memory tools go through. Empty for an agent without
+   * memory. Set by `prepareMemory`, before the first model call.
+   */
+  private memory!: RunMemory;
+  /** The `<memory>` block, read once when the run starts so it is the same on every step. */
+  private memoryBlock: string | null = null;
 
   constructor(config: RunConfig, params: AgentStreamParams) {
     this.config = config;
@@ -2341,6 +2521,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.signingRunId = nesting?.signingRunId ?? this.runId;
     this.pathPrefix = nesting?.signingPath ?? [];
     this.onPending = nesting?.onPending ?? "escalate";
+    this.memory = new RunMemory({
+      options: config.memory,
+      scopes: params.memory?.scopes,
+      agent: config.name,
+      runId: this.runId,
+      threadId: params.threadId,
+      writes: nesting?.memoryWrites,
+    });
 
     if (params.signal) {
       if (params.signal.aborted) this.controller.abort();
@@ -2505,6 +2693,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.emit({ type: "run-start", runId: this.runId, threadId: this.params.threadId });
 
     try {
+      // Which memory tools the run has, and the `<memory>` block: before the
+      // schemas, which the memory tools' are swapped in with.
+      await this.prepareMemory();
       // First, because everything after it reads a tool's schema: re-entering
       // a parked call below validates its input, and the model is shown them.
       const unresolved = await this.resolveToolSchemas();
@@ -2615,6 +2806,67 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     );
     this.config = { ...this.config, registry, providerTools };
     return undefined;
+  }
+
+  /**
+   * Fits the agent's memory to this run (#936). The memory tools are
+   * narrowed to the labels the run resolved (a label it did not resolve is
+   * not a value the model can send), and dropped altogether when it resolved
+   * none, or none it may write to. Then the `<memory>` block is read, once:
+   * a write later in the run does not change the prompt, so the provider's
+   * cache holds for the whole run.
+   *
+   * A store that cannot be read costs the run its block, not the run: the
+   * failure is logged and the model goes on without it.
+   */
+  private async prepareMemory(): Promise<void> {
+    const options = this.config.memory;
+    if (!options) return;
+    const memory = this.memory;
+    const writable = memory.writableLabels();
+    const kinds = memory.toolKinds();
+    const keep = (name: string): boolean =>
+      name === "recall" ? memory.labels.length > 0 : writable.length > 0 && kinds.length > 0;
+
+    const registry = new Map<string, ResolvedTool>();
+    for (const [name, entry] of this.config.registry) {
+      if (entry.namespace !== MEMORY_NAMESPACE) {
+        registry.set(name, entry);
+        continue;
+      }
+      if (!keep(name)) continue;
+      const scopes = name === "recall" ? memory.labels : writable;
+      const inputSchema = memoryToolSchema(name as (typeof MEMORY_TOOL_NAMES)[number], {
+        scopes,
+        descriptions: memory.describeScopes(scopes),
+        kinds,
+      });
+      registry.set(name, { ...entry, inputSchema });
+    }
+    const providerTools = this.config.providerTools.flatMap((tool) => {
+      if (!("tools" in tool) || tool.name !== MEMORY_NAMESPACE) return [tool];
+      const members = tool.tools
+        .filter((spec) => registry.has(spec.name))
+        .map((spec) => toolSpec(registry.get(spec.name)!));
+      return members.length > 0 ? [{ ...tool, tools: members }] : [];
+    });
+    this.config = { ...this.config, registry, providerTools };
+
+    const maxTokens = this.params.memory?.maxTokens ?? options.maxTokens ?? DEFAULT_MEMORY_MAX_TOKENS;
+    try {
+      this.memoryBlock = await memory.block({
+        maxTokens,
+        recall: registry.has("recall"),
+        tools: registry.has("remember") || registry.has("forget"),
+      });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      this.writeLog(
+        `[gemi/ai] agent "${this.config.name}": the memory store could not be read, so this run has no <memory> block: ${text}`,
+        { error },
+      );
+    }
+    if (this.controller.signal.aborted) throw new RunAborted();
   }
 
   /**
@@ -3140,7 +3392,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   private async systemPrompt(): Promise<string | undefined> {
-    const parts = [this.config.instructions, this.params.instructions].filter(
+    // The memory block last: it changes only when a memory does, so
+    // everything above it stays a stable prefix for the prompt cache.
+    const parts = [this.config.instructions, this.params.instructions, this.memoryBlock].filter(
       (part): part is string => Boolean(part && part.trim()),
     );
     return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -3434,6 +3688,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         async: resolved.tool.async,
         attachments: this.params.attachments ?? null,
       }),
+      memory: this.memory.handle({ messageId }),
     };
 
     try {
@@ -3730,6 +3985,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // The same principal, so a sub-agent's question is bound to the user the
       // root run was started for.
       subject: this.params.subject,
+      // The same scope keys, as for attachments: the sub-agent acts for the
+      // same caller. It only uses the labels its own agent declares, and its
+      // own block budget.
+      ...(this.params.memory ? { memory: { scopes: this.params.memory.scopes } } : {}),
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
@@ -3743,6 +4002,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         signingRunId: this.signingRunId,
         signingPath,
         onPending,
+        // One count of memory writes for the whole tree, so a fan-out of
+        // sub-agents cannot write ten each.
+        memoryWrites: this.memory.writes,
       },
     }) as AgentRun;
 
