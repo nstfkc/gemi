@@ -1,5 +1,15 @@
 # Unreleased
 
+## AI: `requiresApproval` decided per call (#944)
+
+**New, nothing to migrate.** `requiresApproval: true` and `false` work as before. See [AI Tool Approvals](docs/ai-tool-approvals.md).
+
+- `AgentTool.create({ requiresApproval })` also takes a function, sync or async: `(input, ctx: ToolApprovalContext) => boolean | Promise<boolean>`, with `ctx` carrying `context`, `body`, `runId`, `threadId`, `toolCallId`, `step`, `depth` and `signal`. It runs for each call after the input is validated and before the call is signed. `false` runs the tool in the same run, with nothing pending; `true` ends the run `awaiting-input` as `requiresApproval: true` does. Only `false` skips the question: a function that throws (logged) or answers anything else asks. Answering a pending call does not call it again.
+- `tool.requiresApproval` stays a boolean and is `true` for a function too ("may ask"); the function is `tool.approvalPredicate`. A voice call still leaves such a tool out.
+- A native MCP tool (`fromTool`) keeps its function: `toAgentTools` hands it to an in-process agent, and a remote client is asked through elicitation only when it answers `true` (a call it lets through runs for a client that cannot elicit, too). The meta's `requiresApproval: true` overrides it. New: `McpRegistry.approvalRequired(caller, name, args)`; `execute` holds an unapproved remote call to the function's answer.
+- New exports from `gemi/ai`: the types `ToolApproval` and `ToolApprovalContext`.
+- **Moving a client-side "always allow" to the server:** put the check in `requiresApproval`, and remove the code that answered `approve(id, true)` as soon as the call arrived. Calls the function lets through never become pending, so there is nothing for the browser to answer.
+
 ## AI: agent memory across conversations (#936, phase 1)
 
 **New, opt-in, nothing to migrate.** Agents can keep short, scoped notes across conversations. See [AI Memory](docs/ai-memory.md).

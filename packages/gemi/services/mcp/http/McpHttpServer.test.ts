@@ -30,6 +30,7 @@ const BOB = { id: 2, name: "bob", orgId: "org_bob" };
 const KEYS: Record<string, { user: any; id: string; scopes: string[] }> = {
   "tk_mcp_alice": { user: ALICE, id: "key_a", scopes: ["site:read", "site:write"] },
   "tk_mcp_reader": { user: BOB, id: "key_b", scopes: ["site:read"] },
+  "tk_mcp_drawer": { user: ALICE, id: "key_d", scopes: ["site:draw"] },
 };
 
 const handled: { route: string; user: number | null; detail?: unknown }[] = [];
@@ -78,8 +79,23 @@ const build = AgentTool.create({
   },
 });
 
+/** Asks unless `allow` says otherwise (#944). */
+let allow = true;
+const drawn: number[] = [];
+const draw = AgentTool.create({
+  name: "draw",
+  description: "Draw pictures",
+  inputSchema: s.object({ count: s.number() }),
+  requiresApproval: (_input, ctx) => (ctx.context as any).userId !== ALICE.id || allow,
+  async execute(input) {
+    drawn.push(input.count);
+    return `drew ${input.count}`;
+  },
+});
+
 class Mcp extends McpRouter<CreateRPC<Api>> {
   scopes = {
+    "site:draw": { description: "Draw", names: ["draw"] },
     "site:read": { description: "Read your site", tags: ["read"] },
     "site:write": { description: "Edit your site", tags: ["write"] },
   };
@@ -105,6 +121,9 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
     }),
     "build-locally": this.fromTool(build, { tags: ["write"] }),
+    draw: this.fromTool(draw, {
+      remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
+    }),
   };
 }
 
@@ -205,6 +224,8 @@ async function events(res: Response): Promise<any[]> {
 
 beforeEach(() => {
   handled.length = 0;
+  drawn.length = 0;
+  allow = true;
   slow = async () => ({});
   noncesDown = false;
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -710,6 +731,72 @@ describe("a modern client (2026-07-28)", () => {
       expect(crossed.error.message).toMatch(/not valid for this call/);
       expect(handled).toEqual([]);
     });
+  });
+});
+
+describe("requiresApproval decided per call (#944)", () => {
+  const elicitation = { capabilities: { elicitation: { form: {} } } };
+  const call = (extra: Record<string, unknown> = {}) =>
+    modern("tools/call", { name: "draw", arguments: { count: 2 }, ...extra }, { ...elicitation, key: "tk_mcp_drawer" });
+
+  test("a call the function lets through runs without an elicitation", async () => {
+    allow = false;
+    const { result } = await (await call()).json();
+    expect(result).toMatchObject({ resultType: "complete", isError: false });
+    expect(result.content[0].text).toBe("drew 2");
+    expect(drawn).toEqual([2]);
+  });
+
+  test("a call the function asks about is elicited, and runs once approved", async () => {
+    const first = (await (await call()).json()).result;
+    expect(first).toMatchObject({ resultType: "input_required" });
+    expect(drawn).toEqual([]);
+
+    const second = (
+      await (
+        await call({
+          requestState: first.requestState,
+          inputResponses: { gemi_approval: { action: "accept", content: { approve: true } } },
+        })
+      ).json()
+    ).result;
+    expect(second).toMatchObject({ resultType: "complete", isError: false });
+    expect(drawn).toEqual([2]);
+  });
+
+  test("the user's answer stands even if the function would now let it through", async () => {
+    const first = (await (await call()).json()).result;
+    allow = false;
+    const declined = (
+      await (
+        await call({
+          requestState: first.requestState,
+          inputResponses: { gemi_approval: { action: "decline" } },
+        })
+      ).json()
+    ).result;
+    expect(declined).toMatchObject({ isError: true });
+    expect(declined.content[0].text).toMatch(/did not approve/);
+    expect(drawn).toEqual([]);
+  });
+
+  test("a legacy client without elicitation can call it when the function lets it through", async () => {
+    allow = false;
+    const init = await post({
+      jsonrpc: "2.0",
+      id: 0,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }, {}, "tk_mcp_drawer");
+    const session = init.headers.get("Mcp-Session-Id")!;
+    const res = await post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "draw", arguments: { count: 4 } } },
+      { "Mcp-Session-Id": session },
+      "tk_mcp_drawer",
+    );
+    const body = await res.json();
+    expect(body.result).toMatchObject({ isError: false });
+    expect(drawn).toEqual([4]);
   });
 });
 

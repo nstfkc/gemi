@@ -120,6 +120,8 @@ export type {
   ToolExecute,
   ToolInputSchema,
   ToolSchemaContext,
+  ToolApproval,
+  ToolApprovalContext,
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";

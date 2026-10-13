@@ -645,9 +645,17 @@ export class McpHttpServer {
           isError: true,
         });
       }
-      const decision = await this.approval(call, tool, args);
-      if (decision.kind === "answer") return decision.result;
-      approved = true;
+      // A native tool that decides per call (#944) is asked first, unless this
+      // is a modern client's retry carrying the user's answer: they were
+      // asked, and the answer stands. `false` runs it without a question;
+      // `execute` asks the tool again, since nothing here approved it.
+      const answering =
+        call.era.modern && isObject(call.params.inputResponses) && call.params.requestState !== undefined;
+      if (answering || (await this.registry.approvalRequired(caller, name, args, { signal: call.signal }))) {
+        const decision = await this.approval(call, tool, args);
+        if (decision.kind === "answer") return decision.result;
+        approved = true;
+      }
     }
 
     const progress = progressSink(call);

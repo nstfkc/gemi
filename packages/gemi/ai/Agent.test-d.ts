@@ -406,3 +406,37 @@ describe("per-run inputSchema (#710)", () => {
     });
   });
 });
+
+describe("requiresApproval decided per call (#944)", () => {
+  test("the function is given the tool's typed input and the approval context", () => {
+    const draw = AgentTool.create({
+      name: "draw",
+      description: "Draw pictures",
+      inputSchema: s.object({ count: s.number(), style: s.string().optional() }),
+      requiresApproval: async (input, ctx) => {
+        expectTypeOf(input.count).toEqualTypeOf<number>();
+        expectTypeOf(ctx.toolCallId).toEqualTypeOf<string>();
+        expectTypeOf(ctx.body).toEqualTypeOf<Record<string, unknown>>();
+        return input.count > 4;
+      },
+      execute: async (input) => ({ drawn: input.count }),
+    });
+    expectTypeOf(draw.requiresApproval).toEqualTypeOf<boolean>();
+    expectTypeOf<Parameters<NonNullable<typeof draw.approvalPredicate>>[0]>().toEqualTypeOf<{
+      count: number;
+      style?: string | undefined;
+    }>();
+  });
+
+  test("a client tool still cannot take one", () => {
+    // @ts-expect-error the client answering is the approval
+    AgentTool.create({
+      name: "pick",
+      description: "Pick",
+      inputSchema: s.object({ q: s.string() }),
+      outputSchema: s.object({ a: s.string() }),
+      answeredBy: "client",
+      requiresApproval: () => true,
+    });
+  });
+});
