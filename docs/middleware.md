@@ -257,6 +257,14 @@ for a page outside the app's locale scheme, such as an embed or a landing page
 for a link sent by another service. Like `no-stream`, it is a routing
 directive with no alias to register.
 
+### `no-theme` (view routes only)
+
+Leaves the theme script out of the route's documents, as `theme: false` on
+the view config does for a whole view tree (see
+[Theme](./views-and-layouts.md#theme-usetheme-and-the-theme-cookie)). Use it
+for a page that must keep its own look, such as a preview framed inside the
+app on the same origin. A routing directive with no alias to register.
+
 ## Registering middleware
 
 The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:

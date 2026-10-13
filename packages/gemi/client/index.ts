@@ -160,6 +160,7 @@ export type { Formatter, DateInput } from "../i18n/formatter";
 export { OpenGraphImage } from "./OpenGraphImage";
 
 export { useTheme } from "./ThemeProvider";
+export type { ResolvedTheme, Theme } from "./theme";
 export { useAppIdMissmatch } from "./useAppIdMissmatch";
 export { island } from "./islands";
 export { onStaticNavigate, type StaticPageLoad } from "./staticNavigation";

@@ -2,6 +2,7 @@ import { createContext, type PropsWithChildren } from "react";
 import type { Translations } from "./I18nContext";
 import type { ComponentTree } from "./types";
 import type { User } from "../auth/types";
+import type { ThemeData } from "./theme";
 
 type Data = Record<string, any>;
 
@@ -48,6 +49,8 @@ export interface ServerDataContextValue {
    * stay on the server. Read through `useFeature` rather than directly.
    */
   features: Record<string, boolean>;
+  /** The theme cookie as the server read it; `null` when these views run no theme script. */
+  theme?: ThemeData | null;
   __csrf: string;
   cssManifest: Record<string, string[]>;
   /** Built chunk URLs per view name, for warming a navigation's imports. */
