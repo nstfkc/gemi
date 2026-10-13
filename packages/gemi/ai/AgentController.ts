@@ -13,6 +13,7 @@ import type {
   AgentRunResult,
   AnyAgent,
   PrepareStepContext,
+  AgentToolShapes,
   PrepareStepResult,
   ToolShapesOf,
 } from "./Agent";
@@ -69,6 +70,7 @@ import { AgentJobs } from "./jobs/AgentJob";
 import { markOrphans, overlayJobs } from "./jobs/overlay";
 import { DEFAULT_JOBS_CONTEXT_MAX, renderJobsBlock } from "./jobs/contextBlock";
 import type { AgentJobRecord } from "./jobs/AgentJobStore";
+import type { AgentMemoryScopes } from "./memory/runMemory";
 import type { Schema } from "./Schema";
 import { RealtimeRequestError, type RealtimeSession } from "./providers/realtime";
 import type { VoiceConfig } from "./voiceConfig";
@@ -844,6 +846,52 @@ export abstract class AgentController<
   }
 
   /**
+   * THE MEMORY SCOPES THIS TURN MAY USE (#936): the labels the agent declares
+   * in `memory.scopes`, each resolved to the app's scope key for this caller.
+   *
+   * ```ts
+   * protected async memoryScopes(req, { body }) {
+   *   const user = req.ctx().user;
+   *   const project = await Project.forPage(body.pageId); // authorized in authorizeRequest()
+   *   return {
+   *     project: project.memoryOff ? null : `project:${project.publicId}`,
+   *     user: user && !user.memoryOff ? `user:${user.publicId}` : null,
+   *   };
+   * }
+   * ```
+   *
+   * The model only ever names a label; the key is decided here, on the
+   * server, from the request — the same defence `attachmentScope()` gives
+   * attachments. A label answered with `null`, or left out, is OFF for the
+   * turn: it is not in the `<memory>` block and the tools cannot name it, so
+   * a per-account or per-project "memory off" switch is a `null` here. A
+   * declared `thread` label is the turn's thread (`thread:<threadId>`) unless
+   * this answers it.
+   *
+   * Runs after `authorizeRequest()` and `context()`, once per turn, on turns
+   * from `useChat`, `startTurn` and voice alike. The default is `{}`: memory
+   * stays off until a controller resolves something. Not called for an agent
+   * without `memory`. Values read from `body` are the client's claim, as in
+   * `context()`: check them (in `authorizeRequest()` or here) before turning
+   * one into a key.
+   */
+  protected memoryScopes(
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ): AgentMemoryScopes | Promise<AgentMemoryScopes> {
+    void req;
+    void extra;
+    return {};
+  }
+
+  /**
+   * The `<memory>` block's budget, in tokens, for this controller's turns.
+   * `undefined` (the default) uses the agent's `memory.maxTokens` (1,500
+   * unless it says otherwise); `0` leaves the block out.
+   */
+  protected memoryMaxTokens: number | undefined = undefined;
+
+  /**
    * Refuse a turn that arrives without a `threadId`, with a 400
    * `thread_required`, before anything runs.
    *
@@ -1359,6 +1407,11 @@ export abstract class AgentController<
       // database read, in any app that has one — is exactly the yield a stop
       // would land in and be missed.
       const attachments = await this.attachmentsFor(req, threadId, { body: extraBody });
+      // For the same reason as `attachments`: an `await` on the app's code,
+      // which has to come before the cancel check below.
+      const memoryScopes = (this.agent as AnyAgent).memory
+        ? await this.memoryScopes(req, { body: extraBody })
+        : undefined;
 
       if (pending?.cancelled) {
         // Stopped while it waited. Nothing has been asked of the model and
@@ -1439,6 +1492,16 @@ export abstract class AgentController<
         // The principal its pending calls are bound to (#447): an answer is
         // only accepted from the same `runOwner` the question was asked of.
         subject: owner,
+        // The memory scopes the server resolved for this caller (#936). The
+        // model only ever sees their labels.
+        ...(memoryScopes
+          ? {
+              memory: {
+                scopes: memoryScopes,
+                ...(this.memoryMaxTokens !== undefined ? { maxTokens: this.memoryMaxTokens } : {}),
+              },
+            }
+          : {}),
         // Background jobs (#461) settle into the thread, so only a threaded
         // turn can start one. The job records who started it.
         ...(threadId ? { jobs: { owner } } : {}),
@@ -3764,7 +3827,7 @@ export type AgentRoute<T> = {
 export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
   __agent: true;
   tools: InstanceType<T>["agent"] extends AnyAgent
-    ? ToolShapesOf<InstanceType<T>["agent"]["tools"]>
+    ? AgentToolShapes<InstanceType<T>["agent"]>
     : ToolShapes;
   output: unknown;
   /**

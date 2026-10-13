@@ -102,6 +102,7 @@ export type {
   AgentRunFailure,
   AgentRunResult,
   AgentStreamParams,
+  AgentToolShapes,
   AnyAgent,
   AnyAgentTool,
   CreateAgentParams,
@@ -138,6 +139,54 @@ export {
   JobsRequireThreadError,
   MemoryAgentJobStore,
 } from "./jobs";
+
+// --- memory across conversations (#936) ------------------------------------
+//
+// Scoped notes agents write and read across runs: the `memory` option on
+// `Agent.create`, `AgentController.memoryScopes()`, `ctx.memory`, and the
+// app's API over them. See docs/ai-memory.md.
+export {
+  AgentMemories,
+  AgentMemoryConflictError,
+  AgentMemoryRefusedError,
+  DatabaseAgentMemoryStore,
+  DEFAULT_MEMORY_LIMITS,
+  DEFAULT_MEMORY_MAX_TOKENS,
+  FakeAgentMemoryStore,
+  InMemoryAgentMemoryStore,
+  MEMORY_NAMESPACE,
+} from "./memory";
+export type {
+  AgentMemoriesHooks,
+  AgentMemoryDraft,
+  AgentMemoryExport,
+  AgentMemoryInput,
+  AgentMemoryKind,
+  AgentMemoryListOptions,
+  AgentMemoryOptions,
+  AgentMemoryRecord,
+  AgentMemoryScopeOptions,
+  AgentMemoryScopes,
+  AgentMemorySearchOptions,
+  AgentMemorySource,
+  AgentMemoryStore,
+  AgentMemoryToolOption,
+  AgentMemoryUpdate,
+  AgentMemoryWriteAction,
+  AgentMemoryWriteEvent,
+  AgentRunMemoryParams,
+  DatabaseAgentMemoryStoreOptions,
+  ForgetInput,
+  ForgetResult,
+  MemoryToolShapes,
+  NewAgentMemoryRecord,
+  RecallInput,
+  RecallResult,
+  RecordedMemoryWrite,
+  RememberInput,
+  RememberResult,
+  ToolMemory,
+} from "./memory";
 export type {
   AgentJobClass,
   AgentJobContext,

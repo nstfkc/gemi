@@ -205,6 +205,15 @@ const supportAgent = Agent.create({
   // it did not start — and a cycle (an agent whose tool runs itself) fails with
   // a sentence naming the chain instead of exhausting the stack.
   maxDepth: 2,
+  // Notes kept across conversations (#936). The labels are what the model
+  // sees; the controller's `memoryScopes` below resolves them to keys per
+  // turn, and a label it answers `null` for is off for that turn.
+  memory: {
+    scopes: {
+      customer: { description: "This customer: their plan, preferences and past issues." },
+    },
+    maxTokens: 800,
+  },
 });
 
 // Module scope, NOT `store = new MemoryAgentStore()` in the class body. A
@@ -225,6 +234,13 @@ class SupportAgentController extends AgentController<typeof supportAgent> {
   // catching one.
   instructions(req: HttpRequest<any, any>) {
     return `Today is ${new Date().toDateString()}.`;
+  }
+
+  // The key comes from the authenticated user, never from the body: it is
+  // what keeps one customer's memories from another's.
+  protected async memoryScopes(req: HttpRequest<any, any>) {
+    const user = req.ctx().user;
+    return { customer: user ? `customer:${user.id}` : null };
   }
 
   protected async onMessage(message: AgentMessage, ctx: AgentHookContext) {
@@ -298,6 +314,15 @@ function Chat({ threadId }: { threadId: string }) {
     for (const part of message.content) {
       if (part.type === "tool-result" && part.name === "grep" && part.status === "ok") {
         part.output.matches; // string[]
+      }
+
+      // The memory tools' parts are typed because the agent declares
+      // `memory`: a "Saved to memory · Undo" receipt reads the note and its id,
+      // and Undo calls an app route that runs `AgentMemories.delete(id)`.
+      if (part.type === "tool-result" && part.name === "remember" && part.status === "ok") {
+        const saved: { id: string; content: string } = part.output;
+        const action: "added" | "updated" | "unchanged" = part.output.action;
+        void [saved, action];
       }
 
       // A generator tool's yields, typed by what its `execute` actually yields

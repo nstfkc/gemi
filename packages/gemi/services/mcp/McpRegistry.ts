@@ -1,6 +1,7 @@
 import type { AnyAgentTool, ToolContext } from "../../ai/Agent";
 import { generateWithin, type GenerateParams } from "../../ai/generate";
 import { isJobHandle, toolJobs } from "../../ai/jobs/AgentJob";
+import { noToolMemory } from "../../ai/memory/runMemory";
 import type { ToolAttachments } from "../../ai/store/Attachments";
 import type { User } from "../../auth/types";
 import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
@@ -1615,6 +1616,7 @@ function remoteToolContext(
       async: plan.tool.async,
       attachments: null,
     }),
+    memory: noToolMemory(),
   };
 }
 
