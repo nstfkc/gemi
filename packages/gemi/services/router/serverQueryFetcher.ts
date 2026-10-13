@@ -46,7 +46,15 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
         try {
           // The api of the page's own host group — on `admin.` that is the
           // admin api, which may not share a single route with the root's.
-          const data = await app(DomainRouter).dispatchers(domain).api.getRouteData(patternPath);
+          const api = app(DomainRouter).dispatchers(domain).api;
+          // The route's middleware first, as the browser's fetch of the same
+          // url runs it: a handler reads what its middleware put on
+          // `req.state`, and a route guarded by its own middleware must not
+          // be answered unguarded here. A middleware's refusal is a
+          // `Response`, handled below like a handler's.
+          const data =
+            (await api.runRouteMiddleware(patternPath, httpRequest)) ??
+            (await api.getRouteData(patternPath));
           // A handler's `HttpResponse`: its body is the data, and a status
           // outside 2xx is the same `QueryError` the browser's fetch makes of
           // it, body included.
