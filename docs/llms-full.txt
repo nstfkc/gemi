@@ -2999,6 +2999,14 @@ for a page outside the app's locale scheme, such as an embed or a landing page
 for a link sent by another service. Like `no-stream`, it is a routing
 directive with no alias to register.
 
+### `no-theme` (view routes only)
+
+Leaves the theme script out of the route's documents, as `theme: false` on
+the view config does for a whole view tree (see
+[Theme](./views-and-layouts.md#theme-usetheme-and-the-theme-cookie)). Use it
+for a page that must keep its own look, such as a preview framed inside the
+app on the same origin. A routing directive with no alias to register.
+
 ## Registering middleware
 
 The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:
@@ -4242,6 +4250,61 @@ init(RootLayout);
 > and `children`; type it with `RootLayoutProps` from `gemi/client`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
 > browser translator that rewrites text before hydration causes a React hydration
 > mismatch that drops the server-injected styles.
+
+### Theme: `useTheme` and the theme cookie
+
+gemi renders a small inline script before the body that puts the visitor's
+theme on `<html>` (the `light` or `dark` class, and `color-scheme`) before
+first paint. `useTheme()` reads and changes it:
+
+```tsx
+import { useTheme } from "gemi/client";
+
+function ThemeSwitch() {
+  const { theme, resolved, setTheme } = useTheme();
+  // theme: "light" | "dark" | "system" — the visitor's choice
+  // resolved: "light" | "dark", or null while "system" is not known yet
+  // (on the server, and in the first client render)
+  return <button onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}>{theme}</button>;
+}
+```
+
+`setTheme` stores the choice in a cookie (`theme` by default, one year,
+`SameSite=Lax`). The server reads it, so `useTheme()` renders the same theme on
+the server as in the browser, and a middleware or handler can set the cookie
+(say, from the account's setting) to choose for the visitor. A choice an older
+gemi stored in `localStorage` is still honoured.
+
+gemi only touches the `light`/`dark` classes when it has a theme to apply: a
+stored choice or the configured default. With neither, `<html>` keeps whatever
+class the app rendered. Configure it on the view router in `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    theme: {
+      default: "system", // for visitors who have not chosen; unset = leave <html> alone
+      cookie: "theme", // the cookie the choice lives in
+    },
+  },
+});
+```
+
+`theme: false` drops the script (an app that runs its own theme, or a
+`route.domains` group whose pages keep their own look), and the `"no-theme"`
+middleware directive drops it from one router or route, such as a preview
+framed inside the app. Static views never carry it.
+
+To render the class on the server too, read `resolved` in `RootLayout` (it is
+inside the theme provider) and keep `suppressHydrationWarning` on `<html>`,
+since the script may change the class before hydration:
+
+```tsx
+const { resolved } = useTheme();
+return <html className={resolved ?? undefined} suppressHydrationWarning>…</html>;
+```
 
 ## Page metadata: `Head` and the `Meta` facade
 
@@ -6838,7 +6901,7 @@ test("renders the organisation's messages", () => {
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
 | `domain` | `null` | `useDomain()` — the `route.domains` group the page is served under. `{ host }` is the only required field: `group` defaults to the apex, `root` to the host minus its first label, and `origin` to `https://` on that host, so `domain={{ host: "acme.example.com", params: { tenant: "acme" } }}` is usually enough. Left out, `useDomain()` reads empty and `url()` throws, exactly as in an app with no `route.domains`. |
 | `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
-| `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
+| `theme` | stored (theme cookie or `localStorage`), else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
 | `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
 | `onNavigate` | — | Called with `(href, "push" \| "replace")` when something navigates. |

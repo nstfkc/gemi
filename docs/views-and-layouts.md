@@ -247,6 +247,61 @@ init(RootLayout);
 > browser translator that rewrites text before hydration causes a React hydration
 > mismatch that drops the server-injected styles.
 
+### Theme: `useTheme` and the theme cookie
+
+gemi renders a small inline script before the body that puts the visitor's
+theme on `<html>` (the `light` or `dark` class, and `color-scheme`) before
+first paint. `useTheme()` reads and changes it:
+
+```tsx
+import { useTheme } from "gemi/client";
+
+function ThemeSwitch() {
+  const { theme, resolved, setTheme } = useTheme();
+  // theme: "light" | "dark" | "system" — the visitor's choice
+  // resolved: "light" | "dark", or null while "system" is not known yet
+  // (on the server, and in the first client render)
+  return <button onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}>{theme}</button>;
+}
+```
+
+`setTheme` stores the choice in a cookie (`theme` by default, one year,
+`SameSite=Lax`). The server reads it, so `useTheme()` renders the same theme on
+the server as in the browser, and a middleware or handler can set the cookie
+(say, from the account's setting) to choose for the visitor. A choice an older
+gemi stored in `localStorage` is still honoured.
+
+gemi only touches the `light`/`dark` classes when it has a theme to apply: a
+stored choice or the configured default. With neither, `<html>` keeps whatever
+class the app rendered. Configure it on the view router in `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    theme: {
+      default: "system", // for visitors who have not chosen; unset = leave <html> alone
+      cookie: "theme", // the cookie the choice lives in
+    },
+  },
+});
+```
+
+`theme: false` drops the script (an app that runs its own theme, or a
+`route.domains` group whose pages keep their own look), and the `"no-theme"`
+middleware directive drops it from one router or route, such as a preview
+framed inside the app. Static views never carry it.
+
+To render the class on the server too, read `resolved` in `RootLayout` (it is
+inside the theme provider) and keep `suppressHydrationWarning` on `<html>`,
+since the script may change the class before hydration:
+
+```tsx
+const { resolved } = useTheme();
+return <html className={resolved ?? undefined} suppressHydrationWarning>…</html>;
+```
+
 ## Page metadata: `Head` and the `Meta` facade
 
 Render `<Head />` once, inside `RootLayout`. It emits `<title>`, the description

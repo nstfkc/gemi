@@ -23,6 +23,17 @@ export interface ApiRouteConfig {
 /** See `ViewRouteConfig.localeRouting`. */
 export type LocaleRouting = "prefix" | "off";
 
+/** See `ViewRouteConfig.theme`. */
+export interface ThemeConfig {
+  /**
+   * The theme for a visitor who has not picked one. Unset (the default), gemi
+   * leaves `<html>` alone until they do, so an app's own class stays.
+   */
+  default?: "light" | "dark" | "system";
+  /** The cookie the visitor's choice is stored in. Defaults to `"theme"`. */
+  cookie?: string;
+}
+
 // Config key: `route.view`. Derived from `ViewRouterServiceProvider`.
 export interface ViewRouteConfig {
   root: (props: any) => JSX.Element;
@@ -56,6 +67,24 @@ export interface ViewRouteConfig {
    *   one with `Lang.setLocale(locale, { cookie: false })`.
    */
   localeRouting?: LocaleRouting;
+
+  /**
+   * The theme script gemi renders before the body and `useTheme()`.
+   *
+   * The visitor's choice is stored in a cookie (`useTheme().setTheme`), which
+   * the inline script applies before first paint (the `light`/`dark` class
+   * and `color-scheme` on `<html>`) and the server reads, so `useTheme()`
+   * renders the same theme on the server as in the browser. A middleware or
+   * handler can set that cookie (e.g. from the account) to choose for them.
+   *
+   * gemi only touches the `light`/`dark` classes when it has a theme to apply
+   * (a stored choice or `default`); otherwise `<html>` is left as the app
+   * rendered it. `false` drops the script for these views altogether, for an
+   * app that runs its own theme or a host group (`route.domains`) whose pages
+   * keep their own look; the `"no-theme"` middleware directive does the same
+   * for one router or route.
+   */
+  theme?: ThemeConfig | false;
 
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
@@ -290,6 +319,7 @@ export function viewRouteConfigDefaults(): Omit<
   return {
     partialRendering: true,
     localeRouting: "prefix",
+    theme: {},
     onRequestStart: () => {},
     onRequestEnd: () => {},
     onRequestFail: () => {},

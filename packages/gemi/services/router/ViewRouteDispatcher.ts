@@ -7,7 +7,13 @@ import {
   type FlatViewRoutes,
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
-import { viewRouteConfigDefaults, type LocaleRouting, type ViewRouteConfig } from "./config";
+import {
+  viewRouteConfigDefaults,
+  type LocaleRouting,
+  type ThemeConfig,
+  type ViewRouteConfig,
+} from "./config";
+import { DEFAULT_THEME_COOKIE, isTheme, themeScriptSource, type ThemeData } from "../../client/theme";
 import { resolvePartialRender } from "./planPartialRender";
 import { matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
@@ -126,18 +132,12 @@ const STREAM_DEADLINE_MS = 10_000;
  */
 const NO_LOCALE_DIRECTIVE = "no-locale";
 
-const themeScript = `
-!function(){try{var d=document.documentElement,c=d.classList;
-c.remove('light','dark');
-var e=localStorage.getItem('theme');
-if('system'===e||(!e&&'system'===defaultTheme)){
-  var t='(prefers-color-scheme: dark)',m=window.matchMedia(t);
-  if(m.media!==t||m.matches){d.style.colorScheme='dark';c.add('dark')}
-  else{d.style.colorScheme='light';c.add('light')}
-}else if(e){
-  c.add(e||'')
-}}catch(e){}}()
-`;
+/**
+ * `"no-theme"` in a route's (or its router's) middleware list drops the theme
+ * script from its documents, as `theme: false` does a whole view tree. A
+ * directive, like `"no-stream"`.
+ */
+const NO_THEME_DIRECTIVE = "no-theme";
 
 async function getTtfFont(
   family: string,
@@ -279,11 +279,15 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.localeRouting`. */
   readonly localeRouting: LocaleRouting;
 
+  /** See `ViewRouteConfig.theme`. */
+  readonly theme: ThemeConfig | false;
+
   constructor(config: ViewRouteConfig) {
     const defaults = viewRouteConfigDefaults();
 
     this.partialRendering = config.partialRendering ?? defaults.partialRendering;
     this.localeRouting = config.localeRouting ?? defaults.localeRouting;
+    this.theme = config.theme ?? defaults.theme;
 
     this.hooks = {
       onRequestStart: config.onRequestStart ?? defaults.onRequestStart,
@@ -572,6 +576,8 @@ export class ViewRouteDispatcher {
     serverQueries: ServerQueryStore;
     userAgent: string | null;
     noStream: boolean;
+    /** The route said `"no-theme"`. */
+    noTheme?: boolean;
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
@@ -599,6 +605,7 @@ export class ViewRouteDispatcher {
       serverQueries,
       userAgent,
       noStream,
+      noTheme,
       url,
       user,
       viewData,
@@ -610,6 +617,17 @@ export class ViewRouteDispatcher {
       features,
       staticView,
     } = props;
+
+    // A static view has no script and one body for every visitor, so it must
+    // not vary on the visitor's cookie.
+    const theme: ThemeData | null =
+      this.theme === false || noTheme || staticView
+        ? null
+        : {
+            cookie: this.theme.cookie ?? DEFAULT_THEME_COOKIE,
+            default: this.theme.default ?? null,
+            value: readThemeCookie(req, this.theme.cookie ?? DEFAULT_THEME_COOKIE),
+          };
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
 
@@ -645,6 +663,9 @@ export class ViewRouteDispatcher {
         // anyone could compute another user's bucket for every flag, including
         // unreleased ones.
         features,
+        // `null` when these views run no theme script (`theme: false`,
+        // `"no-theme"`); `ThemeProvider` then starts on `"light"` as before.
+        theme,
         componentTree: [["404", []], ...this.componentTree],
         // Only when there are any, so an app without static views ships the
         // payload it always did.
@@ -898,12 +919,18 @@ export class ViewRouteDispatcher {
               // first bytes.
               ...preloadLinks,
               ...styles,
-              createElement("script", {
-                key: "theme-script",
-                dangerouslySetInnerHTML: {
-                  __html: themeScript,
-                },
-              }),
+              ...(theme
+                ? [
+                    createElement("script", {
+                      key: "theme-script",
+                      dangerouslySetInnerHTML: {
+                        __html: themeScriptSource(
+                          htmlSafeJson({ cookie: theme.cookie, default: theme.default }),
+                        ),
+                      },
+                    }),
+                  ]
+                : []),
               createElement(Root, {
                 data: result.data,
                 viewImportMap,
@@ -1143,6 +1170,7 @@ export class ViewRouteDispatcher {
     // document a bot UA would (#289). It is a directive read here, not real
     // middleware — the middleware runner ignores unknown aliases.
     let noStream = false;
+    let noTheme = false;
     // Flags gating the matched route, checked once the request scope is open
     // and middleware has run.
     let featureGates: string[] = [];
@@ -1163,6 +1191,7 @@ export class ViewRouteDispatcher {
         middlewares = match.route.middleware;
         featureGates = match.route.features;
         noStream = middlewares.includes("no-stream");
+        noTheme = middlewares.includes(NO_THEME_DIRECTIVE);
         staticView = match.route.static;
 
         // Only navigations skip work. A document request renders the whole
@@ -1604,6 +1633,7 @@ export class ViewRouteDispatcher {
           serverQueries: ctx.serverQueries,
           userAgent: req.headers.get("user-agent"),
           noStream,
+          noTheme,
           url,
           user,
           viewData,
@@ -1655,4 +1685,10 @@ export class ViewRouteDispatcher {
       }
     }, carried);
   }
+}
+
+/** The visitor's stored theme, if the cookie holds one gemi recognises. */
+function readThemeCookie(req: HttpRequest, cookie: string): ThemeData["value"] {
+  const value = req.cookies?.get(cookie);
+  return isTheme(value) ? value : null;
 }
