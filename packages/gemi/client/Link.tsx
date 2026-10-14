@@ -13,6 +13,7 @@ import {
 import { applyParams } from "../utils/applyParams";
 import { isAbsoluteUrl, type AbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
+import { splitLocalePrefix } from "../i18n/localePrefix";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
@@ -323,8 +324,10 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
           e.preventDefault();
           return;
         }
-        let currentPath = window.location.pathname.replace(localeSegment, "");
-        currentPath = currentPath === "" ? "/" : currentPath;
+        const currentPath = splitLocalePrefix(
+          window.location.pathname,
+          urlLocaleSegment ? [urlLocaleSegment] : [],
+        ).pathname;
 
         if (hash === "") {
           e.preventDefault();

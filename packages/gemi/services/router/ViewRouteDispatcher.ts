@@ -25,6 +25,7 @@ import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { Translator } from "../../i18n/Translator";
+import { splitLocalePrefix } from "../../i18n/localePrefix";
 import { resolveLocale } from "../../i18n/resolveLocale";
 import { preloadDictionaries } from "../../i18n/dictionaryRegistry";
 import { createDictionarySink } from "../../i18n/dictionarySink";
@@ -629,7 +630,11 @@ export class ViewRouteDispatcher {
             value: readThemeCookie(req, this.theme.cookie ?? DEFAULT_THEME_COOKIE),
           };
 
-    const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
+    // Keyed like the `.json` envelope: the path without its locale segment,
+    // so `/de-DE` and `/de-DE/` both land on `/` (#948).
+    const pageDataKey = urlLocaleSegment
+      ? splitLocalePrefix(pathname, [urlLocaleSegment]).pathname
+      : pathname;
 
     const result = {
       kind: "view",
