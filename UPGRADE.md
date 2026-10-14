@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.139 to 0.140
 
 ## AI: a stream that breaks before its first event is retried (#946)
 
@@ -9,6 +9,9 @@
 - A call that keeps failing now takes longer to report its error: up to about 1.5 s of backoff with the default `maxRetries`, plus the extra attempts. `maxRetries: 0` restores the old behaviour.
 - The closing `finish` event's `usage` includes the usage reported by dropped attempts.
 - **Fallback chains:** a leg now retries its own transient stream failures before the chain moves on. If you added the same provider as several legs only to get these retries (`FallbackProvider.chain([{ provider: m }, { provider: m }])`), you can remove the extra legs.
+
+# Upgrading from 0.134 to 0.139
+
 
 ## AI: `requiresApproval` decided per call (#944)
 
