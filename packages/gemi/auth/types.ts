@@ -98,6 +98,11 @@ export interface User {
   name: string | null;
   email: string | null;
   emailVerifiedAt: Date | null;
+  /**
+   * The locale the user signed up in (`CreateUserArgs.locale`), selected with
+   * the session user. `null` when the row has none.
+   */
+  locale: string | null;
   globalRole: number;
   password: string | null;
   accounts: Account[];

@@ -1,3 +1,16 @@
+# Unreleased
+
+## i18n: a locale's root URL keeps its view props (#948)
+
+**Bug fix, nothing to migrate.**
+
+- `/de-DE` (no trailing slash) now renders with its view's props, like `/de-DE/` always did. The document payload keyed them under `""` instead of `/`.
+- A locale prefix is only read off a whole first path segment, on the server and in the client router. With a `de` locale, the client router used to read `/delivery` as locale `de` + `/livery`; it is now the route `/delivery`.
+
+## auth: `User.locale` (types only)
+
+**Nothing to migrate.** The session user has always selected `locale` (and sign-up writes it), but the `User` type did not declare it. It is now `locale: string | null`. A hand-built `User` (a test fixture, a mock) needs the field to typecheck.
+
 # Upgrading from 0.139 to 0.140
 
 ## AI: a stream that breaks before its first event is retried (#946)

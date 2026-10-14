@@ -18,6 +18,7 @@ import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
 import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
+import { splitLocalePrefix } from "../i18n/localePrefix";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 import { ServerDataContext } from "./ServerDataProvider";
@@ -215,16 +216,11 @@ export const ClientRouterProvider = (
       const { hash, pathname, search } = routerSubject.getValue();
       const key = [pathname, search, hash].join("");
       window.scrollHistory.set(key, window.scrollY);
-      let _pathname = location.pathname;
-      let _locale = null;
-      for (const locale of supportedLocales) {
-        if (_pathname.startsWith(`/${locale}`)) {
-          _locale = locale;
-          _pathname = _pathname.replace(`/${locale}`, "");
-          break;
-        }
-      }
-      _pathname = _pathname === "" ? "/" : _pathname;
+      // A whole leading segment only: `/de-DE-shop` is a route, not `de-DE`.
+      const { locale: _locale, pathname: _pathname } = splitLocalePrefix(
+        location.pathname,
+        supportedLocales,
+      );
       const routePath = getRoutePathnameFromHref(_pathname);
       if (routePath && staticRoutesRef.current.has(routePath)) {
         // `replace`, not `assign`: history already holds the entry for this
