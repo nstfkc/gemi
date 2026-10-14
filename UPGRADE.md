@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.140.0 to 0.140.1
 
 ## i18n: a locale's root URL keeps its view props (#948)
 
