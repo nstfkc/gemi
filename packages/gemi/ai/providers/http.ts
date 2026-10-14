@@ -126,6 +126,39 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
+ * A backoff nobody can interrupt is a `stop()` that does not stop.
+ *
+ * The wait is where a retrying request spends nearly all of its time — up to
+ * 20 seconds of it — and noticing the abort only at the top of the next
+ * iteration means the run holds its state, and the user watches a cancelled
+ * stream, for the rest of the window. So the sleep loses a race with the
+ * signal, and the abort propagates like any other.
+ *
+ * Shared by the request retry here and the stream retry in `call.ts`, so the
+ * two cannot disagree on what an abort during a backoff does.
+ */
+export async function waitUnlessAborted(
+  ms: number,
+  signal: AbortSignal | undefined,
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void> = defaultSleep,
+): Promise<void> {
+  if (!signal) return await sleep(ms);
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      sleep(ms, signal),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(abortReason(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * One HTTP call, retried.
  *
  * The timeout covers getting a response, not consuming one. A streamed answer
@@ -145,32 +178,7 @@ export async function requestWithRetry(
   const now = options.now ?? Date.now;
   const maxRetries = Math.max(0, options.maxRetries);
 
-  /**
-   * A backoff nobody can interrupt is a `stop()` that does not stop.
-   *
-   * The wait is where a retrying request spends nearly all of its time — up to
-   * 20 seconds of it — and noticing the abort only at the top of the next
-   * iteration means the run holds its state, and the user watches a cancelled
-   * stream, for the rest of the window. So the sleep loses a race with the
-   * signal, and the abort propagates like any other.
-   */
-  const wait = async (ms: number): Promise<void> => {
-    const signal = options.signal;
-    if (!signal) return await sleep(ms);
-    signal.throwIfAborted();
-    let onAbort: (() => void) | undefined;
-    try {
-      await Promise.race([
-        sleep(ms, signal),
-        new Promise<never>((_resolve, reject) => {
-          onAbort = () => reject(abortReason(signal));
-          signal.addEventListener("abort", onAbort, { once: true });
-        }),
-      ]);
-    } finally {
-      if (onAbort) signal.removeEventListener("abort", onAbort);
-    }
-  };
+  const wait = (ms: number) => waitUnlessAborted(ms, options.signal, sleep);
 
   let lastError: unknown;
 

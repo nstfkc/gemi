@@ -17,6 +17,12 @@ export const support = Agent.create({ name: "support", instructions: "Be brief."
 
 `provider.capabilities` says what the model supports (`reasoning`, `structuredOutput`, `fileInput`, `parallelToolCalls`, `toolSearch`). The agent drops anything the provider can't do instead of sending a request the vendor would refuse.
 
+### Retries
+
+A call that fails before the vendor starts answering (a network error, a timeout, a 429 that isn't a spent quota, a 408, 409 or 5xx) is sent again up to `maxRetries` times (default 2), with exponential backoff and jitter starting at 0.5 s. A `Retry-After` header is honoured, capped at 20 s.
+
+A stream that breaks before its first content event is retried the same way: the socket closes while the body is read, the stream ends without a terminal event, or the vendor sends a retryable `response.failed` / `error` event (a server error or a rate limit). These retries also use `maxRetries` and the same backoff. Once a content event (text, reasoning, output or a tool call) has been yielded, the call is never retried. A later failure ends it with an error, because the user has already seen part of the answer. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
+
 ## Fallback chains
 
 `FallbackProvider.chain` wraps an ordered list of providers: the primary first, then the fallbacks. The chain is itself a provider, so you pass it to `Agent.create` like any other provider.

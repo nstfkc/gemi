@@ -7,7 +7,15 @@ import {
   withoutFiles,
   type SentFile,
 } from "./fileRejection";
-import { requestWithRetry, type FetchLike } from "./http";
+import { addUsage, isContentEvent } from "../runtime";
+import type { AgentError, Usage } from "../types";
+import {
+  backoffDelayMs,
+  requestWithRetry,
+  waitUnlessAborted,
+  type FetchLike,
+  type RequestOptions,
+} from "./http";
 import type { ResponsesRequest } from "./request";
 import { decodeChunks, emptyUsage, parseResponsesStream } from "./stream";
 
@@ -29,6 +37,10 @@ export type ResponsesEndpoint = {
   timeoutMs: number;
   maxRetries: number;
   fetchImpl?: FetchLike;
+  /** Injected by the tests, with `random`, so a backoff can be asserted on
+   *  without waiting for it. See `RequestOptions`. */
+  sleep?: RequestOptions["sleep"];
+  random?: () => number;
 };
 
 /**
@@ -57,6 +69,22 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * A `ProviderStream` that threw would make every caller wrap its `for await`,
  * and would lose the deltas already yielded — the agent needs the text it got
  * before the socket died, because the user has already read it.
+ *
+ * A STREAM THAT DIES BEFORE ITS FIRST CONTENT EVENT IS ASKED AGAIN (#946).
+ * `requestWithRetry` covers a request that fails before a response arrives;
+ * this covers the one whose response started and then broke while its body was
+ * being read: the socket closed, the stream ended with no terminal frame, or
+ * the provider sent a `response.failed` / `error` frame that reads as
+ * retryable. Measured in fager: one such drop on the first step lost a whole
+ * build, and the same request a second later worked.
+ *
+ * Nothing the user could have seen is repeated. Until the first content event
+ * (`isContentEvent`) the only things a Responses stream yields are an error and
+ * a finish, and those are held back; from the first content event on, the call
+ * is committed and a later failure ends it as before. The retries use the
+ * endpoint's `maxRetries` and the same backoff as the request retry, and an
+ * abort during the wait ends the call at once. The usage a dropped attempt
+ * reported is added to the call's closing `finish`, because it was billed.
  */
 export async function* streamResponses(
   endpoint: ResponsesEndpoint,
@@ -69,70 +97,128 @@ export async function* streamResponses(
     files?: Map<string, SentFile>;
   },
 ): AsyncGenerator<ProviderEvent> {
-  let response: Response | undefined;
   let request = body;
   const rejected = new Set<string>();
-  for (let attempt = 0; response === undefined; attempt++) {
-    try {
-      response = await requestWithRetry(
-        endpoint.responsesUrl,
-        {
-          method: "POST",
-          headers: { ...(await endpoint.headers()), "content-type": "application/json" },
-          body: JSON.stringify(request),
-        },
-        {
-          maxRetries: endpoint.maxRetries,
-          timeoutMs: endpoint.timeoutMs,
-          signal: params.signal,
-          fetchImpl: endpoint.fetchImpl,
-        },
-      );
-    } catch (error) {
-      // A stored file the provider will not read fails this request and, left
-      // in, every later one in the thread (#684). Take it out and ask again,
-      // as long as the error blames a file this attempt still sent.
-      const blamed =
-        attempt < MAX_FILE_REJECTION_RETRIES
-          ? rejectedFileIds(request, error, params.files).filter((id) => !rejected.has(id))
-          : [];
-      if (blamed.length > 0) {
-        const reason = normalizeProviderError(error).message;
-        for (const fileId of blamed) {
-          rejected.add(fileId);
-          yield { type: "file-rejected", fileId, message: reason, ...httpErrorDetail(error) };
-        }
-        request = withoutFiles(request, new Set(blamed), params.files);
-        continue;
-      }
-      const normalized = normalizeProviderError(error);
-      // An abort is not a failure to report: the run was stopped on purpose, and
-      // `Agent` is already writing the ending. Saying so twice would put an error
-      // in a transcript the user closed themselves.
-      if (normalized.code !== "aborted") {
-        yield { type: "error", error: normalized, ...httpErrorDetail(error) };
-      }
-      yield {
-        type: "finish",
-        reason: normalized.code === "aborted" ? "aborted" : "error",
-        usage: emptyUsage(),
-      };
-      return;
-    }
-  }
+  let fileAttempts = 0;
+  const maxStreamRetries = Math.max(0, endpoint.maxRetries);
+  const random = endpoint.random ?? Math.random;
+  // What the attempts that were dropped before their first content event
+  // reported as used. Folded into whichever `finish` closes the call.
+  let dropped: Usage | undefined;
+  const closing = (event: Extract<ProviderEvent, { type: "finish" }>): ProviderEvent => {
+    if (!dropped) return event;
+    const usage = addUsage(addUsage(emptyUsage(), dropped), event.usage);
+    dropped = undefined;
+    return { ...event, usage };
+  };
+  const aborted = (): ProviderEvent => closing({ type: "finish", reason: "aborted", usage: emptyUsage() });
 
-  try {
-    yield* parseResponsesStream(decodeChunks(response.body), {
-      structuredOutput: params.structuredOutput,
-    });
-  } catch (error) {
-    const normalized = normalizeProviderError(error);
-    if (normalized.code === "aborted") {
-      yield { type: "finish", reason: "aborted", usage: emptyUsage() };
-      return;
+  for (let streamAttempt = 0; ; streamAttempt++) {
+    let response: Response | undefined;
+    while (response === undefined) {
+      try {
+        response = await requestWithRetry(
+          endpoint.responsesUrl,
+          {
+            method: "POST",
+            headers: { ...(await endpoint.headers()), "content-type": "application/json" },
+            body: JSON.stringify(request),
+          },
+          {
+            maxRetries: endpoint.maxRetries,
+            timeoutMs: endpoint.timeoutMs,
+            signal: params.signal,
+            fetchImpl: endpoint.fetchImpl,
+            sleep: endpoint.sleep,
+            random: endpoint.random,
+          },
+        );
+      } catch (error) {
+        // A stored file the provider will not read fails this request and, left
+        // in, every later one in the thread (#684). Take it out and ask again,
+        // as long as the error blames a file this attempt still sent.
+        const blamed =
+          fileAttempts < MAX_FILE_REJECTION_RETRIES
+            ? rejectedFileIds(request, error, params.files).filter((id) => !rejected.has(id))
+            : [];
+        if (blamed.length > 0) {
+          fileAttempts++;
+          const reason = normalizeProviderError(error).message;
+          for (const fileId of blamed) {
+            rejected.add(fileId);
+            yield { type: "file-rejected", fileId, message: reason, ...httpErrorDetail(error) };
+          }
+          request = withoutFiles(request, new Set(blamed), params.files);
+          continue;
+        }
+        const normalized = normalizeProviderError(error);
+        // An abort is not a failure to report: the run was stopped on purpose, and
+        // `Agent` is already writing the ending. Saying so twice would put an error
+        // in a transcript the user closed themselves.
+        if (normalized.code === "aborted") {
+          yield aborted();
+          return;
+        }
+        yield { type: "error", error: normalized, ...httpErrorDetail(error) };
+        yield closing({ type: "finish", reason: "error", usage: emptyUsage() });
+        return;
+      }
     }
-    yield { type: "error", error: normalized };
-    yield { type: "finish", reason: "error", usage: emptyUsage() };
+
+    const held: ProviderEvent[] = [];
+    let committed = false;
+    let failure: AgentError | undefined;
+    try {
+      for await (const event of parseResponsesStream(decodeChunks(response.body), {
+        structuredOutput: params.structuredOutput,
+      })) {
+        if (committed) {
+          yield event.type === "finish" ? closing(event) : event;
+          continue;
+        }
+        if (isContentEvent(event)) {
+          committed = true;
+          yield* held.splice(0);
+          yield event;
+          continue;
+        }
+        if (event.type === "error") failure = event.error;
+        held.push(event);
+      }
+    } catch (error) {
+      const normalized = normalizeProviderError(error);
+      if (normalized.code === "aborted" || params.signal?.aborted) {
+        yield aborted();
+        return;
+      }
+      if (committed) {
+        yield { type: "error", error: normalized };
+        yield closing({ type: "finish", reason: "error", usage: emptyUsage() });
+        return;
+      }
+      failure = normalized;
+      held.push(
+        { type: "error", error: normalized },
+        { type: "finish", reason: "error", usage: emptyUsage() },
+      );
+    }
+    if (committed) return;
+
+    if (failure?.retryable && streamAttempt < maxStreamRetries && !params.signal?.aborted) {
+      for (const event of held) {
+        if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
+      }
+      try {
+        await waitUnlessAborted(backoffDelayMs(streamAttempt, random), params.signal, endpoint.sleep);
+      } catch {
+        yield aborted();
+        return;
+      }
+      continue;
+    }
+
+    for (const event of held) yield event.type === "finish" ? closing(event) : event;
+    return;
   }
 }
 

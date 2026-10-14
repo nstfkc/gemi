@@ -1,4 +1,4 @@
-import type { ProviderStreamParams } from "./AgentProvider";
+import type { ProviderEvent, ProviderStreamParams } from "./AgentProvider";
 import { supportsStrict, type Schema } from "./Schema";
 import type { AgentError, AgentMessage, Usage } from "./types";
 
@@ -32,6 +32,28 @@ export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
+}
+
+/**
+ * Every event that is content a consumer shows or stores.
+ *
+ * The first one is the point of no return for a call: before it, the call can
+ * be asked again (the stream retry in `providers/call.ts`) or handed to another
+ * model (`FallbackProvider`) without anyone seeing a seam; after it, the user
+ * has read something, and asking again would show it twice.
+ */
+export function isContentEvent(event: ProviderEvent): boolean {
+  switch (event.type) {
+    case "text-delta":
+    case "reasoning-delta":
+    case "tool-call-delta":
+    case "tool-call":
+    case "tool-search":
+    case "output-delta":
+      return true;
+    default:
+      return false;
+  }
 }
 
 // --- usage -----------------------------------------------------------------

@@ -1,5 +1,15 @@
 # Unreleased
 
+## AI: a stream that breaks before its first event is retried (#946)
+
+**Behaviour change, nothing to migrate.** See [AI Providers → Retries](docs/ai-providers.md#retries).
+
+- `OpenAIProvider` and `AzureOpenAIProvider` now retry a stream that fails after the response started but before its first content event. This covers a socket that closes while the body is read, a stream that ends with no terminal event, and a retryable in-stream `response.failed` / `error`. They use the provider's `maxRetries` (default 2) and the same backoff as a failed request. Before, such a call failed straight away with `provider_error` (`retryable: true`).
+- Once a content event has been yielded, the call is never retried, as before. An abort during the backoff ends the call with `finish` reason `"aborted"`.
+- A call that keeps failing now takes longer to report its error: up to about 1.5 s of backoff with the default `maxRetries`, plus the extra attempts. `maxRetries: 0` restores the old behaviour.
+- The closing `finish` event's `usage` includes the usage reported by dropped attempts.
+- **Fallback chains:** a leg now retries its own transient stream failures before the chain moves on. If you added the same provider as several legs only to get these retries (`FallbackProvider.chain([{ provider: m }, { provider: m }])`), you can remove the extra legs.
+
 ## AI: `requiresApproval` decided per call (#944)
 
 **New, nothing to migrate.** `requiresApproval: true` and `false` work as before. See [AI Tool Approvals](docs/ai-tool-approvals.md).
