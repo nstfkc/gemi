@@ -14,7 +14,7 @@ import {
   MemoryCircuitStore,
 } from "./CircuitStore";
 import { httpErrorDetail } from "./providers/errors";
-import { addUsage, emptyUsage } from "./runtime";
+import { addUsage, emptyUsage, isContentEvent } from "./runtime";
 import type { AgentError, Usage } from "./types";
 
 /**
@@ -159,21 +159,6 @@ export type FallbackCircuitChange = {
   key: string;
   state: CircuitState;
 };
-
-/** Every event that is content a consumer shows or stores. The first one commits its leg. */
-function isContent(event: ProviderEvent): boolean {
-  switch (event.type) {
-    case "text-delta":
-    case "reasoning-delta":
-    case "tool-call-delta":
-    case "tool-call":
-    case "tool-search":
-    case "output-delta":
-      return true;
-    default:
-      return false;
-  }
-}
 
 const TIMED_OUT = Symbol("timed-out");
 
@@ -391,7 +376,7 @@ export class FallbackProvider extends AgentProvider {
             continue;
           }
 
-          if (isContent(event)) {
+          if (isContentEvent(event)) {
             committed = true;
             await tell("success");
             yield* held.splice(0);
