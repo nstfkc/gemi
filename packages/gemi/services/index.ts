@@ -122,6 +122,9 @@ export {
 } from "./mcp/McpRegistry";
 export {
   McpHttpServer,
+  type McpCallDenial,
+  type McpCallEvent,
+  type McpCallOutcome,
   type McpRemoteHttpConfig,
 } from "./mcp/http/McpHttpServer";
 export {
