@@ -3908,10 +3908,17 @@ Hosted clients (Claude.ai and Claude Desktop connectors, ChatGPT) connect with O
 
 ```ts
 // app/mcp/oauth.ts
-import { McpOAuthServer } from "gemi/services";
+import { McpOAuthServer, PrismaMcpOAuthStore } from "gemi/services";
+import { McpOAuthClient, McpOAuthCredential, McpOAuthUse } from "@/app/models";
+
+export const mcpOAuthStore = new PrismaMcpOAuthStore({
+  clients: McpOAuthClient,
+  credentials: McpOAuthCredential,
+  uses: McpOAuthUse,
+}); // see "The store" below
 
 export const mcpOAuth = new McpOAuthServer({
-  store: new PrismaMcpOAuthStore(), // yours; see "The store" below
+  store: mcpOAuthStore,
   findUser: (id) => User.findUnique({ where: { id: Number(id) } }),
   consentPath: "/oauth/consent", // optional: your own consent view
 });
@@ -3969,9 +3976,10 @@ The decision is accepted only from your own origin (`Origin`, or `Sec-Fetch-Site
 
 #### The store
 
-`McpOAuthStore` keeps clients, codes and tokens. `MemoryMcpOAuthStore` is for development and tests: it forgets everything on restart and is not shared between instances. In production, implement the interface on your database:
+`McpOAuthStore` keeps clients, codes and tokens. `MemoryMcpOAuthStore` is for development and tests: it forgets everything on restart and is not shared between instances. In production use `PrismaMcpOAuthStore`, which keeps them in three tables of your database, shared by every instance. Add the models to `prisma/schema.prisma` and migrate:
 
 ```prisma
+// Clients that registered themselves (Claude's connectors, ChatGPT, the Inspector).
 model McpOAuthClient {
   clientId                String   @id
   clientSecretHash        String?
@@ -3982,32 +3990,50 @@ model McpOAuthClient {
   createdAt               DateTime @default(now())
 }
 
+// Codes ("code"), access tokens ("access") and refresh tokens ("refresh"), by
+// their SHA-256; never the value. A family is one user's grant to one client.
 model McpOAuthCredential {
-  hash        String   @id // SHA-256 of a code or token; never the value
-  kind        String   // "code" | "access" | "refresh"
-  clientId    String
-  userId      String
-  scopes      String[]
-  resource    String
-  familyId    String
-  redirectUri String?
+  hash          String    @id
+  kind          String
+  clientId      String
+  userId        String // String(user.id)
+  scopes        String[]
+  resource      String
+  familyId      String
+  redirectUri   String?
   codeChallenge String?
-  expiresAt   DateTime
-  revokedAt   DateTime?
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  createdAt     DateTime  @default(now())
 
   @@index([familyId])
   @@index([userId])
 }
 
+// Single-use keys spent: codes, refresh tokens, consent decisions, and the
+// approvals of `store.nonces()`.
 model McpOAuthUse {
-  key       String   @id // a code's or refresh token's hash, or a consent decision's nonce
+  key       String   @id
   expiresAt DateTime
 }
 ```
 
-- `use(key, expiresAt)` must be atomic across instances: insert `{ key, expiresAt }` into `McpOAuthUse` and answer `true` if the insert went in, `false` on a unique-key conflict. Delete rows past `expiresAt` from time to time.
-- `findCode` and `findToken` answer `null` for a revoked family.
-- `revokeFamily(familyId)` marks every row of the family revoked. A family is one user's grant to one client, which is what a "Connected apps" screen in your settings lists (by `userId`) and revokes.
+On MySQL or SQLite, which have no `String[]`, declare `redirectUris` and `scopes` as `Json`. The model and field names are what the store reads and writes; the tables may be `@@map`ped to other names.
+
+Pass the models, as gemi ORM model classes or as a Prisma client's delegates:
+
+```ts
+new PrismaMcpOAuthStore({ clients: McpOAuthClient, credentials: McpOAuthCredential, uses: McpOAuthUse });
+new PrismaMcpOAuthStore({ clients: prisma.mcpOAuthClient, credentials: prisma.mcpOAuthCredential, uses: prisma.mcpOAuthUse });
+```
+
+- **Single use.** A code, a refresh token and a consent decision are spent by inserting their key into `McpOAuthUse`: the primary key lets one insert in across every instance, so a code or refresh token used twice is caught (and its grant revoked) even when the two uses race on two servers.
+- **Revocation.** Revoking a family stamps `revokedAt` on its rows, and a family with any revoked row is revoked, so a token saved after the revocation (a refresh racing it) is refused too.
+- **`connectedApps(userId)`** answers the user's live grants, newest first, with the client's (unverified) name and the scopes, for a "Connected apps" screen. **`disconnect(userId, familyId)`** revokes one of them (`false` when it is not the user's). **`revokeUser(userId)`** revokes all of a user's grants, for example when they lose the role the tools need.
+- **`prune()`** deletes codes and tokens a day after they expire and spent keys once they expire. Run it from a scheduled job, daily is plenty. A revoked family's revoked rows are kept while any of its rows has not expired, so pruning never brings a revoked grant back.
+- **`nonces()`** is a `NonceStore` on the same `McpOAuthUse` table for `route.mcp.remote.nonces` (see [Approval](#approval)). Its keys carry a `nonce:` prefix.
+
+Your own store implements the `McpOAuthStore` interface. `use(key, expiresAt)` must be atomic across instances: insert `{ key, expiresAt }` and answer `true` if the insert went in, `false` on a unique-key conflict. `findCode` and `findToken` answer `null` for a revoked family. `revokeFamily(familyId)` revokes every code and token of the family.
 
 ### Scopes: which tools a caller sees
 
@@ -4017,7 +4043,13 @@ model McpOAuthUse {
 
 A tool with `requiresApproval: true` asks the user before it runs, through the client's elicitation (a form with one `approve` checkbox). With a 2026-07-28 client the call answers `input_required` and the client retries with the answer; the retry is signed, bound to the credential, the tool and its exact arguments, expires in ten minutes, and is accepted once. With an older client the question goes over the call's response stream. A client that cannot elicit cannot call the tool, and a declined approval answers an error result; the route never runs. A native tool whose `requiresApproval` is a function is asked only when the function answers `true` for the call; answered `false`, it runs without a question, for any client ([AI Tool Approvals](./ai-tool-approvals.md)).
 
-The one-time approvals are remembered in `nonces`, in this process by default. With more than one instance, pass a shared store (`RedisNonceStore` from `gemi/ai`). Older clients' approvals wait on the instance that asked, so they need sticky routing per session; without it the answer reaches another instance and the call fails closed.
+The one-time approvals are remembered in `nonces`, in this process by default. With more than one instance, pass a shared store: `RedisNonceStore` from `gemi/ai`, or, without Redis, one on your database. `mcpOAuthStore.nonces()` keeps them in the OAuth store's `McpOAuthUse` table; `new PrismaNonceStore(model, { prefix })` from `gemi/ai` keeps them in any model with `key String @id` and `expiresAt DateTime`. Both spend a nonce by inserting it as the primary key, so two instances handed the same approval cannot both run it. Delete expired rows from time to time (`mcpOAuthStore.prune()`, or `nonces.prune()`).
+
+```ts
+remote: { /* ... */ resolvers: [mcpOAuth], nonces: mcpOAuthStore.nonces() },
+```
+
+ Older clients' approvals wait on the instance that asked, so they need sticky routing per session; without it the answer reaches another instance and the call fails closed.
 
 ### Progress and cancellation
 

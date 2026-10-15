@@ -1,4 +1,5 @@
 import { app } from "../../foundation/app";
+import { isUniqueConstraintError } from "../../orm/errors";
 import { RedisManager } from "../../services/redis/RedisManager";
 
 /**
@@ -22,6 +23,8 @@ import { RedisManager } from "../../services/redis/RedisManager";
  *                      the same answer once.
  *   RedisNonceStore  — `SET key 1 PX <ttl> NX` on the app's Redis. Shared,
  *                      atomic, and Redis drops each key at the token's expiry.
+ *   PrismaNonceStore — an insert keyed by the nonce, in a table of the app's
+ *                      database (a gemi ORM model or a Prisma delegate).
  *   your own         — e.g. a table with the nonce as its primary key:
  *
  *     class DbNonceStore implements NonceStore {
@@ -162,6 +165,106 @@ export class RedisNonceStore implements NonceStore {
     }
     return client;
   }
+}
+
+/**
+ * The slice of a model a `PrismaNonceStore` writes to: a Prisma client's
+ * delegate (`prisma.mcpOAuthUse`) or a gemi ORM model class (`McpOAuthUse`).
+ * Rows are `{ key: string; expiresAt: Date }`, `key` the primary key.
+ */
+export interface NonceModel {
+  create(args: { data: { key: string; expiresAt: Date } }): PromiseLike<unknown>;
+  deleteMany(args: { where: Record<string, unknown> }): PromiseLike<{ count: number }>;
+}
+
+export interface PrismaNonceStoreOptions {
+  /**
+   * Put in front of every nonce, so a table shared with other single-use keys
+   * (`McpOAuthUse`, whose keys are SHA-256 hex) cannot collide with them.
+   * Default `""`.
+   */
+  prefix?: string;
+}
+
+/**
+ * Spent nonces in a table of the app's database, shared by every instance
+ * that shares the database: for an app with no Redis. Spending is an
+ * `INSERT` of the nonce as the primary key, so the database settles a race:
+ * of two instances handed the same answer, one insert goes in and the other
+ * hits the key and is told "already spent".
+ *
+ * ```prisma
+ * model McpOAuthUse {
+ *   key       String   @id
+ *   expiresAt DateTime
+ * }
+ * ```
+ *
+ * ```ts
+ * const nonces = new PrismaNonceStore(McpOAuthUse, { prefix: "nonce:" }); // gemi ORM model
+ * const nonces = new PrismaNonceStore(prisma.mcpOAuthUse, { prefix: "nonce:" }); // Prisma client
+ * ```
+ *
+ * A row past its `expiresAt` binds nothing (the token it was spent for fails
+ * verification on its own), so `prune()` deletes them; run it from a
+ * scheduled job. A failing database rejects, and the answer is refused (see
+ * `NonceStore.consume`).
+ */
+export class PrismaNonceStore implements NonceStore {
+  private readonly prefix: string;
+
+  constructor(
+    private readonly model: NonceModel,
+    options: PrismaNonceStoreOptions = {},
+  ) {
+    if (typeof model?.create !== "function" || typeof model.deleteMany !== "function") {
+      throw new Error(
+        "PrismaNonceStore needs a model with create() and deleteMany(): a gemi ORM model class or a Prisma client's delegate, like prisma.mcpOAuthUse.",
+      );
+    }
+    this.prefix = options.prefix ?? "";
+  }
+
+  async consume(nonce: string, expiresAt: number): Promise<boolean> {
+    const key = this.prefix + nonce;
+    if (await this.insert(key, expiresAt)) return true;
+    // A row left over past its expiry (not pruned yet) binds nothing. Deleting
+    // it is guarded by its expiry, so of two racers at most one deletes it,
+    // and the primary key still lets only one insert in.
+    const { count } = await this.model.deleteMany({
+      where: { key, expiresAt: { lte: new Date() } },
+    });
+    return count > 0 && (await this.insert(key, expiresAt));
+  }
+
+  /** Deletes the nonces that have expired, and resolves to how many. */
+  async prune(now = Date.now()): Promise<number> {
+    const where: Record<string, unknown> = { expiresAt: { lte: new Date(now) } };
+    if (this.prefix !== "") where.key = { startsWith: this.prefix };
+    const { count } = await this.model.deleteMany({ where });
+    return count;
+  }
+
+  private async insert(key: string, expiresAt: number): Promise<boolean> {
+    try {
+      await this.model.create({ data: { key, expiresAt: new Date(expiresAt) } });
+      return true;
+    } catch (error) {
+      if (isUniqueViolation(error)) return false;
+      throw error;
+    }
+  }
+}
+
+/**
+ * A write refused by a unique key: gemi ORM's `UniqueConstraintError`, or
+ * Prisma's `P2002` for an app whose models are a Prisma client. The Prisma
+ * code is recognised here, inside a store written for both, and is not part
+ * of gemi's public surface (see `UniqueConstraintError`).
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  if (isUniqueConstraintError(error)) return true;
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2002";
 }
 
 /** The process-wide default, shared by every agent that is not given a store. */

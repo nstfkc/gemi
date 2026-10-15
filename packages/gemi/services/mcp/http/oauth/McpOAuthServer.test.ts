@@ -18,7 +18,7 @@ import { Kernel } from "../../../../kernel";
 import { ServiceProvider } from "../../../../support/ServiceProvider";
 import { McpApiKeyResolver } from "../callers";
 import { McpOAuthServer } from "./McpOAuthServer";
-import { MemoryMcpOAuthStore } from "./store";
+import { MemoryMcpOAuthStore, type McpOAuthStore } from "./store";
 
 /**
  * The OAuth authorization server end to end, through `App.fetch`: a client
@@ -77,7 +77,14 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
   };
 }
 
-let store = new MemoryMcpOAuthStore();
+/**
+ * The store every test runs on. `McpOAuthServer.prisma.test.ts` runs this
+ * whole file again on `PrismaMcpOAuthStore` by setting the factory first.
+ */
+const newStore: () => McpOAuthStore =
+  (globalThis as { __gemiMcpOAuthTestStore?: () => McpOAuthStore }).__gemiMcpOAuthTestStore ??
+  (() => new MemoryMcpOAuthStore());
+let store = newStore();
 const oauth = (options: Partial<ConstructorParameters<typeof McpOAuthServer>[0]> = {}) =>
   new McpOAuthServer({
     store: {
@@ -271,7 +278,7 @@ function mcp(token: string | null, method = "tools/list", params: Record<string,
 }
 
 beforeEach(() => {
-  store = new MemoryMcpOAuthStore();
+  store = newStore();
   ip += 1;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });

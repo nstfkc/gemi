@@ -1,5 +1,13 @@
 # Unreleased
 
+## MCP: `PrismaMcpOAuthStore` and `PrismaNonceStore`, shared stores on the app's database
+
+**New, nothing to migrate.** See [MCP Server → The store](docs/mcp.md#the-store) and [Approval](docs/mcp.md#approval).
+
+- **`PrismaMcpOAuthStore`** (`gemi/services`): a ready-made `McpOAuthStore` on three models (`McpOAuthClient`, `McpOAuthCredential`, `McpOAuthUse`; the schema is in the docs), given as gemi ORM model classes or a Prisma client's delegates. It adds `connectedApps(userId)`, `disconnect(userId, familyId)`, `revokeUser(userId)`, `prune()` and `nonces()`.
+- **`PrismaNonceStore`** (`gemi/ai`): a `NonceStore` on a `key`/`expiresAt` model, for `route.mcp.remote.nonces` (or an `AgentController`'s `nonces`) on an app without Redis. A nonce is spent by inserting it as the primary key, so it is single-use across instances. `prune()` deletes expired rows.
+- An app that wrote its own Prisma store with these models (like the one in the docs before) can switch to `PrismaMcpOAuthStore` without a migration, as long as `McpOAuthCredential` has `createdAt DateTime @default(now())`.
+
 ## `Meta.openGraph` without an image, and `twitter:card` (#961)
 
 **New, plus a small behaviour change. Nothing to migrate.** See [Views & Layouts](docs/views-and-layouts.md).

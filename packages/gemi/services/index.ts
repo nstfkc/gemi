@@ -146,6 +146,12 @@ export {
   type McpOAuthToken,
   type McpOAuthTokenEndpointAuthMethod,
 } from "./mcp/http/oauth/store";
+export {
+  PrismaMcpOAuthStore,
+  type McpOAuthConnectedApp,
+  type McpOAuthModel,
+  type PrismaMcpOAuthStoreModels,
+} from "./mcp/http/oauth/prismaStore";
 export { CONSENT_PAGE_HEADERS } from "./mcp/http/oauth/consentPage";
 
 // Logging
