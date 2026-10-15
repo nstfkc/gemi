@@ -18,6 +18,9 @@
  *   unchanged, as before 0.88. Only sound behind a proxy that overwrites
  *   `X-Forwarded-For` (and `X-Real-IP`) rather than appending to it.
  */
+import { normalizeIpEntry } from "../http/clientAddress";
+import { secretMatches } from "../services/router/DomainResolver";
+
 export type ForwardedTrust =
   | { kind: "none" }
   | { kind: "all" }
@@ -79,7 +82,13 @@ export function applyForwardedTrust(
     // expected means the request skipped a proxy, so its left-most hop is the
     // furthest thing seen — never anything further left than that.
     const index = entries.length - trust.hops;
-    client = index >= 0 ? entries[index]! : (entries[0] ?? peer);
+    const chosen = index >= 0 ? entries[index] : entries[0];
+    // A proxy may append the address it was reached from with its source port
+    // (`203.0.113.7:51234`, `[2001:db8::1]:443`); the port differs per
+    // connection, so it is dropped, or every request gets a rate-limit bucket
+    // of its own. An entry that is not an address at all (`unknown`, junk a
+    // short chain let the client write) is not believed: the peer is used.
+    client = (chosen === undefined ? null : normalizeIpEntry(chosen)) ?? peer;
   }
 
   if (client) {
@@ -87,4 +96,81 @@ export function applyForwardedTrust(
   } else {
     headers.delete("x-forwarded-for");
   }
+}
+
+/**
+ * A header a proxy in front writes the client's address into, believed only on
+ * a request that carries a secret only that proxy sends. Set with
+ * `GEMI_CLIENT_IP_HEADER`, `GEMI_PROXY_SECRET_HEADER` and `GEMI_PROXY_SECRET`,
+ * for an app that does not declare `route.domains` (whose
+ * `trustProxy.clientIpHeader` does the same). Behind Azure Front Door:
+ * `X-Azure-ClientIP`, proven by `X-Azure-FDID` carrying the profile's ID.
+ */
+export interface ClientIpHeaderTrust {
+  /** Lowercased name of the header that carries the client's address. */
+  header: string;
+  /** Lowercased name of the header that carries the secret. */
+  secretHeader: string;
+  secret: string;
+}
+
+/** An RFC 9110 field name. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const MIN_SECRET_LENGTH = 16;
+
+/**
+ * `GEMI_CLIENT_IP_HEADER`, `GEMI_PROXY_SECRET_HEADER` and `GEMI_PROXY_SECRET`
+ * as one policy, or `null` when none is set. A partial or malformed set throws,
+ * so a typo fails the boot instead of silently trusting nothing — or, without
+ * a secret, letting any client name its own address.
+ */
+export function parseClientIpHeaderTrust(
+  env: Record<string, string | undefined>,
+): ClientIpHeaderTrust | null {
+  const header = env.GEMI_CLIENT_IP_HEADER?.trim() ?? "";
+  const secretHeader = env.GEMI_PROXY_SECRET_HEADER?.trim() ?? "";
+  const secret = env.GEMI_PROXY_SECRET ?? "";
+  if (header === "" && secretHeader === "" && secret === "") {
+    return null;
+  }
+  if (header === "" || secretHeader === "" || secret === "") {
+    throw new Error(
+      "GEMI_CLIENT_IP_HEADER, GEMI_PROXY_SECRET_HEADER and GEMI_PROXY_SECRET go together: the client-IP header is only believed on a request that carries the proxy's secret. Set all three, or none.",
+    );
+  }
+  if (!HEADER_NAME.test(header)) {
+    throw new Error(
+      `GEMI_CLIENT_IP_HEADER must be a single header name, e.g. "x-azure-clientip". Got ${JSON.stringify(header)}.`,
+    );
+  }
+  if (!HEADER_NAME.test(secretHeader)) {
+    throw new Error(
+      `GEMI_PROXY_SECRET_HEADER must be a single header name, e.g. "x-azure-fdid". Got ${JSON.stringify(secretHeader)}.`,
+    );
+  }
+  if (header.toLowerCase() === secretHeader.toLowerCase()) {
+    throw new Error("GEMI_CLIENT_IP_HEADER and GEMI_PROXY_SECRET_HEADER name the same header.");
+  }
+  if (secret.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `GEMI_PROXY_SECRET must be at least ${MIN_SECRET_LENGTH} characters. A guessable one lets any client name its own address.`,
+    );
+  }
+  return { header: header.toLowerCase(), secretHeader: secretHeader.toLowerCase(), secret };
+}
+
+/**
+ * The address `trust.header` names — its first entry, without a port — on a
+ * request whose `trust.secretHeader` matches; `null` when the secret is
+ * missing or wrong, or the header is absent or not an IPv4/IPv6 address.
+ */
+export function trustedHeaderClientIp(
+  headers: Headers,
+  trust: ClientIpHeaderTrust,
+): string | null {
+  if (!secretMatches(headers.get(trust.secretHeader), trust.secret)) {
+    return null;
+  }
+  const first = headers.get(trust.header)?.split(",")[0];
+  return first === undefined ? null : normalizeIpEntry(first);
 }

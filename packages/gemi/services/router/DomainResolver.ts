@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { isIP } from "node:net";
+import { normalizeIpEntry } from "../../http/clientAddress";
 import type { CustomDomainConfig, DomainGroupConfig, DomainsConfig } from "./config";
 
 /** The group key the apex itself is served under. */
@@ -294,7 +294,8 @@ export class DomainResolver {
   }
 
   /**
-   * The client address `trustProxy.clientIpHeader` names — its first entry —
+   * The client address `trustProxy.clientIpHeader` names — its first entry,
+   * without a port —
    * or `null` when no such header is configured, the secret is missing or
    * wrong, or the header is absent or not an IPv4/IPv6 address.
    */
@@ -307,8 +308,8 @@ export class DomainResolver {
     if (!secretMatches(req.headers.get(trust.secret.header), trust.secret.value)) {
       return null;
     }
-    const ip = req.headers.get(trust.clientIpHeader)?.split(",")[0]?.trim();
-    return ip && isIP(ip) ? ip : null;
+    const first = req.headers.get(trust.clientIpHeader)?.split(",")[0];
+    return first === undefined ? null : normalizeIpEntry(first);
   }
 
   /**

@@ -728,6 +728,15 @@ describe("trustProxy.clientIpHeader (#917)", () => {
     );
   });
 
+  test("an ip:port or [v6]:port value loses its port (#958)", () => {
+    expect(trusted().trustedClientIp(fromProxy({ "x-client-ip": "203.0.113.9:443" }))).toBe(
+      "203.0.113.9",
+    );
+    expect(trusted().trustedClientIp(fromProxy({ "x-client-ip": "[2001:db8::1]:443" }))).toBe(
+      "2001:db8::1",
+    );
+  });
+
   test("without the secret, or with a wrong one, nothing changes", () => {
     for (const request of [
       req("http://app.up.railway.app/", { "x-client-ip": "203.0.113.9", "x-forwarded-for": "1.2.3.4" }),
@@ -744,7 +753,7 @@ describe("trustProxy.clientIpHeader (#917)", () => {
   });
 
   test("a missing header or one that is not an address changes nothing", () => {
-    for (const value of [undefined, "", "unknown", "203.0.113.9:443", "<script>"]) {
+    for (const value of [undefined, "", "unknown", "203.0.113.9:", "<script>"]) {
       const request = fromProxy({
         "x-forwarded-for": "1.2.3.4",
         ...(value === undefined ? {} : { "x-client-ip": value }),

@@ -9,6 +9,7 @@ import {
 } from "./DomainResolver";
 import type { ApiRouteConfig, DomainGroupRouters, DomainsConfig, ViewRouteConfig } from "./config";
 import { setRequestDomain, withholdFromUpstream } from "../../http/requestDomain";
+import { type ClientIpHeaderTrust, trustedHeaderClientIp } from "../../server/forwardedFor";
 
 /**
  * Where a TLS proxy asks whether to issue a certificate for a host — Caddy's
@@ -35,13 +36,24 @@ export class DomainRouter {
   readonly resolver: DomainResolver | null;
   /** Whether hosts outside the root are served at all — `route.domains.custom` is set. */
   readonly acceptsCustomDomains: boolean;
+  /**
+   * The client-IP header trusted without `route.domains` —
+   * `GEMI_CLIENT_IP_HEADER` and its secret (see `forwardedFor.ts`) — or `null`.
+   */
+  readonly clientIpTrust: ClientIpHeaderTrust | null;
   private readonly groups = new Map<string, DomainDispatchers>();
 
   constructor(
     root: DomainDispatchers,
-    config: { api: ApiRouteConfig; view: ViewRouteConfig; domains?: DomainsConfig },
+    config: {
+      api: ApiRouteConfig;
+      view: ViewRouteConfig;
+      domains?: DomainsConfig;
+      clientIpTrust?: ClientIpHeaderTrust | null;
+    },
   ) {
     this.groups.set(ROOT_GROUP, root);
+    this.clientIpTrust = config.clientIpTrust ?? null;
     const { domains } = config;
     this.acceptsCustomDomains = Boolean(domains?.custom);
     if (!domains) {
@@ -60,6 +72,30 @@ export class DomainRouter {
     if (domains.custom?.fallback) {
       this.groups.set(FALLBACK_GROUP, build(domains.custom.fallback));
     }
+  }
+
+  /**
+   * Makes the address a proven proxy names the one the rest of gemi reads: the
+   * only entry of `X-Forwarded-For`, with `X-Real-IP` dropped. The proxy is
+   * `route.domains.trustProxy` (`clientIpHeader` + `secret`) or, failing that,
+   * `GEMI_CLIENT_IP_HEADER` + `GEMI_PROXY_SECRET_HEADER`/`GEMI_PROXY_SECRET`.
+   * A request without the secret keeps the address `GEMI_TRUST_PROXY` settled
+   * on. Idempotent. Lives here so the secret is withheld from `proxy()` routes
+   * by the app's copy of gemi (see the note at the top of `app/App.ts`).
+   */
+  applyClientIp(req: Request): void {
+    const trust = this.clientIpTrust;
+    if (trust) {
+      withholdFromUpstream(req, trust.secretHeader);
+    }
+    const ip =
+      this.resolver?.trustedClientIp(req) ??
+      (trust ? trustedHeaderClientIp(req.headers, trust) : null);
+    if (!ip) {
+      return;
+    }
+    req.headers.set("x-forwarded-for", ip);
+    req.headers.delete("x-real-ip");
   }
 
   /**

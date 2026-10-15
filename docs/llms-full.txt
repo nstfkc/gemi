@@ -1165,7 +1165,32 @@ GEMI_TRUST_PROXY=2   # Cloudflare in front of Railway
 
 Any other value fails the boot. `gemi dev` passes the headers through as sent. The host a [domain group](./domains.md) is matched on is configured separately, with `route.domains.trustProxy`.
 
+The chosen entry is stored without a port: a proxy that appends `203.0.113.7:51234` or `[2001:db8::1]:443` gives `203.0.113.7` or `2001:db8::1`, so one client keeps one rate-limit bucket across connections. If the chosen entry is not an IP address at all (for example `unknown`), the socket's peer address is used instead. `clientIp(req)` also drops the port from an `ip:port` entry it reads under `GEMI_TRUST_PROXY=true` or `gemi dev`.
+
 Some proxies make a new request to the app, such as a Cloudflare Worker calling `fetch()`, so the client's address is not in `X-Forwarded-For` at all. If the proxy sends the address in a header of its own, name that header with [`route.domains.trustProxy.clientIpHeader`](./domains.md#the-clients-address). It is trusted only together with the proxy's secret, and it takes precedence over `GEMI_TRUST_PROXY`.
+
+### A trusted client-IP header: `GEMI_CLIENT_IP_HEADER`
+
+An app without `route.domains` can trust a proxy's client-IP header through the environment instead. Some proxies set such a header from the TCP connection and also send a value that proves the request came through them. Azure Front Door, for example, sets `X-Azure-ClientIP` and sends the profile's ID in `X-Azure-FDID`. When the proxy provides both, this is more reliable than counting hops:
+
+```bash
+GEMI_CLIENT_IP_HEADER=x-azure-clientip
+GEMI_PROXY_SECRET_HEADER=x-azure-fdid
+GEMI_PROXY_SECRET=<your Front Door profile ID>
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `GEMI_CLIENT_IP_HEADER` | The header that carries the client's address. Its first comma-separated entry is read, without a port. |
+| `GEMI_PROXY_SECRET_HEADER` | The header that proves the proxy sent the request. |
+| `GEMI_PROXY_SECRET` | The value that header must have, at least 16 characters, compared in constant time. |
+
+On a request whose secret header matches, the address becomes the only entry of `X-Forwarded-For` and `X-Real-IP` is dropped. This happens before the global middleware, the broadcast socket upgrade and routing, so `clientIp(req)`, rate limits, one-time-code limits and `broadcast.maxConnectionsPerIp` see the visitor. It works the same in `gemi dev` and `gemi start`.
+
+- A request without the secret, or with a wrong one, is never trusted. It keeps the address `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. Keep `GEMI_TRUST_PROXY` set as you would without this, as the fallback for such requests (health probes, requests that reach the app directly).
+- Set all three or none. A partial set, an invalid header name, the same header named twice, or a secret under 16 characters fails the boot.
+- The secret header is withheld from what a [`proxy()`](./routing.md) route forwards upstream.
+- With `route.domains.trustProxy.clientIpHeader` also configured, whichever proxy proves itself names the client. The domains setting is checked first.
 
 ## Idle connections: `SERVER_IDLE_TIMEOUT`
 
@@ -2357,7 +2382,8 @@ headers.set("X-Proxy-Secret", env.PROXY_SECRET);
 On a request that carries the secret, the first comma-separated entry of `clientIpHeader` becomes the client's address. gemi writes it into `X-Forwarded-For` as the only entry and drops `X-Real-IP`, as `gemi start` does. This happens before the global middleware, the broadcast socket upgrade and routing, so `clientIp(req)`, [rate limits](./middleware.md#rate-limiting), one-time-code limits, the MCP endpoints and `broadcast.maxConnectionsPerIp` see the visitor. Your code does not change.
 
 - **It requires `secret`.** A host the client forges is one it could have sent anyway, but a forged address chooses its own rate-limit bucket. A `clientIpHeader` without a `secret` fails the boot.
-- Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. Requests that reach the app directly keep working as before.
+- Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. A value with a port (`203.0.113.9:443`, `[2001:db8::1]:443`) is read without it. Requests that reach the app directly keep working as before.
+- An app that does not declare `route.domains` gets the same through the environment: see [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header).
 - It must be a header name, and it must differ from `hostHeader` and `secret.header`. The proxy has to **set** the header, not append to it, so a value the visitor sent cannot get through.
 
 ## On-demand TLS for custom domains

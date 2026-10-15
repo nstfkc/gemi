@@ -231,7 +231,8 @@ headers.set("X-Proxy-Secret", env.PROXY_SECRET);
 On a request that carries the secret, the first comma-separated entry of `clientIpHeader` becomes the client's address. gemi writes it into `X-Forwarded-For` as the only entry and drops `X-Real-IP`, as `gemi start` does. This happens before the global middleware, the broadcast socket upgrade and routing, so `clientIp(req)`, [rate limits](./middleware.md#rate-limiting), one-time-code limits, the MCP endpoints and `broadcast.maxConnectionsPerIp` see the visitor. Your code does not change.
 
 - **It requires `secret`.** A host the client forges is one it could have sent anyway, but a forged address chooses its own rate-limit bucket. A `clientIpHeader` without a `secret` fails the boot.
-- Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. Requests that reach the app directly keep working as before.
+- Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. A value with a port (`203.0.113.9:443`, `[2001:db8::1]:443`) is read without it. Requests that reach the app directly keep working as before.
+- An app that does not declare `route.domains` gets the same through the environment: see [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header).
 - It must be a header name, and it must differ from `hostHeader` and `secret.header`. The proxy has to **set** the header, not append to it, so a value the visitor sent cannot get through.
 
 ## On-demand TLS for custom domains

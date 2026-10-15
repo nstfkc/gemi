@@ -1,4 +1,5 @@
 import { ServiceProvider } from "../../support/ServiceProvider";
+import { parseClientIpHeaderTrust } from "../../server/forwardedFor";
 import { McpRegistry } from "../mcp/McpRegistry";
 import { McpHttpServer } from "../mcp/http/McpHttpServer";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
@@ -51,6 +52,7 @@ export class RouteServiceProvider extends ServiceProvider {
             api: readConfig<ApiRouteConfig>(this.app.config, "route.api"),
             view: readConfig<ViewRouteConfig>(this.app.config, "route.view"),
             domains: this.app.config.get<DomainsConfig | undefined>("route.domains"),
+            clientIpTrust: parseClientIpHeaderTrust(process.env),
           },
         ),
     );
