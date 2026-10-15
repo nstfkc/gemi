@@ -27,8 +27,11 @@ export { defaultAgentStore, MemoryAgentStore } from "./MemoryAgentStore";
 export {
   defaultNonceStore,
   MemoryNonceStore,
+  type NonceModel,
   type NonceRedisClient,
   type NonceStore,
+  PrismaNonceStore,
+  type PrismaNonceStoreOptions,
   RedisNonceStore,
   type RedisNonceStoreOptions,
 } from "./Nonces";

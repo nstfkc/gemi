@@ -47,8 +47,11 @@ import {
 import {
   defaultNonceStore,
   MemoryNonceStore,
+  type NonceModel,
   type NonceRedisClient,
   type NonceStore,
+  PrismaNonceStore,
+  type PrismaNonceStoreOptions,
   RedisNonceStore,
   type RedisNonceStoreOptions,
 } from "./store/Nonces";
@@ -243,8 +246,11 @@ export {
 export {
   defaultNonceStore,
   MemoryNonceStore,
+  type NonceModel,
   type NonceRedisClient,
   type NonceStore,
+  PrismaNonceStore,
+  type PrismaNonceStoreOptions,
   RedisNonceStore,
   type RedisNonceStoreOptions,
 };
