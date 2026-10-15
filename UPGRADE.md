@@ -1,3 +1,13 @@
+# Unreleased
+
+## A trusted client-IP header without `route.domains`, and `ip:port` in `X-Forwarded-For` (#958)
+
+**New, plus a small behaviour change. Nothing to migrate.** See [Configuration → A trusted client-IP header](docs/configuration.md#a-trusted-client-ip-header-gemi_client_ip_header).
+
+- **`GEMI_CLIENT_IP_HEADER`, `GEMI_PROXY_SECRET_HEADER`, `GEMI_PROXY_SECRET` (new).** These do what `route.domains.trustProxy.clientIpHeader` does, for an app without `route.domains`. On a request whose secret header matches, the client-IP header's first entry becomes the only entry of `X-Forwarded-For`, before the global middleware, so `clientIp(req)` and every rate limit see it. Without the secret, the address `GEMI_TRUST_PROXY` chose is kept. Set all three or none: a partial set, a bad header name or a secret under 16 characters fails the boot. Behind Azure Front Door: `GEMI_CLIENT_IP_HEADER=x-azure-clientip`, `GEMI_PROXY_SECRET_HEADER=x-azure-fdid`, `GEMI_PROXY_SECRET=<Front Door profile ID>`.
+- **`ip:port` entries (behaviour change).** The `X-Forwarded-For` entry `GEMI_TRUST_PROXY=<n>` picks is now stored without its port (`203.0.113.7:51234` gives `203.0.113.7`, `[2001:db8::1]:443` gives `2001:db8::1`). Before, each connection's source port gave the client a fresh rate-limit bucket. A chosen entry that is not an IP address at all now falls back to the socket's peer address instead of being used as sent. `clientIp(req)` and the broadcast per-IP cap drop the port as well.
+- **`route.domains.trustProxy.clientIpHeader`** now accepts a value with a port and reads it without the port. Before, such a value was ignored.
+
 # Upgrading from 0.140.1 to 0.141.0
 
 ## The 404 view: styles, location and title (#951, #952, #954)

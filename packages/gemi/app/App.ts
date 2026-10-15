@@ -82,15 +82,16 @@ export class App {
   }
 
   /**
-   * Applies `route.domains.trustProxy.clientIpHeader`: on a request that
-   * carries the proxy's secret, the address that header names becomes the
-   * one in `X-Forwarded-For`. The servers call it right after settling
+   * Applies `route.domains.trustProxy.clientIpHeader`, or
+   * `GEMI_CLIENT_IP_HEADER` for an app without `route.domains`: on a request
+   * that carries the proxy's secret, the address that header names becomes
+   * the one in `X-Forwarded-For`. The servers call it right after settling
    * `X-Forwarded-For` (`GEMI_TRUST_PROXY`) and before anything reads it —
    * the socket upgrade and the global middleware included. `fetch` calls it
    * too, for a caller that is not one of the servers. Idempotent.
    */
   public applyTrustedClientIp(req: Request) {
-    this.kernel.domains().resolver?.applyClientIp(req);
+    this.kernel.domains().applyClientIp(req);
   }
 
   public getRouteManifest() {

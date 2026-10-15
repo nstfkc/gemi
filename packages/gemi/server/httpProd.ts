@@ -21,7 +21,7 @@ import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
 import { serverIdleTimeout } from "./idleTimeout";
-import { applyForwardedTrust, parseTrustProxy } from "./forwardedFor";
+import { applyForwardedTrust, parseClientIpHeaderTrust, parseTrustProxy } from "./forwardedFor";
 import { readStaticAssetsRecord } from "../vite/precompressAssets";
 import type { StaticFileOptions } from "./staticFile";
 
@@ -314,10 +314,14 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // Which `X-Forwarded-For` entries to believe — see `forwardedFor.ts`. Parsed
   // before `Bun.serve` so a bad value fails the boot, not every request.
   const forwardedTrust = parseTrustProxy(process.env.GEMI_TRUST_PROXY);
+  // `GEMI_CLIENT_IP_HEADER` and its secret are applied by the app's router
+  // (`app.applyTrustedClientIp`); parsed here as well so a bad set fails the
+  // boot rather than the first request.
+  const clientIpTrust = parseClientIpHeaderTrust(process.env);
 
   // The broadcast socket endpoint, when the app declares `route.channels`.
   const sockets = app.sockets();
-  if (sockets && forwardedTrust.kind === "none") {
+  if (sockets && forwardedTrust.kind === "none" && !clientIpTrust) {
     console.warn(
       "[gemi] Broadcast sockets: GEMI_TRUST_PROXY is not set, so a socket's address is its TCP peer. Behind a proxy or load balancer every client shares the proxy's address, and broadcast.maxConnectionsPerIp caps the whole app per process. Set GEMI_TRUST_PROXY (see forwardedFor) or raise that limit.",
     );
@@ -329,8 +333,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // `requestIP` is null for closed/unix sockets — guard so it never
       // throws before the request is handled.
       applyForwardedTrust(req.headers, server.requestIP(req)?.address ?? null, forwardedTrust);
-      // A proxy that proves itself with `route.domains.trustProxy.secret` may
-      // name the client in `clientIpHeader`, which then wins.
+      // A proxy that proves itself with a secret (`route.domains.trustProxy` or
+      // `GEMI_PROXY_SECRET`) may name the client in its client-IP header,
+      // which then wins.
       app.applyTrustedClientIp(req);
       // Ahead of the instrumentation: an upgrade is not a response to trace,
       // and the hub runs the global middleware itself.

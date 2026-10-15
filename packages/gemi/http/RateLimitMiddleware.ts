@@ -2,6 +2,7 @@ import { app } from "../foundation/app";
 import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import { RateLimitExceededError, rateLimitHeaders } from "./RateLimitExceededError";
 import type { HttpRequest } from "./HttpRequest";
+import { normalizeIpEntry } from "./clientAddress";
 import { Middleware } from "./Middleware";
 import { dispatchedClientAddress, dispatchedGrant } from "./modelOriginated";
 
@@ -148,7 +149,9 @@ export function clientIp(req: HttpRequest) {
   const forwardedFor = req.headers.get("x-forwarded-for");
   if (forwardedFor) {
     const [client] = forwardedFor.split(",");
-    if (client?.trim()) return client.trim();
+    // `203.0.113.7:51234` and `[2001:db8::1]:443` are keyed without the port,
+    // which changes per connection; anything else is used as sent.
+    if (client?.trim()) return normalizeIpEntry(client) ?? client.trim();
   }
 
   return req.headers.get("x-real-ip")?.trim() || "unknown";
