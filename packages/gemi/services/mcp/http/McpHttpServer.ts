@@ -120,6 +120,98 @@ export type McpRemoteHttpConfig = {
   nonces?: NonceStore;
   /** How long a legacy client waits to answer an approval prompt, in ms. Default 10 minutes. */
   approvalTimeoutMs?: number;
+  /**
+   * Called once after every remote `tools/call` has been answered: one that
+   * ran, one that failed, and one that was refused (a tool the credential
+   * cannot see, an approval that was declined, replayed or could not be
+   * asked, a route that answered 401 or 403). For an audit log.
+   *
+   * Awaited before the answer is sent, so a row written here is there when
+   * the client sees the result. It never changes the answer: a hook that
+   * throws is logged and the call is answered as it would have been.
+   *
+   * A modern client's first call to a `requiresApproval` tool, answered
+   * `input_required`, is not reported: the retry that carries the user's
+   * answer is the call, and it is reported once.
+   *
+   * `arguments` are the client's, as sent, file data included. Keep only what
+   * you need (often the keys, or nothing for a tool whose input is private).
+   */
+  onCall?: (event: McpCallEvent) => void | Promise<void>;
+};
+
+/**
+ * How a remote tool call ended, for `route.mcp.remote.onCall`.
+ *
+ * - `ok`: the tool ran and answered.
+ * - `error`: the tool's answer is an error: invalid arguments, a
+ *   `McpToolError`, a route that answered 4xx (other than 401 and 403) or
+ *   5xx, a timeout, or an unexpected failure.
+ * - `denied`: the caller was refused: `reason` says why.
+ */
+export type McpCallOutcome = "ok" | "error" | "denied";
+
+/**
+ * Why a call was `denied`:
+ *
+ * - `unknown-tool`: no tool by that name is available to this credential (out
+ *   of its scopes, behind a feature that is off, or not there at all).
+ * - `approval-declined`: the user declined, cancelled or did not answer.
+ * - `approval-unavailable`: the client cannot ask for an approval.
+ * - `approval-invalid`: the approval sent back was not valid for this call
+ *   (forged, expired, another call's or another credential's).
+ * - `approval-replayed`: the approval was already used, or its single use
+ *   could not be recorded.
+ * - `approval-required`: the registry refused to run it unapproved.
+ * - `forbidden`: the route answered 401 or 403.
+ */
+export type McpCallDenial =
+  | "unknown-tool"
+  | "approval-declined"
+  | "approval-unavailable"
+  | "approval-invalid"
+  | "approval-replayed"
+  | "approval-required"
+  | "forbidden";
+
+/** What `route.mcp.remote.onCall` is told about one remote tool call. */
+export type McpCallEvent = {
+  /** The user the call ran (or would have run) as. */
+  user: McpRemotePrincipal["user"];
+  /** The resolver that vouched for the credential: `"oauth"`, `"api-key"`, or an app's own. */
+  via: string;
+  /** The credential's stable id: the OAuth grant (its family) or the API key's id. Never the secret. */
+  credentialId: string;
+  /** The OAuth client the token was issued to, or `null` (an API key). */
+  clientId: string | null;
+  /** The scopes the credential carries. */
+  scopes: readonly string[];
+  /** The tool's name, as the client called it. */
+  tool: string;
+  /** The arguments, as the client sent them. */
+  arguments: unknown;
+  outcome: McpCallOutcome;
+  /** For `denied`, why. */
+  reason?: McpCallDenial;
+  /** For `error` and `denied`: what the client was told. */
+  message?: string;
+  /** The HTTP status the tool's route answered, when it answered an error. */
+  status?: number;
+  /** For an unexpected failure: what was thrown. It was logged, and the client was told only that the tool failed. */
+  error?: unknown;
+  /** Whether the user approved this call (a `requiresApproval` tool). */
+  approved: boolean;
+  /** How long the call took to answer, in ms: for a legacy client, including the wait for its user's approval. */
+  durationMs: number;
+  /** The MCP endpoint's request: its headers and `clientIp(req)`. */
+  req: HttpRequest<any, any>;
+};
+
+/** What `callTool` found out, for the `onCall` event. */
+type CallAudit = Partial<Pick<McpCallEvent, "outcome" | "reason" | "message" | "status" | "error">> & {
+  approved: boolean;
+  /** An `input_required` answer: not the end of the call. */
+  pending?: boolean;
 };
 
 const REQUEST_STATE = "gemi.mcp.request-state.v1";
@@ -191,6 +283,7 @@ export class McpHttpServer {
   private readonly instructions?: string;
   private readonly nonces: NonceStore;
   private readonly approvalTimeoutMs: number;
+  private readonly onCall?: (event: McpCallEvent) => void | Promise<void>;
   /** `feature`: the flag the endpoint is served behind, if any (#885). */
   private readonly feature?: string;
   private readonly featureOn: (key: string) => boolean | Promise<boolean>;
@@ -249,6 +342,10 @@ export class McpHttpServer {
     this.instructions = config.server?.instructions;
     this.nonces = config.nonces ?? new MemoryNonceStore();
     this.approvalTimeoutMs = config.approvalTimeoutMs ?? APPROVAL_TTL;
+    if (config.onCall !== undefined && typeof config.onCall !== "function") {
+      throw new Error("route.mcp.remote.onCall must be a function.");
+    }
+    this.onCall = config.onCall;
     if (config.feature !== undefined) {
       if (typeof config.feature !== "string" || config.feature === "") {
         throw new Error("route.mcp.remote.feature must be a feature key from app/features.");
@@ -620,30 +717,86 @@ export class McpHttpServer {
   // --- tools/call ------------------------------------------------------------
 
   private async callTool(call: Call): Promise<unknown> {
-    const { params, caller, principal } = call;
-    const name = params.name;
+    const name = call.params.name;
     if (typeof name !== "string") {
       throw new JsonRpcError(ErrorCode.InvalidParams, "tools/call needs a tool name.");
     }
-    const args = params.arguments ?? {};
+    const args = call.params.arguments ?? {};
+    if (!this.onCall) return await this.runTool(call, name, args, { approved: false });
+
+    const started = performance.now();
+    const audit: CallAudit = { approved: false };
+    try {
+      const result = await this.runTool(call, name, args, audit);
+      if (!audit.pending) await this.report(call, name, args, audit, started);
+      return result;
+    } catch (error) {
+      if (!audit.outcome) {
+        audit.outcome = "error";
+        audit.message = error instanceof JsonRpcError ? error.message : "Internal error.";
+        if (!(error instanceof JsonRpcError)) audit.error = error;
+      }
+      await this.report(call, name, args, audit, started);
+      throw error;
+    }
+  }
+
+  /** Tells `onCall` how a call ended. Its failure is logged, never answered. */
+  private async report(call: Call, tool: string, args: unknown, audit: CallAudit, started: number) {
+    const { principal } = call;
+    try {
+      await this.onCall!({
+        user: principal.user,
+        via: principal.via,
+        credentialId: principal.id,
+        clientId: principal.clientId ?? null,
+        scopes: principal.scopes,
+        tool,
+        arguments: args,
+        outcome: audit.outcome ?? "ok",
+        ...(audit.reason !== undefined ? { reason: audit.reason } : {}),
+        ...(audit.message !== undefined ? { message: audit.message } : {}),
+        ...(audit.status !== undefined ? { status: audit.status } : {}),
+        ...(audit.error !== undefined ? { error: audit.error } : {}),
+        approved: audit.approved,
+        durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+        req: call.caller.req,
+      });
+    } catch (error) {
+      console.error(`[gemi/mcp] route.mcp.remote.onCall failed for "${tool}":`, error);
+    }
+  }
+
+  private async runTool(call: Call, name: string, args: unknown, audit: CallAudit): Promise<unknown> {
+    const { caller, principal } = call;
+    const deny = (reason: McpCallDenial, message: string) => {
+      audit.outcome = "denied";
+      audit.reason = reason;
+      audit.message = message;
+    };
+    const fail = (message: string, status?: number, error?: unknown) => {
+      audit.outcome = "error";
+      audit.message = message;
+      if (status !== undefined) audit.status = status;
+      if (error !== undefined) audit.error = error;
+    };
     const tool = (await this.registry.available(caller, { names: [name] }))[0];
     if (!tool) {
       // A tool this credential cannot see, or one behind a feature that is
       // off (#885), is answered as one that does not exist, as the registry
       // would.
+      deny("unknown-tool", `Unknown tool: ${name}`);
       throw new JsonRpcError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
     }
 
-    let approved = false;
     if (tool.requiresApproval) {
       // Checked before the user is asked: approving a call that cannot run
       // wastes their attention, and the model can fix its arguments first.
       const parsed = tool.inputSchema.safeParse(args);
       if (parsed.ok === false) {
-        return this.toolResult(call, {
-          content: [{ type: "text", text: `Invalid arguments for "${name}": ${parsed.errors.join(", ")}` }],
-          isError: true,
-        });
+        const text = `Invalid arguments for "${name}": ${parsed.errors.join(", ")}`;
+        fail(text);
+        return this.toolResult(call, { content: [{ type: "text", text }], isError: true });
       }
       // A native tool that decides per call (#944) is asked first, unless this
       // is a modern client's retry carrying the user's answer: they were
@@ -652,9 +805,9 @@ export class McpHttpServer {
       const answering =
         call.era.modern && isObject(call.params.inputResponses) && call.params.requestState !== undefined;
       if (answering || (await this.registry.approvalRequired(caller, name, args, { signal: call.signal }))) {
-        const decision = await this.approval(call, tool, args);
+        const decision = await this.approval(call, tool, args, deny, audit);
         if (decision.kind === "answer") return decision.result;
-        approved = true;
+        audit.approved = true;
       }
     }
 
@@ -662,27 +815,35 @@ export class McpHttpServer {
     let value: unknown;
     try {
       value = await this.registry.execute(caller, name, args, undefined, {
-        approved,
+        approved: audit.approved,
         signal: call.signal,
         ...(progress ? { progress } : {}),
       });
     } catch (error) {
       if (error instanceof McpToolError) {
+        if (error.status === 401 || error.status === 403) {
+          deny("forbidden", error.message);
+          audit.status = error.status;
+        } else {
+          fail(error.message, error.status);
+        }
         return this.toolResult(call, { content: [{ type: "text", text: error.message }], isError: true });
       }
       if (error instanceof McpCallRefusedError) {
-        throw new JsonRpcError(ErrorCode.InvalidParams, error.reason === "unknown-tool" ? `Unknown tool: ${name}` : error.message);
+        const message = error.reason === "unknown-tool" ? `Unknown tool: ${name}` : error.message;
+        deny(error.reason, message);
+        throw new JsonRpcError(ErrorCode.InvalidParams, message);
       }
       console.error(`[gemi/mcp] "${name}" failed for ${principal.via}:${principal.id}:`, error);
-      return this.toolResult(call, {
-        content: [{ type: "text", text: `"${name}" failed on the server.` }],
-        isError: true,
-      });
+      const text = `"${name}" failed on the server.`;
+      fail(text, undefined, error);
+      return this.toolResult(call, { content: [{ type: "text", text }], isError: true });
     }
 
     const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
     const structured =
       tool.outputSchema && (call.era.modern || isObject(value)) ? { structuredContent: value } : {};
+    audit.outcome = "ok";
     return this.toolResult(call, { content: [{ type: "text", text }], ...structured, isError: false });
   }
 
@@ -707,12 +868,21 @@ export class McpHttpServer {
     call: Call,
     tool: McpToolDescriptor,
     args: unknown,
+    deny: (reason: McpCallDenial, message: string) => void,
+    audit: CallAudit,
   ): Promise<{ kind: "approved" } | { kind: "answer"; result: unknown }> {
     const request = approvalRequest(tool, args);
-    const declined = (why: string) => ({
-      kind: "answer" as const,
-      result: this.toolResult(call, { content: [{ type: "text", text: why }], isError: true }),
-    });
+    const declined = (why: string, reason: McpCallDenial = "approval-declined") => {
+      deny(reason, why);
+      return {
+        kind: "answer" as const,
+        result: this.toolResult(call, { content: [{ type: "text", text: why }], isError: true }),
+      };
+    };
+    const refuse = (reason: McpCallDenial, error: JsonRpcError) => {
+      deny(reason, error.message);
+      return error;
+    };
 
     if (call.era.modern) {
       const meta = isObject(call.params._meta) ? call.params._meta : {};
@@ -723,21 +893,30 @@ export class McpHttpServer {
       if (responses && stateValue !== undefined) {
         const state = verify<RequestState>(REQUEST_STATE, "grs1", stateValue);
         if (!state || state.p !== principalKey(call.principal) || state.t !== tool.name || state.a !== digest) {
-          throw new JsonRpcError(ErrorCode.InvalidParams, "requestState is not valid for this call.");
+          throw refuse(
+            "approval-invalid",
+            new JsonRpcError(ErrorCode.InvalidParams, "requestState is not valid for this call."),
+          );
         }
         if (!(await this.spendNonce(state.n, state.exp))) {
-          throw new JsonRpcError(ErrorCode.InvalidParams, "requestState has already been used.");
+          throw refuse(
+            "approval-replayed",
+            new JsonRpcError(ErrorCode.InvalidParams, "requestState has already been used."),
+          );
         }
         return accepted(responses[APPROVAL_KEY])
           ? { kind: "approved" }
           : declined(`The user did not approve "${tool.name}", and it did not run.`);
       }
       if (!supportsFormElicitation(capabilities.elicitation)) {
-        throw new JsonRpcError(
-          ErrorCode.MissingRequiredClientCapability,
-          `"${tool.name}" needs the user's approval, and this client cannot ask for it (elicitation).`,
-          { requiredCapabilities: { elicitation: { form: {} } } },
-          400,
+        throw refuse(
+          "approval-unavailable",
+          new JsonRpcError(
+            ErrorCode.MissingRequiredClientCapability,
+            `"${tool.name}" needs the user's approval, and this client cannot ask for it (elicitation).`,
+            { requiredCapabilities: { elicitation: { form: {} } } },
+            400,
+          ),
         );
       }
       const state: RequestState = {
@@ -747,6 +926,7 @@ export class McpHttpServer {
         n: randomBytes(16).toString("base64url"),
         exp: Date.now() + APPROVAL_TTL,
       };
+      audit.pending = true;
       return {
         kind: "answer",
         result: {
@@ -762,6 +942,7 @@ export class McpHttpServer {
     if (!era.session.e || !call.stream) {
       return declined(
         `"${tool.name}" needs the user's approval, and this client cannot ask for it (elicitation). It did not run.`,
+        "approval-unavailable",
       );
     }
     const id = `gemi-approval-${randomBytes(12).toString("base64url")}`;

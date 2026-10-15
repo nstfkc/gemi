@@ -1,5 +1,13 @@
 # Unreleased
 
+## MCP: `route.mcp.remote.onCall`, an audit hook for remote tool calls
+
+**New, nothing to migrate.** See [MCP Server → Auditing calls](docs/mcp.md#auditing-calls).
+
+- `onCall(event)` runs once after every remote `tools/call` has been answered, including failures and refusals. The event carries the user, the resolver (`via`), the credential id (the OAuth grant or API key id), the OAuth `clientId`, the scopes, the tool, its arguments, the `outcome` (`ok`, `error` or `denied`, with a `reason` for `denied`), whether the user approved it, and `durationMs`.
+- It is awaited before the answer is sent. A hook that throws is logged and does not change the answer.
+- New exported types: `McpCallEvent`, `McpCallOutcome`, `McpCallDenial` (from `gemi/services`).
+
 ## `Meta.openGraph` without an image, and `twitter:card` (#961)
 
 **New, plus a small behaviour change. Nothing to migrate.** See [Views & Layouts](docs/views-and-layouts.md).
