@@ -101,6 +101,23 @@ export interface ConnectedArgs {
   req: HttpRequest<any, any>;
 }
 
+/**
+ * What `onUserCreated` is handed beside the user: how it was created, and what
+ * the request that created it carried.
+ */
+export interface UserCreatedContext {
+  /** `"password"` is `POST /sign-up`, invited or not. */
+  method: "password" | "email-code" | "oauth";
+  /**
+   * The sign-up or email-code request body, without `password` and `code`, so a
+   * field the form adds (a consent checkbox, a referral code) can be written
+   * alongside the user. Unvalidated beyond what `signUpRequest` checks: treat
+   * every value as untrusted input. Always `{}` for OAuth, whose callback
+   * carries nothing the application's form sent.
+   */
+  input: Record<string, unknown>;
+}
+
 /** What `onAuthenticated` is handed. */
 export interface AuthenticatedArgs {
   user: User;
@@ -283,10 +300,13 @@ export interface AuthConfig {
    * paths, so provisioning there leaves an orphaned user when the second insert
    * fails, which is a failure that only turns up in production.
    *
-   * Fires on all three creation paths — email/password sign-up, invited
-   * sign-up, and first OAuth sign-in — and receives the same password-stripped
-   * user the endpoint returns, so a hook that logs its argument does not log a
-   * credential hash.
+   * Fires on every creation path — email/password sign-up, invited sign-up,
+   * a first email-code sign-in and a first OAuth sign-in — and receives the
+   * same password-stripped user the endpoint returns, so a hook that logs its
+   * argument does not log a credential hash. The second argument says which
+   * path it was and hands over the request body (credentials removed): the
+   * place to write what the sign-up form asked, such as marketing consent, in
+   * the same transaction as the user. See `UserCreatedContext`.
    *
    * On the invited path the inviting organization's `Account` row is already
    * written when this runs, so a hook provisioning an own workspace should
@@ -317,7 +337,7 @@ export interface AuthConfig {
    *   filesystem I/O out entirely — the connection is held for as long as this
    *   runs.
    */
-  onUserCreated?: (user: User) => Promise<void>;
+  onUserCreated?: (user: User, context: UserCreatedContext) => Promise<void>;
 
   onSignUp?: (
     user: User,

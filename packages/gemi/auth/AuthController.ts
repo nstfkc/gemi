@@ -8,7 +8,7 @@ import { AuthorizationError } from "../http/errors";
 import { RequestBreakerError } from "../http/Error";
 import { enabledOAuthProvider } from "./oauth/providers";
 import { enforceCodeRateLimits, foldEmail, normalizeEmail } from "./oneTimeCode";
-import type { AuthConfig, AuthenticatedArgs } from "./config";
+import type { AuthConfig, AuthenticatedArgs, UserCreatedContext } from "./config";
 import { Auth } from "../facades";
 import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
@@ -121,6 +121,15 @@ export function pinValue(value: unknown): string | null {
   return typeof value === "string" && value !== "" && value.length <= MAX_PIN_LENGTH
     ? value
     : null;
+}
+
+/**
+ * A creating request's body as `onUserCreated` sees it: everything but the
+ * credentials, which the hook has no use for and must never be able to log.
+ */
+function withoutCredentials(body: Record<string, unknown>): Record<string, unknown> {
+  const { password: _password, code: _code, ...rest } = body;
+  return rest;
 }
 
 /** Holds a `?redirect=` across the OAuth provider round trip. */
@@ -464,6 +473,10 @@ export class AuthController extends Controller {
       name,
       invitationId,
     } = input.toJSON() as Record<string, any>;
+    const created: UserCreatedContext = {
+      method: "password",
+      input: withoutCredentials(input.toJSON()),
+    };
 
     // `signUpRequest` is the application's to replace, so the types the
     // queries below depend on are checked here as well as by its schema.
@@ -529,7 +542,7 @@ export class AuthController extends Controller {
           organizationRole: invitation.role,
         });
 
-        await config.onUserCreated(user);
+        await config.onUserCreated(user, created);
 
         return user;
       });
@@ -547,7 +560,7 @@ export class AuthController extends Controller {
           locale,
         });
 
-        await config.onUserCreated(user);
+        await config.onUserCreated(user, created);
 
         return user;
       });
@@ -1079,7 +1092,7 @@ export class AuthController extends Controller {
         accessToken: "",
         refreshToken: "",
       });
-      await config.onUserCreated(created);
+      await config.onUserCreated(created, { method: "oauth", input: {} });
       return created;
     });
   }
@@ -1241,7 +1254,7 @@ export class AuthController extends Controller {
         await userProvider.createSocialAccount(socialAccount(created.id));
       }
 
-      await config.onUserCreated(created);
+      await config.onUserCreated(created, { method: "oauth", input: {} });
 
       return created;
     });
@@ -1368,7 +1381,10 @@ export class AuthController extends Controller {
             emailVerifiedAt: new Date(),
             locale,
           });
-          await config.onUserCreated(created);
+          await config.onUserCreated(created, {
+            method: "email-code",
+            input: withoutCredentials(input.toJSON()),
+          });
           return created;
         });
         isNewUser = true;

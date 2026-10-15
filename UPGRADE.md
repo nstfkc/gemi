@@ -46,6 +46,10 @@
 - New exports from `gemi/ai`: the types `ToolApproval` and `ToolApprovalContext`.
 - **Moving a client-side "always allow" to the server:** put the check in `requiresApproval`, and remove the code that answered `approve(id, true)` as soon as the call arrived. Calls the function lets through never become pending, so there is nothing for the browser to answer.
 
+## Auth: `onUserCreated` receives how the user was created and the request's input
+
+**Additive, nothing to migrate.** `onUserCreated(user)` is now `onUserCreated(user, context)`. `context.method` is `"password"` (`POST /sign-up`, invited or not), `"email-code"` or `"oauth"`, and `context.input` is the creating request's body without `password` and `code` (`{}` on OAuth). A field the sign-up form adds, such as a consent checkbox, can now be written in the same transaction as the user; until now nothing past `email`, `name`, `password` and `invitationId` reached application code. New export: `type UserCreatedContext` from `gemi/services`. A hook that takes only `user` keeps working unchanged.
+
 ## AI: agent memory across conversations (#936, phase 1)
 
 **New, opt-in, nothing to migrate.** Agents can keep short, scoped notes across conversations. See [AI Memory](docs/ai-memory.md).
