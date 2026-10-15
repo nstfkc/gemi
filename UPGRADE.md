@@ -1,5 +1,13 @@
 # Unreleased
 
+## `Meta.openGraph` without an image, and `twitter:card` (#961)
+
+**New, plus a small behaviour change. Nothing to migrate.** See [Views & Layouts](docs/views-and-layouts.md).
+
+- **`image` is optional.** `og:image` is rendered only when it is set.
+- **`twitter:card` is always rendered** when `Meta.openGraph` is called: `summary_large_image` when `twitterImage ?? image` is set (as before), `summary` otherwise. Before, a page without `twitterImage` got no `twitter:card`. The new `twitterCard` option picks the card type explicitly.
+- **Image paths.** `image` and `twitterImage` now get the app origin each on their own. Before, a relative `image` prefixed `twitterImage` too, even an absolute one, and a relative `twitterImage` next to an absolute `image` was left relative. Pages that pass only `image` render exactly as before.
+
 ## A trusted client-IP header without `route.domains`, and `ip:port` in `X-Forwarded-For` (#958)
 
 **New, plus a small behaviour change. Nothing to migrate.** See [Configuration → A trusted client-IP header](docs/configuration.md#a-trusted-client-ip-header-gemi_client_ip_header).

@@ -326,6 +326,12 @@ import { Meta } from "gemi/facades";
 }),
 ```
 
+`Meta.openGraph` renders `og:title`, `og:type`, `og:url`, `og:description` and
+`twitter:card`. `image` is optional: `og:image` (and `twitter:image`, unless you pass
+`twitterImage`) is rendered only when it is set, and a path is prefixed with the app
+origin. `twitter:card` is `summary_large_image` when the page has an image
+(`twitterImage ?? image`) and `summary` otherwise; pass `twitterCard` to choose it.
+
 `Meta.title`, `Meta.description`, and `Meta.openGraph` populate what `<Head />`
 renders on the server; the client keeps `document.title` and the description tag in
 sync on navigation. You can also pass extra elements as `children` to `<Head>` if a
