@@ -270,7 +270,7 @@ export class ViewRouteDispatcher {
   private readonly hooks: Required<
     Pick<
       ViewRouteConfig,
-      "onRequestStart" | "onRequestEnd" | "onRequestFail" | "onStreamComplete"
+      "onNotFound" | "onRequestStart" | "onRequestEnd" | "onRequestFail" | "onStreamComplete"
     >
   >;
 
@@ -291,6 +291,7 @@ export class ViewRouteDispatcher {
     this.theme = config.theme ?? defaults.theme;
 
     this.hooks = {
+      onNotFound: config.onNotFound ?? defaults.onNotFound,
       onRequestStart: config.onRequestStart ?? defaults.onRequestStart,
       onRequestEnd: config.onRequestEnd ?? defaults.onRequestEnd,
       onRequestFail: config.onRequestFail ?? defaults.onRequestFail,
@@ -873,7 +874,9 @@ export class ViewRouteDispatcher {
         routeKey: currentPathName ?? "404",
       });
 
-      const styles = await getStyles(currentViews);
+      // The `404` document has no route views; it is styled with the `404`
+      // view's chain, as it is preloaded above (#951).
+      const styles = await getStyles(currentViews ?? ["404"]);
 
       // Everything resolved by now ships in the document payload; everything
       // still in flight streams in behind it. The snapshot marks its entries
@@ -1468,6 +1471,12 @@ export class ViewRouteDispatcher {
           handlers = [];
           httpRequest.routePath = "";
           data = [];
+        }
+
+        // The `404` view has no handler of its own: this is where the app
+        // gives it a title and metadata (#954).
+        if (currentPathName === null) {
+          await this.hooks.onNotFound(httpRequest, { status: refusedStatus ?? 404 });
         }
 
         const cookies = ctx.cookies;

@@ -221,7 +221,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     prefetchedData,
     features,
     appId: currentAppId,
+    router,
   } = useContext(ServerDataContext);
+  const isNotFoundDocument = Boolean(router?.is404);
 
   const [routeState, setRouteState] = useState<RouteState & PageData>({
     params: routerSubject?.getValue().params,
@@ -254,7 +256,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   // The route currently on screen, in `x-gemi-from` form. Updated when a
   // response is committed, never when one is merely requested — a navigation
   // that fails must leave the base the server carries segments from intact.
-  const renderedRouteRef = useRef(initialRenderedRoute(routeState));
+  //
+  // A 404 document mounted only the `404` view, so it carries nothing, as
+  // after a navigation that ended in `is404`.
+  const renderedRouteRef = useRef(isNotFoundDocument ? "" : initialRenderedRoute(routeState));
 
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {

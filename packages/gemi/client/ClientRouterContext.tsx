@@ -144,7 +144,13 @@ export const ClientRouterProvider = (
       params,
       search: searchParams,
       state: {},
-      pathname,
+      // A 404 document matched no route, so it has no route pathname: the
+      // `404` view reads the path that was requested instead, without its
+      // locale segment, as after a client-side navigation (#952).
+      pathname: is404
+        ? splitLocalePrefix(currentPath || "/", urlLocaleSegment ? [urlLocaleSegment] : [])
+            .pathname
+        : pathname,
       hash: "",
       action: null as Action | null,
       routePath: currentPath,
