@@ -264,16 +264,17 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         });
 
         const getStyles = async (
-          currentViews: string[],
+          currentViews: string[] | undefined,
           options?: { static?: boolean; layout?: string },
         ) => {
-          if (!currentViews) {
-            return createStyles([]);
-          }
+          // No views is the `404` document (an unmatched path, a missing
+          // record, a refusal): it is styled like any other, with the app CSS
+          // and the `404` view's own (#951).
+          const views = currentViews ?? ["404"];
           if (options?.static) {
-            return staticStyles(currentViews, options.layout);
+            return staticStyles(views, options.layout);
           }
-          for (const view of currentViews) {
+          for (const view of views) {
             const clientFile = manifest[`app/views/${view}.tsx`];
             for (const cssFile of clientFile?.css ?? []) {
               const css = Bun.file(`${process.env.DIST_DIR}/client/${cssFile}`);

@@ -86,6 +86,17 @@ export interface ViewRouteConfig {
    */
   theme?: ThemeConfig | false;
 
+  /**
+   * Runs when a request renders the app's `404` view instead of a route: a
+   * path no route matches, a missing record (`RecordNotFoundError`,
+   * `FileNotFoundError`), a refusal (`status` 403 or 404) or a feature gate.
+   * It runs where a route's handler would, after middleware, for the document
+   * and for a client navigation, so this is where the `404` page gets its
+   * title and other metadata (`Meta.title(...)`), which otherwise stay
+   * gemi's defaults. A `route.domains` group's `view` can set its own.
+   */
+  onNotFound?: (req: HttpRequest, info: { status: number }) => void | Promise<void>;
+
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
   onRequestFail?: (req: HttpRequest, error: any) => void | Promise<void>;
@@ -320,6 +331,7 @@ export function viewRouteConfigDefaults(): Omit<
     partialRendering: true,
     localeRouting: "prefix",
     theme: {},
+    onNotFound: () => {},
     onRequestStart: () => {},
     onRequestEnd: () => {},
     onRequestFail: () => {},

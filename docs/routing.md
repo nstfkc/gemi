@@ -331,6 +331,35 @@ Layouts nest arbitrarily deep — a child route inside a layout can itself be an
 
 > **Gotcha:** The [`Redirect`](./facades.md) facade works by throwing, which the framework catches to perform the redirect. Never wrap a `Redirect` call in `try/catch` — it swallows the throw and breaks the redirect.
 
+### The 404 view
+
+`app/views/404.tsx` renders whenever a request has no page to show: a path no route matches, a missing record (`findUniqueOrThrow`, `FileNotFoundError`), a refusal (see [Authorization](./authorization.md)) or a gated [feature](./feature-flags.md). It gets the app stylesheet and its own CSS, like any view.
+
+It has no handler, so it reads what it needs from the request. `useLocation()` gives the path that was requested (without its locale segment) and its query, in the server render and after hydration:
+
+```tsx
+export default function NotFound() {
+  const { pathname } = useLocation();
+  return <p>Nothing at {pathname}.</p>;
+}
+```
+
+Its title and other metadata come from the `onNotFound` hook in `app/config/route.ts`. It runs where a route's handler would, for the document and for a client navigation, with the status the page answers with (`404`, or `403` for a permission refusal). A `route.domains` group's `view` can set its own. Without it, the page keeps gemi's default title, "Gemi App".
+
+```typescript
+// app/config/route.ts
+export default defineRouteConfig({
+  // ...
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    onNotFound(req: HttpRequest, { status }) {
+      Meta.title("Page not found");
+    },
+  },
+});
+```
+
 ### Nesting view routers
 
 Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:

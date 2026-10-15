@@ -1,3 +1,13 @@
+# Upgrading from 0.140.1 to 0.141.0
+
+## The 404 view: styles, location and title (#951, #952, #954)
+
+**Behaviour change, nothing to migrate.** See [Routing → The 404 view](docs/routing.md#the-404-view).
+
+- **Styles (#951).** In production the `404` document (an unmatched path, a missing record, a refusal, a gated route) shipped no CSS at all, not even the app stylesheet. It now gets the app CSS and the `404` view's own CSS, like a matched view. In dev it now also gets the `404` view's own CSS (it had only the root layout's).
+- **Location (#952).** On a 404 document, `useLocation().pathname` and `useRoute().pathname` were `null`. They are now the requested path without its locale segment (`/pages/aB3dE9xYz/assets`), and `useLocation().search` its query, in the server render and after hydration. This matches what they already were after a client-side navigation to a 404. Code that read a `null` pathname as "this is a 404" should check for it some other way, for example by being the `404` view.
+- **Title (#954).** New `route.view.onNotFound(req, { status })` hook. It runs whenever a request renders the `404` view, after middleware, for the document and for a client navigation, and is where the page sets its title and metadata with `Meta`. `status` is `404`, or `403` for a permission refusal. A `route.domains` group's `view` can set its own. Without it, the title stays "Gemi App".
+
 # Upgrading from 0.140.0 to 0.140.1
 
 ## i18n: a locale's root URL keeps its view props (#948)
