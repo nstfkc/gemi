@@ -3873,7 +3873,7 @@ export default {
 - **`resolvers`** turn the request's credential into a user. The boot is refused without one, and without `SECRET` (the transport signs what it hands clients).
 - **`allowedOrigins`**: browser origins allowed besides the endpoint's own (a web-based inspector, say). Requests with any other `Origin` get 403. Non-browser clients send none and are not affected.
 - **`rateLimit`**: each credential's budget at the endpoint, default `{ limit: 600, window: 60 }` requests; `false` turns it off.
-- **`maxBodyBytes`**, **`server`** (`name`, `version`, `instructions`), **`nonces`**, **`approvalTimeoutMs`**: see below.
+- **`maxBodyBytes`**, **`server`** (`name`, `version`, `instructions`), **`nonces`**, **`approvalTimeoutMs`**, **`onCall`** (an audit hook): see below.
 - **`files`**: how remote callers send files (below).
 - **`feature`**: serves the endpoint only while this [feature](./feature-flags.md) is on (below).
 
@@ -4068,6 +4068,47 @@ Tools with a bound (non-`input`) file are not offered remotely.
 ### Errors
 
 A `McpToolError` thrown by a route is the tool's answer: the client gets its message as an `isError` result, which the model can read and act on. Any other error answers a generic error result, and the details stay in the server log.
+
+### Auditing calls
+
+`onCall` is told about every remote tool call once it has been answered: the ones that ran, the ones that failed, and the ones that were refused. Use it for an audit log.
+
+```ts
+remote: {
+  enabled: true,
+  url: "https://example.com/mcp",
+  resolvers: [mcpOAuth],
+  onCall: async (call) => {
+    await McpCallLog.create({
+      data: {
+        userId: call.user.id,
+        clientId: call.clientId, // the OAuth client, or null for an API key
+        credentialId: call.credentialId, // the OAuth grant (family) or the API key's id
+        tool: call.tool,
+        argumentKeys: Object.keys((call.arguments ?? {}) as object), // not the values
+        outcome: call.outcome, // "ok" | "error" | "denied"
+        reason: call.reason ?? null,
+        durationMs: Math.round(call.durationMs),
+      },
+    });
+  },
+},
+```
+
+| Field | What |
+|---|---|
+| `user`, `via`, `credentialId`, `clientId`, `scopes` | Who called, from the resolver's principal. `credentialId` is the OAuth grant (one user's consent to one client) or the API key's id, never the secret. `clientId` is `null` for an API key. |
+| `tool`, `arguments` | The tool's name and the arguments as the client sent them, file data included. Keep only what you need. |
+| `outcome` | `ok`, `error` (invalid arguments, a `McpToolError`, a route that answered 4xx or 5xx, a timeout, a crash) or `denied`. |
+| `reason` | For `denied`: `unknown-tool` (out of the credential's scopes, behind a feature that is off, or not there), `approval-declined`, `approval-unavailable` (the client cannot ask), `approval-invalid`, `approval-replayed`, `approval-required`, or `forbidden` (the route answered 401 or 403). |
+| `message`, `status`, `error` | What the client was told, the route's error status, and, for an unexpected failure, what was thrown (logged; the client is only told the tool failed). |
+| `approved` | Whether the user approved this call. |
+| `durationMs` | How long the call took to answer. For a legacy client that includes the wait for the user's approval. |
+| `req` | The endpoint's `HttpRequest`, for headers or `clientIp(req)`. |
+
+- It is awaited before the answer is sent, and it never changes the answer: a hook that throws is logged and the call is answered as it would have been.
+- A modern client's first call to a `requiresApproval` tool is answered `input_required` and is not reported. The retry carrying the user's answer is the call, and it is reported once. A user who never answers leaves no event.
+- Only `tools/call` is reported. `tools/list`, and a request refused before it reaches a tool (no credential, an unknown method, a rate limit), are not.
 
 ### Protocol versions
 

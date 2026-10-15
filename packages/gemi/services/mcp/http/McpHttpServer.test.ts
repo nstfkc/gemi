@@ -9,6 +9,7 @@ import { App } from "../../../app/App";
 import { createRoot } from "../../../client/createRoot";
 import { ApiRouter, type CreateRPC } from "../../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../../http/AuthenticationMiddlware";
+import { InsufficientPermissionsError } from "../../../http/errors";
 import { HttpRequest } from "../../../http/HttpRequest";
 import { McpRouter } from "../../../http/McpRouter";
 import { ViewRouter } from "../../../http/ViewRouter";
@@ -16,6 +17,7 @@ import { Kernel } from "../../../kernel";
 import { MemoryNonceStore } from "../../../ai/store/Nonces";
 import { McpToolError } from "../McpRegistry";
 import { McpApiKeyResolver } from "./callers";
+import type { McpCallEvent } from "./McpHttpServer";
 import { sign } from "./signedState";
 
 /**
@@ -31,6 +33,7 @@ const KEYS: Record<string, { user: any; id: string; scopes: string[] }> = {
   "tk_mcp_alice": { user: ALICE, id: "key_a", scopes: ["site:read", "site:write"] },
   "tk_mcp_reader": { user: BOB, id: "key_b", scopes: ["site:read"] },
   "tk_mcp_drawer": { user: ALICE, id: "key_d", scopes: ["site:draw"] },
+  "tk_mcp_admin": { user: ALICE, id: "key_admin", scopes: ["admin", "site:write"] },
 };
 
 const handled: { route: string; user: number | null; detail?: unknown }[] = [];
@@ -63,6 +66,12 @@ class Api extends ApiRouter {
       throw new McpToolError("never");
     }),
     "/hello": this.get(async () => ({ hello: "from the app" })),
+    "/admin": this.get(async () => {
+      throw new InsufficientPermissionsError();
+    }).middleware(["auth"]),
+    "/boom": this.get(async () => {
+      throw new Error("kaput");
+    }).middleware(["auth"]),
   };
 }
 
@@ -98,6 +107,7 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
     "site:draw": { description: "Draw", names: ["draw"] },
     "site:read": { description: "Read your site", tags: ["read"] },
     "site:write": { description: "Edit your site", tags: ["write"] },
+    admin: { description: "Admin", tags: ["admin"] },
   };
   routes = {
     whoami: this.fromApiRoute("GET", "/me", { description: "Who the user is", tags: ["read"] }),
@@ -116,6 +126,8 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       tags: ["write"],
     }),
     slow: this.fromApiRoute("POST", "/slow", { description: "Takes a while", tags: ["write"] }),
+    admin: this.fromApiRoute("GET", "/admin", { description: "Admins only", tags: ["admin"] }),
+    boom: this.fromApiRoute("GET", "/boom", { description: "Fails", tags: ["admin"] }),
     build: this.fromTool(build, {
       tags: ["write"],
       remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
@@ -155,9 +167,16 @@ const nonces = {
     noncesDown ? Promise.reject(new Error("store down")) : memoryNonces.consume(nonce, expiresAt),
 };
 
+/** What `onCall` was told (#audit). */
+const audited: McpCallEvent[] = [];
+let onCall: (event: McpCallEvent) => void | Promise<void> = (event) => {
+  audited.push(event);
+};
+
 const REMOTE = {
   enabled: true,
   nonces,
+  onCall: (event: McpCallEvent) => onCall(event),
   url: "https://shop.test/mcp",
   resolvers: [resolver],
   allowedOrigins: ["https://inspector.test"],
@@ -228,6 +247,10 @@ beforeEach(() => {
   allow = true;
   slow = async () => ({});
   noncesDown = false;
+  audited.length = 0;
+  onCall = (event) => {
+    audited.push(event);
+  };
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -938,4 +961,140 @@ describe("a legacy client (initialize, Mcp-Session-Id)", () => {
     expect(messages.at(-1).result).toMatchObject({ isError: true });
     expect(handled).toEqual([]);
   }, 10_000);
+});
+
+describe("onCall: an audit hook for every remote tool call", () => {
+  const elicitation = { capabilities: { elicitation: { form: {} } } };
+  const call = (name: string, args: unknown = {}, options: Parameters<typeof modern>[2] = {}) =>
+    modern("tools/call", { name, arguments: args }, options);
+
+  test("a call that ran: who, which credential, what, and how long", async () => {
+    const { result } = await (await call("whoami", { a: 1 })).json();
+    expect(result.isError).toBe(false);
+    expect(audited).toHaveLength(1);
+    const [event] = audited;
+    expect(event).toMatchObject({
+      user: ALICE,
+      via: "api-key",
+      credentialId: "key_a",
+      clientId: null,
+      scopes: ["site:read", "site:write"],
+      tool: "whoami",
+      arguments: { a: 1 },
+      outcome: "ok",
+      approved: false,
+    });
+    expect(event).not.toHaveProperty("reason");
+    expect(event.durationMs).toBeGreaterThanOrEqual(0);
+    expect(event.req).toBeInstanceOf(HttpRequest);
+  });
+
+  test("a tool out of the credential's scopes, or not there, is denied", async () => {
+    const hidden = await (await call("slow", {}, { key: "tk_mcp_reader" })).json();
+    expect(hidden.error).toMatchObject({ code: -32602, message: "Unknown tool: slow" });
+    await call("nope");
+    expect(audited.map(({ tool, outcome, reason, credentialId }) => ({ tool, outcome, reason, credentialId }))).toEqual([
+      { tool: "slow", outcome: "denied", reason: "unknown-tool", credentialId: "key_b" },
+      { tool: "nope", outcome: "denied", reason: "unknown-tool", credentialId: "key_a" },
+    ]);
+  });
+
+  test("invalid arguments and a failing route are errors; a 403 is denied", async () => {
+    await call("whoami", "nope");
+    await call("delete-page", {}, elicitation);
+    const failed = await (await call("boom", {}, { key: "tk_mcp_admin" })).json();
+    expect(failed.result).toMatchObject({ isError: true });
+    const forbidden = await (await call("admin", {}, { key: "tk_mcp_admin" })).json();
+    expect(forbidden.result).toMatchObject({ isError: true });
+    expect(audited.map(({ tool, outcome, reason, status }) => ({ tool, outcome, reason, status }))).toEqual([
+      { tool: "whoami", outcome: "error", reason: undefined, status: undefined },
+      { tool: "delete-page", outcome: "error", reason: undefined, status: undefined },
+      { tool: "boom", outcome: "error", reason: undefined, status: 500 },
+      { tool: "admin", outcome: "denied", reason: "forbidden", status: 403 },
+    ]);
+    expect(audited[0].message).toMatch(/Invalid arguments/);
+    expect(audited[3].message).toMatch(/refused with 403/);
+  });
+
+  test("an approval: the question is not reported, the answer is, once; a replay is denied", async () => {
+    const ask = () => call("delete-page", { id: "pg_1" }, elicitation);
+    const answer = (requestState: string, action: string, content?: unknown) =>
+      modern(
+        "tools/call",
+        {
+          name: "delete-page",
+          arguments: { id: "pg_1" },
+          requestState,
+          inputResponses: { gemi_approval: { action, ...(content ? { content } : {}) } },
+        },
+        elicitation,
+      );
+
+    const first = (await (await ask()).json()).result;
+    expect(first.resultType).toBe("input_required");
+    expect(audited).toEqual([]);
+
+    await answer(first.requestState, "accept", { approve: true });
+    await answer(first.requestState, "accept", { approve: true });
+    const declined = (await (await ask()).json()).result;
+    await answer(declined.requestState, "decline");
+    await answer("grs1.forged.sig", "accept", { approve: true });
+    await call("delete-page", { id: "pg_1" }, { capabilities: {} });
+
+    expect(audited.map(({ outcome, reason, approved }) => ({ outcome, reason, approved }))).toEqual([
+      { outcome: "ok", reason: undefined, approved: true },
+      { outcome: "denied", reason: "approval-replayed", approved: false },
+      { outcome: "denied", reason: "approval-declined", approved: false },
+      { outcome: "denied", reason: "approval-invalid", approved: false },
+      { outcome: "denied", reason: "approval-unavailable", approved: false },
+    ]);
+    expect(handled).toEqual([{ route: "delete-page", user: ALICE.id, detail: { id: "pg_1" } }]);
+  });
+
+  test("a legacy client that cannot approve is denied", async () => {
+    const init = await post({
+      jsonrpc: "2.0",
+      id: 0,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    });
+    const session = init.headers.get("Mcp-Session-Id")!;
+    const res = await post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "delete-page", arguments: { id: "pg_1" } } },
+      { "Mcp-Session-Id": session },
+    );
+    expect((await res.json()).result).toMatchObject({ isError: true });
+    expect(audited.map(({ outcome, reason }) => ({ outcome, reason }))).toEqual([
+      { outcome: "denied", reason: "approval-unavailable" },
+    ]);
+  });
+
+  test("the hook is awaited before the answer is sent", async () => {
+    onCall = async (event) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      audited.push(event);
+    };
+    await call("whoami");
+    expect(audited).toHaveLength(1);
+  });
+
+  test("a hook that throws is logged and changes nothing", async () => {
+    onCall = () => {
+      throw new Error("audit table is gone");
+    };
+    const { result } = await (await call("whoami")).json();
+    expect(result.isError).toBe(false);
+    const hidden = await (await call("slow", {}, { key: "tk_mcp_reader" })).json();
+    expect(hidden.error).toMatchObject({ message: "Unknown tool: slow" });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("onCall failed"),
+      expect.objectContaining({ message: "audit table is gone" }),
+    );
+  });
+
+  test("the boot refuses an onCall that is not a function", async () => {
+    await expect(new App({ kernel: kernelWith({ ...REMOTE, onCall: "log" }) }).waitForBoot()).rejects.toThrow(
+      /onCall must be a function/,
+    );
+  });
 });
