@@ -253,7 +253,7 @@ export default defineLogConfig({
 
 - `Meta.title(title)` — set the page title.
 - `Meta.description(description)` — set the meta description.
-- `Meta.openGraph(params)` — set Open Graph tags.
+- `Meta.openGraph(params)` — set Open Graph tags and `twitter:card`. `image` is optional; without one the card is `summary`.
 - `Meta.htmlAttributes({ lang, dir })` — the `<html>` attributes the layout receives as `htmlAttributes` (default: the request's locale and its direction).
 - `Meta.canonical(url)` — a `<link rel="canonical">`.
 - `Meta.alternates([{ hrefLang, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in.

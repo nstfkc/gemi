@@ -8,7 +8,8 @@ export type OpenGraphParams = {
   description?: string;
   type: string;
   url: string;
-  image: string;
+  /** Rendered as `og:image` only when set. A path is prefixed with the app origin. */
+  image?: string;
   imageAlt?: string;
   imageWidth?: number;
   imageHeight?: number;
@@ -16,6 +17,11 @@ export type OpenGraphParams = {
   twitterImageAlt?: string;
   twitterImageWidth?: number;
   twitterImageHeight?: number;
+  /**
+   * The `twitter:card` type. Defaults to `"summary_large_image"` when the page
+   * has an image (`twitterImage ?? image`), `"summary"` otherwise.
+   */
+  twitterCard?: "summary" | "summary_large_image";
 };
 /**
  * Attributes for the document's `<html>` element, handed to the root (or a
@@ -114,28 +120,26 @@ export class Metadata {
     twitterImageAlt = imageAlt,
     twitterImageWidth = imageWidth,
     twitterImageHeight = imageHeight,
+    twitterCard = twitterImage ? "summary_large_image" : "summary",
   }: OpenGraphParams) {
     this.touched = true;
-    let _image = image;
-    let _twitterImage = twitterImage;
-    if (image && !image.startsWith("http")) {
-      _image = `${configuredAppOrigin()}${image}`;
-      _twitterImage = `${configuredAppOrigin()}${twitterImage}`;
-    }
+    const absolute = (src: string | undefined) =>
+      src && !src.startsWith("http") ? `${configuredAppOrigin()}${src}` : src;
     this.content.openGraph = Object.fromEntries(
       Object.entries({
         title,
         description,
         type,
         url,
-        image: _image,
+        image: absolute(image),
         imageAlt,
         imageWidth,
         imageHeight,
-        twitterImage: _twitterImage,
+        twitterImage: absolute(twitterImage),
         twitterImageAlt,
         twitterImageWidth,
         twitterImageHeight,
+        twitterCard,
       }).filter(([_, value]) => value !== undefined),
     );
   }

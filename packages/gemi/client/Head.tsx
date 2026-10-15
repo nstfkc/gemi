@@ -92,7 +92,7 @@ const OpenGraph = (props: {
   title: string;
   type: string;
   url: string;
-  image: string;
+  image?: string;
   description?: string;
   imageAlt?: string;
   imageWidth?: number;
@@ -101,6 +101,7 @@ const OpenGraph = (props: {
   twitterImageAlt?: string;
   twitterImageWidth?: number;
   twitterImageHeight?: number;
+  twitterCard?: "summary" | "summary_large_image";
 }) => {
   const {
     title,
@@ -115,6 +116,8 @@ const OpenGraph = (props: {
     twitterImageAlt,
     twitterImageWidth,
     twitterImageHeight,
+    // `Metadata.openGraph` always sets it.
+    twitterCard = twitterImage ? "summary_large_image" : "summary",
   } = props;
 
   return (
@@ -122,7 +125,7 @@ const OpenGraph = (props: {
       <meta property="og:title" content={title} />
       <meta property="og:type" content={type} />
       <meta property="og:url" content={url} />
-      <meta property="og:image" content={image} />
+      {image && <meta property="og:image" content={image} />}
       {description && <meta property="og:description" content={description} />}
       {imageAlt && <meta property="og:image:alt" content={imageAlt} />}
       {imageWidth && (
@@ -131,12 +134,8 @@ const OpenGraph = (props: {
       {imageHeight && (
         <meta property="og:image:height" content={String(imageHeight)} />
       )}
-      {twitterImage && (
-        <>
-          <meta name="twitter:image" content={twitterImage} />
-          <meta name="twitter:card" content="summary_large_image" />
-        </>
-      )}
+      {twitterImage && <meta name="twitter:image" content={twitterImage} />}
+      <meta name="twitter:card" content={twitterCard} />
       {twitterImageAlt && (
         <meta name="twitter:image:alt" content={twitterImageAlt} />
       )}
