@@ -1,5 +1,13 @@
 # Unreleased
 
+## AI: per-step reasoning effort in `prepareStep`, and `AgentController.reasoning()` (#975)
+
+**New, nothing to migrate.** See [AI Context Window → Reasoning effort per step](docs/ai-context-window.md#reasoning-effort-per-step).
+
+- `PrepareStepResult` takes `reasoning` and `maxOutputTokens`, for that model call only; the next step goes back to the run's. Capability-gated like the agent's `reasoning`. Only the request's `reasoning` field changes: messages, instructions, tools and replayed reasoning items are sent as before.
+- `PrepareStepContext` has three new fields: `reasoning` and `maxOutputTokens` (what the call would send, after earlier hooks) and `body` (the turn's request body fields, client-controlled). Code that builds a `PrepareStepContext` by hand (a test calling a hook directly) must add them.
+- `AgentController.reasoning(req, { body })`: a per-turn effort, called once per turn beside `instructions()`. Answering nothing keeps the agent's.
+
 ## AI: `endsRun` on a tool, ending the run without another model call (#974)
 
 **New, nothing to migrate.** See [AI Tools That End the Run](docs/ai-tool-ends-run.md).

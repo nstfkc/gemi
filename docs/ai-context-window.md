@@ -144,7 +144,7 @@ export const assistant = Agent.create({
 });
 ```
 
-It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context` and `signal`. It answers `{ messages?, instructions? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
+It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, `reasoning` and `maxOutputTokens` (what the call would send), the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context`, `body` (the request body fields, client-controlled as in `ToolContext.body`) and `signal`. It answers `{ messages?, instructions?, reasoning?, maxOutputTokens? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
 
 `Agent.stream({ prepareStep })` runs after the agent's own, on what that answered. On a controller, override the method; it gets the turn's hook context too:
 
@@ -161,6 +161,37 @@ class ChatController extends AgentController {
 ```
 
 Keep it deterministic for the same history, or the provider's prompt cache stops hitting.
+
+### Reasoning effort per step
+
+`reasoning` and `maxOutputTokens` in the answer apply to that model call only; the next step goes back to the run's. Use this to make a step that only picks a tool, or confirms what a tool did, cheaper than a step that plans:
+
+```typescript
+export const siteAgent = Agent.create({
+  name: "site",
+  provider,
+  prepareStep: ({ step, body }) => {
+    // A turn scoped to a selected element: route fast on the first step.
+    if (step === 1 && body.selection) return { reasoning: "none" };
+  },
+});
+```
+
+- **Same rules as the agent's `reasoning`.** Any string the model accepts works (see `ReasoningEffort`), and the value is dropped on a model with no reasoning parameter.
+- **Only the request's `reasoning` field changes.** The messages, instructions and tools are sent as they would have been, so the request's prompt prefix is the same, and earlier steps' reasoning items are replayed unchanged, whatever effort produced them.
+- **Hooks chain.** `step.reasoning` is the run's effort (`Agent.stream({ reasoning })`, else the agent's), or what an earlier hook answered.
+
+For an effort that holds for the whole turn, a controller can answer `reasoning()`, called once per turn after `authorizeRequest()`, beside `instructions()`. Answering nothing keeps the agent's. `prepareStep` still sees that value as `step.reasoning` and can override it for a single step.
+
+```typescript
+class SiteChat extends AgentController {
+  agent = siteAgent;
+
+  protected reasoning(req, { body }) {
+    return body.selection ? "low" : undefined;
+  }
+}
+```
 
 ## Turns
 

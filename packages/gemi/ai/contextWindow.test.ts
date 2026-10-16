@@ -386,6 +386,80 @@ describe("Agent: contextWindow and prepareStep", () => {
     expect(provider.calls[0]!.messages).toHaveLength(1);
   });
 
+  test("prepareStep can set the reasoning effort and output ceiling for one call (#975)", async () => {
+    const echo = AgentTool.create({
+      name: "echo",
+      description: "Echo",
+      inputSchema: s.object({}),
+      outputSchema: s.string(),
+      execute: async () => "echoed",
+    });
+    const provider = fakeProvider(
+      [{ type: "tool-call", toolCallId: "c1", name: "echo", args: "{}" }, finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const seen: PrepareStepContext[] = [];
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [echo],
+      reasoning: "high",
+      maxOutputTokens: 4000,
+      prepareStep: (ctx) => {
+        seen.push(ctx);
+        if (ctx.step === 1) return { reasoning: "none", maxOutputTokens: 500 };
+      },
+    });
+    await agent
+      .stream({ messages: [], turn: { text: "go" }, body: { selection: "hero" } })
+      .result();
+
+    expect(provider.calls[0]).toMatchObject({ reasoning: "none", maxOutputTokens: 500 });
+    // Step two goes back to the run's.
+    expect(provider.calls[1]).toMatchObject({ reasoning: "high", maxOutputTokens: 4000 });
+    expect(seen[0]).toMatchObject({
+      reasoning: "high",
+      maxOutputTokens: 4000,
+      body: { selection: "hero" },
+    });
+    // The messages are what they would have been: only the effort changed.
+    expect(provider.calls[1]!.messages).toHaveLength(2);
+  });
+
+  test("a later prepareStep sees an earlier one's effort, and the run's own is the default", async () => {
+    const provider = fakeProvider([finish()], [finish()]);
+    const seen: (string | undefined)[] = [];
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      prepareStep: (ctx) => {
+        seen.push(ctx.reasoning);
+        return { reasoning: "low" };
+      },
+    });
+    await agent
+      .stream({
+        messages: [],
+        turn: { text: "go" },
+        reasoning: "medium",
+        prepareStep: (ctx) => {
+          seen.push(ctx.reasoning);
+          return ctx.reasoning === "low" ? { reasoning: "minimal" } : undefined;
+        },
+      })
+      .result();
+    expect(seen).toEqual(["medium", "low"]);
+    expect(provider.calls[0]!.reasoning).toBe("minimal");
+
+    // Unset everywhere: nothing is sent, as before.
+    const plain = fakeProvider([finish()]);
+    await Agent.create({ name: "b", provider: plain })
+      .stream({ messages: [], turn: { text: "go" } })
+      .result();
+    expect(plain.calls[0]!.reasoning).toBeUndefined();
+    expect(plain.calls[0]!.maxOutputTokens).toBeUndefined();
+  });
+
   test("a prepareStep that throws fails the run", async () => {
     const provider = fakeProvider([finish()]);
     const agent = Agent.create({

@@ -3747,3 +3747,35 @@ describe("AgentController.checkUpload", () => {
     expect(uploads).toHaveLength(1);
   });
 });
+
+/** A per-turn reasoning effort from the controller (#975). */
+describe("reasoning()", () => {
+  test("answers the run's effort for the turn, from the request body", async () => {
+    const run = new StubAgentRun("run_reasoning");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected reasoning(_req: any, { body }: { body: Record<string, unknown> }) {
+        return body.selection ? "none" : undefined;
+      }
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "pad it" }, selection: "hero" }));
+    expect(calls[0]!.reasoning).toBe("none");
+    run.finish();
+  });
+
+  test("answering nothing leaves the agent's", async () => {
+    const run = new StubAgentRun("run_reasoning_default");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
+    expect("reasoning" in calls[0]!).toBe(false);
+    run.finish();
+  });
+});
