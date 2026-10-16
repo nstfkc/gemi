@@ -331,6 +331,10 @@ Layouts nest arbitrarily deep — a child route inside a layout can itself be an
 
 > **Gotcha:** The [`Redirect`](./facades.md) facade works by throwing, which the framework catches to perform the redirect. Never wrap a `Redirect` call in `try/catch` — it swallows the throw and breaks the redirect.
 
+### Trailing slashes
+
+A page's address has no trailing slash. A document request for `/about/` (or `/about//`) that no route matches as it stands is answered with a `301` to `/about`, keeping the query (`/about/?x=1` → `/about?x=1`). Catch-all routes (`/:path*`) included: their pattern never matches a trailing slash. The root `/` and a locale's root (`/de-DE/`) are served as they are; `.json` route-data requests and paths starting with `//` are never redirected.
+
 ### The 404 view
 
 `app/views/404.tsx` renders whenever a request has no page to show: a path no route matches, a missing record (`findUniqueOrThrow`, `FileNotFoundError`), a refusal (see [Authorization](./authorization.md)) or a gated [feature](./feature-flags.md). It gets the app stylesheet and its own CSS, like any view.

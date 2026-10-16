@@ -99,6 +99,13 @@ describe("a locale prefix the app can map onto a supported locale", () => {
     expect(await fetchView("/en/about.og")).toBeTypeOf("function");
   });
 
+  test("a trailing slash goes first, a locale's root keeps it", async () => {
+    const res = (await fetchView("/de-DE/about/?x=1")) as Response;
+    expect(res.status).toBe(301);
+    expect(res.headers.get("Location")).toBe("/de-DE/about?x=1");
+    expect(await fetchView("/de-DE/")).toBeTypeOf("function");
+  });
+
   test("does not redirect a language the app doesn't support", async () => {
     const res = await fetchView("/fr/about");
     expect((res as Response).headers?.get("Location") ?? null).toBeNull();
