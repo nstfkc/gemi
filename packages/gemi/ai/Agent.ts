@@ -1351,6 +1351,19 @@ export type PrepareStepContext = {
   history: readonly AgentMessage[];
   /** The system prompt this call would send. */
   instructions: string | undefined;
+  /**
+   * The reasoning effort this call would send: the run's (`Agent.stream`'s,
+   * else the agent's), or what an earlier hook answered. `undefined` is the
+   * model's default.
+   */
+  reasoning: ReasoningEffort | undefined;
+  /** The output ceiling this call would send, chosen the same way. */
+  maxOutputTokens: number | undefined;
+  /**
+   * The app's own fields from the turn's request body, as tools get them in
+   * `ToolContext.body`. CLIENT-CONTROLLED: read the user from `context`.
+   */
+  body: Record<string, unknown>;
   /** What the run has spent so far, tools' sub-runs included. */
   usage: Usage;
   /** The previous model call's own usage, when it reported one. Its
@@ -1382,6 +1395,19 @@ export type PrepareStepResult = {
   messages?: AgentMessage[];
   /** The system prompt to send instead. */
   instructions?: string;
+  /**
+   * The reasoning effort for this call alone (#975), e.g. `"none"` for a step
+   * that only picks a tool or confirms one. The next step goes back to the
+   * run's. Capability-gated like the agent's `reasoning`: dropped on a model
+   * with no reasoning parameter.
+   *
+   * Only the request's `reasoning` field changes. The messages, instructions
+   * and tools are sent as they would have been, and earlier steps' reasoning
+   * items are replayed unchanged, whatever effort produced them.
+   */
+  reasoning?: ReasoningEffort;
+  /** The output ceiling for this call alone. See `CreateAgentParams.maxOutputTokens`. */
+  maxOutputTokens?: number;
 };
 
 /**
@@ -3168,8 +3194,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       systemPrompt: request.instructions,
       tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
       output: this.config.output ? outputFormat(this.config.output) : undefined,
-      reasoning: this.config.reasoning,
-      maxOutputTokens: this.config.maxOutputTokens,
+      reasoning: request.reasoning,
+      maxOutputTokens: request.maxOutputTokens,
       temperature: this.config.temperature,
       signal,
     });
@@ -3400,7 +3426,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private async prepareRequest(
     current: AgentMessage,
     step: number,
-  ): Promise<{ messages: AgentMessage[]; instructions: string | undefined } | { error: AgentError }> {
+  ): Promise<
+    | {
+        messages: AgentMessage[];
+        instructions: string | undefined;
+        reasoning: ReasoningEffort | undefined;
+        maxOutputTokens: number | undefined;
+      }
+    | { error: AgentError }
+  > {
     const history = this.historyForProvider(current);
     const window = this.config.contextWindow;
     const compact = this.compactJobParams(history, current);
@@ -3418,6 +3452,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           })
         : windowMessages(history, window).messages;
     let instructions = await this.systemPrompt();
+    let reasoning = this.config.reasoning;
+    let maxOutputTokens = this.config.maxOutputTokens;
 
     for (const hook of this.config.prepareStep) {
       let answer: PrepareStepResult | void;
@@ -3427,6 +3463,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           messages: [...messages],
           history: [...history],
           instructions,
+          reasoning,
+          maxOutputTokens,
+          body: this.params.body ?? {},
           usage: this.usage,
           ...(this.lastStep?.usage ? { lastStepUsage: this.lastStep.usage } : {}),
           ...(this.lastStep ? { lastFinishReason: this.lastStep.reason } : {}),
@@ -3458,9 +3497,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         messages = answer.messages;
       }
       if (answer.instructions !== undefined) instructions = answer.instructions || undefined;
+      if (answer.reasoning !== undefined) reasoning = answer.reasoning;
+      if (answer.maxOutputTokens !== undefined) maxOutputTokens = answer.maxOutputTokens;
     }
 
-    return { messages, instructions };
+    return { messages, instructions, reasoning, maxOutputTokens };
   }
 
   private async systemPrompt(): Promise<string | undefined> {

@@ -15,6 +15,7 @@ import type {
   AnyAgent,
   PrepareStepContext,
   PrepareStepResult,
+  ReasoningEffort,
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
@@ -828,6 +829,27 @@ export abstract class AgentController<
   }
 
   /**
+   * The reasoning effort for this turn's run (#975), when it should differ
+   * from the agent's: a turn the app knows is small, say. Answer nothing to
+   * keep the agent's. `prepareStep` can still change it for one model call,
+   * and sees this as `step.reasoning`.
+   *
+   *   protected reasoning(req, { body }) {
+   *     return body.selection ? "low" : undefined;
+   *   }
+   *
+   * Called once per turn, after `authorizeRequest()`, beside `instructions()`.
+   * `body` is client-controlled, as there.
+   */
+  protected reasoning(
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ): ReasoningEffort | void | Promise<ReasoningEffort | void> {
+    void req;
+    void extra;
+  }
+
+  /**
    * What every tool of this turn's run gets as `ctx.context` — the user, the
    * tenant, functions the tools call back into. See `AgentContext`.
    *
@@ -957,9 +979,9 @@ export abstract class AgentController<
   /**
    * Called before every model call of a turn's run, after the agent's own
    * `prepareStep`, with the request it hands over (`step.messages`,
-   * `step.instructions`) and the turn's hook context. Answer `{ messages }`
-   * or `{ instructions }` to send something else for that call alone; nothing
-   * answered is stored. Not called for a sub-agent's model calls.
+   * `step.instructions`) and the turn's hook context. Answer `{ messages }`,
+   * `{ instructions }`, `{ reasoning }` or `{ maxOutputTokens }` to send
+   * something else for that call alone; nothing answered is stored. Not called for a sub-agent's model calls.
    *
    *   protected prepareStep(step: PrepareStepContext) {
    *     return { messages: windowMessages(step.history, { maxTurns: 20 }).messages };
@@ -1406,6 +1428,7 @@ export abstract class AgentController<
           .filter(Boolean)
           .join("\n\n") || undefined;
       const context = await this.context(req, { body: extraBody });
+      const reasoning = (await this.reasoning(req, { body: extraBody })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -1466,6 +1489,8 @@ export abstract class AgentController<
           early.notified = written.then(() => this.safely(() => this.onMessage(message, ctx)));
         },
         instructions,
+        // Only when answered, so the agent's own applies otherwise.
+        ...(reasoning ? { reasoning } : {}),
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
         // `AgentContext` — so a tool that needs the user reads it from this.
