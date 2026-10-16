@@ -4,7 +4,7 @@ import { ServerDataContext } from "./ServerDataProvider";
 import { resolveHtmlAttributes } from "./htmlAttributes";
 import { fontFaceRules, fontPreloads } from "./fonts";
 
-/** Marks the `<link>`s rendered from metadata, so a navigation can replace them. */
+/** Marks the `<link>`s and `<meta name="robots">` rendered from metadata, so a navigation can replace them. */
 const GEMI_META_ATTRIBUTE = "data-gemi-meta";
 
 type MetaLink = { rel: "canonical" | "alternate"; href: string; hrefLang?: string };
@@ -40,7 +40,7 @@ export function updateMeta(meta: any, locale?: string | null) {
   if (!meta) {
     return;
   }
-  const { title, description, htmlAttributes, canonical, alternates, fonts } = meta;
+  const { title, description, htmlAttributes, canonical, alternates, fonts, robots } = meta;
   // A page that set `<html>` attributes gets them; after one, a page that set
   // none goes back to its locale's. A layout that never asked keeps its own.
   if (htmlAttributes || htmlAttributesApplied) {
@@ -51,11 +51,18 @@ export function updateMeta(meta: any, locale?: string | null) {
       }
     }
   }
-  // The links `<Head />` rendered from metadata, and only those: a layout's
-  // own `<link>`s are left alone.
+  // The links and robots tag `<Head />` rendered from metadata, and only
+  // those: a layout's own `<link>`s and `<meta>`s are left alone.
   document.head
-    .querySelectorAll(`link[${GEMI_META_ATTRIBUTE}]`)
-    .forEach((link) => link.remove());
+    .querySelectorAll(`link[${GEMI_META_ATTRIBUTE}], meta[${GEMI_META_ATTRIBUTE}]`)
+    .forEach((element) => element.remove());
+  if (robots) {
+    const element = document.createElement("meta");
+    element.setAttribute("name", "robots");
+    element.setAttribute("content", robots);
+    element.setAttribute(GEMI_META_ATTRIBUTE, "");
+    document.head.appendChild(element);
+  }
   for (const link of metaLinks(canonical, alternates)) {
     const element = document.createElement("link");
     element.setAttribute("rel", link.rel);
@@ -184,6 +191,9 @@ export const Head = ({
       <title>{meta?.title}</title>
       {meta?.description && (
         <meta name="description" content={meta.description} />
+      )}
+      {meta?.robots && (
+        <meta name="robots" content={meta.robots} {...{ [GEMI_META_ATTRIBUTE]: "" }} />
       )}
       {meta?.openGraph && <OpenGraph {...meta.openGraph} />}
       {metaLinks(meta?.canonical, meta?.alternates).map((link) => (

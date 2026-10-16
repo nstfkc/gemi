@@ -29,6 +29,15 @@ export class Meta {
     RequestContext.getStore().metadata.alternates(links);
   }
   /**
+   * `<meta name="robots">` for this response, rendered by `<Head />`, e.g.
+   * `Meta.robots("noindex, nofollow")` for a page that is reached by a link
+   * but must not be indexed. Pair it with an `X-Robots-Tag` header
+   * (`req.ctx().setHeaders`) for crawlers that read headers only.
+   */
+  static robots(content: string) {
+    RequestContext.getStore().metadata.robots(content);
+  }
+  /**
    * `@font-face` rules for this response, and a `<link rel="preload" as="font">`
    * for each font marked `preload`; `<Head />` renders both. Calls add up.
    * Throws a `TypeError` for a descriptor that isn't a valid CSS value.

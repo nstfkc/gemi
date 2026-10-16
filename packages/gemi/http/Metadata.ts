@@ -50,6 +50,7 @@ export class Metadata {
     canonical: null,
     alternates: null,
     fonts: null,
+    robots: null,
   };
 
   /**
@@ -68,6 +69,7 @@ export class Metadata {
       canonical: this.content.canonical,
       alternates: this.content.alternates,
       fonts: this.content.fonts,
+      robots: this.content.robots,
     };
   }
 
@@ -83,6 +85,12 @@ export class Metadata {
   canonical(url: string) {
     this.touched = true;
     this.content.canonical = url;
+  }
+
+  /** `<meta name="robots">`'s content, e.g. `"noindex, nofollow"`; the last call wins. */
+  robots(content: string) {
+    this.touched = true;
+    this.content.robots = content;
   }
 
   alternates(links: AlternateLink[]) {
