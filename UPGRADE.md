@@ -1,5 +1,13 @@
 # Unreleased
 
+## View paths with a trailing slash redirect to the slashless path (#970)
+
+**Behaviour change. Nothing to migrate.** See [Routing → Trailing slashes](docs/routing.md#trailing-slashes).
+
+- A GET/HEAD document request whose path ends in `/` (not `/`) and matches no view route as it stands now answers `301` to the same path without its trailing slashes, keeping the query: `/about/?x=1` → `/about?x=1`. Before, it was a 404, also under a catch-all (`/:path*`), whose pattern never matches a trailing slash.
+- Left as they were: the root `/`, a locale's root (`/de-DE/`), `.json` and `.og` requests, a path that starts with `//`, and a slashed path some route does match.
+- An app that relied on `/x/` being a 404 gets a redirect instead; `/x` then answers as it always did.
+
 ## MCP: `PrismaMcpOAuthStore` and `PrismaNonceStore`, shared stores on the app's database
 
 **New, nothing to migrate.** See [MCP Server → The store](docs/mcp.md#the-store) and [Approval](docs/mcp.md#approval).

@@ -1119,6 +1119,32 @@ export class ViewRouteDispatcher {
       urlLocale = maybeLocale;
     }
 
+    // A page's address has no trailing slash: `/about/` (or `/about//`) is
+    // sent for good to `/about`, query and all, since no route pattern
+    // matches it and it would otherwise be a 404 (`/:path*` included). Only a
+    // document request, and only a path no route matches as it stands; ahead
+    // of the locale redirects, which keep the path's slash. A path that starts
+    // with `//` is left alone: its slashless form would be a protocol-relative
+    // Location naming another host.
+    if (
+      (req.method === "GET" || req.method === "HEAD") &&
+      !isViewDataRequest &&
+      !isOgRequest &&
+      directMatch === null &&
+      url.pathname.endsWith("/") &&
+      !url.pathname.startsWith("//")
+    ) {
+      const slashless = url.pathname.replace(/\/+$/, "");
+      // A locale's root keeps its slash (`/de-DE/` is its home page, #948).
+      const localeRoot = localeRouted && translator.supportedLocales.includes(slashless.slice(1));
+      if (slashless && !localeRoot) {
+        return new Response("", {
+          status: 301,
+          headers: { Location: `${slashless}${url.search}` },
+        });
+      }
+    }
+
     // A first path segment is not necessarily a locale, and the shapes overlap:
     // `de-luxe` is a language `de` with a legal 4-letter subtag, `en-suite` the
     // same for `en`. No tightening of the tag pattern separates them, so route
