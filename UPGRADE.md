@@ -1,5 +1,13 @@
 # Unreleased
 
+## `Meta.robots`: a per-response `<meta name="robots">` (#972)
+
+**New, nothing to migrate.** See [Views & Layouts → Robots](docs/views-and-layouts.md#robots).
+
+- `Meta.robots("noindex, nofollow")` renders `<meta name="robots" content="noindex, nofollow">` from `<Head />`. The last call wins.
+- On a client-side navigation the tag follows the new page: replaced when it sets one, removed when it sets none. A `<meta name="robots">` your layout renders itself is left alone.
+- It is a tag in the HTML only. For crawlers that read headers only, also send `X-Robots-Tag` (`req.ctx().setHeaders("X-Robots-Tag", "noindex")`).
+
 ## View paths with a trailing slash redirect to the slashless path (#970)
 
 **Behaviour change. Nothing to migrate.** See [Routing → Trailing slashes](docs/routing.md#trailing-slashes).

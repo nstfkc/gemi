@@ -4514,6 +4514,22 @@ Meta.alternates([
 On a client-side navigation the `<html>` attributes and these links follow the
 new page.
 
+### Robots
+
+`Meta.robots` sets the response's `<meta name="robots">`, which `<Head />`
+renders, for a page that is reached by a link but must not be indexed (a
+share link, a preview). Crawlers that read headers only need the
+`X-Robots-Tag` header as well:
+
+```typescript
+Meta.robots("noindex, nofollow");
+req.ctx().setHeaders("X-Robots-Tag", "noindex, nofollow");
+```
+
+The last call wins. On a client-side navigation the tag follows the new page:
+a page that sets none gets none. A `<meta name="robots">` your layout renders
+itself is not touched.
+
 ### Fonts
 
 `Meta.fonts` declares the response's `@font-face` rules and preloads, which
@@ -15667,6 +15683,7 @@ export default defineLogConfig({
 - `Meta.openGraph(params)` — set Open Graph tags and `twitter:card`. `image` is optional; without one the card is `summary`.
 - `Meta.htmlAttributes({ lang, dir })` — the `<html>` attributes the layout receives as `htmlAttributes` (default: the request's locale and its direction).
 - `Meta.canonical(url)` — a `<link rel="canonical">`.
+- `Meta.robots(content)` — a `<meta name="robots">`, e.g. `"noindex, nofollow"`.
 - `Meta.alternates([{ hrefLang, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in.
 - `Meta.fonts([{ family, src, weight?, style?, stretch?, display?, unicodeRange?, preload? }])` — `@font-face` rules, and `<link rel="preload" as="font">` for the fonts marked `preload` (see [Fonts](./static-views-and-islands.md#fonts)).
 

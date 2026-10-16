@@ -377,6 +377,22 @@ Meta.alternates([
 On a client-side navigation the `<html>` attributes and these links follow the
 new page.
 
+### Robots
+
+`Meta.robots` sets the response's `<meta name="robots">`, which `<Head />`
+renders, for a page that is reached by a link but must not be indexed (a
+share link, a preview). Crawlers that read headers only need the
+`X-Robots-Tag` header as well:
+
+```typescript
+Meta.robots("noindex, nofollow");
+req.ctx().setHeaders("X-Robots-Tag", "noindex, nofollow");
+```
+
+The last call wins. On a client-side navigation the tag follows the new page:
+a page that sets none gets none. A `<meta name="robots">` your layout renders
+itself is not touched.
+
 ### Fonts
 
 `Meta.fonts` declares the response's `@font-face` rules and preloads, which
