@@ -59,5 +59,6 @@ A route exposed with `fromApiRoute` takes `requiresApproval: true` or `false` on
 ## Related
 
 - [MCP Server](./mcp.md): approval by elicitation for remote clients.
+- [AI Tools That End the Run](./ai-tool-ends-run.md): `endsRun`, ending the run after a successful call.
 - [AI Server Turns](./ai-server-turns.md): answering pending approvals from server code.
 - [Mobile Clients](./mobile-clients.md): `approve` on iOS and Android.
