@@ -660,6 +660,31 @@ export type ToolApproval<Input> =
   | ((input: Input, ctx: ToolApprovalContext) => boolean | Promise<boolean>);
 
 /**
+ * What an `endsRun` function is given beside the call's output: the call's
+ * input, and the same run facts `requiresApproval`'s function gets.
+ */
+export interface ToolEndsRunContext<Input = unknown> extends ToolApprovalContext {
+  /** The call's input, as the tool's `execute` received it. */
+  input: Input;
+}
+
+/**
+ * Whether a successful call of this tool ends the run, so the model is not
+ * asked again after it (#974). See `ToolDefinition.endsRun`.
+ *
+ * `true` ends the run after every successful call, with no closing text. The
+ * function form decides per call, from the call's output: a string ends the
+ * run with that string as the closing text, `true` (or `""`) ends it with
+ * none, and `false`, `null` or `undefined` carries on as usual.
+ */
+export type ToolEndsRun<Input, Output> =
+  | boolean
+  | ((
+      output: Output,
+      ctx: ToolEndsRunContext<Input>,
+    ) => string | boolean | null | undefined | Promise<string | boolean | null | undefined>);
+
+/**
  * A tool either resolves once, or yields progress and then returns.
  *
  * The generator form exists because a tool that takes twenty seconds is the
@@ -749,6 +774,31 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
       execute: ToolExecute<Input, Output, Progress>;
       /** Ask the user first: always, never, or per call. See `ToolApproval`. */
       requiresApproval?: ToolApproval<Input>;
+      /**
+       * Ends the run after a successful call of this tool, instead of asking
+       * the model again (#974). For a tool whose result already is the answer:
+       * the follow-up step would only restate it, and costs a model call.
+       *
+       * Only a result with `status: "ok"` can end the run; an error, a timeout,
+       * a refusal or a background job that is still `running` goes back to the
+       * model as usual. With several calls in one step, the run ends only when
+       * every one of them asked to (all succeeded, all said so); otherwise the
+       * model is asked again as if none had. A step that leaves a call pending
+       * ends `awaiting-input` as before.
+       *
+       * The closing texts (in call order, joined by a blank line) become a new
+       * assistant message, streamed as one `text-delta` and stored like any
+       * other, and the run ends with `finishReason: "stop"`. With no text, the
+       * tool's own message is the run's last. Either way the thread stays a
+       * valid history for the next turn. No model call is made for it, so it
+       * adds no usage.
+       *
+       * Only calls run in the step loop: a call answered on a later turn (an
+       * approval) goes back to the model as before. It ends the run it is in,
+       * so a sub-agent's tool ends the sub-run, not its parent. A function that
+       * throws is logged and read as "carry on". See `ToolEndsRun`.
+       */
+      endsRun?: ToolEndsRun<Input, Output>;
     })
   | (ToolDefinitionBase<Name, Input, Output> & {
       answeredBy: "client";
@@ -756,6 +806,8 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
       execute?: never;
       /** Meaningless here: the client answering *is* the approval. */
       requiresApproval?: never;
+      /** Server tools only: a client's answer arrives on a later turn. */
+      endsRun?: never;
     });
 
 /**
@@ -801,6 +853,8 @@ export class AgentTool<
   ) => boolean | Promise<boolean>;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
+  /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
+  readonly endsRun?: ToolEndsRun<Input, Output>;
   /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
   readonly timeoutMs?: number;
   /** See `ToolDefinition.async`. `undefined` for a tool that cannot start a job. */
@@ -830,6 +884,7 @@ export class AgentTool<
     this.execute = params.execute ?? undefined;
     this.timeoutMs = params.timeoutMs;
     this.async = params.async;
+    if (params.endsRun) this.endsRun = params.endsRun;
   }
 
   /**
@@ -859,6 +914,20 @@ export class AgentTool<
     ) {
       throw new Error(
         `The tool "${params.name}" has a requiresApproval that is neither a boolean nor a function.`,
+      );
+    }
+    if (
+      params.endsRun !== undefined &&
+      typeof params.endsRun !== "boolean" &&
+      typeof params.endsRun !== "function"
+    ) {
+      throw new Error(
+        `The tool "${params.name}" has an endsRun that is neither a boolean nor a function.`,
+      );
+    }
+    if (params.endsRun && params.answeredBy === "client") {
+      throw new Error(
+        `The tool "${params.name}" is answered by the client and cannot set \`endsRun\`: its answer arrives on a later turn.`,
       );
     }
     if (params.async && params.answeredBy === "client") {
@@ -3058,6 +3127,25 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         return;
       }
 
+      // Before the `maxSteps` check: a run whose tools finished the job is
+      // done, not out of steps.
+      const closing = await this.closingText(message, calls, step);
+      if (closing !== null) {
+        this.finishReason = "stop";
+        await this.finalizeMessage(outcome.reason);
+        if (closing) {
+          // What the follow-up model step would have produced, minus the
+          // model: a text-only assistant message after the tool results. The
+          // provider replays it as an ordinary assistant message, and one with
+          // no reasoning item before it is valid input.
+          const reply = this.startMessage();
+          appendText(reply, "text", closing);
+          this.emit({ type: "text-delta", messageId: reply.id, delta: closing });
+          await this.finalizeMessage("stop");
+        }
+        return;
+      }
+
       if (step === maxSteps) {
         // Not an exception. An agent that will not stop calling tools is a bug
         // the app has to be able to see and show, and a throw here would put it
@@ -3604,6 +3692,62 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.controller.signal,
     );
     return pending;
+  }
+
+  /**
+   * Whether this step's tool calls end the run (`ToolDefinition.endsRun`), and
+   * with what closing text: `null` to carry on, a string (possibly empty) to
+   * end. Every call of the step has to have succeeded and asked to end; the
+   * first that did not decides, and the rest are not asked.
+   */
+  private async closingText(
+    message: AgentMessage,
+    calls: ToolCallPart[],
+    step: number,
+  ): Promise<string | null> {
+    const texts: string[] = [];
+    for (const call of calls) {
+      const tool = this.config.registry.get(String(call.name))?.tool;
+      if (!tool?.endsRun) return null;
+      const result = message.content.find(
+        (part): part is ToolResultPart =>
+          part.type === "tool-result" && part.toolCallId === call.toolCallId,
+      );
+      if (result?.status !== "ok") return null;
+      let answer: string | boolean | null | undefined = true;
+      if (typeof tool.endsRun === "function") {
+        const ctx: ToolEndsRunContext = {
+          input: call.input,
+          context: this.context,
+          body: this.params.body ?? {},
+          runId: this.runId,
+          threadId: this.params.threadId,
+          toolCallId: call.toolCallId,
+          step,
+          depth: this.depth,
+          signal: this.controller.signal,
+        };
+        try {
+          answer = await raceAbort(
+            Promise.resolve().then(() => (tool.endsRun as Function)(result.output, ctx)),
+            this.controller.signal,
+          );
+        } catch (error) {
+          if (error instanceof RunAborted) throw error;
+          this.writeLog(
+            `[gemi/ai] agent "${this.config.name}": the endsRun of "${tool.name}" threw, so the run carries on`,
+            { error, toolCallId: call.toolCallId },
+          );
+          return null;
+        }
+      }
+      if (typeof answer === "string") {
+        if (answer) texts.push(answer);
+      } else if (answer !== true) {
+        return null;
+      }
+    }
+    return texts.join("\n\n");
   }
 
   /**

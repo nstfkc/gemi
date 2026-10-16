@@ -1,5 +1,14 @@
 # Unreleased
 
+## AI: `endsRun` on a tool, ending the run without another model call (#974)
+
+**New, nothing to migrate.** See [AI Tools That End the Run](docs/ai-tool-ends-run.md).
+
+- `AgentTool.create({ ..., endsRun })`: `true`, or `(output, ctx) => string | boolean | null | undefined` (may be async). After a successful call (`status: "ok"`), a string ends the run with that text as a new assistant message (streamed as one `text-delta`, stored like any reply, no `usage`); `true` or `""` ends it with no closing message; `false`/`null`/`undefined` asks the model again, as before.
+- The run ends with `finishReason: "stop"`, also on the last step `maxSteps` allows. With several calls in one step, it ends only if every call succeeded and asked to end; closing texts are joined in call order. A pending call still ends the run `awaiting-input`.
+- Only calls run in the step loop: a call approved on a later turn goes back to the model. A sub-agent's tool ends its sub-run, not the parent. Client tools can't set it. A function that throws is logged and the run carries on.
+- New exported types: `ToolEndsRun`, `ToolEndsRunContext`.
+
 ## `Meta.robots`: a per-response `<meta name="robots">` (#972)
 
 **New, nothing to migrate.** See [Views & Layouts → Robots](docs/views-and-layouts.md#robots).

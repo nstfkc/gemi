@@ -122,6 +122,8 @@ export type {
   ToolSchemaContext,
   ToolApproval,
   ToolApprovalContext,
+  ToolEndsRun,
+  ToolEndsRunContext,
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";
