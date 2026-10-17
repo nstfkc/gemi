@@ -615,9 +615,12 @@ export default defineRateLimiterConfig({
 | `client` | the app's Redis client | run against a different connection |
 | `prefix` | `gemi:rl` | key namespace |
 | `failOpen` | `true` | admit requests while Redis is unreachable |
+| `timeout` | `250` | ms one call may wait for Redis before it follows `failOpen`; `0` turns it off |
 | `onError` | `console.error` | where Redis failures are reported |
 
 `failOpen` is the interesting one: by default a Redis outage lets traffic through rather than taking the site down with it. Set it to `false` on endpoints where an unmetered request is worse than a rejected one — anything that sends email or costs money per call.
+
+During an outage each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. A timed-out call is reported to `onError` as a `RedisRateLimiterTimeoutError`. The script is not cancelled, so Redis may still count a call that timed out. Once Redis is back the limits apply again without a restart: the app's shared client reconnects on its own (see [Facades: Redis](./facades.md#redis)). A `client` you pass yourself is yours to keep connected.
 
 ### Limiting by something other than an IP
 
