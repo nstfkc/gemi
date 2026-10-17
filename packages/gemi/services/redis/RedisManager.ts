@@ -21,51 +21,58 @@ type RedisClientConstructor = new (
   options?: RedisOptions,
 ) => RedisClient;
 
-/** First wait between two revival attempts while Redis stays unreachable. */
-const REVIVE_MIN_DELAY_MS = 500;
-/** Longest wait between two revival attempts. */
-const REVIVE_MAX_DELAY_MS = 10_000;
+/** First wait before replacing a client that is down. */
+const REPLACE_MIN_DELAY_MS = 500;
+/** Longest wait between two replacements while Redis stays down. */
+const REPLACE_MAX_DELAY_MS = 10_000;
+/** How long past its `connectionTimeout` a connect may stay pending before it counts as failed. */
+const CONNECT_GRACE_MS = 5_000;
+/** Bun's default `connectionTimeout`. */
+const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
 
 export class RedisManager {
   static token = "redis";
 
   private instance: RedisClient | null = null;
 
-  /** The revival attempt in flight, so concurrent accesses share it. */
-  private reviving: Promise<unknown> | null = null;
-  /** Earliest time the next revival attempt may start. */
-  private nextReviveAt = 0;
-  /** Wait applied after the next failed revival attempt. */
-  private reviveDelay = REVIVE_MIN_DELAY_MS;
+  /** When the connect the manager started on `instance` began, while it is pending. */
+  private connectingSince: number | null = null;
+  /** When `instance` was first seen down, after its connect settled. */
+  private downSince: number | null = null;
+  /** How long a client must be down before it is replaced. */
+  private replaceDelay = REPLACE_MIN_DELAY_MS;
 
   constructor(public config: RedisConfig = {}) {}
 
   /**
-   * Bun's Redis client. Built on first access and memoized.
-   *
-   * It connects lazily on the first command, so building it here is safe even
-   * when Redis isn't running or configured — nothing connects until something
-   * actually issues a command.
+   * Bun's Redis client. Built on first access and memoized; building it starts
+   * the connection, which the first command would do anyway.
    *
    * Once Bun's client gives up on a connection (a connect timeout, or
-   * `maxRetries` reconnects in a row) it never connects again on its own, and
-   * every later command fails at once with `Connection has failed`, even after
-   * Redis is back (#982). So a later access that finds the client disconnected
-   * calls its `connect()` again, which brings the same client back: anything
-   * holding on to it (a `Redis.client` kept by app code, a subscription) keeps
-   * working. Attempts are spaced out with a backoff (0.5 s doubling to 10 s,
-   * reset once one succeeds) so a Redis that stays down isn't hammered, and
-   * one attempt at a time is in flight.
+   * `maxRetries` reconnects in a row) it never connects again, and every later
+   * command fails at once with `Connection has failed`, even after Redis is
+   * back (#982); calling its `connect()` again can hang. So an access that
+   * finds the client down replaces it: the old one is closed and a new one
+   * built. A client is down when it is not connected and no connect the
+   * manager started on it is still pending. It gets a grace period first, so a
+   * blip that Bun's own reconnect covers costs nothing: 0.5 s, doubling with
+   * each replacement that does not connect, up to 10 s, and back to 0.5 s once
+   * one connects. So a Redis that stays down is tried at most every 10 s.
+   *
+   * Read `client` each time rather than keeping it: a kept reference can be a
+   * client that was replaced and closed.
    */
   get client(): RedisClient {
-    const built = this.instance === null;
-    const client = (this.instance ??= new (redisClientConstructor())(
-      this.config.url,
-      this.config.options,
-    ));
-    // A client just built has not tried to connect yet; its first command
-    // does that.
-    if (!built) this.reviveIfDisconnected(client);
+    if (this.instance === null) return this.build();
+
+    const client = this.instance;
+    if (this.isDown(client, Date.now())) {
+      this.instance = null;
+      try {
+        client.close();
+      } catch {}
+      return this.build();
+    }
     return client;
   }
 
@@ -79,7 +86,9 @@ export class RedisManager {
    */
   set client(client: RedisClient) {
     this.instance = client;
-    this.resetRevival();
+    this.connectingSince = null;
+    this.downSince = null;
+    this.replaceDelay = REPLACE_MIN_DELAY_MS;
   }
 
   /**
@@ -89,50 +98,69 @@ export class RedisManager {
   close(): void {
     const client = this.instance;
     this.instance = null;
-    this.resetRevival();
+    this.connectingSince = null;
+    this.downSince = null;
+    this.replaceDelay = REPLACE_MIN_DELAY_MS;
     client?.close();
   }
 
-  private reviveIfDisconnected(client: RedisClient) {
-    // Only Bun's client says whether it is connected; a fake that doesn't is
-    // left alone.
-    if (client.connected !== false || typeof client.connect !== "function") {
-      return;
-    }
-    if (this.reviving || Date.now() < this.nextReviveAt) return;
+  private build(): RedisClient {
+    const client = new (redisClientConstructor())(
+      this.config.url,
+      this.config.options,
+    );
+    this.instance = client;
+    this.downSince = null;
+    this.connectingSince = null;
 
-    let connecting: Promise<unknown>;
-    try {
-      connecting = Promise.resolve(client.connect());
-    } catch (error) {
-      connecting = Promise.reject(error);
-    }
-
-    const attempt = connecting
-      .then(
+    // Only Bun's client can say whether it connected; a stand-in without
+    // `connect()` is never replaced.
+    if (typeof client.connect === "function") {
+      this.connectingSince = Date.now();
+      let connecting: Promise<unknown>;
+      try {
+        connecting = Promise.resolve(client.connect());
+      } catch (error) {
+        connecting = Promise.reject(error);
+      }
+      connecting.then(
         () => {
           if (this.instance !== client) return;
-          this.reviveDelay = REVIVE_MIN_DELAY_MS;
-          this.nextReviveAt = 0;
+          this.connectingSince = null;
+          this.replaceDelay = REPLACE_MIN_DELAY_MS;
         },
         () => {
-          // The command that triggered this attempt reports the failure to its
-          // caller; this one only schedules the next attempt.
+          // The commands waiting on this connection report the failure to
+          // their callers; here it only makes the client a candidate for
+          // replacement.
           if (this.instance !== client) return;
-          this.nextReviveAt = Date.now() + this.reviveDelay;
-          this.reviveDelay = Math.min(this.reviveDelay * 2, REVIVE_MAX_DELAY_MS);
+          this.connectingSince = null;
         },
-      )
-      .finally(() => {
-        if (this.reviving === attempt) this.reviving = null;
-      });
-    this.reviving = attempt;
+      );
+    }
+    return client;
   }
 
-  private resetRevival() {
-    this.reviving = null;
-    this.nextReviveAt = 0;
-    this.reviveDelay = REVIVE_MIN_DELAY_MS;
+  private isDown(client: RedisClient, now: number): boolean {
+    if (client.connected !== false || typeof client.connect !== "function") {
+      this.downSince = null;
+      return false;
+    }
+
+    if (this.connectingSince !== null) {
+      const limit =
+        (this.config.options?.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS) +
+        CONNECT_GRACE_MS;
+      if (now - this.connectingSince < limit) return false;
+      // A connect that outlived its own timeout is not coming back.
+      this.connectingSince = null;
+    }
+
+    this.downSince ??= now;
+    if (now - this.downSince < this.replaceDelay) return false;
+
+    this.replaceDelay = Math.min(this.replaceDelay * 2, REPLACE_MAX_DELAY_MS);
+    return true;
   }
 }
 

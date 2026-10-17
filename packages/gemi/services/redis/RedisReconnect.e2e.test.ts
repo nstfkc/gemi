@@ -159,11 +159,11 @@ function suite() {
 
       docker("start", name);
 
-      // No process restart: the same manager, and the same client instance,
-      // count again once Redis is back.
+      // No process restart: the same manager counts again once Redis is back,
+      // on a client it built to replace the one that gave up.
       expect(await waitFor("limits after restart", enforced, 30_000)).toBe(true);
-      expect(manager.client).toBe(client);
-      expect(client.connected).toBe(true);
+      expect(manager.client).not.toBe(client);
+      expect(manager.client.connected).toBe(true);
     }, 90_000);
   });
 }
