@@ -29,8 +29,26 @@ export interface RedisRateLimiterOptions {
    * one (payments, sign-up, anything that costs money per call).
    */
   failOpen?: boolean;
+  /**
+   * How long one `consume` may wait for Redis, in ms, before it gives up and
+   * follows `failOpen`. Default `250`. Without it, a request waits as long as
+   * the client does: up to the connect timeout and the reconnect loop (10 to
+   * 30 s) while Redis is down, and with no limit when Redis stops answering on
+   * an open connection. `0` turns it off.
+   */
+  timeout?: number;
   /** Called with every Redis failure. Defaults to `console.error`. */
   onError?: (error: unknown) => void;
+}
+
+/** What `onError` gets when a `consume` ran past `timeout`. */
+export class RedisRateLimiterTimeoutError extends Error {
+  readonly code = "ERR_RATE_LIMITER_TIMEOUT";
+
+  constructor(timeout: number) {
+    super(`RedisRateLimiter: Redis did not answer within ${timeout}ms.`);
+    this.name = "RedisRateLimiterTimeoutError";
+  }
 }
 
 /**
@@ -93,6 +111,7 @@ export class RedisRateLimiter extends RateLimiterDriver {
   private injectedClient?: RateLimiterRedisClient;
   private prefix: string;
   private failOpen: boolean;
+  private timeout: number;
   private onError: (error: unknown) => void;
 
   /** Cached `SCRIPT LOAD` result, so the script body is sent at most once. */
@@ -103,6 +122,7 @@ export class RedisRateLimiter extends RateLimiterDriver {
     this.injectedClient = options.client;
     this.prefix = options.prefix ?? "gemi:rl";
     this.failOpen = options.failOpen ?? true;
+    this.timeout = options.timeout ?? 250;
     this.onError = options.onError ?? ((error) => console.error(error));
   }
 
@@ -115,12 +135,14 @@ export class RedisRateLimiter extends RateLimiterDriver {
     const bucket = windowStart / window;
 
     try {
-      const reply = await this.run(
-        [
-          `${this.prefix}:${key}:${bucket}`,
-          `${this.prefix}:${key}:${bucket - 1}`,
-        ],
-        [String(limit), String(window), String(elapsed), String(cost)],
+      const reply = await this.withTimeout(
+        this.run(
+          [
+            `${this.prefix}:${key}:${bucket}`,
+            `${this.prefix}:${key}:${bucket - 1}`,
+          ],
+          [String(limit), String(window), String(elapsed), String(cost)],
+        ),
       );
 
       const [allowed, current, previous] = (
@@ -160,6 +182,30 @@ export class RedisRateLimiter extends RateLimiterDriver {
         retryAfter: 0,
       };
     }
+  }
+
+  /**
+   * Settles with `work`, or rejects with `RedisRateLimiterTimeoutError` once
+   * `timeout` passes. The command itself is not cancelled (Redis may still run
+   * the script, so a request that timed out can still be counted); its late
+   * outcome is ignored.
+   */
+  private withTimeout<T>(work: Promise<T>): Promise<T> {
+    if (!(this.timeout > 0) || !Number.isFinite(this.timeout)) return work;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        // A `SCRIPT LOAD` stuck on a connection that stopped answering would
+        // otherwise be awaited by every later call: drop it, the next call
+        // loads again.
+        this.scriptSha = null;
+        reject(new RedisRateLimiterTimeoutError(this.timeout));
+      }, this.timeout);
+    });
+    work.catch(() => {});
+
+    return Promise.race([work, timedOut]).finally(() => clearTimeout(timer));
   }
 
   private get client(): RateLimiterRedisClient {

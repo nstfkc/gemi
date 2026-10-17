@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Application } from "../../../foundation/Application";
 import { kernelContext } from "../../../kernel/context";
 import { RedisManager } from "../../redis/RedisManager";
-import { RedisRateLimiter } from "./RedisRateLimiterDriver";
+import { RedisRateLimiter, RedisRateLimiterTimeoutError } from "./RedisRateLimiterDriver";
 
 type Reply = any | Error | ((args: string[]) => any);
 
@@ -260,5 +260,92 @@ describe("resolving the app's shared client", () => {
         limiter.consume({ key: "k", limit: 10, window: 1000 }),
       ),
     ).rejects.toThrow(/RedisServiceProvider/);
+  });
+});
+
+// #982: while Redis is down or stops answering, a command can wait out Bun's
+// connect timeout and reconnect loop (10 to 30 s), or forever on an open
+// connection that went silent. `timeout` bounds every `consume`.
+describe("when redis does not answer", () => {
+  const never = () => new Promise(() => {});
+
+  test("gives up after 250 ms by default and admits the request", async () => {
+    const onError = vi.fn();
+    const client = fakeRedis({ evalsha: never });
+    const limiter = new RedisRateLimiter({ client, onError });
+
+    let settled: any = null;
+    const pending = limiter
+      .consume({ key: "k", limit: 10, window: 1000 })
+      .then((result) => (settled = result));
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(settled).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(settled.allowed).toBe(true);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(RedisRateLimiterTimeoutError);
+  });
+
+  test("rejects at the timeout when failOpen is off", async () => {
+    const client = fakeRedis({ evalsha: never });
+    const limiter = new RedisRateLimiter({
+      client,
+      failOpen: false,
+      timeout: 50,
+      onError: () => {},
+    });
+
+    const pending = limiter.consume({ key: "k", limit: 10, window: 1000 });
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect((await pending).allowed).toBe(false);
+  });
+
+  test("covers a script load that hangs, and loads again on the next call", async () => {
+    let attempt = 0;
+    const client = fakeRedis({
+      load: () => (++attempt === 1 ? never() : "sha-1"),
+    });
+    const limiter = new RedisRateLimiter({ client, timeout: 100, onError: () => {} });
+
+    const first = limiter.consume({ key: "k", limit: 10, window: 1000 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await first).allowed).toBe(true);
+
+    // The stuck load is not awaited again: the next call loads and counts.
+    await limiter.consume({ key: "k", limit: 10, window: 1000 });
+    expect(client.loadCalls()).toHaveLength(2);
+    expect(client.evalshaCalls()).toHaveLength(1);
+  });
+
+  test("timeout: 0 waits for Redis however long it takes", async () => {
+    let answer!: (value: unknown) => void;
+    const client = fakeRedis({
+      evalsha: () => new Promise((resolve) => (answer = resolve)),
+    });
+    const limiter = new RedisRateLimiter({ client, timeout: 0, onError: () => {} });
+
+    let settled: any = null;
+    const pending = limiter
+      .consume({ key: "k", limit: 10, window: 1000 })
+      .then((result) => (settled = result));
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBeNull();
+
+    answer([0, 10, 0]);
+    await pending;
+    expect(settled.allowed).toBe(false);
+  });
+
+  test("leaves no timer behind once Redis answers", async () => {
+    const limiter = new RedisRateLimiter({ client: fakeRedis() });
+
+    await limiter.consume({ key: "k", limit: 10, window: 1000 });
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

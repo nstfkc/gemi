@@ -62,6 +62,7 @@ export {
 } from "./rate-limiter/drivers/InMemoryRateLimiterDriver";
 export {
   RedisRateLimiter,
+  RedisRateLimiterTimeoutError,
   type RedisRateLimiterOptions,
   type RateLimiterRedisClient,
 } from "./rate-limiter/drivers/RedisRateLimiterDriver";

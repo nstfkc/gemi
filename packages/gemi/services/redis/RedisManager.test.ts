@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { RedisManager } from "./RedisManager";
 
@@ -91,5 +91,101 @@ describe("RedisManager", () => {
 
     // A later access builds a fresh client rather than handing back the closed one.
     expect((manager.client as any).id).toBe(2);
+  });
+
+  // #982: once Bun's client gives up on a connection it never connects again on
+  // its own, so the manager calls `connect()` on it again, spaced out.
+  describe("reviving a client that gave up", () => {
+    /** A client whose `connect()` succeeds or fails as the test says. */
+    function revivableClient() {
+      const state = { up: false, connects: 0 };
+      bun.RedisClient = class {
+        connected = false;
+        async connect() {
+          state.connects += 1;
+          if (!state.up) throw new Error("Connection closed");
+          this.connected = true;
+        }
+      };
+      return state;
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    test("leaves a client that was just built alone", () => {
+      const state = revivableClient();
+      void new RedisManager().client;
+      expect(state.connects).toBe(0);
+    });
+
+    test("reconnects a disconnected client on a later access, keeping the instance", async () => {
+      const state = revivableClient();
+      state.up = true;
+      const manager = new RedisManager();
+      const client = manager.client;
+
+      expect(manager.client).toBe(client);
+      await vi.waitFor(() => expect(client.connected).toBe(true));
+      expect(state.connects).toBe(1);
+
+      // Connected: nothing more to do.
+      void manager.client;
+      expect(state.connects).toBe(1);
+    });
+
+    test("runs one attempt at a time and backs off while Redis stays down", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const state = revivableClient();
+      const manager = new RedisManager();
+      void manager.client;
+
+      // A burst of accesses shares one attempt.
+      for (let i = 0; i < 5; i++) void manager.client;
+      expect(state.connects).toBe(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Then waits 0.5 s, 1 s, 2 s ... between attempts.
+      void manager.client;
+      expect(state.connects).toBe(1);
+      await vi.advanceTimersByTimeAsync(500);
+      void manager.client;
+      expect(state.connects).toBe(2);
+      await vi.advanceTimersByTimeAsync(999);
+      void manager.client;
+      expect(state.connects).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      void manager.client;
+      expect(state.connects).toBe(3);
+
+      // Capped at 10 s.
+      for (let i = 0; i < 10; i++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        void manager.client;
+      }
+      const before = state.connects;
+      await vi.advanceTimersByTimeAsync(10_000);
+      void manager.client;
+      expect(state.connects).toBe(before + 1);
+
+      // Redis is back: the next attempt succeeds and the backoff starts over.
+      state.up = true;
+      await vi.advanceTimersByTimeAsync(10_000);
+      const client = manager.client;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.connected).toBe(true);
+      (client as any).connected = false;
+      void manager.client;
+      expect(state.connects).toBe(before + 3);
+    });
+
+    test("leaves a fake client without connect() alone", () => {
+      const manager = new RedisManager();
+      const fake = { connected: false } as any;
+      manager.client = fake;
+      expect(() => manager.client).not.toThrow();
+    });
   });
 });

@@ -1,5 +1,13 @@
 # Unreleased
 
+## Redis: the shared client reconnects after an outage, and `RedisRateLimiter` has a `timeout` (#982)
+
+**Behaviour change. Nothing to migrate.** See [Middleware → Rate limiting](docs/middleware.md#rate-limiting) and [Facades → Redis](docs/facades.md#outages).
+
+- Before, once Bun's Redis client gave up on a connection (a connect timeout, or `maxRetries` reconnects), it never connected again and `RedisManager` kept handing it out. Every Redis command then failed until the process restarted, and `RedisRateLimiter` with `failOpen` (the default) turned every limit off.
+- `RedisManager.client` now calls `connect()` again on a client it finds disconnected (not on the access that builds it), one attempt at a time, spaced 0.5 s doubling to 10 s while Redis stays down and reset once one succeeds. It is the same client instance. This covers everything on the shared connection: the `Redis` facade, `RedisRateLimiter`, the `"redis"` cache store, `RedisNonceStore`, `RedisReceiptStore`. A client you pass to one of them yourself (`new RedisRateLimiter({ client })`) is not revived.
+- `RedisRateLimiter` takes `timeout` (ms, default `250`, `0` turns it off). A call that runs past it follows `failOpen`/`failClosed` at once and reports a `RedisRateLimiterTimeoutError` (new export of `gemi/services`) to `onError`. Before, a limited request could wait 10 to 30 s during an outage, and with no limit when Redis stopped answering on an open connection. Redis may still run a script that timed out, so that call can still be counted. Raise `timeout` if your Redis is far from the app (a cross-region round trip near 250 ms would fail open or closed on every call).
+
 ## AI: per-step reasoning effort in `prepareStep`, and `AgentController.reasoning()` (#975)
 
 **New, nothing to migrate.** See [AI Context Window → Reasoning effort per step](docs/ai-context-window.md#reasoning-effort-per-step).

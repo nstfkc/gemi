@@ -337,6 +337,10 @@ export default class extends Kernel {
 }
 ```
 
+### Outages
+
+The client connects on the first command. When Redis goes away, Bun's client retries on its own, and gives up for good after a connect timeout or `maxRetries` failed reconnects: from then on its commands fail at once, even after Redis is back. `RedisManager` covers that: a later `Redis.client` that finds the client disconnected calls its `connect()` again, at most one attempt at a time, spaced 0.5 s doubling to 10 s while Redis stays down. It is the same client instance, so a reference you kept keeps working. Everything gemi runs on this connection (`RedisRateLimiter`, the `"redis"` cache store, `RedisNonceStore` and `RedisReceiptStore`, the `Redis` facade) recovers the same way. A client you build yourself does not.
+
 See [Configuration](./configuration.md) and [Project Structure](./project-structure.md).
 
 ## Cache
