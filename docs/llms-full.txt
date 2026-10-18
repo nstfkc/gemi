@@ -14004,7 +14004,7 @@ loading, ... }` — where `trigger(input)` fires the request.
 | --- | --- | --- |
 | `useSignIn({ onSuccess })` | POSTs `/auth/sign-in` | Re-fetches `/auth/me` on success. |
 | `useSignUp()` | POSTs `/auth/sign-up` | |
-| `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Invalidates the cached user. |
+| `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Sets the cached user to `null` (no refetch). |
 | `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
 | `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
 | `useUser(config?)` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
