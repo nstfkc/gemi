@@ -631,7 +631,7 @@ export type AuthorizeRequestParams<Body extends object = Record<string, unknown>
  * `onStreamComplete`) goes on `req.state`, which every hook reaches
  * (`ctx.req.state` in the event hooks).
  */
-export type AgentControllerHooks<Body extends object = Record<string, unknown>> = {
+export type AgentControllerHooks<Body extends object = object> = {
   authorizeRequest?: (
     req: HttpRequest<any, any>,
     params: AuthorizeRequestParams<Body>,
@@ -710,7 +710,7 @@ export type AgentControllerHooks<Body extends object = Record<string, unknown>> 
  *
  * A controller whose `Body` has at least these fields can use it.
  */
-export function defineAgentHooks<Body extends object = Record<string, unknown>>(
+export function defineAgentHooks<Body extends object = object>(
   hooks: AgentControllerHooks<Body>,
 ): AgentControllerHooks<Body> {
   return hooks;
