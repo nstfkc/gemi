@@ -94,6 +94,31 @@ class RootApiRouter extends ApiRouter {
     "/gone/cached": this.get(() =>
       HttpResponse.error(410, { kind: "gone" }, { headers: { "X-Reason": "expired" } }),
     ).middleware(["cache"]),
+    "/form": this.post(() =>
+      HttpResponse.redirect("/thanks?sent=1", { headers: { "Cache-Control": "no-store" } }),
+    ).middleware(["context"]),
+    "/moved": this.get(() => HttpResponse.redirect(new URL("https://example.com/new"), { status: 308 })),
+    "/beacon": this.post(() => HttpResponse.noContent({ headers: { "X-Seen": "1" } })).middleware([
+      "context",
+    ]),
+    "/text": this.get(() => HttpResponse.text("hello")).middleware(["cache"]),
+    "/text/bad": this.get(() => HttpResponse.text("Not a theme's fonts", { status: 400 })).middleware([
+      "cache",
+    ]),
+    "/text/css": this.get(() =>
+      HttpResponse.text("a{}", { headers: { "Content-Type": "text/css; charset=utf-8" } }),
+    ),
+    "/stream/fail": this.stream(async () => {
+      if (Date.now() > 0) {
+        return HttpResponse.error(502, { kind: "upstream", message: "Fonts unreachable" });
+      }
+      return new Blob(["never"]);
+    }).middleware(["context", "cache"]),
+    "/stream/ok": this.stream(() => new Blob(["bytes"], { type: "text/plain" })),
+    "/stream/text": this.stream(() => HttpResponse.text("Bad family", { status: 400 })),
+    "/file/missing": this.file(() => HttpResponse.error(404, { kind: "not_found" })).middleware([
+      "context",
+    ]),
   };
 }
 
@@ -324,6 +349,121 @@ describe("HttpResponse.error / httpError (#665)", () => {
     expect(httpError(400, {}).status).toBe(400);
     expect(HttpResponse.error(599, "x").body).toEqual({ error: "x" });
     expect(isHttpResponse(httpError(410, {}))).toBe(true);
+  });
+});
+
+describe("HttpResponse.redirect", () => {
+  test("answers a real 303 with Location and no body, keeping the request's context", async () => {
+    const res = await fetchApi("/form", { method: "POST" });
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get("Location")).toBe("/thanks?sent=1");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Content-Type")).toBeNull();
+    expect(await res.text()).toBe("");
+    expect(res.headers.get("X-Context")).toBe("context");
+    expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^session=refreshed/)]);
+  });
+
+  test("takes a URL and another redirect status", async () => {
+    const res = await fetchApi("/moved");
+
+    expect(res.status).toBe(308);
+    expect(res.headers.get("Location")).toBe("https://example.com/new");
+  });
+
+  test("refuses a status that is not a redirect, and an empty url", () => {
+    for (const status of [200, 300, 304, 305, 400]) {
+      expect(() => HttpResponse.redirect("/x", { status: status as any })).toThrow(RangeError);
+    }
+    expect(() => HttpResponse.redirect("")).toThrow(TypeError);
+    const res = HttpResponse.redirect("/x");
+    expect([res.status, res.ok, isHttpResponse(res)]).toEqual([303, false, true]);
+  });
+});
+
+describe("HttpResponse.noContent", () => {
+  test("answers 204 with no body and no content type", async () => {
+    const res = await fetchApi("/beacon", { method: "POST" });
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Content-Type")).toBeNull();
+    expect(res.headers.get("X-Seen")).toBe("1");
+    expect(res.headers.get("X-Context")).toBe("context");
+    expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^session=refreshed/)]);
+    expect(await res.text()).toBe("");
+  });
+
+  test("is what HttpResponse.json(x, { status: 204 }) points to", () => {
+    expect(() => HttpResponse.json({}, { status: 204 })).toThrow(/HttpResponse\.noContent/);
+    expect(HttpResponse.noContent().ok).toBe(true);
+  });
+});
+
+describe("HttpResponse.text", () => {
+  test("answers text/plain, and keeps the route's Cache-Control on a 2xx", async () => {
+    const res = await fetchApi("/text");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toMatch(/^public/);
+    expect(await res.text()).toBe("hello");
+  });
+
+  test("an error status is no-store", async () => {
+    const res = await fetchApi("/text/bad");
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([400, "no-store"]);
+    expect(await res.text()).toBe("Not a theme's fonts");
+  });
+
+  test("an option Content-Type replaces text/plain", async () => {
+    const res = await fetchApi("/text/css");
+
+    expect(res.headers.get("Content-Type")).toBe("text/css; charset=utf-8");
+    expect(await res.text()).toBe("a{}");
+  });
+
+  test("refuses a status that has no body", () => {
+    expect(() => HttpResponse.text("x", { status: 204 })).toThrow(RangeError);
+    expect(() => HttpResponse.text("x", { status: 600 })).toThrow(RangeError);
+  });
+});
+
+describe("HttpResponse from stream and file routes (#714)", () => {
+  test("a stream route's HttpResponse.error is answered as on any api route", async () => {
+    const res = await fetchApi("/stream/fail");
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Context")).toBe("context");
+    expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^session=refreshed/)]);
+    expect(await res.json()).toEqual({
+      error: { kind: "upstream", message: "Fonts unreachable" },
+    });
+  });
+
+  test("a stream route's HttpResponse.text, and its bytes as before", async () => {
+    const text = await fetchApi("/stream/text");
+    expect([text.status, await text.text()]).toEqual([400, "Bad family"]);
+
+    const ok = await fetchApi("/stream/ok");
+    expect([ok.status, await ok.text()]).toEqual([200, "bytes"]);
+  });
+
+  test("a stream route answers HEAD for an HttpResponse too", async () => {
+    const res = await fetchApi("/stream/fail", { method: "HEAD" });
+
+    expect(res.status).toBe(502);
+  });
+
+  test("a file route's HttpResponse.error", async () => {
+    const res = await fetchApi("/file/missing");
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("X-Context")).toBe("context");
+    expect(await res.json()).toEqual({ error: { kind: "not_found" } });
   });
 });
 

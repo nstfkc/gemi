@@ -81,6 +81,7 @@ export {
   HttpResponse,
   httpError,
   type HttpResponseOptions,
+  type RedirectStatus,
   type ClientHttpError,
 } from "./HttpResponse";
 export {

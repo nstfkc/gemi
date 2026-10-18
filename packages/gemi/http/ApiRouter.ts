@@ -11,7 +11,7 @@ import type {
 import { isConstructor } from "../internal/isConstructor";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
-import type { ResponseData, ResponseError } from "./HttpResponse";
+import { isHttpResponse, type ResponseData, type ResponseError } from "./HttpResponse";
 import { type MiddlewareInput, toMiddlewareList } from "./middlewareList";
 import type { MiddlewareReturnType } from "./Router";
 import {
@@ -259,6 +259,12 @@ export class StreamRouteHandler extends RouteHandler<"GET", any, any, any> {
 
     try {
       const output = await super.run(_req as any);
+      // An error branch's `HttpResponse.error(502, ...)` and friends: answered
+      // by the api dispatcher, with the context's headers and cookies and the
+      // `no-store` an error status gets, as on any api route (#714).
+      if (isHttpResponse(output)) {
+        return output;
+      }
       return await createStreamResponse(output, {
         range,
         method: rawRequest?.method,

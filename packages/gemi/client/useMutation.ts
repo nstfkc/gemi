@@ -17,6 +17,7 @@ import { QueryManagerContext } from "./QueryManagerContext";
 import type { QueryUpdate } from "./useSetQueryData";
 import { loadLazy } from "./lazyModule";
 import { mutationExtras, preloadMutationExtras } from "./mutationModules";
+import { readResponseBody } from "./helpers/readResponseBody";
 
 type Methods = {
   POST: {
@@ -284,7 +285,7 @@ export function useMutation<
         signal: controller.signal,
       });
 
-      const data = await response.json();
+      const data = await readResponseBody(response);
       // `data.error` rather than the envelope around it: `onError` is typed
       // `(error: MutationError) => void`, and the envelope has no `kind` to
       // branch on. A body without one — an app's own `HttpResponse.json` —
@@ -341,7 +342,7 @@ export function useMutation<
         return;
       }
       // A `TypeError` from `fetch` (no answer) or a `SyntaxError` from
-      // `response.json()` (an answer that was not JSON) — both `Error`s.
+      // reading the body (an answer that was not JSON) — both `Error`s.
       options.onError(error);
       call.onError?.(error);
       // A parallel call's failure doesn't take back another call's result.

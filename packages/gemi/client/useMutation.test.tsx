@@ -697,3 +697,54 @@ describe("useMutation", () => {
     });
   });
 });
+
+describe("useMutation and bodies other than JSON", () => {
+  test("a 204 (HttpResponse.noContent) succeeds with null data", async () => {
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(null, { status: 204 })));
+
+    const { result } = renderHook(() =>
+      useMutation("POST" as never, "/beacon" as never, {} as never, { onSuccess, onError } as never),
+    );
+    await act(() => result.current.trigger({} as never));
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onSuccess).toHaveBeenCalledWith(null);
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  test("a text/plain body (HttpResponse.text) is the string, and an error one a refusal", async () => {
+    const text = (body: string, status: number) =>
+      new Response(body, { status, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(text("hello", 200)).mockResolvedValueOnce(text("Bad family", 400)),
+    );
+
+    const { result } = renderHook(() => useMutation("POST" as never, "/text" as never));
+    await act(() => result.current.trigger({} as never));
+    expect(result.current.data).toBe("hello");
+
+    await act(() => result.current.trigger({} as never));
+    expect(result.current.error).toMatchObject({ message: "Bad family", status: 400 });
+  });
+
+  test("an HTML body is still not data", async () => {
+    const onError = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        new Response("<!doctype html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+      ),
+    );
+
+    const { result } = renderHook(() =>
+      useMutation("POST" as never, "/x" as never, {} as never, { onError } as never),
+    );
+    await act(() => result.current.trigger({} as never));
+
+    expect(onError).toHaveBeenCalledWith(expect.any(SyntaxError));
+  });
+});

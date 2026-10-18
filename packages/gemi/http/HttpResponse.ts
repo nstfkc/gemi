@@ -20,10 +20,15 @@ export type HttpResponseOptions<S extends number = number> = {
 };
 
 /**
- * What the response's body is and how it is written. One member per factory;
- * `.text()` or `.redirect()` would each add one, and a `case` in `serialize`.
+ * What the response's body is and how it is written. One member per factory,
+ * and a `case` in `serialize`.
  */
-type HttpResponseKind = "json";
+type HttpResponseKind = "json" | "text" | "empty";
+
+/** The statuses `HttpResponse.redirect` answers. */
+export type RedirectStatus = 301 | 302 | 303 | 307 | 308;
+
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
 /**
  * A handler's answer with a status or headers of its own, where returning the
@@ -42,8 +47,13 @@ type HttpResponseKind = "json";
  * with `req.ctx().setHeaders()` and whatever middleware added (CORS,
  * `Cache-Control`) are on it too.
  *
- * For api routes. A view's handler returns its props; returning one there
- * throws.
+ * `.redirect()`, `.noContent()` and `.text()` answer what a client other than
+ * gemi's needs: a native `<form>` post's `303`, a beacon's `204`, a plain-text
+ * body.
+ *
+ * For api routes, and for the error branches of `this.stream()` and
+ * `this.file()` routes. A view's handler returns its props; returning one
+ * there throws.
  */
 export class HttpResponse<T = unknown, S extends number = number> {
   readonly [HTTP_RESPONSE] = true;
@@ -69,7 +79,7 @@ export class HttpResponse<T = unknown, S extends number = number> {
     options: HttpResponseOptions<S> = {},
   ): HttpResponse<T, S> {
     const status = options.status ?? 200;
-    assertStatus(status);
+    assertStatus(status, "json");
     return new HttpResponse("json", data, status as S, new Headers(options.headers));
   }
 
@@ -101,6 +111,72 @@ export class HttpResponse<T = unknown, S extends number = number> {
       );
     }
     return HttpResponse.json({ error: body }, { ...options, status });
+  }
+
+  /**
+   * A real redirect to `url`: `303 See Other` by default, with `Location`
+   * set and no body. For a native `<form>` post, where the browser follows
+   * it with a GET. `Redirect.to`/`Redirect.external` are for view routes: on
+   * an api route they answer `200 {}`.
+   *
+   * ```ts
+   * "/subscribe": this.post(async (req) => {
+   *   await Subscriber.create({ data: (await req.input()).toJSON() });
+   *   return HttpResponse.redirect("/thanks");
+   * }),
+   * ```
+   *
+   * `status` is one of 301, 302, 303, 307 or 308; a 307 or 308 makes the
+   * browser repeat the POST at `url`. The route's client type leaves it out:
+   * gemi's client fetches with `redirect: "follow"`, so it would receive the
+   * target, not this.
+   */
+  static redirect<S extends RedirectStatus = 303>(
+    url: string | URL,
+    options: HttpResponseOptions<S> = {},
+  ): HttpResponse<never, S> {
+    const status = options.status ?? 303;
+    if (!REDIRECT_STATUSES.has(status)) {
+      throw new RangeError(
+        `HttpResponse.redirect: status must be 301, 302, 303, 307 or 308, got ${status}.`,
+      );
+    }
+    const location = String(url);
+    if (location === "") {
+      throw new TypeError("HttpResponse.redirect: url is empty.");
+    }
+    const headers = new Headers(options.headers);
+    headers.set("Location", location);
+    return new HttpResponse("empty", undefined as never, status as S, headers);
+  }
+
+  /**
+   * `204 No Content`: no body, `options.headers` on top of the request's own.
+   * gemi's client reads it as `null`.
+   */
+  static noContent(options: Omit<HttpResponseOptions, "status"> = {}): HttpResponse<null, 204> {
+    return new HttpResponse("empty", null, 204, new Headers(options.headers));
+  }
+
+  /**
+   * `body` as plain text, `text/plain; charset=utf-8` unless `options.headers`
+   * names a `Content-Type` (a CSS or HTML body, say), with `options.status`
+   * (default `200`). A status of 400 or more is `no-store`, as with `.json()`.
+   *
+   * ```ts
+   * if (!family) return HttpResponse.text("Unknown font family", { status: 400 });
+   * ```
+   *
+   * gemi's client reads a `text/plain` body as a string, and an error one as the
+   * refusal a string error body makes.
+   */
+  static text<S extends number = 200>(
+    body: string,
+    options: HttpResponseOptions<S> = {},
+  ): HttpResponse<string, S> {
+    const status = options.status ?? 200;
+    assertStatus(status, "text");
+    return new HttpResponse("text", body, status as S, new Headers(options.headers));
   }
 
   /** Whether the status is 2xx, as `Response.ok`. */
@@ -148,6 +224,18 @@ export class HttpResponse<T = unknown, S extends number = number> {
       case "json":
         headers.set("Content-Type", "application/json");
         return JSON.stringify(this.body) ?? null;
+      case "text":
+        // Only when unset: `options.headers` are applied after this and win
+        // anyway, but a context header (a middleware's) must not be replaced.
+        if (!this.headers.has("Content-Type")) {
+          headers.set("Content-Type", "text/plain; charset=utf-8");
+        }
+        return this.body as string;
+      case "empty":
+        // A JSON route's middleware may have put a Content-Type on the
+        // context; a response with no body has none.
+        headers.delete("Content-Type");
+        return null;
     }
   }
 }
@@ -155,14 +243,19 @@ export class HttpResponse<T = unknown, S extends number = number> {
 /**
  * Checked when the response is made rather than when it is sent, so the stack
  * points at the handler. `new Response` would throw for a status outside
- * 200–599 anyway, and a 204, 205 or 304 cannot carry the body `.json()` has.
+ * 200–599 anyway, and a 204, 205 or 304 cannot carry the body `.json()` and
+ * `.text()` have.
  */
-function assertStatus(status: number) {
+function assertStatus(status: number, factory: "json" | "text") {
   if (!Number.isInteger(status) || status < 200 || status > 599) {
-    throw new RangeError(`HttpResponse: status must be an integer from 200 to 599, got ${status}.`);
+    throw new RangeError(
+      `HttpResponse.${factory}: status must be an integer from 200 to 599, got ${status}.`,
+    );
   }
   if (status === 204 || status === 205 || status === 304) {
-    throw new RangeError(`HttpResponse.json: a ${status} response has no body.`);
+    throw new RangeError(
+      `HttpResponse.${factory}: a ${status} response has no body.${status === 204 ? " Use HttpResponse.noContent()." : ""}`,
+    );
   }
 }
 

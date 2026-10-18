@@ -5,11 +5,12 @@ import {
   createUnsatisfiableResponse,
   type StreamOutput,
 } from "./createStreamResponse";
+import type { HttpResponse } from "./HttpResponse";
 import { parseRangeHeader } from "./range";
 
 const TEN = "0123456789";
 
-const serve = (output: StreamOutput, header?: string, method?: string) =>
+const serve = (output: Exclude<StreamOutput, HttpResponse<any, any>>, header?: string, method?: string) =>
   createStreamResponse(output, {
     range: parseRangeHeader(header ?? null),
     method,

@@ -26,6 +26,7 @@ import { s } from "../ai/Schema";
 import { Storage } from "../facades/Storage";
 import { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
+import { HttpResponse } from "./HttpResponse";
 
 class UserController extends Controller {
   show(req: HttpRequest<{ q: string }, { id: string }>) {
@@ -230,6 +231,12 @@ describe("this.stream()", () => {
           return new Blob([src]);
         }),
         "/b": this.stream(() => null),
+        // An error branch answers an HttpResponse (#714).
+        "/c": this.stream(async () => {
+          if (Math.random() > 0.5) return HttpResponse.error(502, { kind: "upstream" });
+          if (Math.random() > 0.5) return HttpResponse.text("Bad family", { status: 400 });
+          return new Blob(["x"]);
+        }),
       };
     }
     expectTypeOf<R["routes"]>().toExtend<ApiRoutes>();

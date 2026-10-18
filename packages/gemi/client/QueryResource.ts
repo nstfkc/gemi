@@ -1,6 +1,7 @@
 import { Subject } from "../utils/Subject";
 import { QueryError } from "./QueryError";
 import { parseRetryAfter } from "./retryPolicy";
+import { readResponseBody } from "./helpers/readResponseBody";
 
 type State = {
   loading: boolean;
@@ -569,7 +570,7 @@ export class QueryResource {
           signal: controller?.signal,
         });
         try {
-          data = await response.json();
+          data = await readResponseBody(response);
         } catch (parseError) {
           // A 2xx that isn't JSON is a broken response. An error status with
           // a non-JSON body (a proxy's HTML 502, a CDN's 404) is still that
