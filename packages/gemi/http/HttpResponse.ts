@@ -225,11 +225,9 @@ export class HttpResponse<T = unknown, S extends number = number> {
         headers.set("Content-Type", "application/json");
         return JSON.stringify(this.body) ?? null;
       case "text":
-        // Only when unset: `options.headers` are applied after this and win
-        // anyway, but a context header (a middleware's) must not be replaced.
-        if (!this.headers.has("Content-Type")) {
-          headers.set("Content-Type", "text/plain; charset=utf-8");
-        }
+        // An `options.headers` Content-Type (`text/css`) is applied after
+        // this, and wins, as it does for `.json()`.
+        headers.set("Content-Type", "text/plain; charset=utf-8");
         return this.body as string;
       case "empty":
         // A JSON route's middleware may have put a Content-Type on the
