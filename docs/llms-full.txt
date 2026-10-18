@@ -58,6 +58,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[AI Tool Approvals](./ai-tool-approvals.md)** — `requiresApproval` on a tool: never, always, or decided per call by a function given the call's input and the run's context, so "always allow" stays on the server; through `toAgentTools` and remote MCP elicitation.
 - **[AI Tools That End the Run](./ai-tool-ends-run.md)** — `endsRun` on a tool: a successful call ends the run with an optional closing text, so the model isn't asked again just to confirm what the tool did.
 - **[AI Server Turns](./ai-server-turns.md)** — `AgentController.startTurn`: an agent turn started from a queue job, a command or an MCP tool, run through the controller and stored on the thread like a chat turn; `AgentTurnError`, pending approvals, and where the run lives.
+- **[AI Controller Hooks](./ai-controller-hooks.md)** — `defineAgentHooks` and `hooks`: one set of `authorizeRequest`, `runOwner`, upload and event hooks shared by several `AgentController`s, each extending gemi's directly; override order, `super`, and `req.state` between hooks.
 - **[AI Voice](./ai-voice.md)** — realtime voice calls (`provider.realtime`: `createCall`, `sideband`, `hangup`, `clientSecret`) on OpenAI and Azure OpenAI, and voice in front of an agent: `this.voice(Controller)`, the `VoiceBridge` delegating to `startTurn`, and `useVoiceSession` from `gemi/ai/voice`; live transcription (transcription sessions with `gpt-live-transcribe`, `useLiveTranscription` with browser end-of-speech detection).
 
 ### Data
@@ -8740,6 +8741,135 @@ A run lives in the process that started it, so a turn started in a `gemi queue:w
 - Await `result()` in the job, so the worker does not move on, or shut down, with the run still going.
 - A browser on another process sees the turn through the store (the messages are written as the run goes) rather than through the live stream: `attach` finds runs in its own process only. The thread lock is per process as well, so a browser turn and a server turn on the same thread in two processes are not ordered against each other.
 - The run's duration is bounded by the agent's `maxRunDurationMs`, as for a chat turn.
+
+---
+
+## AI Controller Hooks
+
+An app with several chats often wants them to behave the same in most ways: the same authorization, the same run owner, the same upload rules, the same billing when a turn ends. Each chat is its own `AgentController`, and each one extends gemi's `AgentController` directly. To share that behaviour without an app-level base class in between, put the shared methods in one hooks object and assign it to each controller's `hooks`.
+
+## Defining shared hooks
+
+`defineAgentHooks<Body>` takes the methods to share, keyed by the controller method each one stands in for. `Body` is the part of the request body the hooks read. Every controller that uses them must send at least those fields.
+
+```typescript
+// app/agents/chatHooks.ts
+import { defineAgentHooks } from "gemi/ai";
+import { InsufficientPermissionsError, stateKey } from "gemi/http";
+import { chargeTurn, settleTurn, type BillingTurn } from "@/app/agents/billing";
+import { canEditPage, teamOf } from "@/app/agents/access";
+
+const billingTurn = stateKey<BillingTurn>("billingTurn");
+
+export const chatHooks = defineAgentHooks<{ pageId: string }>({
+  async authorizeRequest(req, params) {
+    if (params.body && !(await canEditPage(req, params.body.pageId))) {
+      throw new InsufficientPermissionsError();
+    }
+  },
+
+  async runOwner(req) {
+    const team = await teamOf(req);
+    return team ? `team:${team.id}` : null;
+  },
+
+  checkUpload(file) {
+    if (file.size > 20 * 1024 * 1024) {
+      return { code: "file_too_large", message: "Files can be up to 20 MB." };
+    }
+  },
+
+  async context(req, { body }) {
+    req.state.set(billingTurn, await chargeTurn(body.pageId));
+    return { pageId: body.pageId };
+  },
+
+  async onStreamComplete(result, ctx) {
+    await settleTurn(result, ctx.req.state.get(billingTurn));
+  },
+});
+```
+
+Then each controller assigns it:
+
+```typescript
+// app/http/controllers/PostChatController.ts
+import { AgentController } from "gemi/ai";
+import { chatHooks } from "@/app/agents/chatHooks";
+import { postAgent } from "@/app/agents/postAgent";
+import { chatStore } from "@/app/agents/chatStore";
+
+type PostBody = { pageId: string; format: "square" | "story" };
+
+export class PostChatController extends AgentController<typeof postAgent, PostBody> {
+  agent = postAgent;
+  store = chatStore;
+  hooks = chatHooks;
+}
+```
+
+`hooks` is set like `store`, `attachments` and `resource`: with a value made once at module scope.
+
+## What a hook can stand in for
+
+A hook has the same name, the same arguments and the same return type as the controller method it stands in for:
+
+| Hook | |
+|---|---|
+| `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
+| `instructions`, `reasoning`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
+| `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
+| `onMessage`, `onToolCall`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. |
+| `redactError`, `reportHookFailure` | Errors. |
+
+Settings such as `store`, `attachments`, `maxConcurrentRuns` and `requireThread` are not hooks. Set those on the controller.
+
+## Which one runs
+
+For each method, the first of these that exists runs:
+
+1. the method the controller defines itself,
+2. the hook in `hooks`,
+3. gemi's default.
+
+A hook replaces gemi's default. For example, an `authorizeRequest` hook replaces the default check of `resource`.
+
+A controller that needs to do more than the shared hook defines the method and calls `super`, which runs the hook. This is how it would call a base class's method:
+
+```typescript
+export class PageChatController extends AgentController<typeof siteAgent, SiteBody> {
+  agent = siteAgent;
+  hooks = chatHooks;
+
+  protected async onStreamComplete(result: AgentRunResult<any, any>, ctx: AgentHookContext) {
+    await super.onStreamComplete(result, ctx); // chatHooks.onStreamComplete
+    await endFirstBuild(ctx);
+  }
+}
+```
+
+## State that passes between hooks
+
+Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval.
+
+## Variants
+
+Build a variant of a hooks object with a spread. Use one for the chats that need a hook the others don't:
+
+```typescript
+export const siteChatHooks = defineAgentHooks<SiteBody>({
+  ...chatHooks,
+  attachmentScope: (_req, _threadId, extra) => ({ key: `site:${extra?.body.siteId}` }),
+});
+```
+
+A hook named in the spread replaces the one with the same name from `chatHooks`. To run both, call the first one from the second (`chatHooks.onMessage?.(message, ctx)`).
+
+## Related
+
+- [AI Server Turns](./ai-server-turns.md): `startTurn` goes through the same hooks as a chat turn.
+- [Authorization](./authorization.md#on-agent-routes): `resource`, which the default `authorizeRequest` checks.
+- [AI Memory](./ai-memory.md): `memoryScopes()`.
 
 ---
 

@@ -621,6 +621,101 @@ export type AuthorizeRequestParams<Body extends object = Record<string, unknown>
   | { route: "stream" | "upload"; threadId?: string; body: Body }
   | { route: "attach" | "stop"; threadId?: string; body?: undefined };
 
+/**
+ * HOOKS SHARED BY SEVERAL AGENT CONTROLLERS (#989), assigned to a controller's
+ * `hooks`. Each one stands in for gemi's default of the controller method with
+ * the same name, and takes the same arguments. See `AgentController.hooks`.
+ *
+ * Plain functions, not methods: they get no `this`. What one hook leaves for
+ * another in the same turn (a charge made in `context`, settled in
+ * `onStreamComplete`) goes on `req.state`, which every hook reaches
+ * (`ctx.req.state` in the event hooks).
+ */
+export type AgentControllerHooks<Body extends object = Record<string, unknown>> = {
+  authorizeRequest?: (
+    req: HttpRequest<any, any>,
+    params: AuthorizeRequestParams<Body>,
+  ) => void | Promise<void>;
+  runOwner?: (req: HttpRequest<any, any>) => string | null | Promise<string | null>;
+  runLimitKey?: (
+    req: HttpRequest<any, any>,
+    params: { owner: string | null; threadId?: string },
+  ) => string | null | Promise<string | null>;
+  instructions?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ) => string | Promise<string> | void;
+  reasoning?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ) => ReasoningEffort | void | Promise<ReasoningEffort | void>;
+  context?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ) => AgentContext | Promise<AgentContext>;
+  memoryScopes?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ) => AgentMemoryScopes | Promise<AgentMemoryScopes>;
+  prepareStep?: (
+    step: PrepareStepContext,
+    ctx: AgentHookContext,
+  ) => PrepareStepResult | void | Promise<PrepareStepResult | void>;
+  attachmentScope?: (
+    req: HttpRequest<any, any>,
+    threadId?: string,
+    extra?: { body: Body },
+  ) => AttachmentScope | null | Promise<AttachmentScope | null>;
+  attachmentLimits?: (
+    req: HttpRequest<any, any>,
+  ) => AttachmentLimits | null | Promise<AttachmentLimits | null>;
+  checkUpload?: (
+    file: UploadCheckFile,
+    req: HttpRequest<any, any>,
+    ctx: UploadContext<Body>,
+  ) => UploadRefusal | null | void | Promise<UploadRefusal | null | void>;
+  attachmentDestination?: (
+    file: File,
+    req: HttpRequest<any, any>,
+    extra?: UploadContext<Body>,
+  ) => AttachmentDestination | Promise<AttachmentDestination>;
+  onMessage?: (message: AgentMessage, ctx: AgentHookContext) => void | Promise<void>;
+  onToolCall?: (
+    call: { toolCallId: string; name: string; input: unknown },
+    ctx: AgentHookContext,
+  ) => void | Promise<void>;
+  onAwaitingInput?: (pending: PendingToolCall[], ctx: AgentHookContext) => void | Promise<void>;
+  redactError?: (error: AgentError, info: ErrorRedactionInfo, ctx: AgentHookContext) => AgentError;
+  onError?: (error: AgentError, ctx: AgentHookContext) => void | Promise<void>;
+  onStreamComplete?: (
+    result: AgentRunResult<any, any>,
+    ctx: AgentHookContext,
+  ) => void | Promise<void>;
+  reportHookFailure?: (error: unknown) => void;
+};
+
+/**
+ * Types an `AgentControllerHooks` object for the `Body` its controllers take,
+ * so each hook's parameters are typed without annotating them (#989). It
+ * returns the object unchanged.
+ *
+ * ```ts
+ * export const chatHooks = defineAgentHooks<{ pageId: string }>({
+ *   runOwner: (req) => teamOwner(req),
+ *   async onStreamComplete(result, ctx) {
+ *     await settle(result, ctx.req.state.get(charge));
+ *   },
+ * });
+ * ```
+ *
+ * A controller whose `Body` has at least these fields can use it.
+ */
+export function defineAgentHooks<Body extends object = Record<string, unknown>>(
+  hooks: AgentControllerHooks<Body>,
+): AgentControllerHooks<Body> {
+  return hooks;
+}
+
 export abstract class AgentController<
   A extends AnyAgent = AnyAgent,
   /**
@@ -665,6 +760,29 @@ export abstract class AgentController<
    *  argument so `Router.agent(ChatController)` can take the class, matching how
    *  every other controller is mounted. */
   abstract agent: A;
+
+  /**
+   * HOOKS SHARED WITH OTHER CONTROLLERS (#989), so an app's chats can share
+   * their authorization, run owner, upload rules and billing without an
+   * app-level base class between them and this one. Assign a module-level
+   * object made with `defineAgentHooks`:
+   *
+   *   export const chatHooks = defineAgentHooks<{ pageId: string }>({
+   *     authorizeRequest: (req, params) => authorizePage(req, params),
+   *     runOwner: (req) => teamOwner(req),
+   *   });
+   *
+   *   class PageChatController extends AgentController<typeof pageAgent, PageBody> {
+   *     agent = pageAgent;
+   *     hooks = chatHooks;
+   *   }
+   *
+   * Each hook stands in for gemi's default of the method with the same name.
+   * A method the controller overrides itself wins over the hook, and reaches
+   * it with `super.method(...)`, exactly as it would reach a base class's.
+   * Unset (the default), every method is gemi's own.
+   */
+  protected hooks?: AgentControllerHooks<Body>;
 
   /**
    * Defaults to the process-wide `MemoryAgentStore`.
@@ -824,8 +942,7 @@ export abstract class AgentController<
    * middleware's finding about who it is.
    */
   instructions(req: HttpRequest<any, any>, extra: { body: Body }): string | Promise<string> | void {
-    void req;
-    void extra;
+    return this.hooks?.instructions?.(req, extra);
   }
 
   /**
@@ -845,8 +962,7 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ): ReasoningEffort | void | Promise<ReasoningEffort | void> {
-    void req;
-    void extra;
+    return this.hooks?.reasoning?.(req, extra);
   }
 
   /**
@@ -868,8 +984,8 @@ export abstract class AgentController<
    * mistake for something the server decided.
    */
   context(req: HttpRequest<any, any>, extra: { body: Body }): AgentContext | Promise<AgentContext> {
-    void req;
-    void extra;
+    const hook = this.hooks?.context;
+    if (hook) return hook(req, extra);
     return {} as AgentContext;
   }
 
@@ -907,8 +1023,8 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ): AgentMemoryScopes | Promise<AgentMemoryScopes> {
-    void req;
-    void extra;
+    const hook = this.hooks?.memoryScopes;
+    if (hook) return hook(req, extra);
     return {};
   }
 
@@ -991,8 +1107,7 @@ export abstract class AgentController<
     step: PrepareStepContext,
     ctx: AgentHookContext,
   ): PrepareStepResult | void | Promise<PrepareStepResult | void> {
-    void step;
-    void ctx;
+    return this.hooks?.prepareStep?.(step, ctx);
   }
 
   /**
@@ -1030,7 +1145,8 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     params: { owner: string | null; threadId?: string },
   ): string | null | Promise<string | null> {
-    void req;
+    const hook = this.hooks?.runLimitKey;
+    if (hook) return hook(req, params);
     return params.owner;
   }
 
@@ -1067,6 +1183,8 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     params: AuthorizeRequestParams<Body>,
   ): void | Promise<void> {
+    const hook = this.hooks?.authorizeRequest;
+    if (hook) return hook(req, params);
     return this.resource?.authorize(req, params);
   }
 
@@ -1130,6 +1248,8 @@ export abstract class AgentController<
    * turn that asks and the turn that answers.
    */
   protected runOwner(req: HttpRequest<any, any>): string | null | Promise<string | null> {
+    const hook = this.hooks?.runOwner;
+    if (hook) return hook(req);
     const user = req.ctx?.()?.user;
     const userId = user?.id ?? user?.publicId;
     if (userId !== undefined && userId !== null && String(userId) !== "") {
@@ -1543,7 +1663,7 @@ export abstract class AgentController<
         // the store holds them (#782).
         ...(threadId && isSummaryStore(this.store) ? { summaryStore: this.store } : {}),
         // Only when overridden, so a controller without one adds no call.
-        ...(this.prepareStep !== AgentController.prototype.prepareStep
+        ...(this.prepareStep !== AgentController.prototype.prepareStep || this.hooks?.prepareStep
           ? { prepareStep: (step: PrepareStepContext) => this.prepareStep(step, ctx) }
           : {}),
       }) as AgentRun;
@@ -2006,7 +2126,8 @@ export abstract class AgentController<
     threadId?: string,
     extra?: { body: Body },
   ): AttachmentScope | null | Promise<AttachmentScope | null> {
-    void extra;
+    const hook = this.hooks?.attachmentScope;
+    if (hook) return hook(req, threadId, extra);
     const user = req.ctx()?.user;
     const userId = user?.id ?? user?.publicId;
     if (userId !== undefined && userId !== null && String(userId) !== "") {
@@ -2043,7 +2164,8 @@ export abstract class AgentController<
   protected attachmentLimits(
     req: HttpRequest<any, any>,
   ): AttachmentLimits | null | Promise<AttachmentLimits | null> {
-    void req;
+    const hook = this.hooks?.attachmentLimits;
+    if (hook) return hook(req);
     return null;
   }
 
@@ -2090,9 +2212,7 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     ctx: UploadContext<Body>,
   ): UploadRefusal | null | void | Promise<UploadRefusal | null | void> {
-    void file;
-    void req;
-    void ctx;
+    return this.hooks?.checkUpload?.(file, req, ctx);
   }
 
   /**
@@ -2136,9 +2256,8 @@ export abstract class AgentController<
     req: HttpRequest<any, any>,
     extra?: UploadContext<Body>,
   ): AttachmentDestination | Promise<AttachmentDestination> {
-    void file;
-    void req;
-    void extra;
+    const hook = this.hooks?.attachmentDestination;
+    if (hook) return hook(file, req, extra);
     return "both";
   }
 
@@ -2639,16 +2758,14 @@ export abstract class AgentController<
    * how long a hook that does not finish keeps it.
    */
   protected onMessage(message: AgentMessage, ctx: AgentHookContext): void | Promise<void> {
-    void message;
-    void ctx;
+    return this.hooks?.onMessage?.(message, ctx);
   }
 
   protected onToolCall(
     call: { toolCallId: string; name: string; input: unknown },
     ctx: AgentHookContext,
   ): void | Promise<void> {
-    void call;
-    void ctx;
+    return this.hooks?.onToolCall?.(call, ctx);
   }
 
   /** Fires before the stream ends `awaiting-input` — where to notify whoever
@@ -2657,8 +2774,7 @@ export abstract class AgentController<
     pending: PendingToolCall[],
     ctx: AgentHookContext,
   ): void | Promise<void> {
-    void pending;
-    void ctx;
+    return this.hooks?.onAwaitingInput?.(pending, ctx);
   }
 
   /**
@@ -2690,7 +2806,8 @@ export abstract class AgentController<
     info: ErrorRedactionInfo,
     ctx: AgentHookContext,
   ): AgentError {
-    void ctx;
+    const hook = this.hooks?.redactError;
+    if (hook) return hook(error, info, ctx);
     return redactError(error, info);
   }
 
@@ -2700,16 +2817,14 @@ export abstract class AgentController<
    * sent `redactError`'s copy.
    */
   protected onError(error: AgentError, ctx: AgentHookContext): void | Promise<void> {
-    void error;
-    void ctx;
+    return this.hooks?.onError?.(error, ctx);
   }
 
   protected onStreamComplete(
     result: AgentRunResult<ToolShapesOf<A["tools"]>, any>,
     ctx: AgentHookContext,
   ): void | Promise<void> {
-    void result;
-    void ctx;
+    return this.hooks?.onStreamComplete?.(result, ctx);
   }
 
   /**
@@ -2728,6 +2843,16 @@ export abstract class AgentController<
    * Override this to send it somewhere with a pager attached.
    */
   protected reportHookFailure(error: unknown): void {
+    const hook = this.hooks?.reportHookFailure;
+    if (hook) {
+      // The reporter for failed hooks is a hook too: one that throws falls
+      // back to the log rather than becoming an unhandled rejection.
+      try {
+        return hook(error);
+      } catch (reportError) {
+        console.error("[gemi/ai] reportHookFailure hook failed", reportError);
+      }
+    }
     console.error("[gemi/ai] agent controller hook failed", error);
   }
 

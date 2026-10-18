@@ -404,6 +404,7 @@ export {
   RedisNonceStore,
   RedisReceiptStore,
   ScopedAttachments,
+  defineAgentHooks,
 } from "./AgentController";
 export type {
   VoiceMiddlewareConfig,
@@ -412,6 +413,7 @@ export type {
   VoiceRouteRPC,
 } from "./AgentController";
 export type {
+  AgentControllerHooks,
   AgentHookContext,
   AgentMiddlewareConfig,
   AgentRoute,
