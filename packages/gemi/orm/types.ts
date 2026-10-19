@@ -189,20 +189,22 @@ export type JsonColumnTypes<
   ? F extends keyof JsonColumns[M]
     ? {
         output: JsonSpecOutput<JsonColumns[M][F]> | (Nullable extends true ? null : never);
+        // The null markers only on a nullable column: on a non-nullable one
+        // `DbNull` is refused, and `JsonNull` would store a value the schema
+        // may not accept, which every later read would refuse.
         input:
           | Exclude<JsonSchemaOutput<JsonSpecSchema<JsonColumns[M][F]>>, null>
-          | DbNullValue
-          | JsonNullValue;
+          | (Nullable extends true ? DbNullValue | JsonNullValue : never);
       }
     : { output: JsonValue | (Nullable extends true ? null : never); input: JsonInput }
   : { output: JsonValue | (Nullable extends true ? null : never); input: JsonInput };
 
 /** A `Json` column's write type, for the generated `create` scalars. */
-export type JsonColumnInput<M extends string, F extends string> = JsonColumnTypes<
-  M,
-  F,
-  boolean
->["input"];
+export type JsonColumnInput<
+  M extends string,
+  F extends string,
+  Nullable extends boolean = true,
+> = JsonColumnTypes<M, F, Nullable>["input"];
 
 type JsonColumnPair = { output: unknown; input: unknown };
 

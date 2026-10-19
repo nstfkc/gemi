@@ -899,7 +899,7 @@ function isTypedJson(field: FieldSchema): boolean {
 }
 
 function jsonInputTs(schema: ModelSchema, field: FieldSchema): string {
-  return `JsonColumnInput<${JSON.stringify(schema.name)}, ${JSON.stringify(field.name)}>`;
+  return `JsonColumnInput<${JSON.stringify(schema.name)}, ${JSON.stringify(field.name)}, ${field.nullable}>`;
 }
 
 /**

@@ -147,11 +147,39 @@ function columnOf(schema: ModelSchema, field: string, spec: unknown): Column {
 
 // --- reads -------------------------------------------------------------------
 
-/** Parses this model's typed `Json` columns on `rows`, in place. */
+/**
+ * Marks an `$exec` call whose rows belong to a write: the rows a write returns,
+ * the read a find-then-write upsert or a delete makes first, and the includes
+ * on any of them. In this mode a stored value the schema refuses never throws,
+ * even with `invalid: "throw"`: it is answered as stored. Throwing there would
+ * report a write as failed after it was saved (or refuse to delete or fix a
+ * bad row), and only a column the write did not touch can hold such a value,
+ * since the written ones were validated. A module-private symbol, like the
+ * other `$exec` markers.
+ */
+const LENIENT = Symbol("gemi.orm.jsonColumnsLenient");
+
+export function markJsonLenient<T extends object>(options: T): T {
+  return { ...options, [LENIENT]: true };
+}
+
+export function isJsonLenient(options: unknown): boolean {
+  return (
+    typeof options === "object" &&
+    options !== null &&
+    (options as Record<symbol, unknown>)[LENIENT] === true
+  );
+}
+
+/**
+ * Parses this model's typed `Json` columns on `rows`, in place. `lenient`:
+ * see `markJsonLenient`.
+ */
 export function parseJsonRows(
   columns: readonly Column[],
   model: string,
   rows: readonly unknown[],
+  lenient = false,
 ): void {
   if (columns.length === 0 || rows.length === 0) return;
   for (const row of rows) {
@@ -162,17 +190,18 @@ export function parseJsonRows(
       // SQL NULL in a nullable column is the column's own empty state, not a
       // value of the schema's shape.
       if (value === null && column.nullable) continue;
-      row[column.field] = parseStored(column, model, value);
+      row[column.field] = parseStored(column, model, value, lenient);
     }
   }
 }
 
-function parseStored(column: Column, model: string, value: unknown): unknown {
+function parseStored(column: Column, model: string, value: unknown, lenient: boolean): unknown {
   const result = column.schema.safeParse(value);
   if (result.ok) return result.value;
   const { errors } = result as { errors: string[] };
   if (column.invalid === "null") return null;
   if (typeof column.invalid === "function") return column.invalid(value, errors);
+  if (lenient) return value;
   throw new JsonColumnError({ model, field: column.field }, value, errors);
 }
 
@@ -187,7 +216,15 @@ export function parseJsonFolded(
     folded?: readonly { as: string; model: string; folded?: readonly unknown[] }[];
   },
   parents: readonly unknown[],
+  lenient = false,
 ): void {
+  const model = registry.has(relation.model)
+    ? registry.get<{ $schema?: ModelSchema }>(relation.model)
+    : undefined;
+  const columns = model?.$schema ? jsonColumnsOf(model.$schema, model) : [];
+  // Nothing to parse here or below: the common case, a child without `$json`.
+  if (columns.length === 0 && !relation.folded?.length) return;
+
   const rows: unknown[] = [];
   for (const parent of parents) {
     if (!isObject(parent)) continue;
@@ -196,12 +233,9 @@ export function parseJsonFolded(
     else if (isObject(value)) rows.push(value);
   }
   if (rows.length === 0) return;
-  if (registry.has(relation.model)) {
-    const model = registry.get<{ $schema?: ModelSchema }>(relation.model);
-    if (model.$schema) parseJsonRows(jsonColumnsOf(model.$schema, model), relation.model, rows);
-  }
+  parseJsonRows(columns, relation.model, rows, lenient);
   for (const child of relation.folded ?? []) {
-    parseJsonFolded(child as Parameters<typeof parseJsonFolded>[0], rows);
+    parseJsonFolded(child as Parameters<typeof parseJsonFolded>[0], rows, lenient);
   }
 }
 
@@ -211,7 +245,10 @@ export function parseJsonFolded(
  * `args` with this model's typed `Json` columns validated and replaced by
  * their parsed values, or `args` itself when there is nothing to check. Never
  * mutates the caller's objects. A value the schema refuses throws
- * `InvalidArgumentError`; the null sentinels (`DbNull`, `JsonNull`) pass.
+ * `InvalidArgumentError`. On a nullable column the null sentinels (`DbNull`,
+ * `JsonNull`) pass. On a non-nullable one `DbNull` is refused, and `JsonNull`
+ * only passes when the schema accepts `null`: otherwise the row could be
+ * written and then never read.
  */
 export function validateJsonWriteArgs(
   columns: readonly Column[],
@@ -262,7 +299,19 @@ function validateData(
   for (const column of columns) {
     if (!(column.field in data)) continue;
     const value = data[column.field];
-    if (value === undefined || jsonNullKind(value) !== null) continue;
+    if (value === undefined) continue;
+    const kind = jsonNullKind(value);
+    if (kind !== null) {
+      if (column.nullable) continue;
+      if (kind === "json" && column.schema.safeParse(null).ok) continue;
+      throw new InvalidArgumentError(
+        origin.argument,
+        origin.model,
+        origin.operation,
+        `${origin.model}.${column.field} is not nullable and its schema does not accept null, ` +
+          `so it cannot be written as ${kind === "db" ? "DbNull" : "JsonNull"}.`,
+      );
+    }
     const result = column.schema.safeParse(value);
     if (!result.ok) {
       throw new InvalidArgumentError(

@@ -9,6 +9,7 @@ import { Application } from "gemi/foundation";
 import {
   DbNull,
   InvalidArgumentError,
+  JsonNull,
   JsonColumnError,
   Model,
   clearPlanCache,
@@ -74,9 +75,10 @@ abstract class Ops extends Model {
   static findMany(args?: Args, options?: Options) { return this.$exec("findMany", args, options as never); }
   static findFirst(args?: Args, options?: Options) { return this.$exec("findFirst", args, options as never); }
   static findUnique(args: Args, options?: Options) { return this.$exec("findUnique", args, options as never); }
+  static delete(args: Args) { return this.$exec("delete", args); }
   static create(args: Args) { return this.$exec("create", args); }
   static createMany(args: Args) { return this.$exec("createMany", args); }
-  static update(args: Args) { return this.$exec("update", args); }
+  static update(args: Args, options?: Options) { return this.$exec("update", args, options as never); }
   static updateMany(args: Args) { return this.$exec("updateMany", args); }
   static upsert(args: Args) { return this.$exec("upsert", args); }
 }
@@ -193,9 +195,42 @@ function suite(label: string, url?: string) {
         expect(((await JsonPage.findMany({})) as any[]).length).toBe(1);
       });
 
-      test("the null sentinels pass", async () => {
-        const created = await createPage({ style: DbNull });
-        expect(created.style).toBeNull();
+      test("the null sentinels pass on a nullable column", async () => {
+        expect((await createPage({ style: DbNull })).style).toBeNull();
+        expect((await createPage({ style: JsonNull })).style).toBeNull();
+      });
+
+      test("the null sentinels are refused on a non-nullable column whose schema refuses null", async () => {
+        await expect(createPage({ blocks: JsonNull })).rejects.toThrow("cannot be written as JsonNull");
+        await expect(createPage({ blocks: DbNull })).rejects.toThrow("cannot be written as DbNull");
+        const { id } = await createPage();
+        await expect(JsonPage.update({ where: { id }, data: { blocks: JsonNull } })).rejects.toThrow(InvalidArgumentError);
+        expect(((await JsonPage.findUnique({ where: { id } })) as any).blocks).toEqual([TEXT]);
+      });
+
+      test("JsonNull passes on a non-nullable column whose schema accepts null", async () => {
+        class NullableBlocks extends JsonPageBase {
+          static $json = { blocks: s.array(Block).nullable() };
+        }
+        register("JsonPage", NullableBlocks);
+        const created = (await NullableBlocks.create({ data: { bookId: book, blocks: JsonNull } })) as any;
+        expect(created.blocks).toBeNull();
+        expect(((await NullableBlocks.findUnique({ where: { id: created.id } })) as any).blocks).toBeNull();
+      });
+
+      test("a nested update into the model is validated, and writes the parsed value", async () => {
+        const { id } = await createPage();
+        await expect(
+          JsonBook.update({
+            where: { id: book },
+            data: { pages: { update: { where: { id }, data: { blocks: [{ type: "nope" }] } } } },
+          }),
+        ).rejects.toThrow(InvalidArgumentError);
+        await JsonBook.update({
+          where: { id: book },
+          data: { pages: { update: { where: { id }, data: { blocks: [{ type: "image", body: "b", extra: 1 }] } } } },
+        });
+        expect(((await JsonPage.findUnique({ where: { id } })) as any).blocks).toEqual([{ type: "image", body: "b" }]);
       });
 
       test("a nested write into the model is validated by the model", async () => {
@@ -227,6 +262,36 @@ function suite(label: string, url?: string) {
         expect(error.value).toEqual({ not: "a list" });
       });
 
+      test("upsert parses the row it returns, on both branches", async () => {
+        const { id } = await createPage();
+        await storeRaw(id, "style", { color: "red", extra: 1 });
+        const updated = (await JsonPage.upsert({
+          where: { id },
+          create: { bookId: book, blocks: [TEXT] },
+          update: { blocks: [{ ...TEXT, extra: 1 }] },
+        })) as any;
+        expect(updated).toMatchObject({ id, blocks: [TEXT], style: { color: "red" } });
+        expect(updated.style).toEqual({ color: "red" });
+        const created = (await JsonPage.upsert({
+          where: { id: 999_999 },
+          create: { bookId: book, blocks: [{ ...TEXT, extra: 1 }] },
+          update: {},
+        })) as any;
+        expect(created.blocks).toEqual([TEXT]);
+      });
+
+      for (const strategy of STRATEGIES) {
+        test(`an include under select (${strategy})`, async () => {
+          const { id } = await createPage();
+          await storeRaw(id, "blocks", [{ ...TEXT, stale: true }]);
+          const books = (await JsonBook.findMany(
+            { select: { title: true, pages: { select: { blocks: true } } } },
+            { strategy },
+          )) as any[];
+          expect(books).toEqual([{ title: "t", pages: [{ blocks: [TEXT] }] }]);
+        });
+      }
+
       test("SQL NULL in a nullable column stays null", async () => {
         const created = await createPage();
         expect(created).toMatchObject({ style: null, legacy: null });
@@ -246,6 +311,55 @@ function suite(label: string, url?: string) {
         await storeRaw(id, "blocks", [{ ...TEXT, stale: true }]);
         expect(((await JsonPageBase.findUnique({ where: { id } })) as any).blocks).toEqual([TEXT]);
       });
+    });
+
+    describe("a write on a row holding a value its schema refuses (invalid: \"throw\")", () => {
+      // Only a column the write did not touch can hold one, since the written
+      // ones are validated. Throwing after the write would report a saved write
+      // as failed, so the row a write returns answers that column as stored.
+      const LEGACY = { not: "a list" };
+      let id: number;
+
+      beforeEach(async () => {
+        id = (await createPage()).id;
+        await storeRaw(id, "blocks", LEGACY);
+        await expect(JsonPage.findUnique({ where: { id } })).rejects.toThrow(JsonColumnError);
+      });
+
+      test("update saves and answers the stored value", async () => {
+        const updated = (await JsonPage.update({ where: { id }, data: { style: { color: "blue" } } })) as any;
+        expect(updated).toMatchObject({ blocks: LEGACY, style: { color: "blue" } });
+      });
+
+      test("update can fix the row", async () => {
+        const updated = (await JsonPage.update({ where: { id }, data: { blocks: [TEXT] } })) as any;
+        expect(updated.blocks).toEqual([TEXT]);
+        expect(((await JsonPage.findUnique({ where: { id } })) as any).blocks).toEqual([TEXT]);
+      });
+
+      test("delete deletes and answers the stored value", async () => {
+        expect(((await JsonPage.delete({ where: { id } })) as any).blocks).toEqual(LEGACY);
+        expect(await JsonPage.findMany({})).toEqual([]);
+      });
+
+      test("upsert saves", async () => {
+        const upserted = (await JsonPage.upsert({
+          where: { id },
+          create: { bookId: book, blocks: [TEXT] },
+          update: { style: { color: "green" } },
+        })) as any;
+        expect(upserted).toMatchObject({ blocks: LEGACY, style: { color: "green" } });
+      });
+
+      for (const strategy of STRATEGIES) {
+        test(`a write's include answers the stored value (${strategy})`, async () => {
+          const updated = (await JsonBook.update(
+            { where: { id: book }, data: { title: "u" }, include: { pages: true } },
+            { strategy },
+          )) as any;
+          expect(updated.pages[0].blocks).toEqual(LEGACY);
+        });
+      }
     });
 
     test("a $json key that is not a Json column throws", async () => {

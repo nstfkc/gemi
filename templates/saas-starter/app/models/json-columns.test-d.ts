@@ -12,7 +12,7 @@ import type {
   UpdateInput,
   WhereInput,
 } from "gemi/orm";
-import type { DbNull, JsonNull } from "gemi/orm";
+import { type DbNull, JsonNull } from "gemi/orm";
 
 import type { UserTypes } from "./generated";
 
@@ -51,10 +51,10 @@ interface DocTypes extends ModelTypeInfo {
   unique: { id: number };
   create: {
     id: number;
-    body: JsonColumnInput<"TypedDoc", "body">;
-    meta?: JsonColumnInput<"TypedDoc", "meta">;
-    loose?: JsonColumnInput<"TypedDoc", "loose">;
-    raw: JsonColumnInput<"TypedDoc", "raw">;
+    body: JsonColumnInput<"TypedDoc", "body", false>;
+    meta?: JsonColumnInput<"TypedDoc", "meta", true>;
+    loose?: JsonColumnInput<"TypedDoc", "loose", true>;
+    raw: JsonColumnInput<"TypedDoc", "raw", false>;
   };
   json: {
     body: JsonColumnTypes<"TypedDoc", "body", false>;
@@ -91,7 +91,9 @@ describe("reads", () => {
 
 describe("writes", () => {
   test("create and update take the schema's type and the null sentinels", () => {
-    expectTypeOf<CreateInput<DocTypes>["body"]>().toEqualTypeOf<BodyOut | typeof DbNull | typeof JsonNull>();
+    // The null markers only on a nullable column.
+    expectTypeOf<CreateInput<DocTypes>["body"]>().toEqualTypeOf<BodyOut>();
+    expectTypeOf<NonNullable<UpdateInput<DocTypes>["body"]>>().toEqualTypeOf<BodyOut>();
     expectTypeOf<NonNullable<UpdateInput<DocTypes>["meta"]>>().toEqualTypeOf<
       { views: number } | typeof DbNull | typeof JsonNull
     >();
@@ -100,8 +102,11 @@ describe("writes", () => {
     const ok: UpdateInput<DocTypes> = { body: { title: "t", tags: [] } };
     // @ts-expect-error not the schema's shape
     const bad: UpdateInput<DocTypes> = { body: { title: 1 } };
+    // @ts-expect-error JsonNull on a non-nullable typed column
+    const nulled: UpdateInput<DocTypes> = { body: JsonNull };
     void ok;
     void bad;
+    void nulled;
   });
 });
 

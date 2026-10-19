@@ -1214,8 +1214,8 @@ describe("typed Json columns (#995)", () => {
   });
 
   test("create takes the column's input type, and reads stay JsonValue in scalars", () => {
-    expect(models).toContain('  body: JsonColumnInput<"Doc", "body">;');
-    expect(models).toContain('  meta?: JsonColumnInput<"Doc", "meta">;');
+    expect(models).toContain('  body: JsonColumnInput<"Doc", "body", false>;');
+    expect(models).toContain('  meta?: JsonColumnInput<"Doc", "meta", true>;');
     expect(models).toContain("  body: JsonValue;");
     expect(models).toContain("  meta: JsonValue | null;");
   });

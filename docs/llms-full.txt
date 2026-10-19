@@ -12450,10 +12450,16 @@ brief.heroes // { title: string; image: string | null }[]
   column. Rows written before a shape changed need one of the other two: `invalid: "null"` reads
   them as `null` (and adds `null` to the column's type), and a function answers a fallback of the
   schema's type, given the stored value and the schema's errors.
+- **Except on a write.** The row a `create`, `update`, `upsert` or `delete` returns (and its
+  includes) never throws `JsonColumnError`: the write has already been saved, and reporting it as
+  failed would make callers retry it, or leave a bad row that cannot be fixed or deleted through
+  the ORM. A refused value there, which can only be in a column the write did not touch, comes
+  back **as stored**, not in the schema's type. `invalid: "null"` and a fallback apply as usual.
 - **Writes.** `create`, `createMany`, `update`, `updateMany` and `upsert` validate the column before
   the query, and write the parsed value. A value the schema refuses throws `InvalidArgumentError`.
-  The null sentinels (`DbNull`, `JsonNull`) are not validated. A nested write into the model is
-  validated by the model, as with encrypted columns.
+  On a nullable column the null sentinels (`DbNull`, `JsonNull`) pass. A non-nullable column
+  refuses `DbNull`, and takes `JsonNull` only when its schema accepts `null` (the types leave both
+  out there). A nested write into the model is validated by the model, as with encrypted columns.
 - **Types.** `gemi.d.ts` reads `static $json` from the classes your `app/models` barrel exports, by
   their export name, which must be the model's name (as the barrel exports them anyway). A row,
   `select`, `omit` and `include` carry the schema's type, and `create`/`update` take it. Filters
@@ -12463,6 +12469,11 @@ brief.heroes // { title: string; image: string | null }[]
 - **One set of schemas per model.** They are read from the class registered under the model's
   name, so the generated base, your subclass and `Model.on(...)` all parse the same columns. A key
   that is not one of the model's `Json` columns throws on the model's first query.
+
+> **Adding a schema to a column that already has rows?** Give it `invalid: "null"` or a fallback
+> until every row is known to parse. With the default, one old row makes every read that selects
+> the column throw, including `findMany` over the whole table. The schema can be made strict once
+> the data is migrated.
 
 What it does not cover: `Json[]` (list) columns, [raw SQL](#raw-sql), the instance type of `wrap` (its
 row is typed, `this.column` inside a model method is still `JsonValue`), and `groupBy` results.

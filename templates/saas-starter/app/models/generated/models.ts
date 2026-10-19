@@ -67,7 +67,7 @@ export type AccountCreateScalars = {
   createdAt?: Date;
   updatedAt?: Date;
   deletedAt?: Date | null;
-  settings?: JsonColumnInput<"Account", "settings">;
+  settings?: JsonColumnInput<"Account", "settings", true>;
   token?: Uint8Array | null;
 };
 
@@ -3225,7 +3225,7 @@ export type UserCreateScalars = {
   createdAt?: Date;
   updatedAt?: Date;
   deletedAt?: Date | null;
-  metadata?: JsonColumnInput<"User", "metadata">;
+  metadata?: JsonColumnInput<"User", "metadata", true>;
   avatar?: Uint8Array | null;
 };
 
