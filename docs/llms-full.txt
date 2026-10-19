@@ -15947,7 +15947,7 @@ const stats = await Query.instant("/dashboard/stats");
 
 ## Url
 
-`Url` generates URLs for your typed view routes, applying route params, and gives you the app's public origin.
+`Url` generates URLs for your typed view and api routes, applying route params, and gives you the app's public origin.
 
 - `Url.origin(fallback?)` — the app's public origin, e.g. `https://example.com`: `HOST_NAME`, else `APP_URL`, trimmed and without a trailing `/`. Use it for links that leave the app and are not view routes (payment return URLs, webhook URLs you register, links in emails). Throws when neither variable is set and no `fallback` is given, or when the value is not an absolute `http(s)` URL.
 - `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
@@ -15964,6 +15964,27 @@ Url.origin(); // "https://app.example.com"
 `${Url.origin()}/billing/return`; // a path that is not a view route
 Url.origin("http://localhost:5173"); // with a default for when nothing is configured
 ```
+
+### API route URLs
+
+`Url.api`, `Url.apiAbsolute` and `Url.matchApi` do the same for **api** routes. They take a route's path as written in the app's `ApiRouter` (nested routers' prefixes included, `/api` left out), typed from the app's routes (`ApiPaths` from `gemi/client`), so a renamed route is a type error at every call site.
+
+- `Url.api(path, params?)` — `/api` plus the path, with each param `encodeURIComponent`-ed (a `/` or `?` in a value stays in its segment). A wildcard (`:path*`) keeps the `/`s of its value and encodes each segment. An optional param (`:id?`) left out drops its segment. A required param that is left out or empty throws.
+- `Url.apiAbsolute(path, params?)` — the same on `Url.origin()`. Throws when neither `HOST_NAME` nor `APP_URL` is set.
+- `Url.matchApi(path, url)` — the inverse: the params of `url` (decoded) when it is that route's URL, else `null`. `url` may be a path or an absolute URL on any host; its query and hash are ignored.
+
+```typescript
+import { Url } from "gemi/facades";
+
+Url.api("/pages/:pageId/files/:fileId", { pageId, fileId }); // "/api/pages/p1/files/f1"
+Url.api("/form/:formId", { formId: "a b" });                 // "/api/form/a%20b"
+Url.apiAbsolute("/designer-files/:fileId", { fileId });      // "https://app.example.com/api/designer-files/f1"
+
+Url.matchApi("/pages/:pageId/files/:fileId", "/api/pages/p1/files/f1"); // { pageId: "p1", fileId: "f1" }
+Url.matchApi("/pages/:pageId/files/:fileId", "https://cdn.example.com/x.png"); // null
+```
+
+> **Note:** the api router hands a controller its params as they appear in the URL, without decoding them. A value that `Url.api` had to encode (a space, a `/`, a non-ASCII character) therefore reaches `req.params` still encoded. Ids made of letters, digits, `-` and `_` are unaffected.
 
 > **Note:** `Url.origin` and `Url.absolute` resolve nothing from the container. They read `HOST_NAME` (or `APP_URL`) from the environment on every call, so a test sets the origin with `vi.stubEnv("HOST_NAME", "https://example.test")` and no other setup. See [Configuration](./configuration.md#the-apps-public-origin). `Url.forDomain` reads `route.domains`.
 

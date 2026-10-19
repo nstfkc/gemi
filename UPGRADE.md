@@ -1,5 +1,13 @@
 # Unreleased
 
+## Url: `Url.api`, `Url.apiAbsolute` and `Url.matchApi` for api routes (#994)
+
+**New, nothing to migrate.** See [Facades → API route URLs](docs/facades.md#api-route-urls).
+
+- `Url.api("/pages/:pageId/files/:fileId", { pageId, fileId })` is `/api/pages/p1/files/f1`. The path is an api route's path in the app's `ApiRouter`, typed from it (`ApiPaths`, new type export of `gemi/client`), and the params are typed from the path. Each param is `encodeURIComponent`-ed. A missing required param throws.
+- `Url.apiAbsolute(...)` is the same on `Url.origin()`.
+- `Url.matchApi(path, url)` answers the decoded params of a URL of that route, or `null`, in place of a hand-written regex.
+
 ## AI: `Prompt.render` for Markdown prompt files (#993)
 
 **New, nothing to migrate.** See [AI Prompt Files](docs/ai-prompts.md).
