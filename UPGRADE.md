@@ -1,5 +1,15 @@
 # Unreleased
 
+## AI: `Prompt.render` for Markdown prompt files (#993)
+
+**New, nothing to migrate.** See [AI Prompt Files](docs/ai-prompts.md).
+
+- `Prompt.render(name, values)` from `gemi/ai` reads `app/agents/<name>.md` (a bare name is `app/agents/prompts/<name>.md`), fills its `{{placeholders}}` and drops the final newline. A placeholder without a value, a missing file and a partial that includes itself throw.
+- `{{> name}}` includes another prompt (a partial), which shares the values.
+- Files are cached when `NODE_ENV` is `production` and re-read otherwise. `Prompt.configure({ dir, shared, cache })` changes the folders or the caching.
+- `Prompt.placeholders(name)` lists the placeholders a prompt uses.
+- An app with its own loader (fager's `renderPrompt`) can switch with no change to its files: the name rules and the `{{word}}` syntax are the same.
+
 ## `HttpResponse.redirect`, `.noContent`, `.text`; `HttpResponse` from stream and file routes (#990, #714)
 
 **New, plus a small client behaviour change. Nothing to migrate.** See [Controllers → Redirects, no content and text](docs/controllers.md#redirects-no-content-and-text-httpresponseredirect-nocontent-text).
