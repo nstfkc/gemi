@@ -1190,3 +1190,43 @@ describe("encrypted columns", () => {
     expect(() => buildModelSchemas([owner, child])).toThrow(/foreign key/);
   });
 });
+
+describe("typed Json columns (#995)", () => {
+  const DOC = model({
+    name: "Doc",
+    fields: [
+      field({ name: "id", isId: true }),
+      field({ name: "body", type: "Json" }),
+      field({ name: "meta", type: "Json", isRequired: false }),
+    ],
+  });
+  const models = emitArtifacts([DOC])["models.ts"];
+
+  test("each Json column gets a descriptor entry naming its model and column", () => {
+    expect(models).toContain(
+      [
+        "  json: {",
+        '    body: JsonColumnTypes<"Doc", "body", false>;',
+        '    meta: JsonColumnTypes<"Doc", "meta", true>;',
+        "  };",
+      ].join("\n"),
+    );
+  });
+
+  test("create takes the column's input type, and reads stay JsonValue in scalars", () => {
+    expect(models).toContain('  body: JsonColumnInput<"Doc", "body", false>;');
+    expect(models).toContain('  meta?: JsonColumnInput<"Doc", "meta", true>;');
+    expect(models).toContain("  body: JsonValue;");
+    expect(models).toContain("  meta: JsonValue | null;");
+  });
+
+  test("imports only what it uses", () => {
+    expect(models).toContain("type JsonColumnInput,");
+    expect(models).toContain("type JsonColumnTypes,");
+    expect(models).not.toContain("type JsonInput,");
+  });
+
+  test("a model without a Json column has no json member", () => {
+    expect(emitArtifacts([USER, POST])["models.ts"]).not.toContain("json: {");
+  });
+});

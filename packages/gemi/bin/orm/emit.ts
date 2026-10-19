@@ -776,7 +776,7 @@ function createType(schema: ModelSchema, enums: EnumMap): string {
     (field) =>
       `  ${propertyName(field.name)}` +
       `${optionalOnCreate(field, relationBacked) ? "?" : ""}: ` +
-      `${fieldTs(field, enums, "write")};`,
+      `${isTypedJson(field) ? jsonInputTs(schema, field) : fieldTs(field, enums, "write")};`,
   );
 
   return `
@@ -869,14 +869,37 @@ export type ${schema.name}Unique = ${union};
  * from, and the only thing `orm/types.ts` reads.
  */
 function typesInterface(schema: ModelSchema): string {
+  const json = Object.values(schema.fields)
+    .filter(isTypedJson)
+    .map(
+      (field) =>
+        `    ${propertyName(field.name)}: JsonColumnTypes<` +
+        `${JSON.stringify(schema.name)}, ${JSON.stringify(field.name)}, ${field.nullable}>;`,
+    );
+  // Only for a model with a `Json` column, so every other model's descriptor
+  // is unchanged.
+  const jsonMember = json.length > 0 ? `\n  json: {\n${json.join("\n")}\n  };` : "";
   return `
 export interface ${schema.name}Types extends ModelTypeInfo {
   scalars: ${schema.name}Scalars;
   relations: ${schema.name}Relations;
   unique: ${schema.name}Unique;
-  create: ${schema.name}CreateScalars;
+  create: ${schema.name}CreateScalars;${jsonMember}
 }
 `;
+}
+
+/**
+ * A (non-list) \`Json\` column, which a model may type with \`static $json\`
+ * (#995). Its read and write types come from \`JsonColumnTypes\`, which falls
+ * back to \`JsonValue\` / \`JsonInput\` for a column without a schema.
+ */
+function isTypedJson(field: FieldSchema): boolean {
+  return field.type === "Json" && !field.isList;
+}
+
+function jsonInputTs(schema: ModelSchema, field: FieldSchema): string {
+  return `JsonColumnInput<${JSON.stringify(schema.name)}, ${JSON.stringify(field.name)}, ${field.nullable}>`;
 }
 
 /**
@@ -1250,6 +1273,12 @@ function usesJson(schemas: ModelSchema[]): boolean {
   );
 }
 
+function usesJsonList(schemas: ModelSchema[]): boolean {
+  return schemas.some((schema) =>
+    Object.values(schema.fields).some((field) => field.type === "Json" && field.isList),
+  );
+}
+
 export function emitModelsFile(
   schemas: ModelSchema[],
   enums: EnumMap = {},
@@ -1261,7 +1290,10 @@ export function emitModelsFile(
 
   const imports = [...RUNTIME_IMPORTS];
   if (usesJson(schemas)) {
-    imports.push("type JsonInput", "type JsonValue");
+    // `JsonInput` only for a `Json[]` column: a single `Json` column's write
+    // type is `JsonColumnInput`, which falls back to it.
+    imports.push("type JsonColumnInput", "type JsonColumnTypes", "type JsonValue");
+    if (usesJsonList(schemas)) imports.push("type JsonInput");
   }
   imports.sort((a, b) => {
     // Values first, then types, each alphabetically — the order `oxlint` and a

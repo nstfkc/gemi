@@ -28,7 +28,8 @@ import {
   type FindUniqueOrThrowArgs,
   type GroupByArgs,
   type GroupByPayload,
-  type JsonInput,
+  type JsonColumnInput,
+  type JsonColumnTypes,
   type JsonValue,
   type ModelPolicy,
   type ModelTypeInfo,
@@ -66,7 +67,7 @@ export type AccountCreateScalars = {
   createdAt?: Date;
   updatedAt?: Date;
   deletedAt?: Date | null;
-  settings?: JsonInput;
+  settings?: JsonColumnInput<"Account", "settings", true>;
   token?: Uint8Array | null;
 };
 
@@ -82,6 +83,9 @@ export interface AccountTypes extends ModelTypeInfo {
   relations: AccountRelations;
   unique: AccountUnique;
   create: AccountCreateScalars;
+  json: {
+    settings: JsonColumnTypes<"Account", "settings", true>;
+  };
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -3221,7 +3225,7 @@ export type UserCreateScalars = {
   createdAt?: Date;
   updatedAt?: Date;
   deletedAt?: Date | null;
-  metadata?: JsonInput;
+  metadata?: JsonColumnInput<"User", "metadata", true>;
   avatar?: Uint8Array | null;
 };
 
@@ -3241,6 +3245,9 @@ export interface UserTypes extends ModelTypeInfo {
   relations: UserRelations;
   unique: UserUnique;
   create: UserCreateScalars;
+  json: {
+    metadata: JsonColumnTypes<"User", "metadata", true>;
+  };
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can

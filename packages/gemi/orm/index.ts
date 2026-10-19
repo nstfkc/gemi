@@ -38,6 +38,9 @@ export type {
   GroupByOrderByInput,
   GroupByPayload,
   IncludeInput,
+  JsonColumnInput,
+  JsonColumns,
+  JsonColumnTypes,
   JsonInput,
   JsonValue,
   ModelTypeInfo,
@@ -283,3 +286,13 @@ export {
 // `index.ts` calls it.
 export * as registry from "./registry";
 export { register } from "./registry";
+// Typed `Json` columns (#995): `static $json` on a model, parsed on read and
+// validated on write.
+export { JsonColumnError } from "./json-columns";
+export type {
+  JsonColumnInvalid,
+  JsonColumnSchema,
+  JsonColumnSpec,
+  JsonColumnSpecs,
+  JsonSchemaResult,
+} from "./json-columns";

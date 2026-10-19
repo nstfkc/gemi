@@ -11861,6 +11861,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `MissingRequiredValueError` | A write leaving a required column with no value and no default. |
 | `DecodeError` | A column the driver returned that cannot be read as its declared type. |
 | `DecryptionError` | An [encrypted column](#encrypted-columns) holds a value that does not decrypt: not an envelope, a key no longer configured, or tampered. Never answered with the ciphertext. |
+| `JsonColumnError` | A stored value in a [typed `Json` column](#typed-json-columns) that its schema refuses, on a column without a fallback. Carries `column` (`{ model, field }`), `value` and the schema's `errors`. |
 | `EncryptionKeyError` | No usable encryption key: none configured while a model has an encrypted column (at boot), or a key that is empty or not 32 bytes. See [Encrypted columns](#encrypted-columns). |
 | `UnsupportedByDesignError` | A subclass of `UnsupportedQueryError` for the arguments under [Not in scope](#not-in-scope) — it says *decision*, where the parent says *not yet*. Catch this one to tell them apart. |
 | `InvalidArgumentError` | The other subclass: the argument exists and the *value* cannot mean anything — `take: "-2"`. Says what a good value looks like, rather than that the argument is unsupported. |
@@ -12415,6 +12416,67 @@ JS string is JSON *text* rather than a JSON string value.
 > so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
 > it. Those rows now read back as strings. Re-seed development databases; there is no released
 > version affected.
+
+### Typed `Json` columns
+
+A `Json` column reads back as `JsonValue` until the model declares a schema for it. `static $json`
+on the model's class maps column names to schemas (`s` from `gemi/ai`). Each column is then
+**parsed on every read** and **validated on every write**, and its type is the schema's:
+
+```ts
+import { s } from "gemi/ai"
+import { PageBriefModel } from "./generated"
+
+const Hero = s.object({ title: s.string(), image: s.string().nullable() })
+const Style = s.object({ palette: s.array(s.string()) })
+
+export class PageBrief extends PageBriefModel {
+  static $json = {
+    heroes: s.array(Hero),                                        // a stored value that does not parse throws
+    styles: { schema: s.array(Style), invalid: "null" as const },  // ...or reads as null
+    notes: { schema: Notes, invalid: (value) => ({ items: [] }) }, // ...or as a fallback
+  }
+}
+
+const brief = await PageBrief.findFirstOrThrow({ where: { id }, select: { heroes: true } })
+brief.heroes // { title: string; image: string | null }[]
+```
+
+- **Reads.** Every read path parses the column: `findMany`, `findFirst`, `findUnique` and the
+  `OrThrow` forms, a `select`, an `include` under either strategy, and the rows `create`, `update`
+  and `upsert` return. Only the parsed value is returned, so keys the schema does not know are
+  dropped. A SQL `NULL` in a nullable column stays `null` and is not parsed.
+- **A stored value the schema refuses.** By default the read throws `JsonColumnError`, naming the
+  column. Rows written before a shape changed need one of the other two: `invalid: "null"` reads
+  them as `null` (and adds `null` to the column's type), and a function answers a fallback of the
+  schema's type, given the stored value and the schema's errors.
+- **Except on a write.** The row a `create`, `update`, `upsert` or `delete` returns (and its
+  includes) never throws `JsonColumnError`: the write has already been saved, and reporting it as
+  failed would make callers retry it, or leave a bad row that cannot be fixed or deleted through
+  the ORM. A refused value there, which can only be in a column the write did not touch, comes
+  back **as stored**, not in the schema's type. `invalid: "null"` and a fallback apply as usual.
+- **Writes.** `create`, `createMany`, `update`, `updateMany` and `upsert` validate the column before
+  the query, and write the parsed value. A value the schema refuses throws `InvalidArgumentError`.
+  On a nullable column the null sentinels (`DbNull`, `JsonNull`) pass. A non-nullable column
+  refuses `DbNull`, and takes `JsonNull` only when its schema accepts `null` (the types leave both
+  out there). A nested write into the model is validated by the model, as with encrypted columns.
+- **Types.** `gemi.d.ts` reads `static $json` from the classes your `app/models` barrel exports, by
+  their export name, which must be the model's name (as the barrel exports them anyway). A row,
+  `select`, `omit` and `include` carry the schema's type, and `create`/`update` take it. Filters
+  are unchanged: `where` on the column is still a `Json` filter (`path`, `equals`, …). The
+  descriptor that carries it comes from the generator, so re-run `prisma generate` once after
+  upgrading.
+- **One set of schemas per model.** They are read from the class registered under the model's
+  name, so the generated base, your subclass and `Model.on(...)` all parse the same columns. A key
+  that is not one of the model's `Json` columns throws on the model's first query.
+
+> **Adding a schema to a column that already has rows?** Give it `invalid: "null"` or a fallback
+> until every row is known to parse. With the default, one old row makes every read that selects
+> the column throw, including `findMany` over the whole table. The schema can be made strict once
+> the data is migrated.
+
+What it does not cover: `Json[]` (list) columns, [raw SQL](#raw-sql), the instance type of `wrap` (its
+row is typed, `this.column` inside a model method is still `JsonValue`), and `groupBy` results.
 
 ## A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma
 

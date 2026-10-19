@@ -155,6 +155,74 @@ type IsJson<V> = [Exclude<JsonValue, null>] extends [NonNullable<V>]
   ? true
   : false;
 
+// ---------------------------------------------------------------------------
+// Typed Json columns (#995)
+// ---------------------------------------------------------------------------
+
+/**
+ * The application's typed `Json` columns: `{ PageBrief: typeof PageBrief.$json }`.
+ *
+ * Augmented from the app's `app/models` barrel by the framework's own
+ * `gemi.d.ts`, the way `RPC` is from its routes, keyed by each exported
+ * class's name. Empty here, so every `Json` column keeps `JsonValue` until a
+ * model declares `static $json`.
+ */
+export interface JsonColumns {}
+
+type JsonSpecSchema<S> = S extends { schema: infer X } ? X : S;
+type JsonSchemaOutput<S> = S extends { parse(value: unknown): infer T } ? T : JsonValue;
+type JsonSpecOutput<S> =
+  | JsonSchemaOutput<JsonSpecSchema<S>>
+  | (S extends { invalid: "null" } ? null : never);
+
+/**
+ * What the generated descriptor carries for each `Json` column: the type a
+ * read answers and the type a write takes. The schema's when the model
+ * declares one (`JsonColumns`), else `JsonValue` and `JsonInput`, which is
+ * what every `Json` column had before.
+ */
+export type JsonColumnTypes<
+  M extends string,
+  F extends string,
+  Nullable extends boolean,
+> = M extends keyof JsonColumns
+  ? F extends keyof JsonColumns[M]
+    ? {
+        output: JsonSpecOutput<JsonColumns[M][F]> | (Nullable extends true ? null : never);
+        // The null markers only on a nullable column: on a non-nullable one
+        // `DbNull` is refused, and `JsonNull` would store a value the schema
+        // may not accept, which every later read would refuse.
+        input:
+          | Exclude<JsonSchemaOutput<JsonSpecSchema<JsonColumns[M][F]>>, null>
+          | (Nullable extends true ? DbNullValue | JsonNullValue : never);
+      }
+    : { output: JsonValue | (Nullable extends true ? null : never); input: JsonInput }
+  : { output: JsonValue | (Nullable extends true ? null : never); input: JsonInput };
+
+/** A `Json` column's write type, for the generated `create` scalars. */
+export type JsonColumnInput<
+  M extends string,
+  F extends string,
+  Nullable extends boolean = true,
+> = JsonColumnTypes<M, F, Nullable>["input"];
+
+type JsonColumnPair = { output: unknown; input: unknown };
+
+type JsonTypesOf<M> = M extends { json: infer J extends Record<string, JsonColumnPair> } ? J : {};
+
+/**
+ * The row's column types: `scalars` with each typed `Json` column replaced
+ * by its schema's output. `scalars` itself stays the raw column type, which
+ * is what filters, sorting and grouping are built from.
+ */
+type Columns<M extends ModelTypeInfo> = [keyof JsonTypesOf<M>] extends [never]
+  ? Scalars<M>
+  : {
+      [K in keyof Scalars<M>]: K extends keyof JsonTypesOf<M>
+        ? (JsonTypesOf<M>[K] & JsonColumnPair)["output"]
+        : Scalars<M>[K];
+    };
+
 /** One relation, as the generated descriptor describes it. */
 export interface RelationInfo {
   kind: "one" | "many";
@@ -260,7 +328,7 @@ type RelationCountPayload<M extends ModelTypeInfo, A> = "select" extends keyof A
 
 type SelectPayload<M extends ModelTypeInfo, S> = {
   [K in Requested<S>]: K extends keyof Scalars<M>
-    ? Scalars<M>[K]
+    ? Columns<M>[K]
     : K extends keyof Relations<M>
       ? RelationPayload<Relations<M>[K], S[K]>
       : K extends "_count"
@@ -277,7 +345,7 @@ type IncludePayload<M extends ModelTypeInfo, I> = {
 };
 
 /** `omit: { email: true }` removes the column from the default selection. */
-type OmitPayload<M extends ModelTypeInfo, O> = Omit<Scalars<M>, Requested<O>>;
+type OmitPayload<M extends ModelTypeInfo, O> = Omit<Columns<M>, Requested<O>>;
 
 /**
  * The result of an operation, narrowed by the arguments it was given.
@@ -322,9 +390,9 @@ export type Payload<M extends ModelTypeInfo, A> = "select" extends keyof A
 
 type DefaultPayload<M extends ModelTypeInfo, A> = "omit" extends keyof A
   ? [A["omit"]] extends [undefined]
-    ? WithInclude<M, A, Scalars<M>>
+    ? WithInclude<M, A, Columns<M>>
     : WithInclude<M, A, OmitPayload<M, NonNullable<A["omit"]>>>
-  : WithInclude<M, A, Scalars<M>>;
+  : WithInclude<M, A, Columns<M>>;
 
 type WithInclude<M extends ModelTypeInfo, A, Base> = "include" extends keyof A
   ? [A["include"]] extends [undefined]
@@ -333,7 +401,7 @@ type WithInclude<M extends ModelTypeInfo, A, Base> = "include" extends keyof A
   : Base;
 
 /** Every column of the model, which is what `wrap` demands and `include` keeps. */
-export type Row<M extends ModelTypeInfo> = Scalars<M>;
+export type Row<M extends ModelTypeInfo> = Columns<M>;
 
 // ---------------------------------------------------------------------------
 // Filters
@@ -1197,7 +1265,9 @@ type UpdateField<V> =
         : V | { set?: V };
 
 export type UpdateInput<M extends ModelTypeInfo> = {
-  [K in keyof Scalars<M>]?: UpdateField<Scalars<M>[K]>;
+  [K in keyof Scalars<M>]?: K extends keyof JsonTypesOf<M>
+    ? (JsonTypesOf<M>[K] & JsonColumnPair)["input"]
+    : UpdateField<Scalars<M>[K]>;
 } & {
   [K in keyof Relations<M>]?: NestedUpdate<Relations<M>[K]>;
 };

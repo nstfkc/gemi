@@ -34,6 +34,15 @@ import {
   encryptWriteArgs,
   isEncryptionRaw,
 } from "./encryption";
+import {
+  isJsonLenient,
+  jsonColumnsOf,
+  markJsonLenient,
+  parseJsonFolded,
+  parseJsonRows,
+  validateJsonWriteArgs,
+  type JsonColumnSpecs,
+} from "./json-columns";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
   LockOutsideTransactionError,
@@ -113,6 +122,13 @@ const RETURNS_ROWS = new Set<Operation>([
   "upsert",
   "delete",
 ]);
+
+/**
+ * The operations in `RETURNS_ROWS` that write. Their rows (and those of the
+ * reads they make first, and of their includes) are parsed leniently: see
+ * `markJsonLenient`.
+ */
+const WRITES_RETURNING_ROWS = new Set<Operation>(["create", "update", "upsert", "delete"]);
 
 /** Operations Prisma raises on when nothing matched, rather than returning null. */
 const ORTHROW = new Set([
@@ -251,6 +267,23 @@ export abstract class Model {
    * nested relation write — those keep their exact row counts.
    */
   static $skipNoopUpdates?: boolean;
+
+  /**
+   * Schemas for the model's `Json` columns (#995): each column is parsed on
+   * every read and validated on every write.
+   *
+   *     export class PageBrief extends PageBriefModel {
+   *       static $json = {
+   *         heroes: s.array(HeroSchema),
+   *         styles: { schema: s.array(StyleSchema), invalid: "null" },
+   *       };
+   *     }
+   *
+   * Read from the class registered under the model's name, so the generated
+   * base and `Model.on(...)` variants parse the same columns. The row types
+   * follow through `gemi.d.ts` (`JsonColumns`). See `orm/json-columns.ts`.
+   */
+  static $json?: JsonColumnSpecs;
 
   /**
    * The connection this class's operations run on, set only by `on` below.
@@ -989,7 +1022,7 @@ export abstract class Model {
       // Marked ORM-issued so a `$skipNoopUpdates` model's default does not
       // reach the `update` half: `upsert` takes no `skipIfUnchanged`, and its
       // one-statement `on conflict` form could not honour one.
-      const inner = markOrmIssued({ ...options }) as ExecOptions;
+      const inner = markJsonLenient(markOrmIssued({ ...options })) as ExecOptions;
 
       return transact(db, async () => {
         const found = await this.$exec("findFirst", { where }, inner);
@@ -1129,6 +1162,13 @@ export abstract class Model {
     // are encrypted by those models' own `$exec`.
     if (!raw) effective = encryptWriteArgs(schema, op, effective);
 
+    // This model's typed `Json` columns (#995), validated and replaced by their
+    // parsed values. Same place and reasons as encryption: after the
+    // `createMany` split, and nested writes are validated by their own model.
+    const jsonColumns = jsonColumnsOf(schema, this);
+    if (!raw) effective = validateJsonWriteArgs(jsonColumns, schema.name, op, effective);
+    const jsonLenient = WRITES_RETURNING_ROWS.has(op) || isJsonLenient(options);
+
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
     const executor: RelationExecutor = {
@@ -1144,11 +1184,13 @@ export abstract class Model {
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
       exec: (model, operation, relationArgs, preScoped, ormAuthored) => {
-        const base = markOrmIssued(
+        const marked = markOrmIssued(
           preScoped
             ? markPreScoped({ strategy: options?.strategy })
             : { strategy: options?.strategy },
         );
+        // A write's includes are read after it was saved: see `markJsonLenient`.
+        const base = jsonLenient ? markJsonLenient(marked) : marked;
         return registry
           .get<typeof Model>(model)
           .$exec(
@@ -1283,9 +1325,8 @@ export abstract class Model {
           // it, so they are the same string, and taking it from the variable
           // keeps the two from drifting if the guard ever admits a second
           // operation that has to read before it writes.
-          markRedactedAs(
-            markPreScoped({ strategy: options?.strategy }),
-            op,
+          markJsonLenient(
+            markRedactedAs(markPreScoped({ strategy: options?.strategy }), op),
           ) as never,
         );
 
@@ -1353,6 +1394,10 @@ export abstract class Model {
       // see the plaintext. A value that does not decrypt throws.
       if (!raw && RETURNS_ROWS.has(op)) decryptRows(schema, rowsOf(result));
 
+      // Then its typed `Json` columns (#995), parsed, so a policy's `redact`
+      // and the caller see the schema's values.
+      if (!raw && RETURNS_ROWS.has(op)) parseJsonRows(jsonColumns, schema.name, rowsOf(result), jsonLenient);
+
       // `skipIfUnchanged` (#664): an `update` that matched its row but changed
       // nothing wrote nothing, so `returning` came back empty. The caller still
       // gets the row, read the way the `delete` pre-read reads one — the same
@@ -1368,9 +1413,11 @@ export abstract class Model {
         const current = await this.$exec(
           "findFirst",
           { where, ...projection },
-          markRedactedAs(
-            markPreScoped({ strategy: options?.strategy, track: options?.track }),
-            op,
+          markJsonLenient(
+            markRedactedAs(
+              markPreScoped({ strategy: options?.strategy, track: options?.track }),
+              op,
+            ),
           ) as never,
         );
         if (current === null) throw new RecordNotFoundError(schema.name, op);
@@ -1486,6 +1533,11 @@ export abstract class Model {
           decryptFolded(
             { as: relation.as, model: relation.model, folded: relation.root.folded },
             parents,
+          );
+          parseJsonFolded(
+            { as: relation.as, model: relation.model, folded: relation.root.folded },
+            parents,
+            jsonLenient,
           );
         }
       }
