@@ -52,6 +52,7 @@ export type {
   Row,
   RowLock,
   RowLockMode,
+  ScalarColumns,
   SelectInput,
   SelectSubset,
   SortOrder,
@@ -286,13 +287,15 @@ export {
 // `index.ts` calls it.
 export * as registry from "./registry";
 export { register } from "./registry";
-// Typed `Json` columns (#995): `static $json` on a model, parsed on read and
-// validated on write.
-export { JsonColumnError } from "./json-columns";
+// Typed columns: `static $json` (#995) and `static $columns` (#1001) on a
+// model, parsed on read and validated on write.
+export { JsonColumnError, ScalarColumnError } from "./typed-columns";
 export type {
   JsonColumnInvalid,
   JsonColumnSchema,
   JsonColumnSpec,
   JsonColumnSpecs,
   JsonSchemaResult,
-} from "./json-columns";
+  ScalarColumnSpec,
+  ScalarColumnSpecs,
+} from "./typed-columns";

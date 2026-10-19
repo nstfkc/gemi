@@ -4,14 +4,24 @@ import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
 /**
- * Typed `Json` columns (#995): a schema per column, declared once on the
- * model's class, parsed on every read and validated on every write.
+ * Typed columns: a schema per column, declared once on the model's class,
+ * parsed on every read and validated on every write. Two declarations share
+ * this module:
+ *
+ * - `static $json` (#995) for `Json` columns: documents, with Prisma's
+ *   `DbNull` / `JsonNull` markers.
+ * - `static $columns` (#1001) for scalar (`String`) columns: ids into a
+ *   code-side catalogue, read as the catalogue's union. `where` keeps the
+ *   column's own filter, and an update's `{ set: value }` is validated too.
  *
  * ```ts
  * export class PageBrief extends PageBriefModel {
  *   static $json = {
  *     heroes: s.array(HeroSchema),
  *     styles: { schema: s.array(StyleSchema), invalid: "null" },
+ *   };
+ *   static $columns = {
+ *     designStyle: { schema: s.enum(DESIGN_STYLE_IDS), invalid: "null" },
  *   };
  * }
  * ```
@@ -62,6 +72,15 @@ export type JsonColumnSpec<T = any> =
 export type JsonColumnSpecs = Record<string, JsonColumnSpec>;
 
 /**
+ * One scalar column's declaration in `static $columns` (#1001): the same
+ * shape as a `Json` column's, a schema or `{ schema, invalid }`.
+ */
+export type ScalarColumnSpec<T = any> = JsonColumnSpec<T>;
+
+/** `static $columns` on a model: a column name to its declaration. */
+export type ScalarColumnSpecs = Record<string, ScalarColumnSpec>;
+
+/**
  * A stored `Json` value its column's schema refused on a read, with
  * `invalid: "throw"` (the default).
  */
@@ -81,7 +100,31 @@ export class JsonColumnError extends Error {
   }
 }
 
+/**
+ * A stored value in a typed scalar column (`static $columns`) that its schema
+ * refused on a read, with `invalid: "throw"` (the default).
+ */
+export class ScalarColumnError extends Error {
+  constructor(
+    public readonly column: { model: string; field: string },
+    public readonly value: unknown,
+    public readonly errors: string[],
+  ) {
+    super(
+      `The stored value of ${column.model}.${column.field} does not match its ` +
+        `schema: ${errors.join("; ")}. Give the column a fallback ` +
+        `(\`{ schema, invalid: (value) => ... }\` or \`invalid: "null"\`) for ` +
+        `rows holding a value the schema no longer accepts, or fix the rows.`,
+    );
+    this.name = "ScalarColumnError";
+  }
+}
+
+/** Which declaration a column came from: `$json` or `$columns`. */
+type Kind = "json" | "scalar";
+
 interface Column {
+  kind: Kind;
   field: string;
   nullable: boolean;
   schema: JsonColumnSchema;
@@ -91,40 +134,65 @@ interface Column {
 const columnsByClass = new WeakMap<object, readonly Column[]>();
 const NONE: readonly Column[] = [];
 
+/** The column types `static $columns` accepts. `String` for now (#1001). */
+const SCALAR_TYPES = new Set(["String"]);
+
 /**
- * The model's typed `Json` columns, from the class registered under its name
- * (else `fallback`, the class `$exec` was called on). Checked once per class:
- * a key that is not a `Json` column of the model, or a value that is not a
- * schema, throws.
+ * The model's typed columns (`$json` and `$columns`), from the class
+ * registered under its name (else `fallback`, the class `$exec` was called
+ * on). Checked once per class: a key that is not a column of the right type,
+ * or a value that is not a schema, throws.
  */
-export function jsonColumnsOf(schema: ModelSchema, fallback: object): readonly Column[] {
+export function typedColumnsOf(schema: ModelSchema, fallback: object): readonly Column[] {
   const owner = (registry.has(schema.name) ? registry.get<object>(schema.name) : fallback) as {
     $json?: unknown;
+    $columns?: unknown;
   };
   const cached = columnsByClass.get(owner);
   if (cached) return cached;
 
-  const specs = owner.$json;
-  let columns: readonly Column[] = NONE;
-  if (specs !== undefined && specs !== null) {
-    if (typeof specs !== "object") {
-      throw new TypeError(`${schema.name}.$json must be an object of column schemas.`);
-    }
-    columns = Object.entries(specs as Record<string, unknown>).map(([field, spec]) =>
-      columnOf(schema, field, spec),
-    );
-  }
-  columnsByClass.set(owner, columns);
-  return columns;
+  const columns = [
+    ...columnsFrom(schema, "json", owner.$json),
+    ...columnsFrom(schema, "scalar", owner.$columns),
+  ];
+  const result = columns.length === 0 ? NONE : columns;
+  columnsByClass.set(owner, result);
+  return result;
 }
 
-function columnOf(schema: ModelSchema, field: string, spec: unknown): Column {
-  const where = `${schema.name}.$json.${field}`;
+function columnsFrom(schema: ModelSchema, kind: Kind, specs: unknown): Column[] {
+  if (specs === undefined || specs === null) return [];
+  if (typeof specs !== "object") {
+    throw new TypeError(`${schema.name}.${staticName(kind)} must be an object of column schemas.`);
+  }
+  return Object.entries(specs as Record<string, unknown>).map(([field, spec]) =>
+    columnOf(schema, kind, field, spec),
+  );
+}
+
+function staticName(kind: Kind): string {
+  return kind === "json" ? "$json" : "$columns";
+}
+
+function columnOf(schema: ModelSchema, kind: Kind, field: string, spec: unknown): Column {
+  const where = `${schema.name}.${staticName(kind)}.${field}`;
   const column = schema.fields[field];
-  if (!column || column.type !== "Json" || column.isList) {
+  if (kind === "json" && (!column || column.type !== "Json" || column.isList)) {
     throw new TypeError(
       `${where}: ${schema.name} has no \`Json\` column named "${field}". ` +
-        `\`static $json\` declares schemas for the model's own (non-list) Json columns.`,
+        `\`static $json\` declares schemas for the model's own (non-list) Json columns` +
+        (column && SCALAR_TYPES.has(column.type) && !column.isList
+          ? `; declare a \`${column.type}\` column in \`static $columns\`.`
+          : "."),
+    );
+  }
+  if (kind === "scalar" && (!column || !SCALAR_TYPES.has(column.type) || column.isList)) {
+    throw new TypeError(
+      `${where}: ${schema.name} has no \`String\` column named "${field}". ` +
+        `\`static $columns\` declares schemas for the model's own (non-list) String columns` +
+        (column?.type === "Json" && !column.isList
+          ? `; declare a \`Json\` column in \`static $json\`.`
+          : "."),
     );
   }
   const inner = isSchema(spec) ? spec : isObject(spec) ? spec.schema : undefined;
@@ -138,8 +206,9 @@ function columnOf(schema: ModelSchema, field: string, spec: unknown): Column {
     throw new TypeError(`${where}.invalid must be "throw", "null" or a function.`);
   }
   return {
+    kind,
     field,
-    nullable: column.nullable,
+    nullable: column!.nullable,
     schema: inner,
     invalid: invalid as JsonColumnInvalid<unknown>,
   };
@@ -157,13 +226,13 @@ function columnOf(schema: ModelSchema, field: string, spec: unknown): Column {
  * since the written ones were validated. A module-private symbol, like the
  * other `$exec` markers.
  */
-const LENIENT = Symbol("gemi.orm.jsonColumnsLenient");
+const LENIENT = Symbol("gemi.orm.typedColumnsLenient");
 
-export function markJsonLenient<T extends object>(options: T): T {
+export function markLenient<T extends object>(options: T): T {
   return { ...options, [LENIENT]: true };
 }
 
-export function isJsonLenient(options: unknown): boolean {
+export function isLenient(options: unknown): boolean {
   return (
     typeof options === "object" &&
     options !== null &&
@@ -172,10 +241,10 @@ export function isJsonLenient(options: unknown): boolean {
 }
 
 /**
- * Parses this model's typed `Json` columns on `rows`, in place. `lenient`:
- * see `markJsonLenient`.
+ * Parses this model's typed columns on `rows`, in place. `lenient`: see
+ * `markLenient`.
  */
-export function parseJsonRows(
+export function parseTypedRows(
   columns: readonly Column[],
   model: string,
   rows: readonly unknown[],
@@ -202,14 +271,15 @@ function parseStored(column: Column, model: string, value: unknown, lenient: boo
   if (column.invalid === "null") return null;
   if (typeof column.invalid === "function") return column.invalid(value, errors);
   if (lenient) return value;
-  throw new JsonColumnError({ model, field: column.field }, value, errors);
+  const ErrorClass = column.kind === "json" ? JsonColumnError : ScalarColumnError;
+  throw new ErrorClass({ model, field: column.field }, value, errors);
 }
 
 /**
  * Parses the rows a strategy folded into the parent's statement, which never
  * passed through their own model's `$exec`. Recursive, because the fold is.
  */
-export function parseJsonFolded(
+export function parseTypedFolded(
   relation: {
     as: string;
     model: string;
@@ -221,8 +291,8 @@ export function parseJsonFolded(
   const model = registry.has(relation.model)
     ? registry.get<{ $schema?: ModelSchema }>(relation.model)
     : undefined;
-  const columns = model?.$schema ? jsonColumnsOf(model.$schema, model) : [];
-  // Nothing to parse here or below: the common case, a child without `$json`.
+  const columns = model?.$schema ? typedColumnsOf(model.$schema, model) : [];
+  // Nothing to parse here or below: the common case, a child without typed columns.
   if (columns.length === 0 && !relation.folded?.length) return;
 
   const rows: unknown[] = [];
@@ -233,24 +303,29 @@ export function parseJsonFolded(
     else if (isObject(value)) rows.push(value);
   }
   if (rows.length === 0) return;
-  parseJsonRows(columns, relation.model, rows, lenient);
+  parseTypedRows(columns, relation.model, rows, lenient);
   for (const child of relation.folded ?? []) {
-    parseJsonFolded(child as Parameters<typeof parseJsonFolded>[0], rows, lenient);
+    parseTypedFolded(child as Parameters<typeof parseTypedFolded>[0], rows, lenient);
   }
 }
 
 // --- writes ------------------------------------------------------------------
 
 /**
- * `args` with this model's typed `Json` columns validated and replaced by
- * their parsed values, or `args` itself when there is nothing to check. Never
+ * `args` with this model's typed columns validated and replaced by their
+ * parsed values, or `args` itself when there is nothing to check. Never
  * mutates the caller's objects. A value the schema refuses throws
- * `InvalidArgumentError`. On a nullable column the null sentinels (`DbNull`,
+ * `InvalidArgumentError`.
+ *
+ * `Json` columns: on a nullable column the null sentinels (`DbNull`,
  * `JsonNull`) pass. On a non-nullable one `DbNull` is refused, and `JsonNull`
  * only passes when the schema accepts `null`: otherwise the row could be
  * written and then never read.
+ *
+ * Scalar columns: `null` passes on a nullable column and is refused on a
+ * non-nullable one. An update's `{ set: value }` is validated like `value`.
  */
-export function validateJsonWriteArgs(
+export function validateTypedWriteArgs(
   columns: readonly Column[],
   model: string,
   op: string,
@@ -264,14 +339,16 @@ export function validateJsonWriteArgs(
     if (next === args) next = { ...args };
     next[key] = value;
   };
-  const data = (value: unknown, argument: string) =>
-    validateData(columns, value, { model, operation: op, argument });
+  const data = (value: unknown, argument: string, update = false) =>
+    validateData(columns, value, { model, operation: op, argument }, update);
 
   switch (op) {
     case "create":
+      replace("data", data(args.data, "data"));
+      break;
     case "update":
     case "updateMany":
-      replace("data", data(args.data, "data"));
+      replace("data", data(args.data, "data", true));
       break;
     case "createMany":
       replace(
@@ -283,7 +360,7 @@ export function validateJsonWriteArgs(
       break;
     case "upsert":
       replace("create", data(args.create, "create"));
-      replace("update", data(args.update, "update"));
+      replace("update", data(args.update, "update", true));
       break;
   }
   return next;
@@ -293,6 +370,7 @@ function validateData(
   columns: readonly Column[],
   data: unknown,
   origin: { model: string; operation: string; argument: string },
+  update: boolean,
 ): unknown {
   if (!isObject(data)) return data;
   let copy: Record<string, unknown> | undefined;
@@ -300,6 +378,11 @@ function validateData(
     if (!(column.field in data)) continue;
     const value = data[column.field];
     if (value === undefined) continue;
+    if (column.kind === "scalar") {
+      const next = validateScalar(column, value, origin, update);
+      if (next !== value) (copy ??= { ...data })[column.field] = next;
+      continue;
+    }
     const kind = jsonNullKind(value);
     if (kind !== null) {
       if (column.nullable) continue;
@@ -324,6 +407,40 @@ function validateData(
     if (result.value !== value) (copy ??= { ...data })[column.field] = result.value;
   }
   return copy ?? data;
+}
+
+/**
+ * One scalar column's written value: `value`, or an update's `{ set: value }`
+ * (the only operator a `String` column takes), validated and replaced by the
+ * parsed value.
+ */
+function validateScalar(
+  column: Column,
+  value: unknown,
+  origin: { model: string; operation: string; argument: string },
+  update: boolean,
+): unknown {
+  if (update && isObject(value) && "set" in value && Object.keys(value).length === 1) {
+    if (value.set === undefined) return value;
+    const set = validateScalar(column, value.set, origin, false);
+    return set === value.set ? value : { set };
+  }
+  const refuse = (reason: string) =>
+    new InvalidArgumentError(
+      origin.argument,
+      origin.model,
+      origin.operation,
+      `${origin.model}.${column.field} ${reason}.`,
+    );
+  if (value === null) {
+    if (column.nullable) return value;
+    throw refuse("is not nullable");
+  }
+  const result = column.schema.safeParse(value);
+  if (!result.ok) {
+    throw refuse(`does not match its schema: ${(result as { errors: string[] }).errors.join("; ")}`);
+  }
+  return result.value;
 }
 
 // --- helpers -----------------------------------------------------------------

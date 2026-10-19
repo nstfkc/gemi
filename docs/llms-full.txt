@@ -11862,6 +11862,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `DecodeError` | A column the driver returned that cannot be read as its declared type. |
 | `DecryptionError` | An [encrypted column](#encrypted-columns) holds a value that does not decrypt: not an envelope, a key no longer configured, or tampered. Never answered with the ciphertext. |
 | `JsonColumnError` | A stored value in a [typed `Json` column](#typed-json-columns) that its schema refuses, on a column without a fallback. Carries `column` (`{ model, field }`), `value` and the schema's `errors`. |
+| `ScalarColumnError` | A stored value in a [typed `String` column](#typed-string-columns) that its schema refuses, on a column without a fallback. Carries `column` (`{ model, field }`), `value` and the schema's `errors`. |
 | `EncryptionKeyError` | No usable encryption key: none configured while a model has an encrypted column (at boot), or a key that is empty or not 32 bytes. See [Encrypted columns](#encrypted-columns). |
 | `UnsupportedByDesignError` | A subclass of `UnsupportedQueryError` for the arguments under [Not in scope](#not-in-scope) — it says *decision*, where the parent says *not yet*. Catch this one to tell them apart. |
 | `InvalidArgumentError` | The other subclass: the argument exists and the *value* cannot mean anything — `take: "-2"`. Says what a good value looks like, rather than that the argument is unsupported. |
@@ -12477,6 +12478,61 @@ brief.heroes // { title: string; image: string | null }[]
 
 What it does not cover: `Json[]` (list) columns, [raw SQL](#raw-sql), the instance type of `wrap` (its
 row is typed, `this.column` inside a model method is still `JsonValue`), and `groupBy` results.
+
+### Typed `String` columns
+
+A `String` column that holds an id into a code-side catalogue (a design style, a mood, a post
+format) can read as the catalogue's union instead of `string`. `static $columns` is the sibling of
+`$json` for scalar columns: the same declaration, the same read and write rules, and `where` keeps
+the column's own `String` filter.
+
+```ts
+import { s } from "gemi/ai"
+import { WebsiteModel } from "./generated"
+
+export const DESIGN_STYLES = { minimal: { ... }, bold: { ... } } as const
+export const DESIGN_STYLE_IDS = ["minimal", "bold"] as const
+
+export class Website extends WebsiteModel {
+  static $columns = {
+    format: s.enum(["post", "story", "reel"]),                                    // a stored value that does not parse throws
+    designStyle: { schema: s.enum(DESIGN_STYLE_IDS), invalid: "null" as const },  // ...or reads as null
+    mood: { schema: s.enum(MOOD_IDS), invalid: () => "calm" as const },           // ...or as a fallback
+  }
+}
+
+const site = await Website.findFirstOrThrow({ where: { id } })
+site.designStyle                                  // "minimal" | "bold" | null
+if (site.designStyle) DESIGN_STYLES[site.designStyle]
+
+await Website.update({ where: { id }, data: { designStyle: "brutalist" } }) // InvalidArgumentError, and a type error
+await Website.findMany({ where: { designStyle: { in: ["retired-id"] } } })  // still any string
+```
+
+- **Reads, a stored value the schema refuses, and the rows a write returns** work exactly as for
+  [typed `Json` columns](#typed-json-columns), on the same read paths. A refused value throws
+  `ScalarColumnError` by default; `invalid: "null"` answers `null` (a row holding an id that was
+  later retired from the catalogue), and a function answers a fallback. A SQL `NULL` in a nullable
+  column stays `null`.
+- **Writes.** `create`, `createMany`, `update`, `updateMany` and `upsert` validate the column before
+  the query, including an update's `{ set: value }`, and throw `InvalidArgumentError` on a value the
+  schema refuses. `null` passes on a nullable column and is refused on a non-nullable one. A
+  nested write into the model is validated by the model. An [encrypted](#encrypted-columns) column
+  can be typed too: it is validated before it is encrypted and parsed after it is decrypted.
+- **Types.** `gemi.d.ts` reads `static $columns` from the classes your `app/models` barrel exports,
+  like `$json`. A row, `select`, `omit` and `include` carry the schema's output (`invalid: "null"`
+  adds `null`), and `create`/`update` take the schema's type (with `null` on a nullable column),
+  keeping which columns are optional. `where`, `orderBy`, `groupBy` and aggregates are unchanged.
+  The model is looked up by the `name` the generator emits on its descriptor, so re-run
+  `prisma generate` once after upgrading.
+- **Which columns.** Only the model's own non-list `String` columns. A key that is anything else
+  throws on the model's first query; a `String` column declared in `$json` (or a `Json` column in
+  `$columns`) says which declaration it belongs in.
+
+What it does not cover: other scalar types (`Int`, `Boolean`, `DateTime`), `String[]` columns,
+[raw SQL](#raw-sql), the instance type of `wrap`, and `groupBy` results. For a fixed set of values
+the database itself should enforce, a Prisma `enum` is still the better fit: `$columns` is for
+values whose list lives in code and changes with it.
 
 ## A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma
 

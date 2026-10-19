@@ -210,16 +210,55 @@ type JsonColumnPair = { output: unknown; input: unknown };
 
 type JsonTypesOf<M> = M extends { json: infer J extends Record<string, JsonColumnPair> } ? J : {};
 
+// ---------------------------------------------------------------------------
+// Typed scalar columns (#1001)
+// ---------------------------------------------------------------------------
+
 /**
- * The row's column types: `scalars` with each typed `Json` column replaced
- * by its schema's output. `scalars` itself stays the raw column type, which
- * is what filters, sorting and grouping are built from.
+ * The application's typed scalar columns: `{ Website: typeof Website.$columns }`.
+ *
+ * Augmented from the app's `app/models` barrel by the framework's own
+ * `gemi.d.ts`, like `JsonColumns`. Looked up by the model's `name`, which the
+ * generator emits on each descriptor, so a model without `$columns` costs
+ * nothing and a descriptor from an older generator keeps raw columns.
  */
-type Columns<M extends ModelTypeInfo> = [keyof JsonTypesOf<M>] extends [never]
+export interface ScalarColumns {}
+
+type ScalarSpecsOf<M> = M extends { name: infer N }
+  ? N extends keyof ScalarColumns
+    ? ScalarColumns[N]
+    : {}
+  : {};
+
+/**
+ * Each typed scalar column's read and write types, like `JsonColumnTypes`.
+ * Nullability is read off the raw column type: `null` stays in both on a
+ * nullable column, and `invalid: "null"` adds it to the read type only.
+ */
+type ScalarTypesOf<M extends ModelTypeInfo> = {
+  [K in keyof ScalarSpecsOf<M> & keyof Scalars<M>]: {
+    output:
+      | JsonSpecOutput<ScalarSpecsOf<M>[K]>
+      | (null extends Scalars<M>[K] ? null : never);
+    input:
+      | Exclude<JsonSchemaOutput<JsonSpecSchema<ScalarSpecsOf<M>[K]>>, null>
+      | (null extends Scalars<M>[K] ? null : never);
+  };
+};
+
+/** Every typed column of the model, `Json` and scalar, as `{ output, input }`. */
+type TypedColumnsOf<M extends ModelTypeInfo> = JsonTypesOf<M> & ScalarTypesOf<M>;
+
+/**
+ * The row's column types: `scalars` with each typed column replaced by its
+ * schema's output. `scalars` itself stays the raw column type, which is what
+ * filters, sorting and grouping are built from.
+ */
+type Columns<M extends ModelTypeInfo> = [keyof TypedColumnsOf<M>] extends [never]
   ? Scalars<M>
   : {
-      [K in keyof Scalars<M>]: K extends keyof JsonTypesOf<M>
-        ? (JsonTypesOf<M>[K] & JsonColumnPair)["output"]
+      [K in keyof Scalars<M>]: K extends keyof TypedColumnsOf<M>
+        ? (TypedColumnsOf<M>[K] & JsonColumnPair)["output"]
         : Scalars<M>[K];
     };
 
@@ -256,6 +295,11 @@ export interface ModelTypeInfo {
    * rule here to re-derive it from information it does not have.
    */
   create: Record<string, unknown>;
+  /**
+   * The model's name, which `ScalarColumns` is keyed by (#1001). Optional, so
+   * a descriptor from an older generator still fits, with raw columns.
+   */
+  name?: string;
 }
 
 type Scalars<M extends ModelTypeInfo> = M["scalars"];
@@ -1240,11 +1284,20 @@ interface NestedUpsert<M extends ModelTypeInfo> {
 
 /**
  * `create`'s `data`: the generator's scalar split, with the relation half laid
- * over it.
+ * over it. A typed scalar column (#1001) takes its schema's type, keeping the
+ * generator's required/optional split (the mapping is homomorphic).
  */
-export type CreateInput<M extends ModelTypeInfo> = M["create"] & {
+export type CreateInput<M extends ModelTypeInfo> = CreateScalarsOf<M> & {
   [K in keyof Relations<M>]?: NestedCreate<Relations<M>[K]>;
 };
+
+type CreateScalarsOf<M extends ModelTypeInfo> = [keyof ScalarTypesOf<M>] extends [never]
+  ? M["create"]
+  : {
+      [K in keyof M["create"]]: K extends keyof ScalarTypesOf<M>
+        ? (ScalarTypesOf<M>[K] & JsonColumnPair)["input"]
+        : M["create"][K];
+    };
 
 /** Numeric columns accept Prisma's atomic update operators. */
 type AtomicNumber = {
@@ -1267,7 +1320,9 @@ type UpdateField<V> =
 export type UpdateInput<M extends ModelTypeInfo> = {
   [K in keyof Scalars<M>]?: K extends keyof JsonTypesOf<M>
     ? (JsonTypesOf<M>[K] & JsonColumnPair)["input"]
-    : UpdateField<Scalars<M>[K]>;
+    : K extends keyof ScalarTypesOf<M>
+      ? UpdateField<(ScalarTypesOf<M>[K] & JsonColumnPair)["input"]>
+      : UpdateField<Scalars<M>[K]>;
 } & {
   [K in keyof Relations<M>]?: NestedUpdate<Relations<M>[K]>;
 };

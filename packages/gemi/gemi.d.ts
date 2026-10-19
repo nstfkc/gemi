@@ -69,8 +69,16 @@ type AppJsonColumns<T> =
     ? {}
     : { [K in keyof T as T[K] extends { $json: object } ? K : never]: T[K] extends { $json: infer J } ? J : never };
 
+// The app's typed scalar columns (#1001): each exported model class that
+// declares `static $columns`, under its export name.
+type AppScalarColumns<T> =
+  IsAny<T> extends true
+    ? {}
+    : { [K in keyof T as T[K] extends { $columns: object } ? K : never]: T[K] extends { $columns: infer C } ? C : never };
+
 declare module "gemi/orm" {
   export interface JsonColumns extends AppJsonColumns<typeof AppModels> {}
+  export interface ScalarColumns extends AppScalarColumns<typeof AppModels> {}
 }
 
 declare module "gemi/client" {
