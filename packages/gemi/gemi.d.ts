@@ -3,6 +3,7 @@ import type View from "@/app/http/routes/view";
 import type I18nComponents from "@/app/i18n";
 import type AppFeatures from "@/app/features";
 import type Channels from "@/app/http/routes/channels";
+import type * as AppModels from "@/app/models";
 
 import type {
   ApiRouter,
@@ -59,6 +60,18 @@ type AppDictionary<T> = IsAny<T> extends true ? {} : CreateI18nDictionary<T>;
 
 type AppFeatureMap<T> =
   IsAny<T> extends true ? {} : T extends FeatureRegistry ? CreateFeatures<T> : {};
+
+// The app's typed `Json` columns (#995): each exported model class that
+// declares `static $json`, under its export name (the model's name, as the
+// `app/models` barrel exports it).
+type AppJsonColumns<T> =
+  IsAny<T> extends true
+    ? {}
+    : { [K in keyof T as T[K] extends { $json: object } ? K : never]: T[K] extends { $json: infer J } ? J : never };
+
+declare module "gemi/orm" {
+  export interface JsonColumns extends AppJsonColumns<typeof AppModels> {}
+}
 
 declare module "gemi/client" {
   export interface RPC extends AppRPC<Api> {}

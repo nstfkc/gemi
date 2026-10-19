@@ -34,6 +34,13 @@ import {
   encryptWriteArgs,
   isEncryptionRaw,
 } from "./encryption";
+import {
+  jsonColumnsOf,
+  parseJsonFolded,
+  parseJsonRows,
+  validateJsonWriteArgs,
+  type JsonColumnSpecs,
+} from "./json-columns";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
   LockOutsideTransactionError,
@@ -251,6 +258,23 @@ export abstract class Model {
    * nested relation write — those keep their exact row counts.
    */
   static $skipNoopUpdates?: boolean;
+
+  /**
+   * Schemas for the model's `Json` columns (#995): each column is parsed on
+   * every read and validated on every write.
+   *
+   *     export class PageBrief extends PageBriefModel {
+   *       static $json = {
+   *         heroes: s.array(HeroSchema),
+   *         styles: { schema: s.array(StyleSchema), invalid: "null" },
+   *       };
+   *     }
+   *
+   * Read from the class registered under the model's name, so the generated
+   * base and `Model.on(...)` variants parse the same columns. The row types
+   * follow through `gemi.d.ts` (`JsonColumns`). See `orm/json-columns.ts`.
+   */
+  static $json?: JsonColumnSpecs;
 
   /**
    * The connection this class's operations run on, set only by `on` below.
@@ -1129,6 +1153,12 @@ export abstract class Model {
     // are encrypted by those models' own `$exec`.
     if (!raw) effective = encryptWriteArgs(schema, op, effective);
 
+    // This model's typed `Json` columns (#995), validated and replaced by their
+    // parsed values. Same place and reasons as encryption: after the
+    // `createMany` split, and nested writes are validated by their own model.
+    const jsonColumns = jsonColumnsOf(schema, this);
+    if (!raw) effective = validateJsonWriteArgs(jsonColumns, schema.name, op, effective);
+
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
     const executor: RelationExecutor = {
@@ -1353,6 +1383,10 @@ export abstract class Model {
       // see the plaintext. A value that does not decrypt throws.
       if (!raw && RETURNS_ROWS.has(op)) decryptRows(schema, rowsOf(result));
 
+      // Then its typed `Json` columns (#995), parsed, so a policy's `redact`
+      // and the caller see the schema's values.
+      if (!raw && RETURNS_ROWS.has(op)) parseJsonRows(jsonColumns, schema.name, rowsOf(result));
+
       // `skipIfUnchanged` (#664): an `update` that matched its row but changed
       // nothing wrote nothing, so `returning` came back empty. The caller still
       // gets the row, read the way the `delete` pre-read reads one — the same
@@ -1484,6 +1518,10 @@ export abstract class Model {
         for (const relation of plan.relations) {
           if (relation.root === undefined) continue;
           decryptFolded(
+            { as: relation.as, model: relation.model, folded: relation.root.folded },
+            parents,
+          );
+          parseJsonFolded(
             { as: relation.as, model: relation.model, folded: relation.root.folded },
             parents,
           );
