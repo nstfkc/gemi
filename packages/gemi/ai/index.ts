@@ -49,6 +49,12 @@ export type {
   SchemaIssueCode,
 } from "./Schema";
 
+// --- prompt files ----------------------------------------------------------
+//
+// Markdown prompts with `{{placeholders}}`, read from the app's folder.
+export { Prompt } from "./Prompt";
+export type { PromptOptions, PromptValues } from "./Prompt";
+
 // --- the wire vocabulary --------------------------------------------------
 //
 // Also re-exported from `gemi/ai/client`. They are types, so both copies erase.
