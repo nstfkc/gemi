@@ -1,7 +1,7 @@
 import type { PropsWithChildren } from "react";
 import type { ViewHandler } from "../http";
 import type { Prettify, UnwrapPromise } from "../utils/type";
-import type { ViewRPC } from "./rpc";
+import type { FileRPC, RPC, ViewRPC } from "./rpc";
 
 type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
@@ -39,6 +39,29 @@ export type RemoveGroupPrefix<T extends string> = T extends `${infer P}(${string
  * an `href`.
  */
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
+
+type ApiPathOf<K> = K extends `${"GET" | "POST" | "PUT" | "PATCH" | "DELETE"}:${infer P}`
+  ? P
+  : K extends `/${string}`
+    ? K
+    : never;
+
+/**
+ * The api paths of an RPC map and a file-route map: each `"METHOD:/path"`
+ * key's path, each agent route's path, and each file route's path. What
+ * `ApiPaths` is built from; exported for type tests against a router of
+ * their own.
+ */
+export type ApiPathsOf<R, F = {}> = ApiPathOf<keyof R> | (keyof F & string);
+
+/**
+ * Every api route path the application declares, without the `/api` prefix
+ * (`/pages/:pageId/files/:fileId`): what `Url.api`, `Url.apiAbsolute` and
+ * `Url.matchApi` take. Like `ViewPaths`, its members are route patterns, and
+ * it holds only gemi's own routes (`/auth/...`) where the app's route
+ * augmentation does not resolve.
+ */
+export type ApiPaths = ApiPathsOf<RPC, FileRPC>;
 
 export type ViewResult<T extends keyof ViewRPC> =
   ViewRPC[T] extends ViewHandler<infer I, infer O, infer P>

@@ -125,7 +125,7 @@ export type {
   FeatureKey,
   ClientFeatureKey,
 } from "./rpc";
-export type { ViewProps, LayoutProps, ViewPaths } from "./types";
+export type { ViewProps, LayoutProps, ViewPaths, ApiPaths } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";
 
 export { Image } from "./Image";
