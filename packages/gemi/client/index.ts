@@ -7,17 +7,10 @@
 export { useQuery } from "./useQuery";
 export type { QueryResult, GemiQueryDefaults } from "./useQuery";
 export { useInfiniteQuery } from "./useInfiniteQuery";
-export type {
-  InfiniteQueryConfig,
-  InfiniteQueryReturn,
-} from "./useInfiniteQuery";
+export type { InfiniteQueryConfig, InfiniteQueryReturn } from "./useInfiniteQuery";
 export { QueryError } from "./QueryError";
 export { isRetryableQueryError } from "./retryPolicy";
-export type {
-  QueryFailure,
-  RetryOption,
-  RetryDelayOption,
-} from "./retryPolicy";
+export type { QueryFailure, RetryOption, RetryDelayOption } from "./retryPolicy";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
@@ -125,16 +118,12 @@ export type {
   FeatureKey,
   ClientFeatureKey,
 } from "./rpc";
-export type { ViewProps, LayoutProps, ViewPaths } from "./types";
+export type { ViewProps, LayoutProps, ViewPaths, ApiPaths } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";
 
 export { Image } from "./Image";
 export { Head } from "./Head";
-export {
-  textDirection,
-  type HtmlAttributes,
-  type RootLayoutProps,
-} from "./htmlAttributes";
+export { textDirection, type HtmlAttributes, type RootLayoutProps } from "./htmlAttributes";
 export type { MetaFont, FontSource, FontFormat } from "./fonts";
 
 export { useForgotPassword } from "./auth/useForgotPassword";

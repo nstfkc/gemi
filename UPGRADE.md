@@ -1,5 +1,13 @@
 # Unreleased
 
+## Url: `Url.api`, `Url.apiAbsolute` and `Url.matchApi` for api routes (#994)
+
+**New, nothing to migrate.** See [Facades → API route URLs](docs/facades.md#api-route-urls).
+
+- `Url.api("/pages/:pageId/files/:fileId", { pageId, fileId })` is `/api/pages/p1/files/f1`. The path is an api route's path in the app's `ApiRouter`, typed from it (`ApiPaths`, new type export of `gemi/client`), and the params are typed from the path. Each param is `encodeURIComponent`-ed. A missing required param throws.
+- `Url.apiAbsolute(...)` is the same on `Url.origin()`.
+- `Url.matchApi(path, url)` answers the decoded params of a URL of that route, or `null`, in place of a hand-written regex.
+
 ## `HttpResponse.redirect`, `.noContent`, `.text`; `HttpResponse` from stream and file routes (#990, #714)
 
 **New, plus a small client behaviour change. Nothing to migrate.** See [Controllers → Redirects, no content and text](docs/controllers.md#redirects-no-content-and-text-httpresponseredirect-nocontent-text).
