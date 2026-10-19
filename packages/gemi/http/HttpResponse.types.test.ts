@@ -68,6 +68,13 @@ class Root extends ApiRouter {
     "/ctrl-find": this.get(ItemController, "find"),
     "/items/:id": this.resource(Items),
     "/nested": Nested,
+    "/beacon": this.post(() => HttpResponse.noContent()),
+    "/plain-text": this.get(() => HttpResponse.text("hello")),
+    "/form": this.post(async () => {
+      if (Math.random() > 0.5) return HttpResponse.redirect("/thanks");
+      return HttpResponse.json({ ok: true });
+    }),
+    "/only-redirect": this.post(() => HttpResponse.redirect("/elsewhere", { status: 302 })),
   };
 }
 
@@ -115,6 +122,21 @@ const snippets = {
       assert<Equal<typeof stored, { id: string } | undefined>>();
       const updated = await useMutation("PUT", "/items/:id", { params: { id: "1" } }).trigger();
       assert<Equal<typeof updated, { id: string } | undefined>>();
+    }`,
+  otherBodies: `
+    export async function f() {
+      const beacon = await usePost("/beacon").trigger();
+      assert<Equal<typeof beacon, null | undefined>>();
+      assert<Equal<Awaited<ReturnType<typeof Query.instant<"/plain-text">>>, string>>();
+      // A redirect is followed by the client's fetch, so it is no data of the route's.
+      const form = await usePost("/form").trigger();
+      assert<Equal<typeof form, { ok: boolean } | undefined>>();
+      const only = await usePost("/only-redirect").trigger();
+      assert<Equal<typeof only, undefined>>();
+    }`,
+  badRedirectStatus: `
+    export function f() {
+      return HttpResponse.redirect("/x", { status: 200 });
     }`,
 };
 
@@ -182,5 +204,15 @@ describe("HttpResponse's client types", () => {
 
   test("mutations on callback, controller and resource routes resolve the data", () => {
     expect(diagnostics.mutations).toEqual([]);
+  });
+
+  test("noContent is null, text is a string, and a redirect is left out of the data", () => {
+    expect(diagnostics.otherBodies).toEqual([]);
+  });
+
+  test("redirect only takes a redirect status", () => {
+    expect(diagnostics.badRedirectStatus).toEqual([
+      expect.stringMatching(/Type '200' is not assignable to type 'RedirectStatus/),
+    ]);
   });
 });

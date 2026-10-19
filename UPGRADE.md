@@ -1,5 +1,15 @@
 # Unreleased
 
+## `HttpResponse.redirect`, `.noContent`, `.text`; `HttpResponse` from stream and file routes (#990, #714)
+
+**New, plus a small client behaviour change. Nothing to migrate.** See [Controllers → Redirects, no content and text](docs/controllers.md#redirects-no-content-and-text-httpresponseredirect-nocontent-text).
+
+- `HttpResponse.redirect(url, { status = 303, headers })` answers a real redirect for a native `<form>` post: `Location`, no body, and the request's cookies and headers kept. `status` is 301, 302, 303, 307 or 308. The route's client type leaves it out.
+- `HttpResponse.noContent({ headers })` answers `204`. Its client type is `null`.
+- `HttpResponse.text(body, { status, headers })` answers `text/plain; charset=utf-8`, or the `Content-Type` that `headers` names. A status of 400 or more is `no-store`, as with `.json()`. Its client type is `string`.
+- `this.stream(...)` handlers may return an `HttpResponse` (`HttpResponse.error(502, ...)`), and `StreamOutput` includes it. A `this.file(...)` route already took one; that is now tested and documented.
+- **Client behaviour change:** `useMutation`/`usePost`/`<Form>` and `useQuery` read a `204`/`205` as `null` data. Before, `response.json()` failed and `onError` got a `SyntaxError`. A `text/plain` body is now read as a string, and a `text/plain` error is a refusal whose `message` is the text. Other non-JSON bodies (HTML) still fail to parse, as before.
+
 ## Redis: the shared client reconnects after an outage, and `RedisRateLimiter` has a `timeout` (#982)
 
 **Behaviour change. Nothing to migrate.** See [Middleware → Rate limiting](docs/middleware.md#rate-limiting) and [Facades → Redis](docs/facades.md#outages).

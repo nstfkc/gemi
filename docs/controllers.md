@@ -26,7 +26,7 @@ export class HomeController extends Controller {
 }
 ```
 
-To change the response, use `HttpResponse`, the facades and errors rather than constructing a `Response` yourself. `HttpResponse` sets a status or headers (below). For errors see [Errors](#errors-and-validation), and for redirects see the [`Redirect`](./authentication.md) facade.
+To change the response, use `HttpResponse`, the facades and errors rather than constructing a `Response` yourself. `HttpResponse` sets a status or headers, and answers redirects, `204`s and text (below). For errors see [Errors](#errors-and-validation), and for redirects from a view route see the [`Redirect`](./authentication.md) facade.
 
 ### Status and headers: `HttpResponse.json`
 
@@ -99,6 +99,36 @@ export class SharedListController extends Controller {
 It answers `status` with the JSON body `{ "error": body }`, the envelope gemi's own errors use, and is otherwise `HttpResponse.json`: the request's cookies and headers, `options.headers` and `Cache-Control: no-store` apply the same way. `status` must be an integer from 400 to 599, or it throws a `RangeError`.
 
 On the client the route's data type is `{ catalogId; newUser }` only, and `body` joins its error type. `onError` and `error` on `usePost`, `useMutation`, `useUpload` and `<Form>` are `MutationError | typeof body`, with `status: 410` added. `body` is typed with `const` inference, so `kind: "gone"` stays the literal `"gone"` and narrows. A body with a `message` and no `kind` is given the kind its status stands for (`form_error` for most 4xx), as gemi's own errors are. See [Data fetching → Errors](./data-fetching.md#errors) for narrowing it with `isHttpError`.
+
+### Redirects, no content and text: `HttpResponse.redirect`, `.noContent`, `.text`
+
+These answer clients other than gemi's own hooks: a native `<form>` post, a `navigator.sendBeacon`, a crawler, `curl`.
+
+```typescript
+import { Controller, HttpRequest, HttpResponse } from "gemi/http";
+
+export class NewsletterController extends Controller {
+  // <form method="post" action="/api/newsletter">, no JavaScript
+  async subscribe(req: HttpRequest<{ email: string }>) {
+    const { email } = (await req.input()).toJSON();
+    if (!email) return HttpResponse.text("Email is required", { status: 400 });
+    await Subscriber.create({ data: { email } });
+    return HttpResponse.redirect("/newsletter/thanks");
+  }
+
+  // navigator.sendBeacon("/api/newsletter/opened")
+  async opened() {
+    await Stat.increment("newsletter.opened");
+    return HttpResponse.noContent();
+  }
+}
+```
+
+- `HttpResponse.redirect(url, { status?, headers? })` answers a real redirect, with `Location: url` and no body. `status` defaults to `303 See Other`, so the browser follows a POST with a GET. It can also be 301, 302, 307 or 308; any other status throws a `RangeError`. A 307 or 308 makes the browser repeat the POST at `url`. Use it on API routes. The `Redirect` facade is for view routes, and on an API route it answers `200 {}`. The route's client type leaves a redirect out: gemi's client fetch follows it and gets the target page, not the route's data.
+- `HttpResponse.noContent({ headers? })` answers `204` with no body. The client hooks read it as `null`, and the route's data type is `null`. `HttpResponse.json(x, { status: 204 })` throws and points here.
+- `HttpResponse.text(body, { status?, headers? })` answers `body` as `text/plain; charset=utf-8`, with status 200 unless `status` says otherwise. A `Content-Type` in `headers` replaces that, for example `text/css`. The client hooks read a `text/plain` body as a string, which is the route's data type. A `text/plain` error is the refusal a string error body makes (`message` is the text). An HTML body still fails to parse, so a redirect that lands on a sign-in page is never treated as success.
+
+All three keep the request's cookies and headers and apply `options.headers` as `HttpResponse.json` does. A status of 400 or more is `no-store`. They also work from the error branches of [`this.stream(...)` and `this.file(...)` routes](./routing.md#streaming-and-range-requests).
 
 `HttpResponse` is for API routes. A view handler returns its props, and returning an `HttpResponse` from one throws. For a status there, throw an [error](#errors-and-validation) or use `Redirect`.
 

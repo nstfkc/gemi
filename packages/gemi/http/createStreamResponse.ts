@@ -6,6 +6,7 @@ import {
   type ByteRange,
 } from "./range";
 import type { ReadResult } from "../services/file-storage/drivers/types";
+import type { HttpResponse } from "./HttpResponse";
 
 export type StreamBody =
   | Blob
@@ -46,8 +47,14 @@ export type StreamDescriptor = {
 export type StreamReadResult = ReadResult &
   Pick<StreamDescriptor, "download" | "status" | "headers">;
 
+/**
+ * What a `this.stream()` handler returns. An `HttpResponse` (`HttpResponse.error`,
+ * `.text()`, `.redirect()`) is answered as it is on any api route, for the
+ * branches that serve no bytes.
+ */
 export type StreamOutput =
   | StreamReadResult
+  | HttpResponse<any, any>
   | Blob
   | Response
   | StreamDescriptor
@@ -97,7 +104,9 @@ export function createUnsatisfiableResponse(total: number): Response {
   });
 }
 
-async function normalize(output: Exclude<StreamOutput, Response | null | undefined>) {
+async function normalize(
+  output: Exclude<StreamOutput, Response | HttpResponse<any, any> | null | undefined>,
+) {
   if (output instanceof Blob) {
     return {
       body: output,
@@ -159,7 +168,9 @@ async function normalize(output: Exclude<StreamOutput, Response | null | undefin
  * both places would append `Set-Cookie` twice.
  */
 export async function createStreamResponse(
-  output: StreamOutput,
+  // An `HttpResponse` never gets here: `StreamRouteHandler` hands it to the
+  // api dispatcher, which writes the request context onto it.
+  output: Exclude<StreamOutput, HttpResponse<any, any>>,
   options: { range: ByteRange | null; method?: string },
 ): Promise<Response> {
   // A handler that built its own Response owns it completely.
