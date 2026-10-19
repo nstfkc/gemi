@@ -27,14 +27,18 @@ export class Url {
 
   static absolute<T extends ViewPaths>(
     key: T,
-    ...args: UrlParser<T> extends Record<string, never> ? [] : [params: UrlParser<T>]
+    ...args: UrlParser<T> extends Record<string, never>
+      ? []
+      : [params: UrlParser<T>]
   ) {
     return `${configuredAppOrigin()}${applyParams(String(key), args[0] ?? {})}`;
   }
 
   static relative<T extends ViewPaths>(
     key: T,
-    ...args: UrlParser<T> extends Record<string, never> ? [] : [params: UrlParser<T>]
+    ...args: UrlParser<T> extends Record<string, never>
+      ? []
+      : [params: UrlParser<T>]
   ) {
     return applyParams(String(key), args[0] ?? {});
   }
@@ -48,7 +52,9 @@ export class Url {
   static forDomain<T extends ViewPaths>(
     target: DomainTarget,
     key: T,
-    ...args: UrlParser<T> extends Record<string, never> ? [] : [params: UrlParser<T>]
+    ...args: UrlParser<T> extends Record<string, never>
+      ? []
+      : [params: UrlParser<T>]
   ) {
     const resolver = app(DomainRouter).resolver;
     if (!resolver) {
@@ -57,9 +63,7 @@ export class Url {
     const raw = RequestContext.getStore()?.req?.rawRequest;
     const origin = raw ? resolver.publicOrigin(raw) : configuredAppOrigin();
     if (!origin) {
-      throw new Error(
-        "`Url.forDomain` outside a request needs `HOST_NAME` (or `APP_URL`) for the protocol.",
-      );
+      throw new Error("`Url.forDomain` outside a request needs `HOST_NAME` (or `APP_URL`) for the protocol.");
     }
     return domainUrl(
       { root: resolver.root, origin },
