@@ -866,7 +866,8 @@ export type ${schema.name}Unique = ${union};
 
 /**
  * The descriptor itself: the one type every signature on the model is built
- * from, and the only thing `orm/types.ts` reads.
+ * from, and the only thing `orm/types.ts` reads. `name` is what typed scalar
+ * columns (`static $columns`, #1001) are looked up by.
  */
 function typesInterface(schema: ModelSchema): string {
   const json = Object.values(schema.fields)
@@ -881,6 +882,7 @@ function typesInterface(schema: ModelSchema): string {
   const jsonMember = json.length > 0 ? `\n  json: {\n${json.join("\n")}\n  };` : "";
   return `
 export interface ${schema.name}Types extends ModelTypeInfo {
+  name: ${JSON.stringify(schema.name)};
   scalars: ${schema.name}Scalars;
   relations: ${schema.name}Relations;
   unique: ${schema.name}Unique;

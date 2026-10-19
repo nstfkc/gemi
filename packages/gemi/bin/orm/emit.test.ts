@@ -1230,3 +1230,21 @@ describe("typed Json columns (#995)", () => {
     expect(emitArtifacts([USER, POST])["models.ts"]).not.toContain("json: {");
   });
 });
+
+describe("typed scalar columns (#1001)", () => {
+  const SITE = model({
+    name: "Site",
+    fields: [field({ name: "id", isId: true }), field({ name: "format", type: "String" })],
+  });
+  const models = emitArtifacts([SITE])["models.ts"];
+
+  test("each descriptor carries its model's name, which ScalarColumns is keyed by", () => {
+    expect(models).toContain(
+      ["export interface SiteTypes extends ModelTypeInfo {", '  name: "Site";', "  scalars: SiteScalars;"].join("\n"),
+    );
+  });
+
+  test("String columns stay string in scalars and create", () => {
+    expect(models).toContain("  format: string;");
+  });
+});

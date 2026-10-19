@@ -35,14 +35,15 @@ import {
   isEncryptionRaw,
 } from "./encryption";
 import {
-  isJsonLenient,
-  jsonColumnsOf,
-  markJsonLenient,
-  parseJsonFolded,
-  parseJsonRows,
-  validateJsonWriteArgs,
+  isLenient,
+  markLenient,
+  parseTypedFolded,
+  parseTypedRows,
+  typedColumnsOf,
+  validateTypedWriteArgs,
   type JsonColumnSpecs,
-} from "./json-columns";
+  type ScalarColumnSpecs,
+} from "./typed-columns";
 import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
   LockOutsideTransactionError,
@@ -126,7 +127,7 @@ const RETURNS_ROWS = new Set<Operation>([
 /**
  * The operations in `RETURNS_ROWS` that write. Their rows (and those of the
  * reads they make first, and of their includes) are parsed leniently: see
- * `markJsonLenient`.
+ * `markLenient`.
  */
 const WRITES_RETURNING_ROWS = new Set<Operation>(["create", "update", "upsert", "delete"]);
 
@@ -281,9 +282,25 @@ export abstract class Model {
    *
    * Read from the class registered under the model's name, so the generated
    * base and `Model.on(...)` variants parse the same columns. The row types
-   * follow through `gemi.d.ts` (`JsonColumns`). See `orm/json-columns.ts`.
+   * follow through `gemi.d.ts` (`JsonColumns`). See `orm/typed-columns.ts`.
    */
   static $json?: JsonColumnSpecs;
+
+  /**
+   * Schemas for the model's scalar (`String`) columns (#1001), the sibling of
+   * `$json`: each column is parsed on every read and validated on every
+   * write, so an id into a code-side catalogue reads as the catalogue's union.
+   *
+   *     export class Website extends WebsiteModel {
+   *       static $columns = {
+   *         designStyle: { schema: s.enum(DESIGN_STYLE_IDS), invalid: "null" },
+   *       };
+   *     }
+   *
+   * `where` keeps the column's own filter. The row types follow through
+   * `gemi.d.ts` (`ScalarColumns`). See `orm/typed-columns.ts`.
+   */
+  static $columns?: ScalarColumnSpecs;
 
   /**
    * The connection this class's operations run on, set only by `on` below.
@@ -1022,7 +1039,7 @@ export abstract class Model {
       // Marked ORM-issued so a `$skipNoopUpdates` model's default does not
       // reach the `update` half: `upsert` takes no `skipIfUnchanged`, and its
       // one-statement `on conflict` form could not honour one.
-      const inner = markJsonLenient(markOrmIssued({ ...options })) as ExecOptions;
+      const inner = markLenient(markOrmIssued({ ...options })) as ExecOptions;
 
       return transact(db, async () => {
         const found = await this.$exec("findFirst", { where }, inner);
@@ -1155,19 +1172,21 @@ export abstract class Model {
       effective = { ...effective, skipIfUnchanged: true };
     }
 
+    // This model's typed columns (`$json` #995, `$columns` #1001), validated
+    // and replaced by their parsed values. Same place and reasons as
+    // encryption: after the `createMany` split, and nested writes are
+    // validated by their own model. Before encryption, so a typed `String`
+    // column that is also encrypted is validated as plaintext.
+    const typedColumns = typedColumnsOf(schema, this);
+    if (!raw) effective = validateTypedWriteArgs(typedColumns, schema.name, op, effective);
+    const lenient = WRITES_RETURNING_ROWS.has(op) || isLenient(options);
+
     // This model's encrypted columns, encrypted. After the `createMany` split
     // above — each chunk re-enters `$exec` and is encrypted there, so doing it
     // first would encrypt twice — and before the plan, though only the bound
     // values change, never the plan's shape. Nested writes into other models
     // are encrypted by those models' own `$exec`.
     if (!raw) effective = encryptWriteArgs(schema, op, effective);
-
-    // This model's typed `Json` columns (#995), validated and replaced by their
-    // parsed values. Same place and reasons as encryption: after the
-    // `createMany` split, and nested writes are validated by their own model.
-    const jsonColumns = jsonColumnsOf(schema, this);
-    if (!raw) effective = validateJsonWriteArgs(jsonColumns, schema.name, op, effective);
-    const jsonLenient = WRITES_RETURNING_ROWS.has(op) || isJsonLenient(options);
 
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
@@ -1189,8 +1208,8 @@ export abstract class Model {
             ? markPreScoped({ strategy: options?.strategy })
             : { strategy: options?.strategy },
         );
-        // A write's includes are read after it was saved: see `markJsonLenient`.
-        const base = jsonLenient ? markJsonLenient(marked) : marked;
+        // A write's includes are read after it was saved: see `markLenient`.
+        const base = lenient ? markLenient(marked) : marked;
         return registry
           .get<typeof Model>(model)
           .$exec(
@@ -1325,7 +1344,7 @@ export abstract class Model {
           // it, so they are the same string, and taking it from the variable
           // keeps the two from drifting if the guard ever admits a second
           // operation that has to read before it writes.
-          markJsonLenient(
+          markLenient(
             markRedactedAs(markPreScoped({ strategy: options?.strategy }), op),
           ) as never,
         );
@@ -1394,9 +1413,9 @@ export abstract class Model {
       // see the plaintext. A value that does not decrypt throws.
       if (!raw && RETURNS_ROWS.has(op)) decryptRows(schema, rowsOf(result));
 
-      // Then its typed `Json` columns (#995), parsed, so a policy's `redact`
+      // Then its typed columns (#995, #1001), parsed, so a policy's `redact`
       // and the caller see the schema's values.
-      if (!raw && RETURNS_ROWS.has(op)) parseJsonRows(jsonColumns, schema.name, rowsOf(result), jsonLenient);
+      if (!raw && RETURNS_ROWS.has(op)) parseTypedRows(typedColumns, schema.name, rowsOf(result), lenient);
 
       // `skipIfUnchanged` (#664): an `update` that matched its row but changed
       // nothing wrote nothing, so `returning` came back empty. The caller still
@@ -1413,7 +1432,7 @@ export abstract class Model {
         const current = await this.$exec(
           "findFirst",
           { where, ...projection },
-          markJsonLenient(
+          markLenient(
             markRedactedAs(
               markPreScoped({ strategy: options?.strategy, track: options?.track }),
               op,
@@ -1534,10 +1553,10 @@ export abstract class Model {
             { as: relation.as, model: relation.model, folded: relation.root.folded },
             parents,
           );
-          parseJsonFolded(
+          parseTypedFolded(
             { as: relation.as, model: relation.model, folded: relation.root.folded },
             parents,
-            jsonLenient,
+            lenient,
           );
         }
       }

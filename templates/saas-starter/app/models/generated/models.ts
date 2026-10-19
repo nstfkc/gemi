@@ -79,6 +79,7 @@ export type AccountRelations = {
 export type AccountUnique = { id: number } | { publicId: string };
 
 export interface AccountTypes extends ModelTypeInfo {
+  name: "Account";
   scalars: AccountScalars;
   relations: AccountRelations;
   unique: AccountUnique;
@@ -278,6 +279,7 @@ export type FeatureFlagRelations = Record<never, never>;
 export type FeatureFlagUnique = { id: number } | { publicId: string } | { key: string };
 
 export interface FeatureFlagTypes extends ModelTypeInfo {
+  name: "FeatureFlag";
   scalars: FeatureFlagScalars;
   relations: FeatureFlagRelations;
   unique: FeatureFlagUnique;
@@ -472,6 +474,7 @@ export type LedgerRelations = {
 export type LedgerUnique = { tenantId_code: { tenantId: number; code: string } };
 
 export interface LedgerTypes extends ModelTypeInfo {
+  name: "Ledger";
   scalars: LedgerScalars;
   relations: LedgerRelations;
   unique: LedgerUnique;
@@ -668,6 +671,7 @@ export type LedgerEntryRelations = {
 export type LedgerEntryUnique = { id: number };
 
 export interface LedgerEntryTypes extends ModelTypeInfo {
+  name: "LedgerEntry";
   scalars: LedgerEntryScalars;
   relations: LedgerEntryRelations;
   unique: LedgerEntryUnique;
@@ -862,6 +866,7 @@ export type LedgerNoteRelations = {
 export type LedgerNoteUnique = { id: number };
 
 export interface LedgerNoteTypes extends ModelTypeInfo {
+  name: "LedgerNote";
   scalars: LedgerNoteScalars;
   relations: LedgerNoteRelations;
   unique: LedgerNoteUnique;
@@ -1056,6 +1061,7 @@ export type LedgerSealRelations = {
 export type LedgerSealUnique = { id: number } | { tenantId_ledgerCode: { tenantId: number; ledgerCode: string } };
 
 export interface LedgerSealTypes extends ModelTypeInfo {
+  name: "LedgerSeal";
   scalars: LedgerSealScalars;
   relations: LedgerSealRelations;
   unique: LedgerSealUnique;
@@ -1250,6 +1256,7 @@ export type MagicLinkTokenRelations = Record<never, never>;
 export type MagicLinkTokenUnique = { id: number } | { token_email: { token: string; email: string } } | { pin_email: { pin: string; email: string } };
 
 export interface MagicLinkTokenTypes extends ModelTypeInfo {
+  name: "MagicLinkToken";
   scalars: MagicLinkTokenScalars;
   relations: MagicLinkTokenRelations;
   unique: MagicLinkTokenUnique;
@@ -1442,6 +1449,7 @@ export type MembershipRelations = Record<never, never>;
 export type MembershipUnique = { organizationId_userId: { organizationId: number; userId: number } };
 
 export interface MembershipTypes extends ModelTypeInfo {
+  name: "Membership";
   scalars: MembershipScalars;
   relations: MembershipRelations;
   unique: MembershipUnique;
@@ -1642,6 +1650,7 @@ export type OrganizationRelations = {
 export type OrganizationUnique = { id: number } | { publicId: string };
 
 export interface OrganizationTypes extends ModelTypeInfo {
+  name: "Organization";
   scalars: OrganizationScalars;
   relations: OrganizationRelations;
   unique: OrganizationUnique;
@@ -1842,6 +1851,7 @@ export type OrganizationInvitationRelations = {
 export type OrganizationInvitationUnique = { id: number } | { publicId: string };
 
 export interface OrganizationInvitationTypes extends ModelTypeInfo {
+  name: "OrganizationInvitation";
   scalars: OrganizationInvitationScalars;
   relations: OrganizationInvitationRelations;
   unique: OrganizationInvitationUnique;
@@ -2036,6 +2046,7 @@ export type PasswordResetTokenRelations = {
 export type PasswordResetTokenUnique = { id: number } | { token: string };
 
 export interface PasswordResetTokenTypes extends ModelTypeInfo {
+  name: "PasswordResetToken";
   scalars: PasswordResetTokenScalars;
   relations: PasswordResetTokenRelations;
   unique: PasswordResetTokenUnique;
@@ -2226,6 +2237,7 @@ export type PostRelations = {
 export type PostUnique = { id: number };
 
 export interface PostTypes extends ModelTypeInfo {
+  name: "Post";
   scalars: PostScalars;
   relations: PostRelations;
   unique: PostUnique;
@@ -2418,6 +2430,7 @@ export type ProfileRelations = {
 export type ProfileUnique = { id: number } | { userId: number };
 
 export interface ProfileTypes extends ModelTypeInfo {
+  name: "Profile";
   scalars: ProfileScalars;
   relations: ProfileRelations;
   unique: ProfileUnique;
@@ -2622,6 +2635,7 @@ export type SessionRelations = {
 export type SessionUnique = { id: number } | { token: string };
 
 export interface SessionTypes extends ModelTypeInfo {
+  name: "Session";
   scalars: SessionScalars;
   relations: SessionRelations;
   unique: SessionUnique;
@@ -2830,6 +2844,7 @@ export type SocialAccountRelations = {
 export type SocialAccountUnique = { id: number } | { provider_providerId: { provider: string; providerId: string } };
 
 export interface SocialAccountTypes extends ModelTypeInfo {
+  name: "SocialAccount";
   scalars: SocialAccountScalars;
   relations: SocialAccountRelations;
   unique: SocialAccountUnique;
@@ -3020,6 +3035,7 @@ export type TagRelations = {
 export type TagUnique = { id: number } | { label: string };
 
 export interface TagTypes extends ModelTypeInfo {
+  name: "Tag";
   scalars: TagScalars;
   relations: TagRelations;
   unique: TagUnique;
@@ -3241,6 +3257,7 @@ export type UserRelations = {
 export type UserUnique = { id: number } | { publicId: string } | { email: string };
 
 export interface UserTypes extends ModelTypeInfo {
+  name: "User";
   scalars: UserScalars;
   relations: UserRelations;
   unique: UserUnique;
