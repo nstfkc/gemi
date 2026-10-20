@@ -5,7 +5,15 @@ import { addUsage, emptyUsage } from "../runtime";
 import type { Infer, Schema } from "../Schema";
 import type { AgentMessage, Usage } from "../types";
 import { measureUsage } from "../usageMeter";
-import { deltaOf, meanOf, passRate, type Delta, type Estimate } from "./stats";
+import {
+  adjust,
+  meanOf,
+  passRate,
+  passRateDelta,
+  scoreDelta,
+  type Delta,
+  type Estimate,
+} from "./stats";
 
 /**
  * A shared eval harness (#1005): cases × runs, graders, LLM judges, judge
@@ -135,7 +143,15 @@ export type GraderKit<I, O> = {
 };
 
 /** USD per million tokens. `cachedInput` defaults to `input`. */
-export type ModelPrice = { input: number; output: number; cachedInput?: number };
+export type ModelPrice = {
+  input: number;
+  output: number;
+  cachedInput?: number;
+  /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`);
+   *  they're priced as text when these are absent. */
+  imageInput?: number;
+  imageOutput?: number;
+};
 
 /** Prices by model id. A key also prices the ids it is a prefix of
  *  (`gpt-5.4` prices `gpt-5.4-2026-03-05`); the longest key wins. */
@@ -163,11 +179,16 @@ export type CreateEvalParams<I, O> = {
 export type EvalSample<O = unknown> = {
   case: string;
   run: number;
-  /** Every applicable grade passed (and the task didn't throw). */
+  /** Every applicable grade passed (and the task didn't throw). False when
+   *  no grader applied. */
   pass: boolean;
-  /** A gate failed: reported, left out of the statistics. */
+  /** Left out of the statistics: a gate failed, or no grader applied
+   *  (`ungraded`). Still reported. */
   excluded: boolean;
-  /** The mean of the grades' scores; 0 when the task threw. */
+  /** No grader applied to this sample: nothing checked it, so it is neither
+   *  a pass nor a fail. */
+  ungraded?: true;
+  /** The mean of the grades' scores; 0 when the task threw or nothing graded it. */
   score: number;
   /** By grader name; graders that answered "does not apply" are absent. */
   grades: Record<string, Grade>;
@@ -189,7 +210,7 @@ export type GraderSummary = { passRate: Estimate; score: Estimate };
 
 export type EvalSummary = {
   samples: number;
-  /** Samples no gate excluded. */
+  /** Samples counted in the statistics: no gate failed and some grader applied. */
   kept: number;
   passed: number;
   /** Samples whose task threw. */
@@ -214,6 +235,14 @@ export type EvalReport<O = unknown> = {
   startedAt: string;
   durationMs: number;
   runs: number;
+  /**
+   * The run was stopped (`signal`, or an `onSample` that threw) before every
+   * planned sample ran. Its statistics cover only what ran, so
+   * `Eval.compare` refuses it.
+   */
+  aborted: boolean;
+  /** The case ids this run was asked for (after `only`), whether or not all ran. */
+  planned: string[];
   samples: EvalSample<O>[];
   cases: Record<string, CaseSummary>;
   graders: Record<string, GraderSummary>;
@@ -237,15 +266,42 @@ export type EvalRunOptions<O> = {
   signal?: AbortSignal;
   /** Keep each sample's output on the report. Default false. */
   keepOutputs?: boolean;
-  /** Called as each sample is graded. */
+  /** Called as each sample is graded. If it throws, the run stops starting
+   *  samples (and aborts the ones running), then rejects with that error. */
   onSample?: (sample: EvalSample<O>) => void;
+};
+
+export type EvalCompareOptions = {
+  /** Default 0.05. */
+  alpha?: number;
+  /**
+   * How `alpha` is held across the comparison's many tests (every case and
+   * grader, on pass rate and score). `"holm"` (default): Holm's step-down,
+   * so the chance of any false "significant" in the whole comparison stays
+   * under `alpha`. `"none"`: each test at `alpha` alone, which with 20 cases
+   * flags about two changes per comparison by chance.
+   */
+  adjust?: "holm" | "none";
 };
 
 export type EvalComparison = {
   totals: { passRate: Delta; score: Delta };
   cases: Record<string, { passRate: Delta; score: Delta }>;
   graders: Record<string, { passRate: Delta; score: Delta }>;
-  /** "case moon: pass rate 1.00 → 0.33", for each significant drop. */
+  /**
+   * Cases and graders only one report has. One the current report lacks is
+   * also a regression: a case that didn't run is not a case that passed.
+   */
+  missing: {
+    cases: { fromCurrent: string[]; fromBaseline: string[] };
+    graders: { fromCurrent: string[]; fromBaseline: string[] };
+  };
+  /** Tests that had a p (the family `adjust` corrects over). */
+  comparisons: number;
+  alpha: number;
+  adjust: "holm" | "none";
+  /** "case moon: pass rate 1.00 → 0.00 (p = 0.029)" for each significant
+   *  drop, and each case or grader missing from the current report. */
   regressions: string[];
   improvements: string[];
 };
@@ -300,12 +356,23 @@ export class Eval<I = unknown, O = unknown> {
     return { ...spec, kind: "judge" };
   }
 
-  static compare(baseline: EvalReport<any>, current: EvalReport<any>): EvalComparison {
-    return compareReports(baseline, current);
+  /**
+   * Compares a report with a baseline. Throws when either was aborted: its
+   * statistics are of the samples that happened to run.
+   */
+  static compare(
+    baseline: EvalReport<any>,
+    current: EvalReport<any>,
+    options: EvalCompareOptions = {},
+  ): EvalComparison {
+    return compareReports(baseline, current, options);
   }
 
-  static format(report: EvalReport<any>, options: { baseline?: EvalReport<any> } = {}): string {
-    return formatReport(report, options.baseline);
+  static format(
+    report: EvalReport<any>,
+    options: { baseline?: EvalReport<any> } & EvalCompareOptions = {},
+  ): string {
+    return formatReport(report, options);
   }
 
   /** Calibrates the judges, then runs every case `runs` times and grades it. */
@@ -322,37 +389,51 @@ export class Eval<I = unknown, O = unknown> {
     }
     const runs = options.runs ?? this.runs;
     const started = Date.now();
-    const signal = options.signal ?? new AbortController().signal;
+    // The caller's signal, and ours: a throwing `onSample` stops the other
+    // workers rather than leaving them to spend tokens for a rejected run.
+    const stop = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
+    const selected = this.cases.filter((test) => !only || only.has(test.id));
 
     const calibration: Record<string, CalibrationResult> = {};
     for (const [name, grader] of Object.entries(this.graders)) {
+      if (signal.aborted) break;
       if (typeof grader === "function" || grader.kind !== "judge" || !grader.calibration) continue;
-      calibration[name] = await this.calibrate(grader);
+      calibration[name] = await this.calibrate(grader, signal);
     }
 
-    const jobs = this.cases
-      .filter((test) => !only || only.has(test.id))
-      .flatMap((test) => Array.from({ length: runs }, (_, at) => ({ test, run: at + 1 })));
+    const jobs = selected.flatMap((test) =>
+      Array.from({ length: runs }, (_, at) => ({ test, run: at + 1 })),
+    );
     const samples: (EvalSample<O> | undefined)[] = Array.from({ length: jobs.length });
     let next = 0;
+    let failure: { error: unknown } | undefined;
     const worker = async () => {
       while (next < jobs.length && !signal.aborted) {
         const at = next++;
         const job = jobs[at]!;
         const sample = await this.sample(job.test, job.run, signal, options.keepOutputs ?? false);
         samples[at] = sample;
-        options.onSample?.(sample);
+        try {
+          options.onSample?.(sample);
+        } catch (error) {
+          failure ??= { error };
+          stop.abort(error);
+        }
       }
     };
     const workers = Math.min(options.concurrency ?? this.concurrency, jobs.length);
     await Promise.all(Array.from({ length: workers }, worker));
+    if (failure) throw failure.error;
 
+    const ran = samples.filter((sample): sample is EvalSample<O> => sample !== undefined);
     return this.report(
-      samples.filter((sample): sample is EvalSample<O> => sample !== undefined),
+      ran,
       calibration,
       runs,
       new Date(started).toISOString(),
       Date.now() - started,
+      { aborted: signal.aborted || ran.length < jobs.length, planned: selected.map((test) => test.id) },
     );
   }
 
@@ -380,7 +461,7 @@ export class Eval<I = unknown, O = unknown> {
       const ctx: GraderContext<I> = { case: test, input: test.input, run };
       for (const [name, grader] of Object.entries(this.graders)) {
         if (test.skip?.includes(name)) continue;
-        const grade = await gradeWith(grader, output as O, ctx);
+        const grade = await gradeWith(grader, output as O, ctx, signal);
         if (!grade) continue;
         grades[name] = grade;
         if (!grade.pass && typeof grader !== "function" && grader.gate) excluded = true;
@@ -388,15 +469,19 @@ export class Eval<I = unknown, O = unknown> {
     });
 
     const scores = Object.values(grades).map((grade) => grade.score);
+    // Nothing applied: not a pass with a perfect score, which would lift the
+    // pass rate with samples nobody checked. Left out instead.
+    const ungraded = error === undefined && scores.length === 0;
     const priced = this.pricing
       ? costOf(this.pricing, task.byModel).cost + costOf(this.pricing, judged.byModel).cost
       : undefined;
     return {
       case: test.id,
       run,
-      pass: error === undefined && Object.values(grades).every((grade) => grade.pass),
-      excluded,
-      score: error !== undefined || scores.length === 0 ? (error ? 0 : 1) : mean(scores),
+      pass: error === undefined && !ungraded && Object.values(grades).every((grade) => grade.pass),
+      excluded: excluded || ungraded,
+      ...(ungraded ? { ungraded: true as const } : {}),
+      score: error !== undefined || ungraded ? 0 : mean(scores),
       grades,
       ...(error !== undefined ? { error } : {}),
       ...(keepOutput && error === undefined ? { output } : {}),
@@ -408,15 +493,19 @@ export class Eval<I = unknown, O = unknown> {
     };
   }
 
-  private async calibrate(grader: JudgeGrader<I, O, any>): Promise<CalibrationResult> {
+  private async calibrate(
+    grader: JudgeGrader<I, O, any>,
+    signal: AbortSignal,
+  ): Promise<CalibrationResult> {
     const calibration = grader.calibration!;
     const disagreements: CalibrationResult["disagreements"] = [];
     let agreed = 0;
     const measured = await measureUsage(async () => {
       for (const [index, example] of calibration.examples.entries()) {
+        if (signal.aborted) break;
         const id = example.id ?? `example-${index + 1}`;
         const ctx: GraderContext<I> = { case: { id, input: example.input }, input: example.input, run: 0 };
-        const grade = await gradeWith(grader, example.output, ctx);
+        const grade = await gradeWith(grader, example.output, ctx, signal);
         const got = grade?.pass ?? false;
         if (got === example.expected) agreed++;
         else disagreements.push({ id, expected: example.expected, got, ...(grade?.note ? { note: grade.note } : {}) });
@@ -439,12 +528,18 @@ export class Eval<I = unknown, O = unknown> {
     runs: number,
     startedAt: string,
     durationMs: number,
+    progress: { aborted: boolean; planned: string[] },
   ): EvalReport<O> {
+    const gates = new Set(
+      Object.entries(this.graders)
+        .filter(([, grader]) => typeof grader !== "function" && grader.gate)
+        .map(([name]) => name),
+    );
     const cases: Record<string, CaseSummary> = {};
     for (const test of this.cases) {
       const mine = samples.filter((sample) => sample.case === test.id);
       if (mine.length === 0) continue;
-      cases[test.id] = { ...summarize(mine), graders: summarizeGraders(mine) };
+      cases[test.id] = { ...summarize(mine), graders: summarizeGraders(mine, gates) };
     }
     let usage = emptyUsage();
     let judgeUsage = emptyUsage();
@@ -462,9 +557,11 @@ export class Eval<I = unknown, O = unknown> {
       startedAt,
       durationMs,
       runs,
+      aborted: progress.aborted,
+      planned: progress.planned,
       samples,
       cases,
-      graders: summarizeGraders(samples),
+      graders: summarizeGraders(samples, gates),
       calibration,
       totals: {
         ...summarize(samples),
@@ -484,12 +581,13 @@ async function gradeWith<I, O>(
   grader: EvalGrader<I, O>,
   output: O,
   ctx: GraderContext<I>,
+  signal: AbortSignal,
 ): Promise<Grade | null> {
   const threshold = typeof grader === "function" ? 0.5 : (grader.threshold ?? 0.5);
   try {
     if (typeof grader === "function") return toGrade(await grader(output, ctx), threshold);
     if (grader.kind !== "judge") return toGrade(await grader.check(output, ctx), threshold);
-    return await judgeWith(grader, output, ctx, threshold);
+    return await judgeWith(grader, output, ctx, threshold, signal);
   } catch (thrown) {
     return { pass: false, score: 0, error: messageOf(thrown) };
   }
@@ -500,12 +598,14 @@ async function judgeWith<I, O>(
   output: O,
   ctx: GraderContext<I>,
   threshold: number,
+  signal: AbortSignal,
 ): Promise<Grade | null> {
   const asked = await judge.prompt(output, ctx);
   const input = typeof asked === "string" ? { prompt: asked } : asked;
   const grades: Grade[] = [];
-  for (let at = 0; at < (judge.samples ?? 1); at++) {
+  for (let at = 0; at < (judge.samples ?? 1) && !signal.aborted; at++) {
     const result = await generate({
+      signal,
       provider: judge.provider,
       ...(judge.instructions !== undefined ? { instructions: judge.instructions } : {}),
       ...input,
@@ -564,12 +664,21 @@ function summarize(samples: readonly EvalSample<any>[]): EvalSummary {
   };
 }
 
-function summarizeGraders(samples: readonly EvalSample<any>[]): Record<string, GraderSummary> {
+/**
+ * Per grader, over the kept samples. A gate is summarized over every sample
+ * it graded: over the kept ones only, its own failures would have excluded
+ * themselves and its rate would always read 1.
+ */
+function summarizeGraders(
+  samples: readonly EvalSample<any>[],
+  gates: ReadonlySet<string>,
+): Record<string, GraderSummary> {
   const kept = samples.filter((sample) => !sample.excluded);
-  const names = [...new Set(kept.flatMap((sample) => Object.keys(sample.grades)))];
+  const names = [...new Set(samples.flatMap((sample) => Object.keys(sample.grades)))];
   return Object.fromEntries(
     names.map((name) => {
-      const grades = kept.flatMap((sample) => (sample.grades[name] ? [sample.grades[name]!] : []));
+      const from = gates.has(name) ? samples : kept;
+      const grades = from.flatMap((sample) => (sample.grades[name] ? [sample.grades[name]!] : []));
       return [
         name,
         {
@@ -604,10 +713,14 @@ function costOf(
       continue;
     }
     const cached = usage.cachedInputTokens ?? 0;
+    const imageIn = usage.imageInputTokens ?? 0;
+    const imageOut = usage.imageOutputTokens ?? 0;
     cost +=
-      ((usage.inputTokens - cached) * price.input +
+      ((usage.inputTokens - cached - imageIn) * price.input +
         cached * (price.cachedInput ?? price.input) +
-        usage.outputTokens * price.output) /
+        imageIn * (price.imageInput ?? price.input) +
+        (usage.outputTokens - imageOut) * price.output +
+        imageOut * (price.imageOutput ?? price.output)) /
       1_000_000;
   }
   return { cost, unpriced };
@@ -625,57 +738,113 @@ function mergeByModel(...maps: Record<string, Usage>[]): Record<string, Usage> {
 
 // --- compare and format ------------------------------------------------------
 
-function compareReports(baseline: EvalReport<any>, current: EvalReport<any>): EvalComparison {
-  const regressions: string[] = [];
-  const improvements: string[] = [];
-  const both = <T extends GraderSummary>(
-    label: string,
-    before: Record<string, T>,
-    after: Record<string, T>,
-  ) =>
+function compareReports(
+  baseline: EvalReport<any>,
+  current: EvalReport<any>,
+  options: EvalCompareOptions,
+): EvalComparison {
+  for (const [which, report] of [
+    ["baseline", baseline],
+    ["current report", current],
+  ] as const) {
+    if (report.aborted) {
+      throw new Error(
+        `Eval.compare: the ${which} for "${report.name}" was aborted (${report.samples.length} samples ran). Its statistics cover only the samples that ran; run it again in full.`,
+      );
+    }
+  }
+  const alpha = options.alpha ?? 0.05;
+  const method = options.adjust ?? "holm";
+  const all: { label: string; passRate: Delta; score: Delta }[] = [];
+  const pair = (label: string, before: GraderSummary, after: GraderSummary) => {
+    const entry = {
+      label,
+      passRate: passRateDelta(before.passRate, after.passRate),
+      score: scoreDelta(before.score, after.score),
+    };
+    all.push(entry);
+    return { passRate: entry.passRate, score: entry.score };
+  };
+  const both = (label: string, before: Record<string, GraderSummary>, after: Record<string, GraderSummary>) =>
     Object.fromEntries(
       Object.keys(after)
         .filter((key) => key in before)
-        .map((key) => {
-          const entry = deltas(`${label} ${key}`, before[key]!, after[key]!);
-          return [key, entry];
-        }),
+        .map((key) => [key, pair(`${label} ${key}`, before[key]!, after[key]!)]),
     );
-  const deltas = (label: string, before: GraderSummary, after: GraderSummary) => {
-    const entry = {
-      passRate: deltaOf(before.passRate, after.passRate),
-      score: deltaOf(before.score, after.score),
-    };
+  const missingOf = (before: string[], after: string[]) => ({
+    fromCurrent: before.filter((key) => !after.includes(key)),
+    fromBaseline: after.filter((key) => !before.includes(key)),
+  });
+
+  const totals = pair("total", baseline.totals, current.totals);
+  const cases = both("case", baseline.cases, current.cases);
+  const graders = both("grader", baseline.graders, current.graders);
+  const deltas = all.flatMap((entry) => [entry.passRate, entry.score]);
+  adjust(deltas, alpha, method);
+
+  const missing = {
+    cases: missingOf(
+      [...new Set([...(baseline.planned ?? []), ...Object.keys(baseline.cases)])],
+      [...new Set([...(current.planned ?? []), ...Object.keys(current.cases)])],
+    ),
+    graders: missingOf(Object.keys(baseline.graders), Object.keys(current.graders)),
+  };
+  const regressions: string[] = [
+    ...missing.cases.fromCurrent.map((id) => `case ${id}: in the baseline, missing from this report`),
+    ...missing.graders.fromCurrent.map((id) => `grader ${id}: in the baseline, missing from this report`),
+  ];
+  const improvements: string[] = [];
+  for (const entry of all) {
     for (const [what, delta] of [
       ["pass rate", entry.passRate],
       ["score", entry.score],
     ] as const) {
       if (!delta.significant) continue;
-      const line = `${label}: ${what} ${delta.before.toFixed(2)} → ${delta.after.toFixed(2)}`;
+      const line = `${entry.label}: ${what} ${delta.before.toFixed(2)} → ${delta.after.toFixed(2)} (p = ${formatP(delta.pAdjusted!)})`;
       (delta.delta < 0 ? regressions : improvements).push(line);
     }
-    return entry;
-  };
+  }
   return {
-    totals: deltas("total", baseline.totals, current.totals),
-    cases: both("case", baseline.cases, current.cases),
-    graders: both("grader", baseline.graders, current.graders),
+    totals,
+    cases,
+    graders,
+    missing,
+    comparisons: deltas.filter((delta) => delta.p !== null).length,
+    alpha,
+    adjust: method,
     regressions,
     improvements,
   };
 }
 
-function formatReport(report: EvalReport<any>, baseline?: EvalReport<any>): string {
-  const comparison = baseline ? compareReports(baseline, report) : undefined;
+function formatP(p: number): string {
+  return p < 0.001 ? "<0.001" : p.toFixed(3);
+}
+
+function formatReport(
+  report: EvalReport<any>,
+  options: { baseline?: EvalReport<any> } & EvalCompareOptions,
+): string {
+  const comparison =
+    options.baseline && !options.baseline.aborted && !report.aborted
+      ? compareReports(options.baseline, report, options)
+      : undefined;
   const { totals } = report;
   const lines: string[] = [];
   lines.push(
     `eval ${report.name}: ${totals.samples} samples, ${totals.kept} kept, ${totals.passed} passed, ${totals.errors} errors (${(report.durationMs / 1000).toFixed(1)}s)`,
   );
-  const rate = (estimate: Estimate) =>
-    estimate.n === 0
-      ? "-"
-      : `${estimate.mean.toFixed(2)} [${estimate.low.toFixed(2)}, ${estimate.high.toFixed(2)}]`;
+  if (report.aborted) {
+    lines.push(`ABORTED: only ${totals.samples} of the planned samples ran; not comparable.`);
+  }
+  const rate = (estimate: Estimate) => {
+    if (estimate.n === 0) return "-";
+    const mean = estimate.mean.toFixed(2);
+    if (estimate.low === null || estimate.high === null) {
+      return `${mean} (${estimate.n === 1 ? "n=1" : "no spread"})`;
+    }
+    return `${mean} [${estimate.low.toFixed(2)}, ${estimate.high.toFixed(2)}]`;
+  };
   const change = (delta: Delta | undefined) =>
     delta ? ` ${delta.delta >= 0 ? "+" : ""}${delta.delta.toFixed(2)}${delta.significant ? "*" : ""}` : "";
   const table = (title: string, rows: [string, string, string, string][]) => {
@@ -717,7 +886,10 @@ function formatReport(report: EvalReport<any>, baseline?: EvalReport<any>): stri
     `tokens: task ${tokens(totals.usage)}; judges ${tokens(totals.judgeUsage)}${totals.cost !== undefined ? `; cost $${totals.cost.toFixed(4)}` : ""}${totals.unpriced.length > 0 && totals.cost !== undefined ? ` (unpriced: ${totals.unpriced.join(", ")})` : ""}`,
   );
   if (comparison) {
-    lines.push("", "* significant (more than 1.96 standard errors)");
+    lines.push(
+      "",
+      `* significant at ${comparison.alpha} over ${comparison.comparisons} tests (${comparison.adjust === "holm" ? "Holm-adjusted" : "unadjusted"}; Fisher's exact for pass rates, Welch's t for scores)`,
+    );
     for (const line of comparison.regressions) lines.push(`regression: ${line}`);
     for (const line of comparison.improvements) lines.push(`improvement: ${line}`);
   }

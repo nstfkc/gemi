@@ -108,16 +108,18 @@ Before the samples run, the judge grades each example. `report.calibration.<grad
 - `totals`: `samples`, `kept`, `passed`, `errors`, `passRate`, `score`, `usage`, `judgeUsage`, `byModel`, `cost` and `unpriced`.
 - `calibration`: per judge.
 
-A sample **passes** when it didn't throw and every applicable grade passed. Its **score** is the mean of its grades' scores.
+A sample **passes** when it didn't throw and every applicable grade passed. Its **score** is the mean of its grades' scores. A sample that no grader applied to (all answered `null`, or the case skipped them) is `ungraded`: it is excluded from the statistics instead of counting as a pass.
+
+The report also has `aborted` and `planned` (the case ids the run was asked for). When the run was stopped through `signal`, `aborted` is `true` and the statistics cover only the samples that ran.
 
 ### Statistics
 
 `passRate` and `score` are `Estimate`s: `{ n, mean, stddev, low, high }`, where `low` and `high` bound the 95% interval.
 
 - A pass rate uses a Wilson interval. Two passes in three runs is 0.67 [0.21, 0.94], which is a reminder of how little three runs say.
-- A score uses the mean with a t-based interval.
+- A score uses the mean with a t interval. With a single value, or values that never varied, there is nothing to estimate the spread from: `low` and `high` are `null`, and `Eval.format` prints `(n=1)` or `(no spread)` rather than a zero-width interval.
 
-Excluded samples (a failed gate) are not counted.
+Excluded samples (a failed gate, or ungraded) are not counted, except that a gate's own pass rate counts every sample it graded. The totals treat every sample as independent; runs of the same case are correlated, so with `runs > 1` the totals' interval is narrower than it should be. Read the per-case rows for the honest picture.
 
 ### Tokens and cost
 
@@ -132,7 +134,7 @@ Eval.create({
 });
 ```
 
-A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`.
+A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text. Cache-write surcharges (some vendors bill writing to the prompt cache above the input rate) aren't modelled, because `Usage` doesn't report them.
 
 The same meter is available on its own:
 
@@ -142,7 +144,11 @@ import { measureUsage } from "gemi/ai";
 const { value, usage, byModel } = await measureUsage(() => agent.stream(params).result());
 ```
 
-Meters nest, and concurrent meters don't see each other's calls. Work that `fn` started and didn't wait for counts only if it finishes before `fn` returns.
+Meters nest, and concurrent meters don't see each other's calls. What it doesn't see:
+
+- **Work that `fn` started and didn't wait for** counts only if it finishes before `fn` returns.
+- **Background jobs.** A tool that hands work to `ctx.jobs.start` runs it in a queue worker, outside `fn`'s async context, so its model calls aren't metered even when the task waits for the job to settle.
+- **Compaction summaries made elsewhere.** A `contextWindow.compact` summary started in the background after an earlier run, or by a run that was stopped, is billed to the next run's `usage` but no meter sees it, so `measureUsage` can read less than `run.usage` there.
 
 ## Comparing with a baseline
 
@@ -158,7 +164,15 @@ if (diff.regressions.length > 0) process.exit(1);
 writeFileSync("evals/questions.json", JSON.stringify(report));
 ```
 
-`Eval.compare` gives the change in pass rate and score in total, per case and per grader, for the ids both reports have. A change is `significant` when it is larger than 1.96 standard errors of the difference. A side with a single sample is never significant, and with two or more samples on each side and no spread at all, any change is. `regressions` and `improvements` list the significant changes as text. `Eval.format` marks them with `*`.
+`Eval.compare(baseline, current, { alpha, adjust })` gives the change in pass rate and score in total, per case and per grader, each with the test's `p`:
+
+- **Pass rates** use Fisher's exact test. 2/2 against 0/2 has p = 0.33, which is not a regression; 4/4 against 0/4 has p = 0.03.
+- **Scores** use Welch's t with its own degrees of freedom. A score measured once on a side, or without any spread on both sides (a judge that gave 0.8 twice, then 0.7 twice), can't be tested, so `p` is `null` and it is never significant.
+- **Many tests at once.** One compare tests every case and grader on two measures. With `adjust: "holm"` (the default), Holm's correction keeps the chance of any false "significant" in the whole comparison under `alpha` (default 0.05). `comparisons` says how many tests there were, and `pAdjusted` holds each adjusted p. `adjust: "none"` tests each at `alpha` alone, which with 20 cases flags about two changes per compare by chance.
+
+`regressions` and `improvements` list the significant changes as text, and `Eval.format` marks them with `*`.
+
+**Missing cases are regressions.** `missing` lists the cases and graders that only one report has. Those missing from the current report are added to `regressions` too, because a case that didn't run is not a case that passed. `compare` throws when either report is `aborted`.
 
 ## Running options
 
@@ -166,8 +180,8 @@ writeFileSync("evals/questions.json", JSON.stringify(report));
 
 - `only` runs those case ids; an unknown id throws.
 - `runs` and `concurrency` override the eval's own.
-- `signal` stops starting new samples.
-- `onSample(sample)` is called as each sample is graded, to print rows while the eval runs.
+- `signal` stops starting new samples and is passed to the task (`ctx.signal`), to every judge call and to calibration. The report comes back with `aborted: true`.
+- `onSample(sample)` is called as each sample is graded, to print rows while the eval runs. If it throws, the run aborts the samples still running and rejects with that error.
 
 The report keeps the samples in case order whatever the concurrency.
 

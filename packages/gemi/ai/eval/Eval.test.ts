@@ -107,7 +107,7 @@ describe("Eval", () => {
         { id: "b", input: 2 },
       ],
       task: (input) => input,
-      graders: { strict: () => false },
+      graders: { strict: () => false, ok: () => true },
     });
     const report = await suite.run({ only: ["a"], runs: 2 });
     expect(report.samples.map((sample) => sample.case)).toEqual(["a", "a"]);
@@ -242,6 +242,78 @@ describe("Eval", () => {
     expect(report.samples.map((sample) => sample.case)).toEqual(["c1", "c2", "c3", "c4"]);
   });
 
+  test("a sample no grader applied to is ungraded, not a pass", async () => {
+    const suite = Eval.create({
+      name: "ungraded",
+      cases: [
+        { id: "a", input: 1 },
+        { id: "b", input: 2 },
+      ],
+      task: (input) => input,
+      graders: { onlyB: (out) => (out === 2 ? true : null) },
+    });
+    const report = await suite.run();
+    expect(report.samples[0]).toMatchObject({ pass: false, excluded: true, ungraded: true, score: 0 });
+    expect(report.totals).toMatchObject({ samples: 2, kept: 1, passed: 1 });
+  });
+
+  test("a gate's own pass rate counts the samples it excluded", async () => {
+    const suite = Eval.create({
+      name: "gate-rate",
+      cases: [
+        { id: "empty", input: "" },
+        { id: "full", input: "x" },
+      ],
+      task: (input) => input,
+      graders: { content: { check: (out) => out !== "", gate: true } },
+    });
+    const report = await suite.run();
+    expect(report.graders.content!.passRate).toMatchObject({ n: 2, mean: 0.5 });
+  });
+
+  test("an onSample that throws stops the run and rejects with its error", async () => {
+    let started = 0;
+    const suite = Eval.create({
+      name: "throws",
+      cases: [1, 2, 3, 4, 5, 6].map((n) => ({ id: `c${n}`, input: n })),
+      concurrency: 2,
+      task: async (input, { signal }) => {
+        started++;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return signal.aborted ? -input : input;
+      },
+      graders: { ok: () => true },
+    });
+    await expect(
+      suite.run({
+        onSample: () => {
+          throw new Error("printer jammed");
+        },
+      }),
+    ).rejects.toThrow("printer jammed");
+    expect(started).toBe(2);
+  });
+
+  test("judges get the run's signal", async () => {
+    const judge = fakeProvider(answer({ ok: true }));
+    const controller = new AbortController();
+    const suite = Eval.create({
+      name: "judged",
+      cases: [{ id: "x", input: 1 }],
+      task: (input) => input,
+      graders: ({ judge: judgeWith }) => ({
+        judged: judgeWith({
+          provider: judge,
+          prompt: (out) => String(out),
+          output: s.object({ ok: s.boolean() }),
+          verdict: (judgment) => judgment.ok,
+        }),
+      }),
+    });
+    await suite.run({ signal: controller.signal });
+    expect(judge.calls[0]!.signal).toBeInstanceOf(AbortSignal);
+  });
+
   test("create refuses duplicate case ids and bad counts", () => {
     const task = (input: number) => input;
     expect(() =>
@@ -252,37 +324,72 @@ describe("Eval", () => {
 });
 
 describe("Eval.compare and Eval.format", () => {
-  const suite = (passes: boolean[]) => {
+  const suite = (passes: boolean[], cases = ["only"]) => {
     let at = 0;
     return Eval.create({
       name: "flaky",
-      cases: [{ id: "only", input: null }],
+      cases: cases.map((id) => ({ id, input: null })),
       runs: passes.length,
-      task: () => passes[at++]!,
+      task: () => passes[at++ % passes.length]!,
       graders: { pass: (out) => out },
     });
   };
 
-  test("a consistent drop is a regression; noise is not", async () => {
-    const before = await suite([true, true, true, true]).run();
-    const after = await suite([false, false, false, false]).run();
-    const noisy = await suite([true, false, true, true]).run();
+  test("a consistent drop is a regression; noise and tiny samples are not", async () => {
+    const before = await suite([true, true, true, true, true, true]).run();
+    const after = await suite([false, false, false, false, false, false]).run();
 
     const dropped = Eval.compare(before, after);
     expect(dropped.totals.passRate).toMatchObject({ before: 1, after: 0, delta: -1, significant: true });
-    expect(dropped.regressions).toContain("case only: pass rate 1.00 → 0.00");
-    expect(dropped.graders.pass!.passRate.significant).toBe(true);
+    expect(dropped.regressions.some((line) => line.startsWith("case only: pass rate 1.00 → 0.00"))).toBe(true);
+    expect(dropped.comparisons).toBe(3);
+    expect(dropped.adjust).toBe("holm");
 
+    const noisy = await suite([true, false, true, true, true, false]).run();
     expect(Eval.compare(before, noisy).regressions).toEqual([]);
+
+    // 2/2 → 0/2: Fisher's p is 1/3.
+    expect(Eval.compare(await suite([true, true]).run(), await suite([false, false]).run()).regressions).toEqual([]);
+  });
+
+  test("a case or grader missing from the current report is a regression", async () => {
+    const before = await suite([true, true], ["a", "b", "c"]).run();
+    const after = await suite([true, true], ["a", "b", "c"]).run({ only: ["a"] });
+    const diff = Eval.compare(before, after);
+    expect(diff.missing.cases.fromCurrent).toEqual(["b", "c"]);
+    expect(diff.regressions).toContain("case b: in the baseline, missing from this report");
+  });
+
+  test("an aborted run is marked, and compare refuses it", async () => {
+    const controller = new AbortController();
+    const slow = Eval.create({
+      name: "slow",
+      cases: ["a", "b", "c"].map((id) => ({ id, input: id })),
+      task: async (input) => {
+        if (input === "a") controller.abort();
+        return input;
+      },
+      graders: { ok: () => true },
+    });
+    const report = await slow.run({ signal: controller.signal });
+    expect(report.aborted).toBe(true);
+    expect(report.planned).toEqual(["a", "b", "c"]);
+    expect(report.samples.map((sample) => sample.case)).toEqual(["a"]);
+    const full = await slow.run();
+    expect(full.aborted).toBe(false);
+    expect(() => Eval.compare(full, report)).toThrow(/was aborted/);
+    expect(Eval.format(report)).toContain("ABORTED");
   });
 
   test("a report is plain JSON, and formats as a table with deltas", async () => {
-    const before = JSON.parse(JSON.stringify(await suite([true, true, true]).run()));
-    const after = await suite([false, false, false]).run();
+    const before = JSON.parse(JSON.stringify(await suite([true, true, true, true, true]).run()));
+    const after = await suite([false, false, false, false, false]).run();
     const text = Eval.format(after, { baseline: before });
-    expect(text).toContain("eval flaky: 3 samples, 3 kept, 0 passed, 0 errors");
-    expect(text).toMatch(/only\s+3\/3\s+0\.00 \[0\.00, 0\.56\] -1\.00\*/);
-    expect(text).toContain("regression: case only: pass rate 1.00 → 0.00");
+    expect(text).toContain("eval flaky: 5 samples, 5 kept, 0 passed, 0 errors");
+    expect(text).toMatch(/only\s+5\/5\s+0\.00 \[0\.00, 0\.43\] -1\.00\*/);
+    expect(text).toContain("0.00 (no spread)");
+    expect(text).toMatch(/regression: case only: pass rate 1\.00 → 0\.00 \(p = /);
+    expect(text).toContain("Holm-adjusted");
     expect(text).toContain("tokens: task 0 in, 0 out; judges 0 in, 0 out");
   });
 });

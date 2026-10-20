@@ -269,6 +269,7 @@ export type {
   CheckGrader,
   CreateEvalParams,
   EvalCase,
+  EvalCompareOptions,
   EvalComparison,
   EvalGrader,
   EvalPricing,
