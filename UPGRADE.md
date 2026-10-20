@@ -1,5 +1,14 @@
 # Unreleased
 
+## AI: an eval harness, `Eval.create`, and `measureUsage` (#1005)
+
+**New, nothing to migrate.** See [AI Evals](docs/ai-evals.md).
+
+- `Eval.create({ name, cases, runs, concurrency, task, graders, pricing })` and `eval.run({ only, runs, concurrency, signal, keepOutputs, onSample })` return an `EvalReport`: samples with their grades, usage and cost, plus pass rates and scores (95% intervals) per case, per grader and in total, and judge calibration.
+- Graders: checks, `{ check, gate, threshold }`, and LLM judges (`judge(...)` from the `graders` function form, or `Eval.judge`) with `samples` (majority vote) and `calibration`.
+- `Eval.compare(baseline, report, { alpha, adjust })` (Fisher's exact test for pass rates, Welch's t for scores, Holm-adjusted across the comparison; missing cases count as regressions; throws on an aborted report) and `Eval.format(report, { baseline })`.
+- `measureUsage(fn)` sums every model call made inside `fn` (agent steps, `generate`, `ImageModel`), by model. Those call sites now report each call's usage to any open meter. Nothing changes when no meter is open.
+
 ## AI: per-run skills in `Agent.stream` and `AgentController.skills()` (#950)
 
 **New, nothing to migrate.** See [AI Skills → Skills for one run](docs/ai-skills.md#skills-for-one-run).

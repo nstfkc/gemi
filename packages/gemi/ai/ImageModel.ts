@@ -1,6 +1,7 @@
 import type { ImageProvider } from "./ImageProvider";
 import type { ImageResponse } from "./providers/images";
 import type { Usage } from "./types";
+import { recordUsage } from "./usageMeter";
 
 /**
  * A named image model with its settings, the way `Agent` is a named text model
@@ -194,7 +195,7 @@ export class ImageModel {
 
   async generate(params: GenerateImageParams): Promise<GeneratedImage> {
     const merged = this.merge(params);
-    return present(
+    return this.present(
       await this.provider.generate({ prompt: params.prompt, ...merged, signal: params.signal }),
     );
   }
@@ -210,7 +211,7 @@ export class ImageModel {
    */
   async edit(params: EditImageParams): Promise<GeneratedImage> {
     const merged = this.merge(params);
-    return present(
+    return this.present(
       await this.provider.edit({
         prompt: params.prompt,
         ...merged,
@@ -219,6 +220,12 @@ export class ImageModel {
         signal: params.signal,
       }),
     );
+  }
+
+  /** The response as returned, its usage recorded on any open meter. */
+  private present(response: ImageResponse): GeneratedImage {
+    recordUsage(this.provider.model, response.usage);
+    return present(response);
   }
 
   /** Per-call params over the model's defaults, validated as one. */

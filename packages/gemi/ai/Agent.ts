@@ -20,6 +20,7 @@ import {
   resolveRope,
   RunAborted,
 } from "./runtime";
+import { recordUsage } from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -3478,6 +3479,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "finish": {
           this.usage = addUsage(this.usage, event.usage);
+          recordUsage(event.model ?? provider.model, event.usage);
           // This step's own cost, on the message the step wrote (#467). The run
           // total above is the whole turn — every step plus tools' sub-runs,
           // `generate()` calls and images — and putting it on the last message

@@ -15,6 +15,7 @@ import {
 } from "./runtime";
 import type { Infer, Schema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
+import { recordUsage } from "./usageMeter";
 
 /**
  * One model call with an output schema: no tools, no loop, no stream to a client.
@@ -230,6 +231,7 @@ async function callModel<O extends Schema<any>>(
             // then closes the call with a finish that still bills — the same
             // rule `AgentRunImpl.runStep` follows.
             usage = addUsage(usage, event.usage);
+            recordUsage(event.model ?? params.provider.model, event.usage);
             if (!error) reason = event.reason;
             break;
           case "error":
