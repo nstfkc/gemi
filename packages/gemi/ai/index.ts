@@ -260,6 +260,38 @@ export type { ErrorRedactionInfo, ErrorRedactor } from "./redact";
 export { generate } from "./generate";
 export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate";
 
+// --- evals and usage metering (#1005) -----------------------------------------
+export { Eval } from "./eval/Eval";
+export type {
+  CalibrationResult,
+  CaseSummary,
+  CheckFn,
+  CheckGrader,
+  CreateEvalParams,
+  EvalCase,
+  EvalComparison,
+  EvalGrader,
+  EvalPricing,
+  EvalReport,
+  EvalRunOptions,
+  EvalSample,
+  EvalSummary,
+  EvalTaskContext,
+  Grade,
+  GradeValue,
+  GraderContext,
+  GraderResult,
+  GraderSummary,
+  JudgeCalibration,
+  JudgeGrader,
+  JudgePrompt,
+  JudgeSpec,
+  ModelPrice,
+} from "./eval/Eval";
+export type { Delta, Estimate } from "./eval/stats";
+export { measureUsage } from "./usageMeter";
+export type { MeasuredUsage } from "./usageMeter";
+
 // --- an app's API routes as tools ------------------------------------------
 //
 // The registry itself is `McpRegistry` in `gemi/services`; this is its one v1
