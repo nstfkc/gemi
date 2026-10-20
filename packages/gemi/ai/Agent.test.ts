@@ -1629,6 +1629,71 @@ describe("skills", () => {
     });
   });
 
+  test("a run's own skills join the agent's for that run only (#950)", async () => {
+    const own = Skill.create({ name: "refund-policy", description: "Refunds", instructions: "30 days" });
+    const pack = vi.fn(() => "Use heavy borders.");
+    const provider = fakeProvider(
+      [toolCall("c1", "brutalist", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+      [finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [grep], skills: [own] });
+
+    const result = await agent
+      .stream({
+        messages: [],
+        skills: [{ name: "brutalist", description: "The page's design pack", instructions: pack }],
+      })
+      .result();
+    expect(pack).toHaveBeenCalledTimes(1);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "ok",
+      output: "Use heavy borders.",
+    });
+    const skillsOf = (call: number) =>
+      (provider.calls[call].tools as any[]).find((entry) => entry.name === "skills");
+    expect(skillsOf(0).tools.map((tool: any) => tool.name)).toEqual(["refund-policy", "brutalist"]);
+    expect(skillsOf(0).tools[1]).toMatchObject({
+      description: "The page's design pack",
+      parameters: { type: "object", properties: {}, required: [] },
+      deferred: false,
+    });
+
+    // The next run was given none, and sees only the agent's.
+    await agent.stream({ messages: [] }).result();
+    expect(skillsOf(2).tools.map((tool: any) => tool.name)).toEqual(["refund-policy"]);
+    expect(agent.skills).toEqual([own]);
+  });
+
+  test("an agent without skills of its own gets the namespace for the run", async () => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [grep] });
+    await agent
+      .stream({
+        messages: [],
+        skills: [Skill.create({ name: "brutalist", description: "Pack", instructions: "…" })],
+      })
+      .result();
+    const tools = provider.calls[0].tools as any[];
+    expect(tools.map((entry) => entry.name)).toEqual(["grep", "skills"]);
+    expect(tools[1].tools.map((tool: any) => tool.name)).toEqual(["brutalist"]);
+  });
+
+  test("a run's skill may not take a name the agent already uses", () => {
+    const own = Skill.create({ name: "refund-policy", description: "Refunds", instructions: "…" });
+    const agent = Agent.create({ name: "x", provider: fakeProvider(), tools: [grep], skills: [own] });
+    const skill = (name: string) => ({ name, description: "…", instructions: "…" });
+    expect(() => agent.stream({ messages: [], skills: [skill("refund-policy")] })).toThrow(
+      /a skill the agent declares/,
+    );
+    expect(() => agent.stream({ messages: [], skills: [skill("grep")] })).toThrow(
+      /a tool of the agent/,
+    );
+    expect(() =>
+      agent.stream({ messages: [], skills: [skill("pack"), skill("pack")] }),
+    ).toThrow(/another skill of this run/);
+  });
+
   test("an app namespace cannot be called `skills`", () => {
     const shadow = ToolNamespace.create({
       name: "skills",

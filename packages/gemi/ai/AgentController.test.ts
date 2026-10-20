@@ -11,6 +11,7 @@ import {
   AgentController,
   AttachmentNotFoundError,
   defaultAgentStore,
+  defineAgentHooks,
   limitRefusal,
   MemoryAgentStore,
   MemoryAttachmentStore,
@@ -3776,6 +3777,57 @@ describe("reasoning()", () => {
 
     await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
     expect("reasoning" in calls[0]!).toBe(false);
+    run.finish();
+  });
+});
+
+/** Per-turn skills from the controller (#950). */
+describe("skills()", () => {
+  test("answers the run's own skills for the turn", async () => {
+    const run = new StubAgentRun("run_skills");
+    const { agent, calls } = stubAgent(run);
+    const pack = { name: "brutalist", description: "The page's pack", instructions: "…" };
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected skills(_req: any, { body }: { body: Record<string, unknown> }) {
+        return body.pageId === "p1" ? [pack] : [];
+      }
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "pop" }, pageId: "p1" }));
+    expect(calls[0]!.skills).toEqual([pack]);
+    run.finish();
+  });
+
+  test("answering none adds nothing to the run", async () => {
+    const run = new StubAgentRun("run_skills_none");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected skills() {
+        return [];
+      }
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
+    expect("skills" in calls[0]!).toBe(false);
+    run.finish();
+  });
+
+  test("a hooks object can answer them", async () => {
+    const run = new StubAgentRun("run_skills_hooks");
+    const { agent, calls } = stubAgent(run);
+    const pack = { name: "brutalist", description: "Pack", instructions: "…" };
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      hooks = defineAgentHooks({ skills: () => [pack] });
+    }
+
+    await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
+    expect(calls[0]!.skills).toEqual([pack]);
     run.finish();
   });
 });

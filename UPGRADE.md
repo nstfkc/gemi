@@ -1,5 +1,14 @@
 # Unreleased
 
+## AI: per-run skills in `Agent.stream` and `AgentController.skills()` (#950)
+
+**New, nothing to migrate.** See [AI Skills → Skills for one run](docs/ai-skills.md#skills-for-one-run).
+
+- `AgentStreamParams.skills`: skills (`Skill` or a plain `SkillDefinition`) for that run only, added after the agent's own in the reserved `skills` namespace and loaded on demand the same way. A name already used by one of the agent's tools or skills, or repeated in the list, throws from `Agent.stream`. Not handed to sub-runs.
+- `AgentController.skills(req, { body })` (and a `skills` hook in `defineAgentHooks`): answers them per turn, called beside `instructions()`. Answering nothing adds none.
+- **Behaviour change (compaction only):** a summary made by `contextWindow.compact` now records a skill load as `[loaded the skill "name"]` and leaves out its body, for the agent's own skills as well. Summaries already stored are kept.
+- Apps that put a skill pack's text into `instructions()` can move it to `skills()` so it is loaded only when the model needs it.
+
 ## ORM: typed `String` columns with `static $columns` (#1001)
 
 **New. Re-run `prisma generate` to get the types; nothing else to migrate.** See [ORM → Typed `String` columns](docs/orm.md#typed-string-columns).
