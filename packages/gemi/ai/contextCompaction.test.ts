@@ -527,6 +527,52 @@ describe("chunkTurns", () => {
   });
 });
 
+describe("chunkTurns: skills (#950)", () => {
+  const loaded = (namespace?: string): AgentMessage[] => [
+    msg("u0", "user", "make it pop"),
+    {
+      id: "a0",
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "c1",
+          name: "brutalist",
+          input: {},
+          ...(namespace ? { namespace } : {}),
+        },
+      ],
+    } as AgentMessage,
+    {
+      id: "t0",
+      role: "tool",
+      content: [
+        { type: "tool-result", toolCallId: "c1", name: "brutalist", status: "ok", output: "SECRET PACK BODY" },
+      ],
+    } as AgentMessage,
+    msg("a1", "assistant", "done"),
+  ];
+
+  test("a skill the run has is folded in as loaded, without its body", () => {
+    const history = loaded();
+    const chunks = chunkTurns(history, turnStarts(history), 0, history.length, 10_000, new Set(["brutalist"]));
+    expect(chunks.join("\n")).toContain('[loaded the skill "brutalist"]');
+    expect(chunks.join("\n")).not.toContain("SECRET PACK BODY");
+  });
+
+  test("a call the provider reported through the skills namespace is told the same way", () => {
+    const history = loaded("skills");
+    const chunks = chunkTurns(history, turnStarts(history), 0, history.length, 10_000);
+    expect(chunks.join("\n")).not.toContain("SECRET PACK BODY");
+  });
+
+  test("any other tool keeps its result", () => {
+    const history = loaded();
+    const chunks = chunkTurns(history, turnStarts(history), 0, history.length, 10_000);
+    expect(chunks.join("\n")).toContain("SECRET PACK BODY");
+  });
+});
+
 describe("AgentController: compaction", () => {
   test("summaries are kept in the controller's MemoryAgentStore, with the thread", async () => {
     const summarizer = fakeProvider(summaryAnswer("S1"));

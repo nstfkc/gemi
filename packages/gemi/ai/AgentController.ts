@@ -16,6 +16,7 @@ import type {
   PrepareStepContext,
   PrepareStepResult,
   ReasoningEffort,
+  SkillDefinition,
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
@@ -649,6 +650,10 @@ export type AgentControllerHooks<Body extends object = object> = {
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ) => ReasoningEffort | void | Promise<ReasoningEffort | void>;
+  skills?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ) => readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void>;
   context?: (
     req: HttpRequest<any, any>,
     extra: { body: Body },
@@ -963,6 +968,31 @@ export abstract class AgentController<
     extra: { body: Body },
   ): ReasoningEffort | void | Promise<ReasoningEffort | void> {
     return this.hooks?.reasoning?.(req, extra);
+  }
+
+  /**
+   * Skills for this turn's run only (#950), beside the agent's own: the
+   * designer's pack of the page being edited, when one agent serves every
+   * page. Lowered like the agent's skills, so the model sees each one's name
+   * and description and loads the body when it needs it, instead of the whole
+   * pack riding in `instructions()` on every turn.
+   *
+   *   protected async skills(req, { body }) {
+   *     const page = await Page.find(body.pageId); // authorized in authorizeRequest()
+   *     return page.skillPacks.map((pack) =>
+   *       Skill.create({ name: pack.slug, description: pack.summary, instructions: () => pack.body() }),
+   *     );
+   *   }
+   *
+   * Called once per turn, after `authorizeRequest()`, beside `instructions()`.
+   * Answer nothing for none. A name already used by one of the agent's tools
+   * or skills fails the turn. `body` is client-controlled, as there.
+   */
+  protected skills(
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ): readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void> {
+    return this.hooks?.skills?.(req, extra);
   }
 
   /**
@@ -1549,6 +1579,7 @@ export abstract class AgentController<
           .join("\n\n") || undefined;
       const context = await this.context(req, { body: extraBody });
       const reasoning = (await this.reasoning(req, { body: extraBody })) || undefined;
+      const skills = (await this.skills(req, { body: extraBody })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -1611,6 +1642,7 @@ export abstract class AgentController<
         instructions,
         // Only when answered, so the agent's own applies otherwise.
         ...(reasoning ? { reasoning } : {}),
+        ...(skills && skills.length > 0 ? { skills } : {}),
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
         // `AgentContext` — so a tool that needs the user reads it from this.

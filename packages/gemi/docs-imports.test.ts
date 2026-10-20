@@ -64,7 +64,9 @@ function exportsOf(entry: string): Set<string> | undefined {
   // assertion, so a missing target is reported by the caller as unresolvable.
   if (!existsSync(target)) return undefined;
 
-  const source = readFileSync(target, "utf8");
+  // Whole-line comments dropped first: one inside an `export { … }` block
+  // that mentions a `}` (as `ai/index.ts` does) would end the block early.
+  const source = readFileSync(target, "utf8").replace(/^\s*\/\/.*$/gm, "");
   const names = new Set<string>();
 
   // `export { a, b as c }` / `export type { A }`, in one- and multi-line form.

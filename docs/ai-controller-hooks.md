@@ -71,7 +71,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | Hook | |
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
-| `instructions`, `reasoning`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
+| `instructions`, `reasoning`, `skills`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
 | `onMessage`, `onToolCall`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. |
 | `redactError`, `reportHookFailure` | Errors. |
@@ -124,3 +124,4 @@ A hook named in the spread replaces the one with the same name from `chatHooks`.
 - [AI Server Turns](./ai-server-turns.md): `startTurn` goes through the same hooks as a chat turn.
 - [Authorization](./authorization.md#on-agent-routes): `resource`, which the default `authorizeRequest` checks.
 - [AI Memory](./ai-memory.md): `memoryScopes()`.
+- [AI Skills](./ai-skills.md): `skills()`.
