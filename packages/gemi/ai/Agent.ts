@@ -1518,6 +1518,21 @@ interface AgentStreamParamsBase {
   /** Appended to the agent's own `instructions` for this request only. */
   instructions?: string;
   /**
+   * Skills for this run only (#950), beside the agent's own: a designer's
+   * pack that belongs to the page being edited, where the agent is shared by
+   * every page. They are lowered into the same reserved `skills` namespace,
+   * so the model is shown each one's name and description and loads the body
+   * on demand, exactly as for a skill given to `Agent.create`. A `Skill` or a
+   * plain `SkillDefinition`.
+   *
+   * Nothing outlives the run: the next run of the agent sees only what it is
+   * given, and a sub-run started with `ctx.runAgent` gets its own agent's
+   * skills, not these. A name already used by one of the agent's tools or
+   * skills (or twice here) throws from `stream`. `AgentController` sets this
+   * from its `skills()` method.
+   */
+  skills?: readonly SkillDefinition[];
+  /**
    * The app's own fields from the turn's request body, handed to every tool of
    * this run as `ctx.body`.
    *
@@ -1975,7 +1990,7 @@ export class Agent<
   }
 
   stream(params: AgentStreamParams): AgentRun<ToolShapesWithMemory<T, M>, OutputOf<O>> {
-    const config: RunConfig = {
+    let config: RunConfig = {
       ...this.config,
       provider: params.provider ?? this.config.provider,
       maxSteps: params.maxSteps ?? this.config.maxSteps,
@@ -2007,6 +2022,9 @@ export class Agent<
           `Agent.stream for "${this.name}" sets \`memory.maxTokens\` to ${String(params.memory.maxTokens)}, but it has to be a whole number of at least 0.`,
         );
       }
+    }
+    if (params.skills && params.skills.length > 0) {
+      config = withRunSkills(config, params.skills, `Agent.stream for "${this.name}"`);
     }
     return new AgentRunImpl(config, params) as unknown as AgentRun<
       ToolShapesWithMemory<T, M>,
@@ -2111,23 +2129,9 @@ function lowerTools(
   if (skills.length > 0) {
     const members: ProviderToolSpec[] = [];
     for (const skill of skills) {
-      const tool = skillTool(skill);
-      register({
-        tool,
-        namespace: SKILLS_NAMESPACE,
-        deferred: false,
-        inputSchema: staticInputSchema(tool),
-      });
-      members.push({
-        name: skill.name,
-        description: skill.description,
-        parameters: EMPTY_PARAMETERS,
-        strict: true,
-        // Not deferred: the whole cost of a skill in the prompt is its name and
-        // description, and those are exactly what deferral keeps. Withholding
-        // an empty parameter object saves nothing and adds a round trip.
-        deferred: false,
-      });
+      const lowered = lowerSkill(skill);
+      register(lowered.resolved);
+      members.push(lowered.spec);
     }
     providerTools.push({
       name: SKILLS_NAMESPACE,
@@ -2217,8 +2221,99 @@ function builtInMemoryTools(memory: AgentMemoryOptions): AnyAgentTool[] {
   return tools;
 }
 
+/** A skill as the registry entry the loop dispatches on and the spec the
+ *  provider is shown. */
+/** What a provider accepts as a function name: OpenAI answers 400 to anything else. */
+const SKILL_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+
+function lowerSkill(skill: SkillDefinition): { resolved: ResolvedTool; spec: ProviderToolSpec } {
+  if (typeof skill.name !== "string" || !SKILL_NAME.test(skill.name)) {
+    throw new Error(
+      `The skill name ${JSON.stringify(skill.name)} is not one a provider accepts: use 1 to 64 letters, digits, "_" or "-" (a pack slug with a "." or a space has to be mapped first).`,
+    );
+  }
+  const tool = skillTool(skill);
+  return {
+    resolved: {
+      tool,
+      namespace: SKILLS_NAMESPACE,
+      deferred: false,
+      inputSchema: staticInputSchema(tool),
+    },
+    spec: {
+      name: skill.name,
+      description: skill.description,
+      parameters: EMPTY_PARAMETERS,
+      strict: true,
+      // Not deferred: the whole cost of a skill in the prompt is its name and
+      // description, and those are exactly what deferral keeps. Withholding
+      // an empty parameter object saves nothing and adds a round trip.
+      deferred: false,
+    },
+  };
+}
+
+/**
+ * The agent's lowered tools with a run's own skills added (#950): one
+ * `AgentStreamParams.skills`, merged into the same `skills` namespace as the
+ * agent's for this run only.
+ *
+ * A copy, never an edit: `config.registry` and `config.providerTools` are the
+ * agent's and shared by every run of it, so a skill added in place would be
+ * offered to the next run too, whoever started it.
+ *
+ * A name already taken throws, as two tools of one name do at `Agent.create`.
+ * Letting the run's skill win would make the agent's skill unreachable with
+ * no error, and the client discriminates a tool part by its name alone.
+ */
+function withRunSkills(
+  config: RunConfig,
+  skills: readonly SkillDefinition[],
+  owner: string,
+): RunConfig {
+  const registry = new Map(config.registry);
+  const members: ProviderToolSpec[] = [];
+  for (const skill of skills) {
+    const taken = registry.get(skill.name);
+    if (taken) {
+      const what =
+        taken.namespace === SKILLS_NAMESPACE
+          ? config.registry.has(skill.name)
+            ? "a skill the agent declares"
+            : "another skill of this run"
+          : "a tool of the agent";
+      throw new Error(
+        `${owner} is given the skill "${skill.name}", but that name is already ${what}. Tool and skill names are global within a run: the client discriminates a tool part by name alone. Rename the skill.`,
+      );
+    }
+    const lowered = lowerSkill(skill);
+    registry.set(skill.name, lowered.resolved);
+    members.push(lowered.spec);
+  }
+
+  const providerTools = [...config.providerTools];
+  const at = providerTools.findIndex((tool) => "tools" in tool && tool.name === SKILLS_NAMESPACE);
+  if (at >= 0) {
+    const namespace = providerTools[at] as ProviderToolNamespace;
+    providerTools[at] = { ...namespace, tools: [...namespace.tools, ...members] };
+  } else {
+    // Where `lowerTools` puts the namespace: after the app's tools and before
+    // the memory tools, so an agent shows the model the same order whether a
+    // skill came from `Agent.create` or from the run.
+    const memory = providerTools.findIndex(
+      (tool) => "tools" in tool && tool.name === MEMORY_NAMESPACE,
+    );
+    providerTools.splice(memory >= 0 ? memory : providerTools.length, 0, {
+      name: SKILLS_NAMESPACE,
+      description: SKILLS_NAMESPACE_DESCRIPTION,
+      tools: members,
+    });
+  }
+  return { ...config, registry, providerTools };
+}
+
 /** The zero-parameter tool a skill becomes. */
-function skillTool(skill: Skill): AnyAgentTool {
+function skillTool(skill: SkillDefinition): AnyAgentTool {
   return AgentTool.create({
     name: skill.name,
     description: skill.description,
@@ -3353,7 +3448,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "tool-call": {
-          const namespace = event.namespace || partialArgs.get(event.toolCallId)?.namespace;
+          // A skill's load is stamped with the `skills` namespace even when the
+          // provider listed the tools flat and reported none (no tool search):
+          // it is how compaction tells a skill's body from a tool result on a
+          // later turn whose run no longer has that skill (#950). A request
+          // without the namespace drops it on replay (`toResponsesInput`).
+          const namespace =
+            event.namespace ||
+            partialArgs.get(event.toolCallId)?.namespace ||
+            (this.config.registry.get(event.name)?.namespace === SKILLS_NAMESPACE
+              ? SKILLS_NAMESPACE
+              : undefined);
           partialArgs.delete(event.toolCallId);
           const part: ToolCallPart = {
             type: "tool-call",
@@ -3484,7 +3589,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       threadId: this.params.threadId,
       provider: this.config.provider,
       store: compact.store || this.params.summaryStore || defaultSummaryStore,
+      skills: this.skillNames(),
     };
+  }
+
+  /** The run's skills by name, the agent's and its own (#950). */
+  private skillNames(): Set<string> {
+    const names = new Set<string>();
+    for (const [name, entry] of this.config.registry) {
+      if (entry.namespace === SKILLS_NAMESPACE) names.add(name);
+    }
+    return names;
   }
 
   /**

@@ -54,6 +54,9 @@ import { addUsage, emptyUsage } from "./runtime";
 import { s } from "./Schema";
 import type { AgentMessage, AgentContentPart, Usage } from "./types";
 
+/** `SKILLS_NAMESPACE` from `./Agent`, which imports this module. */
+const SKILLS_NAMESPACE = "skills";
+
 /** `ContextCompactOptions.maxSummaryTokens`'s default. */
 export const DEFAULT_MAX_SUMMARY_TOKENS = 1_000;
 /** `ContextCompactOptions.chunkTokens`'s default. */
@@ -281,6 +284,14 @@ export type CompactJobParams = {
   /** The run's provider, used when `compact.provider` is not set. */
   provider: AgentProvider;
   store: SummaryStore;
+  /**
+   * The names of the run's skills, the agent's and the run's own (#950). A
+   * skill loaded in the turns being summarised is folded in as the fact that
+   * it was loaded, not as its body: the body is instructions the model can
+   * load again, not something that happened in the conversation, and a
+   * run's own skill may not be there to load on a later turn.
+   */
+  skills?: ReadonlySet<string>;
 };
 
 export type CompactParams = CompactJobParams & {
@@ -680,7 +691,7 @@ async function build(
   const chunkChars =
     (positiveInt(compact.chunkTokens) ?? DEFAULT_COMPACT_CHUNK_TOKENS) *
     CHARS_PER_TOKEN;
-  const chunks = chunkTurns(history, starts, from, start, chunkChars);
+  const chunks = chunkTurns(history, starts, from, start, chunkChars, params.skills);
   const maxChars = maxSummaryTokens * CHARS_PER_TOKEN;
   const instructions = `${compact.instructions ?? DEFAULT_COMPACT_INSTRUCTIONS} Keep the summary under about ${Math.round(maxSummaryTokens * 0.75)} words.`;
 
@@ -734,7 +745,22 @@ export function chunkTurns(
   from: number,
   to: number,
   chunkChars: number,
+  skills: ReadonlySet<string> = new Set(),
 ): string[] {
+  // A skill load is told by the `skills` namespace the run stamps on its call
+  // (whatever the provider reported), or, for history recorded before it did,
+  // by its name being one of the summarising run's skills.
+  const skillCalls = new Set<string>();
+  for (const message of history) {
+    for (const part of message.content ?? []) {
+      if (
+        part.type === "tool-call" &&
+        (part.namespace === SKILLS_NAMESPACE || skills.has(String(part.name)))
+      ) {
+        skillCalls.add(part.toolCallId);
+      }
+    }
+  }
   const injected = new Set<string>();
   const startSet = new Set(starts);
   for (let i = 0; i < history.length; i++) {
@@ -754,6 +780,7 @@ export function chunkTurns(
         history[i]!,
         injected.has(history[i]!.id),
         partLimit,
+        skillCalls,
       );
       if (line) lines.push(line);
     }
@@ -773,6 +800,7 @@ function renderMessage(
   message: AgentMessage,
   injected: boolean,
   limit: number,
+  skillCalls: ReadonlySet<string>,
 ): string {
   // System messages before the cut are still sent, at the front.
   if (message.role === "system") return "";
@@ -782,24 +810,30 @@ function renderMessage(
       ? "User"
       : "Assistant";
   const parts = (message.content ?? [])
-    .map((part) => renderPart(part, limit))
+    .map((part) => renderPart(part, limit, skillCalls))
     .filter(Boolean);
   return parts.length > 0 ? `${who}: ${parts.join("\n")}` : "";
 }
 
-function renderPart(part: AgentContentPart, limit: number): string {
+function renderPart(
+  part: AgentContentPart,
+  limit: number,
+  skillCalls: ReadonlySet<string>,
+): string {
   switch (part.type) {
     case "text":
       return truncate(part.text ?? "", limit);
     case "file":
       return `[file: ${part.name ?? part.mimeType ?? part.fileId ?? "attachment"}]`;
     case "tool-call": {
+      if (skillCalls.has(part.toolCallId)) return `[loaded the skill "${String(part.name)}"]`;
       const name = part.namespace
         ? `${part.namespace}.${String(part.name)}`
         : String(part.name);
       return `[called ${name}(${truncate(json(part.input), Math.min(limit, 1_000))})]`;
     }
     case "tool-result": {
+      if (skillCalls.has(part.toolCallId)) return "";
       const body =
         part.status === "ok"
           ? json(part.output)
