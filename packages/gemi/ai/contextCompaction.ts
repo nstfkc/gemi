@@ -747,9 +747,9 @@ export function chunkTurns(
   chunkChars: number,
   skills: ReadonlySet<string> = new Set(),
 ): string[] {
-  // A skill load is told by its name being one of the run's skills or by the
-  // provider having reported the call through the `skills` namespace; the
-  // second also catches a run's own skill from a turn whose run had it.
+  // A skill load is told by the `skills` namespace the run stamps on its call
+  // (whatever the provider reported), or, for history recorded before it did,
+  // by its name being one of the summarising run's skills.
   const skillCalls = new Set<string>();
   for (const message of history) {
     for (const part of message.content ?? []) {

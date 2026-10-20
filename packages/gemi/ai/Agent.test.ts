@@ -9,6 +9,7 @@ import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeImageProvider, fakeProvider } from "./providers/fakeProvider";
 import { ImageModel } from "./ImageModel";
 import { toResponsesInput } from "./providers/request";
+import { chunkTurns } from "./contextCompaction";
 // The real builder, imported alongside `schemaOf` below rather than instead of
 // it: the tests in "strict mode follows the schema" are about what `s` produces,
 // so a hand-built stand-in would assert nothing there.
@@ -1663,6 +1664,58 @@ describe("skills", () => {
     await agent.stream({ messages: [] }).result();
     expect(skillsOf(2).tools.map((tool: any) => tool.name)).toEqual(["refund-policy"]);
     expect(agent.skills).toEqual([own]);
+  });
+
+  test("a skill load is recorded in the skills namespace when the provider reported none", async () => {
+    // A model without tool search is sent the tools flat and reports a call
+    // without a namespace. The load still has to be told from a tool result
+    // on a later turn whose run no longer has the skill, or compaction would
+    // fold the pack's body into the thread's summary for good.
+    const provider = fakeProvider(
+      [toolCall("c1", "brand-pack", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [grep] });
+    const result = await agent
+      .stream({
+        messages: [],
+        skills: [{ name: "brand-pack", description: "Pack", instructions: "PACK BODY" }],
+      })
+      .result();
+    expect(partsOf(result.messages, "tool-call")[0]).toMatchObject({
+      name: "brand-pack",
+      namespace: "skills",
+    });
+
+    // Replayed to a provider without tool search, the call goes back flat.
+    const flat = toResponsesInput(result.messages, { ...provider.capabilities, toolSearch: false }, [
+      { name: "skills", description: "…", tools: [] },
+    ]) as any[];
+    const call = flat.find((item) => item.type === "function_call");
+    expect(call.name).toBe("brand-pack");
+    expect(call.namespace).toBeUndefined();
+
+    // Summarised by a later run that has other skills: the body stays out.
+    const history = result.messages;
+    const chunks = chunkTurns(history, [0], 0, history.length, 100_000, new Set(["other-pack"]));
+    expect(chunks.join("\n")).toContain('[loaded the skill "brand-pack"]');
+    expect(chunks.join("\n")).not.toContain("PACK BODY");
+  });
+
+  test("a skill name a provider would refuse throws", () => {
+    const agent = Agent.create({ name: "x", provider: fakeProvider(), tools: [grep] });
+    for (const name of ["brand.pack", "brand pack", "", "x".repeat(65)]) {
+      expect(() =>
+        agent.stream({ messages: [], skills: [{ name, description: "…", instructions: "…" }] }),
+      ).toThrow(/not one a provider accepts/);
+    }
+    expect(() =>
+      Agent.create({
+        name: "y",
+        provider: fakeProvider(),
+        skills: [Skill.create({ name: "a b", description: "…", instructions: "…" })],
+      }),
+    ).toThrow(/not one a provider accepts/);
   });
 
   test("an agent without skills of its own gets the namespace for the run", async () => {

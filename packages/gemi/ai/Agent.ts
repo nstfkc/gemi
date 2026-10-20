@@ -2222,7 +2222,15 @@ function builtInMemoryTools(memory: AgentMemoryOptions): AnyAgentTool[] {
 
 /** A skill as the registry entry the loop dispatches on and the spec the
  *  provider is shown. */
+/** What a provider accepts as a function name: OpenAI answers 400 to anything else. */
+const SKILL_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+
 function lowerSkill(skill: SkillDefinition): { resolved: ResolvedTool; spec: ProviderToolSpec } {
+  if (typeof skill.name !== "string" || !SKILL_NAME.test(skill.name)) {
+    throw new Error(
+      `The skill name ${JSON.stringify(skill.name)} is not one a provider accepts: use 1 to 64 letters, digits, "_" or "-" (a pack slug with a "." or a space has to be mapped first).`,
+    );
+  }
   const tool = skillTool(skill);
   return {
     resolved: {
@@ -3439,7 +3447,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "tool-call": {
-          const namespace = event.namespace || partialArgs.get(event.toolCallId)?.namespace;
+          // A skill's load is stamped with the `skills` namespace even when the
+          // provider listed the tools flat and reported none (no tool search):
+          // it is how compaction tells a skill's body from a tool result on a
+          // later turn whose run no longer has that skill (#950). A request
+          // without the namespace drops it on replay (`toResponsesInput`).
+          const namespace =
+            event.namespace ||
+            partialArgs.get(event.toolCallId)?.namespace ||
+            (this.config.registry.get(event.name)?.namespace === SKILLS_NAMESPACE
+              ? SKILLS_NAMESPACE
+              : undefined);
           partialArgs.delete(event.toolCallId);
           const part: ToolCallPart = {
             type: "tool-call",
