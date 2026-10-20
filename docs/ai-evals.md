@@ -140,8 +140,11 @@ The same meter is available on its own:
 
 ```ts
 import { measureUsage } from "gemi/ai";
+import { supportAgent } from "@/app/agents/support";
 
-const { value, usage, byModel } = await measureUsage(() => agent.stream(params).result());
+const { value, usage, byModel } = await measureUsage(() =>
+  supportAgent.stream({ messages: [], turn: { text: "Where is my order?" } }).result(),
+);
 ```
 
 Meters nest, and concurrent meters don't see each other's calls. What it doesn't see:
@@ -154,8 +157,10 @@ Meters nest, and concurrent meters don't see each other's calls. What it doesn't
 
 ```ts
 import { readFileSync, writeFileSync } from "node:fs";
+import { Eval } from "gemi/ai";
+import { questions } from "./question-evals";
 
-const report = await suite.run();
+const report = await questions.run();
 const baseline = JSON.parse(readFileSync("evals/questions.json", "utf8"));
 console.log(Eval.format(report, { baseline }));
 

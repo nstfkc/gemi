@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { generate } from "../generate";
 import { fakeProvider } from "../providers/fakeProvider";
@@ -391,5 +392,24 @@ describe("Eval.compare and Eval.format", () => {
     expect(text).toMatch(/regression: case only: pass rate 1\.00 → 0\.00 \(p = /);
     expect(text).toContain("Holm-adjusted");
     expect(text).toContain("tokens: task 0 in, 0 out; judges 0 in, 0 out");
+  });
+});
+
+/**
+ * Judges in `graders`, under `strict` (#1007): the package's own config is not
+ * strict, so a `*.test-d.ts` can't see `strictFunctionTypes`. The fixture is
+ * compiled as an app compiles it. See its header.
+ */
+describe("Eval's types, under strict", () => {
+  test("judges typecheck in graders, typed and standalone", { timeout: 120_000 }, () => {
+    const PACKAGE = path.join(import.meta.dirname, "../..");
+    const result = Bun.spawnSync(
+      [path.join(PACKAGE, "node_modules", ".bin", "tsc"), "--noEmit", "-p", "ai/__fixtures__/eval/tsconfig.json"],
+      { cwd: PACKAGE },
+    );
+    const errors = `${result.stdout.toString()}${result.stderr.toString()}`
+      .split("\n")
+      .filter((line) => line.includes("error TS") && line.includes("__fixtures__/eval/"));
+    expect(errors).toEqual([]);
   });
 });

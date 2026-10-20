@@ -65,12 +65,14 @@ describe("Eval.create", () => {
   });
 
   test("a grader typed against another output is refused", () => {
+    // The two disagree about the output, so one of them is reported: an
+    // annotated grader takes part in inference (#1007), so it is the task.
     Eval.create({
       name: "x",
       cases: [{ id: "a", input: 1 }],
+      // @ts-expect-error -- the grader reads a number, the task makes a string
       task: () => "text",
       graders: {
-        // @ts-expect-error -- the output is a string
         wrong: (out: number) => out > 1,
       },
     });
