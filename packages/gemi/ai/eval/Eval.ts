@@ -118,8 +118,18 @@ export type JudgeSpec<I, O, J extends Schema<any>> = GraderOptions & {
   prompt: (output: O, ctx: GraderContext<I>) => JudgePrompt | Promise<JudgePrompt>;
   /** The judgment's schema. */
   output: J;
-  /** The grade, from the judgment. */
-  verdict: (judgment: Infer<J>, ctx: GraderContext<I>) => GradeValue;
+  /**
+   * The grade, from the judgment.
+   *
+   * Declared as a method on purpose (#1007): a judge sits in the graders'
+   * union as `JudgeGrader<I, O, any>`, whose judgment is `Infer<any>`, i.e.
+   * `unknown`. A property's function type is checked contravariantly under
+   * `strictFunctionTypes`, so a judge whose `verdict` reads `{ ok: boolean }`
+   * would not be assignable there; a method's parameters are checked
+   * bivariantly, so it is. The judgment is still typed by `output` where the
+   * judge is written.
+   */
+  verdict(judgment: Infer<J>, ctx: GraderContext<I>): GradeValue;
   reasoning?: ReasoningEffort;
   maxOutputTokens?: number;
   temperature?: number;
@@ -170,7 +180,7 @@ export type CreateEvalParams<I, O> = {
    * is typed by this eval's input and output, so a judge's `prompt` and
    * `verdict` need no annotations.
    */
-  graders: EvalGraders<I, NoInfer<O>> | ((kit: GraderKit<I, NoInfer<O>>) => EvalGraders<I, NoInfer<O>>);
+  graders: EvalGraders<I, O> | ((kit: GraderKit<I, O>) => EvalGraders<I, O>);
   pricing?: EvalPricing;
 };
 

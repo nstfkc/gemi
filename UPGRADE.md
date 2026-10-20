@@ -1,5 +1,9 @@
 # Unreleased
 
+## AI: `judge()` graders typecheck under `strict` (#1007)
+
+**Fix, nothing to migrate.** A judge in `Eval.create`'s `graders` (from the `({ judge })` form or `Eval.judge`) failed to typecheck in a `strict` app, the docs' example included, because its typed `verdict` was checked against the graders' `unknown` judgment. `verdict` is now declared as a method, and `graders` takes part in inferring the output, so a record holding only a standalone judge infers it too. An app that cast around it can drop the cast. A grader whose annotation disagrees with the task's output is now reported at the task rather than at the grader.
+
 ## AI: an eval harness, `Eval.create`, and `measureUsage` (#1005)
 
 **New, nothing to migrate.** See [AI Evals](docs/ai-evals.md).

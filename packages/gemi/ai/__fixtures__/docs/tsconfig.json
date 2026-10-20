@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "jsx": "react-jsx",
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "gemi/ai": ["../../index.ts"],
+      "@/app/config/ai": ["stubs/config-ai.ts"],
+      "@/app/agents/support": ["stubs/support-agent.ts"]
+    }
+  },
+  "include": ["generated-*.ts", "stubs/*.ts", "helpers.ts", "question-evals.ts"]
+}
