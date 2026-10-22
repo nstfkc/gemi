@@ -438,6 +438,31 @@ describe("outage and recovery", () => {
     expect(onError.mock.calls[0][0]).toBeInstanceOf(RedisRateLimiterDisconnectedError);
   });
 
+  test("sends no PING to a client that says it is disconnected, and recovers once it is back", async () => {
+    const client = fakeRedis();
+    client.connected = true;
+    const onError = vi.fn();
+    const limiter = new RedisRateLimiter({ client, onError });
+    await limiter.consume(params);
+
+    client.connected = false;
+    await limiter.consume(params);
+    await afterProbeInterval();
+    await limiter.consume(params);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.pingCalls()).toHaveLength(0);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls[1][0]).toBeInstanceOf(RedisRateLimiterDisconnectedError);
+
+    client.connected = true;
+    await afterProbeInterval();
+    await limiter.consume(params);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.pingCalls()).toHaveLength(1);
+    await limiter.consume(params);
+    expect(client.evalshaCalls()).toHaveLength(2);
+  });
+
   test("sends to a new client that is still making its first connection", async () => {
     const client = fakeRedis();
     client.connected = false;

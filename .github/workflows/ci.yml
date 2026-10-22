@@ -645,7 +645,8 @@ jobs:
         working-directory: packages/gemi
         env:
           TEST_REDIS_DOCKER: "1"
-          VITEST_MIN_PASSED: "3"
+          # 5 tests, one skipped on Linux (#1016).
+          VITEST_MIN_PASSED: "4"
 
   # The iOS client. `swift test` at the root builds GemiChat and replays the
   # TypeScript reducer's recorded cases (`packages/gemi/ai/client/__fixtures__`)

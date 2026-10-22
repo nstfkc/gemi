@@ -163,7 +163,7 @@ return {1, current, previous}
  * default, counted in memory), and the limiter then stops sending its script
  * until Redis answers again. While it is down, each call is answered at once
  * without touching Redis, and at most once a second one of them sends a `PING`
- * in the background; the first `PING` that answers puts the limiter back on
+ * in the background (none while the client says it is disconnected); the first `PING` that answers puts the limiter back on
  * Redis.
  *
  * Not sending is what keeps an outage from being counted twice. Bun's client
@@ -327,6 +327,13 @@ export class RedisRateLimiter extends RateLimiterDriver {
 
     const ping = async () => {
       const client = this.client;
+      // Nothing to learn from a client that says it is down, and a command
+      // queued on it is one more for Bun to deliver on reconnect: wait until
+      // it says it is back. A client never seen connected is still sent to,
+      // as the command is what makes a lazy client connect.
+      if (client.connected === false && this.seenConnected.has(client)) {
+        throw new RedisRateLimiterDisconnectedError();
+      }
       await this.withTimeout(
         client.send("PING", []),
         undefined,

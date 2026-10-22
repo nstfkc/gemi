@@ -224,7 +224,12 @@ function suite() {
       }
     }, 60_000);
 
-    test("a killed Redis: counted in memory, the offline queue does not replay it", async () => {
+    // Skipped on Linux: there, Bun (1.3.14) comes back from its own reconnect
+    // after a kill that caught a command in flight with a connection that
+    // reports `connected` and never answers again, so no limiter on it can
+    // recover until the client is replaced. That is a separate problem
+    // (#1016); the pause above covers the replay on Linux.
+    test.skipIf(process.platform === "linux")("a killed Redis: counted in memory, Bun's reconnect does not replay it", async () => {
       // A client that keeps reconnecting through the outage (rather than
       // giving up as `manager`'s does), so its offline queue is still holding
       // commands when Redis comes back.
