@@ -614,13 +614,25 @@ export default defineRateLimiterConfig({
 | --- | --- | --- |
 | `client` | the app's Redis client | run against a different connection |
 | `prefix` | `gemi:rl` | key namespace |
-| `failOpen` | `true` | admit requests while Redis is unreachable |
-| `timeout` | `250` | ms one call may wait for Redis before it follows `failOpen`; `0` turns it off |
-| `onError` | `console.error` | where Redis failures are reported |
+| `onRedisError` | `"memory"` | how a call is answered when Redis fails: `"memory"`, `"open"` or `"closed"` |
+| `fallback` | a new `InMemoryRateLimiter` | the limiter that counts while Redis is down, with `"memory"` |
+| `timeout` | `250` | ms one call may wait for Redis before it is answered as `onRedisError` says; `0` turns it off |
+| `onError` | one `console.error` line a minute | called with every Redis failure |
+| `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
 
-`failOpen` is the interesting one: by default a Redis outage lets traffic through rather than taking the site down with it. Set it to `false` on endpoints where an unmetered request is worse than a rejected one — anything that sends email or costs money per call.
+#### When Redis fails
 
-During an outage each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. A timed-out call is reported to `onError` as a `RedisRateLimiterTimeoutError`. The script is not cancelled, so Redis may still count a call that timed out. Once Redis is back the limits apply again without a restart: the app's shared client reconnects on its own (see [Facades: Redis](./facades.md#redis)). A `client` you pass yourself is yours to keep connected.
+`onRedisError` decides what a call gets when Redis fails, times out, or the client says it is disconnected:
+
+- `"memory"` (the default) counts it in an in-process limiter (`fallback`). Every instance enforces the limit on its own until Redis is back: N instances give a caller N budgets, which is how the app behaved before it had Redis, but the limit never goes away. It is the right choice for most limits, and the one to keep for brute-force guards (sign-in, PIN and code checks), where admitting every guess or locking every user out are both worse.
+- `"open"` admits the call uncounted: a Redis outage turns the limit off.
+- `"closed"` refuses it: a Redis outage refuses everyone. Use it where an unmetered request is worse than a rejected one and a per-instance budget is not good enough.
+
+Once a call fails, the limiter stops sending its script to Redis. Until Redis is back, every call is answered at once without touching Redis, and at most once a second one of them sends a `PING` in the background (none while the client says it is disconnected); the first `PING` that answers puts the limiter back on Redis, so limits are shared again about a second after Redis recovers, with no restart (the app's shared client reconnects on its own, see [Facades: Redis](./facades.md#redis); a `client` you pass yourself is yours to keep connected).
+
+Not sending is what keeps an outage from being counted twice. Bun's client queues the commands it gets while disconnected and runs them when it reconnects, and a Redis that stopped answering on an open connection (paused, or behind a partition) runs what was written to it once it answers again. If the limiter kept sending, every increment of the outage, already counted in memory, would land in Redis on recovery and put its callers over budget for the next window. What can still land late is what was sent before the first failure was seen: at most `timeout` worth of calls, each counted once in memory and once in Redis.
+
+Each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. `onError` gets a `RedisRateLimiterTimeoutError` for a call that timed out, a `RedisRateLimiterDisconnectedError` for one skipped because the client said it was disconnected, and the client's own error otherwise; while Redis stays down it also gets each failed `PING`, so at most one a second. The default writes one `console.error` line at most once a minute, with how many calls were answered without Redis since the last one, and a `console.info` line when Redis answers again.
 
 ### Limiting by something other than an IP
 

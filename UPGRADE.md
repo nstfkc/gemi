@@ -16,6 +16,17 @@
 - `AgentTool.ask(...)` now returns `AgentTool<Name, { question: string }, Output, never, unknown>`: a question is answered by the browser and reads no context, so it fits an agent of any context. Only a type that spelled out the old return type exactly needs the two extra arguments.
 - `AnyAgentTool` is now `AgentTool<string, any, any, any, any>` and `AnyAgent` is `Agent<any, any, any, any, any>`. A conditional type of your own written as `T extends AgentTool<any, infer I, infer O, infer P>` should add `any` as the fifth argument, or a tool with a typed context won't match it under `strict`.
 
+## Rate limiting: `RedisRateLimiter` counts in memory while Redis is down (#1011)
+
+**Behaviour change. Nothing to migrate unless you relied on the fail-open default.** See [Middleware → When Redis fails](docs/middleware.md#when-redis-fails).
+
+- New option `onRedisError: "memory" | "open" | "closed"`, **default `"memory"`**: a call that Redis fails, times out on, or that finds the client disconnected is counted by an in-process limiter (new option `fallback`, default a new `InMemoryRateLimiter`). During an outage each instance enforces the limit on its own (N instances, N budgets) instead of the limit being turned off. Before, the default was to admit every request (`failOpen: true`).
+  - To keep the old behaviour, pass `onRedisError: "open"`. `failOpen` still works and is deprecated: `true` is `"open"`, `false` is `"closed"`; `onRedisError` wins when both are set.
+  - An app that wrapped `RedisRateLimiter` to fall back to `InMemoryRateLimiter` from `onError` (folio's `SharedRateLimiter`) can drop the wrapper and use the driver as is.
+- **Behaviour change:** after a failure the limiter stops sending its script until Redis answers a `PING` (at most one a second, in the background), and answers every call in between as `onRedisError` says, at once. Before, every call went to Redis and waited out `timeout`; and Bun's offline queue (after a disconnect) or a stalled connection (a paused Redis) ran every increment of the outage once Redis was back, putting its callers over budget for up to two windows. Now at most the calls sent before the first failure was seen (`timeout` worth) can land late. Limits are shared again about a second after Redis recovers.
+- **Behaviour change:** a client that was seen connected and now says `connected === false` is not sent to; the call is answered as `onRedisError` says and `onError` gets a `RedisRateLimiterDisconnectedError` (new export of `gemi/services`). `RateLimiterRedisClient` gains an optional `connected`.
+- **Behaviour change:** the default `onError` writes one `console.error` line at most once a minute (with how many failures and calls without Redis it left out) and a `console.info` line when Redis answers again, instead of one line per failure. A custom `onError` still gets every failure: each failed call, then each failed `PING` while Redis stays down.
+
 ## AI: `judge()` graders typecheck under `strict` (#1007)
 
 **Fix, nothing to migrate.** A judge in `Eval.create`'s `graders` (from the `({ judge })` form or `Eval.judge`) failed to typecheck in a `strict` app, the docs' example included, because its typed `verdict` was checked against the graders' `unknown` judgment. `verdict` is now declared as a method, and `graders` takes part in inferring the output, so a record holding only a standalone judge infers it too. An app that cast around it can drop the cast. A grader whose annotation disagrees with the task's output is now reported at the task rather than at the grader.

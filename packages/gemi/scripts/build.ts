@@ -53,6 +53,7 @@ const result = await Bun.build({
     "./container/index.ts",
     "./foundation/index.ts",
     "./support/index.ts",
+    "./probe/index.ts",
     "./database/index.ts",
     "./orm/index.ts",
     // Server half of the agent module. Its browser half, `./ai/client`, is a

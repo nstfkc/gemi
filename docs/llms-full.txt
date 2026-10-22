@@ -53,12 +53,14 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
 - **[AI Agent Context](./ai-agent-context.md)** — a context per agent: `Agent.withContext<Ctx>()` types its tools' `ctx.context`, the controller's `context()` must build it (services injected in the constructor, passed to tools as functions), and sub-agents with another context are handed one with `ctx.runAgent(agent, { context })`.
+- **[AI Generate](./ai-generate.md)** — `generate` and `ctx.generate`: one typed model call without tools, and its repair loop — `validate`, `attempts`, `feedback`, per-attempt and overall timeouts, summed and per-attempt usage, and the last rejected answer.
 - **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep` (including a per-step reasoning effort): sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
 - **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 - **[AI Memory](./ai-memory.md)** — notes agents keep across conversations: scopes declared on the agent and resolved per run (`memoryScopes()`), the `<memory>` block, the `remember` / `forget` / `recall` tools, `ctx.memory`, `AgentMemories` (list, edit, delete, export) and `DatabaseAgentMemoryStore`.
 - **[AI Tool Approvals](./ai-tool-approvals.md)** — `requiresApproval` on a tool: never, always, or decided per call by a function given the call's input and the run's context, so "always allow" stays on the server; through `toAgentTools` and remote MCP elicitation.
 - **[AI Tools That End the Run](./ai-tool-ends-run.md)** — `endsRun` on a tool: a successful call ends the run with an optional closing text, so the model isn't asked again just to confirm what the tool did.
 - **[AI Evals](./ai-evals.md)** — `Eval.create`: cases × runs through a task, deterministic checks and LLM judges (with calibration), gates, pass rates and scores with 95% intervals, metered tokens and cost (`measureUsage`), and `Eval.compare` / `Eval.format` against a saved baseline.
+- **[AI Usage and Cost](./ai-usage.md)** — `Usage.meter`, `ctx.meter` and `result.metered`: every model call of a run or a scope (steps, `generate`, images, sub-runs) priced at its own model's prices, costs that aren't model calls added under a label, totals by model and by label.
 - **[AI Skills](./ai-skills.md)** — `Skill.create` and `skills` on an agent: instructions the model loads on demand from the reserved `skills` namespace; skills for one run (`Agent.stream({ skills })`, `AgentController.skills()`), and how loaded skills are summarised.
 - **[AI Prompt Files](./ai-prompts.md)** — `Prompt.render` from `gemi/ai`: Markdown prompts with `{{placeholders}}` and `{{> partials}}`, beside their agent or shared, cached in production.
 - **[AI Server Turns](./ai-server-turns.md)** — `AgentController.startTurn`: an agent turn started from a queue job, a command or an MCP tool, run through the controller and stored on the thread like a chat turn; `AgentTurnError`, pending approvals, and where the run lives.
@@ -84,6 +86,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Workflows](./workflows.md)** — durable multi-step `Workflow`s: steps, sleeps, signals, batches and cancel.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Browser Probes](./browser-probes.md)** — code for a headless browser's `page.evaluate` written as normal modules (`*.probe.ts`), bundled by gemi and run with typed arguments and result.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Change Feeds](./change-feed.md)** — `ChangeFeed.publish` on a channel, an SSE route with `ChangeFeed.stream`, and `useSubscription` in the browser: other tabs and instances learn that something changed.
@@ -3462,13 +3465,25 @@ export default defineRateLimiterConfig({
 | --- | --- | --- |
 | `client` | the app's Redis client | run against a different connection |
 | `prefix` | `gemi:rl` | key namespace |
-| `failOpen` | `true` | admit requests while Redis is unreachable |
-| `timeout` | `250` | ms one call may wait for Redis before it follows `failOpen`; `0` turns it off |
-| `onError` | `console.error` | where Redis failures are reported |
+| `onRedisError` | `"memory"` | how a call is answered when Redis fails: `"memory"`, `"open"` or `"closed"` |
+| `fallback` | a new `InMemoryRateLimiter` | the limiter that counts while Redis is down, with `"memory"` |
+| `timeout` | `250` | ms one call may wait for Redis before it is answered as `onRedisError` says; `0` turns it off |
+| `onError` | one `console.error` line a minute | called with every Redis failure |
+| `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
 
-`failOpen` is the interesting one: by default a Redis outage lets traffic through rather than taking the site down with it. Set it to `false` on endpoints where an unmetered request is worse than a rejected one — anything that sends email or costs money per call.
+#### When Redis fails
 
-During an outage each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. A timed-out call is reported to `onError` as a `RedisRateLimiterTimeoutError`. The script is not cancelled, so Redis may still count a call that timed out. Once Redis is back the limits apply again without a restart: the app's shared client reconnects on its own (see [Facades: Redis](./facades.md#redis)). A `client` you pass yourself is yours to keep connected.
+`onRedisError` decides what a call gets when Redis fails, times out, or the client says it is disconnected:
+
+- `"memory"` (the default) counts it in an in-process limiter (`fallback`). Every instance enforces the limit on its own until Redis is back: N instances give a caller N budgets, which is how the app behaved before it had Redis, but the limit never goes away. It is the right choice for most limits, and the one to keep for brute-force guards (sign-in, PIN and code checks), where admitting every guess or locking every user out are both worse.
+- `"open"` admits the call uncounted: a Redis outage turns the limit off.
+- `"closed"` refuses it: a Redis outage refuses everyone. Use it where an unmetered request is worse than a rejected one and a per-instance budget is not good enough.
+
+Once a call fails, the limiter stops sending its script to Redis. Until Redis is back, every call is answered at once without touching Redis, and at most once a second one of them sends a `PING` in the background (none while the client says it is disconnected); the first `PING` that answers puts the limiter back on Redis, so limits are shared again about a second after Redis recovers, with no restart (the app's shared client reconnects on its own, see [Facades: Redis](./facades.md#redis); a `client` you pass yourself is yours to keep connected).
+
+Not sending is what keeps an outage from being counted twice. Bun's client queues the commands it gets while disconnected and runs them when it reconnects, and a Redis that stopped answering on an open connection (paused, or behind a partition) runs what was written to it once it answers again. If the limiter kept sending, every increment of the outage, already counted in memory, would land in Redis on recovery and put its callers over budget for the next window. What can still land late is what was sent before the first failure was seen: at most `timeout` worth of calls, each counted once in memory and once in Redis.
+
+Each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. `onError` gets a `RedisRateLimiterTimeoutError` for a call that timed out, a `RedisRateLimiterDisconnectedError` for one skipped because the client said it was disconnected, and the client's own error otherwise; while Redis stays down it also gets each failed `PING`, so at most one a second. The default writes one `console.error` line at most once a minute, with how many calls were answered without Redis since the last one, and a `console.info` line when Redis answers again.
 
 ### Limiting by something other than an IP
 
@@ -3839,6 +3854,36 @@ read_domain: this.fromApiRoute("GET", "/sites/:siteId/domain", {
 - **Local agents:** `toAgentTools` builds an agent's tools once, so a gated tool stays in the agent's list. A call to it while the feature is off is refused before the route runs, with an error the model reads: `There is no tool named "read_domain".`
 - `await registry.available(caller, filter?)` is `list()` narrowed by features. `list()` and `descriptors()` do not apply them, and each descriptor's `feature` names its key.
 - **`server.version` does not change** when a feature flips. Tools behind a `when` differ per user, so a version derived from what one caller sees would give two callers of the same server different versions. Clients get the change from `tools/list`, which modern clients cache privately for 60 seconds. If you derive `version` from your tool names, hash every declared tool (`registry.descriptors()`), not just the ones a caller sees.
+
+## One route, several audiences
+
+An app often offers the same route to two kinds of caller that want it said differently: the app's own agent, which works inside one chat and has its resource bound, and a connected app, which names the resource itself and is reached through scopes. `fromApiRouteFor` declares the route once and expands to one tool per audience, to spread into `routes`:
+
+```ts
+routes = {
+  ...this.fromApiRouteFor("GET", "/pages/:pageId/site", {
+    name: "list_pages",
+    description: "Lists the site's pages.",
+    result: ({ pages }) => pages.map(({ slug, name }) => ({ path: slug, name })),
+    audiences: {
+      agent: { casing: "camel", tags: ["pages"], params: { pageId: this.chatPage } },
+      remote: {
+        title: "List a site's pages",
+        description: (shared) => `${shared} Name the site by the id list_sites gives.`,
+        tags: ["read"],
+        params: { pageId: this.remoteSite },
+      },
+    },
+  }),
+};
+// => listPages (the agent's) and list_pages (the connected app's)
+```
+
+- **Shared parts:** everything `fromApiRoute` takes (`description`, `input`, `params`, `files`, `result`, `output`, `tags`, `title`, `annotations`, `requiresApproval`, `feature`) may be written once beside `audiences`.
+- **Each audience** may say any of it differently. Its keys replace the shared ones, except `params` and `files`, which are merged field by field (the audience's win), so a shared `"input"` param can stay while an audience binds another. `description` may be a function of the shared one, for an audience that adds a sentence. Without a shared `description`, every audience needs its own.
+- **Names:** `name` is the base name. An audience takes it as written, re-cases it with `casing: "camel" | "snake" | "kebab"` (words split at `_`, `-` and before each capital, so write the base in snake_case or camelCase), or gives its own `name`. Two audiences that end up with the same name fail at declaration.
+- **Checks:** each audience is checked as the `fromApiRoute` call it stands for, with the shared parts merged in: every path param declared, `input` against the body (and required when the body needs it), file fields declared, and `result`/`output` against the route's answer. The tool names are literals, so a typed `toAgentTools` keeps every tool's input and output type.
+- **Nothing else changes:** the audience labels (`agent`, `remote`) mean nothing to gemi. Who sees a tool is still its tags, the router's [scopes](#scopes-which-tools-a-caller-sees) and `toAgentTools`' filters, and the registry sees exactly the tools you would have written out by hand.
 
 ## Native tools
 
@@ -7984,6 +8029,136 @@ Apps that augment `AgentContext` keep working: every new type parameter defaults
 
 ---
 
+## AI Generate
+
+`generate` is one model call with an output schema: no tools, no loop, nothing streamed to a browser. It returns the parsed, typed answer. With `validate`, it also checks the answer against your own rules and asks the model again with the problems until an answer passes.
+
+```ts
+import { generate, s } from "gemi/ai";
+import { provider } from "@/app/config/ai";
+
+const result = await generate({
+  provider,
+  instructions: "You are the copywriter of a small bakery's website.",
+  prompt: "Write the hero's headline and its button.",
+  output: s.object({ headline: s.string(), cta: s.string() }),
+});
+
+if (result.ok) console.log(result.output.headline);
+else console.error(result.error.code, result.error.message);
+```
+
+Inside a tool, call `ctx.generate` instead. It is the same function bound to the turn: it stops when the turn is stopped, and its usage counts toward the turn's.
+
+## The result
+
+`generate` does not throw for a bad answer. It resolves to a result discriminated on `ok`:
+
+- `ok: true` has `output`, the answer typed by the schema (or by `validate`, below).
+- `ok: false` has `error` (`code`, `message`, `retryable`, and the provider's `status` and `requestId` when it answered with an error).
+- Both have `messages` (the transcript, ending with the model's reply), `usage` (billed whether or not the answer passed), `finishReason`, `attempts` (how many calls were made) and `attemptLog` (each call's outcome, duration and usage).
+
+`error.code` is `invalid_output` when the answer did not match the schema, was cut off at `maxOutputTokens` or never came; `timeout` or `aborted` when `signal` (or `timeoutMs`) stopped it; otherwise the provider's code (`rate_limited`, `content_filtered`, `provider_error`, …).
+
+Pass `throwOnError: true` to get an `AgentRunError` instead of `ok: false`; the return type is then the `ok: true` arm. A failure is logged through `Log.error` unless `logErrors: false`; a stop is not logged.
+
+Options: `provider` and `output` are required, plus `prompt` or `messages` (or both: the prompt is appended as the next user turn). Then `instructions` (the system prompt), `reasoning`, `maxOutputTokens`, `temperature` and `signal`.
+
+## Validation and the repair loop
+
+`validate` gets the parsed answer and says whether it passes. An answer that does not pass is asked again with the problems, up to `attempts` times (3 by default when `validate` is set):
+
+```ts
+import { generate, s } from "gemi/ai";
+import { provider } from "@/app/config/ai";
+
+const sections = ["Hero", "Menu", "Visit"];
+
+const result = await generate({
+  provider,
+  instructions: "You plan a website's page.",
+  prompt: `Plan these sections, in order: ${sections.join(", ")}.`,
+  output: s.object({
+    sections: s.array(s.object({ name: s.string(), loud: s.boolean() })),
+  }),
+  validate: (plan) => [
+    plan.sections.map((section) => section.name).join() !== sections.join() &&
+      `"sections" must list exactly ${sections.join(", ")}, in order.`,
+    plan.sections.filter((section) => section.loud).length !== 1 && "Exactly one section is loud.",
+  ],
+  attempts: 3,
+});
+
+if (result.ok) {
+  console.log(result.output.sections, `after ${result.attempts} attempt(s)`);
+} else if (result.rejected) {
+  console.warn("Never passed:", result.rejected.problems);
+}
+```
+
+`validate(output, info)` may be async and may have side effects. `info` has `attempt`, `attempts`, `messages` (the transcript ending with this answer) and `signal`. It returns one of:
+
+| Verdict | Means |
+|---|---|
+| a list of problems | Falsy entries are dropped, so `[cond && "…"]` reads as a checklist. An empty list (or `undefined`) passes, and `output` is the parsed answer. |
+| `{ ok: true, value }` | Passes, and `output` is `value`: the answer turned into what you keep. Its type is inferred, so `result.output` is typed as `value`. |
+| `{ ok: false, problems, retry? }` | Rejected. `retry` is `"continue"` (the default), `"restart"`, or `false` to stop now (the model declined, and asking again would not change that). |
+
+A throw from `validate` is not a verdict: it rejects the call.
+
+### What the next attempt sends
+
+- **Continue** (a rejection, and a schema mismatch by default): the rejected reply stays in the transcript and the feedback is the next user turn, so the model corrects its own answer instead of starting over.
+- **Restart** (an answer cut off at `maxOutputTokens`, an attempt stopped by `attemptTimeoutMs`, and `retry: "restart"`): the reply is dropped and the same request is sent again, with the feedback added to it as a note. Use it for an answer that is no draft to correct: asked to fix a broken one, a model tends to copy it into the same wall. A later restart replaces the note.
+- **Again** (a retryable provider error such as a rate limit, unless `retryErrors: false`): the same request is sent unchanged, after the provider's `retryAfter` (at most 30 seconds) when it gave one.
+
+A non-retryable provider error, a stop and the deadline end the loop at once.
+
+`onInvalidOutput` decides what a schema mismatch does: `"continue"` (default) sends the parse error back as a correction, `"restart"` asks again without the reply, `"fail"` ends the loop with the error.
+
+### Feedback
+
+`feedback(problems, info)` writes the text the model gets back. `info.cause` is `"rejected"`, `"invalid_output"`, `"cut_off"` or `"timeout"`, and `info.restart` says whether the text is a note on the same request or a new turn. Without it, gemi sends a short English "Your answer was rejected: - …" message. With [prompt files](./ai-prompts.md):
+
+```ts
+feedback: (problems, { cause }) =>
+  Prompt.render(cause === "cut_off" ? "builder-cut-off" : "builder-rejected", {
+    problems: problems.map((problem) => `- ${problem}`).join("\n"),
+  }),
+```
+
+### Time limits
+
+- `attemptTimeoutMs` bounds each call. A call still answering after it is stopped and asked again as a cut-off answer is (`cause: "timeout"`), which is the cure for a model that sometimes runs on repeating itself. Validation is not counted.
+- `timeoutMs` bounds the whole loop, every call and validation together. When it runs out, the result is `code: "timeout"` and no further attempt is made. It is the same as an `AbortSignal.timeout` passed alongside `signal`.
+- `signal` stops everything; `info.signal` in `validate` fires with it.
+
+### When it never passes
+
+When the attempts run out (or `validate` says `retry: false`), the result is `ok: false` with `error.code: "invalid_output"`, the last problems in `error.message`, and `rejected: { output, problems }`: the last answer `validate` rejected, typed by the schema. It is returned rather than thrown, so a caller that would rather keep a flawed answer than none can. With `throwOnError: true` the call rejects with an `AgentRunError` whose `rejected` holds the same.
+
+`rejected` is also kept when a later attempt failed for another reason (a provider error after a rejection).
+
+### Usage and logging
+
+`result.usage` is the sum of every attempt's; each entry of `attemptLog` (also passed to `onAttempt` as it ends) has its own `usage`, `durationMs`, `finishReason`, `outcome` (`passed`, `rejected`, `invalid_output`, `cut_off`, `timeout` or `error`), and the `problems` or `error` it ended with. Under `ctx.generate`, the summed usage is added to the turn's.
+
+```ts
+onAttempt: (attempt) => {
+  if (attempt.outcome !== "passed") {
+    console.warn(`attempt ${attempt.attempt}: ${attempt.outcome} after ${attempt.durationMs} ms`, attempt.problems);
+  }
+},
+```
+
+A loop is logged once, when it ends without a passing answer, not once per attempt.
+
+### Without validate
+
+`attempts` alone retries what gemi can judge by itself: a schema mismatch, a cut-off answer, an attempt timeout and a retryable provider error. Without `validate` or `attempts`, `generate` makes exactly one call, as it always has.
+
+---
+
 ## AI Context Window
 
 A thread grows with every turn, and every model call sends the history. Without a bound, a long conversation ends when the provider answers `context_length_exceeded`. gemi bounds the request, not the thread: the store keeps every message, and each model call is sent the latest turns that fit.
@@ -9007,7 +9182,7 @@ const { value, usage, byModel } = await measureUsage(() =>
 );
 ```
 
-Meters nest, and concurrent meters don't see each other's calls. What it doesn't see:
+Meters nest, and concurrent meters don't see each other's calls. For costs outside an eval (a run's, a service's, with labels and costs that aren't model calls), see [AI Usage and Cost](./ai-usage.md). What it doesn't see:
 
 - **Work that `fn` started and didn't wait for** counts only if it finishes before `fn` returns.
 - **Background jobs.** A tool that hands work to `ctx.jobs.start` runs it in a queue worker, outside `fn`'s async context, so its model calls aren't metered even when the task waits for the job to settle.
@@ -9053,6 +9228,167 @@ The report keeps the samples in case order whatever the concurrency.
 ## What it doesn't do
 
 It has no CLI flags (read `--runs` and `--only` with `parseArgs` and pass them to `run`), and it doesn't store artifacts such as screenshots: write those from your task.
+
+---
+
+## AI Usage and Cost
+
+gemi meters what AI work costs. Every model call reports itself to the meters open around it: agent steps, `generate`, `ImageModel` generations and edits, and sub-runs, however deep in your code. Each call is priced at its own model's prices. You can also add costs that aren't model calls, like a browser session or an external API, under a label.
+
+An agent run has a meter of its own (`ctx.meter` in its tools, `result.metered` at the end). For work outside a run, open one with `Usage.meter`.
+
+## Prices
+
+Declare what you pay once, at boot. The table form is USD per million tokens, the same `ModelPrice` that `Eval.create({ pricing })` takes:
+
+```ts
+// app/config/ai.ts
+import { OpenAIProvider, Usage } from "gemi/ai";
+
+export const provider = OpenAIProvider.model("gpt-5.4");
+
+Usage.configure({
+  pricing: {
+    "gpt-5.4": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5.4-mini": { input: 0.25, output: 2 },
+    "gpt-image-2": { input: 5, cachedInput: 1.25, output: 30, imageInput: 8, imageOutput: 30 },
+  },
+});
+```
+
+- A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins.
+- `cachedInput` defaults to `input`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
+- A model with no price costs 0 and is listed in `unpriced`.
+
+Or give a function. It answers the cost in whatever unit you count in, and `undefined` for a model it doesn't price:
+
+```ts
+import { Usage } from "gemi/ai";
+
+// USD millionths per token, by model.
+const MICROS: Record<string, { input: number; output: number }> = {
+  "gpt-5.4": { input: 1.25, output: 10 },
+};
+
+Usage.configure({
+  pricing: (model, usage) => {
+    const price = MICROS[model];
+    if (!price) return undefined;
+    return Math.round(usage.inputTokens * price.input + usage.outputTokens * price.output);
+  },
+});
+```
+
+If the function throws or answers something that isn't a finite number, the call counts as unpriced rather than failing the model call.
+
+Every cost a meter holds is in the pricing's unit, including the ones you `add`. So with the function above, add micros too.
+
+A meter can override the pricing for itself with `Usage.meter(fn, { pricing })`. A meter without its own pricing uses the nearest enclosing meter's, then `Usage.configure`'s. The configured pricing is read when a call is recorded, so meters that are already open pick up a change.
+
+## Metering work outside a run
+
+```ts
+import { Usage, generate, s } from "gemi/ai";
+import { provider } from "@/app/config/ai";
+
+const BROWSER_SESSION_USD = 0.002;
+
+const { value, cost, byModel, byLabel } = await Usage.meter(async (meter) => {
+  const review = await generate({
+    provider,
+    prompt: "Review this page.",
+    output: s.object({ score: s.number() }),
+  });
+  meter.add("browser", BROWSER_SESSION_USD);
+  return review.ok ? review.output.score : null;
+});
+```
+
+`Usage.meter(fn, options?)` runs `fn` with a meter open and answers `fn`'s value with the totals:
+
+- `usage`: every model call's tokens, summed.
+- `cost`: the priced calls plus every added cost.
+- `byModel`: `{ usage, cost, count }` per model id (the one the provider reported, or the one it was asked for).
+- `byLabel`: `{ usage, cost, count }` per label (see below).
+- `unpriced`: the models called that the pricing doesn't price.
+
+Code deep inside `fn` doesn't need the handle. These act on the meters open where they're called:
+
+- `Usage.add(label, cost)` adds a cost to the innermost meter and every meter around it.
+- `Usage.record(model, usage)` records a model call gemi didn't make itself (a vendor SDK called directly, a usage report from elsewhere). It's priced like any other call.
+- `Usage.current()` is the innermost open meter, or `undefined`.
+
+All three do nothing outside a meter.
+
+## Labels
+
+`add(label, cost)` puts a cost under a label. A meter opened with `{ label }` puts every model call inside it under that label, in its own totals and in every enclosing meter's. The innermost label wins. So "what did the critique cost" is one wrapper, not a counter:
+
+```ts
+import { Usage, generate, s } from "gemi/ai";
+import { provider } from "@/app/config/ai";
+
+const critique = () =>
+  generate({ provider, prompt: "Critique the page.", output: s.object({ ok: s.boolean() }) });
+
+const pass = await Usage.meter(async () => {
+  await Usage.meter(critique, { label: "critique" });
+  Usage.add("browser", 0.002);
+});
+
+pass.byLabel.critique?.cost; // the critique's model calls
+pass.byLabel.browser?.cost; // 0.002
+pass.cost; // both
+```
+
+Calls outside any labelled meter count in `cost`, `usage` and `byModel`, but not in `byLabel`.
+
+## A run's meter
+
+Every agent run opens a meter around itself, nested in whatever meter is open where it starts. A sub-run started with `ctx.runAgent` gets its own meter inside its parent's.
+
+In a tool, `ctx.meter` is the run's meter. `add` counts for this run, the runs above it and any `Usage.meter` the run started in. `totals()` is what the run has spent so far.
+
+```ts
+import { AgentTool, s } from "gemi/ai";
+
+const BROWSER_SESSION_USD = 0.002;
+
+export const screenshot = AgentTool.create({
+  name: "screenshot",
+  description: "Takes a screenshot of the page.",
+  inputSchema: s.object({ url: s.string() }),
+  outputSchema: s.object({ ok: s.boolean() }),
+  execute: async ({ url }, ctx) => {
+    // … open a browser session on `url` …
+    ctx.meter.add("browser", BROWSER_SESSION_USD);
+    return { ok: url !== "" };
+  },
+});
+```
+
+When the run ends, `result.metered` holds its totals: the run's own steps, its tools' `generate`, `generateImage` and `editImage` calls, its sub-runs, and every `ctx.meter.add`, each counted once.
+
+```ts
+import { supportAgent } from "@/app/agents/support";
+
+const result = await supportAgent.stream({ messages: [], turn: { text: "Where is my order?" } }).result();
+
+result.metered?.cost; // priced per call
+result.metered?.byModel; // the chat model, the image model, a sub-agent's model
+```
+
+Unlike `result.usage`, which is one sum across every model the run used, `result.metered` prices each call at its own model's prices. Price a run from `metered`, not from `usage`. `metered` is optional in the type so that results built by hand (stubs, replays) still typecheck, but every agent run sets it.
+
+## What a meter doesn't see
+
+- **Work `fn` started and didn't wait for** counts only if it finishes before `fn` returns (or before the run ends, for a run's meter). Once a meter's scope has settled, `add` on it does nothing.
+- **Background jobs.** A tool that hands work to `ctx.jobs.start` runs it in a queue worker, outside the run's async context. Open a `Usage.meter` in the job if you want its cost.
+- **Compaction summaries made after a run** (in the background, or by a run that was stopped). They're billed to the next run's `usage`, but no meter sees them.
+- **Realtime voice.** The voice bridge reports usage through its own `onUsage`. Pass it to `Usage.record` inside a meter if you want it counted.
+- **A tool called by a remote MCP client** has no run. Its `ctx.meter` is a meter of its own whose `add`s still reach any `Usage.meter` open around the request.
+
+Concurrent meters don't see each other's calls, and `measureUsage` (tokens only, used by evals) is the same meter without costs.
 
 ---
 
@@ -14006,7 +14342,10 @@ spends no per-address budget, and a user whose PIN budget somebody else spent ca
 in from the same email (unless the guesses burned the code, which deletes its link too). The limits and lifetimes are
 the `emailCode` settings below, which govern these routes whether or not the email-code
 endpoints are enabled. With more than one instance, bind `RedisRateLimiter` so the attempt
-count and the limits are shared.
+count and the limits are shared. Keep its default `onRedisError: "memory"` for these limits:
+during a Redis outage each instance counts the guesses on its own, rather than admitting every
+guess (`"open"`) or refusing every sign-in (`"closed"`). See
+[When Redis fails](./middleware.md#when-redis-fails).
 
 `/auth/magic-link` answers `{ email: null }` for an address with no user, which tells a
 caller whether an account exists; clients have been built on that answer, so it stays the
@@ -19213,6 +19552,91 @@ Use a **cron job** for time-based, recurring work that runs on its own schedule.
 - [Jobs & Queues](./jobs-and-queues.md) — background work triggered on demand.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
 - [Configuration](./configuration.md) — environment setup.
+
+---
+
+## Browser Probes
+
+When your server reads a page in a headless browser (puppeteer, playwright, a hosted Chrome), it runs code in the page with `page.evaluate`. That takes one self-contained function: its source is sent to the browser as text, so it can use nothing from outside itself. No imports, no helpers at the top of the file, no types or constants shared with the server. Code that reads a page for real (its layout, its colours, its content) then grows into one function of hundreds of lines.
+
+A **probe** is that code written as a normal module. gemi bundles it, with everything it imports, into one self-contained script for the browser, and `probe(...).run(page, ...args)` runs it in the page and returns its result, typed.
+
+```typescript
+// app/utils/layout.probe.ts — runs in the page
+import { boxOf, type Box } from "./geometry";
+
+export default function readLayout(sections: string[]): { name: string; box: Box }[] {
+  return sections.flatMap((name) => {
+    const element = document.querySelector(`[data-section="${name}"]`);
+    return element ? [{ name, box: boxOf(element.getBoundingClientRect()) }] : [];
+  });
+}
+```
+
+```typescript
+// app/services/LayoutChecks.ts — runs on the server
+import { probe } from "gemi/probe";
+
+const readLayout = probe<typeof import("@/app/utils/layout.probe")>("utils/layout");
+
+// `page` is a puppeteer or playwright Page.
+const layout = await readLayout.run(page, ["hero", "pricing"]);
+//    ^? { name: string; box: Box }[]
+```
+
+## Writing a probe
+
+- A probe is a file under `app/` named `*.probe.ts` (or `*.probe.js`). Its **default export** is the function that runs in the page. It may be `async`; `run` resolves to what it resolves to.
+- It may import anything that bundles for the browser: your own helpers, types, constants shared with the server, packages. Only what it uses is bundled.
+- It runs in the page, so it uses the page's `window` and `document`, not the server's. Nothing it imports runs on the server when you call `run`.
+- Its **arguments** are sent as JSON, so they must be JSON values (strings, numbers, booleans, `null`, arrays and plain objects). Its **result** comes back the way your driver returns `evaluate`'s result: for puppeteer and playwright, JSON-like values (a DOM node or a function does not survive).
+
+A probe is **named by its path under `app/`** without the suffix: `app/utils/layout.probe.ts` is `"utils/layout"`, `app/probes/content.probe.ts` is `"probes/content"`.
+
+## Running one
+
+`probe<M>(name)` from `gemi/probe` returns a handle. `M` is the probe's module (`typeof import("@/app/…")`) or its function's type; the handle's arguments and result are typed from the default export.
+
+| Method | What it does |
+| --- | --- |
+| `run(page, ...args)` | Runs the probe in `page` and resolves to its (awaited) result. `page` is anything with `evaluate(expression: string): Promise<unknown>`, which puppeteer's and playwright's `Page` both are. |
+| `expression(...args)` | The JavaScript expression `run` evaluates, for a driver that takes a script string. It evaluates to the probe's result (a promise, for an async probe). |
+| `source()` | The bundled script itself. |
+
+gemi does not open a browser: your app keeps its own (a local Chrome in development, a hosted one in production) and hands its page to `run`.
+
+```typescript
+// A driver that takes the source of a function to call, rather than a page:
+const expression = await readLayout.expression(["hero"]);
+await provider.capture(url, { script: `() => ${expression}` });
+```
+
+The expression wraps the bundle in a function of its own, so it declares nothing in the page's scope and can run any number of times in one page.
+
+## Bundling and caching
+
+Each probe is bundled with `Bun.build` (target browser, minified, one IIFE), the way a static view's [document script](./static-views-and-islands.md) is.
+
+- **`gemi build`** bundles every `app/**/*.probe.{ts,js}` into `dist/server/probes.json`, and `gemi start` reads it, so production never runs the bundler. A probe the manifest lacks is bundled from source once. A probe that does not bundle fails the build.
+- **In development and tests** a probe is bundled on its first `run` and kept until the probe or any file it imports changes (compared by modification time), so an edit shows on the next run and an unchanged probe is not bundled again.
+
+A probe that does not bundle throws on `run` with the bundler's messages; a name with no file throws naming the file it looked for.
+
+## Testing a probe
+
+`run` only needs an object with `evaluate`, so a test can hand it a fake page, or run the expression in jsdom:
+
+```typescript
+import { JSDOM } from "jsdom";
+import { probe } from "gemi/probe";
+
+const dom = new JSDOM(`<section data-section="hero"></section>`, { runScripts: "outside-only" });
+const page = { evaluate: async (expression: string) => dom.window.eval(expression) };
+
+const layout = await probe<typeof import("@/app/utils/layout.probe")>("utils/layout").run(page, ["hero"]);
+```
+
+jsdom does no layout (every box is zero), so a probe that measures belongs in a test with a real headless browser.
 
 ---
 

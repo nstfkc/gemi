@@ -4,7 +4,7 @@ import { generate } from "../generate";
 import { addUsage, emptyUsage } from "../runtime";
 import type { Infer, Schema } from "../Schema";
 import type { AgentMessage, Usage } from "../types";
-import { measureUsage } from "../usageMeter";
+import { measureUsage, priceUsage, type ModelPrice } from "../usageMeter";
 import {
   adjust,
   meanOf,
@@ -152,20 +152,10 @@ export type GraderKit<I, O> = {
   judge: <J extends Schema<any>>(spec: JudgeSpec<I, O, J>) => JudgeGrader<I, O, J>;
 };
 
-/** USD per million tokens. `cachedInput` defaults to `input`. */
-export type ModelPrice = {
-  input: number;
-  output: number;
-  cachedInput?: number;
-  /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`);
-   *  they're priced as text when these are absent. */
-  imageInput?: number;
-  imageOutput?: number;
-};
-
 /** Prices by model id. A key also prices the ids it is a prefix of
  *  (`gpt-5.4` prices `gpt-5.4-2026-03-05`); the longest key wins. */
 export type EvalPricing = Record<string, ModelPrice>;
+export type { ModelPrice };
 
 export type CreateEvalParams<I, O> = {
   name: string;
@@ -702,14 +692,6 @@ function summarizeGraders(
 
 // --- cost --------------------------------------------------------------------
 
-function priceFor(pricing: EvalPricing, model: string): ModelPrice | undefined {
-  if (pricing[model]) return pricing[model];
-  const key = Object.keys(pricing)
-    .filter((name) => model.startsWith(name))
-    .sort((a, b) => b.length - a.length)[0];
-  return key ? pricing[key] : undefined;
-}
-
 function costOf(
   pricing: EvalPricing,
   byModel: Record<string, Usage>,
@@ -717,21 +699,12 @@ function costOf(
   let cost = 0;
   const unpriced: string[] = [];
   for (const [model, usage] of Object.entries(byModel)) {
-    const price = priceFor(pricing, model);
-    if (!price) {
+    const price = priceUsage(pricing, model, usage);
+    if (price === undefined) {
       unpriced.push(model);
       continue;
     }
-    const cached = usage.cachedInputTokens ?? 0;
-    const imageIn = usage.imageInputTokens ?? 0;
-    const imageOut = usage.imageOutputTokens ?? 0;
-    cost +=
-      ((usage.inputTokens - cached - imageIn) * price.input +
-        cached * (price.cachedInput ?? price.input) +
-        imageIn * (price.imageInput ?? price.input) +
-        (usage.outputTokens - imageOut) * price.output +
-        imageOut * (price.imageOutput ?? price.output)) /
-      1_000_000;
+    cost += price;
   }
   return { cost, unpriced };
 }

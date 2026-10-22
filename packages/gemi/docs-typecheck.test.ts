@@ -20,7 +20,7 @@ import { afterAll, expect, test } from "vitest";
 const PACKAGE = import.meta.dirname;
 const DOCS = path.join(PACKAGE, "../../docs");
 const FIXTURE = path.join(PACKAGE, "ai/__fixtures__/docs");
-const PAGES = ["ai-evals.md", "ai-agent-context.md"];
+const PAGES = ["ai-evals.md", "ai-generate.md", "ai-usage.md", "ai-agent-context.md"];
 
 function examples(page: string): string[] {
   const text = readFileSync(path.join(DOCS, page), "utf8");

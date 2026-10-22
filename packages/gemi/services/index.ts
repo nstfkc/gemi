@@ -63,7 +63,9 @@ export {
 export {
   RedisRateLimiter,
   RedisRateLimiterTimeoutError,
+  RedisRateLimiterDisconnectedError,
   type RedisRateLimiterOptions,
+  type RedisRateLimiterFailureMode,
   type RateLimiterRedisClient,
 } from "./rate-limiter/drivers/RedisRateLimiterDriver";
 export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";

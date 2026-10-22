@@ -20,7 +20,7 @@ import {
   resolveRope,
   RunAborted,
 } from "./runtime";
-import { recordUsage } from "./usageMeter";
+import { openMeter, recordUsage, type UsageMeter, type UsageTotals } from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -342,10 +342,12 @@ export interface ToolContext<Ctx = AgentContext> {
    * unlike `runAgent` and `generateImage`, which replay from what they recorded
    * on the tool call. This records nothing, by design.
    */
-  generate<O extends Schema<any>>(
-    params: GenerateParams<O> & { throwOnError: true },
-  ): Promise<GenerateSuccess<Infer<O>>>;
-  generate<O extends Schema<any>>(params: GenerateParams<O>): Promise<GenerateResult<Infer<O>>>;
+  generate<O extends Schema<any>, R = Infer<O>>(
+    params: GenerateParams<O, R> & { throwOnError: true },
+  ): Promise<GenerateSuccess<R>>;
+  generate<O extends Schema<any>, R = Infer<O>>(
+    params: GenerateParams<O, R>,
+  ): Promise<GenerateResult<R, Infer<O>>>;
 
   /**
    * Renders an image and parks it, in one step, wired into this tool call.
@@ -405,6 +407,19 @@ export interface ToolContext<Ctx = AgentContext> {
    * memory in this conversation". See `ToolMemory`.
    */
   memory: ToolMemory;
+
+  /**
+   * The run's usage meter (#1021): every model call of the run, its tools'
+   * `generate`s and images and its sub-runs, each priced at its own model's
+   * prices (`Usage.configure`), plus costs added here.
+   *
+   *     ctx.meter.add("browser", BROWSER_SESSION_COST);
+   *
+   * `add` counts for this run, the runs above it and any `Usage.meter` the
+   * run started in. `totals()` is what the run has spent so far; the final
+   * figures are on `result.metered`. See `UsageMeter`.
+   */
+  meter: UsageMeter;
 }
 
 /** What an image parked by a tool answers. See `ToolContext.generateImage`. */
@@ -1804,6 +1819,14 @@ export type AgentRunResult<T extends ToolShapes, O> = {
   messages: AgentMessage<T, O>[];
   finishReason: FinishReason;
   usage: Usage;
+  /**
+   * What the run's meter counted (#1021): `usage` again, with costs, by model
+   * and by label. Unlike `usage`, each model call is priced at its own
+   * model's prices, so a run that drew images or ran a sub-agent on another
+   * model is priced right. Always set by a run; optional so a result built by
+   * hand (a stub, a replay) still typechecks.
+   */
+  metered?: UsageTotals;
   /** Set when the agent declares an `output` schema and the run finished. */
   output?: O;
   /**
@@ -1844,9 +1867,18 @@ export class AgentRunError extends Error {
   readonly toolCallId?: string;
   readonly runId: string;
   readonly result: AgentRunResult<ToolShapes, unknown>;
+  /**
+   * From `generate({ validate, throwOnError: true })` whose answers never
+   * passed: the last one `validate` rejected, and its problems.
+   */
+  readonly rejected?: { output: unknown; problems: string[] };
 
-  constructor(result: AgentRunResult<ToolShapes, unknown> & { error: AgentRunFailure }) {
+  constructor(
+    result: AgentRunResult<ToolShapes, unknown> & { error: AgentRunFailure },
+    extra?: { rejected?: { output: unknown; problems: string[] } },
+  ) {
     super(result.error.message);
+    if (extra?.rejected) this.rejected = extra.rejected;
     this.name = "AgentRunError";
     this.code = result.error.code;
     this.retryable = result.error.retryable;
@@ -2921,6 +2953,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private cancelDeadline: () => void = () => {};
 
   private readonly settled: Promise<AgentRunResult<ToolShapes, unknown>>;
+  /** The run's usage meter: `ctx.meter`, and `result.metered` once it ends. */
+  private readonly meter: UsageMeter;
 
   /**
    * Where this run sits in a tree of runs, all of it constant for the run.
@@ -3006,7 +3040,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // Started here, not on first read. A run outlives the request that began
     // it, so nothing may depend on someone being attached — a client that
     // never reads still gets its tools run and its messages persisted.
-    this.settled = this.execute();
+    //
+    // In a meter of its own (#1021), nested in whatever meter is open where
+    // the run starts — a parent run's, for a sub-run — so its calls count
+    // there too. Closed when the loop settles: a background summary that
+    // lands later is billed to the next run, not metered here.
+    const meter = openMeter();
+    this.meter = meter.meter;
+    this.settled = meter.run(() => this.execute());
+    this.settled.then(meter.close, meter.close);
     // And a request that started it stays open until it settles. A tool may
     // still read ambient request state — `Auth.user()`, a policied query — and
     // a client that leaves mid-run cancels the response body without stopping
@@ -3198,6 +3240,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       messages: this.produced as AgentMessage<ToolShapes, unknown>[],
       finishReason: this.finishReason,
       usage: this.usage,
+      metered: this.meter.totals(),
       output: this.output,
       // Only when there is one, so a successful result has the same keys it
       // always had.
@@ -4305,6 +4348,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         attachments: this.params.attachments ?? null,
       }),
       memory: this.memory.handle({ messageId }),
+      meter: this.meter,
     };
 
     try {

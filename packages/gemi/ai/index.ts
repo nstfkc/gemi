@@ -80,7 +80,6 @@ export type {
   ToolSearchRecord,
   ToolShape,
   ToolShapes,
-  Usage,
 } from "./types";
 
 // --- agents, tools and skills ---------------------------------------------
@@ -264,7 +263,18 @@ export type { ErrorRedactionInfo, ErrorRedactor } from "./redact";
 // A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same
 // function bound to the turn — see `ToolContext.generate`.
 export { generate } from "./generate";
-export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate";
+export type {
+  GenerateAttempt,
+  GenerateFeedbackCause,
+  GenerateFeedbackInfo,
+  GenerateParams,
+  GenerateProblem,
+  GenerateRejection,
+  GenerateResult,
+  GenerateSuccess,
+  GenerateValidateInfo,
+  GenerateVerdict,
+} from "./generate";
 
 // --- evals and usage metering (#1005) -----------------------------------------
 export { Eval } from "./eval/Eval";
@@ -296,8 +306,17 @@ export type {
   ModelPrice,
 } from "./eval/Eval";
 export type { Delta, Estimate } from "./eval/stats";
-export { measureUsage } from "./usageMeter";
-export type { MeasuredUsage } from "./usageMeter";
+// `Usage` is the token type and, as a value, the meter (#1021).
+export { measureUsage, Usage } from "./usageMeter";
+export type {
+  MeasuredUsage,
+  MeteredUsage,
+  UsageLine,
+  UsageMeter,
+  UsageMeterOptions,
+  UsagePricing,
+  UsageTotals,
+} from "./usageMeter";
 
 // --- an app's API routes as tools ------------------------------------------
 //
