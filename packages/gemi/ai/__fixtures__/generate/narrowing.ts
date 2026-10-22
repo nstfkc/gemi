@@ -55,3 +55,27 @@ export async function destructuring() {
   const sure: { headline: string } = value;
   return { ok, maybe, failure, sure, messages, usage, finishReason };
 }
+
+export async function validated() {
+  // `validate` turning the answer into a value: `ok` narrows to it, and the
+  // failure arm's `rejected` is the parsed answer, possibly absent.
+  const result = await generate({
+    provider,
+    prompt: "go",
+    output,
+    validate: (copy) =>
+      copy.headline
+        ? { ok: true as const, value: copy.headline.length }
+        : { ok: false as const, problems: ["The headline is empty."] },
+  });
+  if (result.ok) {
+    const length: number = result.output;
+    const none: undefined = result.rejected;
+    return { length, none };
+  }
+  // @ts-expect-error — `rejected` may be undefined (the call itself failed)
+  const unchecked: string = result.rejected.output.headline;
+  const headline: string | undefined = result.rejected?.output.headline;
+  const attempts: number = result.attempts;
+  return { unchecked, headline, attempts };
+}
