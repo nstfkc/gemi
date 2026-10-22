@@ -46,6 +46,8 @@ Usage.configure({
 });
 ```
 
+If the function throws or answers something that isn't a finite number, the call counts as unpriced rather than failing the model call.
+
 Every cost a meter holds is in the pricing's unit, including the ones you `add`. So with the function above, add micros too.
 
 A meter can override the pricing for itself with `Usage.meter(fn, { pricing })`. A meter without its own pricing uses the nearest enclosing meter's, then `Usage.configure`'s. The configured pricing is read when a call is recorded, so meters that are already open pick up a change.

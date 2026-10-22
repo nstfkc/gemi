@@ -241,7 +241,16 @@ export function priceUsage(
   usage: UsageType,
 ): number | undefined {
   if (!pricing) return undefined;
-  if (typeof pricing === "function") return pricing(model, usage);
+  if (typeof pricing === "function") {
+    // Called from inside the model call sites: a pricing bug must not fail
+    // the call it is pricing, so a throw or a non-number is "unpriced".
+    try {
+      const cost = pricing(model, usage);
+      return typeof cost === "number" && Number.isFinite(cost) ? cost : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   const price = priceFor(pricing, model);
   if (!price) return undefined;
   const cached = usage.cachedInputTokens ?? 0;

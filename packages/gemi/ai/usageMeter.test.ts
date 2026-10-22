@@ -159,6 +159,17 @@ describe("Usage.meter", () => {
     expect(metered.byModel.fake!.usage).toMatchObject({ inputTokens: 5, outputTokens: 1 });
   });
 
+  test("a pricing function that throws leaves the call unpriced rather than failing it", async () => {
+    const metered = await Usage.meter(() => judge(5, 1), {
+      pricing: () => {
+        throw new Error("no prices");
+      },
+    });
+    expect(metered.value.ok).toBe(true);
+    expect(metered.cost).toBe(0);
+    expect(metered.unpriced).toEqual(["fake"]);
+  });
+
   test("meters images, and calls recorded by hand", async () => {
     Usage.configure({
       pricing: {
