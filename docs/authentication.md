@@ -666,7 +666,10 @@ spends no per-address budget, and a user whose PIN budget somebody else spent ca
 in from the same email (unless the guesses burned the code, which deletes its link too). The limits and lifetimes are
 the `emailCode` settings below, which govern these routes whether or not the email-code
 endpoints are enabled. With more than one instance, bind `RedisRateLimiter` so the attempt
-count and the limits are shared.
+count and the limits are shared. Keep its default `onRedisError: "memory"` for these limits:
+during a Redis outage each instance counts the guesses on its own, rather than admitting every
+guess (`"open"`) or refusing every sign-in (`"closed"`). See
+[When Redis fails](./middleware.md#when-redis-fails).
 
 `/auth/magic-link` answers `{ email: null }` for an address with no user, which tells a
 caller whether an account exists; clients have been built on that answer, so it stays the
