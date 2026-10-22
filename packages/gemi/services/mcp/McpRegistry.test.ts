@@ -1813,3 +1813,107 @@ describe("McpRegistry", () => {
     });
   });
 });
+
+describe("one route for several audiences (#1018)", () => {
+  class AudienceMcp extends McpRouter<CreateRPC<Api>> {
+    page = this.param({
+      as: "page",
+      input: s.string().describe("The page's id, as list_pages gives it."),
+      bind: (page) => page,
+    });
+
+    routes = {
+      ...this.fromApiRouteFor("GET", "/pages/:pageId/outline", {
+        name: "read_outline",
+        description: "Reads a page's outline.",
+        result: ({ pageId }) => ({ page: pageId }),
+        audiences: {
+          agent: {
+            casing: "camel",
+            tags: ["pages"],
+            params: { pageId: (_req, { ctx }) => (ctx!.context as { pageId: string }).pageId },
+          },
+          remote: {
+            title: "Read a page",
+            description: (shared) => `${shared} Name the page by its id.`,
+            tags: ["read"],
+            params: { pageId: this.page },
+            result: ({ pageId, search }) => ({ page: pageId, search }),
+          },
+        },
+      }),
+      ...this.fromApiRouteFor("POST", "/pages/:pageId/title", {
+        name: "retitle-page",
+        description: "Retitles a page.",
+        input: s.object({ title: s.string() }),
+        params: { pageId: "input" },
+        requiresApproval: true,
+        audiences: {
+          agent: { casing: "camel" },
+          remote: {
+            casing: "snake",
+            input: s.object({ title: s.string().describe("At most 60 characters.") }),
+          },
+        },
+      }),
+    };
+  }
+  const registry = () => new McpRegistry(new AudienceMcp(), resolve(ApiRouteDispatcher));
+
+  test("each audience is a tool of its own, with the shared parts and its own", () => {
+    const byName = Object.fromEntries(registry().descriptors().map((tool) => [tool.name, tool]));
+
+    expect(Object.keys(byName).sort()).toEqual([
+      "readOutline",
+      "read_outline",
+      "retitlePage",
+      "retitle_page",
+    ]);
+    expect(byName.readOutline).toMatchObject({
+      description: "Reads a page's outline.",
+      tags: ["pages"],
+      requiresApproval: false,
+    });
+    expect(byName.readOutline.title).toBeUndefined();
+    expect(byName.readOutline.inputSchema.toJSONSchema().properties).toEqual({});
+    expect(byName.read_outline).toMatchObject({
+      description: "Reads a page's outline. Name the page by its id.",
+      title: "Read a page",
+      tags: ["read"],
+    });
+    expect(byName.read_outline.inputSchema.toJSONSchema().properties).toEqual({
+      page: { type: "string", description: "The page's id, as list_pages gives it." },
+    });
+    // Shared params, input and requiresApproval reach both; the input is the
+    // audience's own where it gives one.
+    expect(byName.retitlePage).toMatchObject({ requiresApproval: true, tags: [] });
+    expect(byName.retitlePage.inputSchema.toJSONSchema().properties).toEqual({
+      title: { type: "string" },
+      pageId: { type: "string", description: "The \":pageId\" segment of the url." },
+    });
+    expect(byName.retitle_page.inputSchema.toJSONSchema().properties).toEqual({
+      title: { type: "string", description: "At most 60 characters." },
+      pageId: { type: "string", description: "The \":pageId\" segment of the url." },
+    });
+  });
+
+  test("each audience binds its params and projects the answer its own way", async () => {
+    const agent = await runTool(alice, "readOutline", { pageId: "pg_other" }, {
+      registry: registry(),
+      context: { pageId: "pg_home" },
+    });
+    expect(agent.result).toMatchObject({ status: "ok", output: { page: "pg_home" } });
+
+    const remote = await runTool(alice, "read_outline", { page: "pg_about" }, {
+      registry: registry(),
+    });
+    expect(remote.result).toMatchObject({
+      status: "ok",
+      output: { page: "pg_about", search: "" },
+    });
+    expect(handled).toEqual([
+      { route: "outline", user: 1, params: { pageId: "pg_home" } },
+      { route: "outline", user: 1, params: { pageId: "pg_about" } },
+    ]);
+  });
+});

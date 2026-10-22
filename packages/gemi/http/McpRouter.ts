@@ -629,6 +629,269 @@ export class McpToolDeclaration<
   ) {}
 }
 
+// --- one route, several audiences (#1018) --------------------------------------
+
+/** How an audience re-cases the base name. See `McpAudienceMeta.casing`. */
+export type McpNameCasing = "camel" | "snake" | "kebab";
+
+type PushWord<A extends string[], W extends string> = W extends "" ? A : [...A, W];
+
+/**
+ * The words of a name, lower-cased: split at `_`, `-`, spaces and before each
+ * capital. `listPages`, `list_pages` and `list-pages` are all
+ * `["list", "pages"]`. A run of capitals is a word per letter (`readURL` is
+ * `read_u_r_l`), so a base name is best written in snake_case.
+ */
+type NameWords<S extends string, W extends string = "", A extends string[] = []> =
+  S extends `${infer C}${infer Rest}`
+    ? C extends "_" | "-" | " "
+      ? NameWords<Rest, "", PushWord<A, W>>
+      : C extends Lowercase<C>
+        ? NameWords<Rest, `${W}${C}`, A>
+        : NameWords<Rest, Lowercase<C>, PushWord<A, W>>
+    : PushWord<A, W>;
+
+type JoinWords<A extends string[], Sep extends string> = A extends [
+  infer H extends string,
+  ...infer T extends string[],
+]
+  ? T extends []
+    ? H
+    : `${H}${Sep}${JoinWords<T, Sep>}`
+  : "";
+
+type CamelWords<A extends string[]> = A extends [infer H extends string, ...infer T extends string[]]
+  ? `${H}${JoinWords<{ [I in keyof T]: Capitalize<T[I]> }, "">}`
+  : "";
+
+/** `name` in `casing`, as `recaseName` computes it at runtime. */
+export type McpCasedName<N extends string, C extends McpNameCasing> = C extends "camel"
+  ? CamelWords<NameWords<N>>
+  : C extends "snake"
+    ? JoinWords<NameWords<N>, "_">
+    : JoinWords<NameWords<N>, "-">;
+
+function nameWords(name: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  for (const c of name) {
+    if (c === "_" || c === "-" || c === " ") {
+      if (word) words.push(word);
+      word = "";
+    } else if (c === c.toLowerCase()) {
+      word += c;
+    } else {
+      if (word) words.push(word);
+      word = c.toLowerCase();
+    }
+  }
+  if (word) words.push(word);
+  return words;
+}
+
+/** @internal The runtime twin of `McpCasedName`. */
+export function recaseName(name: string, casing: McpNameCasing): string {
+  const words = nameWords(name);
+  if (casing === "snake") return words.join("_");
+  if (casing === "kebab") return words.join("-");
+  return words.map((word, i) => (i === 0 ? word : word[0].toUpperCase() + word.slice(1))).join("");
+}
+
+/**
+ * One audience of `fromApiRouteFor`: its tool's name, and whatever of the
+ * shared declaration it says differently. Every key is optional; each one
+ * given replaces the shared one, except `params` and `files`, which are merged
+ * field by field (the audience's win).
+ *
+ * The audience's own key (`agent`, `remote`) is a label for the reader. gemi
+ * gives it no meaning: who sees the tool is still its tags, the router's
+ * scopes and `toAgentTools`' filters.
+ */
+export type McpAudienceMeta<D = any> = {
+  /**
+   * The tool's name, verbatim. Wins over `casing`. Without either, the tool
+   * takes the base `name` as it is written.
+   */
+  name?: string;
+  /**
+   * Derives the tool's name from the base `name`: `"camel"` (`listPages`),
+   * `"snake"` (`list_pages`) or `"kebab"` (`list-pages`). Words split at `_`,
+   * `-` and before each capital.
+   */
+  casing?: McpNameCasing;
+  /**
+   * Replaces the shared description; a function is handed the shared one, for
+   * an audience that adds a sentence or rewrites it. Required when there is no
+   * shared description.
+   */
+  description?: string | ((shared: string) => string);
+  title?: string;
+  tags?: readonly string[];
+  requiresApproval?: boolean;
+  annotations?: McpToolAnnotations;
+  feature?: FeatureKey;
+  input?: AnySchema;
+  /** Merged over the shared `params`, param by param. */
+  params?: Record<string, McpParamDeclaration>;
+  /** Merged over the shared `files`, field by field. */
+  files?: Record<string, McpFileBinder | "input">;
+  /** Replaces the shared `result`. Handed the route's answer and the call. */
+  result?: (data: D, call: McpResultContext) => unknown;
+  output?: AnySchema;
+};
+
+type Own<T, Key extends PropertyKey, Fallback> = Key extends keyof T ? T[Key] : Fallback;
+
+type MergedParams<P, A1> = Prettify<Omit<P, keyof Own<A1, "params", {}>> & Own<A1, "params", {}>>;
+type MergedFiles<F, A1> = Prettify<Omit<F, keyof Own<A1, "files", {}>> & Own<A1, "files", {}>>;
+
+/**
+ * Every path param declared, shared or the audience's own, and none the url
+ * does not have among the audience's own (the shared ones are checked where
+ * they are written).
+ */
+type AudienceParamsCheck<K, MP, AP> = string extends keyof ParamsOf<K>
+  ? unknown
+  : [Exclude<keyof ParamsOf<K>, keyof MP>] extends [never]
+    ? [Exclude<keyof AP, keyof ParamsOf<K>>] extends [never]
+      ? unknown
+      : { "params the url does not have": Exclude<keyof AP, keyof ParamsOf<K>> }
+    : { "path params left undeclared": Exclude<keyof ParamsOf<K>, keyof MP> };
+
+type AudienceInputCheck<B, I, A1> = "input" extends keyof A1
+  ? { input: InputCheck<A1["input"], B> }
+  : [I] extends [undefined]
+    ? IsLoose<B> extends true
+      ? unknown
+      : {} extends JsonBody<B>
+        ? unknown
+        : { input: Schema<JsonBody<B>> }
+    : unknown;
+
+type AudienceFilesCheck<B, MF> =
+  IsLoose<B> extends true
+    ? unknown
+    : [Exclude<BinaryKeys<B>, keyof MF>] extends [never]
+      ? [Exclude<keyof MF, BinaryKeys<B>>] extends [never]
+        ? unknown
+        : { "files the route's body does not have": Exclude<keyof MF, BinaryKeys<B>> }
+      : { "file fields left undeclared": Exclude<BinaryKeys<B>, keyof MF> };
+
+/**
+ * What an audience's `result` returns: its own, else the shared one's (`SR`).
+ * `never` is no `result` at all.
+ */
+type AudienceResult<A1, SR> = "result" extends keyof A1
+  ? A1["result"] extends (...args: any[]) => infer X
+    ? Awaited<X>
+    : never
+  : Awaited<SR>;
+
+/**
+ * What an audience's tool returns must be what its `output` (its own, or the
+ * shared one) describes: its `result`'s return — its own, or the shared one's —
+ * or, without a `result`, the route's answer.
+ */
+type AudienceOutputCheck<H, MR, MO> = [MO] extends [undefined]
+  ? unknown
+  : MO extends AnySchema
+    ? unknown extends OutputCheck<MO, [MR] extends [never] ? DataOf<H> : MR>
+      ? unknown
+      : {
+          "output does not describe what the tool answers (its result's return, or the route's answer)": Infer<MO>;
+        }
+    : unknown;
+
+type AudienceDescriptionCheck<D> = [D] extends [undefined] ? { description: string } : unknown;
+
+/** Every audience, checked as the `fromApiRoute` call it expands to would be. */
+type AudienceCheck<H, K, A1, I, P, F, SR, O, D> = AudienceParamsCheck<
+  K,
+  MergedParams<P, A1>,
+  Own<A1, "params", {}>
+> &
+  AudienceInputCheck<BodyOf<H>, I, A1> &
+  AudienceFilesCheck<BodyOf<H>, MergedFiles<F, A1>> &
+  AudienceOutputCheck<H, AudienceResult<A1, SR>, Own<A1, "output", O>> &
+  AudienceDescriptionCheck<D>;
+
+/**
+ * Each audience's check, by audience.
+ *
+ * `unknown` while `A` is still its constraint, which is what it is while the
+ * `result`s and binders inside it are contextually typed. A check that failed
+ * there (the constraint's `params` are any string) would make the literal
+ * unassignable before `A` is inferred, and `A` would then be left at its
+ * constraint, losing every tool name and type.
+ */
+type AudiencesCheck<H, K, A, I, P, F, SR, O, D> = string extends keyof A
+  ? unknown
+  : { [X in keyof A]: AudienceCheck<H, K, A[X], I, P, F, SR, O, D> };
+
+/** The tool name an audience ends up with. */
+export type McpAudienceName<N extends string, A1> = A1 extends { name: infer S extends string }
+  ? S
+  : A1 extends { casing: infer C extends McpNameCasing }
+    ? McpCasedName<N, C>
+    : N;
+
+type AudienceOutput<H, MR, MO> = [MO] extends [undefined]
+  ? [MR] extends [never]
+    ? DataOf<H>
+    : MR
+  : MO extends AnySchema
+    ? Infer<MO>
+    : unknown;
+
+/** What `fromApiRouteFor` returns: one declaration per audience, by tool name. */
+export type McpAudienceDeclarations<
+  M extends McpMethod,
+  K extends string,
+  H,
+  N extends string,
+  A,
+  I,
+  P,
+  F,
+  SR,
+  O,
+  T,
+> = {
+  [X in keyof A as McpAudienceName<N, A[X]>]: McpRouteDeclaration<
+    M,
+    K,
+    McpToolInput<Own<A[X], "input", I>, K, MergedParams<P, A[X]>, MergedFiles<F, A[X]>>,
+    AudienceOutput<H, AudienceResult<A[X], SR>, Own<A[X], "output", O>>,
+    Own<A[X], "tags", T> extends readonly string[] ? Own<A[X], "tags", T> : readonly string[]
+  >;
+};
+
+/** What `fromApiRouteFor` takes. See `McpRouter.fromApiRouteFor`. */
+export type McpAudienceRouteMeta<H, K, N extends string, A, I, O, P, F, SR, D, T> = {
+  /**
+   * The base name, which each audience takes verbatim, re-cases (`casing`) or
+   * replaces (`name`).
+   */
+  name: N;
+  /** Shared by every audience that does not give its own. */
+  description?: D;
+  title?: string;
+  tags?: T;
+  requiresApproval?: boolean;
+  annotations?: McpToolAnnotations;
+  feature?: FeatureKey;
+  /** As `fromApiRoute`'s, checked against the route's body. */
+  input?: I & NoInfer<InputCheck<I, BodyOf<H>>>;
+  /** The params every audience shares; each audience adds or replaces its own. */
+  params?: P & NoInfer<{ [X in Exclude<keyof P, keyof ParamsOf<K>>]: never }>;
+  files?: F;
+  /**
+   * The audiences, each one tool. See `McpAudienceMeta`. Each is checked as
+   * the `fromApiRoute` call it stands for, shared parts merged in.
+   */
+  audiences: A & NoInfer<AudiencesCheck<H, K, A, I, P, F, SR, O, D>>;
+} & ResultMeta<H, O, SR>;
+
 /**
  * Which of an app's API routes a model may call, declared by reference.
  *
@@ -808,5 +1071,107 @@ export class McpRouter<R = McpRoutes> {
     T
   > {
     return new McpRouteDeclaration(method, url, meta as McpRouteMetaRuntime);
+  }
+
+  /**
+   * One route, declared once, as one tool per audience (#1018): the site's own
+   * agent and a connected app, say, which name the same route differently, bind
+   * its params differently and need different words about it.
+   *
+   * ```ts
+   * routes = {
+   *   ...this.fromApiRouteFor("GET", "/pages/:pageId/site", {
+   *     name: "list_pages",
+   *     description: "Lists the site's pages.",
+   *     result: ({ pages }) => pages.map(({ slug, name }) => ({ path: slug, name })),
+   *     audiences: {
+   *       agent: { casing: "camel", tags: ["pages"], params: { pageId: this.chatPage } },
+   *       remote: {
+   *         title: "List a site's pages",
+   *         description: (shared) => `${shared} Name the site by the id list_sites gives.`,
+   *         tags: ["read"],
+   *         params: { pageId: this.remoteSite },
+   *       },
+   *     },
+   *   }),
+   * };
+   * // => { listPages: …, list_pages: … }
+   * ```
+   *
+   * Everything `fromApiRoute` takes may be given once, beside `audiences`, and
+   * each audience may say any of it differently (`McpAudienceMeta`): its keys
+   * replace the shared ones, except `params` and `files`, which are merged
+   * field by field. Each audience is checked as the `fromApiRoute` call it
+   * stands for would be — every path param declared, `input` against the
+   * body, `result` and `output` against the route's answer — so a param the
+   * shared part leaves open must be bound by every audience.
+   *
+   * It answers plain `McpRouteDeclaration`s, keyed by tool name, to spread
+   * into `routes`: the registry sees exactly the tools written out by hand, and
+   * a tool's name is still a contract, fixed where it is written. Two audiences
+   * that end up with the same name fail at declaration.
+   */
+  fromApiRouteFor<
+    M extends McpMethod,
+    K extends keyof RoutesOf<R>[M] & string,
+    const N extends string,
+    const A extends Record<string, McpAudienceMeta<DataOf<RoutesOf<R>[M][K]>>>,
+    I extends AnySchema | undefined = undefined,
+    O extends AnySchema | undefined = undefined,
+    const P extends Record<string, McpParamDeclaration> = {},
+    const F extends Record<string, McpFileBinder | "input"> = {},
+    SR = never,
+    D extends string | undefined = undefined,
+    const T extends readonly string[] = readonly [],
+  >(
+    method: M,
+    url: K,
+    meta: McpAudienceRouteMeta<RoutesOf<R>[M][K], K, N, A, I, O, P, F, SR, D, T>,
+  ): McpAudienceDeclarations<M, K, RoutesOf<R>[M][K], N, A, I, P, F, SR, O, T> {
+    const { name, audiences, description, params, files, ...shared } =
+      meta as McpRouteMetaRuntime & {
+        name: string;
+        audiences: Record<string, McpAudienceMeta>;
+      };
+    const where = `McpRouter.fromApiRouteFor("${method}", "${url}")`;
+    const labels = Object.keys(audiences ?? {});
+    if (labels.length === 0) {
+      throw new Error(`${where}: declare at least one audience.`);
+    }
+    const tools: Record<string, McpRouteDeclaration> = {};
+    const byName = new Map<string, string>();
+    for (const label of labels) {
+      const {
+        name: own,
+        casing,
+        description: told,
+        params: ownParams,
+        files: ownFiles,
+        ...rest
+      } = audiences[label];
+      const tool = own ?? (casing ? recaseName(name, casing) : name);
+      if (byName.has(tool)) {
+        throw new Error(
+          `${where}: the audiences "${byName.get(tool)}" and "${label}" are both named "${tool}". Give one its own name or casing.`,
+        );
+      }
+      byName.set(tool, label);
+      const text =
+        typeof told === "function"
+          ? description === undefined
+            ? undefined
+            : told(description)
+          : (told ?? description);
+      if (typeof text !== "string") {
+        throw new Error(
+          `${where}: the audience "${label}" has no description, and there is no shared one.`,
+        );
+      }
+      const merged: McpRouteMetaRuntime = { ...shared, ...rest, description: text };
+      if (params || ownParams) merged.params = { ...params, ...ownParams };
+      if (files || ownFiles) merged.files = { ...files, ...ownFiles };
+      tools[tool] = new McpRouteDeclaration(method, url, merged);
+    }
+    return tools as McpAudienceDeclarations<M, K, RoutesOf<R>[M][K], N, A, I, P, F, SR, O, T>;
   }
 }

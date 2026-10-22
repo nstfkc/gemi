@@ -154,3 +154,63 @@ export class Mcp extends McpRouter<Routes> {
     }),
   };
 }
+
+// `fromApiRouteFor` (#1018) under strict: every audience's `result` is handed
+// the route's answer, the tool names come out as literals, and each audience
+// is still checked.
+export class AudienceMcp extends McpRouter<Routes> {
+  orderParam = this.param({ as: "order", input: s.string(), bind: (order) => order });
+
+  routes = {
+    ...this.fromApiRouteFor("GET", "/orders/:orderId", {
+      name: "show_order",
+      description: "Show an order",
+      result: ({ total }) => total,
+      audiences: {
+        agent: { casing: "camel", params: { orderId: () => "o1" } },
+        remote: {
+          title: "Show an order",
+          description: (shared) => `${shared}, by its id.`,
+          params: { orderId: this.orderParam },
+          result: (data, call) => {
+            expectTypeOf(data).toEqualTypeOf<{ id: string; total: number }>();
+            return { total: data.total, asked: String(call.input.order) };
+          },
+          output: s.object({ total: s.number(), asked: s.string() }),
+        },
+      },
+    }),
+    ...this.fromApiRouteFor("PUT", "/products/:id/name", {
+      name: "rename_product",
+      description: "Rename",
+      input: s.object({ name: s.string() }),
+      params: { id: "input" },
+      audiences: {
+        agent: { casing: "camel" },
+        // @ts-expect-error the body's `name` is a string
+        remote: { input: s.object({ name: s.number() }) },
+      },
+    }),
+    // An audience's output is checked against the shared result's return. The
+    // mismatch fails on the audience, and leaves that return uninferred, which
+    // tsc reports on the shared result too.
+    ...this.fromApiRouteFor("GET", "/stats", {
+      name: "stats",
+      description: "Stats",
+      // @ts-expect-error the shared result's return is left uninferred
+      result: ({ count }) => count,
+      audiences: {
+        // @ts-expect-error the shared result returns a number; this output says string
+        agent: { output: s.string() },
+      },
+    }),
+  };
+}
+
+const audienceRoutes = new AudienceMcp().routes;
+expectTypeOf(audienceRoutes.showOrder.__tool).toEqualTypeOf<
+  { input: {}; output: number; tags: readonly [] } | undefined
+>();
+expectTypeOf(audienceRoutes.show_order.__tool).toEqualTypeOf<
+  { input: { order: string }; output: { total: number; asked: string }; tags: readonly [] } | undefined
+>();
