@@ -41,6 +41,7 @@
     "./database": "./database/index.ts",
     "./orm": "./orm/index.ts",
     "./support": "./support/index.ts",
+    "./probe": "./probe/index.ts",
     "./console/run": "./console/run.ts",
     "./queue/work": "./services/queue/work.ts",
     "./stats/route-table": "./stats/route-table.ts",

@@ -81,6 +81,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Workflows](./workflows.md)** — durable multi-step `Workflow`s: steps, sleeps, signals, batches and cancel.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Browser Probes](./browser-probes.md)** — code for a headless browser's `page.evaluate` written as normal modules (`*.probe.ts`), bundled by gemi and run with typed arguments and result.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Change Feeds](./change-feed.md)** — `ChangeFeed.publish` on a channel, an SSE route with `ChangeFeed.stream`, and `useSubscription` in the browser: other tabs and instances learn that something changed.
