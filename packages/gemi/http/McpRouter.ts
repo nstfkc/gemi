@@ -797,13 +797,19 @@ type AudienceOutputCheck<H, MR, MO> = [MO] extends [undefined]
   : MO extends AnySchema
     ? unknown extends OutputCheck<MO, [MR] extends [never] ? DataOf<H> : MR>
       ? unknown
-      : { "output does not describe what the tool answers (its result's return, or the route's answer)": Infer<MO> }
+      : {
+          "output does not describe what the tool answers (its result's return, or the route's answer)": Infer<MO>;
+        }
     : unknown;
 
 type AudienceDescriptionCheck<D> = [D] extends [undefined] ? { description: string } : unknown;
 
 /** Every audience, checked as the `fromApiRoute` call it expands to would be. */
-type AudienceCheck<H, K, A1, I, P, F, SR, O, D> = AudienceParamsCheck<K, MergedParams<P, A1>, Own<A1, "params", {}>> &
+type AudienceCheck<H, K, A1, I, P, F, SR, O, D> = AudienceParamsCheck<
+  K,
+  MergedParams<P, A1>,
+  Own<A1, "params", {}>
+> &
   AudienceInputCheck<BodyOf<H>, I, A1> &
   AudienceFilesCheck<BodyOf<H>, MergedFiles<F, A1>> &
   AudienceOutputCheck<H, AudienceResult<A1, SR>, Own<A1, "output", O>> &
@@ -838,7 +844,19 @@ type AudienceOutput<H, MR, MO> = [MO] extends [undefined]
     : unknown;
 
 /** What `fromApiRouteFor` returns: one declaration per audience, by tool name. */
-export type McpAudienceDeclarations<M extends McpMethod, K extends string, H, N extends string, A, I, P, F, SR, O, T> = {
+export type McpAudienceDeclarations<
+  M extends McpMethod,
+  K extends string,
+  H,
+  N extends string,
+  A,
+  I,
+  P,
+  F,
+  SR,
+  O,
+  T,
+> = {
   [X in keyof A as McpAudienceName<N, A[X]>]: McpRouteDeclaration<
     M,
     K,
@@ -1121,7 +1139,7 @@ export class McpRouter<R = McpRoutes> {
       throw new Error(`${where}: declare at least one audience.`);
     }
     const tools: Record<string, McpRouteDeclaration> = {};
-    const byName: Record<string, string> = {};
+    const byName = new Map<string, string>();
     for (const label of labels) {
       const {
         name: own,
@@ -1132,12 +1150,12 @@ export class McpRouter<R = McpRoutes> {
         ...rest
       } = audiences[label];
       const tool = own ?? (casing ? recaseName(name, casing) : name);
-      if (tool in byName) {
+      if (byName.has(tool)) {
         throw new Error(
-          `${where}: the audiences "${byName[tool]}" and "${label}" are both named "${tool}". Give one its own name or casing.`,
+          `${where}: the audiences "${byName.get(tool)}" and "${label}" are both named "${tool}". Give one its own name or casing.`,
         );
       }
-      byName[tool] = label;
+      byName.set(tool, label);
       const text =
         typeof told === "function"
           ? description === undefined
