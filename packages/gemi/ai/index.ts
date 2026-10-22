@@ -80,7 +80,6 @@ export type {
   ToolSearchRecord,
   ToolShape,
   ToolShapes,
-  Usage,
 } from "./types";
 
 // --- agents, tools and skills ---------------------------------------------
@@ -290,8 +289,17 @@ export type {
   ModelPrice,
 } from "./eval/Eval";
 export type { Delta, Estimate } from "./eval/stats";
-export { measureUsage } from "./usageMeter";
-export type { MeasuredUsage } from "./usageMeter";
+// `Usage` is the token type and, as a value, the meter (#1021).
+export { measureUsage, Usage } from "./usageMeter";
+export type {
+  MeasuredUsage,
+  MeteredUsage,
+  UsageLine,
+  UsageMeter,
+  UsageMeterOptions,
+  UsagePricing,
+  UsageTotals,
+} from "./usageMeter";
 
 // --- an app's API routes as tools ------------------------------------------
 //

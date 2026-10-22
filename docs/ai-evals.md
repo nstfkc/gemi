@@ -147,7 +147,7 @@ const { value, usage, byModel } = await measureUsage(() =>
 );
 ```
 
-Meters nest, and concurrent meters don't see each other's calls. What it doesn't see:
+Meters nest, and concurrent meters don't see each other's calls. For costs outside an eval (a run's, a service's, with labels and costs that aren't model calls), see [AI Usage and Cost](./ai-usage.md). What it doesn't see:
 
 - **Work that `fn` started and didn't wait for** counts only if it finishes before `fn` returns.
 - **Background jobs.** A tool that hands work to `ctx.jobs.start` runs it in a queue worker, outside `fn`'s async context, so its model calls aren't metered even when the task waits for the job to settle.
