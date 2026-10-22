@@ -252,6 +252,7 @@ describe("a run that succeeds", () => {
     expect(Object.keys(result).sort()).toEqual([
       "finishReason",
       "messages",
+      "metered",
       "output",
       "runId",
       "usage",

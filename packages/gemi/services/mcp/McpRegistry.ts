@@ -3,6 +3,7 @@ import { generateWithin, type GenerateParams } from "../../ai/generate";
 import { isJobHandle, toolJobs } from "../../ai/jobs/AgentJob";
 import { noToolMemory } from "../../ai/memory/runMemory";
 import type { ToolAttachments } from "../../ai/store/Attachments";
+import { openMeter } from "../../ai/usageMeter";
 import type { User } from "../../auth/types";
 import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
 import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
@@ -1686,6 +1687,9 @@ function remoteToolContext(
       attachments: null,
     }),
     memory: noToolMemory(),
+    // No run to meter: its `add`s still reach any `Usage.meter` open around
+    // the request, as its model calls do.
+    meter: openMeter().meter,
   };
 }
 
