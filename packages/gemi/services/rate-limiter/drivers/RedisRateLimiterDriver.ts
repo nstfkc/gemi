@@ -1,6 +1,7 @@
 import { app } from "../../../foundation/app";
 import { buildResult, windowStartFor } from "../slidingWindow";
 import type { ConsumeParams, RateLimitResult } from "../types";
+import { InMemoryRateLimiter } from "./InMemoryRateLimiterDriver";
 import { RateLimiterDriver } from "./RateLimiterDriver";
 import { RedisManager } from "../../redis/RedisManager";
 
@@ -11,7 +12,22 @@ import { RedisManager } from "../../redis/RedisManager";
  */
 export interface RateLimiterRedisClient {
   send(command: string, args: string[]): Promise<any>;
+  /**
+   * Bun's client says whether its connection is up. Optional: a client that
+   * does not say is always sent to.
+   */
+  readonly connected?: boolean;
 }
+
+/**
+ * How a call is answered when Redis cannot answer it:
+ * - `"memory"`: counted by an in-process limiter (`fallback`), so each
+ *   instance enforces the limit on its own until Redis is back. The outage
+ *   costs precision (one budget per instance), never the limit.
+ * - `"open"`: admitted, uncounted.
+ * - `"closed"`: refused.
+ */
+export type RedisRateLimiterFailureMode = "memory" | "open" | "closed";
 
 export interface RedisRateLimiterOptions {
   /**
@@ -23,21 +39,37 @@ export interface RedisRateLimiterOptions {
   /** Key namespace. Defaults to `gemi:rl`. */
   prefix?: string;
   /**
-   * What to do when Redis is unreachable. `true` (the default) admits the
-   * request — a limiter outage should not take the site down with it. Set
-   * `false` for endpoints where an unmetered request is worse than a rejected
-   * one (payments, sign-up, anything that costs money per call).
+   * What a call gets when Redis fails, times out or is known to be down.
+   * Default `"memory"`: the call is counted by `fallback`, so a Redis outage
+   * degrades every limit to a per-instance one instead of turning it off
+   * (`"open"`) or locking everyone out (`"closed"`). See
+   * {@link RedisRateLimiterFailureMode}.
+   */
+  onRedisError?: RedisRateLimiterFailureMode;
+  /**
+   * The limiter that counts while Redis is down, with `onRedisError:
+   * "memory"`. Default: a new `InMemoryRateLimiter` for this driver.
+   */
+  fallback?: RateLimiterDriver;
+  /**
+   * @deprecated Use `onRedisError`. `true` is `"open"`, `false` is
+   * `"closed"`. Ignored when `onRedisError` is set.
    */
   failOpen?: boolean;
   /**
    * How long one `consume` may wait for Redis, in ms, before it gives up and
-   * follows `failOpen`. Default `250`. Without it, a request waits as long as
-   * the client does: up to the connect timeout and the reconnect loop (10 to
-   * 30 s) while Redis is down, and with no limit when Redis stops answering on
-   * an open connection. `0` turns it off.
+   * is answered as `onRedisError` says. Default `250`. Without it, a request
+   * waits as long as the client does: up to the connect timeout and the
+   * reconnect loop (10 to 30 s) while Redis is down, and with no limit when
+   * Redis stops answering on an open connection. `0` turns it off.
    */
   timeout?: number;
-  /** Called with every Redis failure. Defaults to `console.error`. */
+  /**
+   * Called with every Redis failure: a command that failed or timed out, and
+   * each failed check (at most one a second) of whether Redis is back. By
+   * default a line goes to `console.error`, at most once a minute, saying how
+   * many calls were answered without Redis since the last one.
+   */
   onError?: (error: unknown) => void;
 }
 
@@ -50,6 +82,24 @@ export class RedisRateLimiterTimeoutError extends Error {
     this.name = "RedisRateLimiterTimeoutError";
   }
 }
+
+/**
+ * What `onError` gets when the client says its connection is down, so the
+ * call was answered without sending anything to Redis.
+ */
+export class RedisRateLimiterDisconnectedError extends Error {
+  readonly code = "ERR_RATE_LIMITER_DISCONNECTED";
+
+  constructor() {
+    super("RedisRateLimiter: the Redis client is not connected.");
+    this.name = "RedisRateLimiterDisconnectedError";
+  }
+}
+
+/** How often, at most, a down limiter checks whether Redis answers again. */
+const PROBE_INTERVAL_MS = 1_000;
+/** How often, at most, the default `onError` writes a line. */
+const LOG_INTERVAL_MS = 60_000;
 
 /**
  * The counters and the decision have to move together — a GET, a check, then an
@@ -106,24 +156,67 @@ return {1, current, previous}
  * Window boundaries come from the app server's clock, not Redis's, so keep
  * instances on NTP. A few seconds of skew only shifts where a window starts; it
  * cannot double a budget the way an unsynchronised fixed window would.
+ *
+ * ## When Redis fails
+ *
+ * A call that fails or times out is answered as `onRedisError` says (by
+ * default, counted in memory), and the limiter then stops sending its script
+ * until Redis answers again. While it is down, each call is answered at once
+ * without touching Redis, and at most once a second one of them sends a `PING`
+ * in the background (none while the client says it is disconnected); the first `PING` that answers puts the limiter back on
+ * Redis.
+ *
+ * Not sending is what keeps an outage from being counted twice. Bun's client
+ * queues the commands it is given while disconnected and runs them once it
+ * reconnects, and a connection that stopped answering (a paused or partitioned
+ * Redis) delivers what was written to it once it answers again. Either way the
+ * increments of calls that were already answered from memory would land in
+ * Redis on recovery, and every caller of the outage would start the next
+ * window over budget. A `PING` is harmless to run late. What can still land
+ * late is the few calls sent before the first failure was seen: at most
+ * `timeout` worth of traffic.
  */
 export class RedisRateLimiter extends RateLimiterDriver {
   private injectedClient?: RateLimiterRedisClient;
   private prefix: string;
-  private failOpen: boolean;
+  private mode: RedisRateLimiterFailureMode;
+  private fallback: RateLimiterDriver;
   private timeout: number;
-  private onError: (error: unknown) => void;
+  private onError?: (error: unknown) => void;
 
   /** Cached `SCRIPT LOAD` result, so the script body is sent at most once. */
   private scriptSha: Promise<string> | null = null;
+
+  /** Set by a failure; cleared by the first `PING` that answers. */
+  private down = false;
+  private probing = false;
+  private lastProbeAt = 0;
+  /**
+   * Clients seen connected. A client that says it is not connected is skipped
+   * only once it has been seen connected: a new one is still making its first
+   * connection, and its first commands wait for it (bounded by `timeout`).
+   */
+  private seenConnected = new WeakSet<object>();
+
+  /** For the default `onError`: when it last wrote, and what it left out since. */
+  private loggedAt = -Infinity;
+  private failuresSinceLog = 0;
+  private fallbacksSinceLog = 0;
 
   constructor(options: RedisRateLimiterOptions = {}) {
     super();
     this.injectedClient = options.client;
     this.prefix = options.prefix ?? "gemi:rl";
-    this.failOpen = options.failOpen ?? true;
+    this.mode =
+      options.onRedisError ??
+      (options.failOpen === undefined
+        ? "memory"
+        : options.failOpen
+          ? "open"
+          : "closed");
+    this.fallback = options.fallback ?? new InMemoryRateLimiter();
     this.timeout = options.timeout ?? 250;
-    this.onError = options.onError ?? ((error) => console.error(error));
+    this.onError = options.onError;
   }
 
   async consume(params: ConsumeParams): Promise<RateLimitResult> {
@@ -134,16 +227,34 @@ export class RedisRateLimiter extends RateLimiterDriver {
     const elapsed = now - windowStart;
     const bucket = windowStart / window;
 
+    if (this.down) {
+      this.probe();
+      return this.degrade(params, now);
+    }
+
     try {
+      const client = this.client;
+      if (client.connected === false && this.seenConnected.has(client)) {
+        throw new RedisRateLimiterDisconnectedError();
+      }
+
       const reply = await this.withTimeout(
         this.run(
+          client,
           [
             `${this.prefix}:${key}:${bucket}`,
             `${this.prefix}:${key}:${bucket - 1}`,
           ],
           [String(limit), String(window), String(elapsed), String(cost)],
         ),
+        () => {
+          // A `SCRIPT LOAD` stuck on a connection that stopped answering would
+          // otherwise be awaited by every later call: drop it, the next call
+          // loads again.
+          this.scriptSha = null;
+        },
       );
+      if (client.connected === true) this.seenConnected.add(client);
 
       const [allowed, current, previous] = (
         Array.isArray(reply) ? reply : []
@@ -160,48 +271,153 @@ export class RedisRateLimiter extends RateLimiterDriver {
         cost,
       });
     } catch (error) {
-      this.onError(error);
-
-      if (!this.failOpen) {
-        return {
-          allowed: false,
-          limit,
-          remaining: 0,
-          // Nothing was counted, so there is no decay to wait for — retrying is
-          // worth it as soon as Redis is back.
-          resetAt: now + window,
-          retryAfter: window,
-        };
+      if (!this.down) {
+        this.down = true;
+        this.lastProbeAt = Date.now();
       }
+      this.report(error);
+      return this.degrade(params, now);
+    }
+  }
 
+  /** Answers a call Redis could not, as `onRedisError` says. */
+  private async degrade(
+    params: ConsumeParams,
+    now: number,
+  ): Promise<RateLimitResult> {
+    const { limit, window } = params;
+    const cost = params.cost ?? 1;
+    this.fallbacksSinceLog += 1;
+
+    if (this.mode === "memory") {
+      return await this.fallback.consume(params);
+    }
+
+    if (this.mode === "closed") {
       return {
-        allowed: true,
+        allowed: false,
         limit,
-        remaining: Math.max(0, Math.floor(limit - cost)),
-        resetAt: windowStart + window,
-        retryAfter: 0,
+        remaining: 0,
+        // Nothing was counted, so there is no decay to wait for — retrying is
+        // worth it as soon as Redis is back.
+        resetAt: now + window,
+        retryAfter: window,
       };
     }
+
+    return {
+      allowed: true,
+      limit,
+      remaining: Math.max(0, Math.floor(limit - cost)),
+      resetAt: windowStartFor(now, window) + window,
+      retryAfter: 0,
+    };
+  }
+
+  /**
+   * While down: sends a `PING`, at most one at a time and one a second, and
+   * puts the limiter back on Redis once one answers. Never awaited by the call
+   * that starts it, so that call is not slowed down.
+   */
+  private probe() {
+    const now = Date.now();
+    if (this.probing || now - this.lastProbeAt < PROBE_INTERVAL_MS) return;
+    this.probing = true;
+    this.lastProbeAt = now;
+
+    const ping = async () => {
+      const client = this.client;
+      // Nothing to learn from a client that says it is down, and a command
+      // queued on it is one more for Bun to deliver on reconnect: wait until
+      // it says it is back. A client never seen connected is still sent to,
+      // as the command is what makes a lazy client connect.
+      if (client.connected === false && this.seenConnected.has(client)) {
+        throw new RedisRateLimiterDisconnectedError();
+      }
+      await this.withTimeout(
+        client.send("PING", []),
+        undefined,
+        this.timeout > 0 ? this.timeout : PROBE_INTERVAL_MS,
+      );
+      if (client.connected === true) this.seenConnected.add(client);
+    };
+
+    ping().then(
+      () => {
+        this.probing = false;
+        this.down = false;
+        if (!this.onError) this.logRecovery();
+      },
+      (error) => {
+        this.probing = false;
+        try {
+          this.report(error);
+        } catch {
+          // Nobody awaits the probe: an `onError` that throws has no caller to
+          // reach, and must not become an unhandled rejection.
+        }
+      },
+    );
+  }
+
+  private report(error: unknown) {
+    if (this.onError) {
+      this.onError(error);
+      return;
+    }
+
+    this.failuresSinceLog += 1;
+    const now = Date.now();
+    if (now - this.loggedAt < LOG_INTERVAL_MS) return;
+
+    const answered =
+      this.mode === "memory"
+        ? "counting in memory"
+        : this.mode === "open"
+          ? "admitting every request"
+          : "refusing every request";
+    const since =
+      this.loggedAt === -Infinity
+        ? ""
+        : ` Since the last report: ${this.failuresSinceLog} failures, ${this.fallbacksSinceLog} calls answered without Redis.`;
+    console.error(
+      `[gemi] RedisRateLimiter: Redis failed, ${answered} until it answers again.${since}`,
+      error,
+    );
+    this.loggedAt = now;
+    this.failuresSinceLog = 0;
+    this.fallbacksSinceLog = 0;
+  }
+
+  private logRecovery() {
+    console.info(
+      `[gemi] RedisRateLimiter: Redis answers again; counting in Redis (${this.fallbacksSinceLog} calls answered without it since the last report).`,
+    );
+    // The next outage is reported at once.
+    this.loggedAt = -Infinity;
+    this.failuresSinceLog = 0;
+    this.fallbacksSinceLog = 0;
   }
 
   /**
    * Settles with `work`, or rejects with `RedisRateLimiterTimeoutError` once
-   * `timeout` passes. The command itself is not cancelled (Redis may still run
-   * the script, so a request that timed out can still be counted); its late
+   * `ms` passes. The command itself is not cancelled (Redis may still run the
+   * script, so a request that timed out can still be counted); its late
    * outcome is ignored.
    */
-  private withTimeout<T>(work: Promise<T>): Promise<T> {
-    if (!(this.timeout > 0) || !Number.isFinite(this.timeout)) return work;
+  private withTimeout<T>(
+    work: Promise<T>,
+    onTimeout?: () => void,
+    ms: number = this.timeout,
+  ): Promise<T> {
+    if (!(ms > 0) || !Number.isFinite(ms)) return work;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        // A `SCRIPT LOAD` stuck on a connection that stopped answering would
-        // otherwise be awaited by every later call: drop it, the next call
-        // loads again.
-        this.scriptSha = null;
-        reject(new RedisRateLimiterTimeoutError(this.timeout));
-      }, this.timeout);
+        onTimeout?.();
+        reject(new RedisRateLimiterTimeoutError(ms));
+      }, ms);
     });
     work.catch(() => {});
 
@@ -234,8 +450,11 @@ export class RedisRateLimiter extends RateLimiterDriver {
   }
 
   /** Runs the script by digest, loading it on first use and after a flush. */
-  private async run(keys: string[], args: string[]): Promise<any> {
-    const client = this.client;
+  private async run(
+    client: RateLimiterRedisClient,
+    keys: string[],
+    args: string[],
+  ): Promise<any> {
     const argv = [String(keys.length), ...keys, ...args];
 
     try {

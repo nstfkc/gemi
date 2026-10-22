@@ -76,8 +76,8 @@ function suite() {
 
     const prefix = `gemi-test:${randomBytes(4).toString("hex")}`;
     const errors: unknown[] = [];
-    const open = new RedisRateLimiter({ prefix, timeout: TIMEOUT, onError: (e) => errors.push(e) });
-    const closed = new RedisRateLimiter({ prefix, timeout: TIMEOUT, failOpen: false, onError: (e) => errors.push(e) });
+    const open = new RedisRateLimiter({ prefix, timeout: TIMEOUT, onRedisError: "open", onError: (e) => errors.push(e) });
+    const closed = new RedisRateLimiter({ prefix, timeout: TIMEOUT, onRedisError: "closed", onError: (e) => errors.push(e) });
 
     let keyN = 0;
     const freshKey = () => `k${++keyN}`;
@@ -96,6 +96,70 @@ function suite() {
       const first = await timed(closed, key, 1);
       const second = await timed(closed, key, 1);
       return first.result.allowed && !second.result.allowed ? true : undefined;
+    }
+
+    /** What Redis holds for `key` over the current and the previous minute, read on a client of its own. */
+    async function countedInRedis(key: string) {
+      const reader = new (globalThis as any).Bun.RedisClient(url, { connectionTimeout: 1_000, maxRetries: 0 });
+      try {
+        const bucket = Math.floor(Date.now() / 60_000);
+        let total = 0;
+        for (const b of [bucket, bucket - 1]) total += Number((await reader.send("GET", [`${prefix}:${key}:${b}`])) ?? 0);
+        return total;
+      } finally {
+        reader.close();
+      }
+    }
+
+    /**
+     * #1011: an outage is counted in memory, and none of its calls reach Redis
+     * once it is back. Before, Bun's offline queue (after a kill) or the stalled
+     * socket (after a pause) ran every increment of the outage on recovery.
+     */
+    async function outageIsNotReplayed(
+      on: Application,
+      during: () => Promise<void>,
+      recover: () => void,
+    ) {
+      const memory = new RedisRateLimiter({ prefix, timeout: TIMEOUT, onError: () => {} });
+      const key = freshKey();
+      const consume = async (limit: number) => {
+        const started = performance.now();
+        const result = await kernelContext.run(on, () => memory.consume({ key, limit, window: 60_000 }));
+        return { result, ms: performance.now() - started };
+      };
+      expect((await consume(1_000)).result.allowed).toBe(true);
+
+      await during();
+      for (let i = 0; i < 20; i++) {
+        const { result, ms } = await consume(1_000);
+        expect(result.allowed).toBe(true);
+        expect(ms).toBeLessThan(TIMEOUT + SLACK);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Counted in memory: its budget starts empty, so a limit of 3 refuses
+      // the outage's 21st call.
+      expect((await consume(3)).result.allowed).toBe(false);
+
+      recover();
+      // Back on Redis: a fresh limit of 1 is enforced again.
+      await waitFor(
+        "the limiter to count in Redis again",
+        async () => {
+          const probe = freshKey();
+          const run = (limit: number) =>
+            kernelContext.run(on, () => memory.consume({ key: probe, limit, window: 60_000 }));
+          await run(1_000);
+          return (await countedInRedis(probe)) === 1 ? true : undefined;
+        },
+        30_000,
+      );
+      // Let anything still queued or stuck on a socket land.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+      // The call before the outage, plus at most the one sent into it before
+      // the first failure was seen: not 21.
+      expect(await countedInRedis(key)).toBeLessThanOrEqual(2);
     }
 
     beforeAll(async () => {
@@ -141,6 +205,56 @@ function suite() {
       expect(await waitFor("limits after unpause", enforced)).toBe(true);
     }, 60_000);
 
+    test("a paused Redis: counted in memory, not replayed once it answers", async () => {
+      let paused = false;
+      try {
+        await outageIsNotReplayed(
+          application,
+          async () => {
+            docker("pause", name);
+            paused = true;
+          },
+          () => {
+            docker("unpause", name);
+            paused = false;
+          },
+        );
+      } finally {
+        if (paused) docker("unpause", name);
+      }
+    }, 60_000);
+
+    // Skipped on Linux: there, Bun (1.3.14) comes back from its own reconnect
+    // after a kill that caught a command in flight with a connection that
+    // reports `connected` and never answers again, so no limiter on it can
+    // recover until the client is replaced. That is a separate problem
+    // (#1016); the pause above covers the replay on Linux.
+    test.skipIf(process.platform === "linux")("a killed Redis: counted in memory, Bun's reconnect does not replay it", async () => {
+      // A client that keeps reconnecting through the outage (rather than
+      // giving up as `manager`'s does), so its offline queue is still holding
+      // commands when Redis comes back.
+      const patient = new RedisManager({ url, options: { connectionTimeout: 1_000, maxRetries: 1_000 } });
+      const on = new Application();
+      on.singleton(RedisManager, () => patient);
+      try {
+        await waitFor("the patient client to connect", async () => {
+          await patient.client.send("PING", []);
+          return patient.client.connected ? true : undefined;
+        });
+        await outageIsNotReplayed(
+          on,
+          async () => {
+            docker("stop", "-t", "0", name);
+          },
+          () => {
+            docker("start", name);
+          },
+        );
+      } finally {
+        patient.close();
+      }
+    }, 90_000);
+
     test("after Redis is killed and the client gives up, limits come back once Redis does", async () => {
       const client = manager.client;
       errors.length = 0;
@@ -153,6 +267,9 @@ function suite() {
         const { result, ms } = await timed(open, freshKey());
         expect(result.allowed).toBe(true);
         expect(ms).toBeLessThan(TIMEOUT + SLACK);
+        // A limiter that is down answers without I/O; let its background
+        // PING (and its timeout) run, as requests arriving over the network would.
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(errors.length).toBeGreaterThan(0);
       expect(client.connected).toBe(false);
