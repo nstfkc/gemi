@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "gemi/ai": ["../../index.ts"],
+      "gemi/http": ["../../../http/index.ts"]
+    }
+  },
+  "include": ["typed.ts"]
+}

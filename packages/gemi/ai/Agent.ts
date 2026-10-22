@@ -126,10 +126,13 @@ import type {
  * caller now says that directly. `AgentController` builds it from its request
  * in `context()`; a job builds it from its payload.
  *
- * ONE SHAPE FOR THE APP, NOT ONE PER AGENT. Tools are module-scope singletons
- * that any agent may mount, so there is no agent whose type a tool could be
- * checked against. A field only some runs have is optional, and the tool that
- * needs it checks.
+ * THE APP-WIDE DEFAULT, NOT THE ONLY SHAPE (#1019). This interface is what a
+ * tool's `ctx.context` is when the tool does not say otherwise, so an app that
+ * augments it keeps working unchanged. An agent can declare a context of its
+ * own instead: `Agent.withContext<Ctx>()` binds `Ctx` for its tools and the
+ * agent, the agent carries it (`ContextOf<A>`), and its controller's
+ * `context()` must return it. Typed that way, a field one agent needs is not
+ * an optional field every agent's tools have to check. See `withContext`.
  *
  * TRUSTED. Unlike `ctx.body`, nothing here came from the client unless the
  * caller put it there: it is what the server decided the run is for.
@@ -142,9 +145,7 @@ export interface AgentContext {}
  * optional when it has none — so an app that never declares one is not made to
  * pass `{}`, and an app that does cannot start a run that forgets it.
  */
-type ContextParam = {} extends AgentContext
-  ? { context?: AgentContext }
-  : { context: AgentContext };
+type ContextParam<Ctx = AgentContext> = {} extends Ctx ? { context?: Ctx } : { context: Ctx };
 
 /**
  * Everything a tool needs from the run it is part of.
@@ -155,15 +156,18 @@ type ContextParam = {} extends AgentContext
  * as an argument instead: the tool stays a singleton and the context is per
  * call.
  */
-export interface ToolContext {
+export interface ToolContext<Ctx = AgentContext> {
   /**
    * What the caller of `Agent.stream` handed the run. See `AgentContext`.
+   * Typed as the tool's own `Ctx` when it declares one (`withContext`), and as
+   * the app's `AgentContext` otherwise.
    *
-   * The same object for every tool of the run and every sub-run started with
-   * `ctx.runAgent` — a sub-agent acts for the same caller, so it is given the
-   * same one. `{}` for a run started without one.
+   * The same object for every tool of the run, and for every sub-run started
+   * with `ctx.runAgent` that is not given a `context` of its own — a sub-agent
+   * acts for the same caller, so by default it is given the same one. `{}` for
+   * a run started without one.
    */
-  context: AgentContext;
+  context: Ctx;
   /**
    * The app's own fields from the turn's request body — what `useChat`'s
    * `body` option sent, minus the keys the turn envelope owns.
@@ -300,7 +304,10 @@ export interface ToolContext {
    * makes; it is written here in plain words rather than solved with a
    * checkpoint API, because that is a much larger feature than this one.
    */
-  runAgent<A extends AnyAgent>(agent: A, params?: RunAgentParams): Promise<NestedRunResult>;
+  runAgent<A extends AnyAgent>(
+    agent: A,
+    ...params: RunAgentArgs<Ctx, ContextOf<A>>
+  ): Promise<NestedRunResult>;
 
   /**
    * One model call with an output schema, from inside this tool: `generate`,
@@ -492,8 +499,30 @@ export interface ToolTurn {
   readonly attachments: readonly string[];
 }
 
+/**
+ * `ctx.runAgent`'s second argument: optional while this tool's context also
+ * satisfies the sub-agent's (the sub-run is handed the same one), and required,
+ * with a `context` of the sub-agent's type, when it does not.
+ */
+export type RunAgentArgs<Parent, Sub> = [Parent] extends [Sub]
+  ? [params?: RunAgentParams<Sub>]
+  : [params: RunAgentParams<Sub> & { context: Sub }];
+
 /** What `ctx.runAgent` is given. `messages` and `prompt` are alternatives. */
-export interface RunAgentParams {
+export interface RunAgentParams<Ctx = AgentContext> {
+  /**
+   * The sub-run's context, in place of the parent's (#1019). Omitted, the
+   * sub-run is handed the parent run's own, which is what a sub-agent with the
+   * same context wants. Required by the types when the sub-agent declares a
+   * context the calling tool's does not satisfy (see `withContext`): build it
+   * from `ctx.context`, e.g. `{ pageId: ctx.context.pageId, draw: ... }`.
+   *
+   * Only the context changes: the sub-run still inherits the attachments,
+   * body, subject, memory scopes and signal, because it still acts for the
+   * same caller. On a replay after an escalation the tool body runs again and
+   * passes it again, so nothing about it is persisted.
+   */
+  context?: Ctx;
   /** Prior turns for the sub-agent. Starts empty when omitted. */
   messages?: AgentMessage[];
   /** Sugar for a single user turn — the common case, and the whole message
@@ -586,8 +615,8 @@ export class PendingEscalation extends Error {
  * What a per-run `inputSchema` is resolved from: the run's caller and the
  * app's request body, the same `context` and `body` its tools are given.
  */
-export interface ToolSchemaContext {
-  context: AgentContext;
+export interface ToolSchemaContext<Ctx = AgentContext> {
+  context: Ctx;
   /** CLIENT-CONTROLLED, exactly as `ToolContext.body` is. */
   body: Record<string, unknown>;
   runId: string;
@@ -611,17 +640,17 @@ export interface ToolSchemaContext {
  * A resolver that throws, or returns a non-object schema, fails the run with
  * `tool_error` before anything is sent to the provider.
  */
-export type ToolInputSchema<Input> =
+export type ToolInputSchema<Input, Ctx = AgentContext> =
   | Schema<Input>
-  | ((ctx: ToolSchemaContext) => Schema<Input> | Promise<Schema<Input>>);
+  | ((ctx: ToolSchemaContext<Ctx>) => Schema<Input> | Promise<Schema<Input>>);
 
 /**
  * What a `requiresApproval` function is given beside the call's input: the
  * run's caller and request body, the same `context` and `body` the tool's
  * `execute` gets, and which call of the run this is.
  */
-export interface ToolApprovalContext {
-  context: AgentContext;
+export interface ToolApprovalContext<Ctx = AgentContext> {
+  context: Ctx;
   /** CLIENT-CONTROLLED, exactly as `ToolContext.body` is. */
   body: Record<string, unknown>;
   runId: string;
@@ -656,15 +685,16 @@ export interface ToolApprovalContext {
  * Answering a pending call does not call it again: the user was asked, and
  * their answer stands even if the setting changed in between.
  */
-export type ToolApproval<Input> =
+export type ToolApproval<Input, Ctx = AgentContext> =
   | boolean
-  | ((input: Input, ctx: ToolApprovalContext) => boolean | Promise<boolean>);
+  | ((input: Input, ctx: ToolApprovalContext<Ctx>) => boolean | Promise<boolean>);
 
 /**
  * What an `endsRun` function is given beside the call's output: the call's
  * input, and the same run facts `requiresApproval`'s function gets.
  */
-export interface ToolEndsRunContext<Input = unknown> extends ToolApprovalContext {
+export interface ToolEndsRunContext<Input = unknown, Ctx = AgentContext>
+  extends ToolApprovalContext<Ctx> {
   /** The call's input, as the tool's `execute` received it. */
   input: Input;
 }
@@ -678,11 +708,11 @@ export interface ToolEndsRunContext<Input = unknown> extends ToolApprovalContext
  * run with that string as the closing text, `true` (or `""`) ends it with
  * none, and `false`, `null` or `undefined` carries on as usual.
  */
-export type ToolEndsRun<Input, Output> =
+export type ToolEndsRun<Input, Output, Ctx = AgentContext> =
   | boolean
   | ((
       output: Output,
-      ctx: ToolEndsRunContext<Input>,
+      ctx: ToolEndsRunContext<Input, Ctx>,
     ) => string | boolean | null | undefined | Promise<string | boolean | null | undefined>);
 
 /**
@@ -693,19 +723,19 @@ export type ToolEndsRun<Input, Output> =
  * seconds looks broken. Yields become `tool-progress` events; the return value
  * is the result the model sees.
  */
-export type ToolExecute<Input, Output, Progress = unknown> = (
+export type ToolExecute<Input, Output, Progress = unknown, Ctx = AgentContext> = (
   input: Input,
-  ctx: ToolContext,
+  ctx: ToolContext<Ctx>,
 ) =>
   | Promise<Output | JobHandle<Output>>
   | AsyncGenerator<Progress, Output | JobHandle<Output>, void>;
 
-type ToolDefinitionBase<Name extends string, Input, Output> = {
+type ToolDefinitionBase<Name extends string, Input, Output, Ctx = AgentContext> = {
   name: Name;
   /** The model's only description of when to reach for this. */
   description: string;
   /** A schema, or a function resolving one per run. See `ToolInputSchema`. */
-  inputSchema: ToolInputSchema<Input>;
+  inputSchema: ToolInputSchema<Input, Ctx>;
   /**
    * Optional for a server tool, required for a client one — there it is what
    * the answer is validated against before the model sees it, and what types
@@ -769,12 +799,18 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
  * reason there is no second endpoint — an approval is a question whose answer
  * happens to be yes or no.
  */
-export type ToolDefinition<Name extends string, Input, Output, Progress = never> =
-  | (ToolDefinitionBase<Name, Input, Output> & {
+export type ToolDefinition<
+  Name extends string,
+  Input,
+  Output,
+  Progress = never,
+  Ctx = AgentContext,
+> =
+  | (ToolDefinitionBase<Name, Input, Output, Ctx> & {
       answeredBy?: "server";
-      execute: ToolExecute<Input, Output, Progress>;
+      execute: ToolExecute<Input, Output, Progress, Ctx>;
       /** Ask the user first: always, never, or per call. See `ToolApproval`. */
-      requiresApproval?: ToolApproval<Input>;
+      requiresApproval?: ToolApproval<Input, Ctx>;
       /**
        * Ends the run after a successful call of this tool, instead of asking
        * the model again (#974). For a tool whose result already is the answer:
@@ -799,9 +835,9 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
        * so a sub-agent's tool ends the sub-run, not its parent. A function that
        * throws is logged and read as "carry on". See `ToolEndsRun`.
        */
-      endsRun?: ToolEndsRun<Input, Output>;
+      endsRun?: ToolEndsRun<Input, Output, Ctx>;
     })
-  | (ToolDefinitionBase<Name, Input, Output> & {
+  | (ToolDefinitionBase<Name, Input, Output, Ctx> & {
       answeredBy: "client";
       outputSchema: Schema<Output>;
       execute?: never;
@@ -810,6 +846,9 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
       /** Server tools only: a client's answer arrives on a later turn. */
       endsRun?: never;
     });
+
+/** Phantom key of `AgentTool`'s context. Never set at runtime. */
+declare const TOOL_CONTEXT: unique symbol;
 
 /**
  * `Progress` is inferred, never written down.
@@ -827,16 +866,22 @@ export type ToolDefinition<Name extends string, Input, Output, Progress = never>
  * `AsyncGenerator<Progress, …>`, so a bound of `never` would make every
  * yielding tool fail the `Extract` in `ToolShapesOf` and silently vanish from
  * the shapes.
+ *
+ * `Ctx` is the context the tool reads as `ctx.context` (#1019): the app's
+ * `AgentContext` unless the tool says otherwise, with `withContext<Ctx>().tool`
+ * or an annotated `execute(input, ctx: ToolContext<Ctx>)`. An agent holding
+ * the tool has to supply it. See `ContextOf`.
  */
 export class AgentTool<
   Name extends string = string,
   Input = unknown,
   Output = unknown,
   Progress = never,
+  Ctx = AgentContext,
 > {
   readonly name: Name;
   readonly description: string;
-  readonly inputSchema: ToolInputSchema<Input>;
+  readonly inputSchema: ToolInputSchema<Input, Ctx>;
   readonly outputSchema?: Schema<Output>;
   /**
    * Whether a call of this tool may ask the user first: `true` for
@@ -850,12 +895,12 @@ export class AgentTool<
    */
   readonly approvalPredicate?: (
     input: Input,
-    ctx: ToolApprovalContext,
+    ctx: ToolApprovalContext<Ctx>,
   ) => boolean | Promise<boolean>;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
-  readonly endsRun?: ToolEndsRun<Input, Output>;
+  readonly endsRun?: ToolEndsRun<Input, Output, Ctx>;
   /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
   readonly timeoutMs?: number;
   /** See `ToolDefinition.async`. `undefined` for a tool that cannot start a job. */
@@ -868,9 +913,15 @@ export class AgentTool<
    * avoids. Where a tool sits is a property of the agent, and it lives on the
    * agent's `ResolvedTool`.
    */
-  readonly execute?: ToolExecute<Input, Output, Progress>;
+  readonly execute?: ToolExecute<Input, Output, Progress, Ctx>;
+  /**
+   * Phantom: the context the tool needs, in a position `ContextOf` can read it
+   * back from. A parameter, so a tool that needs less fits an agent that
+   * supplies more.
+   */
+  declare readonly [TOOL_CONTEXT]?: (context: Ctx) => void;
 
-  private constructor(params: ToolDefinition<Name, Input, Output, Progress>) {
+  private constructor(params: ToolDefinition<Name, Input, Output, Progress, Ctx>) {
     this.name = params.name;
     this.description = params.description;
     this.inputSchema = params.inputSchema;
@@ -892,9 +943,9 @@ export class AgentTool<
    * `const` on the params is what preserves `name` as a literal, which is what
    * lets the browser discriminate a tool part by name.
    */
-  static create<const Name extends string, Input, Output, Progress = never>(
-    params: ToolDefinition<Name, Input, Output, Progress>,
-  ): AgentTool<Name, Input, Output, Progress> {
+  static create<const Name extends string, Input, Output, Progress = never, Ctx = AgentContext>(
+    params: ToolDefinition<Name, Input, Output, Progress, Ctx>,
+  ): AgentTool<Name, Input, Output, Progress, Ctx> {
     // Only the input: it is the one schema the provider is shown. The
     // `outputSchema` validates what `execute` or the browser hands back and is
     // never sent, so any shape is fine there.
@@ -943,13 +994,16 @@ export class AgentTool<
    * Sugar for the common client tool: the agent asks the user something and
    * waits. Equivalent to `answeredBy: "client"` with an input schema of one
    * prompt field.
+   *
+   * It reads no context (the browser answers it), so it needs none: `Ctx` is
+   * `unknown`, and it fits any agent.
    */
-  static ask<const Name extends string, Output>(params: {
+  static ask<const Name extends string, Output, Ctx = unknown>(params: {
     name: Name;
     description: string;
     outputSchema: Schema<Output>;
-  }): AgentTool<Name, { question: string }, Output> {
-    return AgentTool.create({
+  }): AgentTool<Name, { question: string }, Output, never, Ctx> {
+    return AgentTool.create<Name, { question: string }, Output, never, Ctx>({
       name: params.name,
       description: params.description,
       inputSchema: questionSchema,
@@ -992,7 +1046,7 @@ const questionSchema = {
   },
 } as unknown as Schema<{ question: string }>;
 
-export type AnyAgentTool = AgentTool<string, any, any, any>;
+export type AnyAgentTool = AgentTool<string, any, any, any, any>;
 
 /**
  * A group of tools the model can search as a unit.
@@ -1083,7 +1137,7 @@ export type ToolShapesOf<T extends readonly ToolEntry[]> =
 type NamedTools<K> = K extends AnyAgentTool ? (string extends K["name"] ? never : K) : never;
 
 type ShapesOf<U extends AnyAgentTool> = {
-  [K in U as K["name"]]: K extends AgentTool<any, infer I, infer O, infer P>
+  [K in U as K["name"]]: K extends AgentTool<any, infer I, infer O, infer P, any>
     ? { input: I; output: O; progress: P }
     : never;
 };
@@ -1265,6 +1319,7 @@ export interface CreateAgentParams<
   S extends readonly Skill[],
   O extends Schema<any> | undefined,
   M extends AgentMemoryOptions | false = false,
+  Ctx = AgentContext,
 > {
   name: string;
   /** The system prompt. Per-request additions belong on the controller, which
@@ -1385,7 +1440,7 @@ export interface CreateAgentParams<
    * about to be sent (after `contextWindow`), and may answer other ones, or
    * other instructions, for that call alone. See `PrepareStep`.
    */
-  prepareStep?: PrepareStep;
+  prepareStep?: PrepareStep<Ctx>;
   /**
    * Background jobs (#461). `contextBlock` bounds the `<jobs>` block the
    * controller adds to the system prompt on a thread with jobs: 20 by
@@ -1407,7 +1462,7 @@ export interface CreateAgentParams<
 /**
  * What `prepareStep` is told before a model call.
  */
-export type PrepareStepContext = {
+export type PrepareStepContext<Ctx = AgentContext> = {
   /** 1 for the run's first model call, 2 for the one after its tools ran, … */
   step: number;
   /**
@@ -1447,7 +1502,7 @@ export type PrepareStepContext = {
   agent: string;
   /** 0 for a run started at the top, 1 for a sub-run of one of its tools, … */
   depth: number;
-  context: AgentContext;
+  context: Ctx;
   signal: AbortSignal;
 };
 
@@ -1488,8 +1543,8 @@ export type PrepareStepResult = {
  * per call, a summary in place of older turns, a note. Keep it deterministic
  * for the same history and the provider's prompt cache keeps working.
  */
-export type PrepareStep = (
-  ctx: PrepareStepContext,
+export type PrepareStep<Ctx = AgentContext> = (
+  ctx: PrepareStepContext<Ctx>,
 ) => PrepareStepResult | void | Promise<PrepareStepResult | void>;
 
 /**
@@ -1503,9 +1558,10 @@ export const DEFAULT_MAX_RUN_DURATION_MS = 10 * 60 * 1000;
  * approval take the same path, because they are the same thing: the next turn
  * of a conversation.
  */
-export type AgentStreamParams = AgentStreamParamsBase & ContextParam;
+export type AgentStreamParams<Ctx = AgentContext> = AgentStreamParamsBase<Ctx> &
+  ContextParam<Ctx>;
 
-interface AgentStreamParamsBase {
+interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Prior turns. The controller loads these from its store, or takes what the
    *  client sent when running stateless. */
   messages: AgentMessage[];
@@ -1564,7 +1620,7 @@ interface AgentStreamParamsBase {
    * handed down to a sub-run. `AgentController` sets this from its
    * `prepareStep` method.
    */
-  prepareStep?: PrepareStep;
+  prepareStep?: PrepareStep<Ctx>;
   /**
    * Where `contextWindow.compact` keeps this thread's summaries, unless the
    * window names its own `store`. `AgentController` passes its `AgentStore`
@@ -1902,11 +1958,102 @@ type ToolShapesWithMemory<T extends readonly ToolEntry[], M> = [M] extends [fals
  *  runaway tree is a readable error rather than a stack trace. */
 const DEFAULT_MAX_DEPTH = 3;
 
+/** Phantom key of `Agent`'s context. Never set at runtime. */
+declare const AGENT_CONTEXT: unique symbol;
+
+/**
+ * The context an agent's runs are given, which its controller's `context()`
+ * returns and `agent.stream({ context })` takes (#1019).
+ *
+ * The `Ctx` the agent was made with by `withContext<Ctx>().agent(...)`, or,
+ * for `Agent.create`, what its tools need (`ContextOfTools`). The app's
+ * `AgentContext` for an agent whose tools declare nothing, which is every
+ * agent written before typed contexts.
+ */
+export type ContextOf<A> = A extends { readonly [AGENT_CONTEXT]?: (context: infer C) => void }
+  ? C
+  : AgentContext;
+
+type ToolContextBox<E> = E extends { readonly [TOOL_CONTEXT]?: (context: infer C) => void }
+  ? // An `any` context (an untyped `toAgentTools`, an `AnyAgentTool`) needs
+    // nothing in particular, and would turn the whole intersection into `any`.
+    0 extends 1 & C
+    ? never
+    : { context: C }
+  : never;
+
+type UnionToIntersection<U> = (U extends unknown ? (u: U) => void : never) extends (
+  i: infer I,
+) => void
+  ? I
+  : never;
+
+/**
+ * What the tools need together, `unknown` when that is nothing: no tools, a
+ * question for the user (`AgentTool.ask`, which reads no context), or tools
+ * typed `any`.
+ */
+type ToolsNeed<T extends readonly ToolEntry[]> = [ToolContextBox<FlattenTools<T>>] extends [never]
+  ? unknown
+  : UnionToIntersection<ToolContextBox<FlattenTools<T>>> extends { context: infer C }
+    ? C
+    : unknown;
+
+/**
+ * What a list of tools needs from the run, together: the intersection of each
+ * tool's context (namespaces flattened). A tool with no context of its own
+ * needs the app's `AgentContext`, and a list that declares nothing needs just
+ * that. An agent made by `Agent.create` gets this as its context.
+ */
+export type ContextOfTools<T extends readonly ToolEntry[]> =
+  unknown extends ToolsNeed<T> ? AgentContext : ToolsNeed<T>;
+
+/**
+ * What `withContext` checks of an agent's tools: that `Ctx` gives each of them
+ * what it reads. When it does not, the agent's params get a required member
+ * whose name says so and whose type is what the tools need, which is where
+ * the compiler's message points.
+ */
+type ToolsFit<T extends readonly ToolEntry[], Ctx> = [Ctx] extends [ToolsNeed<T>]
+  ? unknown
+  : { "a tool of this agent needs more context than its Ctx": ToolsNeed<T> };
+
+/**
+ * `AgentTool.create`, `AgentTool.ask` and `Agent.create` with the context
+ * bound: what `withContext<Ctx>()` answers. See `withContext`.
+ */
+export interface AgentContextKit<Ctx> {
+  /** `AgentTool.create`, whose `ctx.context` is `Ctx`. */
+  tool<const Name extends string, Input, Output, Progress = never>(
+    params: ToolDefinition<Name, Input, Output, Progress, Ctx>,
+  ): AgentTool<Name, Input, Output, Progress, Ctx>;
+  /** `AgentTool.ask`, typed for agents of this context. */
+  ask<const Name extends string, Output>(params: {
+    name: Name;
+    description: string;
+    outputSchema: Schema<Output>;
+  }): AgentTool<Name, { question: string }, Output, never, Ctx>;
+  /**
+   * `Agent.create`, for an agent whose runs are given `Ctx`. Each of its tools
+   * must read no more than `Ctx` gives it: a tool made for another context is
+   * a compile error here, not an `undefined` in its body.
+   */
+  agent<
+    const T extends readonly ToolEntry[],
+    const S extends readonly Skill[],
+    O extends Schema<any> | undefined = undefined,
+    const M extends AgentMemoryOptions | false = false,
+  >(
+    params: CreateAgentParams<T, S, O, M, Ctx> & ToolsFit<T, Ctx>,
+  ): Agent<T, S, O, M, Ctx>;
+}
+
 export class Agent<
   T extends readonly ToolEntry[] = readonly ToolEntry[],
   S extends readonly Skill[] = readonly Skill[],
   O extends Schema<any> | undefined = undefined,
   M extends AgentMemoryOptions | false = false,
+  Ctx = ContextOfTools<T>,
 > {
   readonly name: string;
   readonly tools: T;
@@ -1928,10 +2075,12 @@ export class Agent<
   /** See `CreateAgentParams.memory`. `undefined` for an agent without memory. */
   readonly memory: AgentMemoryOptions | undefined;
   declare readonly [AGENT_MEMORY]?: M;
+  /** Phantom: the agent's context, for `ContextOf`. See `withContext`. */
+  declare readonly [AGENT_CONTEXT]?: (context: Ctx) => void;
 
   private readonly config: RunConfig;
 
-  private constructor(params: CreateAgentParams<T, S, O, M>) {
+  private constructor(params: CreateAgentParams<T, S, O, M, Ctx>) {
     this.name = params.name;
     this.instructions = params.instructions;
     this.provider = params.provider;
@@ -1963,16 +2112,54 @@ export class Agent<
       logErrors: params.logErrors ?? true,
       maxRunDurationMs: limit,
       contextWindow: params.contextWindow,
-      prepareStep: params.prepareStep ? [params.prepareStep] : [],
+      // The run calls it with the context it was given, which the types above
+      // have already checked is this agent's.
+      prepareStep: params.prepareStep ? [params.prepareStep as PrepareStep] : [],
     };
   }
 
+  /**
+   * Binds a context type for an agent and its tools (#1019): answers
+   * `AgentTool.create`, `AgentTool.ask` and `Agent.create` whose `ctx.context`
+   * is `Ctx`, so the agent declares what its runs need (data and functions)
+   * and its controller's `context()` has to build exactly that.
+   *
+   * ```ts
+   * type PageContext = { pageId: string; edit(instruction: string): Promise<string> };
+   * const page = Agent.withContext<PageContext>();
+   *
+   * const editTool = page.tool({
+   *   name: "edit",
+   *   description: "Edit the page",
+   *   inputSchema: s.object({ instruction: s.string() }),
+   *   execute: ({ instruction }, ctx) => ctx.context.edit(instruction),
+   * });
+   * const pageAgent = page.agent({ name: "page", provider, tools: [editTool] });
+   * ```
+   *
+   * A kit rather than `Agent.create<Ctx>(...)` because TypeScript cannot infer
+   * some type arguments and take others: naming `Ctx` there would mean naming
+   * the tool tuple too, or losing it, and with it the client's typed tool
+   * parts. Nothing happens at runtime: the kit's functions are the ones it
+   * names.
+   */
+  static withContext<Ctx>(): AgentContextKit<Ctx> {
+    return CONTEXT_KIT as AgentContextKit<Ctx>;
+  }
+
+  /**
+   * The agent's context is what its tools need together (`ContextOfTools`):
+   * the app's `AgentContext` while none declares one. `withContext` names it
+   * instead.
+   */
   static create<
     const T extends readonly ToolEntry[],
     const S extends readonly Skill[],
     O extends Schema<any> | undefined = undefined,
     const M extends AgentMemoryOptions | false = false,
-  >(params: CreateAgentParams<T, S, O, M>): Agent<T, S, O, M> {
+  >(
+    params: CreateAgentParams<T, S, O, M, ContextOfTools<T>>,
+  ): Agent<T, S, O, M, ContextOfTools<T>> {
     if (params.output) {
       assertObjectRoot(params.output as Schema<any>, `The agent "${params.name}"`, "output");
     }
@@ -1989,7 +2176,7 @@ export class Agent<
     return new Agent(params);
   }
 
-  stream(params: AgentStreamParams): AgentRun<ToolShapesWithMemory<T, M>, OutputOf<O>> {
+  stream(params: AgentStreamParams<Ctx>): AgentRun<ToolShapesWithMemory<T, M>, OutputOf<O>> {
     let config: RunConfig = {
       ...this.config,
       provider: params.provider ?? this.config.provider,
@@ -2006,7 +2193,7 @@ export class Agent<
           ? undefined
           : (params.contextWindow ?? this.config.contextWindow),
       prepareStep: params.prepareStep
-        ? [...this.config.prepareStep, params.prepareStep]
+        ? [...this.config.prepareStep, params.prepareStep as PrepareStep]
         : this.config.prepareStep,
     };
     if (params.maxRunDurationMs != null) {
@@ -2026,7 +2213,8 @@ export class Agent<
     if (params.skills && params.skills.length > 0) {
       config = withRunSkills(config, params.skills, `Agent.stream for "${this.name}"`);
     }
-    return new AgentRunImpl(config, params) as unknown as AgentRun<
+    // The run is untyped inside: what it holds of `Ctx` it only hands on.
+    return new AgentRunImpl(config, params as AgentStreamParams) as unknown as AgentRun<
       ToolShapesWithMemory<T, M>,
       OutputOf<O>
     >;
@@ -2035,7 +2223,13 @@ export class Agent<
 
 export type OutputOf<O> = O extends Schema<any> ? Infer<O> : never;
 
-export type AnyAgent = Agent<any, any, any, any>;
+export type AnyAgent = Agent<any, any, any, any, any>;
+
+const CONTEXT_KIT: AgentContextKit<any> = {
+  tool: (params) => AgentTool.create(params),
+  ask: (params) => AgentTool.ask(params),
+  agent: (params) => Agent.create(params as CreateAgentParams<any, any, any, any, any>),
+};
 
 // --- lowering ------------------------------------------------------------
 
@@ -4375,8 +4569,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // had. The persisted transcript already contains it.
       messages: resuming ? recorded.messages : (params.messages ?? []),
       turn: resuming ? { toolResults: mine } : params.prompt ? { text: params.prompt } : undefined,
-      // The same caller, so the same context. See `ToolContext.context`.
-      context: this.context,
+      // The same caller, so the same context, unless the tool built one for a
+      // sub-agent whose context differs (#1019). See `RunAgentParams.context`.
+      context: (params.context as AgentContext | undefined) ?? this.context,
       // The same scope, down the whole tree. A sub-agent runs on behalf of the
       // caller who started the parent — that is the only reason it is allowed
       // to run at all — so it reads and writes the caller's attachments, and a

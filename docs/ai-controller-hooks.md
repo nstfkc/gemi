@@ -78,6 +78,8 @@ A hook has the same name, the same arguments and the same return type as the con
 
 Settings such as `store`, `attachments`, `maxConcurrentRuns` and `requireThread` are not hooks. Set those on the controller.
 
+A `context` hook returns the app's `AgentContext` unless you name another type: `defineAgentHooks<Body, Ctx>`, for controllers whose agent declares a context of its own (see [AI Agent Context](./ai-agent-context.md)). Hooks that don't build a context fit any controller, whatever its agent's context is.
+
 ## Which one runs
 
 For each method, the first of these that exists runs:

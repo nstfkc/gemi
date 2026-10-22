@@ -103,6 +103,12 @@ export {
 } from "./Agent";
 export type {
   AgentContext,
+  // Per-agent typed contexts (#1019): `Agent.withContext<Ctx>()` answers the
+  // kit, `ContextOf<typeof agent>` reads an agent's back.
+  AgentContextKit,
+  ContextOf,
+  ContextOfTools,
+  RunAgentArgs,
   AgentResultOptions,
   AgentRun,
   AgentRunFailure,

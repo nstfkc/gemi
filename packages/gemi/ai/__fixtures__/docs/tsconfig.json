@@ -12,7 +12,14 @@
     "paths": {
       "gemi/ai": ["../../index.ts"],
       "@/app/config/ai": ["stubs/config-ai.ts"],
-      "@/app/agents/support": ["stubs/support-agent.ts"]
+      "@/app/agents/support": ["stubs/support-agent.ts"],
+      "gemi/http": ["../../../http/index.ts"],
+      "gemi/support": ["../../../support/index.ts"],
+      // docs/ai-agent-context.md: its controller imports the agent its first
+      // example declares, which is generated under this name.
+      "@/app/agents/page": ["generated-ai-agent-context-md-1.ts"],
+      "@/app/services/PageEditor": ["stubs/services.ts"],
+      "@/app/services/Pictures": ["stubs/services.ts"]
     }
   },
   "include": ["generated-*.ts", "stubs/*.ts", "helpers.ts", "question-evals.ts"]

@@ -551,7 +551,7 @@ export class McpRouteDeclaration<
  * a native tool without it is the local agents' only, never listed to a remote
  * caller and refused as unknown when one names it.
  */
-export type McpNativeToolRemote<Progress = unknown> = {
+export type McpNativeToolRemote<Progress = unknown, Ctx = AgentContext> = {
   /**
    * The `AgentContext` the tool's `ctx.context` is for a remote call, built
    * from the call: `caller.principal` is the credential's user and scopes,
@@ -562,8 +562,12 @@ export type McpNativeToolRemote<Progress = unknown> = {
    * It is the server deciding what the call is for, as `AgentController.context()`
    * does for a chat, so it must not be read off the arguments without the
    * same check a route would make. A throw is the server's failure, logged.
+   *
+   * Typed as the tool's own context when it declares one (#1019): a tool
+   * made with `withContext<Ctx>().tool` needs a `Ctx` here, functions
+   * included.
    */
-  context: (call: McpCallContext) => AgentContext | Promise<AgentContext>;
+  context: (call: McpCallContext) => Ctx | Promise<Ctx>;
   /**
    * Turns one of the tool's yields into an MCP progress notification, or
    * `undefined` to send none for it. `n` counts the yields, from 1.
@@ -576,7 +580,7 @@ export type McpNativeToolRemote<Progress = unknown> = {
 };
 
 /** What `McpRouter.fromTool` takes beside the tool. Everything is optional. */
-export type McpNativeToolMeta<T = readonly string[], Progress = unknown> = {
+export type McpNativeToolMeta<T = readonly string[], Progress = unknown, Ctx = AgentContext> = {
   /** Overrides the tool's own description, for the registry's audience. */
   description?: string;
   /** As for a route: the filter's, the namespaces' and the scopes' tags. */
@@ -596,7 +600,7 @@ export type McpNativeToolMeta<T = readonly string[], Progress = unknown> = {
    */
   requiresApproval?: boolean;
   /** Lets a remote MCP client list and call the tool. See `McpNativeToolRemote`. */
-  remote?: McpNativeToolRemote<Progress>;
+  remote?: McpNativeToolRemote<Progress, Ctx>;
 };
 
 /** The runtime shape of a native tool's meta, generics erased. */
@@ -606,7 +610,7 @@ export type McpNativeToolMetaRuntime = {
   title?: string;
   annotations?: McpToolAnnotations;
   requiresApproval?: boolean;
-  remote?: McpNativeToolRemote<any>;
+  remote?: McpNativeToolRemote<any, any>;
 };
 
 /**
@@ -780,9 +784,10 @@ export class McpRouter<R = McpRoutes> {
     O,
     Pr = never,
     const T extends readonly string[] = readonly [],
+    C = AgentContext,
   >(
-    tool: AgentTool<string, I, O, Pr>,
-    meta: McpNativeToolMeta<T, Pr> = {},
+    tool: AgentTool<string, I, O, Pr, C>,
+    meta: McpNativeToolMeta<T, Pr, C> = {},
   ): McpToolDeclaration<I, O, T, Pr> {
     return new McpToolDeclaration(tool as AnyAgentTool, meta as McpNativeToolMetaRuntime);
   }
