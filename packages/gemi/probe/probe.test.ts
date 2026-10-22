@@ -185,7 +185,7 @@ describe("running", () => {
     const dom = new JSDOM("", { runScripts: "outside-only" });
     dom.window.eval(await probe("utils/layout").expression([], "x"));
     expect("__gemiProbe__" in dom.window).toBe(false);
-    expect("probe" in dom.window).toBe(false);
+    expect("__gemiProbeFn__" in dom.window).toBe(false);
   });
 
   test("arguments must be JSON values", () => {

@@ -54,7 +54,7 @@ const expression = await readLayout.expression(["hero"]);
 await provider.capture(url, { script: `() => ${expression}` });
 ```
 
-The expression is `(() => { …bundle…; return probe(...args); })()`, so it declares nothing in the page's scope and can run any number of times in one page.
+The expression wraps the bundle in a function of its own, so it declares nothing in the page's scope and can run any number of times in one page.
 
 ## Bundling and caching
 

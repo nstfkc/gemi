@@ -195,7 +195,8 @@ export async function probeSource(name: string): Promise<string> {
 export function probeExpression(source: string, args: readonly unknown[]): string {
   const json = JSON.stringify(args);
   if (json === undefined) throw new Error("A probe's arguments must be JSON values.");
-  return `(() => { let probe; const ${DEFINE} = (fn) => { probe = fn; }; ${source}; return probe(...${json}); })()`;
+  // The local names start with `__gemi` so they shadow none of the page's globals the bundle may use.
+  return `(() => { let __gemiProbeFn__; const ${DEFINE} = (fn) => { __gemiProbeFn__ = fn; }; ${source}; return __gemiProbeFn__(...${json}); })()`;
 }
 
 /** Anything that evaluates an expression in a page: a puppeteer or playwright `Page`. */
