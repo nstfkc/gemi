@@ -13,7 +13,13 @@ import { describe, expectTypeOf, test } from "vitest";
 
 import { AgentTool, type ToolContext } from "./Agent";
 import { OpenAIProvider } from "./AgentProvider";
-import { generate, type GenerateResult, type GenerateSuccess } from "./generate";
+import {
+  generate,
+  type GenerateAttempt,
+  type GenerateRejection,
+  type GenerateResult,
+  type GenerateSuccess,
+} from "./generate";
 import type { AgentRunFailure } from "./Agent";
 import { s, type JsonValue } from "./Schema";
 import type { AgentMessage, FinishReason, Usage } from "./types";
@@ -75,6 +81,95 @@ describe("generate", () => {
   });
 });
 
+describe("generate with validate", () => {
+  type Validation<T> = { ok: true; value: T } | { ok: false; problems: string[] };
+
+  test("validate is given the parsed output and the attempt", () => {
+    void generate({
+      provider,
+      prompt: "go",
+      output,
+      validate: (copies, info) => {
+        expectTypeOf(copies).toEqualTypeOf<Copies>();
+        expectTypeOf(info.attempt).toEqualTypeOf<number>();
+        expectTypeOf(info.signal).toEqualTypeOf<AbortSignal>();
+        return [];
+      },
+    });
+  });
+
+  test("a list of problems keeps the schema's type", async () => {
+    const result = await generate({
+      provider,
+      prompt: "go",
+      output,
+      validate: (copies) => [copies.copies.length === 0 && "No copies.", null],
+    });
+    expectTypeOf(result).toEqualTypeOf<GenerateResult<Copies, Copies>>();
+  });
+
+  test("{ ok: true, value } types the output as the value", async () => {
+    const result = await generate({
+      provider,
+      prompt: "go",
+      output,
+      validate: async (copies) => ({ ok: true as const, value: copies.copies.length }),
+    });
+    expectTypeOf(result).toEqualTypeOf<GenerateResult<number, Copies>>();
+    if (result.ok) expectTypeOf(result.output).toEqualTypeOf<number>();
+    if (!result.ok) expectTypeOf(result.rejected).toEqualTypeOf<GenerateRejection<Copies>>();
+  });
+
+  test("an app's own Validation<T> plugs in", async () => {
+    const accept = (copies: Copies): Validation<string[]> =>
+      copies.copies.length > 0
+        ? { ok: true, value: copies.copies.map((copy) => copy.headline) }
+        : { ok: false, problems: ["none"] };
+    const result = await generate({ provider, prompt: "go", output, validate: accept });
+    expectTypeOf(result).toEqualTypeOf<GenerateResult<string[], Copies>>();
+  });
+
+  test("throwOnError: true resolves the validated value", async () => {
+    const result = await generate({
+      provider,
+      prompt: "go",
+      output,
+      validate: () => ({ ok: true as const, value: "kept" }),
+      throwOnError: true,
+    });
+    expectTypeOf(result).toEqualTypeOf<GenerateSuccess<string>>();
+  });
+
+  test("both arms report the attempts", async () => {
+    const result = await generate({ provider, prompt: "go", output, attempts: 2 });
+    expectTypeOf(result.attempts).toEqualTypeOf<number>();
+    expectTypeOf(result.attemptLog).toEqualTypeOf<GenerateAttempt[]>();
+  });
+
+  test("feedback returns a string, and retry is one of three", () => {
+    void generate({
+      provider,
+      prompt: "go",
+      output,
+      feedback: (problems, info) => {
+        expectTypeOf(problems).toEqualTypeOf<string[]>();
+        expectTypeOf(info.cause).toEqualTypeOf<
+          "rejected" | "invalid_output" | "cut_off" | "timeout"
+        >();
+        return problems.join("\n");
+      },
+      validate: () => ({ ok: false as const, problems: ["x"], retry: "restart" as const }),
+    });
+    void generate({
+      provider,
+      prompt: "go",
+      output,
+      // @ts-expect-error — not a retry mode
+      validate: () => ({ ok: false as const, problems: ["x"], retry: "again" as const }),
+    });
+  });
+});
+
 describe("ctx.generate", () => {
   test("is typed like generate", () => {
     AgentTool.create({
@@ -99,6 +194,24 @@ describe("ctx.generate", () => {
       execute: async (_input, ctx) => {
         const result = await ctx.generate({ provider, prompt: "go", output, throwOnError: true });
         expectTypeOf(result).toEqualTypeOf<GenerateSuccess<Copies>>();
+        return "ok";
+      },
+    });
+  });
+
+  test("takes validate, typed like generate", () => {
+    AgentTool.create({
+      name: "write",
+      description: "x",
+      inputSchema: s.object({}),
+      execute: async (_input, ctx) => {
+        const result = await ctx.generate({
+          provider,
+          prompt: "go",
+          output,
+          validate: (copies) => ({ ok: true as const, value: copies.copies.length }),
+        });
+        expectTypeOf(result).toEqualTypeOf<GenerateResult<number, Copies>>();
         return "ok";
       },
     });

@@ -335,10 +335,12 @@ export interface ToolContext {
    * unlike `runAgent` and `generateImage`, which replay from what they recorded
    * on the tool call. This records nothing, by design.
    */
-  generate<O extends Schema<any>>(
-    params: GenerateParams<O> & { throwOnError: true },
-  ): Promise<GenerateSuccess<Infer<O>>>;
-  generate<O extends Schema<any>>(params: GenerateParams<O>): Promise<GenerateResult<Infer<O>>>;
+  generate<O extends Schema<any>, R = Infer<O>>(
+    params: GenerateParams<O, R> & { throwOnError: true },
+  ): Promise<GenerateSuccess<R>>;
+  generate<O extends Schema<any>, R = Infer<O>>(
+    params: GenerateParams<O, R>,
+  ): Promise<GenerateResult<R, Infer<O>>>;
 
   /**
    * Renders an image and parks it, in one step, wired into this tool call.
@@ -1788,9 +1790,18 @@ export class AgentRunError extends Error {
   readonly toolCallId?: string;
   readonly runId: string;
   readonly result: AgentRunResult<ToolShapes, unknown>;
+  /**
+   * From `generate({ validate, throwOnError: true })` whose answers never
+   * passed: the last one `validate` rejected, and its problems.
+   */
+  readonly rejected?: { output: unknown; problems: string[] };
 
-  constructor(result: AgentRunResult<ToolShapes, unknown> & { error: AgentRunFailure }) {
+  constructor(
+    result: AgentRunResult<ToolShapes, unknown> & { error: AgentRunFailure },
+    extra?: { rejected?: { output: unknown; problems: string[] } },
+  ) {
     super(result.error.message);
+    if (extra?.rejected) this.rejected = extra.rejected;
     this.name = "AgentRunError";
     this.code = result.error.code;
     this.retryable = result.error.retryable;
