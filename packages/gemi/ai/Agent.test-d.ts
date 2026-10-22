@@ -280,8 +280,10 @@ describe("AgentTool.ask", () => {
       description: "Ask the customer their name",
       outputSchema: s.object({ name: s.string() }),
     });
+    // It reads no context, so it needs none (#1019): `unknown`, which fits
+    // any agent's.
     expectTypeOf(askName).toEqualTypeOf<
-      AgentTool<"askName", { question: string }, { name: string }>
+      AgentTool<"askName", { question: string }, { name: string }, never, unknown>
     >();
   });
 });

@@ -13,6 +13,7 @@ import type {
   AgentRunResult,
   AgentToolShapes,
   AnyAgent,
+  ContextOf,
   PrepareStepContext,
   PrepareStepResult,
   ReasoningEffort,
@@ -632,7 +633,7 @@ export type AuthorizeRequestParams<Body extends object = Record<string, unknown>
  * `onStreamComplete`) goes on `req.state`, which every hook reaches
  * (`ctx.req.state` in the event hooks).
  */
-export type AgentControllerHooks<Body extends object = object> = {
+export type AgentControllerHooks<Body extends object = object, Ctx = AgentContext> = {
   authorizeRequest?: (
     req: HttpRequest<any, any>,
     params: AuthorizeRequestParams<Body>,
@@ -654,16 +655,14 @@ export type AgentControllerHooks<Body extends object = object> = {
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ) => readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void>;
-  context?: (
-    req: HttpRequest<any, any>,
-    extra: { body: Body },
-  ) => AgentContext | Promise<AgentContext>;
+  /** Builds the run's context. `Ctx` is the agents' (see `defineAgentHooks`). */
+  context?: (req: HttpRequest<any, any>, extra: { body: Body }) => Ctx | Promise<Ctx>;
   memoryScopes?: (
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ) => AgentMemoryScopes | Promise<AgentMemoryScopes>;
   prepareStep?: (
-    step: PrepareStepContext,
+    step: PrepareStepContext<Ctx>,
     ctx: AgentHookContext,
   ) => PrepareStepResult | void | Promise<PrepareStepResult | void>;
   attachmentScope?: (
@@ -714,10 +713,15 @@ export type AgentControllerHooks<Body extends object = object> = {
  * ```
  *
  * A controller whose `Body` has at least these fields can use it.
+ *
+ * `Ctx` types a shared `context` hook (and `prepareStep`'s `step.context`) for
+ * agents with a context of their own (#1019): `defineAgentHooks<PageBody,
+ * PageContext>({ context: ... })`. It defaults to the app's `AgentContext`.
+ * Hooks that build no context fit any controller, whatever its agent's.
  */
-export function defineAgentHooks<Body extends object = object>(
-  hooks: AgentControllerHooks<Body>,
-): AgentControllerHooks<Body> {
+export function defineAgentHooks<Body extends object = object, Ctx = AgentContext>(
+  hooks: AgentControllerHooks<Body, Ctx>,
+): AgentControllerHooks<Body, Ctx> {
   return hooks;
 }
 
@@ -786,8 +790,14 @@ export abstract class AgentController<
    * A method the controller overrides itself wins over the hook, and reaches
    * it with `super.method(...)`, exactly as it would reach a base class's.
    * Unset (the default), every method is gemi's own.
+   *
+   * Hooks of any `Ctx` are accepted, so a controller whose agent has a
+   * context of its own (#1019) can share hooks that build none. Such a
+   * controller builds its context in its own `context()`, which is checked
+   * against the agent; a shared `context` hook is checked only against the
+   * `Ctx` its `defineAgentHooks` names.
    */
-  protected hooks?: AgentControllerHooks<Body>;
+  protected hooks?: AgentControllerHooks<Body, any>;
 
   /**
    * Defaults to the process-wide `MemoryAgentStore`.
@@ -999,24 +1009,49 @@ export abstract class AgentController<
    * What every tool of this turn's run gets as `ctx.context` — the user, the
    * tenant, functions the tools call back into. See `AgentContext`.
    *
+   * TYPED BY THE AGENT (#1019): it returns `ContextOf<A>`, the context the
+   * agent declares (`withContext`), or what its tools need. A field or a
+   * function the agent needs and this leaves out is a compile error on the
+   * override. This is where the controller's injected services become the
+   * functions the tools call:
+   *
+   * ```ts
+   * constructor(private pages = PageEditor.inject()) { super(); }
+   *
+   * context(req, { body }) {
+   *   return {
+   *     pageId: body.pageId,
+   *     edit: (instruction: string) => this.pages.edit(body.pageId, instruction),
+   *   };
+   * }
+   * ```
+   *
+   * The same method builds the context of a chat turn, a `startTurn`, and a
+   * voice call's delegated turns, so all of them are typed by it.
+   *
    * The run is not given the request, so this is where the request's facts
    * become the run's: read the user the middleware authenticated here, and a
    * tool reads it from `ctx.context` instead of reaching for `req`. Runs after
    * `authorizeRequest()`, once per turn, and before anything is asked of the
    * model.
    *
-   * The default is `{}`. An app that gives `AgentContext` a required field must
-   * override this: the type of the default cannot see the app's declaration,
-   * so forgetting is a tool that finds the field missing, not a compile error.
+   * The default is `{}`. An agent whose context has a required field needs
+   * this overridden (or a `context` hook): TypeScript cannot make an inherited
+   * method abstract for some agents only, so not overriding it at all is a
+   * tool that finds the field missing, not a compile error. What an override
+   * returns is checked.
    *
    * Values from `body` are the client's claim, exactly as in `instructions()`;
    * putting one here does not make it any more trustworthy, only easier to
    * mistake for something the server decided.
    */
-  context(req: HttpRequest<any, any>, extra: { body: Body }): AgentContext | Promise<AgentContext> {
+  context(
+    req: HttpRequest<any, any>,
+    extra: { body: Body },
+  ): ContextOf<A> | Promise<ContextOf<A>> {
     const hook = this.hooks?.context;
     if (hook) return hook(req, extra);
-    return {} as AgentContext;
+    return {} as ContextOf<A>;
   }
 
   /**
@@ -1134,7 +1169,7 @@ export abstract class AgentController<
    *   }
    */
   protected prepareStep(
-    step: PrepareStepContext,
+    step: PrepareStepContext<ContextOf<A>>,
     ctx: AgentHookContext,
   ): PrepareStepResult | void | Promise<PrepareStepResult | void> {
     return this.hooks?.prepareStep?.(step, ctx);
@@ -1696,7 +1731,10 @@ export abstract class AgentController<
         ...(threadId && isSummaryStore(this.store) ? { summaryStore: this.store } : {}),
         // Only when overridden, so a controller without one adds no call.
         ...(this.prepareStep !== AgentController.prototype.prepareStep || this.hooks?.prepareStep
-          ? { prepareStep: (step: PrepareStepContext) => this.prepareStep(step, ctx) }
+          ? {
+              prepareStep: (step: PrepareStepContext) =>
+                this.prepareStep(step as PrepareStepContext<ContextOf<A>>, ctx),
+            }
           : {}),
       }) as AgentRun;
 

@@ -5788,3 +5788,111 @@ describe("per-run tool input schemas", () => {
     }
   });
 });
+
+/**
+ * `ctx.runAgent(agent, { context })` (#1019): a sub-agent whose context differs
+ * from its caller's is handed one built by the calling tool, in place of the
+ * parent's. Everything else that says who the run is for is still inherited.
+ */
+describe("a sub-run given a context of its own", () => {
+  const recorder = () => {
+    const seen: { context: unknown; body: unknown }[] = [];
+    const tool = AgentTool.create({
+      name: "recordContext",
+      description: "x",
+      inputSchema: stringField("pattern"),
+      outputSchema: anything(),
+      execute: async (_input: any, ctx: any) => {
+        seen.push({ context: ctx.context, body: ctx.body });
+        return { ok: true };
+      },
+    });
+    return { seen, tool };
+  };
+
+  test("its tools see that context, and the parent's tools keep their own", async () => {
+    const { seen, tool } = recorder();
+    const drawn: string[] = [];
+    const sub = Agent.create({
+      name: "pictures",
+      provider: fakeProvider([toolCall("s1", "recordContext", { pattern: "x" })], [finish()]),
+      tools: [tool],
+    });
+    const outer = nestingTool("illustrate", async (ctx) => {
+      const context = {
+        draw: async (prompt: string) => void drawn.push(`${ctx.context.pageId}: ${prompt}`),
+      };
+      await ctx.runAgent(sub, { prompt: "go", context });
+      await (seen[0].context as typeof context).draw("a fox");
+      return { parent: ctx.context.pageId };
+    });
+    const agent = Agent.create({
+      name: "page",
+      provider: fakeProvider([toolCall("c1", "illustrate", {})], [finish()]),
+      tools: [outer],
+    });
+
+    const result = await agent
+      .stream({ messages: [], context: { pageId: "p_1" }, body: { pageId: "p_1" } })
+      .result();
+
+    expect(seen).toHaveLength(1);
+    expect(Object.keys(seen[0].context as object)).toEqual(["draw"]);
+    // The body is inherited still: the sub-run serves the same turn.
+    expect(seen[0].body).toEqual({ pageId: "p_1" });
+    expect(drawn).toEqual(["p_1: a fox"]);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "ok",
+      output: { parent: "p_1" },
+    });
+  });
+
+  test("a sub-run resumed after its question is given the context again", async () => {
+    const { seen, tool } = recorder();
+    const subProvider = fakeProvider(
+      [toolCall("s1", "ask", { question: "which colour?" }), finish()],
+      [toolCall("s2", "recordContext", { pattern: "x" }), finish()],
+      [{ type: "text-delta", delta: "drawn" }, finish()],
+    );
+    const sub = Agent.create({ name: "pictures", provider: subProvider, tools: [askUser, tool] });
+    const illustrate = nestingTool("illustrate", async (ctx) => {
+      const run = await ctx.runAgent(sub, {
+        prompt: "draw",
+        context: { attempt: ctx.resumed ? "resumed" : "first" },
+      });
+      return { text: textOf(run.messages[run.messages.length - 1]) };
+    });
+
+    const first = await escalate({ tool: illustrate });
+    expect(first.result.finishReason).toBe("awaiting-input");
+    expect(seen).toHaveLength(0);
+
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider([{ type: "text-delta", delta: "ok" }, finish()]),
+      tools: [illustrate],
+    });
+    const result = await agent
+      .stream({
+        messages: first.result.messages,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: first.pending[0].signature,
+              path: first.pending[0].path,
+              output: { answer: "red" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    expect(seen.map((entry) => entry.context)).toEqual([{ attempt: "resumed" }]);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "ok",
+      output: { text: "drawn" },
+    });
+  });
+});
