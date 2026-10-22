@@ -61,6 +61,36 @@ read_domain: this.fromApiRoute("GET", "/sites/:siteId/domain", {
 - `await registry.available(caller, filter?)` is `list()` narrowed by features. `list()` and `descriptors()` do not apply them, and each descriptor's `feature` names its key.
 - **`server.version` does not change** when a feature flips. Tools behind a `when` differ per user, so a version derived from what one caller sees would give two callers of the same server different versions. Clients get the change from `tools/list`, which modern clients cache privately for 60 seconds. If you derive `version` from your tool names, hash every declared tool (`registry.descriptors()`), not just the ones a caller sees.
 
+## One route, several audiences
+
+An app often offers the same route to two kinds of caller that want it said differently: the app's own agent, which works inside one chat and has its resource bound, and a connected app, which names the resource itself and is reached through scopes. `fromApiRouteFor` declares the route once and expands to one tool per audience, to spread into `routes`:
+
+```ts
+routes = {
+  ...this.fromApiRouteFor("GET", "/pages/:pageId/site", {
+    name: "list_pages",
+    description: "Lists the site's pages.",
+    result: ({ pages }) => pages.map(({ slug, name }) => ({ path: slug, name })),
+    audiences: {
+      agent: { casing: "camel", tags: ["pages"], params: { pageId: this.chatPage } },
+      remote: {
+        title: "List a site's pages",
+        description: (shared) => `${shared} Name the site by the id list_sites gives.`,
+        tags: ["read"],
+        params: { pageId: this.remoteSite },
+      },
+    },
+  }),
+};
+// => listPages (the agent's) and list_pages (the connected app's)
+```
+
+- **Shared parts:** everything `fromApiRoute` takes (`description`, `input`, `params`, `files`, `result`, `output`, `tags`, `title`, `annotations`, `requiresApproval`, `feature`) may be written once beside `audiences`.
+- **Each audience** may say any of it differently. Its keys replace the shared ones, except `params` and `files`, which are merged field by field (the audience's win), so a shared `"input"` param can stay while an audience binds another. `description` may be a function of the shared one, for an audience that adds a sentence. Without a shared `description`, every audience needs its own.
+- **Names:** `name` is the base name. An audience takes it as written, re-cases it with `casing: "camel" | "snake" | "kebab"` (words split at `_`, `-` and before each capital, so write the base in snake_case or camelCase), or gives its own `name`. Two audiences that end up with the same name fail at declaration.
+- **Checks:** each audience is checked as the `fromApiRoute` call it stands for, with the shared parts merged in: every path param declared, `input` against the body (and required when the body needs it), file fields declared, and `result`/`output` against the route's answer. The tool names are literals, so a typed `toAgentTools` keeps every tool's input and output type.
+- **Nothing else changes:** the audience labels (`agent`, `remote`) mean nothing to gemi. Who sees a tool is still its tags, the router's [scopes](#scopes-which-tools-a-caller-sees) and `toAgentTools`' filters, and the registry sees exactly the tools you would have written out by hand.
+
 ## Native tools
 
 Some operations are not one route: a tool that composes several routes, runs a model itself, or reports progress while it works. Register the `AgentTool` you already have with `fromTool`, and it is listed, filtered, scoped and projected beside the routes:
