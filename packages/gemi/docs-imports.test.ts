@@ -166,6 +166,7 @@ describe("documented gemi imports resolve", () => {
       "gemi/i18n",
       "gemi/kernel",
       "gemi/orm",
+      "gemi/probe",
       "gemi/server",
       "gemi/services",
       "gemi/support",

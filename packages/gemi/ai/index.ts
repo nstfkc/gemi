@@ -257,7 +257,18 @@ export type { ErrorRedactionInfo, ErrorRedactor } from "./redact";
 // A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same
 // function bound to the turn — see `ToolContext.generate`.
 export { generate } from "./generate";
-export type { GenerateParams, GenerateResult, GenerateSuccess } from "./generate";
+export type {
+  GenerateAttempt,
+  GenerateFeedbackCause,
+  GenerateFeedbackInfo,
+  GenerateParams,
+  GenerateProblem,
+  GenerateRejection,
+  GenerateResult,
+  GenerateSuccess,
+  GenerateValidateInfo,
+  GenerateVerdict,
+} from "./generate";
 
 // --- evals and usage metering (#1005) -----------------------------------------
 export { Eval } from "./eval/Eval";

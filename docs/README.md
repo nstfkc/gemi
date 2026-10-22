@@ -49,6 +49,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Testing](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user. Route tests: `App.fetch` with a test `Kernel`, and `gemiRequestPlugin()` from `gemi/vitest`.
 - **[Mobile Clients](./mobile-clients.md)** — `useChat` for iOS and Android: GemiChat (Swift) and `dev.gemijs.chat` (Kotlin) against the same agent routes, and `gemi ai:generate-client` for the agent's typed tools.
 - **[AI Providers](./ai-providers.md)** — `OpenAIProvider`, `AzureOpenAIProvider`, and `FallbackProvider` chains: per-leg timeouts and reasoning, no fallback after output, per-leg usage, `from()` and `evalChain`.
+- **[AI Generate](./ai-generate.md)** — `generate` and `ctx.generate`: one typed model call without tools, and its repair loop — `validate`, `attempts`, `feedback`, per-attempt and overall timeouts, summed and per-attempt usage, and the last rejected answer.
 - **[AI Context Window](./ai-context-window.md)** — `contextWindow` and `prepareStep` (including a per-step reasoning effort): sending a long thread's latest turns, cut at turn starts in steps that keep the prompt cache hitting, summarising the turns left out (`compact`), and the turn helpers.
 - **[AI Background Jobs](./ai-background-jobs.md)** — `ctx.jobs.start` and `AgentJob`: a tool whose result reads `running` while a queued job works, and is replaced by the job's output when it settles.
 - **[AI Memory](./ai-memory.md)** — notes agents keep across conversations: scopes declared on the agent and resolved per run (`memoryScopes()`), the `<memory>` block, the `remember` / `forget` / `recall` tools, `ctx.memory`, `AgentMemories` (list, edit, delete, export) and `DatabaseAgentMemoryStore`.
@@ -81,6 +82,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Workflows](./workflows.md)** — durable multi-step `Workflow`s: steps, sleeps, signals, batches and cancel.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Browser Probes](./browser-probes.md)** — code for a headless browser's `page.evaluate` written as normal modules (`*.probe.ts`), bundled by gemi and run with typed arguments and result.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Change Feeds](./change-feed.md)** — `ChangeFeed.publish` on a channel, an SSE route with `ChangeFeed.stream`, and `useSubscription` in the browser: other tabs and instances learn that something changed.

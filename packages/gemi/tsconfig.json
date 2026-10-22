@@ -65,7 +65,8 @@
     "config",
     "internal",
     "ai",
-    "vitest"
+    "vitest",
+    "probe"
   ],
   "exclude": [
     "node_modules",
