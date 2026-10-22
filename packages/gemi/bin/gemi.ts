@@ -8,6 +8,7 @@ import {
   DOCUMENT_SCRIPTS_MANIFEST,
   bundleDocumentScripts,
 } from "../services/router/documentScript";
+import { PROBES_MANIFEST, bundleProbes } from "../probe";
 import { runMigrate } from "./migrate";
 import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
@@ -274,6 +275,14 @@ withStatsOptions(
   );
   if (Object.keys(documentScripts).length > 0) {
     console.log(`Bundled ${Object.keys(documentScripts).length} document script(s).`);
+  }
+
+  // Browser probes (`app/**/*.probe.ts`, #1020), bundled once here so
+  // `gemi start` hands them to `page.evaluate` without bundling anything.
+  const probes = await bundleProbes(appDir);
+  await Bun.write(path.join(rootDir, "dist", "server", PROBES_MANIFEST), JSON.stringify(probes));
+  if (Object.keys(probes).length > 0) {
+    console.log(`Bundled ${Object.keys(probes).length} probe(s).`);
   }
 
   // `--json` or `--markdown` alone asks for the stats too.
