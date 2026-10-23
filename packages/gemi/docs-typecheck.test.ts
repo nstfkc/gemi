@@ -20,7 +20,7 @@ import { afterAll, expect, test } from "vitest";
 const PACKAGE = import.meta.dirname;
 const DOCS = path.join(PACKAGE, "../../docs");
 const FIXTURE = path.join(PACKAGE, "ai/__fixtures__/docs");
-const PAGES = ["ai-evals.md", "ai-generate.md", "ai-usage.md"];
+const PAGES = ["ai-evals.md", "ai-generate.md", "ai-usage.md", "ai-agent-context.md"];
 
 function examples(page: string): string[] {
   const text = readFileSync(path.join(DOCS, page), "utf8");
@@ -41,7 +41,7 @@ test("the pages have complete examples to check", () => {
   for (const page of PAGES) expect(examples(page).length, page).toBeGreaterThan(0);
 });
 
-test("the docs' complete examples compile under strict", { timeout: 120_000 }, () => {
+test("the docs' complete examples compile under strict", { timeout: 240_000 }, () => {
   clean();
   for (const page of PAGES) {
     examples(page).forEach((code, at) => {

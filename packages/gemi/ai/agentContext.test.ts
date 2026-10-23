@@ -30,7 +30,7 @@ const PACKAGE = path.join(import.meta.dirname, "..");
 const TSC = path.join(PACKAGE, "node_modules", ".bin", "tsc");
 const FIXTURES = "ai/__fixtures__/agent-context";
 
-function compile(fixture: "required" | "optional"): string[] {
+function compile(fixture: "required" | "optional" | "typed"): string[] {
   const result = Bun.spawnSync([TSC, "--noEmit", "-p", `${FIXTURES}/tsconfig.${fixture}.json`], {
     cwd: PACKAGE,
   });
@@ -67,4 +67,19 @@ describe("the app's AgentContext decides whether `context` may be omitted", () =
     // app would stop compiling on upgrade.
     expect(compile("optional")).toEqual([]);
   });
+});
+
+describe("per-agent typed contexts (#1019), under strict", () => {
+  test(
+    "every check in the fixture bites, and everything else compiles",
+    { timeout: 240_000 },
+    () => {
+      // The fixture marks each line that must fail with `@ts-expect-error`, so
+      // a check that stops biting is an unused directive (TS2578) and shows up
+      // here. Only the fixture's own errors: the framework's source is not
+      // written for `strict`, and it is pulled in through `gemi/http`.
+      const errors = compile("typed").filter((line) => line.includes("agent-context/typed.ts"));
+      expect(errors).toEqual([]);
+    },
+  );
 });

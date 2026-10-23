@@ -24,6 +24,22 @@
 - **Fix:** a `(group)` segment in an api router's key is stripped at runtime, as in view routers: `"/(builds)": BuildsRouter` (or `"(builds)/"`) mounts its routes without a path segment, so `/pages/(builds)/:pageId/builds` is served at `/pages/:pageId/builds`, the path the client's types already used. Before, the literal `(builds)` stayed in the path and the route never matched. Parentheses right after a `:param` (`/:id(\\d+)`) are its URLPattern regex and are not stripped.
 - Two routers mounted on the same path (through groups, say) now merge per method instead of the second replacing the first's whole path entry.
 
+## AI: per-agent typed context (#1019)
+
+**New, nothing to migrate.** See [AI Agent Context](docs/ai-agent-context.md). Apps that augment `AgentContext` keep compiling and behaving as before.
+
+- `Agent.withContext<Ctx>()` returns `{ tool, ask, agent }`: `AgentTool.create`, `AgentTool.ask` and `Agent.create` with `Ctx` bound. A tool's `ctx.context` (and `requiresApproval`, `endsRun`, a per-run `inputSchema`, `prepareStep`'s `step.context`) is then `Ctx`. `agent(...)` refuses a tool whose context `Ctx` doesn't satisfy.
+- `AgentTool` takes a fifth type parameter, `Ctx`, and so do `ToolContext`, `ToolSchemaContext`, `ToolApprovalContext`, `ToolEndsRunContext`, `ToolExecute`, `ToolInputSchema`, `ToolApproval`, `ToolEndsRun`, `ToolDefinition`, `PrepareStepContext`, `PrepareStep`, `CreateAgentParams` and `AgentStreamParams`. `Agent` takes a fifth one too. All of them default to the app's `AgentContext`, so existing annotations mean what they meant. `AgentTool.create` infers `Ctx` from an annotated `execute(input, ctx: ToolContext<Ctx>)`.
+- `Agent.create` infers an agent's context from its tools (the intersection of what they need, `ContextOfTools`). It is `AgentContext` while no tool declares one. `ContextOf<A>` reads an agent's context type.
+- `AgentController<A>`'s `context()` now returns `ContextOf<A>`, and `prepareStep` takes `PrepareStepContext<ContextOf<A>>`. For an existing agent that is `AgentContext`, as before.
+- For an agent with a typed context, a `context()` override that leaves out a field or function of it is a compile error. `startTurn`, voice turns and voice MCP turns are typed through the same `context()`. Agents that don't opt in are checked against `AgentContext`, as before.
+- `ctx.runAgent(agent, { context })`: a sub-run can be given a context of its own, which replaces the parent's for that sub-run. It is required by the types when the sub-agent's context isn't satisfied by the calling tool's. Without it, the sub-run inherits the parent's context, as before.
+- `defineAgentHooks<Body, Ctx>` types a shared `context` hook. A controller's `hooks` accepts hooks of any `Ctx`.
+- `McpRouter.fromTool(tool, { remote: { context } })` types `remote.context` by the tool's own context.
+- New type exports from `gemi/ai`: `AgentContextKit`, `ContextOf`, `ContextOfTools`, `RunAgentArgs`.
+- `AgentTool.ask(...)` now returns `AgentTool<Name, { question: string }, Output, never, unknown>`: a question is answered by the browser and reads no context, so it fits an agent of any context. Only a type that spelled out the old return type exactly needs the two extra arguments.
+- `AnyAgentTool` is now `AgentTool<string, any, any, any, any>` and `AnyAgent` is `Agent<any, any, any, any, any>`. A conditional type of your own written as `T extends AgentTool<any, infer I, infer O, infer P>` should add `any` as the fifth argument, or a tool with a typed context won't match it under `strict`.
+
 ## Rate limiting: `RedisRateLimiter` counts in memory while Redis is down (#1011)
 
 **Behaviour change. Nothing to migrate unless you relied on the fail-open default.** See [Middleware → When Redis fails](docs/middleware.md#when-redis-fails).
