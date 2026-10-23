@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.160.2 to 0.161.0
 
 ## Auth: the auth views are mounted only for the features that are configured (#1040)
 
