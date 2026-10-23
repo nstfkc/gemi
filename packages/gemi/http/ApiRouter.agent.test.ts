@@ -194,8 +194,8 @@ describe("ApiRouter.agent()", () => {
   /**
    * Declaration order must not decide whether the agent is guarded. `routes`
    * and `middlewares` are both class fields, so writing `middlewares` below
-   * `routes` means it is still `[]` when `this.agent()` runs — which is why the
-   * router instance is captured and read at flatten time instead.
+   * `routes` means it is still `[]` when `this.agent()` runs, so the list must
+   * be read at flatten time, which `createFlatApiRoutes` does.
    */
   test("is guarded even when middlewares is declared after routes", () => {
     class Api extends ApiRouter {
@@ -224,13 +224,10 @@ describe("ApiRouter.agent()", () => {
   });
 
   /**
-   * A router nested inside another still replaces its parent's list rather than
-   * concatenating — that predates this method and applies to every
-   * `"/sub": SubRouter` in the framework. What matters for an agent is that it
-   * lands on the same list its siblings inside `Nested` land on, which is
-   * `Nested`'s.
+   * An agent lands on the same list its siblings inside `Nested` land on: every
+   * enclosing router's `middlewares`, outermost first (#1022).
    */
-  test("takes the middlewares of the router it is written in, not the one above", () => {
+  test("takes the middlewares of the router it is written in and of every router above", () => {
     class Nested extends ApiRouter {
       middlewares = ["tenant"];
       routes = {
@@ -245,8 +242,8 @@ describe("ApiRouter.agent()", () => {
 
     const flat = createFlatApiRoutes({ "/": Api });
 
-    expect(flat["/ai/chat"]!.POST!.middleware).toEqual(["tenant"]);
-    expect(flat["/ai/plain"]!.GET!.middleware).toEqual(["tenant"]);
+    expect(flat["/ai/chat"]!.POST!.middleware).toEqual(["auth", "tenant"]);
+    expect(flat["/ai/plain"]!.GET!.middleware).toEqual(["auth", "tenant"]);
   });
 
   test("mounts alongside ordinary routes without disturbing them", () => {

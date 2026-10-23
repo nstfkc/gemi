@@ -15,7 +15,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## HTTP layer
 
-- [Routing](https://nstfkc.github.io/gemi/routing.md): ApiRouter/ViewRouter, path params, groups, nesting, resource().
+- [Routing](https://nstfkc.github.io/gemi/routing.md): ApiRouter/ViewRouter, path params, `(group)` segments (view and api routers), nesting and the middlewares nested routers inherit, resource().
 - [Subdomains & Custom Domains](https://nstfkc.github.io/gemi/domains.md): route.domains — host groups with their own routers, `:param` tenant subdomains, custom domains through a resolver, req.domain and useDomain, cross-host links, sharing the session cookie, and the on-demand TLS ask endpoint.
 - [Controllers](https://nstfkc.github.io/gemi/controllers.md): Controller/ResourceController, the HttpRequest API, request validation, ValidationError.
 - [Middleware](https://nstfkc.github.io/gemi/middleware.md): the string DSL, built-in middleware, negation with -name, custom middleware, and rate limiting (in-memory and Redis drivers, and how `RedisRateLimiter` degrades to per-instance counting when Redis fails).
@@ -85,7 +85,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - The client query hook is `useQuery` (not `useGet`).
 - The server-side `Redirect` facade works by throwing — never wrap it in try/catch.
 - An event declares `static name` and a listener binds to it with `static event`; never `instanceof` an event in application code, because a production build and the listener walk hold two different class objects for it.
-- Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware.
+- Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware. A route runs every enclosing router's `middlewares` (outermost first, api and view routers alike), then its own.
 - The typed network layer needs no codegen: the `RPC` / `ViewRPC` augmentation ships inside the package. An app upgrading from 0.55 or earlier must delete its root `gemi.d.ts` and its `types` entry.
 - Runtime config lives in `app/config/*.ts` (`defineMailConfig`, `defineAuthConfig`, …) and is read through `Repository` from `gemi/support`. `gemi.config.ts` / `gemi/config` is the unrelated BUILD config.
 - Subsystem hooks (`filterRecipients`, `onLogCreated`, `onSignUp`, `detectLocale`, `extendSession`, …) are plain properties on a config slice, not methods to override on a provider.

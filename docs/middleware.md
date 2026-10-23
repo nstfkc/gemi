@@ -15,6 +15,8 @@ export default class extends ApiRouter {
 }
 ```
 
+A route runs, in order: the `global` list, the `middlewares` of every router that encloses it (outermost first), and its own `.middleware()`. That holds for api and view routers alike, at any depth, and for what `this.agent()`, `this.voice()` and `this.proxy()` mount. For api routers this is new in #1022: before it, a nested api router ran only its own `middlewares` (see [UPGRADE.md](../UPGRADE.md)).
+
 **Route level** — the fluent `.middleware([...])` applies to a single route, on top of what the router provides:
 
 ```typescript
@@ -45,7 +47,7 @@ class AdminAuthViewRouter extends ViewRouter {
 }
 ```
 
-Middleware is resolved into a de-duplicated map keyed by alias, so `-auth` removes any previously-added `auth`, and re-adding an alias replaces its parameters.
+Middleware is resolved into a de-duplicated map keyed by alias, so `-auth` removes any previously-added `auth`, and re-adding an alias replaces its parameters. The same alias listed by a parent router and again below keeps the parent's position in the chain with the later parameters, so `cache:private` on the root and `cache:public` on a nested route run once, as `cache:public`.
 
 ## Built-in middleware
 

@@ -67,6 +67,24 @@ function isStreamHandler(option: ApiRoutes[string]) {
   return false;
 }
 
+/**
+ * Strips `(group)` segments from an api path, as view routes do: a router
+ * mounted at `"/(builds)"` (or `"(builds)/"`) adds no segment of its own, so
+ * `/pages/(builds)/:pageId` is served at `/pages/:pageId`, the path `CreateRPC`
+ * types it at (`RemoveGroupPrefix`). A group is a name of word characters and
+ * `-` in parentheses. Parentheses right after a `:param` are its URLPattern
+ * regex (`/:id(\\d+)`), as are parentheses holding anything but a name
+ * (`/(\\d+)`); both are left for URLPattern to match.
+ */
+export function removeApiGroupSegments(path: string) {
+  const stripped = path.replace(/(?<!:\w*)\([\w-]+\)/g, "");
+  if (stripped === path) {
+    return path;
+  }
+  const collapsed = `/${stripped}`.replace(/\/{2,}/g, "/");
+  return collapsed.length > 1 ? collapsed.replace(/\/$/, "") : collapsed;
+}
+
 export function createFlatApiRoutes(
   routes: ApiRoutes,
   rootPath = "",
@@ -83,9 +101,8 @@ export function createFlatApiRoutes(
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
-    const finalPath = (`${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`).replaceAll(
-      "//",
-      "/",
+    const finalPath = removeApiGroupSegments(
+      (`${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`).replaceAll("//", "/"),
     );
     if (!flatApiRoutes[finalPath]) {
       flatApiRoutes[finalPath] = {};
@@ -147,9 +164,20 @@ export function createFlatApiRoutes(
 
     if (isApiRouter(option)) {
       const router = new option();
-      const routes = createFlatApiRoutes(router.routes, `${rootPath}${path}`, router.middlewares);
+      // A nested router's routes run every enclosing router's `middlewares`
+      // first, then its own, then the route's: the list is concatenated the
+      // way view routers' are, and `MiddlewareRegistry` resolves it (a later
+      // entry of the same alias replaces its params, a `-alias` removes it).
+      const routes = createFlatApiRoutes(router.routes, `${rootPath}${path}`, [
+        ...rootMiddleware,
+        ...router.middlewares,
+      ] as RouterMiddleware[] | string[]);
+      // Merged per method rather than replaced: two routers mounted under
+      // groups that share a prefix (`"/(builds)"` and `"/(edits)"`) can each
+      // answer a different method on the same path.
       for (const [path, route] of Object.entries(routes)) {
-        flatApiRoutes[path.replaceAll("//", "/")] = route;
+        const key = path.replaceAll("//", "/");
+        flatApiRoutes[key] = { ...flatApiRoutes[key], ...route };
       }
     }
 
