@@ -91,9 +91,9 @@ function scripted(...answers: (ProviderEvent[] | "hang")[]) {
 }
 
 /**
- * Resolves once `signal` has aborted, including when it already had. An
- * `abort` listener added after the fact never fires: on a slow runner the 30 ms
- * deadline could pass before `validate` was called, and the test hung (#1037).
+ * Resolves once `signal` has aborted, including when it already had: an
+ * `abort` listener added after the fact never fires, and the 30 ms deadline
+ * can pass before `validate` is called.
  */
 const untilAborted = (signal: AbortSignal) =>
   new Promise<void>((resolve) => {
@@ -498,8 +498,8 @@ describe("timeouts and abort", () => {
   });
 
   test("a deadline that passed before validation starts still ends the loop", async () => {
-    // The order a slow runner produced in #1037: the answer arrives, and the
-    // deadline is already gone by the time `validate` is called.
+    // The answer arrives, and the deadline is already gone by the time
+    // `validate` is called.
     const provider = scripted(
       answer({ headline: "a", cta: "c" }),
       answer({ headline: "b", cta: "c" }),
