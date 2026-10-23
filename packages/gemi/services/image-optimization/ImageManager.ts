@@ -1,6 +1,8 @@
 import { app } from "../../foundation/app";
 import { ApiRouter, HttpRequest } from "../../http";
+import { configuredAppOrigin } from "../../utils/appOrigin";
 import { imageConfigDefaults, type ImageConfig } from "./config";
+import { fetchSourceImage, ImageSourceError } from "./fetchSourceImage";
 import type { ImageOptimizationDriver } from "./drivers/ImageOptimizationDriver";
 import type { ResizeParameters } from "./drivers/types";
 
@@ -16,66 +18,68 @@ export class ImageOptimizationRouter extends ApiRouter {
       const quality = Number(url.searchParams.get("q"));
 
       if (!rawImageUrl) {
-        return new Response(
-          JSON.stringify({
-            error: "url query parameter is required",
-          }),
-          {
-            headers: {
-              "Content-Type": "application/json",
-            },
-            status: 404,
-          },
-        );
-      }
-      const prefix = rawImageUrl.startsWith("http")
-        ? ""
-        : `http://localhost:${process.env.PORT || 5173}`;
-      const fullImageUrl = `${prefix}${rawImageUrl}`;
-      const res = await fetch(fullImageUrl);
-      if (!res.ok) {
-        return new Response(
-          JSON.stringify({
-            error: "Image not found",
-            info: fullImageUrl,
-          }),
-          {
-            headers: {
-              "Content-Type": "application/json",
-            },
-            status: 404,
-          },
-        );
+        return errorResponse(400, "url query parameter is required");
       }
 
-      const imageBuffer = Buffer.from(await res.arrayBuffer());
+      const manager = app(ImageManager);
+      // Both schemes: behind a TLS proxy the request may arrive as http.
+      const ownOrigins = [url.origin, `${url.protocol === "https:" ? "http" : "https"}://${url.host}`];
+      const configured = configuredAppOrigin();
+      if (configured && URL.canParse(configured)) {
+        ownOrigins.push(new URL(configured).origin);
+      }
 
-      const buffer = await app(ImageManager).resize(imageBuffer, {
+      let source: Awaited<ReturnType<typeof fetchSourceImage>>;
+      try {
+        source = await fetchSourceImage(rawImageUrl, {
+          ownOrigins,
+          localOrigin: `http://localhost:${process.env.PORT || 5173}`,
+          allowedHosts: manager.allowedHosts,
+          maxSize: manager.maxSize,
+          timeout: manager.timeout,
+        });
+      } catch (error) {
+        if (error instanceof ImageSourceError) {
+          return errorResponse(error.status, error.message);
+        }
+        throw error;
+      }
+
+      const buffer = await manager.resize(source.bytes, {
         height,
         width,
         fit: fit as any,
         quality,
       });
 
-      res.headers.delete("Content-Type");
-      res.headers.delete("Content-Length");
-      const _headers = new Headers(res.headers);
-      _headers.set("Content-Type", "image/webp");
-      _headers.set("Content-Length", `${buffer.byteLength}`);
-      return new Response(new Uint8Array(buffer), {
-        headers: _headers,
+      const headers = new Headers({
+        "Content-Type": "image/webp",
+        "Content-Length": `${buffer.byteLength}`,
       });
+      if (source.cacheControl) headers.set("Cache-Control", source.cacheControl);
+      return new Response(new Uint8Array(buffer), { headers });
     }),
   };
+}
+
+function errorResponse(status: number, error: string) {
+  return Response.json({ error }, { status });
 }
 
 export class ImageManager {
   static token = "image";
 
   readonly driver: ImageOptimizationDriver;
+  readonly allowedHosts: readonly string[];
+  readonly maxSize: number;
+  readonly timeout: number;
 
   constructor(config: ImageConfig = {}) {
-    this.driver = config.driver ?? imageConfigDefaults().driver;
+    const defaults = imageConfigDefaults();
+    this.driver = config.driver ?? defaults.driver;
+    this.allowedHosts = config.allowedHosts ?? defaults.allowedHosts;
+    this.maxSize = config.maxSize ?? defaults.maxSize;
+    this.timeout = config.timeout ?? defaults.timeout;
   }
 
   resize(buffer: Buffer, params: ResizeParameters) {
