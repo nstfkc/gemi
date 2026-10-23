@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.157.1 to 0.160.1
 
 ## Security: the image resize route fetches only the app's own images and an allowlist (#1032)
 
