@@ -32,7 +32,8 @@ import { createDictionarySink } from "../../i18n/dictionarySink";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { Log } from "../../facades/Log";
 import { Lang } from "../../facades/Lang";
-import { AuthViewRouter } from "../../auth/routes";
+import { authViewRequirements, createAuthViewRouter } from "../../auth/routes";
+import type { AuthConfig } from "../../auth/config";
 import { KernelId } from "../kernel-id/KernelId";
 import { FeatureManager } from "../features/FeatureManager";
 import { app } from "../../foundation/app";
@@ -236,6 +237,12 @@ export class ViewRouteDispatcher {
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
   /**
+   * The views gemi's own `/auth` routes render, by name, with the config that
+   * requires each (#1040). The servers check these exist before loading them,
+   * so a missing one fails with the file and the setting, not a module error.
+   */
+  requiredViews: Record<string, string> = {};
+  /**
    * Route patterns declared `.static()`. Shipped to the browser so a
    * client-side navigation to one becomes a full page load: the page has no
    * client router to render it into.
@@ -283,7 +290,11 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.theme`. */
   readonly theme: ThemeConfig | false;
 
-  constructor(config: ViewRouteConfig) {
+  /**
+   * `auth` is the app's `auth` config: gemi's `/auth` view routes are mounted
+   * for the features it turns on (#1040).
+   */
+  constructor(config: ViewRouteConfig, auth: AuthConfig = {}) {
     const defaults = viewRouteConfigDefaults();
 
     this.partialRendering = config.partialRendering ?? defaults.partialRendering;
@@ -300,8 +311,11 @@ export class ViewRouteDispatcher {
 
     const routes: ViewRoutes = {
       "/": config.rootRouter,
-      "/auth": AuthViewRouter,
+      "/auth": createAuthViewRouter(auth),
     };
+    this.requiredViews = Object.fromEntries(
+      authViewRequirements(auth).map(({ view, requiredBy }) => [view, requiredBy]),
+    );
     this.flatViewRoutes = createFlatViewRoutes(routes);
     assertNoReservedRoutePaths(Object.keys(this.flatViewRoutes));
     this.routeManifest = createRouteManifest(routes);

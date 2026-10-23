@@ -7,6 +7,7 @@ import {
   secretMatches,
   type ResolvedDomain,
 } from "./DomainResolver";
+import type { AuthConfig } from "../../auth/config";
 import type { ApiRouteConfig, DomainGroupRouters, DomainsConfig, ViewRouteConfig } from "./config";
 import { setRequestDomain, withholdFromUpstream } from "../../http/requestDomain";
 import { type ClientIpHeaderTrust, trustedHeaderClientIp } from "../../server/forwardedFor";
@@ -48,6 +49,8 @@ export class DomainRouter {
     config: {
       api: ApiRouteConfig;
       view: ViewRouteConfig;
+      /** The app's `auth` config, for the `/auth` view routes of each group's dispatcher. */
+      auth?: AuthConfig;
       domains?: DomainsConfig;
       clientIpTrust?: ClientIpHeaderTrust | null;
     },
@@ -64,7 +67,7 @@ export class DomainRouter {
 
     const build = (routers: DomainGroupRouters): DomainDispatchers => ({
       api: routers.api ? new ApiRouteDispatcher({ ...config.api, ...routers.api }) : root.api,
-      view: routers.view ? new ViewRouteDispatcher({ ...config.view, ...routers.view }) : root.view,
+      view: routers.view ? new ViewRouteDispatcher({ ...config.view, ...routers.view }, config.auth) : root.view,
     });
     for (const group of domains.groups ?? []) {
       this.groups.set(group.subdomain, build(group));

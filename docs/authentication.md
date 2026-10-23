@@ -804,10 +804,38 @@ through `dispatchAs`. The routes stay registered under `/auth`, so an app route 
 path is still not served.
 
 Nothing else changes. `/auth/sign-out`, `/auth/me`, the email-code routes, OAuth and
-connections keep working. The `/auth/sign-in/magic-link` page also stays, because it takes
-the link `emailCode.send` is handed and the links `Auth.createMagicLink` issues.
+connections keep working. The `/auth/sign-in/magic-link` page stays while
+`emailCode.enabled` is on, because it takes the link `emailCode.send` is handed; with both
+`magicLink` and `emailCode.enabled` off it is not mounted (see
+[Views the auth routes render](#views-the-auth-routes-render)).
 `hashPassword` and `verifyPassword` stay available to an app that calls them itself. A value
 that isn't `true` or `false` (say `"false"`) fails the boot.
+
+### Views the auth routes render
+
+Three of gemi's `/auth` pages render a view from your `app/views`. Each is mounted only while
+the feature it serves is configured, so an app without that feature needs no file for it:
+
+| View | Route | Mounted while |
+| --- | --- | --- |
+| `auth/MagicLinkSignIn` | `/auth/sign-in/magic-link` | `magicLink` is on (the default) or `emailCode.enabled` is |
+| `_Redirect` | `/auth/oauth/:provider` | `oauthProviders` has an entry |
+| `auth/OauthCallback` | `/auth/oauth/:provider/callback` | `oauthProviders` has an entry |
+
+A provider behind a [feature flag](#a-provider-behind-a-feature-flag) counts as configured:
+the routes are mounted and answer 404 while its feature is off. The
+[connection](#oauth-connections) routes render no view and are always mounted.
+
+When a feature is on and its view is missing, `gemi dev` answers the page with an error and
+`gemi start` fails the boot, naming the file and the setting:
+
+```
+app/views/auth/MagicLinkSignIn.tsx is missing. gemi's auth routes render it because
+auth.magicLink (on by default; set `magicLink: false` to turn it off) is on. Add the view,
+or turn that setting off in app/config/auth.ts.
+```
+
+The starter templates ship all three.
 
 ## OAuth
 

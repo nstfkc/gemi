@@ -7,6 +7,7 @@ import { DomainRouter } from "./DomainRouter";
 import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import type { ApiRouteConfig, DomainsConfig, McpRouteConfig, ViewRouteConfig } from "./config";
 import type { Repository } from "../../support/Repository";
+import type { AuthConfig } from "../../auth/config";
 
 function readConfig<T>(config: Repository, key: string): T {
   const slice = config.get<T>(key);
@@ -38,6 +39,7 @@ export class RouteServiceProvider extends ServiceProvider {
       () =>
         new ViewRouteDispatcher(
           readConfig<ViewRouteConfig>(this.app.config, "route.view"),
+          this.app.config.get<AuthConfig>("auth", {}),
         ),
     );
 
@@ -51,6 +53,7 @@ export class RouteServiceProvider extends ServiceProvider {
           {
             api: readConfig<ApiRouteConfig>(this.app.config, "route.api"),
             view: readConfig<ViewRouteConfig>(this.app.config, "route.view"),
+            auth: this.app.config.get<AuthConfig>("auth", {}),
             domains: this.app.config.get<DomainsConfig | undefined>("route.domains"),
             clientIpTrust: parseClientIpHeaderTrust(process.env),
           },
