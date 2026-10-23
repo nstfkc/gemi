@@ -24,6 +24,14 @@
 - **Fix:** a `(group)` segment in an api router's key is stripped at runtime, as in view routers: `"/(builds)": BuildsRouter` (or `"(builds)/"`) mounts its routes without a path segment, so `/pages/(builds)/:pageId/builds` is served at `/pages/:pageId/builds`, the path the client's types already used. Before, the literal `(builds)` stayed in the path and the route never matched. Parentheses right after a `:param` (`/:id(\\d+)`) are its URLPattern regex and are not stripped.
 - Two routers mounted on the same path (through groups, say) now merge per method instead of the second replacing the first's whole path entry.
 
+## Security: the debug endpoints are served by the dev server only (#1030)
+
+**Fix (patch). Nothing to migrate unless a deployment used them.** See [CLI → `gemi dev`](docs/cli.md#gemi-dev).
+
+- `/api/__gemi__/debug/api-routes`, `/api/__gemi__/debug/view-routes` (every route with its middleware chain) and `/api/__gemi__/services/logs/live` (the server's current log file) were mounted in every environment, without authentication. They are now mounted only when `NODE_ENV === "development"`, which `gemi dev` sets, and answer 404 everywhere else, `gemi start` and an unset `NODE_ENV` included.
+- **Upgrade soon** if your app is deployed: until then, anyone can read its route table and, where the server writes `storage/logs`, its logs. Rotate any secret that may have been logged.
+- A deployment that reads them on purpose (a staging box, say) has to run with `NODE_ENV=development`. The other `__gemi__` routes (i18n, image resize, health, the domains ask endpoint) are unchanged.
+
 ## AI: per-agent typed context (#1019)
 
 **New, nothing to migrate.** See [AI Agent Context](docs/ai-agent-context.md). Apps that augment `AgentContext` keep compiling and behaving as before.

@@ -1424,6 +1424,8 @@ It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, r
 - `--preload gemi/bun/preload` — gemi's custom-request transform, so handler `req` params are wired at runtime.
 - `--preload app/preload.ts` — your optional [preload script](./configuration.md#apppreloadts), if the file exists.
 
+Only the dev server mounts gemi's debug endpoints: `GET /api/__gemi__/debug/api-routes` and `/api/__gemi__/debug/view-routes` (every route with its middleware chain) and `/api/__gemi__/services/logs/live` (the current log file). They are mounted when `NODE_ENV` is exactly `development`, which `gemi dev` sets; under `gemi start`, or any other `NODE_ENV` (unset included), their paths answer 404.
+
 In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
 
 `dev` relays `SIGTERM` and `SIGINT` to the dev server and exits with its exit code, as [`start`](#gemi-start) does, so a dev container or process manager that stops `gemi dev` stops the server too rather than leaving it on its port. There is no drain in development: the signal stops the server at once.
