@@ -90,6 +90,17 @@ function scripted(...answers: (ProviderEvent[] | "hang")[]) {
   return provider as unknown as AgentProvider & { calls: ProviderStreamParams[] };
 }
 
+/**
+ * Resolves once `signal` has aborted, including when it already had. An
+ * `abort` listener added after the fact never fires: on a slow runner the 30 ms
+ * deadline could pass before `validate` was called, and the test hung (#1037).
+ */
+const untilAborted = (signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+
 describe("generate with validate", () => {
   test("without validate or attempts it is one call, as before", async () => {
     const provider = scripted(broken(), answer({ headline: "h", cta: "c" }));
@@ -471,7 +482,7 @@ describe("timeouts and abort", () => {
       output: COPY,
       timeoutMs: 30,
       validate: async (_copy, { signal }) => {
-        await new Promise((resolve) => signal.addEventListener("abort", resolve));
+        await untilAborted(signal);
         return ["late"];
       },
       logErrors: false,
@@ -483,6 +494,34 @@ describe("timeouts and abort", () => {
       error: { code: "timeout" },
       finishReason: "aborted",
     });
+    expect(result.rejected?.problems).toEqual(["late"]);
+  });
+
+  test("a deadline that passed before validation starts still ends the loop", async () => {
+    // The order a slow runner produced in #1037: the answer arrives, and the
+    // deadline is already gone by the time `validate` is called.
+    const provider = scripted(
+      answer({ headline: "a", cta: "c" }),
+      answer({ headline: "b", cta: "c" }),
+    );
+    const seen: boolean[] = [];
+    const result = await generate({
+      provider,
+      prompt: "go",
+      output: COPY,
+      timeoutMs: 30,
+      validate: async (_copy, { signal }) => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        seen.push(signal.aborted);
+        await untilAborted(signal);
+        return ["late"];
+      },
+      logErrors: false,
+    });
+
+    expect(seen).toEqual([true]);
+    expect(provider.calls).toHaveLength(1);
+    expect(result).toMatchObject({ ok: false, error: { code: "timeout" } });
     expect(result.rejected?.problems).toEqual(["late"]);
   });
 
