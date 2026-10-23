@@ -45,17 +45,12 @@ export class ImageOptimizationRouter extends ApiRouter {
         throw error;
       }
 
-      let buffer: Buffer;
-      try {
-        buffer = await manager.resize(source.bytes, {
-          height,
-          width,
-          fit: fit as any,
-          quality,
-        });
-      } catch {
-        return errorResponse(415, "The image could not be decoded");
-      }
+      const buffer = await manager.resize(source.bytes, {
+        height,
+        width,
+        fit: fit as any,
+        quality,
+      });
 
       const headers = new Headers({
         "Content-Type": "image/webp",

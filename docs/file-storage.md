@@ -550,7 +550,7 @@ The route is public, so it fetches only what the app says it may (#1032):
 
   Entries are host names (`"*.example.com"` covers its subdomains, not `example.com` itself) or IP ranges, as `safeFetch`'s `allow` ([Outbound HTTP](./outbound-http.md)). These are fetched through `safeFetch`: on ports 80 and 443 only, and never to a private, loopback, link-local or cloud-metadata address, even when the host is listed.
 
-Every redirect hop is checked against the same rules, so an allowed host (or the app) redirecting to an internal address or an unlisted host is refused. The answer must have an `image/*` content type and be at most `maxSize` bytes. A refused or failed source answers JSON `{ "error": "..." }` without the URL: `400` (no or malformed `url`), `403` (source not allowed), `404` (the source answered non-2xx), `413` (too large), `415` (not an image, or not decodable), `502` (network failure or too many redirects), `504` (timeout). Only the source's `Cache-Control` is passed on; its other headers are not.
+Every redirect hop is checked against the same rules, so an allowed host (or the app) redirecting to an internal address or an unlisted host is refused. The answer must have an `image/*` content type and be at most `maxSize` bytes. A refused or failed source answers JSON `{ "error": "..." }` without the URL: `400` (no or malformed `url`), `403` (source not allowed), `404` (the source answered non-2xx), `413` (too large), `415` (not an `image/*` answer), `502` (network failure or too many redirects), `504` (timeout). Only the source's `Cache-Control` is passed on; its other headers are not.
 
 If your `<Image src>` points at a path that redirects to object storage (a signed S3 or R2 URL, say), add that storage host to `allowedHosts`.
 
