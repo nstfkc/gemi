@@ -1,5 +1,29 @@
 # Unreleased
 
+## Routing: nested api routers inherit their enclosing routers' middlewares, and `(group)` segments work in api routers (#1022)
+
+**Behaviour change. Check every api router that mounts another one.** See [Routing → Nesting API routers](docs/routing.md#nesting-api-routers) and [Middleware → Attaching middleware](docs/middleware.md#attaching-middleware).
+
+- **Behaviour change:** a route in a nested `ApiRouter` now runs every enclosing router's `middlewares` (outermost first), then its own router's, then its `.middleware()`, as view routers always did and as the docs said. Before, flattening kept only the innermost router's list, so in
+
+  ```ts
+  class Pages extends ApiRouter { middlewares = ["page-owner"]; routes = { "/:id": this.get(...) } }
+  export default class extends ApiRouter {
+    middlewares = ["cache:private"];
+    routes = { "/projects": this.get(...), "/pages": Pages };
+  }
+  ```
+
+  `GET /pages/:id` ran `["page-owner"]`; it now runs `["cache:private", "page-owner"]`. A middleware on the root api router (`auth`, `cache:...`, `rate-limit:...`, `cors`, a tenant or CSRF check) now reaches every nested router's routes, at any depth. That is usually what was meant (an `auth` on the root now really guards the whole api), but it can change answers:
+  - a nested route that was public by accident of nesting now gets the parent's `auth` and answers 401 when signed out;
+  - a `rate-limit` on a parent now also counts the nested routes' requests (into the same bucket when the key is the same);
+  - a `cache:...` on a parent now sets `Cache-Control` on the nested routes' GET answers. A `Response` that sets its own `Cache-Control` keeps it; a handler that returns plain data gets the parent's;
+  - a `-name` in a nested router or route now also cancels the parent's `name`, which before had nothing to cancel.
+- **Migration:** for each `ApiRouter` that mounts another (`"/x": OtherRouter`), compare the parent's `middlewares` with what the nested routes should run. Where a nested router or route must not run one of them, cancel it there: `middlewares = ["-auth"]` on the nested router, or `.middleware(["-cache"])` on the route. Where a nested router repeated its parent's list to make up for the missing inheritance (`middlewares = ["auth", "tenant"]` under a router with `["auth"]`), it can drop the repetition; leaving it is harmless, since the same alias runs once (a later entry only replaces its parameters). For a quick audit, `GET /api/__gemi__/debug/api-routes` on the dev server lists every api path and method with the middleware list it runs; save it before and after the upgrade and diff the two.
+- `this.agent()` and `this.voice()` no longer copy the enclosing router's `middlewares` onto their routes themselves; they get them, and every router's above, through the inheritance above. An agent mounted in a nested router therefore now also runs the outer routers' `middlewares`.
+- **Fix:** a `(group)` segment in an api router's key is stripped at runtime, as in view routers: `"/(builds)": BuildsRouter` (or `"(builds)/"`) mounts its routes without a path segment, so `/pages/(builds)/:pageId/builds` is served at `/pages/:pageId/builds`, the path the client's types already used. Before, the literal `(builds)` stayed in the path and the route never matched. Parentheses right after a `:param` (`/:id(\\d+)`) are its URLPattern regex and are not stripped.
+- Two routers mounted on the same path (through groups, say) now merge per method instead of the second replacing the first's whole path entry.
+
 ## Rate limiting: `RedisRateLimiter` counts in memory while Redis is down (#1011)
 
 **Behaviour change. Nothing to migrate unless you relied on the fail-open default.** See [Middleware → When Redis fails](docs/middleware.md#when-redis-fails).

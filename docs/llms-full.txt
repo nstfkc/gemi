@@ -1985,6 +1985,51 @@ export default class extends ApiRouter {
 }
 ```
 
+A nested router's routes run the `middlewares` of **every router that encloses it**, outermost first, then the nested router's own, then the route's `.middleware()`. Here `GET /api/org/:orgId/products/:productId` runs `["cache:private", "auth"]` and `GET /api/org/:orgId/billing` runs `["cache:private", "auth", "rate-limit:10"]`:
+
+```typescript
+class OrgRouter extends ApiRouter {
+  middlewares = ["auth"];
+  routes = {
+    "/:orgId/products/:productId": this.resource(ProductsController),
+    "/:orgId/billing": this.get(BillingController, "show").middleware(["rate-limit:10"]),
+  };
+}
+
+export default class extends ApiRouter {
+  middlewares = ["cache:private"];
+  routes = {
+    "/org": OrgRouter,
+  };
+}
+```
+
+A nested router or route that should not run an inherited middleware cancels it with `-name` (`middlewares = ["-auth"]`, `.middleware(["-cache"])`); see [Middleware → Negation](./middleware.md#negation-with--). Before #1022, an api router nested in another ran only its own `middlewares`; see [UPGRADE.md](../UPGRADE.md).
+
+### Groups in API routers
+
+A `(group)` segment adds no path segment to an api router either, as in [view routers](#prefix-less-groups--group). It lets you split one router into areas that share a prefix and give each its own middleware:
+
+```typescript
+class BuildsRouter extends ApiRouter {
+  middlewares = ["rate-limit:30"];
+  routes = {
+    "/:pageId/builds": this.post(BuildController, "start"),        // POST /api/pages/:pageId/builds
+    "/:pageId/builds/:buildId": this.get(BuildController, "show"), // GET  /api/pages/:pageId/builds/:buildId
+  };
+}
+
+class PagesRouter extends ApiRouter {
+  middlewares = ["page-owner"];
+  routes = {
+    "/:pageId": this.get(PageController, "show"),
+    "/(builds)": BuildsRouter, // no "/(builds)" in the URL
+  };
+}
+```
+
+Both spellings work, `"/(builds)"` and `"(builds)/"`, and groups at several levels are all stripped. Two groups may answer different methods on the same path. Parentheses right after a `:param` are its URLPattern regex (`"/:id(\\d+)"`), not a group. The client's types (`CreateRPC`) already left groups out of the path; the server now serves the same path.
+
 ## ViewRouter
 
 A `ViewRouter` maps URLs to server-rendered React views. The string you pass to `this.view(...)` is the **view component name** (resolved against `app/views`), which is independent of the URL — you decide the mapping.
@@ -2865,6 +2910,8 @@ export default class extends ApiRouter {
 }
 ```
 
+A route runs, in order: the `global` list, the `middlewares` of every router that encloses it (outermost first), and its own `.middleware()`. That holds for api and view routers alike, at any depth, and for what `this.agent()`, `this.voice()` and `this.proxy()` mount. For api routers this is new in #1022: before it, a nested api router ran only its own `middlewares` (see [UPGRADE.md](../UPGRADE.md)).
+
 **Route level** — the fluent `.middleware([...])` applies to a single route, on top of what the router provides:
 
 ```typescript
@@ -2895,7 +2942,7 @@ class AdminAuthViewRouter extends ViewRouter {
 }
 ```
 
-Middleware is resolved into a de-duplicated map keyed by alias, so `-auth` removes any previously-added `auth`, and re-adding an alias replaces its parameters.
+Middleware is resolved into a de-duplicated map keyed by alias, so `-auth` removes any previously-added `auth`, and re-adding an alias replaces its parameters. The same alias listed by a parent router and again below keeps the parent's position in the chain with the later parameters, so `cache:private` on the root and `cache:public` on a nested route run once, as `cache:public`.
 
 ## Built-in middleware
 

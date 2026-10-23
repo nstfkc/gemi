@@ -521,7 +521,7 @@ export class ApiRouter {
         `this.agent() takes an AgentController class, and got ${describeController(Controller)}.`,
       );
     }
-    return createAgentRouteHandlers(Controller as any, this) as unknown as AgentRoute<T>;
+    return createAgentRouteHandlers(Controller as any) as unknown as AgentRoute<T>;
   }
 
   /**
@@ -551,7 +551,7 @@ export class ApiRouter {
         `this.voice() takes an AgentController class, and got ${describeController(Controller)}.`,
       );
     }
-    return createVoiceRouteHandlers(Controller as any, this) as unknown as VoiceRoute<T>;
+    return createVoiceRouteHandlers(Controller as any) as unknown as VoiceRoute<T>;
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
@@ -610,18 +610,17 @@ function describeController(candidate: unknown) {
  * A parallel mechanism would have to reimplement all of it, and would be the
  * second place to fix when route flattening changes.
  *
- * The one thing it does not inherit is the enclosing router's `middlewares` —
- * see the constructor.
+ * The enclosing routers' `middlewares` reach its four routes the way they reach
+ * any nested router's: `createFlatApiRoutes` puts them in front of its own
+ * (#1022). Until then it copied its owner's list itself, because flattening
+ * dropped them.
  *
  * The four handlers are built once and shared with `routes`, because
  * `.middleware()` is called on the class — at `routes = {...}` time — while
  * `routes` is read off an instance the dispatcher constructs later. Rebuilding
  * them per instance would quietly drop every per-method middleware.
  */
-function createAgentRouteHandlers<T extends new () => AgentController<any, any>>(
-  Controller: T,
-  owner: ApiRouter,
-) {
+function createAgentRouteHandlers<T extends new () => AgentController<any, any>>(Controller: T) {
   const handlers = {
     stream: new RouteHandler("POST", Controller as any, "stream"),
     attach: new RouteHandler("POST", Controller as any, "attach"),
@@ -633,24 +632,6 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
     static __internal_brand = "AgentRoute" as const;
     static controller = Controller;
     static handlers = handlers;
-
-    constructor() {
-      super();
-      // Adopt the enclosing router's guards, which is the one thing being a
-      // nested router does NOT give us: `createFlatApiRoutes` *replaces*
-      // `rootMiddleware` when it descends into a router rather than
-      // concatenating, so without this an agent mounted next to
-      // `middlewares = ["auth"]` would come out unguarded while every sibling
-      // route came out guarded — an unauthenticated model endpoint reached by
-      // writing the idiomatic thing.
-      //
-      // Read from the router *instance* here, at flatten time, rather than
-      // from `owner.middlewares` at `this.agent()` time: `routes` and
-      // `middlewares` are both class fields, so a `middlewares` declared below
-      // `routes` has not been assigned yet when `this.agent()` runs. Capturing
-      // the instance makes declaration order irrelevant.
-      this.middlewares = [...(owner?.middlewares ?? [])];
-    }
 
     routes: ApiRoutes = {
       "/": handlers.stream,
@@ -674,10 +655,7 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
  * `createAgentRouteHandlers` gives, guarded by the enclosing router's
  * `middlewares` the same way.
  */
-function createVoiceRouteHandlers<T extends new () => AgentController<any, any>>(
-  Controller: T,
-  owner: ApiRouter,
-) {
+function createVoiceRouteHandlers<T extends new () => AgentController<any, any>>(Controller: T) {
   const handlers = {
     start: new RouteHandler("POST", Controller as any, "voiceStart"),
     update: new RouteHandler("PATCH", Controller as any, "voiceUpdate"),
@@ -688,11 +666,6 @@ function createVoiceRouteHandlers<T extends new () => AgentController<any, any>>
     static __internal_brand = "VoiceRoute" as const;
     static controller = Controller;
     static handlers = handlers;
-
-    constructor() {
-      super();
-      this.middlewares = [...(owner?.middlewares ?? [])];
-    }
 
     routes: ApiRoutes = {
       "/": handlers.start,

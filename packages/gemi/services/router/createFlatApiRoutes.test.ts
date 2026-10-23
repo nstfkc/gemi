@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 
-import { createFlatApiRoutes } from "./createFlatApiRoutes";
+import { createFlatApiRoutes, removeApiGroupSegments } from "./createFlatApiRoutes";
 import { ApiRouter } from "../../http/ApiRouter";
 import { Controller, ResourceController } from "../../http/Controller";
 import { AgentController } from "../../ai/AgentController";
@@ -413,5 +413,294 @@ describe("createFlatApiRoutes - route source", () => {
       controller: ReportController,
       methodName: "export",
     });
+  });
+});
+
+describe("createFlatApiRoutes - nested routers inherit middlewares (#1022)", () => {
+  test("a nested router's routes run the enclosing router's middlewares first", () => {
+    class Pages extends ApiRouter {
+      middlewares = ["page-owner"];
+      routes = {
+        "/:id": this.get(() => ({})),
+      };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["cache:private"];
+      routes = {
+        "/projects": this.get(() => []),
+        "/pages": Pages,
+      };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["GET /projects"]).toEqual(["cache:private"]);
+    expect(middlewares["GET /pages/:id"]).toEqual(["cache:private", "page-owner"]);
+  });
+
+  test("inherits through several levels, outermost first, then the route's own", () => {
+    class Builds extends ApiRouter {
+      middlewares = ["builds"];
+      routes = {
+        "/:buildId": this.get(() => ({})).middleware(["rate-limit:10,60"]),
+        "/": this.post(() => ({})),
+      };
+    }
+    class Page extends ApiRouter {
+      middlewares = ["page-owner"];
+      routes = { "/builds": Builds, "/": this.get(() => ({})) };
+    }
+    class Pages extends ApiRouter {
+      middlewares = ["auth"];
+      routes = { "/:pageId": Page };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["cache:private"];
+      routes = { "/pages": Pages };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }, "", ["csrf"]));
+
+    expect(middlewares["GET /pages/:pageId"]).toEqual([
+      "csrf",
+      "cache:private",
+      "auth",
+      "page-owner",
+    ]);
+    expect(middlewares["POST /pages/:pageId/builds"]).toEqual([
+      "csrf",
+      "cache:private",
+      "auth",
+      "page-owner",
+      "builds",
+    ]);
+    expect(middlewares["GET /pages/:pageId/builds/:buildId"]).toEqual([
+      "csrf",
+      "cache:private",
+      "auth",
+      "page-owner",
+      "builds",
+      "rate-limit:10,60",
+    ]);
+  });
+
+  test("a router without middlewares passes its parent's through unchanged", () => {
+    class Leaf extends ApiRouter {
+      routes = { "/x": this.get(() => ({})) };
+    }
+    class Middle extends ApiRouter {
+      routes = { "/leaf": Leaf };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["auth"];
+      routes = { "/middle": Middle };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["GET /middle/leaf/x"]).toEqual(["auth"]);
+  });
+
+  test("siblings do not leak middlewares into each other", () => {
+    class A extends ApiRouter {
+      middlewares = ["a"];
+      routes = { "/": this.get(() => ({})) };
+    }
+    class B extends ApiRouter {
+      middlewares = ["b"];
+      routes = { "/": this.get(() => ({})) };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["root"];
+      routes = { "/a": A, "/b": B };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["GET /a"]).toEqual(["root", "a"]);
+    expect(middlewares["GET /b"]).toEqual(["root", "b"]);
+  });
+
+  test("a `-alias` on a nested route follows the inherited one, so it can remove it", () => {
+    class Account extends ApiRouter {
+      middlewares = ["auth"];
+      routes = {
+        "/welcome": this.get(() => ({})).middleware(["-auth", "-cache"]),
+      };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["cache:private"];
+      routes = { "/account": Account };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["GET /account/welcome"]).toEqual([
+      "cache:private",
+      "auth",
+      "-auth",
+      "-cache",
+    ]);
+  });
+
+  test("OPTIONS still runs no middleware", () => {
+    class Child extends ApiRouter {
+      middlewares = ["child"];
+      routes = { "/x": this.get(() => ({})) };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["auth"];
+      routes = { "/child": Child };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["OPTIONS /child/x"]).toEqual([]);
+  });
+});
+
+describe("createFlatApiRoutes - (group) segments (#1022)", () => {
+  test("a router mounted under a group adds no path segment", () => {
+    class Builds extends ApiRouter {
+      routes = {
+        "/:pageId/builds": this.post(() => ({})),
+        "/:pageId/builds/:buildId": this.get(() => ({})),
+      };
+    }
+    class Pages extends ApiRouter {
+      routes = {
+        "/:pageId": this.get(() => ({})),
+        "/(builds)": Builds,
+      };
+    }
+
+    const routes = createFlatApiRoutes({ "/pages": Pages });
+
+    expect(Object.keys(routes)).toEqual(
+      expect.arrayContaining([
+        "/pages/:pageId",
+        "/pages/:pageId/builds",
+        "/pages/:pageId/builds/:buildId",
+      ]),
+    );
+    expect(Object.keys(routes).some((path) => path.includes("("))).toBe(false);
+  });
+
+  test("a group's routes keep the group router's middlewares", () => {
+    class Builds extends ApiRouter {
+      middlewares = ["builds"];
+      routes = { "/:pageId/builds": this.post(() => ({})) };
+    }
+    class Pages extends ApiRouter {
+      middlewares = ["page-owner"];
+      routes = { "/(builds)": Builds };
+    }
+    class Root extends ApiRouter {
+      middlewares = ["cache:private"];
+      routes = { "/pages": Pages };
+    }
+
+    const middlewares = middlewaresOf(createFlatApiRoutes({ "/": Root }));
+
+    expect(middlewares["POST /pages/:pageId/builds"]).toEqual([
+      "cache:private",
+      "page-owner",
+      "builds",
+    ]);
+  });
+
+  test("a group's root route is served at the enclosing path, without a trailing slash", () => {
+    class Area extends ApiRouter {
+      routes = { "/": this.get(() => ({})) };
+    }
+    class Pages extends ApiRouter {
+      routes = { "/(area)": Area };
+    }
+
+    const routes = createFlatApiRoutes({ "/pages": Pages });
+
+    expect(routes["/pages"]?.GET).toBeDefined();
+    expect(routes["/pages/"]).toBeUndefined();
+  });
+
+  test("a group at the root mounts at /", () => {
+    class Area extends ApiRouter {
+      routes = { "/": this.get(() => ({})), "/x": this.get(() => ({})) };
+    }
+
+    const routes = createFlatApiRoutes({ "/(area)": Area });
+
+    expect(routes["/"]?.GET).toBeDefined();
+    expect(routes["/x"]?.GET).toBeDefined();
+  });
+
+  test("the view routers' `(group)/` spelling works too", () => {
+    class Area extends ApiRouter {
+      routes = { "/x": this.get(() => ({})) };
+    }
+    class Pages extends ApiRouter {
+      routes = { "(area)/": Area };
+    }
+
+    const routes = createFlatApiRoutes({ "/pages": Pages });
+
+    expect(Object.keys(routes)).toContain("/pages/x");
+  });
+
+  test("nested groups are all stripped", () => {
+    class Inner extends ApiRouter {
+      routes = { "/x": this.get(() => ({})) };
+    }
+    class Outer extends ApiRouter {
+      routes = { "/(inner)": Inner };
+    }
+
+    const routes = createFlatApiRoutes({ "/a/(outer)": Outer });
+
+    expect(Object.keys(routes)).toContain("/a/x");
+  });
+
+  test("two groups sharing a path each keep their methods", () => {
+    class Reads extends ApiRouter {
+      routes = { "/:pageId": this.get(() => ({})) };
+    }
+    class Writes extends ApiRouter {
+      routes = { "/:pageId": this.patch(() => ({})) };
+    }
+    class Pages extends ApiRouter {
+      routes = { "/(reads)": Reads, "/(writes)": Writes };
+    }
+
+    const routes = createFlatApiRoutes({ "/pages": Pages });
+
+    expect(routes["/pages/:pageId"]?.GET).toBeDefined();
+    expect(routes["/pages/:pageId"]?.PATCH).toBeDefined();
+  });
+
+  test("a URLPattern regex in parentheses is not a group", () => {
+    class Root extends ApiRouter {
+      routes = { "/items/:id(\\d+)": this.get(() => ({})) };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+
+    expect(Object.keys(routes)).toContain("/items/:id(\\d+)");
+  });
+});
+
+describe("removeApiGroupSegments", () => {
+  test.each([
+    ["/pages/(builds)/:pageId", "/pages/:pageId"],
+    ["/pages/(builds)", "/pages"],
+    ["/(area)", "/"],
+    ["(auth)/x", "/x"],
+    ["/pages(auth)/x", "/pages/x"],
+    ["/a/(b)/(c-d)/e", "/a/e"],
+    ["/items/:id(\\d+)", "/items/:id(\\d+)"],
+    ["/items/:id(foo)", "/items/:id(foo)"],
+    ["/items/(\\d+)", "/items/(\\d+)"],
+    ["/plain/path/", "/plain/path/"],
+  ])("%s -> %s", (input, expected) => {
+    expect(removeApiGroupSegments(input)).toBe(expected);
   });
 });
