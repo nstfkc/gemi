@@ -177,19 +177,36 @@ const MAX_RETRY_WAIT_MS = 30_000;
  *   - again: a retryable provider error sends exactly the same thing.
  */
 async function callUntilValid(params: GenerateParams): Promise<GenerateResult<unknown>> {
+  if (params.timeoutMs === undefined) return repairLoop(params, params.signal);
+  // The deadline is a timer of our own rather than `AbortSignal.timeout`.
+  // Under Bun 1.3, a timeout signal whose last `abort` listener is removed
+  // never aborts. `raceAbort` removes its listener when each call ends, so the
+  // deadline died after the first attempt and a slow `validate` or a later
+  // attempt was never bounded (#1037). The reason is the same `TimeoutError`
+  // `AbortSignal.timeout` gives, which `abortError` reports as `timeout`.
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new DOMException("The operation timed out.", "TimeoutError")),
+    params.timeoutMs,
+  );
+  try {
+    return await repairLoop(params, anySignal(params.signal, deadline.signal));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function repairLoop(
+  params: GenerateParams,
+  // The overall bound: the caller's signal, and `timeoutMs` over every attempt
+  // and every validation.
+  outer: AbortSignal | undefined,
+): Promise<GenerateResult<unknown>> {
   const validate = params.validate;
   const attempts = Math.max(1, Math.floor(params.attempts ?? (validate ? 3 : 1)));
   const feedback = params.feedback ?? defaultFeedback;
   const onInvalidOutput = params.onInvalidOutput ?? "continue";
   const retryErrors = params.retryErrors ?? true;
-  // The overall bound: the caller's signal, and `timeoutMs` over every attempt
-  // and every validation. `AbortSignal.timeout` aborts with a `TimeoutError`,
-  // which `callModel` reports as `timeout`.
-  const outer = anySignal(
-    params.signal,
-    params.timeoutMs !== undefined ? AbortSignal.timeout(params.timeoutMs) : undefined,
-  );
-
   let base: AgentMessage[] = params.messages ?? [];
   let request = params.prompt;
   let note = "";
