@@ -317,6 +317,21 @@ export function mergeContextIntoResponse(
   }
 }
 
+/**
+ * Whether this process is the development server, which is what may mount the
+ * framework's debug endpoints (`/__gemi__/debug/*`, `/__gemi__/services/logs/*`).
+ *
+ * An allowlist on `NODE_ENV === "development"`, which `gemi dev` sets, rather
+ * than `NODE_ENV !== "production"`: a deployment that starts the server some
+ * other way than `gemi start` and leaves `NODE_ENV` unset, or sets it to
+ * `staging` or `test`, then keeps them unmounted. Getting the signal wrong in
+ * that direction costs a developer a debug page; in the other it published
+ * every route, its middleware and the server's log file (#1030).
+ */
+export function isDevelopmentServer() {
+  return process.env.NODE_ENV === "development";
+}
+
 export class ApiRouteDispatcher {
   static token = "router.api";
 
@@ -337,9 +352,15 @@ export class ApiRouteDispatcher {
       "/": config.rootRouter,
       "/auth": AuthApiRouter,
       "/__gemi__/services/i18n": I18nRouter,
-      "/__gemi__/services/logs": LoggingRouter,
       "/__gemi__/services/image": ImageOptimizationRouter,
-      "/__gemi__/debug": DebugRouter,
+      // The route table and the live log file, for the developer only: in
+      // any other process they are not mounted, and their paths are a 404.
+      ...(isDevelopmentServer()
+        ? {
+            "/__gemi__/services/logs": LoggingRouter,
+            "/__gemi__/debug": DebugRouter,
+          }
+        : {}),
     });
   }
 
