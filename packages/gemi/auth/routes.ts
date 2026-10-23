@@ -1,18 +1,52 @@
 import { ApiRouter } from "../http/ApiRouter";
 import { SameSiteBounceMiddleware } from "../http/SameSiteBounceMiddleware";
-import { ViewRouter } from "../http/ViewRouter";
+import { ViewRouter, type ViewRoutes } from "../http/ViewRouter";
+import type { AuthConfig } from "./config";
 import { AuthController } from "./AuthController";
 import { ConnectionsController } from "./connections/ConnectionsController";
 
-class OAuthViewRouter extends ViewRouter {
-  middlewares = ["cache:private"];
-  routes = {
-    "/:provider": this.view("_Redirect", [AuthController, "oauthRedirect"]),
-    "/:provider/callback": this.view("auth/OauthCallback", [
-      AuthController,
-      "oauthCallback",
-    ]),
-  };
+/**
+ * The views gemi's auth router renders from the application's `app/views`,
+ * each with the config that turns it on (#1040). A view whose feature is off
+ * is not routed, so an app without the feature needs no file for it.
+ */
+export interface AuthViewRequirement {
+  /** The view name, as under `app/views` without `.tsx`. */
+  view: string;
+  /** The config that requires it, for the error a missing file throws. */
+  requiredBy: string;
+}
+
+/**
+ * The magic-link page takes the links `POST /auth/magic-link` mails and the
+ * ones `emailCode.send` is handed, so it is on while either is.
+ */
+function magicLinkPageEnabled(config: AuthConfig) {
+  return config.magicLink !== false || config.emailCode?.enabled === true;
+}
+
+function oauthEnabled(config: AuthConfig) {
+  return Object.keys(config.oauthProviders ?? {}).length > 0;
+}
+
+/** Which application views the auth router needs under `config`, and why. */
+export function authViewRequirements(config: AuthConfig = {}): AuthViewRequirement[] {
+  const views: AuthViewRequirement[] = [];
+  if (magicLinkPageEnabled(config)) {
+    views.push({
+      view: "auth/MagicLinkSignIn",
+      requiredBy:
+        config.emailCode?.enabled === true && config.magicLink === false
+          ? "auth.emailCode.enabled"
+          : `auth.magicLink${config.magicLink === undefined ? " (on by default; set `magicLink: false` to turn it off)" : ""}`,
+    });
+  }
+  if (oauthEnabled(config)) {
+    const names = Object.keys(config.oauthProviders ?? {}).join(", ");
+    const requiredBy = `auth.oauthProviders (${names})`;
+    views.push({ view: "_Redirect", requiredBy }, { view: "auth/OauthCallback", requiredBy });
+  }
+  return views;
 }
 
 /** OAuth connections (#845): connect the signed-in user's account at a provider. */
@@ -30,15 +64,41 @@ class ConnectionsViewRouter extends ViewRouter {
   };
 }
 
-export class AuthViewRouter extends ViewRouter {
-  middlewares = ["cache:private"];
-  routes = {
-    "/sign-in/magic-link": this.view("auth/MagicLinkSignIn", [
-      AuthController,
-      "signInWithMagicLink",
-    ]),
-    "/oauth": OAuthViewRouter,
-    "/connections": ConnectionsViewRouter,
+/**
+ * gemi's `/auth` view routes for `config`: the magic-link page while
+ * `auth.magicLink` (or `auth.emailCode.enabled`) is on, the OAuth sign-in
+ * routes while `auth.oauthProviders` has an entry, and the connection routes,
+ * which render no view, always.
+ */
+export function createAuthViewRouter(config: AuthConfig = {}): new () => ViewRouter {
+  const magicLink = magicLinkPageEnabled(config);
+  const oauth = oauthEnabled(config);
+
+  class OAuthViewRouter extends ViewRouter {
+    middlewares = ["cache:private"];
+    routes = {
+      "/:provider": this.view("_Redirect", [AuthController, "oauthRedirect"]),
+      "/:provider/callback": this.view("auth/OauthCallback", [
+        AuthController,
+        "oauthCallback",
+      ]),
+    };
+  }
+
+  return class AuthViewRouter extends ViewRouter {
+    middlewares = ["cache:private"];
+    routes: ViewRoutes = {
+      ...(magicLink
+        ? {
+            "/sign-in/magic-link": this.view("auth/MagicLinkSignIn", [
+              AuthController,
+              "signInWithMagicLink",
+            ]),
+          }
+        : {}),
+      ...(oauth ? { "/oauth": OAuthViewRouter } : {}),
+      "/connections": ConnectionsViewRouter,
+    };
   };
 }
 

@@ -159,8 +159,9 @@ export interface AuthConfig {
   /**
    * The magic-link + PIN pair. Default `true`. `false` answers 404 on
    * `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`
-   * (#879). The `/auth/sign-in/magic-link` page stays: it takes the link
-   * `emailCode.send` is handed, and the ones `Auth.createMagicLink` issues.
+   * (#879). The `/auth/sign-in/magic-link` page (the `auth/MagicLinkSignIn`
+   * view) stays while `emailCode.enabled` is on, since it takes the link
+   * `emailCode.send` is handed; with both off it is not mounted (#1040).
    */
   magicLink?: boolean;
   /**

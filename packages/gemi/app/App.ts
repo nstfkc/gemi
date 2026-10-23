@@ -60,6 +60,18 @@ export class App {
   }
 
   /**
+   * The views gemi's own routes need from `app/views`, by name, with the
+   * config that requires each (#1040), for the servers' existence check.
+   */
+  public getRequiredViews(): Record<string, string> {
+    const views: Record<string, string> = {};
+    for (const dispatcher of this.kernel.domains().viewDispatchers()) {
+      Object.assign(views, dispatcher.requiredViews);
+    }
+    return views;
+  }
+
+  /**
    * The hosts the dev server's Vite may answer: the `route.domains` root and
    * its subdomains, or any host when custom domains are on, since those are
    * only known to the app's resolver.

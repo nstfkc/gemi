@@ -20,6 +20,7 @@ import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 import { unhandledErrorResponse } from "./unhandledError";
+import { missingRequiredViewError } from "./requiredViews";
 import { serverIdleTimeout } from "./idleTimeout";
 import { applyForwardedTrust, parseClientIpHeaderTrust, parseTrustProxy } from "./forwardedFor";
 import { readStaticAssetsRecord } from "../vite/precompressAssets";
@@ -87,8 +88,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const template = (viewName: string, path: string) => `"${viewName}": () => import("${path}")`;
   const templates = [];
 
+  const requiredViews = app.getRequiredViews.call(app);
   for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
     const serverFile = serverManifest[`app/views/${fileName}.tsx`];
+    if (!serverFile?.file && requiredViews[fileName]) {
+      throw missingRequiredViewError(fileName, requiredViews[fileName]);
+    }
     if (!serverFile?.file) {
       console.log(`Server file not found for ${fileName}`);
       console.log(serverFile);

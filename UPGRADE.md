@@ -1,3 +1,15 @@
+# Unreleased
+
+## Auth: the auth views are mounted only for the features that are configured (#1040)
+
+**Behaviour change (minor). Most apps need nothing.** See [Authentication → Views the auth routes render](docs/authentication.md#views-the-auth-routes-render).
+
+- gemi's `/auth` view routes used to mount `auth/MagicLinkSignIn`, `_Redirect` and `auth/OauthCallback` in every app, and the dev and production servers load every routed view up front, so an app without those files failed as soon as an auth page loaded (dev: `Failed to load url …/MagicLinkSignIn.tsx`; production: `… not found in server manifest` at boot).
+- Now `/auth/sign-in/magic-link` (`auth/MagicLinkSignIn`) is mounted while `auth.magicLink` is on (the default) or `auth.emailCode.enabled` is, and `/auth/oauth/:provider` (`_Redirect`) and `/auth/oauth/:provider/callback` (`auth/OauthCallback`) while `auth.oauthProviders` has an entry. An app with `magicLink: false` and no OAuth providers can delete those views.
+- A view a configured feature needs that is missing now fails with the file and the setting: `app/views/auth/OauthCallback.tsx is missing. gemi's auth routes render it because auth.oauthProviders (google) is on. …`, as an error page in `gemi dev` and at boot in `gemi start`.
+- **Behaviour change:** with `magicLink: false` and `emailCode.enabled` off, `/auth/sign-in/magic-link` is no longer served (404), and with no `oauthProviders` neither are the `/auth/oauth/*` routes (they answered an error before). An app that sets `magicLink: false` but still mails links from `Auth.createMagicLink` must turn `magicLink` back on (or `emailCode.enabled`) to keep the page.
+- `ViewRouteDispatcher` takes the `auth` config as an optional second argument; `AuthViewRouter` is replaced by `createAuthViewRouter(authConfig)` (both internal).
+
 # Upgrading from 0.157.1 to 0.160.1
 
 ## Security: the image resize route fetches only the app's own images and an allowlist (#1032)

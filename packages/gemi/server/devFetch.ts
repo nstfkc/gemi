@@ -1,5 +1,7 @@
 import { stringEraRefusal } from "../http/Error";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { missingRequiredViewError } from "./requiredViews";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 
@@ -279,11 +281,16 @@ export function createDevFetch(
           `"${viewName}": () => import("${path}")`;
         const templates = [];
 
+        const requiredViews = app.getRequiredViews.call(app);
         for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
           if (process.env.NODE_ENV === "test") {
             break;
           }
           const appDir = `${process.env.APP_DIR}`;
+          const requiredBy = requiredViews[fileName];
+          if (requiredBy && !existsSync(`${appDir}/views/${fileName}.tsx`)) {
+            throw missingRequiredViewError(fileName, requiredBy);
+          }
           const mod = await ssrRunner(vite).import(`${appDir}/views/${fileName}.tsx`);
 
           viewImportMap[fileName] = mod.default;
