@@ -481,7 +481,7 @@ export default class extends Kernel {
 
 ## Image optimization
 
-gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageManager`, which uses a Sharp-backed driver by default. It needs no configuration at all; supply an `image` slice only to swap the driver:
+gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageManager`, which uses a Sharp-backed driver by default. It needs no configuration for the app's own images; supply an `image` slice to swap the driver, or to let `<Image>` load images from other hosts (`allowedHosts`, see [Which sources it fetches](#which-sources-it-fetches)):
 
 ```typescript
 // app/config/image.ts
@@ -528,7 +528,31 @@ The service exposes an internal route:
 GET /api/__gemi__/services/image/resize?url=<src>&w=<width>&h=<height>&fit=<fit>&q=<quality>
 ```
 
-It fetches the source image at `url` (an absolute URL, or a path resolved against the local dev server), runs it through the optimization driver, and streams back `image/webp`. You rarely build these URLs by hand — the `Image` component does it for you. `fit` defaults to `cover` and `q` to `80`.
+It fetches the source image at `url`, runs it through the optimization driver, and streams back `image/webp`. You rarely build these URLs by hand — the `Image` component does it for you. `fit` defaults to `cover` and `q` to `80`.
+
+### Which sources it fetches
+
+The route is public, so it fetches only what the app says it may (#1032):
+
+- **The app's own images:** a path (`/api/files/logo.png`), or an absolute URL on the app's own origin (the request's origin, or `HOST_NAME`/`APP_URL`). These are read from the app itself (`http://localhost:$PORT`), with only the path and query taken from `url`. Paths under `/api/__gemi__/services/image/` are refused.
+- **Hosts on `allowedHosts`:** nothing else by default. List the storage or CDN hosts your images live on:
+
+  ```typescript
+  // app/config/image.ts
+  import { defineImageConfig } from "gemi/services";
+
+  export default defineImageConfig({
+    allowedHosts: ["my-bucket.s3.eu-central-1.amazonaws.com", "*.cdn.example.com"],
+    maxSize: 10 * 1024 * 1024, // default 10 MiB
+    timeout: 10_000,           // default 10 s, redirects and body included
+  });
+  ```
+
+  Entries are host names (`"*.example.com"` covers its subdomains, not `example.com` itself) or IP ranges, as `safeFetch`'s `allow` ([Outbound HTTP](./outbound-http.md)). These are fetched through `safeFetch`: on ports 80 and 443 only, and never to a private, loopback, link-local or cloud-metadata address, even when the host is listed.
+
+Every redirect hop is checked against the same rules, so an allowed host (or the app) redirecting to an internal address or an unlisted host is refused. The answer must have an `image/*` content type and be at most `maxSize` bytes. A refused or failed source answers JSON `{ "error": "..." }` without the URL: `400` (no or malformed `url`), `403` (source not allowed), `404` (the source answered non-2xx), `413` (too large), `415` (not an image, or not decodable), `502` (network failure or too many redirects), `504` (timeout). Only the source's `Cache-Control` is passed on; its other headers are not.
+
+If your `<Image src>` points at a path that redirects to object storage (a signed S3 or R2 URL, say), add that storage host to `allowedHosts`.
 
 ## The client `Image` component
 
@@ -552,7 +576,7 @@ Props (on top of all standard `<img>` attributes):
 
 It automatically generates a `srcSet` (including a `2x` high-DPR candidate at `width * 2`) so you don't set `srcSet` yourself.
 
-> **Note:** `src` may be a local path (e.g. a controller route that streams a stored file) or an absolute URL. The resize route resolves relative paths against the dev server origin.
+> **Note:** `src` may be a local path (e.g. a controller route that streams a stored file), a URL on the app's own origin, or a URL on a host listed in `image.allowedHosts`; see [Which sources it fetches](#which-sources-it-fetches). `src` is URL-encoded into the resize route's `url`, so a `src` with its own query string survives intact.
 
 ### `OpenGraphImage`
 

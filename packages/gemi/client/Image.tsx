@@ -10,7 +10,7 @@ function generateImageProps(
   screen = defaultScreen,
   quality = 80,
 ) {
-  const baseUrl = src;
+  const baseUrl = encodeURIComponent(src);
 
   const widths = [...container.map((c, i) => (screen[i] * c) / 100), width * 2];
 

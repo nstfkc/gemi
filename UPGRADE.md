@@ -1,5 +1,24 @@
 # Unreleased
 
+## Security: the image resize route fetches only the app's own images and an allowlist (#1032)
+
+**Fix (patch). Configure `image.allowedHosts` if `<Image>` loads images from another host.** See [File Storage → Which sources it fetches](docs/file-storage.md#which-sources-it-fetches).
+
+- `/api/__gemi__/services/image/resize?url=` (what `<Image>` from `gemi/client` points at) fetched any absolute URL with plain `fetch`, following redirects, so anyone could make a deployed app request internal addresses and cloud metadata (`169.254.169.254`) and read the answer back, resized. It now fetches only:
+  - paths and URLs on the app's own origin (the request's, or `HOST_NAME`/`APP_URL`), read from the app itself as before;
+  - hosts listed in the new `image.allowedHosts` (default `[]`), through `safeFetch`: ports 80/443, never a private, loopback or metadata address.
+- **Behaviour change:** an `<Image src>` on another host (an S3 bucket, a CDN, a path that redirects to a signed storage URL) now answers 403 until its host is listed:
+
+  ```ts
+  // app/config/image.ts
+  export default defineImageConfig({ allowedHosts: ["my-bucket.s3.eu-central-1.amazonaws.com"] });
+  ```
+
+  and add `image` to the kernel's `config`. Apps that only use their own paths need nothing.
+- Every redirect hop is checked against the same rules. The answer must be `image/*` (else 415) and at most `image.maxSize` bytes (default 10 MiB, else 413); the whole fetch has `image.timeout` ms (default 10 000, else 504).
+- Errors no longer echo the URL (`info` is gone), a missing `url` is now 400 (was 404), and only the source's `Cache-Control` is passed on, not its other headers.
+- `<Image>` now URL-encodes `src` into the route's `url`, so a `src` with a query string of its own is no longer cut at its first `&`.
+
 ## Routing: nested api routers inherit their enclosing routers' middlewares, and `(group)` segments work in api routers (#1022)
 
 **Behaviour change. Check every api router that mounts another one.** See [Routing → Nesting API routers](docs/routing.md#nesting-api-routers) and [Middleware → Attaching middleware](docs/middleware.md#attaching-middleware).
