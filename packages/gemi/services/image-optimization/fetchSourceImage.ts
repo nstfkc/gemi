@@ -120,23 +120,51 @@ async function fetchHop(
     headers: { accept: "image/*" },
   } as const;
 
+  let target = url;
   if (options.ownOrigins.includes(url.origin)) {
     if (url.pathname.startsWith(RESIZE_PATH)) {
       throw new ImageSourceError(403, "This image source is not allowed");
     }
+    // A path starting with `//` or `/\` (also percent-encoded) is
+    // protocol-relative: resolved against `localOrigin` it names another host.
+    if (isProtocolRelative(url.pathname)) {
+      throw new ImageSourceError(403, "This image source is not allowed");
+    }
     // Only the path and query come from the request; the host is ours.
-    const local = new URL(`${url.pathname}${url.search}`, options.localOrigin);
-    return safeFetch(local, { ...common, allowPrivate: true, ports: "any" });
+    const localOrigin = new URL(options.localOrigin).origin;
+    const local = new URL(`${url.pathname}${url.search}`, localOrigin);
+    if (local.origin === localOrigin) {
+      return safeFetch(local, { ...common, allowPrivate: true, ports: "any" });
+    }
+    // Anything that isn't the app itself is just another host.
+    target = local;
   }
 
   if (options.allowedHosts.length === 0) {
     throw new ImageSourceError(403, "This image source is not allowed");
   }
-  return safeFetch(url, {
+  return safeFetch(target, {
     ...options.external,
     ...common,
     allow: options.allowedHosts,
   });
+}
+
+function isProtocolRelative(pathname: string) {
+  let path = pathname;
+  // Decode until stable, so `%252F%252F` can't slip through either.
+  for (let i = 0; i < 5; i++) {
+    if (/^[/\\][/\\]/.test(path)) return true;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      return true;
+    }
+    if (decoded === path) return false;
+    path = decoded;
+  }
+  return true;
 }
 
 function toSourceError(error: unknown, signal: AbortSignal) {

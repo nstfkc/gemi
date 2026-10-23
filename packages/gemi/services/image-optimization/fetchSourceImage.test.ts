@@ -205,3 +205,78 @@ describe("the answer", () => {
     expect(error.message).toBe("Image not found");
   });
 });
+
+/**
+ * #1035. A path starting with `//` or `/\` (also percent-encoded) resolved
+ * against `localOrigin` would name another host. A second loopback server
+ * plays that internal host and must never be reached.
+ */
+describe("protocol-relative paths on the app's own origin", () => {
+  let internal: ReturnType<typeof Bun.serve>;
+  const hits: string[] = [];
+
+  beforeAll(() => {
+    internal = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        hits.push(request.url);
+        return new Response(PNG, { headers: { "content-type": "image/png" } });
+      },
+    });
+  });
+
+  afterAll(() => internal.stop(true));
+
+  const cases = (): [string, string][] => {
+    const host = `127.0.0.1:${internal.port}`;
+    return [
+      ["//host", `//${host}/x`],
+      ["/\\host", `/\\${host}/x`],
+      ["/%2F%2Fhost", `/%2F%2F${host}/x`],
+      ["/%5C%5Chost", `/%5C%5C${host}/x`],
+      ["/%252F%252Fhost", `/%252F%252F${host}/x`],
+    ];
+  };
+
+  test("are refused and never reach the internal host", async () => {
+    // Both the app's origin and the internal host's are "own" here, the worst
+    // case: a request arriving on the internal address itself.
+    const own = [OWN, `http://127.0.0.1:${internal.port}`, `https://127.0.0.1:${internal.port}`];
+    for (const [name, path] of cases()) {
+      const error = await rejection(fetchSourceImage(`${OWN}${path}`, options({ ownOrigins: own })));
+      expect(error.status, name).toBe(403);
+      // On its own the path is a URL on the internal (here "own") origin:
+      // only its path is kept, read from the app itself, never the host.
+      await rejection(fetchSourceImage(path, options({ ownOrigins: own })));
+    }
+    expect(hits).toEqual([]);
+  });
+
+  test("are refused even when the internal host is on the allowlist", async () => {
+    for (const [name, path] of cases()) {
+      const error = await rejection(
+        fetchSourceImage(`${OWN}${path}`, options({ allowedHosts: ["127.0.0.1"] })),
+      );
+      expect(error.status, name).toBe(403);
+    }
+    expect(hits).toEqual([]);
+  });
+
+  test("a redirect from the app to a protocol-relative path is refused", async () => {
+    const error = await rejection(
+      fetchSourceImage(
+        `/redirect?to=${encodeURIComponent(`${OWN}//127.0.0.1:${internal.port}/x`)}`,
+        options(),
+      ),
+    );
+    expect(error.status).toBe(403);
+    expect(hits).toEqual([]);
+  });
+
+  test("a path that merely contains // further on is still the app's", async () => {
+    const image = await fetchSourceImage(`${OWN}/a.png?next=//127.0.0.1:${internal.port}/x`, options());
+    expect(new Uint8Array(image.bytes)).toEqual(PNG);
+    expect(hits).toEqual([]);
+  });
+});
