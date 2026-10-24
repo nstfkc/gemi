@@ -341,6 +341,50 @@ page needs custom tags.
 > it from route/controller handlers, not from React components. See the facades
 > reference for the full list.
 
+### The app's default title and metadata
+
+A view whose handlers set no title (a view with no handler, a redirect page, a
+handler that never calls `Meta.title`) is titled "Gemi App". Set the app's own
+default with `meta` in the `view` config of `app/config/route.ts`:
+
+```typescript
+// app/config/route.ts
+export default defineRouteConfig({
+  // ...
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    meta: {
+      title: "Acme",
+      description: "Acme makes things.",
+      openGraph: { image: "/og-cover.jpg" }, // optional
+    },
+  },
+});
+```
+
+It fills each of `title`, `description` and `openGraph` that no handler set,
+field by field: a handler that calls only `Meta.title` keeps its title and gets
+the default description and Open Graph tags. A handler's `Meta.openGraph`
+replaces the default's Open Graph tags as a whole. Every `openGraph` field is
+optional here: `title` and `description` follow the page's own, `type` is
+`"website"`, and `og:url` is only rendered when you pass `url`.
+
+`meta` can also be a function of the request, which runs after the handlers
+(only when one of the three fields is still unset), so it can read the locale
+or the path:
+
+```typescript
+meta: (req: HttpRequest) => ({
+  title: Lang.locale().startsWith("tr") ? "Acme Türkiye" : "Acme",
+}),
+```
+
+It applies to [the 404 view](./routing.md#the-404-view) too, for whatever
+`onNotFound` leaves unset. A [`route.domains`](./domains.md) group's `view`
+inherits the root `meta` or sets its own, which replaces it. Without `meta`,
+nothing changes.
+
 ### `<html lang>`, `dir`, canonical and alternates
 
 A layout (the root one, or a static view's `layout`) receives `htmlAttributes`:

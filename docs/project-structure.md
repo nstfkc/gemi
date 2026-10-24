@@ -331,7 +331,7 @@ The hooks are ordinary config values, so a service reads them the same way it re
 | `log` | `onLogCreated`, `onLogFileClosed` |
 | `translation` | `detectLocale`, `onLocaleChange` |
 | `route.api` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
-| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail`, `onStreamComplete`, `onNotFound` ([the 404 view](./routing.md#the-404-view)) |
+| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail`, `onStreamComplete`, `onNotFound` ([the 404 view](./routing.md#the-404-view)), `meta` ([the default title and metadata](./views-and-layouts.md#the-apps-default-title-and-metadata)) |
 
 Request lifecycle hooks are the usual place for tracing and error reporting:
 

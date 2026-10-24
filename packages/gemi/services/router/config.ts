@@ -1,5 +1,6 @@
 import type { JSX } from "react";
 import type { HttpRequest } from "../../http/HttpRequest";
+import type { DefaultViewMeta } from "../../http/Metadata";
 import type { ApiRouter } from "../../http/ApiRouter";
 import type { ChannelRouterClass } from "../../http/ChannelRouter";
 import type { McpRouter } from "../../http/McpRouter";
@@ -96,6 +97,20 @@ export interface ViewRouteConfig {
    * gemi's defaults. A `route.domains` group's `view` can set its own.
    */
   onNotFound?: (req: HttpRequest, info: { status: number }) => void | Promise<void>;
+
+  /**
+   * The app-wide default title, description and Open Graph tags (#1042), for
+   * a view whose handlers set none: a view with no handler, one whose handler
+   * never calls `Meta.title`, and the `404` view when `onNotFound` sets none.
+   * Without it such a page is titled `"Gemi App"`.
+   *
+   * Field by field: a handler's `Meta.title` keeps its title and the page
+   * still gets this `description` and `openGraph`. A function runs per
+   * request after the handlers (and `onNotFound`), so it can read the
+   * request and the locale, e.g. for a translated default. A `route.domains`
+   * group's `view` inherits it or sets its own.
+   */
+  meta?: DefaultViewMeta | ((req: HttpRequest) => DefaultViewMeta | Promise<DefaultViewMeta>);
 
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
@@ -325,7 +340,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter"
+  "root" | "rootRouter" | "meta"
 > {
   return {
     partialRendering: true,

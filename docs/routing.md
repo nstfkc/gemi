@@ -403,7 +403,7 @@ export default function NotFound() {
 }
 ```
 
-Its title and other metadata come from the `onNotFound` hook in `app/config/route.ts`. It runs where a route's handler would, for the document and for a client navigation, with the status the page answers with (`404`, or `403` for a permission refusal). A `route.domains` group's `view` can set its own. Without it, the page keeps gemi's default title, "Gemi App".
+Its title and other metadata come from the `onNotFound` hook in `app/config/route.ts`. It runs where a route's handler would, for the document and for a client navigation, with the status the page answers with (`404`, or `403` for a permission refusal). A `route.domains` group's `view` can set its own. Whatever it leaves unset comes from the app's default `view.meta` ([The app's default title and metadata](./views-and-layouts.md#the-apps-default-title-and-metadata)); without either, the page keeps gemi's default title, "Gemi App".
 
 ```typescript
 // app/config/route.ts

@@ -1,3 +1,15 @@
+# Unreleased
+
+## Views: an app-wide default title and metadata, `route.view.meta` (#1042)
+
+**New API (minor). Nothing changes unless you set it.** See [Views and Layouts → The app's default title and metadata](docs/views-and-layouts.md#the-apps-default-title-and-metadata).
+
+- A view whose handlers set no title (no handler, or one that never calls `Meta.title`) was titled "Gemi App", in the tab and in link previews. `route.view.meta` sets the app's default: `{ title?, description?, openGraph? }`, or a function `(req) => …` (sync or async) that runs per request after the handlers, e.g. for a localized title.
+- Field by field: each of `title`, `description` and `openGraph` that no handler (or `onNotFound`) set comes from the default. A handler's `Meta.openGraph` replaces the default's Open Graph tags as a whole. The default's `openGraph` fields are all optional: `title`/`description` follow the page's, `type` is `"website"`, `og:url` is rendered only when `url` is given.
+- The `404` view gets it too, for whatever `onNotFound` leaves unset.
+- A `route.domains` group's `view` inherits the root `meta` or sets its own.
+- `<Head />` no longer renders an empty `og:url` tag when an Open Graph `url` is missing (only possible through the default).
+
 # Upgrading from 0.160.2 to 0.161.0
 
 ## Auth: the auth views are mounted only for the features that are configured (#1040)

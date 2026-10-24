@@ -98,7 +98,7 @@ export function updateMeta(meta: any, locale?: string | null) {
 const OpenGraph = (props: {
   title: string;
   type: string;
-  url: string;
+  url?: string;
   image?: string;
   description?: string;
   imageAlt?: string;
@@ -131,7 +131,7 @@ const OpenGraph = (props: {
     <>
       <meta property="og:title" content={title} />
       <meta property="og:type" content={type} />
-      <meta property="og:url" content={url} />
+      {url && <meta property="og:url" content={url} />}
       {image && <meta property="og:image" content={image} />}
       {description && <meta property="og:description" content={description} />}
       {imageAlt && <meta property="og:image:alt" content={imageAlt} />}
