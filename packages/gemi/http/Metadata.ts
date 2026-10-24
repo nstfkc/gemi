@@ -24,6 +24,20 @@ export type OpenGraphParams = {
   twitterCard?: "summary" | "summary_large_image";
 };
 /**
+ * The app-wide default title and metadata (`route.view.meta`, #1042): used for
+ * each field that no handler (or `onNotFound`) set. See `ViewRouteConfig.meta`.
+ */
+export type DefaultViewMeta = {
+  title?: string;
+  description?: string;
+  /**
+   * Every field is optional: `title` and `description` default to the page's
+   * own, `type` to `"website"`. `url` is left out of the page unless given.
+   */
+  openGraph?: Partial<OpenGraphParams>;
+};
+
+/**
  * Attributes for the document's `<html>` element, handed to the root (or a
  * static view's) layout as its `htmlAttributes` prop.
  */
@@ -59,6 +73,9 @@ export class Metadata {
    * none, so the client keeps what the skipped segments put there.
    */
   touched = false;
+
+  /** The fields a handler set, which the app's default (`route.view.meta`) leaves alone. */
+  private setFields = new Set<keyof DefaultViewMeta>();
 
   render() {
     return {
@@ -107,15 +124,55 @@ export class Metadata {
 
   title(title: string) {
     this.touched = true;
+    this.setFields.add("title");
     this.content.title = title;
   }
 
   description(description: string) {
     this.touched = true;
+    this.setFields.add("description");
     this.content.description = description;
   }
 
-  openGraph({
+  /** Whether every field the app's default could fill was set by a handler. */
+  get hasAllDefaultFields() {
+    return this.setFields.size === 3;
+  }
+
+  /**
+   * Fills each of `title`, `description` and `openGraph` that no handler set
+   * from the app's default (`route.view.meta`, #1042). Field by field: a
+   * handler's `Meta.title` keeps its title and still gets the default
+   * description. Not a handler call, so `touched` stays as it was.
+   *
+   * The default's Open Graph fields fall back to the page's title and
+   * description and to `type: "website"`; `url` is only rendered when given.
+   */
+  applyDefaults(defaults: DefaultViewMeta) {
+    if (!this.setFields.has("title") && defaults.title !== undefined) {
+      this.content.title = defaults.title;
+    }
+    if (!this.setFields.has("description") && defaults.description !== undefined) {
+      this.content.description = defaults.description;
+    }
+    if (!this.setFields.has("openGraph") && defaults.openGraph) {
+      const { title, description, type, ...rest } = defaults.openGraph;
+      this.content.openGraph = this.normalizeOpenGraph({
+        ...rest,
+        title: title ?? this.content.title,
+        description: description ?? this.content.description ?? undefined,
+        type: type ?? "website",
+      });
+    }
+  }
+
+  openGraph(params: OpenGraphParams) {
+    this.touched = true;
+    this.setFields.add("openGraph");
+    this.content.openGraph = this.normalizeOpenGraph(params);
+  }
+
+  private normalizeOpenGraph({
     title,
     description,
     type,
@@ -129,11 +186,10 @@ export class Metadata {
     twitterImageWidth = imageWidth,
     twitterImageHeight = imageHeight,
     twitterCard = twitterImage ? "summary_large_image" : "summary",
-  }: OpenGraphParams) {
-    this.touched = true;
+  }: Omit<OpenGraphParams, "url"> & { url?: string }) {
     const absolute = (src: string | undefined) =>
       src && !src.startsWith("http") ? `${configuredAppOrigin()}${src}` : src;
-    this.content.openGraph = Object.fromEntries(
+    return Object.fromEntries(
       Object.entries({
         title,
         description,

@@ -290,6 +290,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.theme`. */
   readonly theme: ThemeConfig | false;
 
+  /** See `ViewRouteConfig.meta`. */
+  readonly defaultMeta: ViewRouteConfig["meta"];
+
   /**
    * `auth` is the app's `auth` config: gemi's `/auth` view routes are mounted
    * for the features it turns on (#1040).
@@ -300,6 +303,7 @@ export class ViewRouteDispatcher {
     this.partialRendering = config.partialRendering ?? defaults.partialRendering;
     this.localeRouting = config.localeRouting ?? defaults.localeRouting;
     this.theme = config.theme ?? defaults.theme;
+    this.defaultMeta = config.meta;
 
     this.hooks = {
       onNotFound: config.onNotFound ?? defaults.onNotFound,
@@ -1517,6 +1521,15 @@ export class ViewRouteDispatcher {
         // gives it a title and metadata (#954).
         if (currentPathName === null) {
           await this.hooks.onNotFound(httpRequest, { status: refusedStatus ?? 404 });
+        }
+
+        // The app's default fills whatever the handlers left unset (#1042).
+        if (this.defaultMeta && !ctx.metadata.hasAllDefaultFields) {
+          ctx.metadata.applyDefaults(
+            typeof this.defaultMeta === "function"
+              ? await this.defaultMeta(httpRequest)
+              : this.defaultMeta,
+          );
         }
 
         const cookies = ctx.cookies;
