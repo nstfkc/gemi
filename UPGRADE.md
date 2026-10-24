@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.161.0 to 0.162.0
 
 ## Views: an app-wide default title and metadata, `route.view.meta` (#1042)
 
