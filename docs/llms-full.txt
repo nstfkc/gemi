@@ -14484,7 +14484,7 @@ export default defineAuthConfig({
 });
 ```
 
-- `POST /auth/email-code` `{ email }` replaces any outstanding code for the address and
+- `POST /auth/email-code` `{ email }` replaces any outstanding code for the address (see `activeCodes`) and
   calls `send`. It answers `{ ok: true }` for every address, known or not, and whether or
   not one gets a code, so it never says who has an account. Nothing is created yet.
 - `POST /auth/email-code/verify` `{ email, code, name? }` signs in. A missing user is

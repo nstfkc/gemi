@@ -866,6 +866,57 @@ function suite(label: string, url?: string) {
       const result: any = await clickLink("known@x.test", magicLinks[0].token);
       expect(result.session.user.email).toBe("known@x.test");
     });
+
+    // --- emailCode.activeCodes (#1046) ------------------------------------------
+
+    test("activeCodes keeps the newest codes working, and using one ends them all", async () => {
+      emailCode = { activeCodes: 3 };
+      bindAuth();
+      for (let i = 0; i < 4; i++) await post("requestEmailCode", { email: "a@x.test" });
+
+      const rows = await codeRows();
+      expect(rows).toHaveLength(3);
+      expect(rows.map((r) => r.id)).toEqual([...rows.map((r) => r.id)].sort((a, b) => a - b));
+
+      const { isNewUser } = await post("verifyEmailCode", { email: "a@x.test", code: sent[1].code });
+      expect(isNewUser).toBe(true);
+      expect(await codeRows()).toEqual([]);
+      if (sent[2].code !== sent[1].code) {
+        expect(
+          errorsOf(await attempt("verifyEmailCode", { email: "a@x.test", code: sent[2].code })),
+        ).toEqual({ code: ["invalid_code"] });
+      }
+    });
+
+    test("activeCodes: guesses share one budget across the live codes", async () => {
+      emailCode = { activeCodes: 2, maxAttempts: 3 };
+      bindAuth();
+      await post("requestEmailCode", { email: "a@x.test" });
+      await post("requestEmailCode", { email: "a@x.test" });
+
+      for (let i = 0; i < 3; i++) {
+        await attempt("verifyEmailCode", { email: "a@x.test", code: "0000000" });
+      }
+      expect(
+        errorsOf(await attempt("verifyEmailCode", { email: "a@x.test", code: sent[0].code })),
+      ).toEqual({ code: ["too_many_attempts"] });
+      expect(await codeRows()).toEqual([]);
+    });
+
+    test("activeCodes: the link of an earlier code still signs in", async () => {
+      emailCode = { activeCodes: 2 };
+      bindAuth();
+      await seedUser("known@x.test");
+      await post("createMagicLinkToken", { email: "known@x.test" });
+      await post("createMagicLinkToken", { email: "known@x.test" });
+
+      const result: any = await clickLink("known@x.test", magicLinks[0].token);
+      expect(result.session.user.email).toBe("known@x.test");
+      expect(await codeRows()).toEqual([]);
+      expect(await clickLink("known@x.test", magicLinks[1].token)).toEqual({
+        error: "Invalid token",
+      });
+    });
   });
 }
 

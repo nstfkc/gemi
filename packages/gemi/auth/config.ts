@@ -56,6 +56,16 @@ export interface EmailCodeConfig {
   /** Wrong guesses one code survives; the next one burns it. Default 5. */
   maxAttempts?: number;
   /**
+   * How many codes (and their links) an address can hold at once, 1 to 5.
+   * Default 1: a new request replaces the outstanding code. Above 1, a new
+   * request keeps the newest `activeCodes - 1` codes that can still be used,
+   * so a code from a delayed email still works after the user asked again.
+   * Using any of them deletes them all. Guesses share one budget: each guess
+   * counts against every live code, and `maxAttempts` wrong ones delete them
+   * all, so more codes do not mean more guesses.
+   */
+  activeCodes?: number;
+  /**
    * Requests for a code (`/auth/email-code` and `/auth/magic-link`).
    * Default `{ perEmail: [5, 900], perIp: [20, 900] }`. Over it: 429
    * `{ error: { kind: "rate_limit" } }`.
@@ -421,10 +431,12 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
   const expiresInMinutes = config.expiresInMinutes ?? 10;
   const linkExpiresInMinutes = config.linkExpiresInMinutes ?? 7 * 24 * 60;
   const maxAttempts = config.maxAttempts ?? 5;
+  const activeCodes = config.activeCodes ?? 1;
   checkEmailCodeNumber("length", length, 4, 12);
   checkEmailCodeNumber("expiresInMinutes", expiresInMinutes, 1);
   checkEmailCodeNumber("linkExpiresInMinutes", linkExpiresInMinutes, 1);
   checkEmailCodeNumber("maxAttempts", maxAttempts, 1);
+  checkEmailCodeNumber("activeCodes", activeCodes, 1, 5);
   return {
     enabled: config.enabled ?? false,
     createUser: config.createUser ?? false,
@@ -432,6 +444,7 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
     expiresInMinutes,
     linkExpiresInMinutes,
     maxAttempts,
+    activeCodes,
     requestLimit: {
       perEmail: config.requestLimit?.perEmail ?? [5, 900],
       perIp: config.requestLimit?.perIp ?? [20, 900],
