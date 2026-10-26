@@ -1361,7 +1361,7 @@ export class AuthController extends Controller {
     let isNewUser = false;
 
     if (user) {
-      if (!(await userProvider.claimMagicLinkToken(row.id))) {
+      if (!(await auth.claimOneTimeCode(email, row.id))) {
         throw new ValidationError({ code: ["invalid_code"] });
       }
       await userProvider.verifyUser(email);
@@ -1372,7 +1372,7 @@ export class AuthController extends Controller {
         // the code back, and of two requests with the same code only the one
         // that deletes the row creates a user.
         user = await userProvider.transaction(async () => {
-          if (!(await userProvider.claimMagicLinkToken(row.id))) {
+          if (!(await auth.claimOneTimeCode(email, row.id))) {
             throw new CodeAlreadyClaimed();
           }
           const created = await userProvider.createUser({
@@ -1396,7 +1396,7 @@ export class AuthController extends Controller {
       }
     } else {
       // A row for an address with no user, left from when `createUser` was on.
-      await userProvider.claimMagicLinkToken(row.id);
+      await auth.claimOneTimeCode(email, row.id);
       throw new ValidationError({ code: ["invalid_code"] });
     }
 

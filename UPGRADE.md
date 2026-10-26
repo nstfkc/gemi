@@ -1,3 +1,14 @@
+# Unreleased
+
+## Auth: `emailCode.activeCodes` keeps earlier one-time codes valid (#1046)
+
+**New API (minor). Nothing changes unless you set it.** See [Authentication → Keeping earlier codes valid](docs/authentication.md#keeping-earlier-codes-valid).
+
+- `auth.emailCode.activeCodes` (integer 1 to 5, default 1) is how many one-time codes an address holds at once. At 1 a new request replaces the outstanding code, as before. Above 1 the newest codes stay usable, so a code from a delayed email still works after the user asked again; any of their links works too, and using one deletes them all.
+- Guesses share one budget across the live codes: every guess counts against each of them, and the guess past `maxAttempts` deletes them all.
+- New `UserProvider` methods: `listMagicLinkTokensByEmail(email, take)` and `deleteMagicLinkTokensExcept(email, keepIds)`, used only when `activeCodes` is above 1. A provider subclass that overrides the `MagicLinkToken` methods needs these two as well before turning the option on.
+- New `AuthManager.claimOneTimeCode(email, id)`: claims a verified code and, above 1, deletes the others. A custom verify route that calls `verifyOneTimeCode(..., { claim: false })` should claim with it instead of `userProvider.claimMagicLinkToken`.
+
 # Upgrading from 0.161.0 to 0.162.0
 
 ## Views: an app-wide default title and metadata, `route.view.meta` (#1042)

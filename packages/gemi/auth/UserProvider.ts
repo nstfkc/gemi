@@ -626,6 +626,27 @@ export class UserProvider<TSession = SessionWithUser> {
   }
 
   /**
+   * The newest `take` one-time-code rows for `email`, newest first. Read in
+   * place of `findMagicLinkTokenByEmail` when `emailCode.activeCodes` is above 1.
+   */
+  async listMagicLinkTokensByEmail(email: string, take: number): Promise<MagicLinkTokenRow[]> {
+    return await this.run(() =>
+      this.models.MagicLinkToken.findMany({
+        where: { email },
+        orderBy: { id: "desc" },
+        take,
+      }),
+    );
+  }
+
+  /** Deletes every one-time-code row for `email` but the ones `keepIds` names. */
+  async deleteMagicLinkTokensExcept(email: string, keepIds: number[]): Promise<void> {
+    await this.run(() =>
+      this.models.MagicLinkToken.deleteMany({ where: { email, id: { notIn: keepIds } } }),
+    );
+  }
+
+  /**
    * Deletes row `id` and reports whether this call is the one that deleted it.
    * Two requests verifying the same code at once both match it; only the one
    * that gets `true` here may sign in.

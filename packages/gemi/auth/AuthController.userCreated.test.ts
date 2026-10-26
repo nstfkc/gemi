@@ -39,6 +39,7 @@ const auth = {
   },
   userProvider,
   verifyOneTimeCode: vi.fn(async () => ({ status: "ok" as const, row: { id: 1 } })),
+  claimOneTimeCode: (_email: string, id: number) => userProvider.claimMagicLinkToken(id),
   createOrUpdateSessionV2: async () => ({ token: "t", expiresAt: new Date(Date.now() + 60_000) }),
   accessTokenCookieOptions: (_req: unknown, expires: Date) => ({ expires, httpOnly: true }),
   detectLocale: () => "en-US",

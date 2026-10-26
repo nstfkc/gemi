@@ -529,11 +529,26 @@ export class AuthManager {
   }
 
   /**
-   * Replaces any outstanding code for `email` with a new one and stores it
-   * hashed. Writes whether or not a user has the address; callers decide that.
+   * Issues a new code for `email` and stores it hashed. Writes whether or not a
+   * user has the address; callers decide that.
+   *
+   * With `emailCode.activeCodes` at 1 (the default) it replaces any
+   * outstanding code. Above 1 it keeps the newest `activeCodes - 1` codes whose
+   * code or link can still be used, and deletes the rest.
    */
   async issueOneTimeCode(email: string, length: number) {
-    await this.userProvider.deleteMagicLinkToken(email);
+    const { activeCodes, expiresInMinutes, linkExpiresInMinutes } = this.config.emailCode;
+    if (activeCodes === 1) {
+      await this.userProvider.deleteMagicLinkToken(email);
+    } else {
+      const lifetime = Math.max(expiresInMinutes, linkExpiresInMinutes) * 60_000;
+      const rows = await this.userProvider.listMagicLinkTokensByEmail(email, activeCodes - 1);
+      const keep = rows.filter((row) => expiryMs(row.createdAt) + lifetime > Date.now());
+      await this.userProvider.deleteMagicLinkTokensExcept(
+        email,
+        keep.map((row) => row.id),
+      );
+    }
 
     const token = await this.config.generateMagicLinkToken(email);
     const custom = await this.config.generateCode(email);
@@ -549,14 +564,45 @@ export class AuthManager {
   }
 
   /**
-   * Checks a typed code against the outstanding row for `email`, and on a
-   * match deletes the row, so the code works once. Every guess counts against
-   * `emailCode.maxAttempts`, the right one included, before the comparison;
-   * the guess past the limit deletes the row. The comparison is of keyed
-   * hashes, in constant time.
+   * The rows a code or link for `email` is checked against, newest first: the
+   * newest one, or with `emailCode.activeCodes` above 1, the newest that many.
+   */
+  private async oneTimeCodeRows(email: string): Promise<MagicLinkTokenRow[]> {
+    const { activeCodes } = this.config.emailCode;
+    if (activeCodes === 1) {
+      const row = await this.userProvider.findMagicLinkTokenByEmail(email);
+      return row ? [row] : [];
+    }
+    return await this.userProvider.listMagicLinkTokensByEmail(email, activeCodes);
+  }
+
+  /**
+   * Deletes row `id` and reports whether this call is the one that deleted it
+   * (`userProvider.claimMagicLinkToken`). With `emailCode.activeCodes` above 1,
+   * a successful claim also deletes every other code for `email`, so using one
+   * code ends them all. Callers that verified with `claim: false` claim here.
+   */
+  async claimOneTimeCode(email: string, id: number): Promise<boolean> {
+    if (!(await this.userProvider.claimMagicLinkToken(id))) {
+      return false;
+    }
+    if (this.config.emailCode.activeCodes > 1) {
+      await this.userProvider.deleteMagicLinkToken(email);
+    }
+    return true;
+  }
+
+  /**
+   * Checks a typed code against the outstanding codes for `email` (one, unless
+   * `emailCode.activeCodes` is above 1), and on a match deletes them, so a code
+   * works once. Every guess counts against `emailCode.maxAttempts`, the right
+   * one included, before the comparison; the guess past the limit deletes the
+   * codes. With several live codes, each guess counts against every one of
+   * them and is refused once any is spent, so they share one budget. The
+   * comparison is of keyed hashes, in constant time, against every live code.
    *
-   * `claim: false` leaves the row for the caller to claim (with
-   * `userProvider.claimMagicLinkToken`) inside a transaction of its own.
+   * `claim: false` leaves the rows for the caller to claim (with
+   * `claimOneTimeCode`) inside a transaction of its own.
    */
   async verifyOneTimeCode(
     email: string,
@@ -567,51 +613,81 @@ export class AuthManager {
     | { status: "invalid" | "expired" | "too_many_attempts" }
   > {
     const { expiresInMinutes, maxAttempts } = this.config.emailCode;
-    const row = await this.userProvider.findMagicLinkTokenByEmail(email);
-    if (!row) {
+    const rows = await this.oneTimeCodeRows(email);
+    if (rows.length === 0) {
       // Hashed anyway, so an address with no code costs what a wrong code does.
       oneTimeSecretMatches("pin", email, null, code);
       return { status: "invalid" };
     }
 
-    const issuedAt = expiryMs(row.createdAt);
-    if (issuedAt + expiresInMinutes * 60_000 <= Date.now()) {
+    const live = rows.filter(
+      (row) => expiryMs(row.createdAt) + expiresInMinutes * 60_000 > Date.now(),
+    );
+    if (live.length === 0) {
       oneTimeSecretMatches("pin", email, null, code);
       return { status: "expired" };
     }
 
-    if (!(await countCodeAttempt(row.id, issuedAt, maxAttempts, expiresInMinutes))) {
-      await this.userProvider.claimMagicLinkToken(row.id);
+    let allowed = true;
+    for (const row of live) {
+      if (!(await countCodeAttempt(row.id, expiryMs(row.createdAt), maxAttempts, expiresInMinutes))) {
+        allowed = false;
+      }
+    }
+    if (!allowed) {
+      if (this.config.emailCode.activeCodes === 1) {
+        await this.userProvider.claimMagicLinkToken(live[0].id);
+      } else {
+        await this.userProvider.deleteMagicLinkToken(email);
+      }
       return { status: "too_many_attempts" };
     }
 
-    if (!oneTimeSecretMatches("pin", email, row.pin, code)) {
+    // Every live code is compared, so the time taken does not say which matched.
+    let match: MagicLinkTokenRow | null = null;
+    for (const row of live) {
+      if (oneTimeSecretMatches("pin", email, row.pin, code)) {
+        match ??= row;
+      }
+    }
+    if (!match) {
       return { status: "invalid" };
     }
 
-    if (options.claim !== false && !(await this.userProvider.claimMagicLinkToken(row.id))) {
+    if (options.claim !== false && !(await this.claimOneTimeCode(email, match.id))) {
       // A concurrent request with the same code got there first.
       return { status: "invalid" };
     }
 
-    return { status: "ok", row };
+    return { status: "ok", row: match };
   }
 
   /**
    * The link counterpart of `verifyOneTimeCode`, for
    * `/auth/sign-in/magic-link`: valid for `emailCode.linkExpiresInMinutes`,
-   * single use. Not attempt-counted: a 256-bit token is not guessed.
+   * single use. Not attempt-counted: a 256-bit token is not guessed. With
+   * `emailCode.activeCodes` above 1, the link of any outstanding code works,
+   * and using it deletes them all.
    */
   async verifyMagicLinkToken(email: string, token: unknown): Promise<boolean> {
-    const row = await this.userProvider.findMagicLinkTokenByEmail(email);
-    const matches = oneTimeSecretMatches("link", email, row?.token, token);
-    if (!row || !matches) {
+    const rows = await this.oneTimeCodeRows(email);
+    if (rows.length === 0) {
+      oneTimeSecretMatches("link", email, undefined, token);
       return false;
     }
-    const issuedAt = expiryMs(row.createdAt);
+    let match: MagicLinkTokenRow | null = null;
+    for (const row of rows) {
+      if (oneTimeSecretMatches("link", email, row.token, token)) {
+        match ??= row;
+      }
+    }
+    if (!match) {
+      return false;
+    }
+    const issuedAt = expiryMs(match.createdAt);
     if (issuedAt + this.config.emailCode.linkExpiresInMinutes * 60_000 <= Date.now()) {
       return false;
     }
-    return await this.userProvider.claimMagicLinkToken(row.id);
+    return await this.claimOneTimeCode(email, match.id);
   }
 }
