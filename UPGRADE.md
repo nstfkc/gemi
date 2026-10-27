@@ -1,3 +1,9 @@
+# Unreleased
+
+## Router: a shallow navigation sent right after a route commits is no longer refetched
+
+- **Bug fix (regression in 0.163.1):** a shallow `push`/`replace` within the same views sent from a layout effect as a route commits (for example a held search write) was compared against the previous route's views, treated as a navigation to other views and fetched again. It now keeps the data on screen as before. Follow-up to #1048.
+
 # Upgrading from 0.163.0 to 0.163.1
 
 ## Router: a second click on a link that is still loading no longer renders the target without data (#1048)

@@ -2,6 +2,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useInsertionEffect,
   useRef,
   useState,
   StrictMode,
@@ -267,8 +268,14 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
   // The views on screen, for the subscriber below, whose closure outlives the
   // render it was created in.
+  //
+  // Recorded in an insertion effect, which runs while the commit mutates the
+  // DOM, before any layout effect in the tree. A passive (or layout) effect
+  // here runs after the routes' own layout effects, so a shallow navigation
+  // sent from one of them right after a route commits was measured against
+  // the previous route's views and fetched again.
   const committedViewsRef = useRef(routeState.views);
-  useEffect(() => {
+  useInsertionEffect(() => {
     committedViewsRef.current = routeState.views;
   }, [routeState.views]);
 
