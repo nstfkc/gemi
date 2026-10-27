@@ -534,31 +534,38 @@ export class AuthManager {
    *
    * With `emailCode.activeCodes` at 1 (the default) it replaces any
    * outstanding code. Above 1 it keeps the newest `activeCodes - 1` codes whose
-   * code or link can still be used, and deletes the rest.
+   * code or link can still be used, and deletes the rest. A kept code with the
+   * same code or link as the new one (a fixed `generateCode`, or a chance
+   * collision) is deleted too, so the newest issue wins rather than hitting the
+   * table's unique constraints.
    */
   async issueOneTimeCode(email: string, length: number) {
     const { activeCodes, expiresInMinutes, linkExpiresInMinutes } = this.config.emailCode;
+
+    const token = await this.config.generateMagicLinkToken(email);
+    const custom = await this.config.generateCode(email);
+    const pin = typeof custom === "string" && custom !== "" ? custom : randomDigits(length);
+    const tokenHash = hashOneTimeSecret("link", email, token);
+    const pinHash = hashOneTimeSecret("pin", email, pin);
+
     if (activeCodes === 1) {
       await this.userProvider.deleteMagicLinkToken(email);
     } else {
       const lifetime = Math.max(expiresInMinutes, linkExpiresInMinutes) * 60_000;
       const rows = await this.userProvider.listMagicLinkTokensByEmail(email, activeCodes - 1);
-      const keep = rows.filter((row) => expiryMs(row.createdAt) + lifetime > Date.now());
+      const keep = rows.filter(
+        (row) =>
+          expiryMs(row.createdAt) + lifetime > Date.now() &&
+          row.pin !== pinHash &&
+          row.token !== tokenHash,
+      );
       await this.userProvider.deleteMagicLinkTokensExcept(
         email,
         keep.map((row) => row.id),
       );
     }
 
-    const token = await this.config.generateMagicLinkToken(email);
-    const custom = await this.config.generateCode(email);
-    const pin = typeof custom === "string" && custom !== "" ? custom : randomDigits(length);
-
-    await this.userProvider.createMagicLinkToken({
-      email,
-      token: hashOneTimeSecret("link", email, token),
-      pin: hashOneTimeSecret("pin", email, pin),
-    });
+    await this.userProvider.createMagicLinkToken({ email, token: tokenHash, pin: pinHash });
 
     return { email, pin, token };
   }
