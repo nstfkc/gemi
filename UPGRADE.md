@@ -1,3 +1,9 @@
+# Unreleased
+
+## Rate limiting: `clientIp` accepts any typed request (#1053)
+
+`clientIp(req)` and the rate-limit `key` callback now take `HttpRequest<any, any>`, so a controller's typed request (`HttpRequest<{ form?: string }, { siteSlug: string }>`) is accepted without a cast. Types only; nothing to change.
+
 # Upgrading from 0.163.1 to 0.163.2
 
 ## Router: a shallow navigation sent right after a route commits is no longer refetched
