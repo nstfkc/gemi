@@ -183,7 +183,7 @@ export async function enforceCodeRateLimits(
 ) {
   const limiter = codeLimiter();
   const checks: Array<[string, CodeRateLimit | undefined]> = [
-    [`auth:code-${scope}:ip:${limiterKeyPart(clientIp(req as HttpRequest))}`, limits.perIp],
+    [`auth:code-${scope}:ip:${limiterKeyPart(clientIp(req))}`, limits.perIp],
   ];
   if (email !== null) {
     checks.push([`auth:code-${scope}:email:${limiterKeyPart(email)}`, limits.perEmail]);
