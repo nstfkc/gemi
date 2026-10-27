@@ -74,6 +74,10 @@ function restoreScroll(action: Action | null = null, _pathname = "no path") {
   sh?.delete(key);
 }
 
+function sameViews(a: string[] = [], b: string[] = []) {
+  return a.length === b.length && a.every((view, i) => view === b[i]);
+}
+
 interface RouteProps {
   componentPath: string;
   pathname: string;
@@ -261,6 +265,13 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   // after a navigation that ended in `is404`.
   const renderedRouteRef = useRef(isNotFoundDocument ? "" : initialRenderedRoute(routeState));
 
+  // The views on screen, for the subscriber below, whose closure outlives the
+  // render it was created in.
+  const committedViewsRef = useRef(routeState.views);
+  useEffect(() => {
+    committedViewsRef.current = routeState.views;
+  }, [routeState.views]);
+
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
@@ -280,7 +291,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         return;
       }
 
-      if (state?.shallow) {
+      // A shallow navigation keeps the data on screen, so it can only stay
+      // shallow while the views do too: a different set of views has nothing
+      // under the current data and would mount with empty props (#1048).
+      // Anything else is fetched like a normal navigation.
+      if (state?.shallow && sameViews(views, committedViewsRef.current)) {
         setRouteState((state) => ({
           ...state,
           ...routerState,
