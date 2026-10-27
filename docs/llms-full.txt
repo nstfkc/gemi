@@ -9067,6 +9067,29 @@ A native tool registered with `fromTool` keeps its function:
 
 A route exposed with `fromApiRoute` takes `requiresApproval: true` or `false` only.
 
+## After a reload
+
+The question outlives the page that was watching when it was asked. The assistant message that ended `awaiting-input` keeps the open calls in `pending`, signatures and `path` included, so a page opened later (a reload, a second tab, another instance) can answer them without a live run to attach to.
+
+Hand the thread to `useChat` as usual:
+
+```tsx
+// The app's route, server-side.
+const initialMessages = await new ChatController().readThread(threadId);
+
+// The page.
+const chat = useChat("/chat", { threadId, initialMessages });
+// chat.status === "awaiting-input", chat.pending holds the call,
+// and chat.approve(call.toolCallId, true) answers it.
+```
+
+- `useChat` starts with the calls that are still open in `initialMessages`, and `setMessages` takes them from the messages it is given, so a re-read thread also drops a question another tab answered. `openPending(messages)` (from `gemi/ai/client`) is the same read for code outside the hook.
+- A call that has a result since (answered, refused by a later turn, closed as `interrupted`) is not handed back, and the turn that answers or refuses the calls takes them off the message.
+- The signatures are bound to the turn's owner (`runOwner`). Anyone else holding the thread sees the question but cannot answer it.
+- Two tabs answering the same call: the first wins. The second gets `invalid_tool_result`, its turn runs nothing, and the model is not called again.
+- A stateless chat restored from the app's own storage has no stored copy: persist `pending` beside `messages` and `cursor` and pass it as `initialPending`.
+- The thread store must keep the whole message, as it already must for `usage` and `outputTruncated`.
+
 ## Related
 
 - [MCP Server](./mcp.md): approval by elicitation for remote clients.
@@ -9734,7 +9757,7 @@ try {
 
 ## Approvals and questions
 
-A server turn does not answer the calls it raises. A turn that ends `awaiting-input` resolves with `finishReason: "awaiting-input"` and the calls in `pending`, and they stay on the thread, signed for the turn's owner. Either the user answers them in the chat like any other approval, or the caller answers with another server turn:
+A server turn does not answer the calls it raises. A turn that ends `awaiting-input` resolves with `finishReason: "awaiting-input"` and the calls in `pending`, and they stay on the thread, signed for the turn's owner: the assistant message keeps them in `pending`, so a chat opened on the thread later starts with them (see [After a reload](./ai-tool-approvals.md#after-a-reload)). Either the user answers them in the chat like any other approval, or the caller answers with another server turn:
 
 ```typescript
 const first = await turn.result();

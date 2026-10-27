@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RPC } from "../client/rpc";
 import { useParams } from "../client/useParams";
-import { applyFrame, initialChatState, markAborted, type ChatState } from "./client/reducer";
+import {
+  applyFrame,
+  initialChatState,
+  markAborted,
+  openPending,
+  type ChatState,
+} from "./client/reducer";
 import { decodeSSE } from "./client/sse";
 import type {
   AgentError,
@@ -69,8 +75,22 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    *  (`new MemoryAgentStore({ clientOwnedIds: true })`) takes one the client
    *  made up. */
   threadId?: string;
-  /** Server-rendered or restored history. */
+  /**
+   * Server-rendered or restored history.
+   *
+   * A thread whose last turn ended `awaiting-input` comes back with the open
+   * calls on its messages (`AgentMessage.pending`), and the hook starts with
+   * them in `pending` and `status: "awaiting-input"`, so a reload or a second
+   * tab can answer the question it shows (#1052).
+   */
   initialMessages?: AgentMessage<ToolsOf<P>, OutputOf<P>>[];
+  /**
+   * The open calls to start with, when the app keeps them itself. Defaults to
+   * what `initialMessages` say is still open (`openPending`), which is what
+   * `readThread` hands back. Only needed by an app that restores a stateless
+   * chat from its own storage: persist `pending` beside `messages` and `cursor`.
+   */
+  initialPending?: PendingToolCall<ToolsOf<P>>[];
   /**
    * Where the client that produced `initialMessages` left off, so `/attach` can
    * be asked for the tail rather than the whole run.
@@ -508,6 +528,35 @@ export type AgentAttachBody = { threadId: string; cursor: number; runId?: string
  */
 export type AgentStopBody = { runId?: string; threadId?: string; clientRunId?: string };
 
+/**
+ * What `pending` is after `setMessages` (#1052).
+ *
+ * A re-read thread says itself what is open (`AgentMessage.pending`), and that
+ * wins: it is the server's word, and it is empty for a question another tab
+ * has answered since. Messages this chat built from frames carry no copy, so
+ * an app that only rearranges its own list keeps what the `awaiting-input`
+ * frame said, for the calls that are still open in the list it set.
+ */
+function restatedPending(
+  state: ChatState<any, any>,
+  messages: AgentMessage<any, any>[],
+): PendingToolCall[] {
+  const stored = openPending(messages);
+  if (stored.length > 0 || state.pending.length === 0) return stored;
+  const resolved = new Set<string>();
+  const called = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-result") resolved.add(part.toolCallId);
+      if (part.type === "tool-call") called.add(part.toolCallId);
+    }
+  }
+  return state.pending.filter((call: PendingToolCall) => {
+    const host = call.path?.[0] ?? call.toolCallId;
+    return called.has(host) && !resolved.has(host);
+  });
+}
+
 let localIdCounter = 0;
 
 /** Ids the client mints: messages it authored, and the correlation id it names a
@@ -788,6 +837,7 @@ export function useChat<P extends keyof AgentRoutes>(
   const {
     threadId: initialThreadId,
     initialMessages,
+    initialPending,
     cursor: initialCursor,
     attach: attachOnMount = true,
     reattachOnFocus = false,
@@ -824,6 +874,9 @@ export function useChat<P extends keyof AgentRoutes>(
   if (stateRef.current === null) {
     stateRef.current = initialChatState<any, any>({
       messages: initialMessages,
+      pending: (initialPending ?? (initialMessages && openPending(initialMessages))) as
+        | PendingToolCall<any>[]
+        | undefined,
       threadId: initialThreadId,
       seq: initialCursor?.seq,
       cursorRunId: initialCursor?.runId,
@@ -1381,7 +1434,12 @@ export function useChat<P extends keyof AgentRoutes>(
 
   const setMessages = useCallback(
     (messages: AgentMessage<ToolsOf<P>, OutputOf<P>>[]) => {
-      commit({ ...stateRef.current!, messages: messages as AgentMessage<any, any>[] });
+      const current = stateRef.current!;
+      commit({
+        ...current,
+        messages: messages as AgentMessage<any, any>[],
+        pending: restatedPending(current, messages as AgentMessage<any, any>[]),
+      });
     },
     [commit],
   );

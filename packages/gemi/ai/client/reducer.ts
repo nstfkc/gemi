@@ -138,6 +138,36 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
 }
 
 /**
+ * The calls a stored transcript is still waiting on (#1052): every
+ * `AgentMessage.pending` entry whose tool call has no result yet.
+ *
+ * What a page opened after the turn ended needs in order to answer it. The
+ * `awaiting-input` frame went to whichever client was watching then; the
+ * message kept a copy, and this reads it back. A call that has a result since
+ * (answered, refused by a later turn, closed as interrupted) is left out, so a
+ * thread read late does not hand back a question nobody can answer any more.
+ * A sub-agent's question is open while the top-level call it is nested under
+ * (`path[0]`) is.
+ */
+export function openPending<T extends ToolShapes = ToolShapes, O = unknown>(
+  messages: readonly AgentMessage<T, O>[],
+): PendingToolCall<T>[] {
+  const resolved = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-result") resolved.add(part.toolCallId);
+    }
+  }
+  const open: PendingToolCall<T>[] = [];
+  for (const message of messages) {
+    for (const call of message.pending ?? []) {
+      if (!resolved.has(call.path?.[0] ?? call.toolCallId)) open.push(call);
+    }
+  }
+  return open;
+}
+
+/**
  * Apply one frame.
  *
  * `now` is an argument rather than a `Date.now()` call so the reducer stays a

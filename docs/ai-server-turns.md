@@ -76,7 +76,7 @@ try {
 
 ## Approvals and questions
 
-A server turn does not answer the calls it raises. A turn that ends `awaiting-input` resolves with `finishReason: "awaiting-input"` and the calls in `pending`, and they stay on the thread, signed for the turn's owner. Either the user answers them in the chat like any other approval, or the caller answers with another server turn:
+A server turn does not answer the calls it raises. A turn that ends `awaiting-input` resolves with `finishReason: "awaiting-input"` and the calls in `pending`, and they stay on the thread, signed for the turn's owner: the assistant message keeps them in `pending`, so a chat opened on the thread later starts with them (see [After a reload](./ai-tool-approvals.md#after-a-reload)). Either the user answers them in the chat like any other approval, or the caller answers with another server turn:
 
 ```typescript
 const first = await turn.result();

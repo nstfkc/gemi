@@ -1,3 +1,16 @@
+# Unreleased
+
+## AI: a question still open after a reload can be answered (#1052)
+
+**Fix with a new optional API (minor). Nothing to change in apps that hand `readThread` to `useChat({ initialMessages })`.** See [AI Tool Approvals → After a reload](docs/ai-tool-approvals.md#after-a-reload).
+
+- The assistant message that ends `awaiting-input` now carries the open calls in `AgentMessage.pending` (signatures and `path` included), and it is stored with the message. The turn that answers or refuses them takes them off again, or replaces them with the questions a re-entered tool asked next.
+- `useChat` starts with the calls still open in `initialMessages` (`status: "awaiting-input"`), so a reloaded page or a second tab can answer the question it shows. Before, `pending` started empty and `approve`/`answer` failed with `invalid_tool_result`.
+- New `useChat` option `initialPending`, for a stateless chat restored from the app's own storage, and new `openPending(messages)` in `gemi/ai/client`.
+- `setMessages` now also sets `pending`: from the messages' stored copies when they have any, else the calls already held that are still open in the new list. `setMessages([])` clears `pending`.
+- A turn that is only answers, to calls that are all answered already (a second tab, a retried submit), now ends with an `invalid_tool_result` error and no model step. It used to call the model again on the same history.
+- Thread stores must keep the whole message (most store it as JSON and need nothing). Existing threads have no stored copy; a question asked before the upgrade still can't be answered after a reload.
+
 # Upgrading from 0.163.1 to 0.163.2
 
 ## Router: a shallow navigation sent right after a route commits is no longer refetched

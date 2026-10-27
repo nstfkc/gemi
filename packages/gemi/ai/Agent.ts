@@ -2971,6 +2971,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly signingRunId: string;
   private readonly pathPrefix: string[];
   private readonly onPending: "escalate" | "deny";
+  /** How many tool calls were open when the client's turn arrived. */
+  private openedWith = 0;
   /**
    * Sub-runs that have not yet written their transcript to the tool call.
    *
@@ -3210,6 +3212,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       } else if (escalated.length > 0) {
         this.finishReason = "awaiting-input";
         this.emit({ type: "awaiting-input", runId: this.runId, pending: escalated });
+      } else if (this.answersOnlyStale()) {
+        // Answers and nothing else, for calls that were all answered already:
+        // a second tab answering the question the first one did (#1052), or a
+        // retried submit. Nothing in the history changed, so a model step here
+        // would only be a second reply to the same turn.
+        this.fail({
+          code: "invalid_tool_result",
+          message:
+            "The tool calls this turn answers are no longer waiting for an answer: an earlier turn answered or refused them.",
+          retryable: false,
+        });
+        this.finishReason = "error";
       } else {
         await this.loop();
       }
@@ -3481,6 +3495,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // `awaiting-input` is terminal, and everything needed to answer it has
         // to already be on the stream when it arrives.
         this.finishReason = "awaiting-input";
+        // Kept on the message as well as sent on the frame (#1052): the frame
+        // reaches only a client watching now, and a page opened later reads
+        // the thread. See `AgentMessage.pending`.
+        if (this.depth === 0) message.pending = pending;
         await this.finalizeMessage("awaiting-input");
         this.emit({ type: "awaiting-input", runId: this.runId, pending });
         return;
@@ -5316,6 +5334,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private async ingestTurn(): Promise<PendingToolCall[]> {
     const turn = this.params.turn;
     const open = this.openCalls();
+    this.openedWith = open.length;
     /** Questions a re-entered tool asked again. The run ends on these. */
     const escalated: PendingToolCall[] = [];
 
@@ -5475,6 +5494,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           cause: "refused",
         });
       }
+
+      if (this.depth === 0) this.restatePending(open, escalated);
 
       await this.reportDeferred();
     }
@@ -5685,6 +5706,47 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     if (at >= 0) message.content[at] = call;
     this.unreported.add(message);
     return call;
+  }
+
+  /**
+   * Whether the turn is nothing but answers, to calls none of which is open.
+   * Read after `ingestTurn`, which leaves no call open, so it is asked of the
+   * history the turn arrived with.
+   */
+  private answersOnlyStale(): boolean {
+    const turn = this.params.turn;
+    if (!turn?.toolResults?.length || turn.text || turn.files?.length) return false;
+    return this.openedWith === 0;
+  }
+
+  /**
+   * Rewrites `pending` on the messages whose calls this turn answered (#1052).
+   *
+   * Every call that was open is now answered, refused, or still open because
+   * its tool asked again, and only that last kind is still waiting. So each
+   * message keeps the questions its calls asked again this turn, with their
+   * new signatures, and loses the rest: a page opened after this turn must not
+   * be handed back a question that has been answered, nor an old signature for
+   * one that was asked again.
+   */
+  private restatePending(
+    open: { message: AgentMessage; call: ToolCallPart }[],
+    escalated: PendingToolCall[],
+  ): void {
+    const calls = new Map<AgentMessage, Set<string>>();
+    for (const entry of open) {
+      let ids = calls.get(entry.message);
+      if (!ids) calls.set(entry.message, (ids = new Set()));
+      ids.add(entry.call.toolCallId);
+    }
+    for (const [original, ids] of calls) {
+      const still = escalated.filter((call) => ids.has(call.path?.[0] ?? call.toolCallId));
+      if (still.length === 0 && original.pending === undefined) continue;
+      const message = this.amend(original);
+      if (still.length > 0) message.pending = still;
+      else delete message.pending;
+      this.unreported.add(message);
+    }
   }
 
   /** Tool calls in the history with no result anywhere after them. */

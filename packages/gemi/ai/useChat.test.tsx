@@ -3020,3 +3020,113 @@ describe("per-send options and the client's key", () => {
     });
   });
 });
+
+/**
+ * #1052: the turn ended awaiting an approval and the page was reloaded. The
+ * thread read back carries the open call on its message; the hook must start
+ * holding it, so the question on screen can be answered.
+ */
+describe("a question restored from the thread", () => {
+  const call = {
+    toolCallId: "tc_1",
+    name: "refund",
+    input: { orderId: "o_1" },
+    kind: "approval" as const,
+    signature: "sig_stored",
+  };
+  const asking = (pending?: unknown[]) => ({
+    id: "m1",
+    role: "assistant",
+    content: [{ type: "tool-call", toolCallId: "tc_1", name: "refund", input: { orderId: "o_1" } }],
+    createdAt: "",
+    finishReason: "awaiting-input",
+    ...(pending ? { pending } : {}),
+  });
+  const refused = {
+    ...asking([call]),
+    content: [
+      ...asking().content,
+      { type: "tool-result", toolCallId: "tc_1", name: "refund", status: "denied", cause: "refused" },
+    ],
+  };
+  const noRun = () => new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 });
+
+  test("starts awaiting input, and approve() sends the stored signature", async () => {
+    fetchMock.mockResolvedValueOnce(noRun());
+    const { box } = mount({ threadId: "th_9", initialMessages: [asking([call])] });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(box.api.status).toBe("awaiting-input");
+    expect(box.api.pending).toEqual([call]);
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+    expect(calls()[1]![0]).toBe("/api/chat");
+    expect(bodyOf(1).turn).toEqual({
+      toolResults: [{ toolCallId: "tc_1", signature: "sig_stored", approve: true }],
+    });
+  });
+
+  test("a call the thread has a result for is not restored", async () => {
+    const { box } = mount({ attach: false, threadId: "th_9", initialMessages: [refused] });
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("initialPending wins over what the messages say", async () => {
+    const own = { ...call, signature: "sig_own" };
+    const { box } = mount({ attach: false, initialMessages: [asking([call])], initialPending: [own] });
+    expect(box.api.pending).toEqual([own]);
+  });
+
+  test("setMessages with a re-read thread drops a question another tab answered", async () => {
+    const { box } = mount({ attach: false, threadId: "th_9", initialMessages: [asking([call])] });
+    expect(box.api.status).toBe("awaiting-input");
+
+    act(() => box.api.setMessages([refused] as any));
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("setMessages with a re-read thread picks up a question asked elsewhere", async () => {
+    const { box } = mount({ attach: false, threadId: "th_9" });
+    act(() => box.api.setMessages([asking([call])] as any));
+    expect(box.api.pending).toEqual([call]);
+    expect(box.api.status).toBe("awaiting-input");
+  });
+
+  test("setMessages over the chat's own messages keeps the frame's question", async () => {
+    const toolCall = (seq: number, toolCallId: string, name: string): AgentStreamFrame => ({
+      seq,
+      event: {
+        type: "tool-call",
+        messageId: "m2",
+        part: { type: "tool-call", toolCallId, name, input: {} },
+      } as any,
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        ...ASKING.slice(0, 3),
+        toolCall(3, "tc_1", "charge"),
+        toolCall(4, "tc_2", "refundOrder"),
+        ...ASKING.slice(3).map((frame) => ({ ...frame, seq: frame.seq + 2 })),
+      ]),
+    );
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+    expect(box.api.pending).toHaveLength(2);
+
+    // The hook's own copies carry no `pending`: the frame's list stands, for
+    // the calls the list set still holds.
+    act(() => box.api.setMessages(box.api.messages.slice()));
+    expect(box.api.pending.map((call) => call.signature)).toEqual(["sig_one", "sig_two"]);
+
+    act(() => box.api.setMessages([]));
+    expect(box.api.pending).toEqual([]);
+  });
+});
