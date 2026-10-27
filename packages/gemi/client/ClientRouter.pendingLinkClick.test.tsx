@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { act, type ReactNode } from "react";
+import { act, useLayoutEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { ClientRouter } from "./ClientRouter";
@@ -42,6 +42,16 @@ function Home(props: { greeting?: string }) {
   );
 }
 function About(props: { greeting?: string }) {
+  const { replace } = useNavigate();
+  // folio's pattern: once the route has committed, a layout effect sends a
+  // search write that was held back while the push was in flight.
+  useLayoutEffect(() => {
+    if (window.location.search === "" && window.location.pathname === "/about") {
+      if ((globalThis as any).__shallowReplaceOnCommit) {
+        void replace("/about" as never, { search: { tab: "2" }, shallow: true } as never);
+      }
+    }
+  });
   return <p data-view="About">{props.greeting ?? "missing"}</p>;
 }
 function NotFound() {
@@ -102,6 +112,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   globalThis.fetch = realFetch;
+  delete (globalThis as any).__shallowReplaceOnCommit;
   window.history.replaceState(null, "", "/");
 });
 
@@ -205,5 +216,46 @@ describe("a second click on a link whose navigation is pending (#1048)", () => {
 
     expect(text("About")).toBeNull();
     expect(responses).toHaveLength(1);
+  });
+
+  test("a shallow replace sent from a layout effect right after the route commits is not fetched", async () => {
+    window.history.replaceState(null, "", "/");
+    (globalThis as any).__shallowReplaceOnCommit = true;
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          data: { "/about": { Layout: {}, About: { greeting: "hello from About" } } },
+          breadcrumbs: {},
+          prefetchedData: {},
+          meta: {},
+          i18n: value.i18n,
+          appId: "test",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    await act(async () => {
+      root = createRoot(container!);
+      root.render(
+        <ServerDataContext.Provider value={value}>
+          <ClientRouter viewImportMap={viewImportMap} RootLayout={(p: any) => <>{p.children}</>} />
+        </ServerDataContext.Provider>,
+      );
+    });
+
+    click(container.querySelector("a")!);
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(window.location.pathname).toBe("/about");
+    expect(window.location.search).toBe("?tab=2");
+    // Same views as on screen: the shallow replace keeps the data, no refetch.
+    expect(urls.filter((url) => url.includes("about"))).toHaveLength(1);
+    expect(text("About")).toBe("hello from About");
   });
 });
