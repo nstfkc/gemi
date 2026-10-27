@@ -20,6 +20,13 @@ class MemoryProvider {
   nextId = 1;
 
   async createMagicLinkToken(args: { email: string; token: string; pin: string }) {
+    // The MagicLinkToken table's @@unique([token, email]) and @@unique([pin, email]).
+    for (const row of this.rows) {
+      if (row.email !== args.email) continue;
+      if (row.token === args.token || row.pin === args.pin) {
+        throw new Error("Unique constraint failed on MagicLinkToken");
+      }
+    }
     const row = { id: this.nextId++, ...args, createdAt: new Date() };
     this.rows.push(row);
     return row;
@@ -214,6 +221,81 @@ describe("activeCodes: 3", () => {
     expect(await auth.claimOneTimeCode(EMAIL, result.row.id)).toBe(true);
     expect(provider.rows).toHaveLength(0);
     expect(await auth.claimOneTimeCode(EMAIL, result.row.id)).toBe(false);
+  });
+});
+
+describe("a fixed or repeated code (#1046 follow-up)", () => {
+  test("two requests with a fixed generateCode: the second succeeds and the code works", async () => {
+    const auth = new AuthManager(
+      { emailCode: { activeCodes: 3 }, generateCode: () => "424242" },
+      provider as never,
+    );
+    const first = await auth.issueOneTimeCode(EMAIL, 6);
+    const second = await auth.issueOneTimeCode(EMAIL, 6);
+
+    expect(first.pin).toBe("424242");
+    expect(second.pin).toBe("424242");
+    // The older row with the same code is replaced by the newer one.
+    expect(provider.rows.map((row) => row.id)).toEqual([2]);
+    expect(await auth.verifyMagicLinkToken(EMAIL, first.token)).toBe(false);
+    expect((await auth.verifyOneTimeCode(EMAIL, "424242")).status).toBe("ok");
+    expect(provider.rows).toHaveLength(0);
+  });
+
+  test("a fixed code keeps one row however often it is requested", async () => {
+    const auth = new AuthManager(
+      { emailCode: { activeCodes: 3 }, generateCode: () => "424242" },
+      provider as never,
+    );
+    for (let i = 0; i < 5; i++) await auth.issueOneTimeCode(EMAIL, 6);
+
+    expect(provider.rows.map((row) => row.id)).toEqual([5]);
+    expect((await auth.verifyOneTimeCode(EMAIL, "424242")).status).toBe("ok");
+  });
+
+  test("a random code that repeats a kept one replaces only that one", async () => {
+    const pins = ["111111", "222222", "111111"];
+    const auth = new AuthManager(
+      { emailCode: { activeCodes: 3 }, generateCode: () => pins.shift() },
+      provider as never,
+    );
+    const a = await auth.issueOneTimeCode(EMAIL, 6);
+    const b = await auth.issueOneTimeCode(EMAIL, 6);
+    const c = await auth.issueOneTimeCode(EMAIL, 6);
+
+    expect(provider.rows.map((row) => row.id).sort()).toEqual([2, 3]);
+    expect(await auth.verifyMagicLinkToken(EMAIL, a.token)).toBe(false);
+    expect((await auth.verifyOneTimeCode(EMAIL, b.pin, { claim: false })).status).toBe("ok");
+    const result = await auth.verifyOneTimeCode(EMAIL, c.pin);
+    expect(result).toMatchObject({ status: "ok", row: { id: 3 } });
+  });
+
+  test("a fixed magic-link token is replaced the same way", async () => {
+    const auth = new AuthManager(
+      {
+        emailCode: { activeCodes: 3 },
+        generateMagicLinkToken: () => "fixed-token",
+      },
+      provider as never,
+    );
+    await auth.issueOneTimeCode(EMAIL, 6);
+    const second = await auth.issueOneTimeCode(EMAIL, 6);
+
+    expect(provider.rows.map((row) => row.id)).toEqual([2]);
+    expect((await auth.verifyOneTimeCode(EMAIL, second.pin, { claim: false })).status).toBe("ok");
+    expect(await auth.verifyMagicLinkToken(EMAIL, "fixed-token")).toBe(true);
+  });
+
+  test("activeCodes: 1 with a fixed code still replaces the row", async () => {
+    const auth = new AuthManager(
+      { emailCode: {}, generateCode: () => "424242" },
+      provider as never,
+    );
+    await auth.issueOneTimeCode(EMAIL, 6);
+    await auth.issueOneTimeCode(EMAIL, 6);
+
+    expect(provider.rows.map((row) => row.id)).toEqual([2]);
+    expect((await auth.verifyOneTimeCode(EMAIL, "424242")).status).toBe("ok");
   });
 });
 
