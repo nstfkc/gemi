@@ -1,3 +1,13 @@
+# Unreleased
+
+## Router: a second click on a link that is still loading no longer renders the target without data (#1048)
+
+**Fix (patch). Nothing to change in apps.**
+
+- Clicking a `Link` again while its own navigation is still loading is now ignored: no second history entry, no second request. It used to be pushed as a shallow navigation, which mounted the target view with the previous page's data (empty props).
+- `Link` decides whether a click is shallow from the route on screen, not from `window.location`.
+- A shallow navigation (`push(path, { shallow: true })`, `Link`, `useSearchParams`) whose target renders different views from the ones on screen is now fetched like a normal navigation instead of mounting those views with no data. Shallow navigations within the same views are unchanged.
+
 # Upgrading from 0.162.0 to 0.163.0
 
 ## Auth: `emailCode.activeCodes` keeps earlier one-time codes valid (#1046)

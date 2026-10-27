@@ -13,7 +13,6 @@ import {
 import { applyParams } from "../utils/applyParams";
 import { isAbsoluteUrl, type AbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
-import { splitLocalePrefix } from "../i18n/localePrefix";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
@@ -324,10 +323,16 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
           e.preventDefault();
           return;
         }
-        const currentPath = splitLocalePrefix(
-          window.location.pathname,
-          urlLocaleSegment ? [urlLocaleSegment] : [],
-        ).pathname;
+        // Already heading there: `history.push` moved the URL to this link's
+        // target and its payload is still loading. Pushing again would only
+        // add a duplicate history entry and restart the request (#1048).
+        if (isTransitioning && resolvedPath === targetPath) {
+          const { pathname, search, hash: urlHash } = window.location;
+          if (`${pathname}${search}${urlHash}` === (targetHref || "/")) {
+            e.preventDefault();
+            return;
+          }
+        }
 
         if (hash === "") {
           e.preventDefault();
@@ -336,7 +341,11 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
           hash,
           search,
           params,
-          shallow: path === currentPath,
+          // Against the committed route, never `window.location`: while a
+          // navigation is pending the URL already names its target, and a
+          // shallow push there would mount the target's views on the previous
+          // page's data (#1048).
+          shallow: path === location.pathname,
         } as unknown as never);
       }}
       onMouseEnter={prefetchOn(onMouseEnter, pointerArrived)}
