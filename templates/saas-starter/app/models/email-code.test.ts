@@ -917,6 +917,57 @@ function suite(label: string, url?: string) {
         error: "Invalid token",
       });
     });
+
+    test("activeCodes with a fixed generateCode: a repeat request replaces the row", async () => {
+      application.instance(
+        AuthManager,
+        new AuthManager(
+          {
+            emailCode: {
+              enabled: true,
+              createUser: true,
+              activeCodes: 3,
+              send: async (args) => {
+                sent.push({
+                  email: args.email,
+                  code: args.code,
+                  token: args.token,
+                  isNewUser: args.isNewUser,
+                });
+              },
+            },
+            generateCode: (email) => (email === "tester@x.test" ? "424242" : undefined),
+            onMagicLinkCreated: async (_user: any, args: any) => {
+              magicLinks.push(args);
+            },
+          },
+          new UserProvider({
+            User: UserModel,
+            Session: SessionModel,
+            Account: AccountModel,
+            PasswordResetToken: PasswordResetTokenModel,
+            MagicLinkToken: MagicLinkTokenModel,
+            OrganizationInvitation: OrganizationInvitationModel,
+            SocialAccount: SocialAccountModel,
+          }),
+        ) as never,
+      );
+      await seedUser("tester@x.test");
+      // The unique (pin, email) index would refuse a second row with the same code.
+      await post("createMagicLinkToken", { email: "tester@x.test" });
+      await post("createMagicLinkToken", { email: "tester@x.test" });
+      await post("requestEmailCode", { email: "tester@x.test" });
+
+      expect(magicLinks.map((l) => l.pin)).toEqual(["424242", "424242"]);
+      expect(sent.map((s) => s.code)).toEqual(["424242"]);
+      expect(await codeRows()).toHaveLength(1);
+      expect(await clickLink("tester@x.test", magicLinks[0].token)).toEqual({
+        error: "Invalid token",
+      });
+      const result = await post("signInWithPinV2", { email: "tester@x.test", pin: "424242" });
+      expect(result.user.email).toBe("tester@x.test");
+      expect(await codeRows()).toEqual([]);
+    });
   });
 }
 
