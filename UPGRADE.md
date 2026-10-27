@@ -11,6 +11,12 @@
 - A turn that is only answers, to calls that are all answered already (a second tab, a retried submit), now ends with an `invalid_tool_result` error and no model step. It used to call the model again on the same history.
 - Thread stores must keep the whole message (most store it as JSON and need nothing). Existing threads have no stored copy; a question asked before the upgrade still can't be answered after a reload.
 
+# Upgrading from 0.163.2 to 0.163.3
+
+## Rate limiting: `clientIp` accepts any typed request (#1053)
+
+`clientIp(req)` and the rate-limit `key` callback now take `HttpRequest<any, any>`, so a controller's typed request (`HttpRequest<{ form?: string }, { siteSlug: string }>`) is accepted without a cast. Types only; nothing to change.
+
 # Upgrading from 0.163.1 to 0.163.2
 
 ## Router: a shallow navigation sent right after a route commits is no longer refetched

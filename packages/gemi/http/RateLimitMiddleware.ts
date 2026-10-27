@@ -44,7 +44,7 @@ export interface RateLimitMiddlewareConfig {
    * })
    * ```
    */
-  key?: (req: HttpRequest) => string;
+  key?: (req: HttpRequest<any, any>) => string;
   /** Set `X-RateLimit-*` response headers. Defaults to `true`. */
   headers?: boolean;
 }
@@ -139,7 +139,7 @@ function resolveLimiter(): RateLimiter | null {
  * whatever the client sent. When you have something better (a session, an API
  * key), pass `key` in the config.
  */
-export function clientIp(req: HttpRequest) {
+export function clientIp(req: HttpRequest<any, any>): string {
   // A tool call's synthetic request has no forwarding headers; it spends the
   // budget of the user whose run made it. Checked first so a nested dispatch
   // keeps the address of the request that started the chain.
