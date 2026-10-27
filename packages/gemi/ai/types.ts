@@ -489,6 +489,22 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    */
   runId?: string;
   /**
+   * The calls this assistant message is waiting on, as the `awaiting-input`
+   * frame listed them: signatures and `path` included (#1052).
+   *
+   * On a message that ended `awaiting-input`, so the store keeps what the frame
+   * told the client watching at the time, and a page opened later (a reload, a
+   * second tab) can answer the question it shows. `useChat` reads it from
+   * `initialMessages` and `setMessages` (see `openPending`). The turn that
+   * answers or refuses the calls takes it off again, or replaces it with the
+   * questions a re-entered tool asked next.
+   *
+   * The signatures are bound to the run's owner (`runOwner`), so a copy in
+   * anyone else's hands answers nothing. Only on top-level messages: a
+   * sub-agent's question is listed on the parent's message, with its `path`.
+   */
+  pending?: PendingToolCall<T>[];
+  /**
    * The client's own id for a user message it sent, kept after the server's
    * `message-id` renames `id` to the stored one (#818).
    *

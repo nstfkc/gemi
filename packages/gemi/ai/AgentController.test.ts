@@ -29,6 +29,7 @@ import { fakeProvider } from "./providers/fakeProvider";
 import { toResponsesInput } from "./providers/request";
 import { s } from "./Schema";
 import { StubAgentRun } from "./store/stubAgentRun";
+import { openPending } from "./client/reducer";
 import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -3829,5 +3830,142 @@ describe("skills()", () => {
     await new Chat().stream(jsonRequest({ turn: { text: "hi" } }));
     expect(calls[0]!.skills).toEqual([pack]);
     run.finish();
+  });
+});
+
+/**
+ * #1052: a turn ended awaiting an approval, and the page was reloaded (or the
+ * chat opened in another tab, or on another instance) before it was answered.
+ * The run is over, so `attach` has nothing; the thread is what is left, and it
+ * has to be enough to answer the question.
+ */
+describe("a question still open when the page is reloaded", () => {
+  function setup() {
+    const refunded: string[] = [];
+    const refund = AgentTool.create({
+      name: "refund",
+      description: "Refund an order",
+      inputSchema: s.object({ orderId: s.string() }),
+      requiresApproval: true,
+      execute: async ({ orderId }: { orderId: string }) => {
+        refunded.push(orderId);
+        return { refunded: orderId };
+      },
+    });
+    const store = new MemoryAgentStore();
+    let owner: string | null = "user:1";
+    // A new controller class per "process": its own live runs, the shared store.
+    const instance = (...scripts: ProviderEvent[][]) => {
+      const agent = Agent.create({
+        name: "support",
+        provider: fakeProvider(...scripts),
+        tools: [refund],
+      });
+      return class extends AgentController {
+        agent = agent;
+        liveRuns = new MemoryLiveRuns();
+        store = store;
+        protected runOwner() {
+          return owner;
+        }
+      };
+    };
+    return { refunded, store, instance, as: (next: string | null) => (owner = next) };
+  }
+
+  test("the thread read back hands the open call to the new page, which can answer it", async () => {
+    const { refunded, store, instance } = setup();
+    const { threadId } = await store.createThread({});
+    const First = instance([
+      { type: "tool-call", toolCallId: "c1", name: "refund", args: '{"orderId":"o1"}' },
+      finish(),
+    ]);
+    const asked = await eventsOf(
+      await new First().stream(jsonRequest({ threadId, text: "refund o1" })),
+    );
+    await settle();
+    const frame = asked.find((event) => event.type === "awaiting-input") as any;
+
+    const Reloaded = instance([{ type: "text-delta", delta: "refunded" }, finish()]);
+    // Nothing to attach to: the run ended, and this is another process anyway.
+    expect((await new Reloaded().attach(jsonRequest({ threadId }))).status).toBe(404);
+
+    const read = (await new Reloaded().readThread(threadId))!;
+    const pending = openPending(read);
+    expect(pending).toEqual(frame.pending);
+
+    const answered = await eventsOf(
+      await new Reloaded().stream(
+        jsonRequest({
+          threadId,
+          toolResults: [{ toolCallId: "c1", signature: pending[0]!.signature, approve: true }],
+        }),
+      ),
+    );
+    await settle();
+    expect(answered.find((event) => event.type === "error")).toBeUndefined();
+    expect(refunded).toEqual(["o1"]);
+    expect(openPending((await new Reloaded().readThread(threadId))!)).toEqual([]);
+  });
+
+  test("a second tab answering the same restored call is refused, and runs nothing", async () => {
+    const { refunded, store, instance } = setup();
+    const { threadId } = await store.createThread({});
+    const First = instance([
+      { type: "tool-call", toolCallId: "c1", name: "refund", args: '{"orderId":"o1"}' },
+      finish(),
+    ]);
+    await eventsOf(await new First().stream(jsonRequest({ threadId, text: "refund o1" })));
+    await settle();
+
+    const Tabs = instance(
+      [{ type: "text-delta", delta: "refunded" }, finish()],
+      [{ type: "text-delta", delta: "refunded twice" }, finish()],
+    );
+    const [restored] = openPending((await new Tabs().readThread(threadId))!);
+    const answer = {
+      threadId,
+      toolResults: [{ toolCallId: "c1", signature: restored!.signature, approve: true }],
+    };
+    await eventsOf(await new Tabs().stream(jsonRequest(answer)));
+    await settle();
+    const before = (await store.loadThread(threadId))!.length;
+
+    const late = await eventsOf(await new Tabs().stream(jsonRequest(answer)));
+    await settle();
+    expect(refunded).toEqual(["o1"]);
+    expect(late.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+    // No second reply: the model was not called again.
+    expect((await store.loadThread(threadId))!.length).toBe(before);
+  });
+
+  test("the signatures stay the owner's: another user holding the thread cannot answer", async () => {
+    const { refunded, store, instance, as } = setup();
+    const { threadId } = await store.createThread({});
+    const First = instance([
+      { type: "tool-call", toolCallId: "c1", name: "refund", args: '{"orderId":"o1"}' },
+      finish(),
+    ]);
+    await eventsOf(await new First().stream(jsonRequest({ threadId, text: "refund o1" })));
+    await settle();
+
+    const Other = instance([{ type: "text-delta", delta: "refunded" }, finish()]);
+    const [restored] = openPending((await new Other().readThread(threadId))!);
+    as("user:2");
+    const refused = await eventsOf(
+      await new Other().stream(
+        jsonRequest({
+          threadId,
+          toolResults: [{ toolCallId: "c1", signature: restored!.signature, approve: true }],
+        }),
+      ),
+    );
+    await settle();
+    expect(refunded).toEqual([]);
+    expect(refused.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
   });
 });

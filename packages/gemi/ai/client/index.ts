@@ -20,6 +20,10 @@
  */
 
 export { AttachError, useChat } from "../useChat";
+// Not the reducer itself, which stays internal (see above): the one read of a
+// stored transcript an app may need outside the hook, to tell from a thread it
+// read which questions are still open (#1052).
+export { openPending } from "./reducer";
 export type {
   AgentAttachBody,
   AttachOptions,
