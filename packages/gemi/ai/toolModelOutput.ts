@@ -13,6 +13,12 @@ export function modelOutputOf(
   try {
     const projected = tool.toModel(output);
     if (projected === undefined || typeof projected === "string") return projected;
+    if (typeof (projected as { then?: unknown }).then === "function") {
+      // An async `toModel` would reach the model as `{}`: refused, so the
+      // model reads the whole output and the log says why.
+      (projected as Promise<unknown>).then(undefined, () => {});
+      throw new TypeError("toModel returned a promise; it must return its value synchronously.");
+    }
     return JSON.parse(JSON.stringify(projected));
   } catch (error) {
     onError(error);

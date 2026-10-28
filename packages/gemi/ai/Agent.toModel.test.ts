@@ -118,6 +118,13 @@ describe("toModel (#1061)", () => {
     expect(logged.mock.calls.flat().join(" ")).toContain("toModel");
   });
 
+  test("an async toModel is refused, and the model reads the whole output", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result } = await run(queryTool((async () => "x") as never));
+    expect(results(result.messages)[0]).not.toHaveProperty("modelOutput");
+    expect(logged.mock.calls.flat().join(" ")).toContain("toModel");
+  });
+
   test("a later turn replays the stored projection, not the output", async () => {
     const tool = queryTool(sample);
     const first = await run(tool);
