@@ -44,6 +44,8 @@ export async function overlayJobs(
     isRunLive: (runId: string) => boolean | Promise<boolean>;
     /** The tool's output schema, to check a settled output against. */
     outputSchemaFor?: (toolName: string) => Schema<any> | undefined;
+    /** The tool's `toModel` projection of a settled output (#1061). */
+    modelOutputFor?: (toolName: string, output: unknown) => unknown;
     /** How many of the thread's newest jobs to read. At least 50. */
     scan?: number;
   },
@@ -95,7 +97,7 @@ export async function overlayJobs(
       if (record?.state === "running") continue;
 
       content ??= message.content.slice();
-      content[index] = settledResult(part, record, params.outputSchemaFor);
+      content[index] = settledResult(part, record, params.outputSchemaFor, params.modelOutputFor);
     }
     if (content) {
       const changed: AgentMessage = { ...message, content };
@@ -133,8 +135,19 @@ function settledResult(
   part: Extract<ToolResultPart, { status: "running" }>,
   record: AgentJobRecord | undefined,
   outputSchemaFor: ((toolName: string) => Schema<any> | undefined) | undefined,
+  modelOutputFor?: (toolName: string, output: unknown) => unknown,
 ): ToolResultPart {
   const base = { type: "tool-result" as const, toolCallId: part.toolCallId, name: part.name };
+  const ok = (output: unknown, job: AgentJobRef): ToolResultPart => {
+    const modelOutput = modelOutputFor?.(String(part.name), output);
+    return {
+      ...base,
+      status: "ok",
+      job,
+      output,
+      ...(modelOutput !== undefined ? { modelOutput } : {}),
+    };
+  };
   if (!record) {
     return {
       ...base,
@@ -184,7 +197,7 @@ function settledResult(
         },
       };
     }
-    return { ...base, status: "ok", job, output: parsed.value };
+    return ok(parsed.value, job);
   }
-  return { ...base, status: "ok", job, output: record.output };
+  return ok(record.output, job);
 }

@@ -100,6 +100,7 @@ import type {
   ToolShapes,
   Usage,
 } from "./types";
+import { modelOutputOf } from "./toolModelOutput";
 
 // --- tools ---------------------------------------------------------------
 
@@ -727,6 +728,12 @@ export type ToolApprovalPreview<Input, Ctx = AgentContext> = (
 ) => unknown;
 
 /**
+ * A tool's `toModel` (#1061): the projection of a successful output that the
+ * model reads instead of the whole of it. See `ToolDefinition.toModel`.
+ */
+export type ToolToModel<Output> = (output: Output) => unknown;
+
+/**
  * What an `endsRun` function is given beside the call's output: the call's
  * input, and the same run facts `requiresApproval`'s function gets.
  */
@@ -868,6 +875,19 @@ export type ToolDefinition<
        */
       approvalPreview?: ToolApprovalPreview<Input, Ctx>;
       /**
+       * What the model reads instead of the full output (#1061). The client,
+       * the store and `onMessage` still get `output` whole; the model gets
+       * this projection of it, such as a row count and the first 50 rows of
+       * a 1000-row query.
+       *
+       * Called once per successful result (a background job's too, when it
+       * settles), synchronously, and kept on the result as `modelOutput`, so
+       * every later request sends the model the same text. Return a string
+       * to send it as is, or a value to send as JSON. A function that throws
+       * is logged and the model reads the full `output`.
+       */
+      toModel?: ToolToModel<Output>;
+      /**
        * Ends the run after a successful call of this tool, instead of asking
        * the model again (#974). For a tool whose result already is the answer:
        * the follow-up step would only restate it, and costs a model call.
@@ -900,6 +920,8 @@ export type ToolDefinition<
       /** Meaningless here: the client answering *is* the approval. */
       requiresApproval?: never;
       approvalPreview?: never;
+      /** Server tools only: a client's answer is what the model reads. */
+      toModel?: never;
       /** Server tools only: a client's answer arrives on a later turn. */
       endsRun?: never;
     });
@@ -960,6 +982,8 @@ export class AgentTool<
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
   readonly endsRun?: ToolEndsRun<Input, Output, Ctx>;
+  /** See `ToolDefinition.toModel`. `undefined` when the model reads the whole output. */
+  readonly toModel?: ToolToModel<Output>;
   /** See `ToolDefinition.timeoutMs`. `undefined` is no limit of its own. */
   readonly timeoutMs?: number;
   /** See `ToolDefinition.async`. `undefined` for a tool that cannot start a job. */
@@ -997,6 +1021,7 @@ export class AgentTool<
     this.timeoutMs = params.timeoutMs;
     this.async = params.async;
     if (params.endsRun) this.endsRun = params.endsRun;
+    if (params.toModel) this.toModel = params.toModel;
   }
 
   /**
@@ -1051,6 +1076,16 @@ export class AgentTool<
       throw new Error(
         `The tool "${params.name}" has an endsRun that is neither a boolean nor a function.`,
       );
+    }
+    if (params.toModel !== undefined) {
+      if (typeof params.toModel !== "function") {
+        throw new Error(`The tool "${params.name}" has a toModel that is not a function.`);
+      }
+      if (params.answeredBy === "client") {
+        throw new Error(
+          `The tool "${params.name}" is answered by the client and cannot set \`toModel\`: the client's answer is what the model reads.`,
+        );
+      }
     }
     if (params.endsRun && params.answeredBy === "client") {
       throw new Error(
@@ -4536,12 +4571,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           },
         };
       }
+      const modelOutput = modelOutputOf(resolved.tool, output, (error) =>
+        this.writeLog(
+          `[gemi/ai] agent "${this.config.name}": the toModel of "${String(call.name)}" threw, so the model reads the whole output`,
+          { error, toolCallId: call.toolCallId },
+        ),
+      );
       return {
         type: "tool-result",
         toolCallId: call.toolCallId,
         name: call.name,
         status: "ok",
         output,
+        ...(modelOutput !== undefined ? { modelOutput } : {}),
       };
     } catch (error) {
       if (error instanceof RunAborted || this.controller.signal.aborted) {

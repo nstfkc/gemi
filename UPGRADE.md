@@ -1,5 +1,12 @@
 # Unreleased
 
+## AI: a tool result's model-facing projection, `toModel` (#1061)
+
+**New optional API (minor). Nothing to change in apps.** See [AI Tool Output for the Model](docs/ai-tool-model-output.md).
+
+- New `toModel(output)` on `AgentTool.create` (server tools): the model reads its value instead of the whole output, while the client, `onMessage` and the store still get `output`. The value is kept on the `ok` result as the new `modelOutput` field, computed once when the result is produced (and when a background job settles).
+- The provider request and compaction summaries send `modelOutput` when a result has one, and `output` otherwise, as before.
+
 ## AI: approval previews, who approved a call, and `onToolResult` (#1060, #1062)
 
 **New optional APIs (minor). Nothing to change in apps.** See [AI Tool Approvals → Showing a preview](docs/ai-tool-approvals.md#showing-a-preview) and [→ Who approved a call](docs/ai-tool-approvals.md#who-approved-a-call).
