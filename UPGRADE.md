@@ -1,5 +1,13 @@
 # Unreleased
 
+## AI: `DatabaseAgentStore`, threads in the database (#1063)
+
+**New API (minor). Nothing to change in apps.** See [AI Thread Store](docs/ai-thread-store.md).
+
+- `DatabaseAgentStore` from `gemi/ai` implements `AgentStore` over two tables of the app's database (`gemi_agent_threads`, `gemi_agent_messages`; Prisma models in the docs, or `createTable()`), on SQLite, Postgres and MySQL 8 / MariaDB 10.6+. It supports regenerate (`removeMessages`) and compaction summaries with `lockSummary`.
+- Extra methods for the app's own thread list: `listThreads({ userId, limit, offset })`, `getThread(id)` and `deleteThread(id)`. `createThread({ userId })` stores the user id, and the first user message becomes the thread's `title`.
+- Opt in by setting `store` on the controller to one instance made at module scope. `MemoryAgentStore` stays the default.
+
 ## ORM: `describeSchema()`, a prompt-ready schema summary, and `/// @gemi.sensitive` (#1065)
 
 **New API (minor). Nothing to change in apps.** See [ORM → Describing the schema for a prompt](docs/orm.md#describing-the-schema-for-a-prompt).

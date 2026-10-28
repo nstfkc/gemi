@@ -572,6 +572,15 @@ jobs:
         env:
           VITEST_MIN_PASSED: "18"
 
+      # The agent thread store's upsert in thread order, row-locked appends from
+      # two clients, summaries and the summary lock, listing, and a turn through
+      # AgentController (#1063).
+      - name: Agent thread store on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" ai/store/DatabaseAgentStore.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "28"
+
       # The run store's compare-and-set, listing, clock-based sweep and prune,
       # and a run written inside a transaction that rolls back (#908).
       - name: Run store on Postgres and MySQL
