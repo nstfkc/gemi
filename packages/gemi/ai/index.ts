@@ -446,6 +446,9 @@ export type { VoiceConfig, VoiceSessionOptions, VoiceStartContext } from "./voic
 export type { VoiceEndReason, VoiceStartResponse } from "./voice/wire";
 
 // --- the controller, its stores and the route it mounts -------------------
+// Threads in the app's database (#1063). See docs/ai-thread-store.md.
+export { DatabaseAgentStore } from "./store/DatabaseAgentStore";
+export type { AgentThreadRecord, DatabaseAgentStoreOptions } from "./store/DatabaseAgentStore";
 export {
   AgentController,
   AgentTurnError,
