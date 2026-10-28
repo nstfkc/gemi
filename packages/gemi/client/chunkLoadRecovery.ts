@@ -91,7 +91,20 @@ export interface ChunkLoadRecoveryOptions {
 
 let enabled = true;
 let options: ChunkLoadRecoveryOptions = {};
-let reloading = false;
+/**
+ * The full load gemi started and the page is still waiting on: further
+ * failures of the same navigation (a route with several views fails once per
+ * view) report it as under way instead of starting another.
+ *
+ * Not a latch for the life of the page: the load can be cancelled — "Stay" on
+ * a `beforeunload` prompt (a dirty editor), a handler that stops it — and the
+ * page then keeps running with no load coming. It holds only for the
+ * navigation that started it (`navigationStarted` clears it) and for the
+ * cooldown, so a later failure is judged on its own: another URL loads in
+ * full, the same URL inside the cooldown is refused (the data renders, the
+ * view's error boundary shows), and after the cooldown it loads again.
+ */
+let pendingLoad: { url: string; at: number } | null = null;
 
 /**
  * Sets how gemi recovers from a failed chunk. `false` turns recovery off: the
@@ -107,7 +120,25 @@ export function configureChunkLoadRecovery(next: ChunkLoadRecoveryOptions | fals
 export function __resetChunkLoadRecovery() {
   enabled = true;
   options = {};
-  reloading = false;
+  pendingLoad = null;
+}
+
+/**
+ * The router calls this as each client-side navigation starts. A full load
+ * still pending from an earlier one was cancelled (the page would be gone
+ * otherwise), so it no longer speaks for this navigation's failures.
+ */
+export function navigationStarted() {
+  pendingLoad = null;
+}
+
+/** Whether a full load onto `url` is already under way. */
+function loadPending(url: string): boolean {
+  return (
+    pendingLoad !== null &&
+    pendingLoad.url === url &&
+    withinCooldown(Date.now() - pendingLoad.at, cooldownMs())
+  );
 }
 
 /**
@@ -161,11 +192,11 @@ export function recoverFromChunkLoadError(
   if (typeof window === "undefined" || !enabled || !isChunkLoadError(error)) {
     return false;
   }
-  if (reloading) {
+  const target = url ?? window.location.href;
+  if (loadPending(target)) {
     // A route with several views fails once per view; the first one reloads.
     return true;
   }
-  const target = url ?? window.location.href;
   const blocked = reloadBlock(target);
 
   if (options.onChunkLoadError?.({ error, url: target, source, blocked }) === false) {
@@ -194,7 +225,7 @@ export function recoverFromBuildMismatch({
   if (typeof window === "undefined" || !enabled) {
     return false;
   }
-  if (reloading) {
+  if (loadPending(url)) {
     return true;
   }
   const blocked = reloadBlock(url);
@@ -219,7 +250,7 @@ function loadInFull(target: string, blocked: ChunkReloadBlock): boolean {
     return false;
   }
 
-  reloading = true;
+  pendingLoad = { url: target, at: Date.now() };
   if (target === window.location.href) {
     window.location.reload();
   } else {

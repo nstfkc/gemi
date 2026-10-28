@@ -7,6 +7,7 @@ import {
   chunkReloadStubScript,
   configureChunkLoadRecovery,
   isChunkLoadError,
+  navigationStarted,
   otherBuild,
   recoverFromBuildMismatch,
   recoverFromChunkLoadError,
@@ -217,6 +218,48 @@ describe("recoverFromBuildMismatch (#1056)", () => {
 
     __resetChunkLoadRecovery();
     expect(mismatch(), "same URL inside the cooldown").toBe(false);
+    expect(mismatch("https://app.test/settings")).toBe(true);
+    expect(assign).toHaveBeenCalledWith("https://app.test/settings");
+  });
+
+  // folio#2750: the load was cancelled ("Stay" on a dirty page's
+  // `beforeunload` prompt; here `assign`/`reload` do nothing) and the page
+  // keeps running. Nothing may stay latched behind it.
+  test("a cancelled load does not hold back another URL", () => {
+    expect(mismatch()).toBe(true);
+    expect(mismatch(), "same navigation, load still pending").toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    expect(mismatch("https://app.test/settings")).toBe(true);
+    expect(assign).toHaveBeenCalledWith("https://app.test/settings");
+  });
+
+  test("a cancelled load is retried for the same URL after the cooldown", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T12:00:00Z"));
+    expect(mismatch()).toBe(true);
+
+    vi.setSystemTime(Date.now() + 30_000);
+    expect(mismatch()).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  test("a new navigation after a cancelled load is not discarded inside the cooldown", () => {
+    expect(mismatch()).toBe(true);
+
+    navigationStarted();
+    // Refused by the cooldown, so the caller renders the data instead of
+    // waiting on a load that is not coming.
+    expect(mismatch()).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test("a load the app's hook vetoed latches nothing", () => {
+    const onBuildMismatch = vi.fn(() => false);
+    configureChunkLoadRecovery({ onBuildMismatch });
+    expect(mismatch()).toBe(false);
+
+    onBuildMismatch.mockReturnValue(undefined as never);
     expect(mismatch("https://app.test/settings")).toBe(true);
     expect(assign).toHaveBeenCalledWith("https://app.test/settings");
   });

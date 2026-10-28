@@ -1,3 +1,13 @@
+# Unreleased
+
+## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
+
+**Fix (patch). Nothing to change in apps.**
+
+- Since 0.165.0 a navigation answered by another build loads the target page in full. When that load was cancelled ("Stay" on a `beforeunload` prompt, e.g. a dirty editor), gemi stayed latched as if a load were still under way: every later cross-build navigation was discarded with no new load, even to another URL or after the cooldown.
+- The "load under way" state now lasts only for the navigation that started it (and at most the cooldown). After a cancel, a later mismatch on another URL loads it in full; the same URL inside the cooldown renders the data (as any refused reload does); the same URL after the cooldown loads in full again. Chunk-load recovery (`recoverFromChunkLoadError`) shares the guard and gets the same fix.
+- The navigation whose load was cancelled keeps the current page on screen, as the user asked by choosing "Stay".
+
 # Upgrading from 0.165.0 to 0.166.0
 
 ## AI: `DatabaseAgentStore`, threads in the database (#1063)
