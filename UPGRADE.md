@@ -7,6 +7,13 @@
 - `describeSchema(options?)` from `gemi/orm` writes the registered models (or the `schemas` you pass) as one line per model: table, columns (database names under `@map`), keys and relations. `describeSchemaModels(options?)` returns the same as data. Options: `models`, `exclude` (models or `Model.field`), `sensitive` (`Model.field`), `sensitiveColumns: "mark" | "omit"`.
 - `/// @gemi.sensitive` on a Prisma field emits `sensitive: true` in the generated artifact. Only `describeSchema` reads it; encrypted columns count as sensitive too. The artifact of a schema that doesn't use it is unchanged, and the artifact version is not bumped. Re-run `prisma generate` after adding the annotation.
 
+## ORM: `DB.readOnly`, a read-only transaction with `SET LOCAL` timeouts and role (#1064)
+
+**New API (minor). Nothing to change in apps.** See [ORM → Read-only transactions](docs/orm.md#read-only-transactions).
+
+- `DB.readOnly(options?, fn)` and `DB.connection(name).readOnly(options?, fn)` run `fn` in a transaction that starts with `SET TRANSACTION READ ONLY` and the `SET LOCAL`s for `statementTimeoutMs`, `lockTimeoutMs`, `idleInTransactionTimeoutMs` and `role`. It is always rolled back, and returns what `fn` returned. Postgres only; refused inside an open transaction.
+- New exported type `ReadOnlyOptions`.
+
 # Upgrading from 0.164.0 to 0.165.0
 
 ## Router: a navigation answered by another build loads the page in full (#1056)

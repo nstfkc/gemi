@@ -12320,6 +12320,27 @@ migration whose transactions are legitimately long.
 The warning is development-only and never fires in production, whatever the config says. It is a
 diagnostic, not a limit: nothing cancels a long transaction.
 
+### Read-only transactions
+
+`DB.readOnly` runs a callback in a read-only transaction and always rolls it back, returning what the callback returned. It is meant for queries you don't fully control, such as SQL an AI agent wrote or a report an admin typed. Postgres only.
+
+```ts
+import { DB } from "gemi/facades"
+import { sql } from "gemi/orm"
+
+const rows = await DB.connection("analytics").readOnly(
+  { statementTimeoutMs: 8_000, lockTimeoutMs: 1_000, role: "app_readonly" },
+  () => DB.connection("analytics").query(sql`select …`),
+)
+```
+
+- **What it runs.** `BEGIN`, `SET TRANSACTION READ ONLY`, then one `SET LOCAL` per option (`statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `ROLE`), the callback, and `ROLLBACK`. A write inside fails with Postgres' own "cannot execute … in a read-only transaction".
+- **Safe behind a pooler.** Every setting is `SET LOCAL`, so it ends with the transaction. A session `SET` behind PgBouncer in transaction mode would stay on the server connection for the next client.
+- **`role`** switches to a role the connecting user is a member of, such as a `NOLOGIN` role with column grants that leave secrets out. It must be a plain identifier and is quoted as written.
+- **Joins like `transaction`.** `DB.query`, `DB.execute` and the ORM inside the callback run in the read-only transaction, on its connection. `afterCommit` callbacks queued inside never run.
+- **Refused inside an open transaction**, because `SET TRANSACTION READ ONLY` has to be the first statement of its own transaction. Also refused on SQLite and MySQL.
+- `DB.readOnly(fn)` takes no options and uses the ambient connection.
+
 ### Unit-testing code that opens one
 
 `Model.transaction` resolves its connection ambiently, out of the `AsyncLocalStorage` scope — which
