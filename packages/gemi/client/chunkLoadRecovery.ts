@@ -4,10 +4,16 @@
  * (#548). The page cannot continue with the module it wanted, and a full load
  * of the URL it was heading to gets it the current release's document.
  *
- * One reload, guarded: a reload that lands on the same failure (a chunk that is
- * genuinely missing, a proxy that keeps refusing it) must not become a loop. A
- * `sessionStorage` marker with a timestamp survives the reload it guards, so a
- * second failure inside the cooldown is left to the route's error boundary.
+ * One reload per page, guarded: a reload that lands on the same failure (a
+ * chunk that is genuinely missing, a proxy that keeps refusing it) must not
+ * become a loop. A `sessionStorage` marker records when each URL was reloaded
+ * onto and survives the reload it guards, so a second failure for the same URL
+ * inside the cooldown is left to the route's error boundary. Per URL rather
+ * than per tab (#1056): while two releases serve at once every navigation can
+ * miss, and a tab-wide cooldown sent the second one to the error boundary.
+ *
+ * The same guard covers a navigation whose data came from another build
+ * (`recoverFromBuildMismatch`).
  *
  * No DOM or React import at module scope: the server's reload stub
  * (`server/staticAssetMiss.ts`) embeds the same guard as a script.
@@ -16,7 +22,14 @@
 /** The `sessionStorage` key the guard lives under, shared with the reload stub. */
 export const CHUNK_RELOAD_MARKER = "gemi:chunk-reload";
 
-/** How long after one recovery reload another is refused. */
+/**
+ * The response header carrying the client build id on a `.json` navigation
+ * (#1056). The document carries its own as `buildId`; they differ when the
+ * request reached a server running another release.
+ */
+export const BUILD_HEADER = "x-gemi-build";
+
+/** How long after a recovery reload onto a URL another one onto it is refused. */
 export const DEFAULT_CHUNK_RELOAD_COOLDOWN_MS = 30_000;
 
 /**
@@ -29,7 +42,7 @@ export type ChunkLoadErrorSource = "navigation" | "hydration" | "preload" | "app
 
 /**
  * Why gemi will not reload, or `null` when it will:
- * - `cooldown`: it already reloaded for a chunk failure within `cooldownMs`.
+ * - `cooldown`: it already reloaded onto this URL within `cooldownMs`.
  * - `offline`: `navigator.onLine` is false — a reload would only fail harder.
  * - `storage`: `sessionStorage` cannot be read or written, so the guard cannot
  *   survive the reload and the loop it prevents could not be ruled out.
@@ -45,6 +58,17 @@ export interface ChunkLoadErrorContext {
   blocked: ChunkReloadBlock;
 }
 
+export interface BuildMismatchContext {
+  /** The URL the full page load goes to: the page being navigated to. */
+  url: string;
+  /** The build the page was loaded with. */
+  clientBuild: string;
+  /** The build that answered the navigation. */
+  serverBuild: string;
+  /** Why gemi will not reload, or `null` when it is about to. */
+  blocked: ChunkReloadBlock;
+}
+
 export interface ChunkLoadRecoveryOptions {
   /** Default 30 000 ms. */
   cooldownMs?: number;
@@ -56,6 +80,13 @@ export interface ChunkLoadRecoveryOptions {
    * when the reload is blocked too, with `blocked` saying why.
    */
   onChunkLoadError?: (context: ChunkLoadErrorContext) => boolean | void;
+  /**
+   * Called when a client-side navigation's data came from another build (a
+   * deploy in progress, two releases behind one load balancer), before gemi
+   * loads the page in full. Return `false` to skip that and render the data
+   * anyway. Called when the load is blocked too, with `blocked` saying why.
+   */
+  onBuildMismatch?: (context: BuildMismatchContext) => boolean | void;
 }
 
 let enabled = true;
@@ -135,12 +166,55 @@ export function recoverFromChunkLoadError(
     return true;
   }
   const target = url ?? window.location.href;
-  const cooldownMs = options.cooldownMs ?? DEFAULT_CHUNK_RELOAD_COOLDOWN_MS;
-  const blocked = reloadBlock(cooldownMs);
+  const blocked = reloadBlock(target);
 
   if (options.onChunkLoadError?.({ error, url: target, source, blocked }) === false) {
     return false;
   }
+  return loadInFull(target, blocked);
+}
+
+/**
+ * Loads `url` in full because the navigation to it got its data from another
+ * build (#1056): the views this page runs were not written for that data, and
+ * rendering it anyway is how a deploy turned into "Something went wrong". The
+ * full load gets a document and views of one build. Same guard as a chunk
+ * failure, once per URL per cooldown; a navigation refused here renders the
+ * data as before. Returns whether the page load was started.
+ */
+export function recoverFromBuildMismatch({
+  url,
+  clientBuild,
+  serverBuild,
+}: {
+  url: string;
+  clientBuild: string;
+  serverBuild: string;
+}): boolean {
+  if (typeof window === "undefined" || !enabled) {
+    return false;
+  }
+  if (reloading) {
+    return true;
+  }
+  const blocked = reloadBlock(url);
+  if (options.onBuildMismatch?.({ url, clientBuild, serverBuild, blocked }) === false) {
+    return false;
+  }
+  return loadInFull(url, blocked);
+}
+
+/**
+ * The build that answered a `.json` navigation, when it is not `clientBuild`;
+ * otherwise `null`. Unknown on either side (dev, a test double, a server from
+ * before the header) is not a mismatch.
+ */
+export function otherBuild(response: Response, clientBuild: string | undefined): string | null {
+  const served = response.headers?.get?.(BUILD_HEADER);
+  return clientBuild && served && served !== clientBuild ? served : null;
+}
+
+function loadInFull(target: string, blocked: ChunkReloadBlock): boolean {
   if (blocked !== null || !markReload(target)) {
     return false;
   }
@@ -154,7 +228,11 @@ export function recoverFromChunkLoadError(
   return true;
 }
 
-function reloadBlock(cooldownMs: number): ChunkReloadBlock {
+function cooldownMs() {
+  return options.cooldownMs ?? DEFAULT_CHUNK_RELOAD_COOLDOWN_MS;
+}
+
+function reloadBlock(url: string): ChunkReloadBlock {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     return "offline";
   }
@@ -164,8 +242,8 @@ function reloadBlock(cooldownMs: number): ChunkReloadBlock {
   } catch {
     return "storage";
   }
-  const at = parseMarker(raw);
-  return at !== null && withinCooldown(Date.now() - at, cooldownMs) ? "cooldown" : null;
+  const at = parseMarker(raw)[url];
+  return at !== undefined && withinCooldown(Date.now() - at, cooldownMs()) ? "cooldown" : null;
 }
 
 // A marker from the future (the clock was set back since it was written) is
@@ -174,21 +252,39 @@ function withinCooldown(elapsed: number, cooldownMs: number): boolean {
   return elapsed >= 0 && elapsed < cooldownMs;
 }
 
-function parseMarker(raw: string | null): number | null {
-  if (!raw) {
-    return null;
-  }
+/**
+ * The marker: when each URL was last reloaded onto, `{ [url]: at }`. Anything
+ * else in it (a marker written by an earlier gemi as `{ url, at }`) is ignored.
+ */
+function parseMarker(raw: string | null): Record<string, number> {
+  let parsed: unknown;
   try {
-    const at = JSON.parse(raw)?.at;
-    return typeof at === "number" ? at : null;
+    parsed = raw ? JSON.parse(raw) : null;
   } catch {
-    return null;
+    return {};
   }
+  const marker: Record<string, number> = {};
+  if (parsed && typeof parsed === "object") {
+    for (const [url, at] of Object.entries(parsed)) {
+      if (typeof at === "number") marker[url] = at;
+    }
+  }
+  return marker;
 }
 
+// Entries past the cooldown are dropped as a new one is written, so the marker
+// holds only the reloads it still guards.
 function markReload(url: string): boolean {
   try {
-    window.sessionStorage.setItem(CHUNK_RELOAD_MARKER, JSON.stringify({ url, at: Date.now() }));
+    const now = Date.now();
+    const marker: Record<string, number> = {};
+    for (const [other, at] of Object.entries(
+      parseMarker(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)),
+    )) {
+      if (withinCooldown(now - at, cooldownMs())) marker[other] = at;
+    }
+    marker[url] = now;
+    window.sessionStorage.setItem(CHUNK_RELOAD_MARKER, JSON.stringify(marker));
     return true;
   } catch {
     return false;
@@ -197,8 +293,8 @@ function markReload(url: string): boolean {
 
 /**
  * The same guard as a classic script body, for the module the server sends in
- * place of a chunk it does not have. It reloads once per cooldown; inside the
- * cooldown (or with no storage) it throws an error `isChunkLoadError`
+ * place of a chunk it does not have. It reloads once per URL per cooldown;
+ * inside the cooldown (or with no storage) it throws an error `isChunkLoadError`
  * recognises, so the importing page's own recovery and error boundary see the
  * failure instead of a module that silently has no exports.
  */
@@ -209,10 +305,10 @@ export function chunkReloadStubScript(
   const key = JSON.stringify(CHUNK_RELOAD_MARKER);
   const error = JSON.stringify(`Failed to fetch dynamically imported module: ${pathname}`);
   return (
-    `var r=!1;try{var s=window.sessionStorage,m=JSON.parse(s.getItem(${key})||"null");` +
-    `var d=m?Date.now()-m.at:NaN;` +
+    `var r=!1;try{var s=window.sessionStorage,u=window.location.href,m=JSON.parse(s.getItem(${key})||"{}");` +
+    `if(!m||typeof m!=="object")m={};var d=Date.now()-m[u];` +
     `if(navigator.onLine!==!1&&!(d>=0&&d<${cooldownMs})){` +
-    `s.setItem(${key},JSON.stringify({url:window.location.href,at:Date.now()}));r=!0}}catch(e){}` +
+    `m[u]=Date.now();s.setItem(${key},JSON.stringify(m));r=!0}}catch(e){}` +
     `if(r)window.location.reload();else throw new Error(${error});export {}`
   );
 }

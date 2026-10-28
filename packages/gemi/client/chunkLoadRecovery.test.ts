@@ -7,6 +7,8 @@ import {
   chunkReloadStubScript,
   configureChunkLoadRecovery,
   isChunkLoadError,
+  otherBuild,
+  recoverFromBuildMismatch,
   recoverFromChunkLoadError,
 } from "./chunkLoadRecovery";
 import { loadViewModule } from "./ComponentContext";
@@ -67,8 +69,7 @@ describe("recoverFromChunkLoadError", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
     const marker = JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!);
-    expect(marker.url).toBe("https://app.test/dashboard");
-    expect(typeof marker.at).toBe("number");
+    expect(marker).toEqual({ "https://app.test/dashboard": expect.any(Number) });
   });
 
   test("goes to the URL it is given when that is not the current one", () => {
@@ -83,7 +84,7 @@ describe("recoverFromChunkLoadError", () => {
     vi.setSystemTime(new Date("2026-10-02T12:00:00Z"));
     window.sessionStorage.setItem(
       CHUNK_RELOAD_MARKER,
-      JSON.stringify({ url: "https://app.test/dashboard", at: Date.now() - 5_000 }),
+      JSON.stringify({ "https://app.test/dashboard": Date.now() - 5_000 }),
     );
 
     expect(recoverFromChunkLoadError(chunkError())).toBe(false);
@@ -94,10 +95,46 @@ describe("recoverFromChunkLoadError", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  test("the cooldown is per URL: another page inside it still reloads (#1056)", () => {
+    window.sessionStorage.setItem(
+      CHUNK_RELOAD_MARKER,
+      JSON.stringify({ "https://app.test/settings": Date.now() - 5_000 }),
+    );
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(Object.keys(JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!))).toEqual([
+      "https://app.test/settings",
+      "https://app.test/dashboard",
+    ]);
+  });
+
+  test("entries past the cooldown are dropped when a reload is recorded", () => {
+    window.sessionStorage.setItem(
+      CHUNK_RELOAD_MARKER,
+      JSON.stringify({ "https://app.test/settings": Date.now() - 60_000 }),
+    );
+
+    recoverFromChunkLoadError(chunkError());
+
+    expect(Object.keys(JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!))).toEqual([
+      "https://app.test/dashboard",
+    ]);
+  });
+
+  test("a marker in the earlier `{ url, at }` shape is ignored", () => {
+    window.sessionStorage.setItem(
+      CHUNK_RELOAD_MARKER,
+      JSON.stringify({ url: "https://app.test/dashboard", at: Date.now() }),
+    );
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+  });
+
   test("a marker from the future (clock set back) does not block recovery for good", () => {
     window.sessionStorage.setItem(
       CHUNK_RELOAD_MARKER,
-      JSON.stringify({ url: "https://app.test/dashboard", at: Date.now() + 86_400_000 }),
+      JSON.stringify({ "https://app.test/dashboard": Date.now() + 86_400_000 }),
     );
 
     expect(recoverFromChunkLoadError(chunkError())).toBe(true);
@@ -156,7 +193,7 @@ describe("recoverFromChunkLoadError", () => {
     configureChunkLoadRecovery({ cooldownMs: 1_000 });
     window.sessionStorage.setItem(
       CHUNK_RELOAD_MARKER,
-      JSON.stringify({ url: "x", at: Date.now() - 2_000 }),
+      JSON.stringify({ "https://app.test/dashboard": Date.now() - 2_000 }),
     );
 
     expect(recoverFromChunkLoadError(chunkError())).toBe(true);
@@ -167,6 +204,52 @@ describe("recoverFromChunkLoadError", () => {
 
     expect(recoverFromChunkLoadError(chunkError())).toBe(false);
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("recoverFromBuildMismatch (#1056)", () => {
+  const mismatch = (url = "https://app.test/dashboard") =>
+    recoverFromBuildMismatch({ url, clientBuild: "a", serverBuild: "b" });
+
+  test("loads the page in full once, under the chunk guard", () => {
+    expect(mismatch()).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    __resetChunkLoadRecovery();
+    expect(mismatch(), "same URL inside the cooldown").toBe(false);
+    expect(mismatch("https://app.test/settings")).toBe(true);
+    expect(assign).toHaveBeenCalledWith("https://app.test/settings");
+  });
+
+  test("the app's hook sees it and can veto the load", () => {
+    const onBuildMismatch = vi.fn(() => false);
+    configureChunkLoadRecovery({ onBuildMismatch });
+
+    expect(mismatch()).toBe(false);
+    expect(onBuildMismatch).toHaveBeenCalledWith({
+      url: "https://app.test/dashboard",
+      clientBuild: "a",
+      serverBuild: "b",
+      blocked: null,
+    });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("`chunkLoadRecovery: false` turns it off too", () => {
+    configureChunkLoadRecovery(false);
+
+    expect(mismatch()).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("otherBuild compares only when both sides know their build", () => {
+    const response = (build?: string) =>
+      new Response("{}", { headers: build ? { "x-gemi-build": build } : {} });
+
+    expect(otherBuild(response("b"), "a")).toBe("b");
+    expect(otherBuild(response("a"), "a")).toBeNull();
+    expect(otherBuild(response(), "a")).toBeNull();
+    expect(otherBuild(response("b"), undefined)).toBeNull();
   });
 });
 
@@ -206,9 +289,22 @@ describe("the server's reload stub", () => {
     run();
 
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!).at).toEqual(
-      expect.any(Number),
-    );
+    expect(JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!)).toEqual({
+      "https://app.test/dashboard": expect.any(Number),
+    });
+  });
+
+  test("inside another page's cooldown it still reloads, keeping that entry", () => {
+    recoverFromChunkLoadError(chunkError(), { url: "https://app.test/settings" });
+    reload.mockClear();
+
+    run();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(Object.keys(JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!))).toEqual([
+      "https://app.test/settings",
+      "https://app.test/dashboard",
+    ]);
   });
 
   test("inside the cooldown it throws a chunk-load error instead of reloading again", () => {

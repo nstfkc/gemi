@@ -871,6 +871,11 @@ export class ViewRouteDispatcher {
       if (assetBase && assetBase !== "/") {
         result.data["assetBase"] = assetBase;
       }
+      // What the client compares a navigation's `x-gemi-build` with (#1056).
+      // Not in dev, which has one build.
+      if (buildId && buildId !== "dev") {
+        result.data["buildId"] = buildId;
+      }
 
       // Hydration reaches each route segment through `window.loaders`, i.e. an
       // `import()` the browser cannot see until the entry has run — and it

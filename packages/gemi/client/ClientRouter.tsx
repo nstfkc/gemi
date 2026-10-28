@@ -40,6 +40,7 @@ import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { loadRoutePayload } from "./helpers/loadRoutePayload";
 import { isExternalRedirect } from "../utils/intendedUrl";
+import { recoverFromBuildMismatch } from "./chunkLoadRecovery";
 
 declare global {
   interface Window {
@@ -226,6 +227,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     prefetchedData,
     features,
     appId: currentAppId,
+    buildId,
     router,
   } = useContext(ServerDataContext);
   const isNotFoundDocument = Boolean(router?.is404);
@@ -345,6 +347,17 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         onQueryPayload: ([path, variantKey, data]) => {
           hydrate({ [path]: { [variantKey]: data } });
         },
+        // Another build answered (a deploy in progress, two releases behind
+        // one load balancer): its data is for its own views, and rendering it
+        // with this page's views is how a deploy became "Something went
+        // wrong" (#1056). The page is loaded in full instead, once per URL.
+        buildId,
+        onOtherBuild: (serverBuild) =>
+          recoverFromBuildMismatch({
+            url: window.location.href,
+            clientBuild: buildId!,
+            serverBuild,
+          }),
       });
 
       if (payload) {
@@ -436,7 +449,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, preloadRouteModules, takePrefetched, replace, hydrate]);
+  }, [routerSubject, fetchRouteCSS, preloadRouteModules, takePrefetched, replace, hydrate, buildId]);
 
   return (
     <RouteTransitionProvider

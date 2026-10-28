@@ -334,6 +334,10 @@ off-site URLs.
 > same reason, code after a `Redirect.to(...)` call is unreachable — it never
 > returns.
 
+## During a deploy
+
+A client-side navigation fetches the target's data from the server, and while a deploy rolls out that server may run another release than the page. When the build that answered differs from the page's own, or a view chunk will not load, the router loads the target URL in full instead of rendering it, at most once per URL every 30 seconds. See [Deploys and mixed builds](./configuration.md#deploys-and-mixed-builds).
+
 ## Related
 
 - [Routing](./routing.md) — how paths, params, and groups are defined.

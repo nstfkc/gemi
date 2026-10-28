@@ -16,6 +16,7 @@ import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
+import { BUILD_HEADER } from "../client/chunkLoadRecovery";
 import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
@@ -150,7 +151,8 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const resolveIsland = createIslandResolver(manifest, assetBase);
 
   // Identifies this client build: a static page with `navigation` swaps in
-  // only pages of the same build. The manifest names every content-hashed
+  // only pages of the same build, and a client-side navigation answered by
+  // another build loads the page in full (#1056). The manifest names every content-hashed
   // file, so it changes whenever any of them does.
   const buildId = createHash("sha256")
     .update(await Bun.file(`${distDir}/client/.vite/manifest.json`).text())
@@ -251,7 +253,17 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       }
     }
 
-    return await handleWithApp(req, pathname);
+    const response = await handleWithApp(req, pathname);
+    // A `.json` navigation says which build answered it, so a page of another
+    // build loads the target in full rather than rendering data its views were
+    // not written for (#1056). A redirect's headers are immutable; it carries
+    // no data to mismatch.
+    if (pathname.endsWith(".json")) {
+      try {
+        response.headers.set(BUILD_HEADER, buildId);
+      } catch {}
+    }
+    return response;
   }
 
   async function handleWithApp(req: Request, pathname: string) {
