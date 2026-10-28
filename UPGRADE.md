@@ -1,3 +1,12 @@
+# Unreleased
+
+## AI: a tool result's model-facing projection, `toModel` (#1061)
+
+**New optional API (minor). Nothing to change in apps.** See [AI Tool Output for the Model](docs/ai-tool-model-output.md).
+
+- New `toModel(output)` on `AgentTool.create` (server tools): the model reads its value instead of the whole output, while the client, `onMessage` and the store still get `output`. The value is kept on the `ok` result as the new `modelOutput` field, computed once when the result is produced (and when a background job settles).
+- The provider request and compaction summaries send `modelOutput` when a result has one, and `output` otherwise, as before.
+
 # Upgrading from 0.164.0 to 0.165.0
 
 ## Router: a navigation answered by another build loads the page in full (#1056)

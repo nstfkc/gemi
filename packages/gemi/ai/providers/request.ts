@@ -559,7 +559,10 @@ function reasoningItem(part: { id?: string; text?: string }): ResponsesInputItem
  */
 export function toolResultOutput(part: ToolResultPart): string {
   if (part.status === "ok") {
-    return typeof part.output === "string" ? part.output : JSON.stringify(part.output ?? null);
+    // The tool's `toModel` projection when it has one (#1061): the client got
+    // the whole output, the model reads what the tool chose to show it.
+    const output = part.modelOutput !== undefined ? part.modelOutput : part.output;
+    return typeof output === "string" ? output : JSON.stringify(output ?? null);
   }
 
   if (part.status === "running") {

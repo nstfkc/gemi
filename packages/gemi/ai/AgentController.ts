@@ -21,6 +21,7 @@ import type {
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
+import { modelOutputOf } from "./toolModelOutput";
 import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
 import { injectedMessageIds } from "./Agent";
 import {
@@ -3016,7 +3017,9 @@ export abstract class AgentController<
           threadId,
           store: AgentJobs.store,
           isRunLive: isLive,
-          outputSchemaFor: (name) => this.toolOutputSchema(name),
+          outputSchemaFor: (name) => this.toolNamed(name)?.outputSchema,
+          modelOutputFor: (name, output) =>
+            modelOutputOf(this.toolNamed(name), output, (err) => this.reportHookFailure(err)),
           scan: this.jobsBlockMax(),
         });
         messages = overlaid.messages;
@@ -3061,15 +3064,15 @@ export abstract class AgentController<
   }
 
   /** A tool's output schema, by name, for checking a background job's output. */
-  private toolOutputSchema(name: string): Schema<any> | undefined {
-    const visit = (entries: readonly unknown[]): Schema<any> | undefined => {
+  private toolNamed(name: string): ToolLike | undefined {
+    const visit = (entries: readonly unknown[]): ToolLike | undefined => {
       for (const entry of entries) {
-        const tool = entry as { name?: string; outputSchema?: Schema<any>; tools?: unknown[] };
+        const tool = entry as ToolLike & { tools?: unknown[] };
         if (Array.isArray(tool.tools)) {
           const found = visit(tool.tools);
           if (found) return found;
         } else if (tool.name === name) {
-          return tool.outputSchema;
+          return tool;
         }
       }
       return undefined;
@@ -3233,6 +3236,13 @@ export abstract class AgentController<
  * has written it, and `notifyRun` skips it by `id`: once per message, as
  * before, and in the same order.
  */
+/** What the controller reads off one of its agent's tools by name. */
+type ToolLike = {
+  name?: string;
+  outputSchema?: Schema<any>;
+  toModel?: (output: any) => unknown;
+};
+
 type EarlyTurn = {
   /** The turn message's id, once the run has reported it. */
   id: string | null;

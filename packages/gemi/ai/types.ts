@@ -390,7 +390,22 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
     toolCallId: string;
     name: K;
   } & (
-    | { status: "ok"; output: T[K]["output"]; job?: AgentJobRef }
+    | {
+        status: "ok";
+        output: T[K]["output"];
+        /**
+         * What the model reads instead of `output` (#1061): the tool's
+         * `toModel` projection, such as a summary and the first rows of a
+         * large result. Absent for a tool without one, and then the model
+         * reads `output`, as before.
+         *
+         * Computed once, when the result is produced, and kept with it, so
+         * every later request sends the model the same text and a stateless
+         * client carries it back with the history.
+         */
+        modelOutput?: unknown;
+        job?: AgentJobRef;
+      }
     | { status: "error"; error: AgentError; job?: AgentJobRef }
     /**
      * The tool started a background job (it returned a `JobHandle`) and the
