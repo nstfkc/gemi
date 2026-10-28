@@ -1,3 +1,14 @@
+# Unreleased
+
+## AI: approval previews, who approved a call, and `onToolResult` (#1060, #1062)
+
+**New optional APIs (minor). Nothing to change in apps.** See [AI Tool Approvals → Showing a preview](docs/ai-tool-approvals.md#showing-a-preview) and [→ Who approved a call](docs/ai-tool-approvals.md#who-approved-a-call).
+
+- New `approvalPreview(input, ctx)` on `AgentTool.create` (needs `requiresApproval`): computes a dry run to show before the user approves. Its value is the pending call's new `preview` field, on the `awaiting-input` frame, in `useChat`'s `pending` and in the stored `AgentMessage.pending`. Display only: not signed, so `execute` re-checks what it relies on. A preview that throws is logged and the call is asked without one.
+- New `ctx.approval` (`ToolApprovalRecord`: `{ approved, at, by, reason? }`) on the `ToolContext` of a call that runs because a person approved it. `by` is the run's subject (`runOwner`).
+- The `ToolResultPart` of a call a person approved or refused now carries the same record as `approval`. Stores that keep the whole message keep it; nothing else changes on results of calls that never asked.
+- New `onToolResult(result, ctx)` hook on `AgentController` and in `defineAgentHooks`: once per tool result on the run's stream (top-level calls; a background job settling later is not one).
+
 # Upgrading from 0.164.0 to 0.165.0
 
 ## Router: a navigation answered by another build loads the page in full (#1056)
