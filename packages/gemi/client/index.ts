@@ -111,6 +111,7 @@ export type {
   ChunkLoadErrorContext,
   ChunkLoadErrorSource,
   ChunkLoadRecoveryOptions,
+  BuildMismatchContext,
   ChunkReloadBlock,
 } from "./chunkLoadRecovery";
 export { createRoot } from "./createRoot";

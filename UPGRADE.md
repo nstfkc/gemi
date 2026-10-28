@@ -1,3 +1,14 @@
+# Unreleased
+
+## Router: a navigation answered by another build loads the page in full (#1056)
+
+**Fix with a new optional API (minor). Nothing to change in apps.** See [Deploys and mixed builds](docs/configuration.md#deploys-and-mixed-builds).
+
+- While two releases serve one tab (a rolling deploy, two origins behind a load balancer with no affinity), a client-side navigation could get its `.json` data from the other release and render it with this page's views. A view that threw on the other release's props showed the error boundary ("Something went wrong") until the user reloaded. Now the document carries its client build id (`buildId`) and each `.json` navigation response says which build answered (`x-gemi-build`); on a mismatch the router loads the target URL in full instead. At most once per URL within the chunk-reload cooldown (30 s); after that the data is rendered as before. A prefetched payload from another build is dropped. Nothing is compared in dev.
+- The chunk-reload guard is now per URL. A view chunk that fails to load on a second page within 30 seconds of a reload onto another page now reloads that page too; it used to go to the error boundary. A second failure for the same URL still goes to the error boundary. The `gemi:chunk-reload` marker is now `{ [url]: at }`; a marker in the old `{ url, at }` shape is ignored.
+- New optional `onBuildMismatch({ url, clientBuild, serverBuild, blocked })` in `init(RootLayout, { chunkLoadRecovery })`, to report a mismatch or return `false` to render the data anyway. `chunkLoadRecovery: false` turns the build check off too.
+- A proxy or CDN in front of the app must pass the `x-gemi-build` response header through on `.json` requests (most do).
+
 # Upgrading from 0.163.3 to 0.164.0
 
 ## AI: a question still open after a reload can be answered (#1052)

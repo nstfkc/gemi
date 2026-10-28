@@ -3,6 +3,7 @@ import {
   type PartialRenderInfo,
 } from "../../utils/partialRender";
 import { readRoutePayload, type RouteQueryPayload } from "./readRoutePayload";
+import { otherBuild } from "../chunkLoadRecovery";
 
 interface LoadRoutePayloadOptions {
   /** The `.json` URL for the route being navigated to. */
@@ -23,6 +24,14 @@ interface LoadRoutePayloadOptions {
    * segment suspended on that variant.
    */
   onQueryPayload?: (payload: RouteQueryPayload) => void;
+  /** The build the page was loaded with (`buildId` in the document). */
+  buildId?: string;
+  /**
+   * The response came from another build (#1056). Returns whether a full page
+   * load is under way, in which case nothing is rendered; otherwise the
+   * payload is used as it is.
+   */
+  onOtherBuild?: (serverBuild: string) => boolean;
 }
 
 /**
@@ -39,7 +48,13 @@ interface LoadRoutePayloadOptions {
 export async function loadRoutePayload(
   options: LoadRoutePayloadOptions,
 ): Promise<any> {
-  const { url, from, takePrefetched, renderedRoute, onQueryPayload } = options;
+  const { url, from, takePrefetched, renderedRoute, onQueryPayload, buildId, onOtherBuild } =
+    options;
+  // Before the body is read: a page of another build has nothing to render.
+  const fromOtherBuild = (response: Response) => {
+    const served = otherBuild(response, buildId);
+    return served !== null && onOtherBuild?.(served) === true;
+  };
 
   const prefetched = takePrefetched?.(url);
   if (prefetched) {
@@ -57,7 +72,7 @@ export async function loadRoutePayload(
     return null;
   }
 
-  if (!response.ok) {
+  if (!response.ok || fromOtherBuild(response)) {
     return null;
   }
 
@@ -73,6 +88,7 @@ export async function loadRoutePayload(
     try {
       const full = await fetch(url);
       if (full.ok) {
+        if (fromOtherBuild(full)) return null;
         return await readRoutePayload(full, onQueryPayload);
       }
     } catch (e) {

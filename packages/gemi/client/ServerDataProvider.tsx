@@ -59,6 +59,12 @@ export interface ServerDataContextValue {
   assetBase?: string;
   meta: any;
   appId: string;
+  /**
+   * The client build this document was rendered for. A `.json` navigation
+   * answered by another build (`x-gemi-build`) loads the page in full (#1056).
+   * Absent in dev and in tests.
+   */
+  buildId?: string;
   /** Route patterns declared `.static()`; absent when the app has none. */
   staticRoutes?: string[];
 }

@@ -131,3 +131,20 @@ describe("httpProd: the 404 document's styles (#951)", () => {
     expect(res.body).not.toContain(HOME_CSS);
   });
 });
+
+describe("httpProd: the build a page and its navigations came from (#1056)", () => {
+  test("a `.json` navigation names the build the document carries", async () => {
+    const { body } = await document("/");
+    const buildId = body.match(/"buildId":"([^"]+)"/)?.[1];
+    expect(buildId).toMatch(/^[\w-]{12}$/);
+
+    const res = await fetch(`http://localhost:${server.port}/.json`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-gemi-build")).toBe(buildId);
+  });
+
+  test("a document does not send the header", async () => {
+    const res = await fetch(`http://localhost:${server.port}/`);
+    expect(res.headers.get("x-gemi-build")).toBeNull();
+  });
+});

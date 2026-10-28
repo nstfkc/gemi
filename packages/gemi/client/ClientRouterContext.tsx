@@ -21,6 +21,7 @@ import { routeDataUrl } from "./helpers/routeDataUrl";
 import { splitLocalePrefix } from "../i18n/localePrefix";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
+import { otherBuild } from "./chunkLoadRecovery";
 import { ServerDataContext } from "./ServerDataProvider";
 
 export interface PrefetchTarget {
@@ -113,7 +114,7 @@ export const ClientRouterProvider = (
   const i18nContext = useContext(I18nContext);
   // `.static()` routes: there is no client router on the other side to render
   // them into, so a navigation there is a full page load.
-  const { staticRoutes, i18n } = useContext(ServerDataContext);
+  const { staticRoutes, i18n, buildId } = useContext(ServerDataContext);
   // Views out of locale routing (`localeRouting: "off"`) have no locale in
   // their URLs: none is read off a path, and links get none prepended.
   const localeRouted = i18n?.localeRouting !== "off";
@@ -398,7 +399,9 @@ export const ClientRouterProvider = (
       const response = await fetch(url, {
         headers: { Purpose: "prefetch" },
       });
-      if (!response.ok) {
+      // Another build's data is not kept: the navigation fetches it again and
+      // meets the mismatch there (#1056).
+      if (!response.ok || otherBuild(response, buildId)) {
         return null;
       }
       // The settled aggregate: every streamed query result merged back into
