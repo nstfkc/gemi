@@ -16,6 +16,64 @@ import { renderFragment, type SqlFragment } from "../orm/sql";
 import { Facade } from "./Facade";
 
 /**
+ * What `readOnly` sets for its transaction (#1064). Every field is optional,
+ * and each one is a `SET LOCAL`, so it ends with the transaction: safe behind
+ * a pooler in transaction mode (PgBouncer), where a session `SET` would stay
+ * on the server connection for the next client.
+ */
+export type ReadOnlyOptions = {
+  /** `statement_timeout`, in milliseconds: a statement running longer is cancelled. */
+  statementTimeoutMs?: number;
+  /** `lock_timeout`, in milliseconds: how long a statement waits for a lock. */
+  lockTimeoutMs?: number;
+  /** `idle_in_transaction_session_timeout`, in milliseconds. */
+  idleInTransactionTimeoutMs?: number;
+  /**
+   * `SET LOCAL ROLE`: run as this role, such as a NOLOGIN role with column
+   * grants that leave secrets out. The connecting user must be a member of
+   * it. A plain identifier (letters, digits, `_` and `$`, not starting with a
+   * digit), quoted as written.
+   */
+  role?: string;
+};
+
+/** Thrown inside `readOnly`'s transaction to roll it back with a result. */
+class ReadOnlyRollback<T> {
+  constructor(readonly value: T) {}
+}
+
+const ROLE_NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+/** The `SET` statements for one `readOnly` call, checked before anything runs. */
+function readOnlyStatements(options: ReadOnlyOptions): string[] {
+  const statements = ["SET TRANSACTION READ ONLY"];
+  const settings: [keyof ReadOnlyOptions, string][] = [
+    ["statementTimeoutMs", "statement_timeout"],
+    ["lockTimeoutMs", "lock_timeout"],
+    ["idleInTransactionTimeoutMs", "idle_in_transaction_session_timeout"],
+  ];
+  for (const [option, setting] of settings) {
+    const value = options[option];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      throw new TypeError(
+        `DB.readOnly: ${option} must be a positive whole number of milliseconds, got ${String(value)}.`,
+      );
+    }
+    statements.push(`SET LOCAL ${setting} = ${value}`);
+  }
+  if (options.role !== undefined) {
+    if (typeof options.role !== "string" || !ROLE_NAME.test(options.role)) {
+      throw new TypeError(
+        `DB.readOnly: the role "${String(options.role)}" is not a plain identifier. Use letters, digits, _ and $.`,
+      );
+    }
+    statements.push(`SET LOCAL ROLE "${options.role}"`);
+  }
+  return statements;
+}
+
+/**
  * The raw-SQL surface, pointed at one connection.
  *
  * `DB` itself is one of these — the one that resolves the **ambient**
@@ -175,6 +233,73 @@ export class ConnectionQueries {
     );
   }
 
+  // Runs the callback in a read-only transaction and always rolls it back,
+  // returning what the callback returned (#1064).
+  //
+  //   const rows = await DB.connection("analytics").readOnly(
+  //     { statementTimeoutMs: 8_000, lockTimeoutMs: 1_000, role: "app_readonly" },
+  //     () => DB.connection("analytics").query(sql`select ...`),
+  //   )
+  //
+  // It opens a transaction, issues `SET TRANSACTION READ ONLY` and then one
+  // `SET LOCAL` per option, so the timeouts and the role end with the
+  // transaction. A write inside fails with Postgres' own "cannot execute …
+  // in a read-only transaction", and `query`, `execute` and the ORM inside
+  // the callback join the transaction, as they do in `transaction`.
+  //
+  // **Always rolled back**, even when the callback resolves: nothing a
+  // read-only transaction does needs committing, and rolling back means a
+  // function with a side effect the read-only mode does not stop (`nextval`,
+  // `pg_advisory_lock`'s transaction-level form) leaves nothing behind.
+  // `afterCommit` callbacks queued inside never run.
+  //
+  // **Postgres only**, and refused inside an open transaction:
+  // `SET TRANSACTION READ ONLY` has to be the first thing a transaction
+  // does, and a savepoint cannot be made read-only.
+  async readOnly<T>(
+    optionsOrFn: ReadOnlyOptions | ((tx: SQL) => Promise<T>),
+    maybeFn?: (tx: SQL) => Promise<T>,
+  ): Promise<T> {
+    const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+    if (typeof fn !== "function") {
+      throw new TypeError("DB.readOnly needs a callback: readOnly(options, async (tx) => ...).");
+    }
+    const statements = readOnlyStatements(options ?? {});
+    const name = this.name;
+    const connection = this.connection(name);
+    if (connection.dialect !== "postgres") {
+      throw new Error(
+        `DB.readOnly is supported on Postgres only, and the "${name}" connection is ${connection.dialect}.`,
+      );
+    }
+    if (currentTransaction() !== undefined) {
+      throw new Error(
+        "DB.readOnly cannot run inside a transaction: SET TRANSACTION READ ONLY has to be the first statement of its own transaction. Call it outside the transaction.",
+      );
+    }
+
+    try {
+      await withTransaction(
+        connection.sql,
+        async (tx) => {
+          for (const statement of statements) await tx.unsafe(statement);
+          const value = await runOnConnection(name, () => fn(tx));
+          throw new ReadOnlyRollback(value);
+        },
+        {
+          slowTransactionThreshold: connection.config.slowTransactionThreshold,
+          connection: name,
+        },
+      );
+    } catch (error) {
+      if (error instanceof ReadOnlyRollback) return error.value as T;
+      throw error;
+    }
+    // `withTransaction` only resolves when the callback does, and it always throws.
+    throw new Error("DB.readOnly: the transaction committed, which it never should.");
+  }
+
   // The schema of the live database, read back from its own catalog: every
   // table, its columns and their types, its primary key, and the foreign keys
   // that relate it to the others.
@@ -309,6 +434,15 @@ export class DB extends Facade {
   // `User.create` inside this joins it. See `ConnectionQueries.transaction`.
   static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
     return ambient.transaction(fn);
+  }
+
+  // Runs the callback in a read-only transaction on the ambient connection
+  // and always rolls it back. Postgres only. See `ConnectionQueries.readOnly`.
+  static readOnly<T>(
+    optionsOrFn: ReadOnlyOptions | ((tx: SQL) => Promise<T>),
+    fn?: (tx: SQL) => Promise<T>,
+  ): Promise<T> {
+    return ambient.readOnly(optionsOrFn, fn);
   }
 
   // The schema of the live database: tables, columns and their types, primary

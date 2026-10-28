@@ -9,6 +9,13 @@
 - The `ToolResultPart` of a call a person approved or refused now carries the same record as `approval`. Stores that keep the whole message keep it; nothing else changes on results of calls that never asked.
 - New `onToolResult(result, ctx)` hook on `AgentController` and in `defineAgentHooks`: once per tool result on the run's stream (top-level calls; a background job settling later is not one).
 
+## ORM: `DB.readOnly`, a read-only transaction with `SET LOCAL` timeouts and role (#1064)
+
+**New API (minor). Nothing to change in apps.** See [ORM → Read-only transactions](docs/orm.md#read-only-transactions).
+
+- `DB.readOnly(options?, fn)` and `DB.connection(name).readOnly(options?, fn)` run `fn` in a transaction that starts with `SET TRANSACTION READ ONLY` and the `SET LOCAL`s for `statementTimeoutMs`, `lockTimeoutMs`, `idleInTransactionTimeoutMs` and `role`. It is always rolled back, and returns what `fn` returned. Postgres only; refused inside an open transaction.
+- New exported type `ReadOnlyOptions`.
+
 # Upgrading from 0.164.0 to 0.165.0
 
 ## Router: a navigation answered by another build loads the page in full (#1056)
