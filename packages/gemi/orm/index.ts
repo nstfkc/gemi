@@ -299,3 +299,14 @@ export type {
   ScalarColumnSpec,
   ScalarColumnSpecs,
 } from "./typed-columns";
+
+// A compact, prompt-ready description of the models (#1065): tables, columns,
+// keys and relations, with sensitive columns marked. See `describeSchema.ts`.
+export {
+  describeSchema,
+  describeSchemaModels,
+  type DescribeSchemaOptions,
+  type SchemaColumnSummary,
+  type SchemaModelSummary,
+  type SchemaRelationSummary,
+} from "./describeSchema";
