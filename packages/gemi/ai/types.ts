@@ -384,11 +384,42 @@ export type AgentJobRef = {
   usage?: Usage;
 };
 
+/**
+ * A person's answer to an approval, as the server accepted it (#1062).
+ *
+ * On `ToolContext.approval` while an approved call runs, and on the
+ * `ToolResultPart` of every call a person answered: the tool's own result when
+ * they approved it, the `denied` one when they refused. So the stored thread
+ * says who decided and when, and an `onToolResult` hook can audit it.
+ */
+export type ToolApprovalRecord = {
+  approved: boolean;
+  /** When the server accepted the answer, as an ISO 8601 string. */
+  at: string;
+  /**
+   * The run's subject the answer was verified against (`runOwner`, so
+   * `user:<id>` by default), or `null` for an anonymous run. The signature on
+   * the pending call is bound to it, so this is who answered.
+   */
+  by: string | null;
+  /** What the client sent with the answer, if anything. Client-written text. */
+  reason?: string;
+};
+
 export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
   [K in keyof T]: {
     type: "tool-result";
     toolCallId: string;
     name: K;
+    /**
+     * Set on the result of a call a person approved or refused (#1062). See
+     * `ToolApprovalRecord`. Absent on calls that never asked.
+     *
+     * In stateless mode this travels through the browser like the rest of
+     * the history, so read it from the server's own copy (`onToolResult`, the
+     * store) when it matters.
+     */
+    approval?: ToolApprovalRecord;
   } & (
     | { status: "ok"; output: T[K]["output"]; job?: AgentJobRef }
     | { status: "error"; error: AgentError; job?: AgentJobRef }
@@ -579,6 +610,17 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      * answering a sub-agent's question writes what it writes for any other one.
      */
     path?: string[];
+    /**
+     * What the tool's `approvalPreview` computed for this call (#1060): the
+     * dry run to show next to Approve and Reject, such as the SQL and how many
+     * rows it changes. Only on `approval` calls of a tool that has one, and
+     * absent when the preview threw.
+     *
+     * Display data, and not signed: the signature covers the input, so the
+     * approval is of the call, not of the preview. Things can change between
+     * the preview and the click, and `execute` re-checks what it relies on.
+     */
+    preview?: unknown;
   };
 }[keyof T];
 
