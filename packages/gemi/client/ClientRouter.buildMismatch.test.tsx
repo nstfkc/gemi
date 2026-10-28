@@ -26,6 +26,7 @@ function Layout(props: { children?: ReactNode }) {
   return (
     <section>
       <Link href={"/about" as never}>About</Link>
+      <Link href={"/contact" as never}>Contact</Link>
       {props.children}
     </section>
   );
@@ -37,17 +38,21 @@ function Home() {
 function About(props: { author: { name: string } }) {
   return <p data-view="About">{props.author.name}</p>;
 }
+function Contact() {
+  return <p data-view="Contact">contact</p>;
+}
 function NotFound() {
   return <p data-view="404">not found</p>;
 }
 
-const viewImportMap = { Layout, Home, About, 404: NotFound } as any;
+const viewImportMap = { Layout, Home, About, Contact, 404: NotFound } as any;
 
 class AppRouter extends ViewRouter {
   routes = {
     "/": this.layout("Layout", {
       "/": this.view("Home"),
       "/about": this.view("About"),
+      "/contact": this.view("Contact"),
     }),
   };
 }
@@ -147,10 +152,10 @@ async function mount(serverData = value) {
   });
 }
 
-async function clickAbout() {
+async function clickAbout(href = "/about") {
   await act(async () => {
     container!
-      .querySelector("a")!
+      .querySelector(`a[href="${href}"]`)!
       .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
   });
   await act(async () => {});
@@ -212,5 +217,111 @@ describe("a navigation answered by another build (#1056)", () => {
 
     expect(reload).not.toHaveBeenCalled();
     expect(text("About")).toBe("Ada");
+  });
+});
+
+/**
+ * folio#2750: the full load is cancelled ("Stay" on a dirty editor's
+ * `beforeunload` prompt, here a `reload` that does nothing) and the page keeps
+ * running. Later navigations answered by the other build must still recover,
+ * not be discarded behind a load that is never coming.
+ */
+describe("after a full load that was cancelled", () => {
+  // Per path: which build answers it, and with what About data.
+  let builds: Record<string, string>;
+  let dirty: (event: BeforeUnloadEvent) => void;
+
+  beforeEach(() => {
+    builds = { "/.json": "build-a", "/about.json": "build-a", "/contact.json": "build-a" };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), realLocation.origin).pathname;
+      const build = builds[path];
+      if (path === "/about.json") return aboutPayload(build, { author: { name: "Ada" } });
+      const route = path === "/contact.json" ? "/contact" : "/";
+      const view = route === "/" ? "Home" : "Contact";
+      return new Response(
+        JSON.stringify({
+          data: { [route]: { Layout: {}, [view]: {} } },
+          breadcrumbs: {},
+          prefetchedData: {},
+          meta: {},
+          i18n: value.i18n,
+          appId: "other-process",
+        }),
+        { status: 200, headers: { [BUILD_HEADER]: build } },
+      );
+    }) as unknown as typeof fetch;
+    // The dirty editor: asks before the page is left.
+    dirty = (event) => event.preventDefault();
+    window.addEventListener("beforeunload", dirty);
+  });
+
+  afterEach(() => {
+    window.removeEventListener("beforeunload", dirty);
+  });
+
+  async function back() {
+    await act(async () => {
+      const popped = new Promise((resolve) =>
+        window.addEventListener("popstate", resolve, { once: true }),
+      );
+      window.history.back();
+      await popped;
+    });
+    await act(async () => {});
+  }
+
+  /** Editor open on /about, then Back to `/` answered by the other build: "Stay". */
+  async function cancelOnBack() {
+    await mount();
+    await clickAbout();
+    expect(text("About")).toBe("Ada");
+
+    builds["/.json"] = "build-b";
+    await back();
+
+    expect(realLocation.pathname).toBe("/");
+    expect(reload).toHaveBeenCalledTimes(1);
+    // Cancelled: the editor stays on screen.
+    expect(text("About")).toBe("Ada");
+  }
+
+  test("a mismatch on another URL loads it in full", async () => {
+    await cancelOnBack();
+
+    builds["/contact.json"] = "build-b";
+    await clickAbout("/contact");
+
+    expect(realLocation.pathname).toBe("/contact");
+    expect(reload).toHaveBeenCalledTimes(2);
+    const marker = JSON.parse(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)!);
+    expect(Object.keys(marker).sort()).toEqual(
+      [`${realLocation.origin}/`, `${realLocation.origin}/contact`].sort(),
+    );
+  });
+
+  test("the same URL inside the cooldown renders the data instead of being discarded", async () => {
+    await cancelOnBack();
+
+    await clickAbout("/contact");
+    expect(text("Contact")).toBe("contact");
+    await back();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(text("Home")).toBe("home");
+  });
+
+  test("the same URL after the cooldown loads it in full again", async () => {
+    await cancelOnBack();
+
+    const later = Date.now() + 31_000;
+    vi.spyOn(Date, "now").mockImplementation(() => later);
+    await clickAbout("/contact");
+    expect(text("Contact")).toBe("contact");
+    await back();
+
+    expect(realLocation.pathname).toBe("/");
+    expect(reload).toHaveBeenCalledTimes(2);
+    expect(text("Contact")).toBe("contact");
   });
 });

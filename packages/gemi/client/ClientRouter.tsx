@@ -40,7 +40,7 @@ import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { loadRoutePayload } from "./helpers/loadRoutePayload";
 import { isExternalRedirect } from "../utils/intendedUrl";
-import { recoverFromBuildMismatch } from "./chunkLoadRecovery";
+import { navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
 
 declare global {
   interface Window {
@@ -284,6 +284,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
+      // A full load an earlier navigation started and the page is still here
+      // for was cancelled ("Stay" on a dirty editor's prompt): this navigation
+      // gets its own recovery rather than being discarded behind it.
+      navigationStarted();
       setTransitionPath((current) => {
         const [, prevTarget] = current;
         return [prevTarget, pathname];
