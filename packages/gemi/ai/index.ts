@@ -76,6 +76,7 @@ export type {
   ReasoningPart,
   TextPart,
   ToolCallPart,
+  ToolApprovalRecord,
   ToolResultPart,
   ToolSearchRecord,
   ToolShape,
@@ -135,6 +136,7 @@ export type {
   ToolApprovalContext,
   ToolEndsRun,
   ToolEndsRunContext,
+  ToolToModel,
   ToolShapesOf,
   ToolTurn,
 } from "./Agent";

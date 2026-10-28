@@ -21,6 +21,7 @@ import type {
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
+import { modelOutputOf } from "./toolModelOutput";
 import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
 import { injectedMessageIds } from "./Agent";
 import {
@@ -91,6 +92,7 @@ import type {
   AgentStreamEvent,
   ClientTurn,
   PendingToolCall,
+  ToolResultPart,
   ToolShapes,
 } from "./types";
 
@@ -688,6 +690,7 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     call: { toolCallId: string; name: string; input: unknown },
     ctx: AgentHookContext,
   ) => void | Promise<void>;
+  onToolResult?: (result: ToolResultPart, ctx: AgentHookContext) => void | Promise<void>;
   onAwaitingInput?: (pending: PendingToolCall[], ctx: AgentHookContext) => void | Promise<void>;
   redactError?: (error: AgentError, info: ErrorRedactionInfo, ctx: AgentHookContext) => AgentError;
   onError?: (error: AgentError, ctx: AgentHookContext) => void | Promise<void>;
@@ -2838,6 +2841,24 @@ export abstract class AgentController<
     return this.hooks?.onToolCall?.(call, ctx);
   }
 
+  /**
+   * Fires once for each tool result on the run's stream (#1062): `ok`,
+   * `error`, `denied` (refused, stopped, interrupted) and `running` (a
+   * background job started), from the step loop and from a turn that answers
+   * a pending call. The place for an audit log of what the tools did.
+   *
+   * A result a person approved or refused carries `result.approval`: who
+   * (the run's subject) and when. This is the server's own copy, so it is
+   * trustworthy in stateless mode too, unlike the one the client posts back.
+   *
+   * Top-level calls only: a sub-agent's results are on its nested transcript.
+   * A background job settling later is not a result on this stream; read
+   * those off the thread, or from the job store.
+   */
+  protected onToolResult(result: ToolResultPart, ctx: AgentHookContext): void | Promise<void> {
+    return this.hooks?.onToolResult?.(result, ctx);
+  }
+
   /** Fires before the stream ends `awaiting-input` — where to notify whoever
    *  has to approve, if they are not the person watching the stream. */
   protected onAwaitingInput(
@@ -2946,6 +2967,9 @@ export abstract class AgentController<
           );
         }
         return;
+      case "tool-result":
+        await this.onToolResult(event.part as ToolResultPart, ctx);
+        return;
       case "awaiting-input":
         await this.onAwaitingInput(event.pending as PendingToolCall[], ctx);
         return;
@@ -3016,7 +3040,9 @@ export abstract class AgentController<
           threadId,
           store: AgentJobs.store,
           isRunLive: isLive,
-          outputSchemaFor: (name) => this.toolOutputSchema(name),
+          outputSchemaFor: (name) => this.toolNamed(name)?.outputSchema,
+          modelOutputFor: (name, output) =>
+            modelOutputOf(this.toolNamed(name), output, (err) => this.reportHookFailure(err)),
           scan: this.jobsBlockMax(),
         });
         messages = overlaid.messages;
@@ -3061,15 +3087,15 @@ export abstract class AgentController<
   }
 
   /** A tool's output schema, by name, for checking a background job's output. */
-  private toolOutputSchema(name: string): Schema<any> | undefined {
-    const visit = (entries: readonly unknown[]): Schema<any> | undefined => {
+  private toolNamed(name: string): ToolLike | undefined {
+    const visit = (entries: readonly unknown[]): ToolLike | undefined => {
       for (const entry of entries) {
-        const tool = entry as { name?: string; outputSchema?: Schema<any>; tools?: unknown[] };
+        const tool = entry as ToolLike & { tools?: unknown[] };
         if (Array.isArray(tool.tools)) {
           const found = visit(tool.tools);
           if (found) return found;
         } else if (tool.name === name) {
-          return tool.outputSchema;
+          return tool;
         }
       }
       return undefined;
@@ -3233,6 +3259,13 @@ export abstract class AgentController<
  * has written it, and `notifyRun` skips it by `id`: once per message, as
  * before, and in the same order.
  */
+/** What the controller reads off one of its agent's tools by name. */
+type ToolLike = {
+  name?: string;
+  outputSchema?: Schema<any>;
+  toModel?: (output: any) => unknown;
+};
+
 type EarlyTurn = {
   /** The turn message's id, once the run has reported it. */
   id: string | null;

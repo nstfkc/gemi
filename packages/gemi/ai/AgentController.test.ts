@@ -30,7 +30,7 @@ import { toResponsesInput } from "./providers/request";
 import { s } from "./Schema";
 import { StubAgentRun } from "./store/stubAgentRun";
 import { openPending } from "./client/reducer";
-import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
+import type { AgentMessage, AgentStreamEvent, PendingToolCall, ToolResultPart } from "./types";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -495,6 +495,68 @@ describe("AgentController.stream", () => {
     expect(toolCalls).toEqual(["bash"]);
     expect(pendingSeen).toHaveLength(1);
     expect(errors).toEqual(["boom"]);
+  });
+
+  test("fires onToolResult once per tool result, approval record included (#1062)", async () => {
+    const run = new StubAgentRun("run_4b");
+    const { agent } = stubAgent(run);
+    const seen: ToolResultPart[] = [];
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      protected onToolResult(result: ToolResultPart) {
+        seen.push(result);
+      }
+    }
+
+    await new Chat().stream(jsonRequest({ text: "hi" }));
+    const approval = { approved: true, at: "2026-10-28T00:00:00.000Z", by: "user:1" };
+    run.emit({
+      type: "tool-result",
+      messageId: "a1",
+      part: { type: "tool-result", toolCallId: "c1", name: "bash", status: "ok", output: 1, approval },
+    } as AgentStreamEvent);
+    run.emit({
+      type: "tool-result",
+      messageId: "a1",
+      part: { type: "tool-result", toolCallId: "c2", name: "bash", status: "denied", cause: "stopped" },
+    } as AgentStreamEvent);
+    run.finish();
+    await settle();
+
+    expect(seen.map((part) => [part.toolCallId, part.status])).toEqual([
+      ["c1", "ok"],
+      ["c2", "denied"],
+    ]);
+    expect(seen[0]!.approval).toEqual(approval);
+  });
+
+  test("onToolResult from defineAgentHooks", async () => {
+    const run = new StubAgentRun("run_4c");
+    const { agent } = stubAgent(run);
+    const seen: string[] = [];
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      hooks = defineAgentHooks({
+        onToolResult: (result) => {
+          seen.push(result.toolCallId);
+        },
+      });
+    }
+
+    await new Chat().stream(jsonRequest({ text: "hi" }));
+    run.emit({
+      type: "tool-result",
+      messageId: "a1",
+      part: { type: "tool-result", toolCallId: "c9", name: "bash", status: "ok", output: 1 },
+    } as AgentStreamEvent);
+    run.finish();
+    await settle();
+
+    expect(seen).toEqual(["c9"]);
   });
 
   test("a hook that throws is reported and the run survives it", async () => {

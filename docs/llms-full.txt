@@ -60,6 +60,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[AI Memory](./ai-memory.md)** — notes agents keep across conversations: scopes declared on the agent and resolved per run (`memoryScopes()`), the `<memory>` block, the `remember` / `forget` / `recall` tools, `ctx.memory`, `AgentMemories` (list, edit, delete, export) and `DatabaseAgentMemoryStore`.
 - **[AI Tool Approvals](./ai-tool-approvals.md)** — `requiresApproval` on a tool: never, always, or decided per call by a function given the call's input and the run's context, so "always allow" stays on the server; through `toAgentTools` and remote MCP elicitation.
 - **[AI Tools That End the Run](./ai-tool-ends-run.md)** — `endsRun` on a tool: a successful call ends the run with an optional closing text, so the model isn't asked again just to confirm what the tool did.
+- **[AI Tool Output for the Model](./ai-tool-model-output.md)** — `toModel` on a tool: the client gets the whole output, the model reads a smaller projection of it (`modelOutput`), such as a row count and the first rows.
 - **[AI Evals](./ai-evals.md)** — `Eval.create`: cases × runs through a task, deterministic checks and LLM judges (with calibration), gates, pass rates and scores with 95% intervals, metered tokens and cost (`measureUsage`), and `Eval.compare` / `Eval.format` against a saved baseline.
 - **[AI Usage and Cost](./ai-usage.md)** — `Usage.meter`, `ctx.meter` and `result.metered`: every model call of a run or a scope (steps, `generate`, images, sub-runs) priced at its own model's prices, costs that aren't model calls added under a label, totals by model and by label.
 - **[AI Skills](./ai-skills.md)** — `Skill.create` and `skills` on an agent: instructions the model loads on demand from the reserved `skills` namespace; skills for one run (`Agent.stream({ skills })`, `AgentController.skills()`), and how loaded skills are summarised.
@@ -9173,6 +9174,54 @@ A sub-agent's tool works the same way. A call that asks escalates to the parent 
 
 `tool.requiresApproval` still reads as a boolean: `true` for a function as well, meaning "may ask". The function itself is `tool.approvalPredicate`. Places that only need "may it ask" treat a function as yes: a voice call leaves such a tool out, as it does any tool with `requiresApproval`.
 
+## Showing a preview
+
+`approvalPreview` computes what the user sees before they decide: a dry run, such as the SQL a write would run and how many rows it changes.
+
+```ts
+export const executeWrite = AgentTool.create({
+  name: "executeWrite",
+  description: "Run an UPDATE or DELETE",
+  inputSchema: s.object({ sql: s.string() }),
+  requiresApproval: true,
+  approvalPreview: async ({ sql }, ctx) => {
+    const dryRun = await dryRunWrite(sql); // runs it in a transaction and rolls back
+    return { sql, affectedRows: dryRun.count, sample: dryRun.rows.slice(0, 20) };
+  },
+  execute: async ({ sql }, ctx) => runWrite(sql),
+});
+```
+
+```tsx
+// The page: the preview is on the pending call.
+{chat.pending.map((call) => (
+  <WriteApproval key={call.toolCallId} preview={call.preview} onAnswer={(ok) => chat.approve(call.toolCallId, ok)} />
+))}
+```
+
+- **When it runs.** Once for each call that goes pending, after the input is validated and `requiresApproval` said to ask, with the same `input` and `ctx` (`ToolApprovalContext`) as a `requiresApproval` function. Not for a call that runs without asking, and not under `onPending: "deny"`.
+- **Where it goes.** The value is the pending call's `preview`: on the `awaiting-input` frame, in `useChat`'s `pending`, and in the stored `AgentMessage.pending`, so it is still there after a reload. It is sent and stored as JSON (a `Date` becomes its ISO string). `undefined` means no preview.
+- **Display only.** The signature covers the input, not the preview, so approving approves the call. The data can change between the preview and the click: `execute` should re-check what it relies on, for example that the write still changes the number of rows the preview showed.
+- **A preview that throws**, or runs past the tool's `timeoutMs`, is logged, and the call is still asked, without `preview`.
+- It needs `requiresApproval` (`true` or a function), and is refused on client tools.
+
+## Who approved a call
+
+A call that runs because a person approved it gets `ctx.approval`:
+
+```ts
+execute: async ({ sql }, ctx) => {
+  // { approved: true, at: "2026-10-28T09:14:03.120Z", by: "user:42", reason?: "..." }
+  await AuditLog.create({ sql, approvedBy: ctx.approval?.by, approvedAt: ctx.approval?.at });
+  return runWrite(sql);
+},
+```
+
+- `by` is the run's subject the answer was verified against (`runOwner`, so `user:<id>` by default), `null` for an anonymous run. `at` is when the server accepted the answer. `reason` is what the client sent with the answer, if anything.
+- `ctx.approval` is absent for a call that never asked, including one whose `requiresApproval` function answered `false`, so a tool can tell "the user approved this" from "it was allowed to run". It is also absent when an approved tool that escalated a sub-agent's question is re-entered on a later turn.
+- The same record is on the call's `ToolResultPart` as `approval`: on the tool's result when it was approved, on the `denied` result (`approved: false`) when it was refused. The stored thread says who decided and when.
+- `onToolResult` on the controller sees every tool result, with `approval` on these. See [AI Controller Hooks](./ai-controller-hooks.md). In stateless mode read the record there rather than from what the client posts back.
+
 ## Through the MCP registry
 
 A native tool registered with `fromTool` keeps its function:
@@ -9264,6 +9313,47 @@ A function that throws is logged, and the run continues as if it had answered `n
 
 - [AI Tool Approvals](./ai-tool-approvals.md): `requiresApproval`, the other per-call tool hook.
 - [AI Context Window](./ai-context-window.md): `prepareStep`, which changes what the next model call is sent.
+
+---
+
+## AI Tool Output for the Model
+
+A tool's result goes to two readers: the client renders it, and the model reads it on the next step. Sometimes they need different amounts. A query tool might return 1000 rows for a table in the UI, while the model only needs the row count and the first few rows to answer. With `toModel`, the client gets the whole output and the model gets a smaller projection of it.
+
+```ts
+import { AgentTool, s } from "gemi/ai";
+
+export const runQuery = AgentTool.create({
+  name: "runQuery",
+  description: "Run a read-only SQL query",
+  inputSchema: s.object({ sql: s.string() }),
+  execute: async ({ sql }) => queries.run(sql, { limit: 1000 }), // { columns, rows }
+  // What the model reads instead of the whole output.
+  toModel: (output) => ({
+    columns: output.columns,
+    rowCount: output.rows.length,
+    rows: output.rows.slice(0, 50),
+    truncated: output.rows.length > 50,
+  }),
+});
+```
+
+## What happens
+
+- **The client gets the whole output.** The `tool-result` frame, `useChat`, `onMessage` and the thread store all have `output` as `execute` returned it.
+- **The model reads the projection.** It is stored on the result as `modelOutput`, and the request sends it instead of `output`. A string is sent as is, and any other value as JSON. Compaction summaries use it too.
+- **Computed once.** `toModel` runs when the result is produced, synchronously, and the value is kept with the result (as JSON). Every later request sends the model the same text, so the prompt cache holds, and a stateless client posts it back with the rest of the history. Changing `toModel` later does not change results already stored.
+- **Successful results only.** Errors, refusals and `running` background jobs are sent as before. When a background job settles, its output gets the projection as well.
+- **A `toModel` that throws** is logged, and the model reads the whole output. `undefined` also means the model reads the whole output.
+- **Server tools only.** A client tool (`answeredBy: "client"`) can't set it: the client's answer is what the model reads.
+
+`modelOutput` travels to the client with the result, so keep anything there that the user must not see out of `output` as well.
+
+## Related
+
+- [AI Tools That End the Run](./ai-tool-ends-run.md): `endsRun`, ending the run after a successful call.
+- [AI Background Jobs](./ai-background-jobs.md): results that settle later.
+- [AI Context Window](./ai-context-window.md): bounding what a long thread sends.
 
 ---
 
@@ -9980,7 +10070,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
 | `instructions`, `reasoning`, `skills`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
-| `onMessage`, `onToolCall`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. |
+| `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused; see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
 
 Settings such as `store`, `attachments`, `maxConcurrentRuns` and `requireThread` are not hooks. Set those on the controller.
@@ -13225,6 +13315,38 @@ const post = tables.find((t) => t.name === "Post")
 - **It works on MySQL and MariaDB**, where `DB.query` does not yet.
 - **The code loads on first call.** An app that never calls it never loads it.
 - **It joins the ambient transaction.** A table created earlier in the same transaction is included.
+
+### Describing the schema for a prompt
+
+`describeSchema()` writes the models as compact text, one line per model, for an AI agent's system prompt. It reads the generated schema, so it cannot go stale the way a pasted copy does.
+
+```ts
+import { describeSchema } from "gemi/orm"
+
+const schema = describeSchema({
+  exclude: ["Session", "User.verificationToken"], // models or fields left out
+  sensitive: ["Subscription.paymentMethodId"],      // marked [sensitive]
+})
+// User table "users": id:Int [pk], email:String [unique], name:String?,
+//   passwordHash@password_hash:String [sensitive], createdAt@created_at:DateTime; relations: posts -> Post[]
+// Post table "Post": id:Int [pk], authorId@author_id:Int, …; relations: author -> User on author_id = User.id
+// Columns marked [sensitive] hold secrets: never select them.
+```
+
+- **Columns** are `field:Type`, with the database column after `@` when `@map` renamed it (raw SQL needs the column), `?` when nullable, `[]` for a list and `Enum(enum)` for an enum. `[pk]`, `[unique]` and `[sensitive]` are flags. Composite unique keys and relations (with their join columns, or the join table of a many-to-many) follow.
+- **Sensitive columns** are those marked `/// @gemi.sensitive` in the Prisma schema, encrypted ones (`@gemi.encrypted`), and the ones named in `sensitive`. They are marked so the model knows not to select them; `sensitiveColumns: "omit"` leaves them out instead. A marker in a prompt is not access control: enforce it in the database too, for example with a role whose column grants leave secrets out.
+- **What it reads.** Every registered model by default, each once, in registry order, so the same schema gives the same text. `models` picks some by name. `schemas` takes the schemas instead: a list, or the generated module itself (`import * as schema from "./models/generated/schema"`).
+- **`describeSchemaModels()`** returns the same as data (`SchemaModelSummary[]`: columns with their database names and flags, relations, keys), for a tool that answers "describe these tables".
+
+```prisma
+model User {
+  id           Int    @id @default(autoincrement())
+  /// @gemi.sensitive
+  passwordHash String @map("password_hash")
+}
+```
+
+`@gemi.sensitive` changes nothing else: no query reads it.
 
 ## Encrypted columns
 

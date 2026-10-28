@@ -836,7 +836,7 @@ function renderPart(
       if (skillCalls.has(part.toolCallId)) return "";
       const body =
         part.status === "ok"
-          ? json(part.output)
+          ? json(part.modelOutput !== undefined ? part.modelOutput : part.output)
           : part.status === "error"
             ? `error: ${part.error?.message ?? ""}`
             : part.status === "running"

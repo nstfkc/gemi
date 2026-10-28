@@ -2613,6 +2613,38 @@ const post = tables.find((t) => t.name === "Post")
 - **The code loads on first call.** An app that never calls it never loads it.
 - **It joins the ambient transaction.** A table created earlier in the same transaction is included.
 
+### Describing the schema for a prompt
+
+`describeSchema()` writes the models as compact text, one line per model, for an AI agent's system prompt. It reads the generated schema, so it cannot go stale the way a pasted copy does.
+
+```ts
+import { describeSchema } from "gemi/orm"
+
+const schema = describeSchema({
+  exclude: ["Session", "User.verificationToken"], // models or fields left out
+  sensitive: ["Subscription.paymentMethodId"],      // marked [sensitive]
+})
+// User table "users": id:Int [pk], email:String [unique], name:String?,
+//   passwordHash@password_hash:String [sensitive], createdAt@created_at:DateTime; relations: posts -> Post[]
+// Post table "Post": id:Int [pk], authorId@author_id:Int, …; relations: author -> User on author_id = User.id
+// Columns marked [sensitive] hold secrets: never select them.
+```
+
+- **Columns** are `field:Type`, with the database column after `@` when `@map` renamed it (raw SQL needs the column), `?` when nullable, `[]` for a list and `Enum(enum)` for an enum. `[pk]`, `[unique]` and `[sensitive]` are flags. Composite unique keys and relations (with their join columns, or the join table of a many-to-many) follow.
+- **Sensitive columns** are those marked `/// @gemi.sensitive` in the Prisma schema, encrypted ones (`@gemi.encrypted`), and the ones named in `sensitive`. They are marked so the model knows not to select them; `sensitiveColumns: "omit"` leaves them out instead. A marker in a prompt is not access control: enforce it in the database too, for example with a role whose column grants leave secrets out.
+- **What it reads.** Every registered model by default, each once, in registry order, so the same schema gives the same text. `models` picks some by name. `schemas` takes the schemas instead: a list, or the generated module itself (`import * as schema from "./models/generated/schema"`).
+- **`describeSchemaModels()`** returns the same as data (`SchemaModelSummary[]`: columns with their database names and flags, relations, keys), for a tool that answers "describe these tables".
+
+```prisma
+model User {
+  id           Int    @id @default(autoincrement())
+  /// @gemi.sensitive
+  passwordHash String @map("password_hash")
+}
+```
+
+`@gemi.sensitive` changes nothing else: no query reads it.
+
 ## Encrypted columns
 
 Mark a `String` field `/// @gemi.encrypted` and the ORM stores it encrypted and hands it back as plaintext. Use it for
