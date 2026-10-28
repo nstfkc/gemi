@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.165.0 to 0.166.0
 
 ## AI: `DatabaseAgentStore`, threads in the database (#1063)
 
