@@ -44,6 +44,54 @@ A sub-agent's tool works the same way. A call that asks escalates to the parent 
 
 `tool.requiresApproval` still reads as a boolean: `true` for a function as well, meaning "may ask". The function itself is `tool.approvalPredicate`. Places that only need "may it ask" treat a function as yes: a voice call leaves such a tool out, as it does any tool with `requiresApproval`.
 
+## Showing a preview
+
+`approvalPreview` computes what the user sees before they decide: a dry run, such as the SQL a write would run and how many rows it changes.
+
+```ts
+export const executeWrite = AgentTool.create({
+  name: "executeWrite",
+  description: "Run an UPDATE or DELETE",
+  inputSchema: s.object({ sql: s.string() }),
+  requiresApproval: true,
+  approvalPreview: async ({ sql }, ctx) => {
+    const dryRun = await dryRunWrite(sql); // runs it in a transaction and rolls back
+    return { sql, affectedRows: dryRun.count, sample: dryRun.rows.slice(0, 20) };
+  },
+  execute: async ({ sql }, ctx) => runWrite(sql),
+});
+```
+
+```tsx
+// The page: the preview is on the pending call.
+{chat.pending.map((call) => (
+  <WriteApproval key={call.toolCallId} preview={call.preview} onAnswer={(ok) => chat.approve(call.toolCallId, ok)} />
+))}
+```
+
+- **When it runs.** Once for each call that goes pending, after the input is validated and `requiresApproval` said to ask, with the same `input` and `ctx` (`ToolApprovalContext`) as a `requiresApproval` function. Not for a call that runs without asking, and not under `onPending: "deny"`.
+- **Where it goes.** The value is the pending call's `preview`: on the `awaiting-input` frame, in `useChat`'s `pending`, and in the stored `AgentMessage.pending`, so it is still there after a reload. It is sent and stored as JSON (a `Date` becomes its ISO string). `undefined` means no preview.
+- **Display only.** The signature covers the input, not the preview, so approving approves the call. The data can change between the preview and the click: `execute` should re-check what it relies on, for example that the write still changes the number of rows the preview showed.
+- **A preview that throws**, or runs past the tool's `timeoutMs`, is logged, and the call is still asked, without `preview`.
+- It needs `requiresApproval` (`true` or a function), and is refused on client tools.
+
+## Who approved a call
+
+A call that runs because a person approved it gets `ctx.approval`:
+
+```ts
+execute: async ({ sql }, ctx) => {
+  // { approved: true, at: "2026-10-28T09:14:03.120Z", by: "user:42", reason?: "..." }
+  await AuditLog.create({ sql, approvedBy: ctx.approval?.by, approvedAt: ctx.approval?.at });
+  return runWrite(sql);
+},
+```
+
+- `by` is the run's subject the answer was verified against (`runOwner`, so `user:<id>` by default), `null` for an anonymous run. `at` is when the server accepted the answer. `reason` is what the client sent with the answer, if anything.
+- `ctx.approval` is absent for a call that never asked, including one whose `requiresApproval` function answered `false`, so a tool can tell "the user approved this" from "it was allowed to run". It is also absent when an approved tool that escalated a sub-agent's question is re-entered on a later turn.
+- The same record is on the call's `ToolResultPart` as `approval`: on the tool's result when it was approved, on the `denied` result (`approved: false`) when it was refused. The stored thread says who decided and when.
+- `onToolResult` on the controller sees every tool result, with `approval` on these. See [AI Controller Hooks](./ai-controller-hooks.md). In stateless mode read the record there rather than from what the client posts back.
+
 ## Through the MCP registry
 
 A native tool registered with `fromTool` keeps its function:

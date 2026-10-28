@@ -7,6 +7,22 @@
 - `describeSchema(options?)` from `gemi/orm` writes the registered models (or the `schemas` you pass) as one line per model: table, columns (database names under `@map`), keys and relations. `describeSchemaModels(options?)` returns the same as data. Options: `models`, `exclude` (models or `Model.field`), `sensitive` (`Model.field`), `sensitiveColumns: "mark" | "omit"`.
 - `/// @gemi.sensitive` on a Prisma field emits `sensitive: true` in the generated artifact. Only `describeSchema` reads it; encrypted columns count as sensitive too. The artifact of a schema that doesn't use it is unchanged, and the artifact version is not bumped. Re-run `prisma generate` after adding the annotation.
 
+## AI: a tool result's model-facing projection, `toModel` (#1061)
+
+**New optional API (minor). Nothing to change in apps.** See [AI Tool Output for the Model](docs/ai-tool-model-output.md).
+
+- New `toModel(output)` on `AgentTool.create` (server tools): the model reads its value instead of the whole output, while the client, `onMessage` and the store still get `output`. The value is kept on the `ok` result as the new `modelOutput` field, computed once when the result is produced (and when a background job settles).
+- The provider request and compaction summaries send `modelOutput` when a result has one, and `output` otherwise, as before.
+
+## AI: approval previews, who approved a call, and `onToolResult` (#1060, #1062)
+
+**New optional APIs (minor). Nothing to change in apps.** See [AI Tool Approvals → Showing a preview](docs/ai-tool-approvals.md#showing-a-preview) and [→ Who approved a call](docs/ai-tool-approvals.md#who-approved-a-call).
+
+- New `approvalPreview(input, ctx)` on `AgentTool.create` (needs `requiresApproval`): computes a dry run to show before the user approves. Its value is the pending call's new `preview` field, on the `awaiting-input` frame, in `useChat`'s `pending` and in the stored `AgentMessage.pending`. Display only: not signed, so `execute` re-checks what it relies on. A preview that throws is logged and the call is asked without one.
+- New `ctx.approval` (`ToolApprovalRecord`: `{ approved, at, by, reason? }`) on the `ToolContext` of a call that runs because a person approved it. `by` is the run's subject (`runOwner`).
+- The `ToolResultPart` of a call a person approved or refused now carries the same record as `approval`. Stores that keep the whole message keep it; nothing else changes on results of calls that never asked.
+- New `onToolResult(result, ctx)` hook on `AgentController` and in `defineAgentHooks`: once per tool result on the run's stream (top-level calls; a background job settling later is not one).
+
 ## ORM: `DB.readOnly`, a read-only transaction with `SET LOCAL` timeouts and role (#1064)
 
 **New API (minor). Nothing to change in apps.** See [ORM → Read-only transactions](docs/orm.md#read-only-transactions).
