@@ -334,7 +334,7 @@ jobs:
 
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: gemi_test
@@ -486,7 +486,7 @@ jobs:
 
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: gemi_test
@@ -497,7 +497,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: public.ecr.aws/docker/library/mysql:8.4
+        image: mirror.gcr.io/library/mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: mysql
           MYSQL_DATABASE: gemi_test
@@ -589,6 +589,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "10"
 
+      # `DB.readOnly`: READ ONLY, the SET LOCAL timeouts and role, and that
+      # none of them is left on the pooled connection afterwards (#1064).
+      - name: Read-only transactions on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" facades/DB.readOnly.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "8"
+
       # `DB.schema()` reads a different catalog per dialect, and the servers
       # are already here. The filter selects nothing at all if the URLs go
       # missing, which would read as a pass, so the suite is told to fail
@@ -611,7 +619,7 @@ jobs:
 
     services:
       redis:
-        image: public.ecr.aws/docker/library/redis:7-alpine
+        image: mirror.gcr.io/library/redis:7-alpine
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
