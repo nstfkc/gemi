@@ -1104,6 +1104,35 @@ describe("emitArtifacts()", () => {
  * carries it, so a schema without one generates the artifact it always did,
  * and every column the ORM could never serve encrypted is refused here.
  */
+/** `/// @gemi.sensitive` (#1065): a flag `describeSchema` reads, and nothing else. */
+describe("sensitive columns", () => {
+  const vault = model({
+    name: "Vault",
+    fields: [
+      field({ name: "id", isId: true }),
+      field({ name: "token", type: "String", documentation: "Session token.\n@gemi.sensitive" }),
+      field({ name: "hash", type: "String", isUnique: true, documentation: "@gemi.sensitive" }),
+      field({ name: "label", type: "String", documentation: "Not @gemi.sensitiveish" }),
+    ],
+  });
+
+  test("records sensitive: true on the annotated fields only, keys included", () => {
+    const [schema] = buildModelSchemas([vault]);
+    expect(schema.fields.token.sensitive).toBe(true);
+    expect(schema.fields.hash.sensitive).toBe(true);
+    expect(schema.fields.label).not.toHaveProperty("sensitive");
+    expect(schema.fields.id).not.toHaveProperty("sensitive");
+  });
+
+  test("does not change the artifact version", () => {
+    expect(emitArtifacts([vault])["schema.ts"]).toContain("ARTIFACT_VERSION = 2");
+  });
+
+  test("a schema without sensitive columns emits no trace of the flag", () => {
+    expect(emitArtifacts([USER, POST])["schema.ts"]).not.toContain("sensitive");
+  });
+});
+
 describe("encrypted columns", () => {
   const secret = (extra: Partial<DMMF.Field> = {}, modelExtra: Partial<DMMF.Model> = {}) =>
     model({

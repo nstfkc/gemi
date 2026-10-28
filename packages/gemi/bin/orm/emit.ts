@@ -321,7 +321,17 @@ function fieldSchema(
     schema.encrypted = true;
   }
 
+  // `/// @gemi.sensitive` (#1065): read only by `describeSchema`. Last for the
+  // same reason as `encrypted`: a schema without it emits what it did before.
+  if (hasAnnotation(field, SENSITIVE_ANNOTATION)) schema.sensitive = true;
+
   return schema;
+}
+
+const SENSITIVE_ANNOTATION = /(^|\s)@gemi\.sensitive(?![\w.])/;
+
+function hasAnnotation(field: DMMF.Field, annotation: RegExp): boolean {
+  return typeof field.documentation === "string" && annotation.test(field.documentation);
 }
 
 /**

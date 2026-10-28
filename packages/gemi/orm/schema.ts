@@ -187,6 +187,17 @@ export interface FieldSchema {
    * see `SCHEMA_ARTIFACT_VERSION`.
    */
   encrypted?: true;
+  /**
+   * `/// @gemi.sensitive` on the field (#1065): a secret, such as a token or
+   * a password hash, that a schema summary for a model (`describeSchema`)
+   * marks or leaves out. Nothing else reads it: it changes no query.
+   *
+   * Absent rather than `false`, so an artifact without one is byte-identical
+   * to one generated before this existed. A runtime that predates it ignores
+   * it, which is harmless for a flag no query reads, so it does not bump
+   * `SCHEMA_ARTIFACT_VERSION`.
+   */
+  sensitive?: true;
 }
 
 export interface RelationSchema {
