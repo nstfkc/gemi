@@ -73,7 +73,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
 | `instructions`, `reasoning`, `skills`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
-| `onMessage`, `onToolCall`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. |
+| `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused; see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
 
 Settings such as `store`, `attachments`, `maxConcurrentRuns` and `requireThread` are not hooks. Set those on the controller.

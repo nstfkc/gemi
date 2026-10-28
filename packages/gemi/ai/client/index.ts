@@ -64,6 +64,7 @@ export type {
   // parameter type, and an app writing the handler as a named function needs to
   // be able to spell it.
   ToolProgress,
+  ToolApprovalRecord,
   ToolResultPart,
   ToolShape,
   ToolShapes,

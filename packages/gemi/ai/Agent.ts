@@ -93,6 +93,7 @@ import type {
   FinishReason,
   NestedRun,
   PendingToolCall,
+  ToolApprovalRecord,
   ToolCallPart,
   ToolSearchRecord,
   ToolResultPart,
@@ -421,6 +422,18 @@ export interface ToolContext<Ctx = AgentContext> {
    * figures are on `result.metered`. See `UsageMeter`.
    */
   meter: UsageMeter;
+  /**
+   * Set when this call runs because a person approved it (#1062): who
+   * approved it (`by`, the run's subject) and when. Absent for a call that
+   * never asked, and for one whose `requiresApproval` function answered
+   * `false`, so a tool can tell "the user clicked Approve" from "it was
+   * allowed to run".
+   *
+   * Only on the run that executes the approved call. A tool that escalates a
+   * sub-agent's question after the approval and is re-entered on the next
+   * turn does not have it there, so a check on it fails closed.
+   */
+  approval?: ToolApprovalRecord;
 }
 
 /** What an image parked by a tool answers. See `ToolContext.generateImage`. */
@@ -706,6 +719,15 @@ export type ToolApproval<Input, Ctx = AgentContext> =
   | ((input: Input, ctx: ToolApprovalContext<Ctx>) => boolean | Promise<boolean>);
 
 /**
+ * A tool's `approvalPreview` (#1060): what the user is shown before they
+ * approve a call. See `ToolDefinition.approvalPreview`.
+ */
+export type ToolApprovalPreview<Input, Ctx = AgentContext> = (
+  input: Input,
+  ctx: ToolApprovalContext<Ctx>,
+) => unknown;
+
+/**
  * A tool's `toModel` (#1061): the projection of a successful output that the
  * model reads instead of the whole of it. See `ToolDefinition.toModel`.
  */
@@ -834,6 +856,25 @@ export type ToolDefinition<
       /** Ask the user first: always, never, or per call. See `ToolApproval`. */
       requiresApproval?: ToolApproval<Input, Ctx>;
       /**
+       * Computes what the user is shown before they approve a call (#1060): a
+       * dry run, such as the SQL a write would run and how many rows it
+       * changes. Needs `requiresApproval`.
+       *
+       * Called once per call that goes pending, after the input is validated
+       * and `requiresApproval` said to ask, with the same context the
+       * `requiresApproval` function gets. The value (JSON) is the pending
+       * call's `preview`: on the `awaiting-input` frame, in `useChat`'s
+       * `pending`, and stored with the message in `AgentMessage.pending`, so
+       * it is still there after a reload.
+       *
+       * Display only, never signed: the approval covers the input, and
+       * `execute` re-checks what it relies on, since the data can change
+       * between the preview and the click. A preview that throws, or runs
+       * past the tool's `timeoutMs`, is logged and the call is asked without
+       * one. Return `undefined` for no preview.
+       */
+      approvalPreview?: ToolApprovalPreview<Input, Ctx>;
+      /**
        * What the model reads instead of the full output (#1061). The client,
        * the store and `onMessage` still get `output` whole; the model gets
        * this projection of it, such as a row count and the first 50 rows of
@@ -878,6 +919,7 @@ export type ToolDefinition<
       execute?: never;
       /** Meaningless here: the client answering *is* the approval. */
       requiresApproval?: never;
+      approvalPreview?: never;
       /** Server tools only: a client's answer is what the model reads. */
       toModel?: never;
       /** Server tools only: a client's answer arrives on a later turn. */
@@ -934,6 +976,8 @@ export class AgentTool<
     input: Input,
     ctx: ToolApprovalContext<Ctx>,
   ) => boolean | Promise<boolean>;
+  /** See `ToolDefinition.approvalPreview`. */
+  readonly approvalPreview?: ToolApprovalPreview<Input, Ctx>;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
@@ -970,6 +1014,7 @@ export class AgentTool<
     if (typeof params.requiresApproval === "function") {
       this.approvalPredicate = params.requiresApproval;
     }
+    if (params.approvalPreview) this.approvalPreview = params.approvalPreview;
     this.deferred = params.deferred === true;
     this.answeredBy = params.answeredBy === "client" ? "client" : "server";
     this.execute = params.execute ?? undefined;
@@ -1007,6 +1052,21 @@ export class AgentTool<
       throw new Error(
         `The tool "${params.name}" has a requiresApproval that is neither a boolean nor a function.`,
       );
+    }
+    if (params.approvalPreview !== undefined) {
+      if (typeof params.approvalPreview !== "function") {
+        throw new Error(`The tool "${params.name}" has an approvalPreview that is not a function.`);
+      }
+      if (params.answeredBy === "client") {
+        throw new Error(
+          `The tool "${params.name}" is answered by the client and cannot set \`approvalPreview\`: there is no approval to preview.`,
+        );
+      }
+      if (!params.requiresApproval) {
+        throw new Error(
+          `The tool "${params.name}" has an approvalPreview but no requiresApproval, so it never asks and the preview would never be shown.`,
+        );
+      }
     }
     if (
       params.endsRun !== undefined &&
@@ -2972,6 +3032,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly unreported = new Set<AgentMessage>();
 
   private usage: Usage = emptyUsage();
+  /**
+   * The approvals this run accepted, by tool call id (#1062), read by
+   * `runToolBody` for `ctx.approval`. Set just before the approved call
+   * executes, so only that execution sees it.
+   */
+  private readonly approvals = new Map<string, ToolApprovalRecord>();
   private finishReason: FinishReason = "stop";
   /** Set by `fail`, and only there: the cause of a run that ends `"error"`. */
   private failure: AgentRunFailure | undefined;
@@ -4091,6 +4157,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           this.addResult(message, this.deniedByPolicy(call));
           continue;
         }
+        const preview =
+          kind === "approval" && resolved.tool.approvalPreview
+            ? await this.previewApproval(resolved.tool, call, parsed.value, step)
+            : undefined;
         pending.push({
           toolCallId: call.toolCallId,
           name: call.name,
@@ -4100,6 +4170,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value),
           ),
           ...(this.pathPrefix.length > 0 ? { path: [...this.pathPrefix] } : {}),
+          ...(preview !== undefined ? { preview } : {}),
         });
         continue;
       }
@@ -4210,16 +4281,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     input: unknown,
     step: number,
   ): Promise<boolean> {
-    const ctx: ToolApprovalContext = {
-      context: this.context,
-      body: this.params.body ?? {},
-      runId: this.runId,
-      threadId: this.params.threadId,
-      toolCallId: call.toolCallId,
-      step,
-      depth: this.depth,
-      signal: this.controller.signal,
-    };
+    const ctx = this.approvalContext(call, step);
     try {
       const answer = await raceAbort(
         Promise.resolve().then(() => tool.approvalPredicate!(input, ctx)),
@@ -4233,6 +4295,69 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         { error, toolCallId: call.toolCallId },
       );
       return true;
+    }
+  }
+
+  /** What `requiresApproval`'s function and `approvalPreview` are given. */
+  private approvalContext(call: ToolCallPart, step: number): ToolApprovalContext {
+    return {
+      context: this.context,
+      body: this.params.body ?? {},
+      runId: this.runId,
+      threadId: this.params.threadId,
+      toolCallId: call.toolCallId,
+      step,
+      depth: this.depth,
+      signal: this.controller.signal,
+    };
+  }
+
+  /**
+   * A tool's `approvalPreview` for one pending call (#1060). A preview that
+   * throws, or is not JSON, is logged and left off: the call is still asked,
+   * because the question matters more than its illustration. Raced against
+   * the run's signal like `asksApproval`.
+   */
+  private async previewApproval(
+    tool: AnyAgentTool,
+    call: ToolCallPart,
+    input: unknown,
+    step: number,
+  ): Promise<unknown> {
+    const ctx = this.approvalContext(call, step);
+    let cancelTimer = () => {};
+    try {
+      const computing = Promise.resolve().then(() => tool.approvalPreview!(input, ctx));
+      // Bounded by the tool's own `timeoutMs` when it has one: a dry run that
+      // hangs must not keep the question from being asked.
+      const timeoutMs = tool.timeoutMs;
+      const bounded =
+        timeoutMs === undefined
+          ? computing
+          : Promise.race([
+              computing,
+              new Promise<never>((_, reject) => {
+                cancelTimer = startTimer(timeoutMs, () =>
+                  reject(new Error(`approvalPreview did not finish within ${timeoutMs}ms`)),
+                );
+              }),
+            ]);
+      computing.catch(() => {});
+      const preview = await raceAbort(bounded, this.controller.signal);
+      if (preview === undefined) return undefined;
+      // Stored with the message and sent on the frame, both as JSON: a value
+      // that does not survive the trip is refused here, where the log can
+      // name the tool, rather than turning into a different value later.
+      return JSON.parse(JSON.stringify(preview));
+    } catch (error) {
+      if (error instanceof RunAborted) throw error;
+      this.writeLog(
+        `[gemi/ai] agent "${this.config.name}": the approvalPreview of "${tool.name}" failed, so the call is asked without a preview`,
+        { error, toolCallId: call.toolCallId },
+      );
+      return undefined;
+    } finally {
+      cancelTimer();
     }
   }
 
@@ -4370,6 +4495,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   ): Promise<ToolResultPart> {
     // One object, because the three of them share a memo — see `toolFiles`.
     const files = this.toolFiles(call, signal);
+    const approval = this.approvals.get(call.toolCallId);
     const ctx: ToolContext = {
       context: this.context,
       // `{}` rather than undefined, so a tool can read a field without a guard
@@ -4402,6 +4528,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }),
       memory: this.memory.handle({ messageId }),
       meter: this.meter,
+      ...(approval ? { approval } : {}),
     };
 
     try {
@@ -5861,6 +5988,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     return result;
   }
 
+  /** A person's answer to an approval, as this run accepted it (#1062). */
+  private approvalRecord(approved: boolean, reason: unknown): ToolApprovalRecord {
+    return {
+      approved,
+      at: new Date().toISOString(),
+      by: this.params.subject ?? null,
+      ...(typeof reason === "string" && reason !== "" ? { reason } : {}),
+    };
+  }
+
   private async resolveAnswer(
     entry: { message: AgentMessage; call: ToolCallPart },
     answer: ClientToolResult,
@@ -6005,13 +6142,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // an input and not scratch space — and the clone is what makes the
         // sub-run transcript something `onMessage` can report.
         const executing = this.amendCall(entry);
+        const approval = this.approvalRecord(true, answer.reason);
+        this.approvals.set(call.toolCallId, approval);
+        // The record goes on the result before the receipt keeps it, so a
+        // replayed presentation answers with the approval that ran it.
         const execution = this.executeTool(
           resolved,
           entry.message.id,
           executing,
           executing.input,
           0,
-        );
+        ).then((result) => ({ ...result, approval }));
         try {
           return await raceAbort(
             receipt ? this.recordReceipt(receipt, execution) : execution,
@@ -6037,6 +6178,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         status: "denied",
         cause: "refused",
         reason: answer.reason,
+        approval: this.approvalRecord(false, answer.reason),
       };
     }
 

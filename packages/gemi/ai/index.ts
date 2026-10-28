@@ -76,6 +76,7 @@ export type {
   ReasoningPart,
   TextPart,
   ToolCallPart,
+  ToolApprovalRecord,
   ToolResultPart,
   ToolSearchRecord,
   ToolShape,
