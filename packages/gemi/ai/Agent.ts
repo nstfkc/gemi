@@ -862,8 +862,9 @@ export type ToolDefinition<
        *
        * Display only, never signed: the approval covers the input, and
        * `execute` re-checks what it relies on, since the data can change
-       * between the preview and the click. A preview that throws is logged
-       * and the call is asked without one. Return `undefined` for no preview.
+       * between the preview and the click. A preview that throws, or runs
+       * past the tool's `timeoutMs`, is logged and the call is asked without
+       * one. Return `undefined` for no preview.
        */
       approvalPreview?: ToolApprovalPreview<Input, Ctx>;
       /**
@@ -4289,11 +4290,25 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     step: number,
   ): Promise<unknown> {
     const ctx = this.approvalContext(call, step);
+    let cancelTimer = () => {};
     try {
-      const preview = await raceAbort(
-        Promise.resolve().then(() => tool.approvalPreview!(input, ctx)),
-        this.controller.signal,
-      );
+      const computing = Promise.resolve().then(() => tool.approvalPreview!(input, ctx));
+      // Bounded by the tool's own `timeoutMs` when it has one: a dry run that
+      // hangs must not keep the question from being asked.
+      const timeoutMs = tool.timeoutMs;
+      const bounded =
+        timeoutMs === undefined
+          ? computing
+          : Promise.race([
+              computing,
+              new Promise<never>((_, reject) => {
+                cancelTimer = startTimer(timeoutMs, () =>
+                  reject(new Error(`approvalPreview did not finish within ${timeoutMs}ms`)),
+                );
+              }),
+            ]);
+      computing.catch(() => {});
+      const preview = await raceAbort(bounded, this.controller.signal);
       if (preview === undefined) return undefined;
       // Stored with the message and sent on the frame, both as JSON: a value
       // that does not survive the trip is refused here, where the log can
@@ -4306,6 +4321,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         { error, toolCallId: call.toolCallId },
       );
       return undefined;
+    } finally {
+      cancelTimer();
     }
   }
 

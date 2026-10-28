@@ -160,6 +160,22 @@ describe("approvalPreview (#1060)", () => {
     expect(logged.mock.calls.flat().join(" ")).toContain("approvalPreview");
   });
 
+  test("a preview past the tool's timeoutMs is left off, and the call is still asked", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tool = AgentTool.create({
+      name: "write",
+      description: "Run a write",
+      inputSchema: s.object({ sql: s.string() }),
+      requiresApproval: true,
+      timeoutMs: 20,
+      approvalPreview: () => new Promise(() => {}),
+      execute: async () => ({}),
+    });
+    const { pending } = await ask(tool);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).not.toHaveProperty("preview");
+  });
+
   test("undefined is no preview", async () => {
     const { pending } = await ask(writeTool({ approvalPreview: () => undefined }));
     expect(pending[0]).not.toHaveProperty("preview");
