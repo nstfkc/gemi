@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.167.0 to 0.168.0
 
 ## AI: `onToolResult` gets the call's input (#1079)
 
