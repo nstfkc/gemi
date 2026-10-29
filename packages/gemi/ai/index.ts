@@ -515,6 +515,7 @@ export type {
   ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,
+  ToolResultCall,
   UploadCheckFile,
   UploadContext,
   UploadRefusal,

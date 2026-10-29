@@ -7,6 +7,7 @@ import {
   type AgentHookContext,
   type AuthorizeRequestParams,
   defineAgentHooks,
+  type ToolResultCall,
   type UploadContext,
 } from "./AgentController";
 
@@ -63,4 +64,21 @@ test("a hook returns what the method it stands in for returns", () => {
     // @ts-expect-error a run owner is a string or null.
     runOwner: () => 42,
   });
+});
+
+test("onToolResult gets the call it answers (#1079), and a two-parameter hook still fits", () => {
+  defineAgentHooks({
+    onToolResult(_result, _ctx, call) {
+      expectTypeOf(call).toEqualTypeOf<ToolResultCall>();
+      expectTypeOf(call.input).toBeUnknown();
+    },
+  });
+  defineAgentHooks({ onToolResult(_result, _ctx) {} });
+
+  abstract class Audited extends AgentController {
+    protected onToolResult(_result: unknown, _ctx: AgentHookContext, call: ToolResultCall) {
+      expectTypeOf(call.toolCallId).toBeString();
+    }
+  }
+  expectTypeOf<Audited>().toMatchTypeOf<AgentController>();
 });

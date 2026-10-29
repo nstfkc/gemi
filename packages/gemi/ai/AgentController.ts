@@ -23,7 +23,7 @@ import type {
 import type { ContextWindowOptions } from "./contextWindow";
 import { modelOutputOf } from "./toolModelOutput";
 import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
-import { injectedMessageIds } from "./Agent";
+import { injectedMessageIds, toolCallInputOf } from "./Agent";
 import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
@@ -273,6 +273,17 @@ export type AgentHookContext = {
   req: HttpRequest<any, any>;
   runId: string;
   threadId?: string;
+};
+
+/**
+ * The call a tool result answers, as `onToolResult` gets it (#1079): the same
+ * shape `onToolCall` gets. `input` is what the model sent, before the tool's
+ * schema parsed it, so a call refused for a mis-typed argument has it too.
+ */
+export type ToolResultCall = {
+  toolCallId: string;
+  name: string;
+  input: unknown;
 };
 
 /**
@@ -690,7 +701,11 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     call: { toolCallId: string; name: string; input: unknown },
     ctx: AgentHookContext,
   ) => void | Promise<void>;
-  onToolResult?: (result: ToolResultPart, ctx: AgentHookContext) => void | Promise<void>;
+  onToolResult?: (
+    result: ToolResultPart,
+    ctx: AgentHookContext,
+    call: ToolResultCall,
+  ) => void | Promise<void>;
   onAwaitingInput?: (pending: PendingToolCall[], ctx: AgentHookContext) => void | Promise<void>;
   redactError?: (error: AgentError, info: ErrorRedactionInfo, ctx: AgentHookContext) => AgentError;
   onError?: (error: AgentError, ctx: AgentHookContext) => void | Promise<void>;
@@ -2851,12 +2866,20 @@ export abstract class AgentController<
    * (the run's subject) and when. This is the server's own copy, so it is
    * trustworthy in stateless mode too, unlike the one the client posts back.
    *
+   * `call` is the call the result answers, with its `input` as the model sent
+   * it (what `onToolCall` got), for every status: an audit of a refused call
+   * can say what was refused without reading the thread (#1079).
+   *
    * Top-level calls only: a sub-agent's results are on its nested transcript.
    * A background job settling later is not a result on this stream; read
    * those off the thread, or from the job store.
    */
-  protected onToolResult(result: ToolResultPart, ctx: AgentHookContext): void | Promise<void> {
-    return this.hooks?.onToolResult?.(result, ctx);
+  protected onToolResult(
+    result: ToolResultPart,
+    ctx: AgentHookContext,
+    call: ToolResultCall,
+  ): void | Promise<void> {
+    return this.hooks?.onToolResult?.(result, ctx, call);
   }
 
   /** Fires before the stream ends `awaiting-input` — where to notify whoever
@@ -2967,9 +2990,15 @@ export abstract class AgentController<
           );
         }
         return;
-      case "tool-result":
-        await this.onToolResult(event.part as ToolResultPart, ctx);
+      case "tool-result": {
+        const result = event.part as ToolResultPart;
+        await this.onToolResult(result, ctx, {
+          toolCallId: result.toolCallId,
+          name: String(result.name),
+          input: toolCallInputOf(result),
+        });
         return;
+      }
       case "awaiting-input":
         await this.onAwaitingInput(event.pending as PendingToolCall[], ctx);
         return;
