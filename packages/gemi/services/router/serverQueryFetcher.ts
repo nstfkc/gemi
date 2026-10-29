@@ -7,6 +7,7 @@ import { applyParams } from "../../utils/applyParams";
 import { app } from "../../foundation/app";
 import { requestDomain, setRequestDomain } from "../../http/requestDomain";
 import { DomainRouter } from "./DomainRouter";
+import { Translator } from "../../i18n/Translator";
 import type { ServerQueryFetcher } from "./ServerQueryStore";
 
 /**
@@ -25,6 +26,9 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
   // *outside* the kernel scope — so capture the store now and re-enter it
   // around every fetch.
   const kernelStore = kernelContext.getStore();
+  // The view's own request context. Its locale is read per fetch, not here:
+  // the view router creates this fetcher before it resolves the page's locale.
+  const viewContext = RequestContext.getStore();
   return (patternPath, params, searchParams) => {
     const origin = new URL(req.url).origin;
     const pathnameWithSearch = [applyParams(patternPath, params), searchParams.toString()]
@@ -43,6 +47,15 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
     const httpRequest = new HttpRequest(newReq, params);
     return kernelContext.run(kernelStore, () =>
       RequestContext.run(httpRequest, async () => {
+        // The locale the page renders in (URL prefix, then cookie, then
+        // `accept-language`), so `req.locale()` in the handler matches it.
+        // The rebuilt request has lost the URL prefix, so detecting here would
+        // let a cookie override `/tr-TR/...` (#1074). Left unset when i18n is
+        // off, as the api dispatcher leaves it.
+        const locale = viewContext?.locale;
+        if (locale && app(Translator).isLocaleAware) {
+          RequestContext.getStore().setLocale(locale);
+        }
         try {
           // The api of the page's own host group — on `admin.` that is the
           // admin api, which may not share a single route with the root's.
