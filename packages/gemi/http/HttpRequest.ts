@@ -10,6 +10,8 @@ import {
 } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
+import { app } from "../foundation/app";
+import { Translator } from "../i18n/Translator";
 import { requestDomain } from "./requestDomain";
 import { RequestState } from "./requestState";
 import { ValidationError } from "./Router";
@@ -219,8 +221,19 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     this.cookies = cookies;
   }
 
+  /**
+   * The locale this request resolved to. Where nothing resolved one (a
+   * context gemi builds outside the view and api routers), it falls back to
+   * detection from the cookie and `accept-language`, as `Lang.locale()` does.
+   * With i18n off it stays what the router set: `null` on an api request.
+   */
   locale() {
-    return RequestContext.getStore().locale;
+    const ctx = RequestContext.getStore();
+    if (ctx.locale) {
+      return ctx.locale;
+    }
+    const translator = app(Translator);
+    return translator.isLocaleAware ? translator.detectLocale(ctx.req) : ctx.locale;
   }
 
   ctx() {

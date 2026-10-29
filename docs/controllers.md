@@ -156,7 +156,7 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 | `req.signal` | `AbortSignal` | Aborts when the client goes away before the response is sent — a closed tab, or a `useQuery` request nobody renders any more. Pass it to slow work (`fetch(url, { signal: req.signal })`, a model call) so it stops early. |
 | `await req.input()` | `Promise<Input<Body>>` | Parses **and validates** the request body — see below. |
 | `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
-| `req.locale()` | `string` | The resolved request locale. |
+| `req.locale()` | `string \| null` | The resolved request locale: the URL prefix, then the `i18n-locale` cookie, then `Accept-Language`. Server-side queries (`Query.prefetch`, `useQuery` during SSR) get the page's locale. `null` when the app configures no locales. |
 | `req.ctx()` | request context | Access to the per-request store (used by facades, `setHeaders`, etc.). |
 | `req.state` | `RequestState` | Typed values kept for this request: what a middleware resolved, read back with `req.state.require(key)`. See [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate). |
 
