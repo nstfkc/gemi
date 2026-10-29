@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.166.0 to 0.166.1
 
 ## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
 
