@@ -1,3 +1,14 @@
+# Unreleased
+
+## AI: `onToolResult` gets the call's input (#1079)
+
+**New API (minor). Nothing to change in apps.** See [AI Tool Approvals](docs/ai-tool-approvals.md#who-approved-a-call).
+
+- `onToolResult(result, ctx, call)`: the hook (on the controller or in `defineAgentHooks`) now gets a third argument, `call: ToolResultCall` (`{ toolCallId, name, input }`, the same shape `onToolCall` gets), for every status: `ok`, `error`, `running` and `denied` (refused, stopped, interrupted), including a refusal answered on a later turn.
+- `input` is what the model sent, before the tool's schema parsed it, so a call refused for a mis-typed argument has it too. An audit of refused approvals no longer needs `store.loadThread` to find the call.
+- The input is handed to the hook in-process only; the `tool-result` frame on the stream is unchanged.
+- Existing two-parameter hooks and overrides keep working.
+
 # Upgrading from 0.166.1 to 0.167.0
 
 ## i18n: server-side queries run in the page's locale (#1074)

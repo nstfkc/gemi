@@ -1661,6 +1661,24 @@ export type PrepareStep<Ctx = AgentContext> = (
  * How long a run may take when its agent does not say. See
  * `CreateAgentParams.maxRunDurationMs`.
  */
+/**
+ * The input of the call each tool result answers, for `onToolResult` (#1079).
+ *
+ * Keyed by the part put on the frame, which is the object the controller's
+ * event hooks are handed in the same process; it never crosses a wire, so the
+ * stream does not carry every input twice.
+ */
+const toolCallInputs = new WeakMap<ToolResultPart, unknown>();
+
+function rememberToolCallInput(result: ToolResultPart, input: unknown): void {
+  toolCallInputs.set(result, input);
+}
+
+/** The input of the call `result` answers, when this process emitted it. @internal */
+export function toolCallInputOf(result: ToolResultPart): unknown {
+  return toolCallInputs.get(result);
+}
+
 export const DEFAULT_MAX_RUN_DURATION_MS = 10 * 60 * 1000;
 
 /**
@@ -5008,6 +5026,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   private addResult(message: AgentMessage, part: ToolResultPart) {
+    const call = message.content.find(
+      (other): other is ToolCallPart =>
+        other.type === "tool-call" && other.toolCallId === part.toolCallId,
+    );
+    if (call) rememberToolCallInput(part, call.input);
     message.content.push(part);
     this.emit({ type: "tool-result", messageId: message.id, part });
   }
@@ -6232,6 +6255,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     result: ToolResultPart,
   ) {
     const message = this.amend(entry.message);
+    rememberToolCallInput(result, entry.call.input);
     message.content.push(result);
     this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
