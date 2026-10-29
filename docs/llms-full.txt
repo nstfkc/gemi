@@ -9843,7 +9843,15 @@ Names resolve under `app/agents` (relative to the working directory, which is th
 
 A name with a `/` is a path, so a prompt can sit beside its agent. A bare name is a shared prompt in `prompts/`. Names use letters, digits, `-` and `_`, with `/` between folders; anything else (`..`, an absolute path) throws.
 
-The files are read from disk, not bundled, so the server, the tests and the evals read the same files. Keep `app/agents` in the deployed image.
+In dev, tests and evals the files are read from disk, so an edit applies at once and everything reads the same files.
+
+## Deploying without `app/` source
+
+`gemi build` copies every Markdown file under `app/agents` into `dist/server/prompts.json`. Under `gemi start` (`NODE_ENV=production`), `Prompt.render` and `Prompt.placeholders` read that file first, so an image that ships only `dist/` renders its prompts the same as one that ships `app/agents`. Placeholder checks and partials work as they do on disk.
+
+- A prompt the manifest lacks (a file added after the build, or a `dir` outside `app/agents`) is read from disk, as before.
+- Outside production the manifest is ignored, so a stale `dist/` never shadows an edited prompt.
+- The manifest holds the prompts' text: treat `dist/server` as you treat `app/agents`.
 
 ## Placeholders
 
@@ -9884,9 +9892,11 @@ expect(Object.keys(values).sort()).toEqual(Prompt.placeholders("siteNamer/name")
 
 ## Caching and configuration
 
-In production (`NODE_ENV=production`) each file is read once and kept. Otherwise it is read on every render, so an edited prompt applies at once in dev.
+In production (`NODE_ENV=production`) each file is read once and kept (the build's manifest is read once too). Otherwise it is read on every render, so an edited prompt applies at once in dev.
 
 `Prompt.configure` changes the defaults. Call it once at boot (a service provider, `app/preload.ts`, a test setup file); each call replaces the previous options and clears the cache.
+
+The manifest covers `app/agents` only. A `dir` elsewhere is still read from disk in production, so ship that folder in the image.
 
 ```typescript
 Prompt.configure({

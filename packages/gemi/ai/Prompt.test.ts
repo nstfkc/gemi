@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { Prompt } from "./Prompt";
+import { bundlePrompts, Prompt, PROMPTS_MANIFEST } from "./Prompt";
 
 let dir: string;
 
@@ -148,5 +148,65 @@ describe("caching", () => {
     Prompt.render("p");
     write("prompts/p.md", "two");
     expect(Prompt.render("p")).toBe("two");
+  });
+});
+
+describe("gemi build's prompt manifest", () => {
+  // A release image: dist/server/prompts.json and no app/ source.
+  function buildImage() {
+    write("source/app/agents/builder/system.md", "Build for {{business}}.\n\n{{> credit-prices}}\n");
+    write("source/app/agents/prompts/credit-prices.md", "A page costs {{pagePrice}} credits.\n");
+    write("source/app/agents/node_modules/x/readme.md", "skipped");
+    write("source/app/agents/builder/notes.txt", "skipped");
+    const manifest = bundlePrompts(join(dir, "source"));
+    write(`image/dist/server/${PROMPTS_MANIFEST}`, JSON.stringify(manifest));
+    vi.spyOn(process, "cwd").mockReturnValue(join(dir, "image"));
+    Prompt.configure({});
+    return manifest;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("bundlePrompts keys each Markdown file under app/agents by its path", () => {
+    expect(buildImage()).toEqual({
+      "app/agents/builder/system.md": "Build for {{business}}.\n\n{{> credit-prices}}",
+      "app/agents/prompts/credit-prices.md": "A page costs {{pagePrice}} credits.",
+    });
+  });
+
+  test("bundlePrompts answers nothing when there is no app/agents", () => {
+    expect(bundlePrompts(join(dir, "nothing"))).toEqual({});
+  });
+
+  test("in production, renders from the manifest with no source on disk", () => {
+    buildImage();
+    vi.stubEnv("NODE_ENV", "production");
+    expect(Prompt.render("builder/system", { business: "a bakery", pagePrice: 5 })).toBe(
+      "Build for a bakery.\n\nA page costs 5 credits.",
+    );
+    expect(Prompt.placeholders("builder/system")).toEqual(["business", "pagePrice"]);
+    expect(() => Prompt.render("builder/system", { business: "a bakery" })).toThrow(
+      'The prompt "builder/system" has no value for {{pagePrice}}.',
+    );
+  });
+
+  test("in production, a prompt the manifest lacks is read from disk", () => {
+    buildImage();
+    vi.stubEnv("NODE_ENV", "production");
+    write("image/app/agents/prompts/late.md", "Added after the build.");
+    expect(Prompt.render("late")).toBe("Added after the build.");
+    expect(() => Prompt.render("missing")).toThrow(
+      `or in dist/server/${PROMPTS_MANIFEST}`,
+    );
+  });
+
+  test("outside production, the manifest is ignored so edits apply at once", () => {
+    buildImage();
+    vi.stubEnv("NODE_ENV", "development");
+    expect(() => Prompt.render("builder/system", { business: "x", pagePrice: 1 })).toThrow(
+      'The prompt "builder/system" does not exist',
+    );
   });
 });

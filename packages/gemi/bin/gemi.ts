@@ -9,6 +9,7 @@ import {
   bundleDocumentScripts,
 } from "../services/router/documentScript";
 import { PROBES_MANIFEST, bundleProbes } from "../probe";
+import { PROMPTS_MANIFEST, bundlePrompts } from "../ai/Prompt";
 import { runMigrate } from "./migrate";
 import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
@@ -283,6 +284,14 @@ withStatsOptions(
   await Bun.write(path.join(rootDir, "dist", "server", PROBES_MANIFEST), JSON.stringify(probes));
   if (Object.keys(probes).length > 0) {
     console.log(`Bundled ${Object.keys(probes).length} probe(s).`);
+  }
+
+  // Prompt files (`app/agents/**/*.md`, #1078), copied into the build so
+  // `Prompt.render` works from an image that ships no `app/` source.
+  const prompts = bundlePrompts(rootDir);
+  await Bun.write(path.join(rootDir, "dist", "server", PROMPTS_MANIFEST), JSON.stringify(prompts));
+  if (Object.keys(prompts).length > 0) {
+    console.log(`Bundled ${Object.keys(prompts).length} prompt file(s).`);
   }
 
   // `--json` or `--markdown` alone asks for the stats too.
