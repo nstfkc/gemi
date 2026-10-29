@@ -12,7 +12,7 @@
 
 ## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
 
-**Fix (minor: `req.locale()` on api routes can now return a detected locale where it returned `null`). Check code that treats `null` as "no locale chosen".**
+**Fix (patch). Nothing to change in apps.**
 
 - Since 0.165.0 a navigation answered by another build loads the target page in full. When that load was cancelled ("Stay" on a `beforeunload` prompt, e.g. a dirty editor), gemi stayed latched as if a load were still under way: every later cross-build navigation was discarded with no new load, even to another URL or after the cooldown.
 - The "load under way" state now lasts only for the navigation that started it (and at most the cooldown). After a cancel, a later mismatch on another URL loads it in full; the same URL inside the cooldown renders the data (as any refused reload does); the same URL after the cooldown loads in full again. Chunk-load recovery (`recoverFromChunkLoadError`) shares the guard and gets the same fix.
@@ -98,7 +98,7 @@
 
 ## Router: a second click on a link that is still loading no longer renders the target without data (#1048)
 
-**Fix (minor: `req.locale()` on api routes can now return a detected locale where it returned `null`). Check code that treats `null` as "no locale chosen".**
+**Fix (patch). Nothing to change in apps.**
 
 - Clicking a `Link` again while its own navigation is still loading is now ignored: no second history entry, no second request. It used to be pushed as a shallow navigation, which mounted the target view with the previous page's data (empty props).
 - `Link` decides whether a click is shallow from the route on screen, not from `window.location`.
