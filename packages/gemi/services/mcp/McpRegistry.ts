@@ -5,6 +5,7 @@ import { noToolMemory } from "../../ai/memory/runMemory";
 import type { ToolAttachments } from "../../ai/store/Attachments";
 import { openMeter } from "../../ai/usageMeter";
 import type { User } from "../../auth/types";
+import { userActedFor } from "./actingFor";
 import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
 import { safeFetch, type SafeFetchOptions } from "../../http/safeFetch";
 import { ToolError } from "../../ai/redact";
@@ -642,6 +643,10 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       ...(credentials ? { credentials } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.progress ? { progress: options.progress } : {}),
+      // A local call in a turn the server started acts for its user (#1075).
+      ...(caller.kind === "local" && userActedFor(caller.req)
+        ? { identity: { user: userActedFor(caller.req)! } }
+        : {}),
       ...(caller.kind === "remote"
         ? {
             identity: {

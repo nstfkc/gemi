@@ -3,6 +3,8 @@ import { Controller } from "../http/Controller";
 import { refusal, RequestBreakerError } from "../http/Error";
 import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
+import type { User } from "../auth/types";
+import { actFor } from "../services/mcp/actingFor";
 import { mediaType } from "../http/mediaType";
 import { refusalKindForStatus } from "../http/refusal";
 import type { MiddlewareInput } from "../http/middlewareList";
@@ -1399,6 +1401,9 @@ export abstract class AgentController<
     const controller = new this();
     // Marks the request as `startTurn`'s, so only its run is kept here.
     serverTurns.set(req, null);
+    // Its tools' calls to the app's routes run as its user (#1075): the
+    // request carries no credentials of theirs to copy.
+    if (params.user) actFor(req, params.user as User);
     // A request scope of its own, carrying the caller's user, whether or not
     // this is called from inside another request: the run is not that
     // request's, and must not end with it or read its user.

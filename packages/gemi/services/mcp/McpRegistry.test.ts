@@ -7,6 +7,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../../ai/AgentProvider";
+import { AgentController, MemoryAgentStore, MemoryLiveRuns } from "../../ai/AgentController";
 import { toResponsesTools } from "../../ai/providers/request";
 import { fakeProvider } from "../../ai/providers/fakeProvider";
 import { s } from "../../ai/Schema";
@@ -511,6 +512,42 @@ describe("an agent calling the app's routes", () => {
       '"whoami" calls an api route as the user who started this run, and this run was not started inside a request. Run it from an AgentController, or give this agent tools that do not go through the MCP registry.',
     );
     expect(handled).toEqual([]);
+  });
+
+  /**
+   * #1075: a turn the server starts (a job carrying on a thread) has a user
+   * but no request of theirs, so no token to copy. Its calls run as the user
+   * it was given, and an anonymous one stays anonymous.
+   */
+  test("a turn started with startTurn runs the routes as its user, without a token", async () => {
+    const turn = async (user: unknown) => {
+      const store = new MemoryAgentStore();
+      const provider = fakeProvider([toolCall("c1", "whoami", {}), finish()], [finish()]);
+      class Chat extends AgentController<any, {}> {
+        agent = Agent.create({
+          name: "shop",
+          provider,
+          tools: toAgentTools(resolve(McpRegistry)),
+        }) as any;
+        store = store;
+        liveRuns = new MemoryLiveRuns();
+      }
+      const { threadId } = await store.createThread({});
+      const started = await Chat.startTurn({ threadId, user, text: "go" });
+      const { messages } = await started.result();
+      return messages
+        .flatMap((message) => message.content)
+        .find((part: any) => part.type === "tool-result" && part.toolCallId === "c1") as any;
+    };
+
+    const asAlice = await turn(SESSIONS["v2.tok-alice"]);
+    expect(asAlice).toMatchObject({ status: "ok", output: { id: 1, modelOriginated: true } });
+    expect(handled).toEqual([{ route: "me", user: 1 }]);
+
+    const anonymous = await turn(null);
+    expect(anonymous.status).toBe("error");
+    expect(anonymous.error.message).toMatch(/^"whoami" was refused with 401/);
+    expect(handled).toHaveLength(1);
   });
 
   test("an auth-guarded route rejects an anonymous run, and the handler never runs", async () => {
