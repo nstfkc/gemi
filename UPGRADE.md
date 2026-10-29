@@ -1,3 +1,13 @@
+# Unreleased
+
+## AI: prompt files work from an image without `app/` source (#1078)
+
+**New behaviour (minor). Nothing to change in apps.** See [AI Prompt Files](docs/ai-prompts.md#deploying-without-app-source).
+
+- `gemi build` now writes `dist/server/prompts.json`, holding every Markdown file under `app/agents`.
+- Under `NODE_ENV=production`, `Prompt.render` and `Prompt.placeholders` read a prompt from that file first, then from disk, so an image that ships only `dist/` (no `app/agents`) renders prompts with the placeholder check and partials intact. Apps that inlined prompts with `?raw` can go back to `Prompt.render`.
+- Outside production the manifest is ignored. A production image that keeps `app/agents` next to an older `dist/` now renders the built copy; rebuild after editing a prompt.
+
 # Upgrading from 0.166.1 to 0.167.0
 
 ## i18n: server-side queries run in the page's locale (#1074)
