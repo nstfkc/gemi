@@ -1,8 +1,8 @@
-# Unreleased
+# Upgrading from 0.166.1 to 0.167.0
 
 ## i18n: server-side queries run in the page's locale (#1074)
 
-**Fix (patch). Nothing to change in apps.**
+**Fix (minor: `req.locale()` on api routes can now return a detected locale where it returned `null`). Check code that treats `null` as "no locale chosen".**
 
 - A query run during SSR (`Query.prefetch`, `Query.instant`, a `useQuery` the render discovers) ran its api handler in a fresh request context with no locale, so `req.locale()` was `null` there. A page at `/tr-TR/...` or with an `i18n-locale=tr-TR` cookie shipped SSR data in the default locale, which flipped to the right one on the first client refetch.
 - The query's context now takes the locale the page resolved: the URL prefix first, then the cookie, then `Accept-Language`. `/en-US/...` with a `tr-TR` cookie stays `en-US`.
@@ -12,7 +12,7 @@
 
 ## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
 
-**Fix (patch). Nothing to change in apps.**
+**Fix (minor: `req.locale()` on api routes can now return a detected locale where it returned `null`). Check code that treats `null` as "no locale chosen".**
 
 - Since 0.165.0 a navigation answered by another build loads the target page in full. When that load was cancelled ("Stay" on a `beforeunload` prompt, e.g. a dirty editor), gemi stayed latched as if a load were still under way: every later cross-build navigation was discarded with no new load, even to another URL or after the cooldown.
 - The "load under way" state now lasts only for the navigation that started it (and at most the cooldown). After a cancel, a later mismatch on another URL loads it in full; the same URL inside the cooldown renders the data (as any refused reload does); the same URL after the cooldown loads in full again. Chunk-load recovery (`recoverFromChunkLoadError`) shares the guard and gets the same fix.
@@ -98,7 +98,7 @@
 
 ## Router: a second click on a link that is still loading no longer renders the target without data (#1048)
 
-**Fix (patch). Nothing to change in apps.**
+**Fix (minor: `req.locale()` on api routes can now return a detected locale where it returned `null`). Check code that treats `null` as "no locale chosen".**
 
 - Clicking a `Link` again while its own navigation is still loading is now ignored: no second history entry, no second request. It used to be pushed as a shallow navigation, which mounted the target view with the previous page's data (empty props).
 - `Link` decides whether a click is shallow from the route on screen, not from `window.location`.
