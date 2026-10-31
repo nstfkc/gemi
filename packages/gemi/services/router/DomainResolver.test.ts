@@ -978,6 +978,27 @@ describe("trustProxy as a list (#1013)", () => {
     ).toEqual(["x-proxy-secret"]);
   });
 
+  test("each entry reads its own host header: Front Door's X-Forwarded-Host, the Worker's X-Original-Host", async () => {
+    const frontDoorWithHost = { ...frontDoor, hostHeader: "x-forwarded-host" };
+    const r = chain([worker, frontDoorWithHost]);
+    // Panel: Host is the origin's own FQDN; Front Door names the client's host.
+    const panel = req("http://web.azurewebsites.example/", {
+      "x-forwarded-host": "admin.example.com",
+      "x-azure-clientip": "198.51.100.7",
+      "x-azure-fdid": FDID,
+    });
+    expect(await r.resolve(panel)).toMatchObject({ host: "admin.example.com", group: "admin" });
+    expect(r.publicOrigin(panel)).toBe("http://admin.example.com");
+    expect(r.trustedClientIp(panel)).toBe("198.51.100.7");
+    // Shop: Front Door's X-Forwarded-Host names the Worker's target; the Worker's entry wins.
+    const shop = throughWorker({ "x-forwarded-host": "shop-origin.example.com" });
+    expect(await r.resolve(shop)).toMatchObject({ host: "shop.acme.com", custom: true });
+    expect(r.trustedClientIp(shop)).toBe("203.0.113.9");
+    // Without Front Door's secret, X-Forwarded-Host is not read.
+    const direct = req("http://web.azurewebsites.example/", { "x-forwarded-host": "admin.example.com" });
+    expect((await r.resolve(direct))?.host ?? null).not.toBe("admin.example.com");
+  });
+
   test("two proxies sharing a secret header, each with its own value", async () => {
     const r = chain([
       worker,

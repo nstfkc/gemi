@@ -2506,8 +2506,10 @@ domains: {
       clientIpHeader: "x-client-ip",
       secret: { header: "x-proxy-secret", value: process.env.SHOP_PROXY_SECRET! },
     },
-    // Front Door on its own: the client's address only. The host stays the request's own.
+    // Front Door on its own. It reaches the app with the origin's own host in
+    // `Host` and passes the client's host in X-Forwarded-Host.
     {
+      hostHeader: "x-forwarded-host",
       clientIpHeader: "x-azure-clientip",
       secret: { header: "x-azure-fdid", value: process.env.FRONT_DOOR_ID! },
     },
@@ -2518,7 +2520,7 @@ domains: {
 
 - **Order matters.** Put the proxy furthest from the app first. A request that came through the Worker also carries Front Door's secret, so with Front Door listed first every buyer would get the Worker's address.
 - **`secret` is required on every entry.** An entry without one would match every request and shadow the rest. Each entry needs a secret value of its own; two entries may share a secret header if their values differ.
-- **An entry without `hostHeader` only proves the client's address.** It never moves the host, not even to `X-Forwarded-Host`: the request is routed by its own `Host`. (The single-object form keeps its `X-Forwarded-Host` default.)
+- **Each entry names its own `hostHeader`.** An entry without one only proves the client's address and never moves the host, not even to `X-Forwarded-Host`: the request is routed by its own `Host`. (The single-object form keeps its `X-Forwarded-Host` default.) Behind a proxy that reaches the app on the origin's own host, as Front Door does, name the header that carries the client's host, or every request lands on the origin's hostname.
 - **A later entry is not a fallback for an earlier one.** When the winning entry has no `clientIpHeader`, or its header is missing or not an address, the next entry's header is not read: for a request through the Worker, Front Door's header names the Worker. The address is then what [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header) gives, if set, or else what `GEMI_TRUST_PROXY` settled on.
 - **A request no secret matches** is routed by its own `Host`, and its address is what `GEMI_CLIENT_IP_HEADER` gives, if set, or else what `GEMI_TRUST_PROXY` settled on. A forged `X-Proxy-Secret` sent through Front Door therefore falls through to Front Door's entry.
 - **Every entry's secret header is withheld** from what a `proxy()` route forwards upstream, on every request, whether or not it matched.
