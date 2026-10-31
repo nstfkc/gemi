@@ -1,6 +1,7 @@
 import {
   AgentTool,
   ToolNamespace,
+  type AgentContext,
   type AnyAgentTool,
   type ToolEntry,
   type ToolShapesOf,
@@ -102,7 +103,7 @@ export type McpAgentTool<R extends McpRouter<any>, F = {}> =
               output: infer O;
               progress: infer P;
             }
-            ? AgentTool<N, I, O, P>
+            ? AgentTool<N, I, O, P, AgentContext, never>
             : never
           : never;
       }[keyof RoutesOf<R> & string];

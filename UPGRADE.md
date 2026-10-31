@@ -2,13 +2,18 @@
 
 ## ai: typed `PendingToolCall.preview` and `readThread` messages (#1100)
 
-**New types (minor). Nothing to change in apps; casts for either can be removed.** See [AI Tool Approvals → Showing a preview](docs/ai-tool-approvals.md#showing-a-preview).
+**New types (minor). Casts for either can be removed; see below for the few places that can stop compiling.** See [AI Tool Approvals → Showing a preview](docs/ai-tool-approvals.md#showing-a-preview).
 
 - A pending call's `preview` is typed by what the tool's `approvalPreview` returns (awaited). Narrowing a `PendingToolCall` (or `useChat`'s `pending`) on `name` types `preview` with no cast. A tool without `approvalPreview` has `preview?: never`; `PendingToolCall` without type arguments, or over a hand-written `ToolShapes` with no `preview` member, keeps `preview?: unknown`.
-- `AgentTool` takes a sixth type parameter, `Preview` (default `never`), inferred by `AgentTool.create` and `withContext<Ctx>().tool`. `ToolShapesOf` emits `preview` for every tool, and `ToolShape` has an optional `preview` member. `ToolApprovalPreview<Input, Ctx, Preview = unknown>` returns `Preview | Promise<Preview>`.
-- `AgentController.readThread` answers `AgentMessage<AgentToolShapes<A>>[] | null`, typed by the controller's agent, so it goes into the route's `useChat({ initialMessages })` with no cast. A controller that picks its agent per request is typed by the agent it is declared with (`A`).
-- `AgentMessage`'s tool shapes parameter is declared covariant (`out T`), so a typed message still goes wherever an untyped `AgentMessage` is expected, which it did not before.
-- Only code that writes the tool type out by hand changes: a tool annotated as `AgentTool<Name, Input, Output, Progress, Ctx>` that sets `approvalPreview` no longer fits (its preview is not `never`); add the preview type as the sixth argument or let it be inferred.
+- `AgentTool` takes a sixth type parameter, `Preview`. `AgentTool.create` and `withContext<Ctx>().tool` infer it (default `never`); the class's own default is `unknown`, so `AgentTool<string, any, any, any, any>` and other five-argument spellings still hold any tool. `AgentTool.ask` returns `Preview` `never`. `ToolShapesOf` emits `preview` for every tool, and `ToolShape` has an optional `preview` member. `ToolApprovalPreview<Input, Ctx, Preview = unknown>` returns `Preview | Promise<Preview>`.
+- `AgentController.readThread` answers `ThreadMessage<A>[] | null`: `AgentMessage<AgentToolShapes<A>>` for a controller with a concrete agent, so it goes into the route's `useChat({ initialMessages })` with no cast, and `AgentMessage<any>` for a controller whose agent is not known (`AgentController`, `AgentController<any, any>`, or an agent whose tools have no literal names). A controller that picks its agent per request is typed by the agent it is declared with (`A`).
+
+What can stop compiling:
+
+- **A concrete controller's `readThread` result put where an untyped `AgentMessage[]` is declared**, such as `const messages: AgentMessage[] | null = await new ChatController().readThread(id)` or a helper taking `AgentMessage[]`. `AgentMessage` is invariant in its tool shapes (it already was, which is why `useChat`'s typed messages never fit `AgentMessage[]` either). Drop the annotation, type it `AgentMessage<AgentToolShapes<typeof agent>>[]` (or `ThreadMessage<typeof agent>[]`), or make the helper generic over `T extends ToolShapes`.
+- **A `readThread` result handed to a route whose agent has fewer or different tools** is now refused, since its parts can name tools that route does not handle. That is the intended check; a cast there was hiding it.
+- **`AgentTool.create<Name, Input, Output, Progress, Ctx>(…)` or `withContext().tool<Name, Input, Output, Progress>(…)` with an `approvalPreview`** still compiles, but its `preview` is typed `never` on the client, since nothing infers it. Add the preview type as the last type argument.
+- **`toEqualTypeOf<AgentTool<…>>()`-style exact type assertions** on tools now need the sixth argument (`never` for a tool without a preview).
 
 # Upgrading from 0.175.0 to 0.175.1
 

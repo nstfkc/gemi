@@ -486,15 +486,7 @@ export type AgentContentPart<T extends ToolShapes = ToolShapes, O = unknown> =
   | ToolResultPart<T>
   | OutputPart<O>;
 
-/**
- * `out` (#1100): a message typed by an agent's tools is still an
- * `AgentMessage`, so `AgentController.readThread`'s typed answer goes wherever
- * an untyped `AgentMessage[]` is expected. TypeScript measures `T` as
- * invariant without it (`keyof T` in the mapped part unions reads as
- * contravariant), although each part is covariant on its own; the compiler
- * checks the annotation, so it cannot hide a real contravariant use.
- */
-export type AgentMessage<out T extends ToolShapes = ToolShapes, O = unknown> = {
+export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
   /** Stable and server-assigned, so a reattached stream does not duplicate
    *  messages the client already has. */
   id: string;

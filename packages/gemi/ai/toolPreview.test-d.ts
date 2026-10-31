@@ -7,7 +7,14 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 
-import { Agent, AgentTool, type AgentToolShapes, type ToolShapesOf } from "./Agent";
+import {
+  Agent,
+  AgentTool,
+  type AgentContext,
+  type AgentToolShapes,
+  type AnyAgentTool,
+  type ToolShapesOf,
+} from "./Agent";
 import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
@@ -102,10 +109,82 @@ describe("a tool's preview type", () => {
     }>();
   });
 
-  test("leaves the tool's own type unchanged for a tool without one", () => {
+  test("is `never` on the tool's own type for a tool without one", () => {
     expectTypeOf(readRows).toEqualTypeOf<
-      AgentTool<"readRows", { sql: string }, { rows: string[] }>
+      AgentTool<"readRows", { sql: string }, { rows: string[] }, never, AgentContext, never>
     >();
+    expectTypeOf(ask).toEqualTypeOf<
+      AgentTool<"ask", { question: string }, { answer: string }, never, unknown, never>
+    >();
+  });
+});
+
+describe("tool types written out by hand", () => {
+  test("a five-argument AgentTool still holds a tool with a preview", () => {
+    // The class's own `Preview` defaults to `unknown`, so the pre-#1100
+    // spelling of "any tool" keeps accepting every tool.
+    const anyTool: AgentTool<string, any, any, any, any> = executeWrite;
+    const anyTool6: AnyAgentTool = executeWrite;
+    const typed: AgentTool<"executeWrite", { sql: string }, { rowsAffected: number }> =
+      executeWrite;
+    void [anyTool, anyTool6, typed];
+  });
+
+  test("explicit type arguments without Preview still accept an approvalPreview", () => {
+    const explicit = AgentTool.create<"explicit", { sql: string }, number, never, AgentContext>({
+      name: "explicit",
+      description: "Explicit type arguments",
+      inputSchema: s.object({ sql: s.string() }),
+      requiresApproval: true,
+      approvalPreview: (input) => ({ sql: input.sql }),
+      execute: async () => 1,
+    });
+    // Nothing infers it there, so it is the default.
+    expectTypeOf<IsNever<ToolShapesOf<[typeof explicit]>["explicit"]["preview"]>>().toEqualTypeOf<true>();
+
+    const viaKit = Agent.withContext<{ tenantId: string }>().tool<
+      "viaKit",
+      { sql: string },
+      number,
+      never
+    >({
+      name: "viaKit",
+      description: "Explicit type arguments through withContext",
+      inputSchema: s.object({ sql: s.string() }),
+      requiresApproval: true,
+      approvalPreview: (input) => ({ sql: input.sql }),
+      execute: async () => 1,
+    });
+
+    const withPreview = AgentTool.create<
+      "withPreview",
+      { sql: string },
+      number,
+      never,
+      AgentContext,
+      { sql: string }
+    >({
+      name: "withPreview",
+      description: "Explicit Preview",
+      inputSchema: s.object({ sql: s.string() }),
+      requiresApproval: true,
+      approvalPreview: (input) => ({ sql: input.sql }),
+      execute: async () => 1,
+    });
+    expectTypeOf<ToolShapesOf<[typeof withPreview]>["withPreview"]["preview"]>().toEqualTypeOf<{
+      sql: string;
+    }>();
+
+    AgentTool.create<"wrongPreview", { sql: string }, number, never, AgentContext, { sql: string }>({
+      name: "wrongPreview",
+      description: "A preview of the wrong type",
+      inputSchema: s.object({ sql: s.string() }),
+      requiresApproval: true,
+      // @ts-expect-error the explicit Preview is `{ sql: string }`
+      approvalPreview: () => ({ rows: 1 }),
+      execute: async () => 1,
+    });
+    void viaKit;
   });
 });
 
@@ -144,8 +223,8 @@ describe("PendingToolCall.preview", () => {
 
 describe("AgentController.readThread", () => {
   test("answers the controller's agent's messages", () => {
-    expectTypeOf(new DataChat().readThread("t")).toEqualTypeOf<
-      Promise<AgentMessage<AgentToolShapes<typeof dataAgent>>[] | null>
+    expectTypeOf<Awaited<ReturnType<DataChat["readThread"]>>>().toEqualTypeOf<
+      AgentMessage<AgentToolShapes<typeof dataAgent>>[] | null
     >();
   });
 
@@ -155,12 +234,60 @@ describe("AgentController.readThread", () => {
     void params;
   });
 
-  test("still fits an untyped controller, whose messages stay assignable to AgentMessage[]", async () => {
+  test("a controller still fits the untyped bounds", async () => {
     expectTypeOf<DataChat>().toMatchTypeOf<AgentController>();
     expectTypeOf<DataChat>().toMatchTypeOf<AgentController<any, any>>();
     const untyped: AgentController = new DataChat();
+    // An unknown agent answers `AgentMessage<any>`, which fits as before.
     const loose: AgentMessage[] | null = await untyped.readThread("t");
+    void loose;
+  });
+
+  test("a typed answer is not an untyped AgentMessage[], as any typed message is not", async () => {
+    // `AgentMessage` is invariant in its tool shapes, on purpose (see below).
+    // @ts-expect-error a typed message is not `AgentMessage<ToolShapes>`
     const typed: AgentMessage[] | null = await new DataChat().readThread("t");
-    void [loose, typed];
+    void typed;
+  });
+});
+
+describe("AgentMessage's tool shapes", () => {
+  type S = { input: { x: string }; output: number };
+
+  test("a message of an agent with more tools does not fit a narrower agent's", () => {
+    // Its parts can name a tool the narrower side does not handle.
+    const wide = {} as AgentMessage<{ a: S; b: S; c: S }>;
+    // @ts-expect-error the extra tool `c`
+    const narrow: AgentMessage<{ a: S; b: S }> = wide;
+    void narrow;
+  });
+
+  test("a message with a wider output does not fit a narrower one", () => {
+    const wide = {} as AgentMessage<{ a: S }>;
+    // @ts-expect-error `number` is not `1`
+    const narrow: AgentMessage<{ a: { input: { x: string }; output: 1 } }> = wide;
+    void narrow;
+  });
+
+  test("a message of an unrelated tool does not fit", () => {
+    const other = {} as AgentMessage<{ z: S }>;
+    // @ts-expect-error no tool `z` on the target
+    const target: AgentMessage<{ a: S }> = other;
+    void target;
+  });
+
+  test("a superset agent's readThread does not go into a narrower route's useChat", async () => {
+    const wider = Agent.create({
+      name: "wider",
+      provider: OpenAIProvider.model("gpt-5.4"),
+      tools: [executeWrite, deleteRow, readRows, ask, scoped],
+    });
+    class WiderChat extends AgentController<typeof wider> {
+      agent = wider;
+    }
+    const messages = (await new WiderChat().readThread("t")) ?? [];
+    // @ts-expect-error `scopedWrite` is not a tool of the route's agent
+    const params: UseChatParams<"/tool-preview-test-d"> = { initialMessages: messages };
+    void params;
   });
 });
