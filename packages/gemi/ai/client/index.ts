@@ -67,7 +67,9 @@ export type {
   ToolProgress,
   ToolApprovalRecord,
   ToolResultPart,
+  JsonToolShapes,
   ToolShape,
   ToolShapes,
   Usage,
 } from "../types";
+export type { Jsonify } from "../../utils/jsonify";

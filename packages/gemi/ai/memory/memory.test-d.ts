@@ -12,7 +12,7 @@ import { Agent, AgentTool, type AgentToolShapes, type ToolShapesOf } from "../Ag
 import { AgentController, type AgentRouteRPC } from "../AgentController";
 import { OpenAIProvider } from "../AgentProvider";
 import { s } from "../Schema";
-import type { ToolResultPart } from "../types";
+import type { JsonToolShapes, ToolResultPart } from "../types";
 import type { MemoryToolShapes, RememberResult, ToolMemory } from "./runMemory";
 
 const provider = OpenAIProvider.model("gpt-5.4");
@@ -70,9 +70,13 @@ describe("memory tool shapes", () => {
   });
 
   test("the route carries them to the client", () => {
+    // In their JSON form (#1107); memory results are JSON already.
     expectTypeOf<AgentRouteRPC<typeof SiteChat>["tools"]>().toEqualTypeOf<
-      AgentToolShapes<typeof remembering>
+      JsonToolShapes<AgentToolShapes<typeof remembering>>
     >();
+    expectTypeOf<
+      AgentRouteRPC<typeof SiteChat>["tools"]["remember"]["output"]
+    >().toEqualTypeOf<RememberResult>();
   });
 
   test("an agent without memory, or with its tools off, is unchanged", () => {
