@@ -77,7 +77,7 @@ const hydrate = new Function(
  * Puts a static document (`.static({ navigation })`) into the test's DOM and
  * starts its navigation runtime against stubbed pages, so a test can check that
  * a site's links are followed client-side, and what the next page looks like.
- * Needs a DOM (`// @vitest-environment jsdom`).
+ * Needs a DOM (`// @vitest-environment jsdom` or `happy-dom`).
  *
  * ```ts
  * const html = await (await render("/")).text(); // the page, from your app
@@ -116,7 +116,11 @@ export function renderStaticDocument(
   for (const script of Array.from(parsed.querySelectorAll("script"))) {
     if (!/json/.test(script.type)) script.remove();
   }
-  document.replaceChild(document.importNode(parsed.documentElement, true), document.documentElement);
+  // Removed, then appended: happy-dom refuses a second root element, which
+  // `replaceChild` (insert, then remove) would make for a moment (#1102).
+  const root = document.importNode(parsed.documentElement, true);
+  document.removeChild(document.documentElement);
+  document.appendChild(root);
 
   const fullLoad = (url: string) => {
     fullLoads.push(url);
