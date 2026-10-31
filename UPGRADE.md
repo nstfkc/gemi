@@ -6,7 +6,7 @@
 
 - `view.notFound: { view, static }` (on a `route.domains` group's `view`, or the root's) renders that view as a static document, with `static.layout` as its document layout, wherever the app's hydrated `404` view would render on a document request: an unmatched path, a `NotFoundError` / `FileNotFoundError` / `RecordNotFoundError` from a handler or middleware, a refusal (`403`) or a feature gate. The status is unchanged (`404` or `403`); no client entry, `__GEMI_DATA__` or theme script is sent.
 - `onNotFound` may now return an object: with `notFound` set, it is the not-found view's props (e.g. the tenant's name and logo from `req.domain.params`). Without `notFound` the return value is ignored, as before.
-- `static.cacheControl` applies to an unmatched path; a refusal or missing record keeps `Cache-Control: no-store`. Cookies follow the static page's policy (`session` / `csrf` opt-ins).
+- `static.cacheControl` applies to an unmatched path only; a refusal or missing record keeps `Cache-Control: no-store`, and a gated route gets none. Cookies follow the static page's policy (`session` / `csrf` opt-ins).
 - `.json` client navigations are unchanged: they still answer `is404`, and the client renders the app's `404` view.
 - Without `notFound`, nothing changes.
 

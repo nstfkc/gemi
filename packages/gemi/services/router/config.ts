@@ -119,9 +119,9 @@ export interface ViewRouteConfig {
    *
    * `static` takes the options of `.static()`; `layout` is the document
    * layout, and `cacheControl` applies to an unmatched path only (a refusal
-   * or a missing record is sent `no-store`). A client-side navigation from a
-   * hydrated page still lands on the app's `404` view: the client router has
-   * only that one.
+   * or a missing record is sent `no-store`, a gated route none). A
+   * client-side navigation from a hydrated page still lands on the app's
+   * `404` view: the client router has only that one.
    */
   notFound?: { view: string; static: StaticViewOptions };
 

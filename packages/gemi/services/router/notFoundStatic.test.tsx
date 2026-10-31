@@ -83,6 +83,9 @@ class ShopViewRouter extends ViewRouter {
     "/private": this.view("Page", () => ({ text: "private" }))
       .middleware(["forbidden"])
       .static({ layout: "shop/ShopLayout" }),
+    "/beta": this.view("Page", () => ({ text: "beta" }))
+      .feature("shop-beta" as any)
+      .static({ layout: "shop/ShopLayout" }),
     // A hydrated page in the same group: its `.json` navigation keeps the
     // client's `is404`.
     "/account/:id": this.view("Page", () => {
@@ -190,6 +193,13 @@ describe("a group's static notFound", () => {
     expect(res.layout).toBe("shop");
     expect(res.hydrated).toBe(false);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("a closed feature gate renders it without the page's cacheControl", async () => {
+    const res = await visit("http://acme.example.test/beta");
+    expect(res.status).toBe(404);
+    expect(res.shown).toBe("acme|404|/beta");
+    expect(res.headers.get("Cache-Control")).toBeNull();
   });
 
   test("a matched page of the group is untouched", async () => {

@@ -1276,6 +1276,8 @@ export class ViewRouteDispatcher {
     let featureGates: string[] = [];
     // The matched route's `.static()` options, if it has any.
     let staticView: StaticViewOptions | undefined;
+    // Whether the path names a route at all, whatever happens to it later.
+    let matched = false;
 
     try {
       let match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -1285,6 +1287,7 @@ export class ViewRouteDispatcher {
         match = null;
       }
       if (match) {
+        matched = true;
         currentPathName = match.routePath;
         params = match.params;
         handlers = match.route.exec;
@@ -1754,8 +1757,10 @@ export class ViewRouteDispatcher {
           });
         }
 
-        if (staticDocument) {
-          // A refusal already set `no-store`, which wins (#828).
+        // The `notFound` page's `cacheControl` is for a path no route has
+        // (#828). A route that became a 404 (a refusal, a missing record, a
+        // feature gate) depends on who asked, so a shared cache must not keep it.
+        if (staticDocument && (currentPathName || !matched)) {
           applyStaticCacheControl(headers, documentStatic!);
         }
 
