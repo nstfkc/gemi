@@ -492,6 +492,7 @@ export type {
   AgentTurn,
   AgentTurnParams,
   AgentTurnResult,
+  ThreadMessage,
   Attachment,
   AttachmentDestination,
   AttachmentLimits,

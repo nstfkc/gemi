@@ -721,11 +721,16 @@ export type ToolApproval<Input, Ctx = AgentContext> =
 /**
  * A tool's `approvalPreview` (#1060): what the user is shown before they
  * approve a call. See `ToolDefinition.approvalPreview`.
+ *
+ * `Preview` is inferred from the return type (#1100), from the `Promise<…>`
+ * when there is one. A function declared as returning `A | Promise<B>` infers
+ * `B` and then fails against `A`: return one type, sync or async, or pass
+ * `Preview` explicitly.
  */
-export type ToolApprovalPreview<Input, Ctx = AgentContext> = (
+export type ToolApprovalPreview<Input, Ctx = AgentContext, Preview = unknown> = (
   input: Input,
   ctx: ToolApprovalContext<Ctx>,
-) => unknown;
+) => Preview | Promise<Preview>;
 
 /**
  * A tool's `toModel` (#1061): the projection of a successful output that the
@@ -849,6 +854,7 @@ export type ToolDefinition<
   Output,
   Progress = never,
   Ctx = AgentContext,
+  Preview = never,
 > =
   | (ToolDefinitionBase<Name, Input, Output, Ctx> & {
       answeredBy?: "server";
@@ -872,8 +878,18 @@ export type ToolDefinition<
        * between the preview and the click. A preview that throws, or runs
        * past the tool's `timeoutMs`, is logged and the call is asked without
        * one. Return `undefined` for no preview.
+       *
+       * What it returns types the pending call's `preview` (#1100): narrow a
+       * `PendingToolCall` on `name` and `preview` is this tool's, with no cast.
+       * (`Preview` is inferred from the false branch below. The true branch is
+       * for type arguments written out without it: `Preview` is then its
+       * default `never`, and the function may still return anything.)
        */
-      approvalPreview?: ToolApprovalPreview<Input, Ctx>;
+      approvalPreview?: ToolApprovalPreview<
+        Input,
+        Ctx,
+        [Preview] extends [never] ? unknown : Preview
+      >;
       /**
        * What the model reads instead of the full output (#1061). The client,
        * the store and `onMessage` still get `output` whole; the model gets
@@ -950,6 +966,13 @@ declare const TOOL_CONTEXT: unique symbol;
  * `AgentContext` unless the tool says otherwise, with `withContext<Ctx>().tool`
  * or an annotated `execute(input, ctx: ToolContext<Ctx>)`. An agent holding
  * the tool has to supply it. See `ContextOf`.
+ *
+ * `Preview` is inferred the way `Progress` is (#1100): from what
+ * `approvalPreview` returns (awaited), and `AgentTool.create` makes it `never`
+ * for a tool without one. It is what types a pending call's `preview` in the
+ * browser. The class's own default is `unknown`, so a tool type written out
+ * by hand with five arguments (`AgentTool<string, any, any, any, any>`)
+ * still holds a tool that has a preview.
  */
 export class AgentTool<
   Name extends string = string,
@@ -957,6 +980,7 @@ export class AgentTool<
   Output = unknown,
   Progress = never,
   Ctx = AgentContext,
+  Preview = unknown,
 > {
   readonly name: Name;
   readonly description: string;
@@ -977,7 +1001,7 @@ export class AgentTool<
     ctx: ToolApprovalContext<Ctx>,
   ) => boolean | Promise<boolean>;
   /** See `ToolDefinition.approvalPreview`. */
-  readonly approvalPreview?: ToolApprovalPreview<Input, Ctx>;
+  readonly approvalPreview?: ToolApprovalPreview<Input, Ctx, Preview>;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
@@ -1004,7 +1028,7 @@ export class AgentTool<
    */
   declare readonly [TOOL_CONTEXT]?: (context: Ctx) => void;
 
-  private constructor(params: ToolDefinition<Name, Input, Output, Progress, Ctx>) {
+  private constructor(params: ToolDefinition<Name, Input, Output, Progress, Ctx, Preview>) {
     this.name = params.name;
     this.description = params.description;
     this.inputSchema = params.inputSchema;
@@ -1014,7 +1038,11 @@ export class AgentTool<
     if (typeof params.requiresApproval === "function") {
       this.approvalPredicate = params.requiresApproval;
     }
-    if (params.approvalPreview) this.approvalPreview = params.approvalPreview;
+    if (params.approvalPreview) {
+      // Its return type only differs for `Preview` left at `never` (see
+      // `ToolDefinition.approvalPreview`).
+      this.approvalPreview = params.approvalPreview as ToolApprovalPreview<Input, Ctx, Preview>;
+    }
     this.deferred = params.deferred === true;
     this.answeredBy = params.answeredBy === "client" ? "client" : "server";
     this.execute = params.execute ?? undefined;
@@ -1028,9 +1056,16 @@ export class AgentTool<
    * `const` on the params is what preserves `name` as a literal, which is what
    * lets the browser discriminate a tool part by name.
    */
-  static create<const Name extends string, Input, Output, Progress = never, Ctx = AgentContext>(
-    params: ToolDefinition<Name, Input, Output, Progress, Ctx>,
-  ): AgentTool<Name, Input, Output, Progress, Ctx> {
+  static create<
+    const Name extends string,
+    Input,
+    Output,
+    Progress = never,
+    Ctx = AgentContext,
+    Preview = never,
+  >(
+    params: ToolDefinition<Name, Input, Output, Progress, Ctx, Preview>,
+  ): AgentTool<Name, Input, Output, Progress, Ctx, Preview> {
     // Only the input: it is the one schema the provider is shown. The
     // `outputSchema` validates what `execute` or the browser hands back and is
     // never sent, so any shape is fine there.
@@ -1112,8 +1147,8 @@ export class AgentTool<
     name: Name;
     description: string;
     outputSchema: Schema<Output>;
-  }): AgentTool<Name, { question: string }, Output, never, Ctx> {
-    return AgentTool.create<Name, { question: string }, Output, never, Ctx>({
+  }): AgentTool<Name, { question: string }, Output, never, Ctx, never> {
+    return AgentTool.create<Name, { question: string }, Output, never, Ctx, never>({
       name: params.name,
       description: params.description,
       inputSchema: questionSchema,
@@ -1156,7 +1191,7 @@ const questionSchema = {
   },
 } as unknown as Schema<{ question: string }>;
 
-export type AnyAgentTool = AgentTool<string, any, any, any, any>;
+export type AnyAgentTool = AgentTool<string, any, any, any, any, any>;
 
 /**
  * A group of tools the model can search as a unit.
@@ -1247,8 +1282,8 @@ export type ToolShapesOf<T extends readonly ToolEntry[]> =
 type NamedTools<K> = K extends AnyAgentTool ? (string extends K["name"] ? never : K) : never;
 
 type ShapesOf<U extends AnyAgentTool> = {
-  [K in U as K["name"]]: K extends AgentTool<any, infer I, infer O, infer P, any>
-    ? { input: I; output: O; progress: P }
+  [K in U as K["name"]]: K extends AgentTool<any, infer I, infer O, infer P, any, infer V>
+    ? { input: I; output: O; progress: P; preview: V }
     : never;
 };
 
@@ -2169,15 +2204,15 @@ type ToolsFit<T extends readonly ToolEntry[], Ctx> = [Ctx] extends [ToolsNeed<T>
  */
 export interface AgentContextKit<Ctx> {
   /** `AgentTool.create`, whose `ctx.context` is `Ctx`. */
-  tool<const Name extends string, Input, Output, Progress = never>(
-    params: ToolDefinition<Name, Input, Output, Progress, Ctx>,
-  ): AgentTool<Name, Input, Output, Progress, Ctx>;
+  tool<const Name extends string, Input, Output, Progress = never, Preview = never>(
+    params: ToolDefinition<Name, Input, Output, Progress, Ctx, Preview>,
+  ): AgentTool<Name, Input, Output, Progress, Ctx, Preview>;
   /** `AgentTool.ask`, typed for agents of this context. */
   ask<const Name extends string, Output>(params: {
     name: Name;
     description: string;
     outputSchema: Schema<Output>;
-  }): AgentTool<Name, { question: string }, Output, never, Ctx>;
+  }): AgentTool<Name, { question: string }, Output, never, Ctx, never>;
   /**
    * `Agent.create`, for an agent whose runs are given `Ctx`. Each of its tools
    * must read no more than `Ctx` gives it: a tool made for another context is

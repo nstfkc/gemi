@@ -27,8 +27,13 @@ import type { ToolAttachmentRecord } from "./store/Attachments";
  * existed is still a valid one, and every `T[K]["progress"]` below resolves for
  * it rather than failing to compile. That is why this is a third member of the
  * existing type and not a second type beside it.
+ *
+ * `preview` is what the tool's `approvalPreview` returns (#1100), and optional
+ * for the same reason: `ToolShapesOf` emits it for every tool (`never` for one
+ * without a preview), and a hand-written shape without it types a pending
+ * call's `preview` as `unknown`, as before.
  */
-export type ToolShape = { input: unknown; output: unknown; progress?: unknown };
+export type ToolShape = { input: unknown; output: unknown; progress?: unknown; preview?: unknown };
 export type ToolShapes = Record<string, ToolShape>;
 
 export type Usage = {
@@ -634,10 +639,20 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      * Display data, and not signed: the signature covers the input, so the
      * approval is of the call, not of the preview. Things can change between
      * the preview and the click, and `execute` re-checks what it relies on.
+     *
+     * Typed by what that tool's `approvalPreview` returns (#1100), so
+     * narrowing on `name` types it with no cast. `never` for a tool without
+     * one, and `unknown` for a hand-written shape that does not say.
      */
-    preview?: unknown;
+    preview?: PreviewOf<T[K]>;
   };
 }[keyof T];
+
+/**
+ * A tool shape's `preview`, awaited. `never` stays `never` (a tool with no
+ * `approvalPreview`), and a shape with no `preview` member is `unknown`.
+ */
+type PreviewOf<S> = S extends { preview: infer V } ? ([V] extends [never] ? never : Awaited<V>) : unknown;
 
 /**
  * The client's half of a pending call.

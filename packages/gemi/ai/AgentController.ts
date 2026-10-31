@@ -327,6 +327,28 @@ export type AgentTurn = {
   result(): Promise<AgentTurnResult>;
 };
 
+/**
+ * A message of the controller's threads, as `readThread` answers it (#1100):
+ * typed by the agent's tools, so it goes into the route's
+ * `useChat({ initialMessages })` with no cast.
+ *
+ * A controller whose agent is not known (`AgentController`, or the
+ * `AgentController<any, any>` bound the route helpers use, or an agent whose
+ * tools have no literal names) answers `AgentMessage<any>`. `AgentMessage` is invariant in its tool shapes (a
+ * message of an agent with more tools has parts a narrower one does not
+ * expect), so a typed answer fits neither `AgentMessage<ToolShapes>` nor
+ * `AgentMessage<AgentToolShapes<AnyAgent>>`, and a concrete controller would
+ * no longer fit those bounds.
+ */
+export type ThreadMessage<A> = 0 extends 1 & A
+  ? AgentMessage<any>
+  : A extends AnyAgent
+    ? // `AnyAgent`'s shapes (and an untyped tool list's) are an index signature.
+      string extends keyof AgentToolShapes<A>
+      ? AgentMessage<any>
+      : AgentMessage<AgentToolShapes<A>>
+    : AgentMessage<any>;
+
 /** What `AgentTurn.result()` answers: the run's result, and what a caller reads off it. */
 export type AgentTurnResult = AgentRunResult<ToolShapes, unknown> & {
   threadId: string;
@@ -3023,10 +3045,17 @@ export abstract class AgentController<
    *
    * It does not write: the next turn on the thread settles the same messages
    * the same way and stores them then, under the thread's lock.
+   *
+   * Typed by the controller's agent (#1100), as `useChat`'s `initialMessages`
+   * for the route is, so the result goes there with no cast. A controller that
+   * picks its agent per request is typed by the widest one, `A`.
    */
-  async readThread(threadId: string): Promise<AgentMessage[] | null> {
+  async readThread(threadId: string): Promise<ThreadMessage<A>[] | null> {
     const history = await this.store.loadThread(threadId);
-    return history ? (await this.settleThread(threadId, history, { write: false })).messages : null;
+    if (!history) return null;
+    const { messages } = await this.settleThread(threadId, history, { write: false });
+    // The store is not typed per agent; these are this agent's messages.
+    return messages as ThreadMessage<A>[];
   }
 
   /**

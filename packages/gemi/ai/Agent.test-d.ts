@@ -18,6 +18,7 @@ import {
   AgentTool,
   Skill,
   ToolNamespace,
+  type AgentContext,
   type AgentRunFailure,
   type ReasoningEffort,
   type ToolShapesOf,
@@ -207,7 +208,14 @@ describe("a tool's progress type", () => {
     // type up, `ToolShapesOf` has nothing to carry and the assertion below
     // would be testing the mapped type against a default rather than a fact.
     expectTypeOf(research).toEqualTypeOf<
-      AgentTool<"research", { topic: string }, { summary: string }, { stage: string }>
+      AgentTool<
+        "research",
+        { topic: string },
+        { summary: string },
+        { stage: string },
+        AgentContext,
+        never
+      >
     >();
     expectTypeOf<Shapes["research"]["progress"]>().toEqualTypeOf<{ stage: string }>();
   });
@@ -283,7 +291,7 @@ describe("AgentTool.ask", () => {
     // It reads no context, so it needs none (#1019): `unknown`, which fits
     // any agent's.
     expectTypeOf(askName).toEqualTypeOf<
-      AgentTool<"askName", { question: string }, { name: string }, never, unknown>
+      AgentTool<"askName", { question: string }, { name: string }, never, unknown, never>
     >();
   });
 });
