@@ -1,4 +1,4 @@
-# Upgrading from 0.172.0 to 0.173.0
+# Unreleased
 
 ## i18n: `useDictionary` inside islands on static pages (#1095)
 
@@ -8,6 +8,8 @@
 - The dictionaries islands read go in the document as `<script type="application/json" id="gemi-island-i18n">` (`{ currentLocale, defaultLocale, timeZone, dictionaries: [[id, locale, strings]] }`), and the island runtime hydrates from it with no fetch. Only strings an island read are in it, in the page's locale only; a page whose islands read no locale, zone or dictionary gets no such script.
 - An island that passed translated strings or templates as props keeps working; it can now call `useDictionary` itself, including for strings whose params only exist in the browser.
 - A test that hydrates an island with `ISLAND_HYDRATE_SOURCE` (or `renderStaticDocument` from `gemi/testing`) gets the same behaviour.
+
+# Upgrading from 0.172.0 to 0.173.0
 
 ## i18n: `view.detectLocale` for views out of locale routing (#1092)
 
