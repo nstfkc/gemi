@@ -58,7 +58,12 @@ import {
   type StaticNavigationMarker,
 } from "./staticDocument";
 import { documentScriptSource } from "./documentScript";
-import { applyStaticCacheControl, staticCookiePolicy } from "./staticCache";
+import {
+  applyStaticCacheControl,
+  dropCookiesFromSharedCacheable,
+  staticCookiePolicy,
+} from "./staticCache";
+import { mergeContextIntoResponse } from "./ApiRouteDispatcher";
 
 /**
  * `satori`, loaded on the first OG-image request rather than on import, for the
@@ -1305,6 +1310,8 @@ export class ViewRouteDispatcher {
     let staticView: StaticViewOptions | undefined;
     // Whether the path names a route at all, whatever happens to it later.
     let matched = false;
+    // A `this.file(...)` route: an asset, not a page.
+    let fileRoute = false;
 
     try {
       let match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -1323,6 +1330,7 @@ export class ViewRouteDispatcher {
         noStream = middlewares.includes("no-stream");
         noTheme = middlewares.includes(NO_THEME_DIRECTIVE);
         staticView = match.route.static;
+        fileRoute = match.route.segments.at(-1)?.viewPath === "FILE";
 
         // Only navigations skip work. A document request renders the whole
         // tree, and the client has nothing to carry forward yet.
@@ -1416,9 +1424,16 @@ export class ViewRouteDispatcher {
       //
       // A path no route matches is already known to render `notFound`, so it
       // takes that page's policy (#828).
+      //
+      // A file route is an asset, and gets the same treatment as a static
+      // view with no opt-ins (#1094).
       const staticCookies = staticCookiePolicy(
-        staticView ??
-          (currentPathName === null && !isViewDataRequest ? this.notFound?.static : undefined),
+        fileRoute
+          ? {}
+          : (staticView ??
+              (currentPathName === null && !isViewDataRequest
+                ? this.notFound?.static
+                : undefined)),
       );
 
       if (urlLocale) {
@@ -1691,19 +1706,28 @@ export class ViewRouteDispatcher {
 
         const fileOutput: FileOutput | undefined = (viewData as any).FILE;
         if (fileOutput) {
-          for (const cookie of cookies) {
-            headers.append("Set-Cookie", cookie.toString());
-          }
-
+          // No `session_id` of gemi's own, as for a static view: the cookies
+          // sent are the ones the handler and middleware set.
           try {
-            await this.onRequestEnd(httpRequest);
+            await this.onRequestEnd(httpRequest, { mintSession: false });
           } catch (err) {
             Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
               err: JSON.stringify(err),
             });
           }
 
-          return await createFileResponse(fileOutput, headers);
+          // A handler's own Response carries the context too — `cache:public`,
+          // a `Vary` — with its own headers winning, as on an api route.
+          let response: Response;
+          if (fileOutput instanceof Response) {
+            response = mergeContextIntoResponse(fileOutput, headers, cookies);
+          } else {
+            for (const cookie of cookies) {
+              headers.append("Set-Cookie", cookie.toString());
+            }
+            response = await createFileResponse(fileOutput, headers);
+          }
+          return dropCookiesFromSharedCacheable(response, currentPathName);
         }
 
         if (isViewDataRequest) {

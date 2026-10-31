@@ -10,6 +10,15 @@
 - Without it nothing changes: out of locale routing a request still renders in `defaultLocale` unless middleware picks one.
 - An app that picks the locale of such a group in a router-level middleware can move that into `detectLocale` to reach its not-found page too.
 
+## View file routes: context headers, cookies and file names (#1094)
+
+**Behaviour change (fix). Most apps change nothing; read the cookie bullet if a file route sets a cookie.** See [Files](docs/routing.md#files).
+
+- A `this.file(...)` view route whose handler returns a `Response` now gets the headers and cookies the request context collected (`cache:public`'s `Cache-Control`, a `Vary` set with `req.ctx().setHeaders`), as the other return forms and api routes already did. The `Response`'s own headers win.
+- gemi no longer sets `session_id`, `csrf_token` or `i18n-locale` on a file route, as for a static view. Cookies your middleware or handler set are still sent.
+- No `Set-Cookie` at all is sent on a file route's response whose `Cache-Control` is `public` or has `s-maxage`; development logs a warning when that drops a cookie the app set. A file route that needs to set a cookie makes its caching `private`.
+- `Content-Disposition` uses only the last segment of the file name, so a `Bun.file(path)` returned without `name` (from a file or a stream route) is no longer named by its full server path.
+
 # Upgrading from 0.171.0 to 0.172.0
 
 ## `route.domains`: a group may own `/robots.txt` and `/assets/*` (#1015)

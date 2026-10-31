@@ -86,3 +86,15 @@ describe("createFileResponse()", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("contentDisposition()", () => {
+  test("names the file by its base name, never its directory", async () => {
+    const { contentDisposition } = await import("./contentDisposition");
+    expect(contentDisposition("/srv/app/public/favicon.ico", false)).toBe(
+      `inline; filename="favicon.ico"; filename*=UTF-8''favicon.ico`,
+    );
+    expect(contentDisposition("C:\\app\\x.pdf", true)).toBe(
+      `attachment; filename="x.pdf"; filename*=UTF-8''x.pdf`,
+    );
+  });
+});
