@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.176.0 to 0.177.0
 
 ## ai: client-side tool data is typed as its JSON form (#1107)
 
