@@ -6,7 +6,9 @@
 
 - On views with `localeRouting: "off"`, `Lang.setLocale(locale, { cookie: false })` inside `onNotFound` now sets the locale of the not-found page: its `useDictionary` strings, `<html lang>`, the default `meta` and a `.json` navigation's `i18n.currentLocale`. Before, the `i18n` payload was already computed and the call only changed `Lang.locale()`.
 - It covers a path no route matches and a matched route that ends on the not-found page (`RecordNotFoundError`, `NotFoundError`, a refusal). Matched pages keep the locale `detectLocale` or middleware picked.
-- An app whose `onNotFound` already calls `Lang.setLocale` with another locale than the page's on such views now gets its not-found page in that locale. Locale-routed views are unchanged: the URL decides.
+- More generally, such a not-found page now renders in the locale current when the request ended: that includes a `Lang.setLocale` a matched route's handler made before it threw `RecordNotFoundError` or `NotFoundError`. Before, the page kept the locale from `detectLocale` or middleware while `Lang.locale()` (and so `Meta.title`) already answered with the handler's.
+- An app whose `onNotFound` or handlers already call `Lang.setLocale` on such views now gets its not-found page in that locale. Locale-routed views are unchanged: the URL decides.
+- A static `notFound` page whose locale comes from `Accept-Language` should not be cached by a shared cache under its URL alone: send `Vary: Accept-Language`, make its `cacheControl` `private`, or leave out any shared-cache directive.
 
 # Upgrading from 0.173.0 to 0.174.0
 

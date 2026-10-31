@@ -5,6 +5,7 @@ import { App } from "../../app/App";
 import { createRoot } from "../../client/createRoot";
 import { Head } from "../../client/Head";
 import type { RootLayoutProps } from "../../client/htmlAttributes";
+import { island } from "../../client/islands";
 import { useDictionary } from "../../client/useDictionary";
 import { Lang } from "../../facades/Lang";
 import { Meta } from "../../facades/Meta";
@@ -16,6 +17,7 @@ import { defineDictionary } from "../../i18n/defineDictionary";
 import { __resetDictionaryRegistry } from "../../i18n/dictionaryRegistry";
 import { Kernel } from "../../kernel";
 import { RecordNotFoundError } from "../../orm/errors";
+import * as Cart from "./__fixtures__/islands/Cart";
 
 /**
  * `onNotFound` picks the not-found page's locale (#1099). On a
@@ -49,9 +51,22 @@ const ShopLayout = (props: { children?: ReactNode; locale?: string }) => (
   </html>
 );
 
+/** What gemi's Vite plugin turns `island(() => import("./x"))`'s loader into. */
+const VatLine = island(
+  Object.assign(() => Promise.resolve(Cart), {
+    gemiIsland: "app/views/shop/Cart.tsx",
+    gemiModule: Cart,
+  }) as () => Promise<any>,
+);
+
 function ShopNotFound(props: { locale?: string }) {
   const t = useDictionary(dict);
-  return <p id="shop-404">{`${t("missing")}|${props.locale ?? ""}`}</p>;
+  return (
+    <>
+      <p id="shop-404">{`${t("missing")}|${props.locale ?? ""}`}</p>
+      <VatLine rate={18} />
+    </>
+  );
 }
 
 function AppNotFound() {
@@ -89,6 +104,11 @@ class ShopViewRouter extends ViewRouter {
       return { text: Lang.locale() };
     }).static({ layout: "shop/ShopLayout" }),
     "/account": this.view("Greeting", () => ({ text: Lang.locale() })),
+    // A handler that picks a locale, then finds nothing.
+    "/switch": this.view("Greeting", () => {
+      Lang.setLocale("de-DE", { cookie: false });
+      throw new RecordNotFoundError("Org", "findUniqueOrThrow");
+    }),
   };
 }
 
@@ -115,7 +135,14 @@ class TestKernel extends Kernel {
     translation: { supportedLocales: ["en-US", "tr-TR", "de-DE"], defaultLocale: "en-US" },
     route: {
       api: { rootRouter: RootApiRouter },
-      view: { root: createRoot(AppLayout), rootRouter: RootViewRouter },
+      // Locale-routed: the URL decides, whatever `onNotFound` sets.
+      view: {
+        root: createRoot(AppLayout),
+        rootRouter: RootViewRouter,
+        onNotFound: () => {
+          Lang.setLocale("tr-TR", { cookie: false });
+        },
+      },
       domains: {
         root: "example.test",
         groups: [
@@ -162,6 +189,8 @@ const params = {
   ogMap: {},
   clientEntry: { module: "/assets/client.js", preload: ["/assets/client.js"] },
   modulePreloadManifest: {},
+  resolveIsland: (key: string) =>
+    key === "app/views/shop/Cart.tsx" ? { src: "/assets/Cart.js", preload: ["/assets/Cart.js"] } : undefined,
 };
 
 async function visit(url: string, headers: Record<string, string> = {}) {
@@ -177,6 +206,10 @@ async function visit(url: string, headers: Record<string, string> = {}) {
     appNotFound: body.match(/<p id="app-404">([^<]*)<\/p>/)?.[1] ?? null,
     page: body.match(/<main>([^<]*)<\/main>/)?.[1] ?? null,
     title: body.match(/<title>([^<]*)<\/title>/)?.[1] ?? null,
+    island: body.match(/<output>([^<]*)<\/output>/)?.[1] ?? null,
+    islandI18n: JSON.parse(
+      body.match(/<script type="application\/json" id="gemi-island-i18n">(.*?)<\/script>/)?.[1] ?? "null",
+    ),
   };
 }
 
@@ -190,6 +223,26 @@ describe("onNotFound picks the not-found page's locale (localeRouting: \"off\")"
     expect(res.body).toContain('data-locale="tr-TR"');
     expect(res.title).toBe("404 in tr-TR");
     expect(res.cookies.join("\n")).not.toContain("i18n-locale");
+  });
+
+  test("an island on the static notFound page follows it", async () => {
+    const res = await visit("http://acme.example.test/unknown/path", turkish);
+    expect(res.island).toBe("KDV (%18)");
+    expect(res.islandI18n).toMatchObject({
+      currentLocale: "tr-TR",
+      dictionaries: [[Cart.cartDict.id, "tr-TR", Cart.strings["tr-TR"]]],
+    });
+
+    const english = await visit("http://plain.example.test/nope");
+    expect(english.island).toBe("VAT (18%)");
+    expect(english.islandI18n.currentLocale).toBe("en-US");
+  });
+
+  test("a matched handler's Lang.setLocale before its not-found holds on the 404", async () => {
+    // The locale current when the request ended, whoever set it.
+    const res = await visit("http://plain.example.test/switch", turkish);
+    expect(res.status).toBe(404);
+    expect(res.notFound).toBe("Seite nicht gefunden|de-DE");
   });
 
   test("a matched route whose handler throws RecordNotFoundError renders in it too", async () => {
@@ -235,5 +288,23 @@ describe("onNotFound picks the not-found page's locale (localeRouting: \"off\")"
 
     const page = await envelope("http://hydrated.example.test/account.json");
     expect(page.i18n.currentLocale).toBe("en-US");
+  });
+});
+
+describe("onNotFound on locale-routed views", () => {
+  test("Lang.setLocale there leaves the page in the URL's locale", async () => {
+    const plain = await visit("http://example.test/nope");
+    expect(plain.status).toBe(404);
+    expect(plain.appNotFound).toBe("Page not found");
+    expect(plain.body).toContain('lang="en-US"');
+
+    const german = await visit("http://example.test/de-DE/nope");
+    expect(german.appNotFound).toBe("Seite nicht gefunden");
+    expect(german.body).toContain('lang="de-DE"');
+
+    const answer = await app.fetch(new Request("http://example.test/de-DE/nope.json"));
+    const envelope = JSON.parse((await (answer as Response).text()).split("\n")[0]);
+    expect(envelope.is404).toBe(true);
+    expect(envelope.i18n.currentLocale).toBe("de-DE");
   });
 });

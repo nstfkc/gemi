@@ -1652,8 +1652,9 @@ export class ViewRouteDispatcher {
           notFoundProps = await this.hooks.onNotFound(httpRequest, {
             status: refusedStatus ?? 404,
           });
-          // Out of locale routing, `onNotFound` may pick the not-found page's
-          // own locale with `Lang.setLocale` (#1099). `detectLocale` runs
+          // Out of locale routing, the not-found page renders in the locale
+          // current now, so `onNotFound` (or a handler before it threw) may
+          // pick it with `Lang.setLocale` (#1099). `detectLocale` runs
           // before anyone knows the request ends here, so a rule meant only
           // for the 404 (say, `Accept-Language` where pages ignore it) has
           // nowhere else to live. Matched pages keep the payload decided
