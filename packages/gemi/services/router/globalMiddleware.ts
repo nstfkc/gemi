@@ -8,6 +8,7 @@ import { breakResponse, mergeContextIntoResponse } from "./ApiRouteDispatcher";
 import { isApiPath } from "./apiPath";
 import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
+import { sharedCacheable } from "./staticCache";
 import { viewBreakResponse, viewDataBreakResponse } from "./ViewRouteDispatcher";
 
 export interface GlobalMiddlewareOutcome {
@@ -26,18 +27,6 @@ export interface GlobalMiddlewareOutcome {
    * from. `null` when there is no list, or it refused.
    */
   carried: CarriedContext | null;
-}
-
-/**
- * Whether a shared cache may store this response: `public` or `s-maxage` in
- * its Cache-Control, as the static `dist/client` files carry
- * (`public, max-age=31536000`). A per-visitor cookie a global middleware set
- * would otherwise be stored with the asset, and a CDN that caches responses
- * with Set-Cookie would hand it to every visitor who gets that copy.
- */
-function sharedCacheable(response: Response) {
-  const cacheControl = response.headers.get("Cache-Control")?.toLowerCase() ?? "";
-  return /(^|[\s,])(public|s-maxage)\b/.test(cacheControl);
 }
 
 const noCookies = new Set<string>();
