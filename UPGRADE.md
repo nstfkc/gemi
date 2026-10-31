@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.172.0 to 0.173.0
 
 ## i18n: `view.detectLocale` for views out of locale routing (#1092)
 
