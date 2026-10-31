@@ -217,6 +217,35 @@ function hostAndPort(host: string): string | null {
 }
 
 /**
+ * `route.domains.devHosts`, lowercased, or `true`. A malformed entry fails the
+ * boot: Vite would silently match nothing for `"https://acme.test"` or
+ * `"acme.test:3000"`, and `"*"` reads like the wildcard it is not.
+ */
+export function devHostsOf(devHosts: DomainsConfig["devHosts"]): true | string[] {
+  if (devHosts === undefined) {
+    return [];
+  }
+  if (devHosts === true) {
+    return true;
+  }
+  if (!Array.isArray(devHosts)) {
+    throw new Error(
+      `\`route.domains.devHosts\` must be a list of hostnames (or \`true\`). Got ${JSON.stringify(devHosts)}.`,
+    );
+  }
+  return devHosts.map((entry, index) => {
+    const host = typeof entry === "string" ? entry.trim().toLowerCase() : "";
+    const name = host.startsWith(".") ? host.slice(1) : host;
+    if (!name || !name.split(".").every((label) => LABEL.test(label))) {
+      throw new Error(
+        `\`route.domains.devHosts[${index}]\` must be a bare hostname, e.g. "app.acme.test", or ".acme.test" for the domain and its subdomains — no scheme, port, path or "*". Got ${JSON.stringify(entry)}.`,
+      );
+    }
+    return host;
+  });
+}
+
+/**
  * Fails the boot on a `domains` config that could never route the way it
  * reads: an empty root, a subdomain declared twice, a malformed label, two
  * param groups competing for the same label, or a custom-domain target that
@@ -247,6 +276,7 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
     );
   }
   assertValidTrustProxy(config.trustProxy);
+  devHostsOf(config.devHosts);
   const seen = new Set<string>();
   let paramGroup: DomainGroupConfig | null = null;
   for (const group of config.groups ?? []) {
@@ -301,6 +331,8 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
  */
 export class DomainResolver {
   readonly root: string;
+  /** `route.domains.devHosts`, lowercased: `[]` when left out, `true` to answer any host. */
+  readonly devHosts: true | readonly string[];
   private readonly hostTrusts: HostTrust[];
   private readonly fixed = new Map<string, DomainGroupConfig>();
   private readonly param: (DomainGroupConfig & { name: string }) | null = null;
@@ -320,6 +352,7 @@ export class DomainResolver {
   constructor(config: DomainsConfig) {
     assertValidDomainsConfig(config);
     this.root = normalizeHost(config.root)!;
+    this.devHosts = devHostsOf(config.devHosts);
     this.hostTrusts = hostTrustsOf(config.trustProxy);
     for (const group of config.groups ?? []) {
       if (isParamSubdomain(group.subdomain)) {

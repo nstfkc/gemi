@@ -88,6 +88,12 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   // single Vite server on `globalThis` instead of spawning a new one (and a new
   // HMR socket) on each reload.
   const isReload = Boolean(globalThis.__gemiVite);
+  const allowedHosts = app.devAllowedHosts.call(app);
+  if (allowedHosts === true && !isReload) {
+    console.warn(
+      "gemi dev: `route.domains.devHosts` is `true`, so the dev server answers any Host. A web page you visit can then read the app's source through DNS rebinding. List the hosts you need instead.",
+    );
+  }
   const vite = (globalThis.__gemiVite ??= await createServer({
     // gemi owns the Vite setup — the app has no `vite.config.mjs` to discover.
     // Register the gemi plugin explicitly instead; it loads `gemi.config.ts` and
@@ -113,10 +119,14 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       // `vite` block is applied) is merged over this inline config, and Vite's
       // own `hmr`→`ws` compat shim forwards the deprecated spelling here.
       ws: { server: await listenHmrServer(resolveHmrPort(httpPort)) },
-      // Vite answers any host other than `localhost` and `*.localhost` with a
-      // 403, which would block a `route.domains` root such as `lvh.me` and
-      // every custom domain pointed here from `/etc/hosts`.
-      allowedHosts: app.devAllowedHosts.call(app),
+      // Vite answers any host other than `localhost`, `*.localhost` and IP
+      // addresses with a 403, which would block a `route.domains` root such as
+      // `lvh.me` and a custom domain pointed here from `/etc/hosts`. Hence the
+      // root, its subdomains and `route.domains.devHosts`, and never every
+      // host unless the app asked for it (warned about below). Vite's
+      // middleware runs before the app, so the check guards the source it
+      // serves as well as the pages.
+      allowedHosts,
       // gemi reloads `.env` into process.env itself (see `watchEnv`). Stop Vite
       // from *also* watching env files: Vite's env-change handler restarts the
       // dev server, which closes the SSR module runner — but gemi keeps a single

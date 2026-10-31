@@ -355,6 +355,22 @@ export interface DomainsConfig {
   custom?: CustomDomainConfig;
 
   /**
+   * Extra hosts the dev server (`gemi dev`) answers, besides the root and its
+   * subdomains, which it always answers, and `localhost`, `*.localhost` and
+   * IP addresses, which Vite always admits. Every other host gets a 403 from
+   * Vite's host check, the guard against DNS rebinding. `gemi start` ignores it.
+   *
+   * List the custom domains you point at `127.0.0.1` in `/etc/hosts` to try
+   * them locally, e.g. `["app.acme.test"]`. Vite's syntax: a leading `.`
+   * admits the domain and every subdomain (`".acme.test"`).
+   *
+   * `true` turns the check off and the dev server answers any host, which lets
+   * any web page you visit read the app's source through DNS rebinding. Avoid
+   * it; gemi warns at boot when it is set.
+   */
+  devHosts?: readonly string[] | true;
+
+  /**
    * Turns on the on-demand TLS ask endpoint, which a proxy calls to decide
    * whether to issue a certificate for a host.
    *

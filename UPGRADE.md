@@ -9,6 +9,30 @@
 - `Meta.translate(allow = true)` sets it per response, from a view or layout handler, and wins over the config. `Meta.translate(false)` keeps the tag on a page of a group that allows translation.
 - On a client-side navigation the tag follows the new page. A `translate="no"` on `<html>` in the layout still blocks translation; leave it off the layout of pages that allow it.
 
+# Upgrading from 0.170.0 to 0.171.0
+
+## `route.domains.devHosts`: the dev server no longer answers every host with `custom` set (#1088)
+
+**Behaviour change (minor). Apps that open custom domains under `gemi dev` add them to `devHosts`.** See [Subdomains & Custom Domains → Development](docs/domains.md#development).
+
+- Before, declaring `route.domains.custom` made `gemi dev` answer any `Host` (Vite's `server.allowedHosts: true`). It now answers `root` and its subdomains, plus what Vite always admits (`localhost`, `*.localhost`, IP addresses), plus the new `route.domains.devHosts`. Any other host gets Vite's `403`, as it already did for apps without `custom`.
+- New `route.domains.devHosts?: string[] | true`, read by `gemi dev` only (`gemi start` ignores it). Vite's syntax: `"app.acme.test"` admits that host, `".acme.test"` the domain and every subdomain. An entry that is not a bare hostname (scheme, port, path, `*`) fails the boot.
+- **What to add:** if you open a custom domain locally (an `/etc/hosts` entry such as `127.0.0.1 app.acme.test`), or a tunnel hostname that is not under `root`, list it:
+
+  ```ts
+  domains: {
+    root: "localhost",
+    groups: [/* … */],
+    custom: { group: ":tenant", resolve /* … */ },
+    devHosts: ["app.acme.test"], // or ".acme.test" for the domain and its subdomains
+  },
+  ```
+
+  Restart `gemi dev` afterwards. Without it, those hosts get `403 Blocked request` in dev.
+- `devHosts: true` restores the old any-host behaviour, with a warning at boot. Prefer listing the hosts.
+- Nothing changes for production, for hosts under `root`, for `localhost`/IP access, or for apps without `custom`.
+- Internal: `App.devAllowedHosts()` returns `true` only for `devHosts: true`; `DomainResolver.devHosts` holds the normalized list.
+
 # Upgrading from 0.169.0 to 0.170.0
 
 ## `route.view.notFound`: a group's own static not-found page (#828)

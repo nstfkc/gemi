@@ -59,8 +59,9 @@ vi.mock("./banner", () => ({ printStartupBanner: vi.fn() }));
 
 // `sockets` is the broadcast endpoint: none unless a test sets one.
 let sockets: any = null;
+let allowedHosts: true | string[] = [".gemi.dev"];
 const app = {
-  devAllowedHosts: () => true,
+  devAllowedHosts: () => allowedHosts,
   sockets: () => sockets,
   applyTrustedClientIp: () => {},
 } as any;
@@ -93,6 +94,7 @@ beforeEach(() => {
 
 afterEach(() => {
   sockets = null;
+  allowedHosts = [".gemi.dev"];
   vi.restoreAllMocks();
   delete (globalThis as any).__gemiVite;
   if (originalPort === undefined) delete process.env.PORT;
@@ -185,8 +187,29 @@ describe("httpDev's HMR websocket port", () => {
     await startDev();
 
     expect(createdConfigs[0].server.middlewareMode).toBe(true);
-    expect(createdConfigs[0].server.allowedHosts).toBe(true);
+    expect(createdConfigs[0].server.allowedHosts).toEqual([".gemi.dev"]);
     expect(createdConfigs[0].appType).toBe("custom");
+  });
+});
+
+/** #1088: the dev server answers any host only when the app asks for it. */
+describe("httpDev's allowed hosts", () => {
+  test("are the app's list, with no warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    allowedHosts = [".gemi.dev", "app.acme.test"];
+    await startDev();
+
+    expect(createdConfigs[0].server.allowedHosts).toEqual([".gemi.dev", "app.acme.test"]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("`devHosts: true` is passed on, with a warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    allowedHosts = true;
+    await startDev();
+
+    expect(createdConfigs[0].server.allowedHosts).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("DNS rebinding"));
   });
 });
 
