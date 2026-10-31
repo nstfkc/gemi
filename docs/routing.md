@@ -386,6 +386,24 @@ Layouts nest arbitrarily deep — a child route inside a layout can itself be an
 
 > **Gotcha:** The [`Redirect`](./facades.md) facade works by throwing, which the framework catches to perform the redirect. Never wrap a `Redirect` call in `try/catch` — it swallows the throw and breaks the redirect.
 
+### Files
+
+`this.file(...)` serves bytes at a page's address: a favicon, a sitemap, an image. The handler returns a `Blob` (a `Bun.file()` included), a `Response`, or `{ file, name?, type?, download?, status?, headers? }`:
+
+```typescript
+routes = {
+  "/favicon.ico": this.file(() => ({
+    file: Bun.file("public/favicon.ico"),
+    type: "image/x-icon",
+  })).middleware(["cache:public"]),
+  "/image/:src": this.file(MediaController, "image").middleware(["cache:public"]),
+};
+```
+
+- **Headers.** The headers middleware and the handler set on the request context (`cache:public`'s `Cache-Control`, `req.ctx().setHeaders("Vary", "Range")`) are sent whatever the handler returns. A returned `Response` keeps its own headers; the context only fills the ones it doesn't set.
+- **Cookies.** A file route is an asset, so gemi sets none of its own cookies on it (`session_id`, `csrf_token`, `i18n-locale`), as for a [static view](./static-views-and-islands.md#cookies-and-caching). The cookies your middleware and handler set are sent, **unless the response's `Cache-Control` lets a shared cache store it** (`public` or `s-maxage`): then no `Set-Cookie` is sent at all, because a CDN would hand that cookie to every visitor who gets the cached copy. Development logs a warning when this drops one of your cookies; make the route's caching `private` if it needs the cookie.
+- **File name.** `Content-Disposition` names the file by `name`, else by the blob's name. Only the last path segment is used, so `Bun.file("/srv/app/public/favicon.ico")` is sent as `favicon.ico` (stream routes too).
+
 ### Trailing slashes
 
 A page's address has no trailing slash. A document request for `/about/` (or `/about//`) that no route matches as it stands is answered with a `301` to `/about`, keeping the query (`/about/?x=1` → `/about?x=1`). Catch-all routes (`/:path*`) included: their pattern never matches a trailing slash. The root `/` and a locale's root (`/de-DE/`) are served as they are; `.json` route-data requests and paths starting with `//` are never redirected.

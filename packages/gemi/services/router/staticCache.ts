@@ -40,3 +40,47 @@ export function applyStaticCacheControl(headers: Headers, staticView: StaticView
     headers.set("Cache-Control", staticView.cacheControl);
   }
 }
+
+/**
+ * Whether a shared cache may store this response: `public` or `s-maxage` in
+ * its Cache-Control, as the static `dist/client` files carry
+ * (`public, max-age=31536000`). A per-visitor cookie stored with such a
+ * response would be handed to every visitor who gets that copy.
+ */
+export function sharedCacheable(response: Response) {
+  const cacheControl = response.headers.get("Cache-Control")?.toLowerCase() ?? "";
+  return /(^|[\s,])(public|s-maxage)\b/.test(cacheControl);
+}
+
+/**
+ * Takes every `Set-Cookie` off a response a shared cache may store (#1094). A
+ * file route is an asset — a favicon, an image, a sitemap — and its caching
+ * is the point of it, so the cookie goes rather than the caching, as on the
+ * global-middleware path. The app's own cookie is reported in development.
+ */
+const warnedFileRoutes = new Set<string | null>();
+
+export function dropCookiesFromSharedCacheable(response: Response, routePath: string | null) {
+  if (!sharedCacheable(response) || response.headers.getSetCookie().length === 0) {
+    return response;
+  }
+  if (process.env.NODE_ENV !== "production" && !warnedFileRoutes.has(routePath)) {
+    warnedFileRoutes.add(routePath);
+    console.warn(
+      `[gemi] The file route "${routePath ?? ""}" set a cookie on a response with Cache-Control "${response.headers.get("Cache-Control")}", so the cookie was not sent: a shared cache would hand it to every visitor. Make the response private, or set the cookie elsewhere.`,
+    );
+  }
+  try {
+    response.headers.delete("Set-Cookie");
+    return response;
+  } catch {
+    // A Response from fetch() has immutable headers.
+    const headers = new Headers(response.headers);
+    headers.delete("Set-Cookie");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+}
