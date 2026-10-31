@@ -6,7 +6,7 @@ import type { ChannelRouterClass } from "../../http/ChannelRouter";
 import type { McpRouter } from "../../http/McpRouter";
 import type { McpRemoteFileOptions } from "../mcp/McpRegistry";
 import type { McpRemoteHttpConfig } from "../mcp/http/McpHttpServer";
-import type { ViewRouter } from "../../http/ViewRouter";
+import type { StaticViewOptions, ViewRouter } from "../../http/ViewRouter";
 import type { StreamSummary } from "./ServerQueryStore";
 
 // Config key: `route.api`. Derived from `ApiRouterServiceProvider`.
@@ -95,8 +95,35 @@ export interface ViewRouteConfig {
    * and for a client navigation, so this is where the `404` page gets its
    * title and other metadata (`Meta.title(...)`), which otherwise stay
    * gemi's defaults. A `route.domains` group's `view` can set its own.
+   *
+   * With `notFound` set, what it returns is the props of `notFound.view` on
+   * the document (e.g. the tenant's name and logo for a branded page). It is
+   * not used otherwise: the app's hydrated `404` view takes no props.
    */
-  onNotFound?: (req: HttpRequest, info: { status: number }) => void | Promise<void>;
+  onNotFound?: (
+    req: HttpRequest,
+    info: { status: number },
+  ) => void | Record<string, unknown> | Promise<void | Record<string, unknown>>;
+
+  /**
+   * These views' own not-found page, served as a static document (#828),
+   * instead of the app's hydrated `404` view. Meant for a `route.domains`
+   * group whose pages are `.static()` with their own `layout`: a missing
+   * page answers in the same spirit, with no app bundle.
+   *
+   * It answers every document request that would render the `404` view: a
+   * path no route matches, a handler or middleware that throws
+   * `NotFoundError`, `FileNotFoundError` or `RecordNotFoundError`, a refusal
+   * (403, under its own status) and a feature gate. The view's props are what
+   * `onNotFound` returns.
+   *
+   * `static` takes the options of `.static()`; `layout` is the document
+   * layout, and `cacheControl` applies to an unmatched path only (a refusal
+   * or a missing record is sent `no-store`). A client-side navigation from a
+   * hydrated page still lands on the app's `404` view: the client router has
+   * only that one.
+   */
+  notFound?: { view: string; static: StaticViewOptions };
 
   /**
    * The app-wide default title, description and Open Graph tags (#1042), for
@@ -367,7 +394,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter" | "meta"
+  "root" | "rootRouter" | "meta" | "notFound"
 > {
   return {
     partialRendering: true,

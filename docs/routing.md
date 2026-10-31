@@ -419,6 +419,45 @@ export default defineRouteConfig({
 });
 ```
 
+#### A static not-found page of its own
+
+A `route.domains` group whose pages are [`.static()`](./static-views-and-islands.md) with their own `layout` (a storefront, a published site) can answer a missing page in the same spirit: `view.notFound` names a view rendered as a static document, with the `layout` it gives, instead of the app's hydrated `404` in the app's `RootLayout` (#828). It answers everything the `404` view would on a document request: a path no route matches, a handler or middleware that throws `NotFoundError`, `FileNotFoundError` or `RecordNotFoundError`, a refusal (under its `403`) and a gated feature. The status stays `404` (or `403`), and the page ships no app bundle, like any static view.
+
+The view's props are what `onNotFound` returns, so the page can be branded from the host:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.shop",
+  groups: [
+    {
+      subdomain: ":shop",
+      view: {
+        rootRouter: ShopViewRouter,
+        notFound: {
+          view: "shop/NotFound",
+          static: { layout: "shop/ShopLayout" },
+        },
+        async onNotFound(req: HttpRequest, { status }) {
+          const store = await Store.findFirst({ where: { slug: req.domain?.params.shop } });
+          Meta.title(store ? `${store.name}: page not found` : "Store unavailable");
+          return { store: store && { name: store.name, logoUrl: store.logoUrl } };
+        },
+      },
+    },
+  ],
+},
+```
+
+```tsx
+// app/views/shop/NotFound.tsx
+export default function NotFound(props: { store: { name: string; logoUrl: string } | null }) {
+  return <main>{props.store ? `${props.store.name} has no such page.` : "This store is unavailable."}</main>;
+}
+```
+
+`static` takes the [`.static()` options](./static-views-and-islands.md): islands, `script` and `navigation` work as on any static page. `cacheControl` applies to an unmatched path only; a refusal or a missing record is sent `Cache-Control: no-store`, since it depends on who asked. A client-side navigation from a hydrated page of the group still lands on the app's `404` view, as the client router has only that one. Left out, the group renders the app's `404` view as before. Set on the root `view`, it applies to the root (and to every group that does not set its own, as groups inherit the root's hooks).
+
 ### Nesting view routers
 
 Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:

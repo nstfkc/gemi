@@ -55,6 +55,7 @@ export default defineRouteConfig({
 | `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? } \| Array<{ hostHeader?, clientIpHeader?, secret }>` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. A list trusts [several proxies](#several-proxies), each with its own secret. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
+| `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
 | `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
