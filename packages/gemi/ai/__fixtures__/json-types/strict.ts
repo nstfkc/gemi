@@ -33,6 +33,10 @@ expectTypeOf<Jsonify<{ a: string | (() => void) }>>().toEqualTypeOf<{ a?: string
 expectTypeOf<Jsonify<(string | undefined)[]>>().toEqualTypeOf<(string | null)[]>();
 expectTypeOf<Jsonify<[Date, undefined]>>().toEqualTypeOf<[string, null]>();
 
+// Readonly tuples keep readonly, with dropped values as `null`.
+expectTypeOf<Jsonify<readonly [Date, () => void]>>().toEqualTypeOf<readonly [string, null]>();
+expectTypeOf<Jsonify<readonly (Date | undefined)[]>>().toEqualTypeOf<readonly (string | null)[]>();
+
 // `null` survives, in objects and on its own.
 expectTypeOf<Jsonify<{ at: Date | null }>>().toEqualTypeOf<{ at: string | null }>();
 expectTypeOf<Jsonify<null>>().toEqualTypeOf<null>();
@@ -41,6 +45,24 @@ expectTypeOf<Jsonify<null>>().toEqualTypeOf<null>();
 expectTypeOf<Jsonify<{ meta?: { at: Date; note?: string } }>>().toEqualTypeOf<{
   meta?: { at: string; note?: string };
 }>();
+
+// At the top level `undefined` and `void` stay `undefined`: `JSON.stringify`
+// answers `undefined`, and the client gets no value.
+type Foo = { at: Date; n: number };
+expectTypeOf<Jsonify<Foo | undefined>>().toEqualTypeOf<{ at: string; n: number } | undefined>();
+expectTypeOf<Jsonify<string | undefined>>().toEqualTypeOf<string | undefined>();
+expectTypeOf<Jsonify<undefined>>().toEqualTypeOf<undefined>();
+expectTypeOf<Jsonify<void>>().toEqualTypeOf<undefined>();
+expectTypeOf<Jsonify<Foo>>().toEqualTypeOf<{ at: string; n: number }>();
+
+// A `void` member may hold a value, so it is optional, not a required `never`.
+expectTypeOf<Jsonify<{ v: void; n: number }>>().toEqualTypeOf<{ v?: never; n: number }>();
+// @ts-expect-error not required
+const missingVoid: Jsonify<{ v: void; n: number }> extends { v: unknown } ? true : false = true;
+void missingVoid;
+
+// An `any` member stays as it is, required.
+expectTypeOf<Jsonify<{ a: any; d: Date }>>().toEqualTypeOf<{ a: any; d: string }>();
 
 // @ts-expect-error a member that is always undefined is not there
 void ({} as Jsonify<{ a: string; gone: undefined }>).gone;
@@ -57,14 +79,51 @@ const grant = AgentTool.create({
   execute: async () => ({ grantedAt: new Date() }),
 });
 
-const agent = Agent.create({ name: "strict-json", provider, tools: [grant] });
+// A tool that may answer nothing, and one that never answers anything.
+const maybe = AgentTool.create({
+  name: "maybe",
+  description: "May find nothing",
+  inputSchema: s.object({ q: s.string() }),
+  execute: async (): Promise<Foo | undefined> => undefined,
+});
+
+const fireAndForget = AgentTool.create({
+  name: "fireAndForget",
+  description: "Returns nothing",
+  inputSchema: s.object({ q: s.string() }),
+  execute: async () => {},
+});
+
+const agent = Agent.create({
+  name: "strict-json",
+  provider,
+  tools: [grant, maybe, fireAndForget],
+});
 
 class StrictChat extends AgentController<typeof agent> {
   agent = agent;
 }
 
 type Tools = AgentRouteRPC<typeof StrictChat>["tools"];
-expectTypeOf<Tools>().toEqualTypeOf<JsonToolShapes<{ grant: Tools["grant"] }>>();
+
+// The missing answer stays possible on the client: a check, not a `Foo`.
+expectTypeOf<Tools["maybe"]["output"]>().toEqualTypeOf<{ at: string; n: number } | undefined>();
+declare const maybeOutput: Tools["maybe"]["output"];
+// @ts-expect-error may be undefined
+void maybeOutput.n;
+// A tool with no answer is `undefined` on the client, not `never`.
+expectTypeOf<Tools["fireAndForget"]["output"]>().toEqualTypeOf<undefined>();
+
+// A hand-written shape: an output that may be missing keeps `undefined`.
+type HandWritten = JsonToolShapes<{
+  find: {
+    input: { q: string };
+    output: { at: Date } | undefined;
+    progress: { at: Date } | undefined;
+  };
+}>;
+expectTypeOf<HandWritten["find"]["output"]>().toEqualTypeOf<{ at: string } | undefined>();
+expectTypeOf<HandWritten["find"]["progress"]>().toEqualTypeOf<{ at: string } | undefined>();
 
 const pending = {} as PendingToolCall<Tools>;
 if (pending.name === "grant") {

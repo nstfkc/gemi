@@ -59,6 +59,40 @@ describe("MemoryAgentStore", () => {
     expect(await store.loadThread(threadId)).toHaveLength(1);
   });
 
+  test("stores messages as JSON, as a database store does (#1107)", async () => {
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    const at = new Date("2026-10-31T12:00:00.000Z");
+    const written: AgentMessage = {
+      id: "1",
+      role: "assistant",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "tc_1",
+          name: "grant",
+          status: "ok",
+          output: { grantedAt: at, note: undefined },
+        },
+      ],
+      createdAt: at.toISOString(),
+      finishReason: "stop",
+    };
+    await store.appendMessages(threadId, [written]);
+
+    const [read] = (await store.loadThread(threadId))!;
+    const part = read!.content[0] as { output: Record<string, unknown> };
+    expect(part.output).toEqual({ grantedAt: "2026-10-31T12:00:00.000Z" });
+    expect("note" in part.output).toBe(false);
+
+    // A copy: editing what was written does not edit what is stored.
+    (written.content[0] as { output: Record<string, unknown> }).output.grantedAt = "changed";
+    const [again] = (await store.loadThread(threadId))!;
+    expect((again!.content[0] as { output: Record<string, unknown> }).output.grantedAt).toBe(
+      "2026-10-31T12:00:00.000Z",
+    );
+  });
+
   test("answers null for a thread it does not have, which is not an empty one", async () => {
     const store = new MemoryAgentStore();
     // `[]` here was the bug: an expired or mistyped id read as a conversation

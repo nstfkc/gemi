@@ -140,6 +140,37 @@ describe("Jsonify", () => {
     expectTypeOf<IsNever<Jsonify<never>>>().toEqualTypeOf<true>();
   });
 
+  test("a recursive type resolves, at any depth", () => {
+    type Tree = { at: Date; label: string; children: Tree[]; parent?: Tree };
+    type JsonTree = Jsonify<Tree>;
+    expectTypeOf<JsonTree["at"]>().toEqualTypeOf<string>();
+    expectTypeOf<JsonTree["children"][number]["children"][number]["at"]>().toEqualTypeOf<string>();
+    expectTypeOf<
+      NonNullable<JsonTree["parent"]>["children"][number]["label"]
+    >().toEqualTypeOf<string>();
+    type List<T> = { value: T; next: List<T> | null };
+    expectTypeOf<Jsonify<List<Date>>["next"]>().toEqualTypeOf<Jsonify<List<Date>> | null>();
+  });
+
+  test("readonly arrays and tuples keep readonly", () => {
+    expectTypeOf<Jsonify<readonly Date[]>>().toEqualTypeOf<readonly string[]>();
+    expectTypeOf<Jsonify<ReadonlyArray<{ x: Date }>>>().toEqualTypeOf<readonly { x: string }[]>();
+    expectTypeOf<Jsonify<readonly [Date, number]>>().toEqualTypeOf<readonly [string, number]>();
+    expectTypeOf<Jsonify<{ list: readonly Date[] }>>().toEqualTypeOf<{ list: readonly string[] }>();
+    // @ts-expect-error still readonly
+    (({}) as Jsonify<readonly Date[]>).push("x");
+  });
+
+  test("branded strings keep their brand", () => {
+    type UserId = string & { readonly __brand: "UserId" };
+    expectTypeOf<Jsonify<UserId>>().toEqualTypeOf<UserId>();
+    expectTypeOf<Jsonify<{ id: UserId; at: Date }>>().toEqualTypeOf<{ id: UserId; at: string }>();
+    expectTypeOf<Jsonify<UserId[]>>().toEqualTypeOf<UserId[]>();
+    // @ts-expect-error a plain string is not the brand
+    const id: Jsonify<{ id: UserId; at: Date }>["id"] = "u_1";
+    void id;
+  });
+
   test("a Date is not what arrives", () => {
     // @ts-expect-error a Date became a string
     const at: Date = {} as Jsonify<{ at: Date }>["at"];
