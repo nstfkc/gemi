@@ -3023,10 +3023,17 @@ export abstract class AgentController<
    *
    * It does not write: the next turn on the thread settles the same messages
    * the same way and stores them then, under the thread's lock.
+   *
+   * Typed by the controller's agent (#1100), as `useChat`'s `initialMessages`
+   * for the route is, so the result goes there with no cast. A controller that
+   * picks its agent per request is typed by the widest one, `A`.
    */
-  async readThread(threadId: string): Promise<AgentMessage[] | null> {
+  async readThread(threadId: string): Promise<AgentMessage<AgentToolShapes<A>>[] | null> {
     const history = await this.store.loadThread(threadId);
-    return history ? (await this.settleThread(threadId, history, { write: false })).messages : null;
+    if (!history) return null;
+    const { messages } = await this.settleThread(threadId, history, { write: false });
+    // The store is not typed per agent; these are this agent's messages.
+    return messages as AgentMessage<AgentToolShapes<A>>[];
   }
 
   /**

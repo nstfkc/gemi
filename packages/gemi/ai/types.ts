@@ -27,8 +27,13 @@ import type { ToolAttachmentRecord } from "./store/Attachments";
  * existed is still a valid one, and every `T[K]["progress"]` below resolves for
  * it rather than failing to compile. That is why this is a third member of the
  * existing type and not a second type beside it.
+ *
+ * `preview` is what the tool's `approvalPreview` returns (#1100), and optional
+ * for the same reason: `ToolShapesOf` emits it for every tool (`never` for one
+ * without a preview), and a hand-written shape without it types a pending
+ * call's `preview` as `unknown`, as before.
  */
-export type ToolShape = { input: unknown; output: unknown; progress?: unknown };
+export type ToolShape = { input: unknown; output: unknown; progress?: unknown; preview?: unknown };
 export type ToolShapes = Record<string, ToolShape>;
 
 export type Usage = {
@@ -481,7 +486,15 @@ export type AgentContentPart<T extends ToolShapes = ToolShapes, O = unknown> =
   | ToolResultPart<T>
   | OutputPart<O>;
 
-export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
+/**
+ * `out` (#1100): a message typed by an agent's tools is still an
+ * `AgentMessage`, so `AgentController.readThread`'s typed answer goes wherever
+ * an untyped `AgentMessage[]` is expected. TypeScript measures `T` as
+ * invariant without it (`keyof T` in the mapped part unions reads as
+ * contravariant), although each part is covariant on its own; the compiler
+ * checks the annotation, so it cannot hide a real contravariant use.
+ */
+export type AgentMessage<out T extends ToolShapes = ToolShapes, O = unknown> = {
   /** Stable and server-assigned, so a reattached stream does not duplicate
    *  messages the client already has. */
   id: string;
@@ -634,10 +647,20 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      * Display data, and not signed: the signature covers the input, so the
      * approval is of the call, not of the preview. Things can change between
      * the preview and the click, and `execute` re-checks what it relies on.
+     *
+     * Typed by what that tool's `approvalPreview` returns (#1100), so
+     * narrowing on `name` types it with no cast. `never` for a tool without
+     * one, and `unknown` for a hand-written shape that does not say.
      */
-    preview?: unknown;
+    preview?: PreviewOf<T[K]>;
   };
 }[keyof T];
+
+/**
+ * A tool shape's `preview`, awaited. `never` stays `never` (a tool with no
+ * `approvalPreview`), and a shape with no `preview` member is `unknown`.
+ */
+type PreviewOf<S> = S extends { preview: infer V } ? ([V] extends [never] ? never : Awaited<V>) : unknown;
 
 /**
  * The client's half of a pending call.
