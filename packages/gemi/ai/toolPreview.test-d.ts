@@ -19,7 +19,7 @@ import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
 import type { AgentMessage, PendingToolCall, ToolShapes } from "./types";
-import type { UseChatParams } from "./useChat";
+import type { ChatPendingToolCall, UseChatParams, UseChatResult } from "./useChat";
 
 /** See `Agent.test-d.ts`: a tuple stops `never` from passing every check. */
 type IsNever<T> = [T] extends [never] ? true : false;
@@ -218,6 +218,33 @@ describe("PendingToolCall.preview", () => {
     if (pending.name === "executeWrite") {
       expectTypeOf(pending.preview).toEqualTypeOf<WritePreview | undefined>();
     }
+  });
+});
+
+describe("useChat's pending (#1106)", () => {
+  type Held = UseChatResult<"/tool-preview-test-d">["pending"][number];
+
+  test("carries an optional answering flag and still narrows on name", () => {
+    const pending = {} as Held;
+    expectTypeOf(pending.answering).toEqualTypeOf<boolean | undefined>();
+    if (pending.name === "executeWrite") {
+      expectTypeOf(pending.preview).toEqualTypeOf<WritePreview | undefined>();
+    }
+  });
+
+  test("is a PendingToolCall, so it goes back into initialPending", () => {
+    expectTypeOf<Held>().toMatchTypeOf<PendingToolCall<Shapes>>();
+    expectTypeOf<Held[]>().toMatchTypeOf<
+      NonNullable<UseChatParams<"/tool-preview-test-d">["initialPending"]>
+    >();
+    expectTypeOf<ChatPendingToolCall<Shapes>>().toEqualTypeOf<Held>();
+  });
+
+  test("answering is a boolean", () => {
+    const pending = {} as Held;
+    // @ts-expect-error not a string
+    const wrong: string = pending.answering;
+    void wrong;
   });
 });
 

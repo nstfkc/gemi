@@ -1,5 +1,20 @@
 # Unreleased
 
+## ai: `useChat` keeps a pending call until its answer is taken (#1106)
+
+**New behaviour (minor). Workarounds can be removed; nothing has to change.** See [AI Tool Approvals → While the answer is sent](docs/ai-tool-approvals.md#while-the-answer-is-sent).
+
+- `approve`/`answer` no longer take the calls out of `pending` as the turn goes out. They stay, marked `answering: true`, until the server answers the request. On a 2xx they leave `pending` as before; on a network error or non-2xx they are plain pending again, with the failure in `error`/`onError`, and answering again retries. Apps that re-read the thread and remounted the chat after a failed approval can drop that.
+- While an answer is in flight, `status` stays `awaiting-input` (it used to be `submitted` at once). Answering the same call the same way again sends nothing and resolves with the request in flight; answering another held call (or the same one differently) is not sent and is reported as `invalid_tool_result` in `error`/`onError`, since the turn in flight settles every held call. The same call answered twice in one tick is sent once.
+- `stop()` during an answer puts the calls back to plain pending. `initialPending` drops a persisted `answering` mark.
+- `UseChatResult.pending` is typed `ChatPendingToolCall<T>[]` (new, exported from `gemi/ai/client`): `PendingToolCall<T>` plus `answering?: boolean`. It is still assignable to `PendingToolCall<T>[]`.
+
+What to check:
+
+- **UIs that show a spinner on `status === "submitted"` right after a click on Approve** now see `awaiting-input` until the server answers; use `call.answering` for that window.
+- **UIs that show a retry message on `status === "error"` after a failed approval.** The calls are back, so `status` is `awaiting-input` with `error` set (it used to be `"error"`, with no calls left to answer). Read `chat.error` for the message. A failure after the server took the answer (the stream drops after a 2xx) still ends `"error"` with `pending` empty.
+- **Exact type assertions** such as `expectTypeOf(chat.pending).toEqualTypeOf<PendingToolCall<…>[]>()` need `ChatPendingToolCall<…>[]`.
+
 ## Views: `cache:public` is lowered to `private` when the response sets a cookie (#1098)
 
 **Behaviour change (fix). Most apps change nothing; read on if a hydrated view is meant to be cached by a CDN.** See [`cache`](docs/middleware.md#cache--cachemiddleware) and [Static views → Cookies and caching](docs/static-views-and-islands.md#cookies-and-caching).
@@ -7,7 +22,7 @@
 - A regular (non-static) view response, the document or its `.json` navigation, that sets any cookie and whose `Cache-Control` has `public` or `s-maxage` is now sent `private`: `public` becomes `private`, `s-maxage` and `proxy-revalidate` are dropped, and `max-age`, `stale-while-revalidate` and the other directives are kept. The cookies are still sent. Development logs a warning once per route.
 - In practice this covers every hydrated view under `cache:public` (or a middleware/handler setting `public`/`s-maxage`): gemi sets `csrf_token` on every hydrated document, `session_id` on a first visit, and `i18n-locale` on documents and `.json` navigations. When sessions are created is unchanged.
 - What can change for apps: a CDN or proxy in front of such pages stops caching them (or, if it ignored `Set-Cookie`, stops replaying one visitor's cookies to others). Browsers still cache for `max-age`. A page that should be served from a shared cache is a static view: `this.view(...).static({ cacheControl: "public, ..." })`, which sets no cookie of gemi's own.
-- Static views, file routes and api routes are unchanged.
+- Static views, file routes and api routes are unchanged. A `cache:public` in the `global` middleware list is lowered the same way on pages (api responses keep it).
 
 # Upgrading from 0.175.1 to 0.176.0
 
