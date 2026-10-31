@@ -1,3 +1,14 @@
+# Unreleased
+
+## Views: a group or a page may allow translation (#1087)
+
+**New API (minor). Nothing to change in apps.** See [Translation](docs/views-and-layouts.md#translation).
+
+- `<Head />` still renders `<meta name="google" content="notranslate">` by default.
+- `translate: true` on a `view` config (the root's, or a `route.domains` group's, which inherits the root's unless set) leaves it out of those views' pages, static views and not-found pages included, so Chrome and Google Search offer to translate them.
+- `Meta.translate(allow = true)` sets it per response, from a view or layout handler, and wins over the config. `Meta.translate(false)` keeps the tag on a page of a group that allows translation.
+- On a client-side navigation the tag follows the new page. A `translate="no"` on `<html>` in the layout still blocks translation; leave it off the layout of pages that allow it.
+
 # Upgrading from 0.169.0 to 0.170.0
 
 ## `route.view.notFound`: a group's own static not-found page (#828)

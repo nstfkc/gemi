@@ -65,6 +65,7 @@ export class Metadata {
     alternates: null,
     fonts: null,
     robots: null,
+    translate: null,
   };
 
   /**
@@ -87,6 +88,7 @@ export class Metadata {
       alternates: this.content.alternates,
       fonts: this.content.fonts,
       robots: this.content.robots,
+      translate: this.content.translate,
     };
   }
 
@@ -108,6 +110,31 @@ export class Metadata {
   robots(content: string) {
     this.touched = true;
     this.content.robots = content;
+  }
+
+  /**
+   * Whether browsers and Google Search may translate the page (#1087). `true`
+   * leaves `<meta name="google" content="notranslate">` out; `false` (or no
+   * call) keeps it. The last call wins.
+   */
+  translate(allow = true) {
+    this.touched = true;
+    this.translateSet = true;
+    this.content.translate = allow;
+  }
+
+  /** Whether a handler called `translate`, which the views' default (`route.view.translate`) leaves alone. */
+  private translateSet = false;
+
+  /**
+   * The views' default (`route.view.translate`, #1087), for a response whose
+   * handlers didn't call `translate`. Not a handler call, so `touched` stays
+   * as it was.
+   */
+  applyTranslateDefault(allow: boolean) {
+    if (!this.translateSet) {
+      this.content.translate = allow;
+    }
   }
 
   alternates(links: AlternateLink[]) {
