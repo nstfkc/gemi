@@ -458,6 +458,8 @@ export default function NotFound(props: { store: { name: string; logoUrl: string
 
 `static` takes the [`.static()` options](./static-views-and-islands.md): islands, `script` and `navigation` work as on any static page. `cacheControl` applies to an unmatched path only, since a route that became a 404 depends on who asked: a refusal or a missing record is sent `Cache-Control: no-store`, and a gated route no `Cache-Control` at all. A client-side navigation from a hydrated page of the group still lands on the app's `404` view, as the client router has only that one. Left out, the group renders the app's `404` view as before. Set on the root `view`, it applies to the root (and to every group that does not set its own, as groups inherit the root's hooks).
 
+On a group with `localeRouting: "off"`, no route middleware runs for a path no route matches, so a locale middleware cannot reach the not-found page. Pick the locale with the group's [`view.detectLocale`](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing) instead: it runs for matched and unmatched paths alike, before `onNotFound`, and the not-found view's `useDictionary` renders in it.
+
 ### Nesting view routers
 
 Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:
