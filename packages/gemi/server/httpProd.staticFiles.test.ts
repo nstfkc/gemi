@@ -57,6 +57,13 @@ class AppKernel extends Kernel {
           // Shares the root's views, and so serves `public/` as the root does.
           { subdomain: "admin" },
         ],
+        custom: {
+          group: ":shop",
+          resolve: (host: string) => {
+            if (host === "broken.test") throw new Error("database down");
+            return null;
+          },
+        },
       },
     },
   };
@@ -169,5 +176,13 @@ describe("httpProd: /assets per host (#1015)", () => {
 
   test("/image/* is an ordinary path a group's routes answer", async () => {
     expect((await get("acme.example.test", "/image/a/b.png")).body).toBe("image a/b.png");
+  });
+});
+
+describe("httpProd: a host that fails to resolve (#1015)", () => {
+  test.each(["/robots.txt", "/assets/products/42.jpg"])("%s is answered as the app's failure, not a static file", async (path) => {
+    const res = await get("broken.test", path);
+    expect(res.status).toBe(500);
+    expect(res.body).not.toBe("panel robots");
   });
 });

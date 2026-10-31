@@ -277,9 +277,16 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   }
 
   // How static files are served to the request's host (#1015). An app
-  // built against a gemi without it serves them as before.
+  // built against a gemi without it serves them as before. A host that fails
+  // to resolve (a `custom.resolve` that throws) gets no `public/` file it may
+  // not be meant to have, and no `/assets` 404: the request goes to the app,
+  // which answers the same failure as for any route.
   async function staticFilesPolicy(req: Request) {
-    return (await app.staticFiles?.(req)) ?? { publicFiles: true, assetRoutes: false };
+    try {
+      return (await app.staticFiles?.(req)) ?? { publicFiles: true, assetRoutes: false };
+    } catch {
+      return { publicFiles: false, assetRoutes: true };
+    }
   }
 
   async function handleWithApp(req: Request, pathname: string) {
