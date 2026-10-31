@@ -18,7 +18,7 @@ import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
 import type { AgentMessage, JsonToolShapes, PendingToolCall, ToolResultPart } from "./types";
-import type { UseChatParams, UseChatResult } from "./useChat";
+import type { ChatPendingToolCall, UseChatParams, UseChatResult } from "./useChat";
 
 type IsNever<T> = [T] extends [never] ? true : false;
 
@@ -208,7 +208,12 @@ describe("PendingToolCall.preview on the client", () => {
 
   test("initialPending takes the same JSON form", () => {
     type Initial = NonNullable<UseChatParams<Route>["initialPending"]>[number];
-    expectTypeOf<Initial>().toEqualTypeOf<ClientPending>();
+    expectTypeOf<Initial>().toEqualTypeOf<PendingToolCall<JsonToolShapes<ServerShapes>>>();
+    // `pending` is the same call plus `answering` (#1106), and goes back in.
+    expectTypeOf<ClientPending>().toEqualTypeOf<
+      ChatPendingToolCall<JsonToolShapes<ServerShapes>>
+    >();
+    expectTypeOf<ClientPending[]>().toMatchTypeOf<Initial[]>();
   });
 
   test("the input is the schema's, unchanged", () => {

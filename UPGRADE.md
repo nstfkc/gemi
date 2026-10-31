@@ -2,7 +2,7 @@
 
 ## ai: client-side tool data is typed as its JSON form (#1107)
 
-**Type change (minor). No runtime change.** See [AI Tool Approvals → Tool data in the browser is JSON](docs/ai-tool-approvals.md#tool-data-in-the-browser-is-json).
+**Type change (minor), plus one runtime change: `MemoryAgentStore` stores messages as JSON.** See [AI Tool Approvals → Tool data in the browser is JSON](docs/ai-tool-approvals.md#tool-data-in-the-browser-is-json).
 
 - A tool's `output`, `progress` and `preview` reach the browser as JSON, and are now typed that way there: `Jsonify<T>` of the server type. A `Date` is a `string`, anything with `toJSON()` is what it returns, `undefined`/function/symbol members are dropped (optional when they may be `undefined` or are `void`; `null` inside arrays), `Map`/`Set` are `{}`, `bigint` is `never`. At the top level `undefined` stays (`Foo | undefined` is `Jsonify<Foo> | undefined`, a `void` tool is `undefined`). A type that is JSON already is unchanged, so tools returning plain data see no difference.
 - `MemoryAgentStore` now stores a JSON copy of each message (as the database store always did), so `loadThread`/`readThread` hand back strings for `Date`s and drop `undefined` members in dev and tests too. Server code or tests that read a `Date` instance back from a memory-store thread now get its ISO string.
@@ -18,6 +18,21 @@ What can stop compiling (only for tools whose output, progress or preview is not
 - **Server-typed messages passed to `useChat`'s `initialMessages`** (for example a list built from `AgentMessage<AgentToolShapes<…>>`). Type them in the JSON form, or let `readThread` type them.
 - **Callbacks annotated with server-side part types**, such as `onToolResult: (part: ToolResultPart<AgentToolShapes<typeof agent>>) => …`. Annotate with `ToolResultPart<JsonToolShapes<AgentToolShapes<typeof agent>>>`, or let it be inferred.
 - **Exact type assertions** on `AgentRouteRPC<…>["tools"]`, such as `toEqualTypeOf<AgentToolShapes<typeof agent>>()`, need `JsonToolShapes<AgentToolShapes<typeof agent>>` (for any agent, since the type is a new mapped type even when every tool is JSON already).
+
+## ai: `useChat` keeps a pending call until its answer is taken (#1106)
+
+**New behaviour (minor). Workarounds can be removed; nothing has to change.** See [AI Tool Approvals → While the answer is sent](docs/ai-tool-approvals.md#while-the-answer-is-sent).
+
+- `approve`/`answer` no longer take the calls out of `pending` as the turn goes out. They stay, marked `answering: true`, until the server answers the request. On a 2xx they leave `pending` as before; on a network error or non-2xx they are plain pending again, with the failure in `error`/`onError`, and answering again retries. Apps that re-read the thread and remounted the chat after a failed approval can drop that.
+- While an answer is in flight, `status` stays `awaiting-input` (it used to be `submitted` at once). Answering the same call the same way again sends nothing and resolves with the request in flight; answering another held call (or the same one differently) is not sent and is reported as `invalid_tool_result` in `error`/`onError`, since the turn in flight settles every held call. The same call answered twice in one tick is sent once.
+- `stop()` during an answer puts the calls back to plain pending. `initialPending` drops a persisted `answering` mark.
+- `UseChatResult.pending` is typed `ChatPendingToolCall<T>[]` (new, exported from `gemi/ai/client`): `PendingToolCall<T>` plus `answering?: boolean`. It is still assignable to `PendingToolCall<T>[]`.
+
+What to check:
+
+- **UIs that show a spinner on `status === "submitted"` right after a click on Approve** now see `awaiting-input` until the server answers; use `call.answering` for that window.
+- **UIs that show a retry message on `status === "error"` after a failed approval.** The calls are back, so `status` is `awaiting-input` with `error` set (it used to be `"error"`, with no calls left to answer). Read `chat.error` for the message. A failure after the server took the answer (the stream drops after a 2xx) still ends `"error"` with `pending` empty.
+- **Exact type assertions** such as `expectTypeOf(chat.pending).toEqualTypeOf<PendingToolCall<…>[]>()` need `ChatPendingToolCall<…>[]`.
 
 # Upgrading from 0.175.1 to 0.176.0
 
