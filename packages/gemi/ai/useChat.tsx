@@ -64,6 +64,36 @@ type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer 
  */
 export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" | "error";
 
+/**
+ * A pending call as `useChat` holds it: the server's `PendingToolCall`, plus
+ * whether this client is answering it right now (#1106).
+ *
+ * `answering` is `true` from the moment `approve`/`answer` is called until the
+ * server takes the turn. The call stays in `pending` meanwhile, so the card
+ * that asked is still on screen and can disable its buttons. If the request
+ * fails, the call goes back to plain pending (`answering` absent) next to the
+ * error, and the same card can answer again; once the server has the answer,
+ * the call leaves `pending` as before.
+ */
+export type ChatPendingToolCall<T extends ToolShapes = ToolShapes> = PendingToolCall<T> & {
+  answering?: boolean;
+};
+
+/** The calls named in `ids` marked as being answered (or, with `answering`
+ *  false, back to plain pending). Untouched calls keep their identity. */
+function withAnswering(
+  pending: ChatPendingToolCall[],
+  ids: ReadonlySet<string>,
+  answering: boolean,
+): ChatPendingToolCall[] {
+  return pending.map((call) => {
+    if (!ids.has(call.toolCallId) || Boolean(call.answering) === answering) return call;
+    if (answering) return { ...call, answering: true };
+    const { answering: _, ...rest } = call;
+    return rest as ChatPendingToolCall;
+  });
+}
+
 export interface UseChatParams<P extends keyof AgentRoutes> {
   /** Continues a server-side thread. Omitted, the hook keeps history itself and
    *  sends it with each request — the stateless default.
@@ -332,8 +362,11 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * tool calls it is nested under. Nothing else about it is different, and that
    * is the point: it is answered by `approve`/`answer` like any other, and
    * `path` is there only so a UI can say which agent is asking.
+   *
+   * A call being answered stays here, with `answering: true`, until the server
+   * takes the answer; if the request fails it is plain pending again (#1106).
    */
-  pending: PendingToolCall<ToolsOf<P>>[];
+  pending: ChatPendingToolCall<ToolsOf<P>>[];
   /**
    * The deferred tools the model has pulled in during the run in flight.
    *
@@ -355,10 +388,18 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * untouched, so an app answers with a boolean and never sees the mechanism
    * that makes answering trustworthy. Answering a nested question is the same
    * call as answering a top-level one.
+   *
+   * The call is marked `answering` while the request is in flight and leaves
+   * `pending` once the server takes it. If the request fails (network error,
+   * non-2xx), the call is pending again and the failure is in `error` and
+   * `onError`, so calling this again retries. A second call for the same
+   * `toolCallId` while the first is in flight sends nothing and resolves with
+   * the first (#1106).
    */
   approve(toolCallId: string, approve: boolean, reason?: string): Promise<void>;
   /** The same, for a `question` or `client` tool: the value is checked against
-   *  the tool's output schema server-side before the model sees it. */
+   *  the tool's output schema server-side before the model sees it. Kept,
+   *  marked and retried exactly like `approve`. */
   answer(toolCallId: string, output: unknown): Promise<void>;
 
   /**
@@ -872,11 +913,18 @@ export function useChat<P extends keyof AgentRoutes>(
    */
   const stateRef = useRef<ChatState<any, any> | null>(null);
   if (stateRef.current === null) {
+    const restored = (initialPending ?? (initialMessages && openPending(initialMessages))) as
+      | ChatPendingToolCall<any>[]
+      | undefined;
     stateRef.current = initialChatState<any, any>({
       messages: initialMessages,
-      pending: (initialPending ?? (initialMessages && openPending(initialMessages))) as
-        | PendingToolCall<any>[]
-        | undefined,
+      // A persisted `pending` can carry the `answering` mark of a request that
+      // never finished; nothing is in flight on a fresh mount (#1106).
+      pending: restored?.map((call) => {
+        if (!call.answering) return call;
+        const { answering: _, ...rest } = call;
+        return rest;
+      }) as PendingToolCall<any>[] | undefined,
       threadId: initialThreadId,
       seq: initialCursor?.seq,
       cursorRunId: initialCursor?.runId,
@@ -1159,6 +1207,31 @@ export function useChat<P extends keyof AgentRoutes>(
             ]
           : [];
 
+      // The calls this turn answers (#1106). Until the server takes the turn,
+      // they are still pending on its side, so they stay here, marked, and go
+      // back to plain pending if the request fails: dropping them on the way
+      // out left a failed approval with no card to answer again.
+      //
+      // Every held call is marked, not only the answered ones: the turn
+      // resolves all of them (the server denies what it leaves out), so a
+      // second card answered while this one flies would only race it.
+      const answered = turn.toolResults?.length
+        ? new Set(previous.pending.map((call: PendingToolCall) => call.toolCallId))
+        : null;
+      // Run once the server has said whether it took the turn, and only while
+      // this send is still the hook's request: a send that superseded it has
+      // already settled `pending` for its own turn.
+      let settled = false;
+      const settle = (taken: boolean) => {
+        if (!answered || settled || abortRef.current?.controller !== controller) return;
+        settled = true;
+        const current = stateRef.current!;
+        commit({
+          ...current,
+          pending: taken ? [] : withAnswering(current.pending, answered, false),
+        });
+      };
+
       commit({
         ...previous,
         messages: [...history, ...authored],
@@ -1170,8 +1243,9 @@ export function useChat<P extends keyof AgentRoutes>(
         // asking a question that is already settled. No local tool-result parts
         // are fabricated here: the server emits one per call, denials included,
         // and guessing at the output of a call it has not run yet would be a lie
-        // the stream then contradicts.
-        pending: [],
+        // the stream then contradicts. A turn that answers keeps them until the
+        // server takes it (`settle`), so a failed answer can be sent again.
+        pending: answered ? withAnswering(previous.pending, answered, true) : [],
       });
       setPhaseSafe("submitted");
 
@@ -1214,14 +1288,20 @@ export function useChat<P extends keyof AgentRoutes>(
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {
-          fail(await httpError(response));
+          const error = await httpError(response);
+          settle(false);
+          fail(error);
           return;
         }
+        // A 2xx is the server taking the turn: the answered calls are its now,
+        // and the stream reports what became of them.
+        settle(true);
         await consume(response, controller.signal);
       } catch (error) {
         // An abort is `stop()` or unmount; both already put the UI where it
         // belongs, and reporting it as a failure would be wrong twice.
         if (!isAbort(error)) {
+          settle(false);
           fail({
             code: "unknown",
             message: error instanceof Error ? error.message : String(error),
@@ -1258,22 +1338,46 @@ export function useChat<P extends keyof AgentRoutes>(
    * it reads.
    */
   const queued = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
+  // The answer turn that has gone out and not settled yet, so an answer given
+  // while it flies (a double click) resolves with it instead of sending a
+  // second turn that would supersede it (#1106).
+  const answering = useRef<Promise<void> | null>(null);
 
   const queueResult = useCallback(
     (result: ClientToolResult) => {
-      if (queued.current) {
-        queued.current.results.push(result);
-        return queued.current.flushed;
+      const batch = queued.current;
+      if (batch) {
+        // The same call answered twice in one tick is one answer: the first.
+        if (!batch.results.some((queuedResult) => queuedResult.toolCallId === result.toolCallId)) {
+          batch.results.push(result);
+        }
+        return batch.flushed;
       }
       const results: ClientToolResult[] = [result];
-      const flushed = Promise.resolve().then(() => {
+      const flushed: Promise<void> = Promise.resolve().then(async () => {
         queued.current = null;
-        return send({ toolResults: results });
+        answering.current = flushed;
+        try {
+          await send({ toolResults: results });
+        } finally {
+          if (answering.current === flushed) answering.current = null;
+        }
       });
       queued.current = { results, flushed };
+      // Marked now rather than when the microtask runs, so a UI rendering off
+      // this click already sees the card as being answered.
+      const current = stateRef.current!;
+      commit({
+        ...current,
+        pending: withAnswering(
+          current.pending,
+          new Set(current.pending.map((call: PendingToolCall) => call.toolCallId)),
+          true,
+        ),
+      });
       return flushed;
     },
-    [send],
+    [commit, send],
   );
 
   /**
@@ -1337,24 +1441,47 @@ export function useChat<P extends keyof AgentRoutes>(
     [fail],
   );
 
-  const approve = useCallback(
-    async (toolCallId: string, approved: boolean, reason?: string) => {
-      const result = resultFor(toolCallId, (base) => ({
-        ...base,
-        approve: approved,
-        ...(reason ? { reason } : {}),
-      }));
-      if (result) await queueResult(result);
+  /**
+   * One answer, unless one is already on its way.
+   *
+   * A call marked `answering` with no batch still collecting is in flight: a
+   * second click on its card gets the request already going out, not another.
+   * A failed answer clears the mark before its promise settles, so retrying
+   * from `onError` goes through.
+   */
+  const submit = useCallback(
+    (
+      toolCallId: string,
+      build: (base: { toolCallId: string; signature: string; path?: string[] }) => ClientToolResult,
+    ): Promise<void> => {
+      if (!queued.current) {
+        const call = (stateRef.current!.pending as ChatPendingToolCall[]).find(
+          (candidate) => candidate.toolCallId === toolCallId,
+        );
+        if (call?.answering) return answering.current ?? Promise.resolve();
+      }
+      const result = resultFor(toolCallId, build);
+      return result ? queueResult(result) : Promise.resolve();
     },
     [queueResult, resultFor],
   );
 
+  const approve = useCallback(
+    async (toolCallId: string, approved: boolean, reason?: string) => {
+      await submit(toolCallId, (base) => ({
+        ...base,
+        approve: approved,
+        ...(reason ? { reason } : {}),
+      }));
+    },
+    [submit],
+  );
+
   const answer = useCallback(
     async (toolCallId: string, output: unknown) => {
-      const result = resultFor(toolCallId, (base) => ({ ...base, output }));
-      if (result) await queueResult(result);
+      await submit(toolCallId, (base) => ({ ...base, output }));
     },
-    [queueResult, resultFor],
+    [submit],
   );
 
   const stop = useCallback(async () => {
@@ -1365,7 +1492,19 @@ export function useChat<P extends keyof AgentRoutes>(
     const inFlight = abortRef.current;
     inFlight?.controller.abort();
     abortRef.current = null;
-    commit(markAborted(stateRef.current!));
+    const stopped = markAborted(stateRef.current!);
+    commit({
+      ...stopped,
+      // An answer cut off before the server said it took it may never have
+      // arrived, so its calls are answerable again rather than stuck on
+      // `answering` (#1106). If it did arrive, answering again is refused by
+      // the server like any stale answer.
+      pending: withAnswering(
+        stopped.pending,
+        new Set(stopped.pending.map((call: PendingToolCall) => call.toolCallId)),
+        false,
+      ),
+    });
     setPhaseSafe("idle");
     // Whether there is anything to stop is a question about the *request*, not
     // about `runId`. Gating on `runId` meant the whole time-to-first-token
@@ -1632,7 +1771,7 @@ export function useChat<P extends keyof AgentRoutes>(
     reattach,
     regenerate,
     setMessages,
-    pending: state.pending as PendingToolCall<ToolsOf<P>>[],
+    pending: state.pending as ChatPendingToolCall<ToolsOf<P>>[],
     loadedTools: state.loadedTools,
     usage: state.usage,
     approve,

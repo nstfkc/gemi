@@ -79,6 +79,29 @@ export const executeWrite = AgentTool.create({
 - **A preview that throws**, or runs past the tool's `timeoutMs`, is logged, and the call is still asked, without `preview`.
 - It needs `requiresApproval` (`true` or a function), and is refused on client tools.
 
+## While the answer is sent
+
+`useChat` keeps a call in `pending` until the server takes the answer, so a request that fails does not lose the question:
+
+```tsx
+{chat.pending.map((call) => (
+  <ApprovalCard
+    key={call.toolCallId}
+    call={call}
+    disabled={call.answering}
+    onAnswer={(ok) => chat.approve(call.toolCallId, ok)}
+  />
+))}
+{chat.error && <p>{chat.error.message}. Try again.</p>}
+```
+
+- **While the request is in flight**, every held call has `answering: true` (the turn settles all of them: the server refuses the ones it leaves out). `status` stays `awaiting-input` until the server answers.
+- **When the server takes it** (a 2xx), the calls leave `pending` and the stream shows what happened to them, as before.
+- **When it fails** (a network error or a non-2xx), the calls are back to plain pending (`answering` absent), the failure is in `error` and `onError`, and calling `approve`/`answer` again sends the answer again. No thread re-read or remount is needed.
+- **A second answer while one is in flight** (a double click, or another card) sends nothing and resolves with the request already going out. Answers given in the same tick still go out as one turn, and the same call answered twice in that tick is sent once, with the first answer.
+- **`stop()`** while an answer is in flight puts the calls back to plain pending. If the answer had reached the server, answering again is refused like any stale answer (`invalid_tool_result`).
+- `answering` is client state: `initialPending` drops it, so a `pending` persisted mid-request does not mount stuck. The type is `ChatPendingToolCall` (from `gemi/ai/client`), a `PendingToolCall` with an optional `answering`.
+
 ## Who approved a call
 
 A call that runs because a person approved it gets `ctx.approval`:

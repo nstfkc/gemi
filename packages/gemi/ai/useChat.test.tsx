@@ -467,6 +467,187 @@ describe("awaiting input", () => {
   });
 });
 
+describe("answering a pending call (#1106)", () => {
+  async function asked(params: Record<string, unknown> = {}) {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const mounted = mount({ attach: false, ...params });
+    await act(async () => {
+      await mounted.box.api.sendMessage("refund me");
+    });
+    return mounted;
+  }
+
+  test("the call stays in pending, marked answering, until the server takes the turn", async () => {
+    let respond!: (response: Response) => void;
+    const { box } = await asked();
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_1", true);
+    });
+
+    // Both: the turn resolves every held call, so neither card should take a
+    // second answer while this one flies.
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_1", true],
+      ["tc_2", true],
+    ]);
+    expect(box.api.status).toBe("awaiting-input");
+
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await done;
+    });
+
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a failed answer leaves the call pending with the error, and a second answer succeeds", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_1", "tc_2"]);
+    expect(box.api.pending.every((call) => call.answering === undefined)).toBe(true);
+    expect(box.api.pending[0]).toMatchObject({ toolCallId: "tc_1", signature: "sig_one" });
+    expect(box.api.error).toMatchObject({ code: "unknown", message: "Failed to fetch" });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(box.api.status).toBe("awaiting-input");
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+
+    expect(calls()).toHaveLength(3);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.error).toBeNull();
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a 5xx answer restores the call the same way", async () => {
+    const { box } = await asked();
+    fetchMock.mockResolvedValueOnce(new Response("upstream down", { status: 503 }));
+
+    await act(async () => {
+      await box.api.answer("tc_2", { ok: true });
+    });
+
+    expect(box.api.pending).toHaveLength(2);
+    expect(box.api.pending.some((call) => call.answering)).toBe(false);
+    expect(box.api.error).not.toBeNull();
+    expect(box.api.status).toBe("awaiting-input");
+  });
+
+  test("double-submitting while answering sends one request", async () => {
+    let respond!: (response: Response) => void;
+    const { box } = await asked();
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    let other!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_1", true);
+      other = box.api.approve("tc_2", false);
+    });
+
+    expect(calls()).toHaveLength(2);
+
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await Promise.all([first, second, other]);
+    });
+
+    expect(calls()).toHaveLength(2);
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+  });
+
+  test("the same call answered twice in one tick is sent once", async () => {
+    const { box } = await asked();
+
+    await act(async () => {
+      await Promise.all([box.api.approve("tc_1", true), box.api.approve("tc_1", false)]);
+    });
+
+    expect(calls()).toHaveLength(2);
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+  });
+
+  test("stop() while answering makes the calls answerable again", async () => {
+    const { box } = await asked();
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ stopped: false }));
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+    });
+
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_1", true);
+    });
+    expect(box.api.pending[0]!.answering).toBe(true);
+
+    await act(async () => {
+      await box.api.stop();
+      await done;
+    });
+
+    expect(box.api.pending).toHaveLength(2);
+    expect(box.api.pending.some((call) => call.answering)).toBe(false);
+    expect(box.api.error).toBeNull();
+  });
+
+  test("a persisted answering mark is dropped on mount", async () => {
+    const { box } = mount({
+      attach: false,
+      initialPending: [
+        {
+          toolCallId: "tc_1",
+          name: "charge",
+          input: { amountCents: 500 },
+          kind: "approval",
+          signature: "sig_one",
+          answering: true,
+        },
+      ],
+    });
+
+    expect(box.api.pending).toEqual([
+      {
+        toolCallId: "tc_1",
+        name: "charge",
+        input: { amountCents: 500 },
+        kind: "approval",
+        signature: "sig_one",
+      },
+    ]);
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+    expect(calls()).toHaveLength(1);
+  });
+});
+
 describe("stop", () => {
   test("the UI stops now, the run is ended by the route", async () => {
     const run = controlled();

@@ -1,3 +1,19 @@
+# Unreleased
+
+## ai: `useChat` keeps a pending call until its answer is taken (#1106)
+
+**New behaviour (minor). Workarounds can be removed; nothing has to change.** See [AI Tool Approvals → While the answer is sent](docs/ai-tool-approvals.md#while-the-answer-is-sent).
+
+- `approve`/`answer` no longer take the calls out of `pending` as the turn goes out. They stay, marked `answering: true`, until the server answers the request. On a 2xx they leave `pending` as before; on a network error or non-2xx they are plain pending again, with the failure in `error`/`onError`, and answering again retries. Apps that re-read the thread and remounted the chat after a failed approval can drop that.
+- While an answer is in flight, `status` stays `awaiting-input` (it used to be `submitted` at once), and `approve`/`answer` for any held call send nothing and resolve with the request in flight. The same call answered twice in one tick is sent once.
+- `stop()` during an answer puts the calls back to plain pending. `initialPending` drops a persisted `answering` mark.
+- `UseChatResult.pending` is typed `ChatPendingToolCall<T>[]` (new, exported from `gemi/ai/client`): `PendingToolCall<T>` plus `answering?: boolean`. It is still assignable to `PendingToolCall<T>[]`.
+
+What to check:
+
+- **UIs that show a spinner on `status === "submitted"` right after a click on Approve** now see `awaiting-input` until the server answers; use `call.answering` for that window.
+- **Exact type assertions** such as `expectTypeOf(chat.pending).toEqualTypeOf<PendingToolCall<…>[]>()` need `ChatPendingToolCall<…>[]`.
+
 # Upgrading from 0.175.1 to 0.176.0
 
 ## ai: typed `PendingToolCall.preview` and `readThread` messages (#1100)
