@@ -405,8 +405,8 @@ The render params a test passes need no `resolveIsland`; without one, the page
 is its markup and no loader is added.
 
 To test that a site's links navigate client-side, `renderStaticDocument` (from
-`gemi/testing`) puts a page's HTML into a DOM (`// @vitest-environment jsdom`)
-and runs the navigation runtime against pages you stub. `navigate(href)`
+`gemi/testing`) puts a page's HTML into a DOM (`// @vitest-environment jsdom`
+or `happy-dom`) and runs the navigation runtime against pages you stub. `navigate(href)`
 clicks the page's link to `href` and says how it ended: `"swap"`,
 `"full-load"`, or `"native"` when the runtime left the click to the browser.
 

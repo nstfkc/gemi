@@ -1,3 +1,11 @@
+# Unreleased
+
+## gemi/testing: `renderStaticDocument` works under happy-dom (#1102)
+
+**Fix (patch). Nothing to change in apps.**
+
+- `renderStaticDocument` swapped the test document's root with `replaceChild`, which happy-dom rejects ("Only one element on document allowed"). It now removes the old root and appends the new one, which jsdom and happy-dom both accept, so the helper works in tests that run under happy-dom (`// @vitest-environment happy-dom`, or `@happy-dom/global-registrator` preloaded in bun tests). What it renders is unchanged.
+
 # Upgrading from 0.174.0 to 0.175.0
 
 ## i18n: `onNotFound` picks the not-found page's locale (#1099)
