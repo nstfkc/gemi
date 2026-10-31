@@ -8,7 +8,7 @@ import { breakResponse, mergeContextIntoResponse } from "./ApiRouteDispatcher";
 import { isApiPath } from "./apiPath";
 import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
-import { sharedCacheable } from "./staticCache";
+import { privateWhenSettingCookies, sharedCacheable } from "./staticCache";
 import { viewBreakResponse, viewDataBreakResponse } from "./ViewRouteDispatcher";
 
 export interface GlobalMiddlewareOutcome {
@@ -82,7 +82,12 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
     const { headers, cookies } = ctx;
     const apply = (response: Response) => {
       if (!sharedCacheable(response)) {
-        return mergeContextIntoResponse(response, headers, cookies);
+        const merged = mergeContextIntoResponse(response, headers, cookies);
+        // A `Cache-Control` from the global list (`cache:public` there) only
+        // meets a page's own cookies here, so the view dispatcher could not
+        // lower it: a page that sets a cookie is never left publicly
+        // cacheable (#1098). An api response is left as it was.
+        return isApi ? merged : lowerToPrivate(merged, pathname);
       }
       const withoutCookies = new Headers(headers);
       withoutCookies.delete("Set-Cookie");
@@ -121,4 +126,24 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
       ctx.destroy();
     }
   });
+}
+
+/** `privateWhenSettingCookies` on a response, whose headers may be immutable. */
+function lowerToPrivate(response: Response, pathname: string) {
+  if (!sharedCacheable(response) || response.headers.getSetCookie().length === 0) {
+    return response;
+  }
+  try {
+    privateWhenSettingCookies(response.headers, pathname);
+    return response;
+  } catch {
+    // A Response from fetch() has immutable headers.
+    const headers = new Headers(response.headers);
+    privateWhenSettingCookies(headers, pathname);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
 }

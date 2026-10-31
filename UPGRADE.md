@@ -43,6 +43,15 @@ What to check:
 - Only handlers that declare a parameter with no default are handed one. Inline handlers, rewritten to `(req = new HttpRequest())` or `(req = new MyRequest())`, keep building their own, so a custom request class on an inline handler or controller method still applies. A function passed by name gets a plain `HttpRequest`; build a custom request class inside it (`new MyRequest()`) to validate against its `schema`.
 - View routes already passed the request; they are unchanged.
 
+## Views: `cache:public` is lowered to `private` when the response sets a cookie (#1098)
+
+**Behaviour change (fix). Most apps change nothing; read on if a hydrated view is meant to be cached by a CDN.** See [`cache`](docs/middleware.md#cache--cachemiddleware) and [Static views → Cookies and caching](docs/static-views-and-islands.md#cookies-and-caching).
+
+- A regular (non-static) view response, the document or its `.json` navigation, that sets any cookie and whose `Cache-Control` has `public` or `s-maxage` is now sent `private`: `public` becomes `private`, `s-maxage` and `proxy-revalidate` are dropped, and `max-age`, `stale-while-revalidate` and the other directives are kept. The cookies are still sent. Development logs a warning once per route.
+- In practice this covers every hydrated view under `cache:public` (or a middleware/handler setting `public`/`s-maxage`): gemi sets `csrf_token` on every hydrated document, `session_id` on a first visit, and `i18n-locale` on documents and `.json` navigations. When sessions are created is unchanged.
+- What can change for apps: a CDN or proxy in front of such pages stops caching them (or, if it ignored `Set-Cookie`, stops replaying one visitor's cookies to others). Browsers still cache for `max-age`. A page that should be served from a shared cache is a static view: `this.view(...).static({ cacheControl: "public, ..." })`, which sets no cookie of gemi's own.
+- Static views, file routes and api routes are unchanged. A `cache:public` in the `global` middleware list is lowered the same way on pages (api responses keep it).
+
 # Upgrading from 0.175.1 to 0.176.0
 
 ## ai: typed `PendingToolCall.preview` and `readThread` messages (#1100)

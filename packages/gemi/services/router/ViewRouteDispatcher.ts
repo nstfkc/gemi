@@ -61,6 +61,7 @@ import { documentScriptSource } from "./documentScript";
 import {
   applyStaticCacheControl,
   dropCookiesFromSharedCacheable,
+  privateWhenSettingCookies,
   staticCookiePolicy,
 } from "./staticCache";
 import { mergeContextIntoResponse } from "./ApiRouteDispatcher";
@@ -1772,6 +1773,7 @@ export class ViewRouteDispatcher {
           headers.append("Vary", PARTIAL_RENDER_HEADER);
 
           cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
+          privateWhenSettingCookies(headers, currentPathName);
 
           await this.hooks.onRequestEnd(httpRequest);
 
@@ -1867,6 +1869,10 @@ export class ViewRouteDispatcher {
         if (staticDocument && (currentPathName || !matched)) {
           applyStaticCacheControl(headers, documentStatic!);
         }
+        // A hydrated page under `cache:public` sets `session_id` and
+        // `csrf_token`, so it is lowered to private (#1098). A static page
+        // that set a cookie is already `private, no-store` above.
+        privateWhenSettingCookies(headers, currentPathName);
 
         return await this.render({
           req: httpRequest,

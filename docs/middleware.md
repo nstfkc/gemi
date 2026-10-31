@@ -124,6 +124,8 @@ Sets a `Cache-Control` header on `GET` responses. Parameters are `scope`, `maxAg
 | `cache:private,0,no-store` | `private, max-age=0, no-store` |
 | `cache:public,12840,must-revalidate` | `public, max-age=12840, must-revalidate` |
 
+**On views, `public` only holds for a response that sets no cookie.** A hydrated view sets `session_id` and `csrf_token`, and a shared cache (a CDN, a proxy) that stored the page would hand one visitor's cookies to everyone who gets that copy. So when a view response (the document or its `.json` navigation) sets any cookie and its `Cache-Control` has `public` or `s-maxage`, gemi sends it `private` instead: `public` becomes `private`, `s-maxage` and `proxy-revalidate` are dropped, and `max-age` and the other directives stay, so the browser still caches it. Development logs a warning once per route. A page a CDN should cache is a [static view](./static-views-and-islands.md#cookies-and-caching), which sets none of gemi's cookies. File routes drop the cookies instead of the caching (see [Files](./routing.md#files)); api routes are unchanged.
+
 ### `rate-limit:N,W` → `RateLimitMiddleware`
 
 Limits how often one client may hit a route. `N` is the number of requests, `W` the window in **seconds**; both fall back to the rate-limiter service defaults (`1000` per `60`s). Over the limit the middleware throws a **429**.
@@ -241,9 +243,22 @@ streaming, so without this a large static page renders blank until JS runs.
 
 ```ts
 class MarketingRouter extends ViewRouter {
-  middlewares = ["cache:public", "no-stream"];
-  // ...
+  middlewares = ["no-stream"];
+  routes = {
+    "/pricing": this.view("Pricing"),
+  };
 }
+```
+
+A hydrated page like this sets the session and CSRF cookies, so `cache:public`
+on it is sent as `private` (see [`cache`](#cache--cachemiddleware)). To have a
+CDN cache a marketing page, make it a static view, which renders settled
+without `no-stream` and sets no cookie of gemi's own:
+
+```ts
+"/pricing": this.view("Pricing").static({
+  cacheControl: "public, max-age=60, s-maxage=600",
+}),
 ```
 
 Streaming stays the right default for the authenticated app, where JS is a
