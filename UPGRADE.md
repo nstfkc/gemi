@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.175.1 to 0.176.0
 
 ## ai: typed `PendingToolCall.preview` and `readThread` messages (#1100)
 
