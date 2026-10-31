@@ -29,6 +29,7 @@ export type {
   AttachOptions,
   AgentRequestBody,
   AgentStopBody,
+  ChatPendingToolCall,
   ChatStatus,
   SendMessageOptions,
   UseChatParams,
