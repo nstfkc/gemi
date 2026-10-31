@@ -53,6 +53,47 @@ export function sharedCacheable(response: Response) {
 }
 
 /**
+ * Lowers a page response that sets a cookie from shared to private caching
+ * (#1098). A hydrated view gets `session_id` and `csrf_token` from gemi, so
+ * under `cache:public` it would hand a shared cache a response carrying one
+ * visitor's cookies. The cookies stay and the caching goes: `public` becomes
+ * `private` and `s-maxage` (with `proxy-revalidate`, which only a shared cache
+ * reads) is dropped, so the browser's own cache keeps `max-age` and the rest.
+ *
+ * A page that should be cached by a CDN is a static view (`.static()`), which
+ * sets no cookie of gemi's own. Reported once per route in development.
+ */
+const warnedViewRoutes = new Set<string | null>();
+// `private` is in the list so it is not written twice.
+const SHARED_ONLY = new Set(["public", "private", "s-maxage", "proxy-revalidate"]);
+
+export function privateWhenSettingCookies(headers: Headers, routePath: string | null) {
+  const cacheControl = headers.get("Cache-Control");
+  if (!cacheControl || headers.getSetCookie().length === 0) {
+    return;
+  }
+  if (!/(^|[\s,])(public|s-maxage)\b/i.test(cacheControl)) {
+    return;
+  }
+  const kept = cacheControl
+    .split(",")
+    .map((directive) => directive.trim())
+    .filter((directive) => {
+      const name = directive.split("=")[0].trim().toLowerCase();
+      return name !== "" && !SHARED_ONLY.has(name);
+    });
+  const lowered = ["private", ...kept].join(", ");
+  if (process.env.NODE_ENV !== "production" && !warnedViewRoutes.has(routePath)) {
+    warnedViewRoutes.add(routePath);
+    const names = [...new Set(headers.getSetCookie().map((cookie) => cookie.split("=")[0]))];
+    console.warn(
+      `[gemi] The view "${routePath ?? ""}" sets cookies (${names.join(", ")}) on a response with Cache-Control "${cacheControl}", so it was sent "${lowered}" instead: a shared cache would hand those cookies to every visitor. To let a CDN cache the page, make it a static view with .static({ cacheControl }).`,
+    );
+  }
+  headers.set("Cache-Control", lowered);
+}
+
+/**
  * Takes every `Set-Cookie` off a response a shared cache may store (#1094). A
  * file route is an asset — a favicon, an image, a sitemap — and its caching
  * is the point of it, so the cookie goes rather than the caching, as on the

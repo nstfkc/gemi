@@ -163,6 +163,11 @@ A page that sets a cookie is sent `private, no-store` instead, whatever
 hands it to the next. A cookie a `global` middleware sets is left off a page
 whose `Cache-Control` is `public` (or has `s-maxage`).
 
+A hydrated view (not `.static()`) always sets `session_id` and `csrf_token`, so
+`cache:public` on one is sent as `private` with its `max-age` kept and
+`s-maxage` dropped (see [`cache`](./middleware.md#cache--cachemiddleware)).
+Static views are the pages a shared cache can store.
+
 Two options bring a hydrated view's cookies back, for pages that are not meant
 to be cached:
 
