@@ -45,6 +45,10 @@ function controlled() {
     close() {
       controller.close();
     },
+    /** The connection dropping mid-stream. */
+    fail(error: Error) {
+      controller.error(error);
+    },
     // What a real fetch does when its signal fires, and the reason `stop()` can
     // trust the loop to end.
     abort() {
@@ -549,31 +553,127 @@ describe("answering a pending call (#1106)", () => {
 
   test("double-submitting while answering sends one request", async () => {
     let respond!: (response: Response) => void;
-    const { box } = await asked();
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
     fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
 
     let first!: Promise<void>;
     let second!: Promise<void>;
-    let other!: Promise<void>;
     await act(async () => {
       first = box.api.approve("tc_1", true);
     });
     await act(async () => {
       second = box.api.approve("tc_1", true);
-      other = box.api.approve("tc_2", false);
     });
 
     expect(calls()).toHaveLength(2);
+    expect(onError).not.toHaveBeenCalled();
 
     await act(async () => {
       respond(streamed(ANSWER));
-      await Promise.all([first, second, other]);
+      await Promise.all([first, second]);
     });
 
     expect(calls()).toHaveLength(2);
     expect(bodyOf(1).turn.toolResults).toEqual([
       { toolCallId: "tc_1", signature: "sig_one", approve: true },
     ]);
+    expect(box.api.error).toBeNull();
+  });
+
+  test("answering another held call, or the same one differently, while one flies is reported, not sent", async () => {
+    // The turn in flight settles every held call, and the server refuses the
+    // ones it leaves out, so resolving as if `tc_2` had been approved would
+    // be a lie.
+    let respond!: (response: Response) => void;
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+
+    let first!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      await box.api.approve("tc_2", true);
+    });
+
+    expect(calls()).toHaveLength(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(box.api.error).toMatchObject({
+      code: "invalid_tool_result",
+      toolCallId: "tc_2",
+      retryable: false,
+    });
+
+    await act(async () => {
+      await box.api.approve("tc_1", false);
+    });
+
+    expect(calls()).toHaveLength(2);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(box.api.error).toMatchObject({ code: "invalid_tool_result", toolCallId: "tc_1" });
+
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await first;
+    });
+    expect(calls()).toHaveLength(2);
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test("retrying from inside onError sends the answer again", async () => {
+    const box: { api: Api } = { api: null as unknown as Api };
+    let retried = false;
+    const onError = vi.fn(() => {
+      if (retried) return;
+      retried = true;
+      void box.api.approve("tc_1", true);
+    });
+    const mounted = await asked({ onError });
+    box.api = mounted.box.api;
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await act(async () => {
+      await mounted.box.api.approve("tc_1", true);
+      // The retry is queued on a microtask from inside onError.
+      await Promise.resolve();
+    });
+    await act(async () => {});
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(calls()).toHaveLength(3);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+    expect(mounted.box.api.pending).toEqual([]);
+    expect(mounted.box.api.error).toBeNull();
+    expect(mounted.box.api.status).toBe("idle");
+  });
+
+  test("a 2xx whose stream then fails does not restore the calls", async () => {
+    // The server took the turn: the calls are its now, and the run goes on
+    // there (`reattach` picks it up). Putting them back would offer an answer
+    // the server already has.
+    const { box } = await asked();
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      run.fail(new TypeError("network lost"));
+      await done;
+    });
+
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.error).toMatchObject({ code: "unknown", message: "network lost" });
+    expect(box.api.status).toBe("error");
   });
 
   test("the same call answered twice in one tick is sent once", async () => {

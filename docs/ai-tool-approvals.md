@@ -97,8 +97,11 @@ export const executeWrite = AgentTool.create({
 
 - **While the request is in flight**, every held call has `answering: true` (the turn settles all of them: the server refuses the ones it leaves out). `status` stays `awaiting-input` until the server answers.
 - **When the server takes it** (a 2xx), the calls leave `pending` and the stream shows what happened to them, as before.
-- **When it fails** (a network error or a non-2xx), the calls are back to plain pending (`answering` absent), the failure is in `error` and `onError`, and calling `approve`/`answer` again sends the answer again. No thread re-read or remount is needed.
-- **A second answer while one is in flight** (a double click, or another card) sends nothing and resolves with the request already going out. Answers given in the same tick still go out as one turn, and the same call answered twice in that tick is sent once, with the first answer.
+- **When it fails** (a network error or a non-2xx), the calls are back to plain pending (`answering` absent), the failure is in `error` and `onError`, and calling `approve`/`answer` again sends the answer again, including from inside `onError`. No thread re-read or remount is needed. Since the calls are back, `status` is `awaiting-input`, not `"error"`: show the retry message from `chat.error`, not from `status === "error"`.
+- **When the server took it and the stream then fails** (the connection drops after the 2xx), the calls stay gone: the server has the answer and the run goes on there (`reattach` picks it up). `error` is set and `status` is `"error"`.
+- **The same answer again while it is in flight** (a double click) sends nothing and resolves with the request already going out.
+- **A different answer while one is in flight** (another card, or the same card answered the other way) is not sent: the turn in flight settles every held call, and the server refuses the ones it leaves out. It is reported like an answer to a call the chat no longer holds: `error` and `onError` get `invalid_tool_result` with that `toolCallId`. Disabling the cards while `call.answering` avoids it.
+- Answers given in the same tick still go out as one turn, and the same call answered twice in that tick is sent once, with the first answer.
 - **`stop()`** while an answer is in flight puts the calls back to plain pending. If the answer had reached the server, answering again is refused like any stale answer (`invalid_tool_result`).
 - `answering` is client state: `initialPending` drops it, so a `pending` persisted mid-request does not mount stuck. The type is `ChatPendingToolCall` (from `gemi/ai/client`), a `PendingToolCall` with an optional `answering`.
 

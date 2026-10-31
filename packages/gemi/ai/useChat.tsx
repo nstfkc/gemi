@@ -1341,7 +1341,7 @@ export function useChat<P extends keyof AgentRoutes>(
   // The answer turn that has gone out and not settled yet, so an answer given
   // while it flies (a double click) resolves with it instead of sending a
   // second turn that would supersede it (#1106).
-  const answering = useRef<Promise<void> | null>(null);
+  const answering = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
 
   const queueResult = useCallback(
     (result: ClientToolResult) => {
@@ -1355,12 +1355,13 @@ export function useChat<P extends keyof AgentRoutes>(
       }
       const results: ClientToolResult[] = [result];
       const flushed: Promise<void> = Promise.resolve().then(async () => {
+        const batch = queued.current!;
         queued.current = null;
-        answering.current = flushed;
+        answering.current = batch;
         try {
           await send({ toolResults: results });
         } finally {
-          if (answering.current === flushed) answering.current = null;
+          if (answering.current === batch) answering.current = null;
         }
       });
       queued.current = { results, flushed };
@@ -1444,8 +1445,14 @@ export function useChat<P extends keyof AgentRoutes>(
   /**
    * One answer, unless one is already on its way.
    *
-   * A call marked `answering` with no batch still collecting is in flight: a
-   * second click on its card gets the request already going out, not another.
+   * A call marked `answering` with no batch still collecting is in flight.
+   * Answering it again the same way (a double click) gets the request already
+   * going out, not another. Anything else while that turn flies (a different
+   * answer, or a different held call) cannot be honoured: the turn in flight
+   * settles every held call, and the server refuses the ones it leaves out. So
+   * it is reported as `invalid_tool_result`, the way answering a call this
+   * client no longer holds is, rather than resolving as if it had been sent.
+   *
    * A failed answer clears the mark before its promise settles, so retrying
    * from `onError` goes through.
    */
@@ -1454,16 +1461,31 @@ export function useChat<P extends keyof AgentRoutes>(
       toolCallId: string,
       build: (base: { toolCallId: string; signature: string; path?: string[] }) => ClientToolResult,
     ): Promise<void> => {
-      if (!queued.current) {
+      const inFlight = answering.current;
+      if (!queued.current && inFlight) {
         const call = (stateRef.current!.pending as ChatPendingToolCall[]).find(
           (candidate) => candidate.toolCallId === toolCallId,
         );
-        if (call?.answering) return answering.current ?? Promise.resolve();
+        if (call?.answering) {
+          const result = resultFor(toolCallId, build);
+          if (!result) return Promise.resolve();
+          const sent = inFlight.results.find((sentResult) => sentResult.toolCallId === toolCallId);
+          if (sent && JSON.stringify(sent) === JSON.stringify(result)) return inFlight.flushed;
+          fail({
+            code: "invalid_tool_result",
+            message: sent
+              ? `Tool call ${toolCallId} is already being answered differently`
+              : `Tool call ${toolCallId} is settled by the answer in flight, which refuses it`,
+            toolCallId,
+            retryable: false,
+          });
+          return Promise.resolve();
+        }
       }
       const result = resultFor(toolCallId, build);
       return result ? queueResult(result) : Promise.resolve();
     },
-    [queueResult, resultFor],
+    [fail, queueResult, resultFor],
   );
 
   const approve = useCallback(
