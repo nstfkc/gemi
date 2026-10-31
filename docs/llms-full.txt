@@ -1822,6 +1822,22 @@ export default class extends ApiRouter {
 }
 ```
 
+A callback can also be a function declared elsewhere and passed by name. It receives the request the same way:
+
+```typescript
+async function showDict(req: HttpRequest<{}, { id: string }>) {
+  return { id: req.params.id };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/dict/:id": this.get(showDict),
+  };
+}
+```
+
+The same goes for `this.stream(...)`, `this.file(...)` and view routes. A function passed by name is handed a plain `HttpRequest`, whatever its parameter's type says. To validate against a custom request class's `schema` there, build it inside the function: `const input = await new CreateCustomerRequest().input()`.
+
 **Controller reference** — pass a `Controller` class and the method name to invoke ([Controllers](./controllers.md)):
 
 ```typescript

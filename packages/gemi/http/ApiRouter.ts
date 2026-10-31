@@ -108,6 +108,29 @@ export type RouteSource = {
   methodName: string;
 };
 
+/**
+ * Calls a route's handler with the request, the way a handler written inline
+ * gets it (#1110).
+ *
+ * An inline `(req: HttpRequest) => ...` in a routes or controllers file is
+ * rewritten at build time to `(req = new HttpRequest()) => ...`, so it is
+ * called with no argument and builds its own. A handler passed by reference
+ * (`this.get(showUser)`, imported or declared elsewhere) is not rewritten, so
+ * it has to be handed the request.
+ *
+ * Only a handler that declares a parameter without a default is handed one:
+ * `fn.length` counts exactly those. A rewritten handler has length 0 and keeps
+ * its default, which matters when the default is a request subclass (`req =
+ * new CreateUserRequest()`, with its validation schema) that a plain
+ * `HttpRequest` would replace.
+ */
+function callWithRequest<T>(fn: (req: HttpRequest<any, any>) => T, req?: HttpRequest<any, any>) {
+  if (fn.length === 0) {
+    return (fn as () => T)();
+  }
+  return fn(req ?? new HttpRequest());
+}
+
 export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   __internal_brand = "RouteHandler";
   middlewares: string[] = [];
@@ -146,15 +169,13 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     };
   }
 
-  run(_req: HttpRequest<Input, Params>) {
-    if (isController(this.handler)) {
-      const controller = new this.handler();
-      const handler = controller[this.methodName].bind(controller);
-      return handler();
+  run(req?: HttpRequest<Input, Params>): any {
+    if (this.source) {
+      const controller = new this.source.controller();
+      return callWithRequest(controller[this.methodName].bind(controller), req);
     }
 
-    // @ts-ignore
-    return this.handler();
+    return callWithRequest(this.handler as CallbackHandler<Input, Output, Params>, req);
   }
 
   middleware(middlewareList: MiddlewareInput) {

@@ -15,6 +15,15 @@ What to check:
 - **UIs that show a retry message on `status === "error"` after a failed approval.** The calls are back, so `status` is `awaiting-input` with `error` set (it used to be `"error"`, with no calls left to answer). Read `chat.error` for the message. A failure after the server took the answer (the stream drops after a 2xx) still ends `"error"` with `pending` empty.
 - **Exact type assertions** such as `expectTypeOf(chat.pending).toEqualTypeOf<PendingToolCall<…>[]>()` need `ChatPendingToolCall<…>[]`.
 
+## http: route handlers passed by reference receive the request (#1110)
+
+**Fix (patch). Nothing to change in apps.** See [Routing → HTTP method handlers](docs/routing.md#http-method-handlers).
+
+- A function passed by name to `this.get`/`post`/`put`/`patch`/`delete`/`stream`/`file` (`this.get(showUser)`) is now called with the request, as an inline handler is. Before, it got nothing, and the first `req.` threw a 500. A `function` declaration passed this way was also mistaken for a controller class and failed the same way; it now runs as a callback.
+- The same holds for any handler the build does not rewrite: an inline `(req) => ...` with no type annotation, or a controller method declared outside `http/controllers/` or with an untyped parameter.
+- Only handlers that declare a parameter with no default are handed one. Inline handlers, rewritten to `(req = new HttpRequest())` or `(req = new MyRequest())`, keep building their own, so a custom request class on an inline handler or controller method still applies. A function passed by name gets a plain `HttpRequest`; build a custom request class inside it (`new MyRequest()`) to validate against its `schema`.
+- View routes already passed the request; they are unchanged.
+
 # Upgrading from 0.175.1 to 0.176.0
 
 ## ai: typed `PendingToolCall.preview` and `readThread` messages (#1100)
