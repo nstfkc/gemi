@@ -105,7 +105,13 @@ export class MemoryAgentStore implements AgentStore {
     // versions, and the model would read the same call twice on every turn
     // that follows. Replacing in place keeps the message where the
     // conversation put it.
-    for (const message of messages) {
+    for (const written of messages) {
+      // Stored as JSON, like every other store (#1107): what `loadThread` and
+      // `readThread` hand back is what a database store would, and what the
+      // client types say it is (`Date`s are strings, `undefined` members gone).
+      // It is also a copy, so the caller mutating its message later does not
+      // edit the stored history.
+      const message = JSON.parse(JSON.stringify(written)) as AgentMessage;
       const at = thread.messages.findIndex((held) => held.id === message.id);
       if (at === -1) {
         thread.messages.push(message);

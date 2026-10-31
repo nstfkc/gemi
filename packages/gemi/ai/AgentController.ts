@@ -91,6 +91,7 @@ import type {
   AgentMessage,
   AgentStreamEvent,
   ClientTurn,
+  JsonToolShapes,
   PendingToolCall,
   ToolResultPart,
   ToolShapes,
@@ -330,7 +331,9 @@ export type AgentTurn = {
 /**
  * A message of the controller's threads, as `readThread` answers it (#1100):
  * typed by the agent's tools, so it goes into the route's
- * `useChat({ initialMessages })` with no cast.
+ * `useChat({ initialMessages })` with no cast. The tools' outputs, progress
+ * and previews are in their JSON form (`JsonToolShapes`, #1107), as the
+ * thread store hands them back and as `useChat` types them.
  *
  * A controller whose agent is not known (`AgentController`, or the
  * `AgentController<any, any>` bound the route helpers use, or an agent whose
@@ -346,7 +349,11 @@ export type ThreadMessage<A> = 0 extends 1 & A
     ? // `AnyAgent`'s shapes (and an untyped tool list's) are an index signature.
       string extends keyof AgentToolShapes<A>
       ? AgentMessage<any>
-      : AgentMessage<AgentToolShapes<A>>
+      : // Re-checked against `ToolShapes` because the mapping over a generic
+        // agent's shapes cannot show it keeps `input` and `output`.
+        JsonToolShapes<AgentToolShapes<A>> extends infer J extends ToolShapes
+        ? AgentMessage<J>
+        : never
     : AgentMessage<any>;
 
 /** What `AgentTurn.result()` answers: the run's result, and what a caller reads off it. */
@@ -4143,8 +4150,10 @@ export type AgentRoute<T> = {
  *  type its messages, and nothing that drags server code into the bundle. */
 export type AgentRouteRPC<T extends new () => AgentController<any, any>> = {
   __agent: true;
+  // In their JSON form (#1107): what the browser holds is what came over the
+  // wire, so a `Date` in a tool's output or preview is a `string` there.
   tools: InstanceType<T>["agent"] extends AnyAgent
-    ? AgentToolShapes<InstanceType<T>["agent"]>
+    ? JsonToolShapes<AgentToolShapes<InstanceType<T>["agent"]>>
     : ToolShapes;
   output: unknown;
   /**

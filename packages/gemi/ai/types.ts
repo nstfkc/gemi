@@ -12,6 +12,7 @@
  */
 
 import type { ToolAttachmentRecord } from "./store/Attachments";
+import type { Jsonify } from "../utils/jsonify";
 
 /**
  * Tools reduced to just their payload types.
@@ -35,6 +36,33 @@ import type { ToolAttachmentRecord } from "./store/Attachments";
  */
 export type ToolShape = { input: unknown; output: unknown; progress?: unknown; preview?: unknown };
 export type ToolShapes = Record<string, ToolShape>;
+
+/**
+ * Tool shapes as the browser receives them (#1107): `output`, `progress` and
+ * `preview` in their JSON form (`Jsonify`), since that is how they travel. A
+ * `Date` in a tool's output or preview is a `string` here, `undefined` members
+ * are optional or gone, and `toJSON` is honoured. `input` is left as the
+ * schema types it, which is JSON already.
+ *
+ * What `useChat` reads off a route (`AgentRouteRPC`'s `tools`) and what
+ * `readThread` answers (`ThreadMessage`). Server-side hooks keep the tools'
+ * own types, because they get the values themselves.
+ */
+export type JsonToolShapes<T extends ToolShapes> = {
+  [K in keyof T]: JsonToolShape<T[K]>;
+};
+
+// Homomorphic over the shape, so a member a hand-written shape leaves out
+// (`progress`, `preview`) stays left out, and `PreviewOf` still reads it as
+// `unknown`. `preview` is awaited first: the shape carries what
+// `approvalPreview` returns, which may be a promise.
+type JsonToolShape<S> = {
+  [M in keyof S]: M extends "input"
+    ? S[M]
+    : M extends "preview"
+      ? Jsonify<Awaited<S[M]>>
+      : Jsonify<S[M]>;
+};
 
 export type Usage = {
   inputTokens: number;

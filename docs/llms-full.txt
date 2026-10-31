@@ -1822,6 +1822,22 @@ export default class extends ApiRouter {
 }
 ```
 
+A callback can also be a function declared elsewhere and passed by name. It receives the request the same way:
+
+```typescript
+async function showDict(req: HttpRequest<{}, { id: string }>) {
+  return { id: req.params.id };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/dict/:id": this.get(showDict),
+  };
+}
+```
+
+The same goes for `this.stream(...)`, `this.file(...)` and view routes. A function passed by name is handed a plain `HttpRequest`, whatever its parameter's type says. To validate against a custom request class's `schema` there, build it inside the function: `const input = await new CreateCustomerRequest().input()`.
+
 **Controller reference** — pass a `Controller` class and the method name to invoke ([Controllers](./controllers.md)):
 
 ```typescript
@@ -9512,10 +9528,32 @@ export const executeWrite = AgentTool.create({
 
 - **When it runs.** Once for each call that goes pending, after the input is validated and `requiresApproval` said to ask, with the same `input` and `ctx` (`ToolApprovalContext`) as a `requiresApproval` function. Not for a call that runs without asking, and not under `onPending: "deny"`.
 - **Where it goes.** The value is the pending call's `preview`: on the `awaiting-input` frame, in `useChat`'s `pending`, and in the stored `AgentMessage.pending`, so it is still there after a reload. It is sent and stored as JSON (a `Date` becomes its ISO string). `undefined` means no preview.
-- **Its type.** `preview` is typed by what the tool's `approvalPreview` returns (awaited), the way `input` is typed by its schema: narrow the pending call on `name` and `preview` needs no cast. A tool without `approvalPreview` has `preview?: never`. A hand-written `ToolShapes` map types it from an optional `preview` member of each tool, and as `unknown` without one. Return one type, sync or async: a function declared as returning `A | Promise<B>` infers `B` from the promise and then fails against `A`. With type arguments written out (`AgentTool.create<Name, Input, Output, Progress, Ctx>`), pass the preview type as the sixth, or `preview` is typed `never`.
+- **Its type.** `preview` is typed by what the tool's `approvalPreview` returns (awaited), the way `input` is typed by its schema: narrow the pending call on `name` and `preview` needs no cast. In the browser (`useChat`, `readThread`) it is typed in its JSON form, as it arrives: a `Date` is a `string`, `undefined` members are optional or gone, and `toJSON` is honoured (see [Tool data in the browser is JSON](#tool-data-in-the-browser-is-json)). A tool without `approvalPreview` has `preview?: never`. A hand-written `ToolShapes` map types it from an optional `preview` member of each tool, and as `unknown` without one. Return one type, sync or async: a function declared as returning `A | Promise<B>` infers `B` from the promise and then fails against `A`. With type arguments written out (`AgentTool.create<Name, Input, Output, Progress, Ctx>`), pass the preview type as the sixth, or `preview` is typed `never`.
 - **Display only.** The signature covers the input, not the preview, so approving approves the call. The data can change between the preview and the click: `execute` should re-check what it relies on, for example that the write still changes the number of rows the preview showed.
 - **A preview that throws**, or runs past the tool's `timeoutMs`, is logged, and the call is still asked, without `preview`.
 - It needs `requiresApproval` (`true` or a function), and is refused on client tools.
+
+### Tool data in the browser is JSON
+
+Everything a tool hands the browser travels as JSON: a pending call's `preview`, a result's `output`, and what a generator tool yields (`progress`). So the client types them as `Jsonify<T>` of the server's type, which is what `JSON.parse(JSON.stringify(value))` gives:
+
+```ts
+approvalPreview: async ({ userId }) => ({ userId, expiresAt: new Date(), note: undefined as string | undefined }),
+
+// In the browser, on chat.pending, narrowed to this tool:
+// call.preview is { userId: string; expiresAt: string; note?: string } | undefined
+new Date(call.preview.expiresAt); // parse it back where a Date is needed
+```
+
+- A `Date`, or anything with a `toJSON()`, is what `toJSON()` returns (`string` for a `Date`). A member whose `toJSON()` may answer `undefined` is optional, and gone when it always does.
+- Object members that are `undefined`, functions or symbols are dropped; a member that may be `undefined` (or is `void`) is optional. In arrays they are `null`.
+- At the top level `undefined` stays: a tool returning `Foo | undefined` is `Jsonify<Foo> | undefined` in the browser, and one returning nothing (`void`) is `undefined`.
+- Class instances are read as their public members, getters included. At run time only own enumerable properties are written (an `Error` arrives as `{}`), so give such a type a `toJSON` if it crosses.
+- `Map` and `Set` arrive as `{}`, and a `bigint` cannot be sent (`never`).
+- A type that is JSON already is unchanged, so most tools see no difference.
+- This applies to `useChat` (`messages`, `pending`, `onToolResult`, `onToolProgress`, `initialMessages`, `initialPending`), to the route's `AgentRouteRPC` tools and to `readThread`. `input` is left as its schema types it. Server-side code (hooks, `ToolShapesOf`, `AgentToolShapes`) keeps the tool's own types, since it gets the values themselves.
+- Every thread store hands back JSON: the database store parses what it stored, and `MemoryAgentStore` stores a JSON copy of each message, so `readThread` returns the same thing in dev and tests as in production.
+- `Jsonify` and `JsonToolShapes` are exported from `gemi/ai` and `gemi/ai/client` for code that types the same data by hand. A component that takes a preview or an output as a prop types it as the client form, for example `preview: Jsonify<WritePreview>`, or reads it off `chat.pending`.
 
 ## While the answer is sent
 
@@ -9599,7 +9637,7 @@ const chat = useChat("/chat", { threadId, initialMessages });
 // and chat.approve(call.toolCallId, true) answers it.
 ```
 
-- `readThread` answers the messages typed by the controller's agent (`AgentMessage<AgentToolShapes<typeof agent>>[]`), which is what the route's `initialMessages` takes, so no cast is needed. A controller that picks its agent per request is typed by `A`, the agent it is declared with; declare the widest one. Like any typed message, it is not an untyped `AgentMessage[]`, and it does not fit a route whose agent has fewer tools; a controller whose agent is not known (`AgentController`) answers `AgentMessage<any>[]`.
+- `readThread` answers the messages typed by the controller's agent, in their JSON form (`AgentMessage<JsonToolShapes<AgentToolShapes<typeof agent>>>[]`, also spelled `ThreadMessage<typeof agent>[]`), which is what the route's `initialMessages` takes, so no cast is needed. A controller that picks its agent per request is typed by `A`, the agent it is declared with; declare the widest one. Like any typed message, it is not an untyped `AgentMessage[]`, and it does not fit a route whose agent has fewer tools; a controller whose agent is not known (`AgentController`) answers `AgentMessage<any>[]`.
 - `useChat` starts with the calls that are still open in `initialMessages`, and `setMessages` takes them from the messages it is given, so a re-read thread also drops a question another tab answered. `openPending(messages)` (from `gemi/ai/client`) is the same read for code outside the hook.
 - A call that has a result since (answered, refused by a later turn, closed as `interrupted`) is not handed back, and the turn that answers or refuses the calls takes them off the message.
 - The signatures are bound to the turn's owner (`runOwner`). Anyone else holding the thread sees the question but cannot answer it.

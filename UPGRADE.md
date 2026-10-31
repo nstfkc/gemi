@@ -1,5 +1,24 @@
 # Unreleased
 
+## ai: client-side tool data is typed as its JSON form (#1107)
+
+**Type change (minor), plus one runtime change: `MemoryAgentStore` stores messages as JSON.** See [AI Tool Approvals → Tool data in the browser is JSON](docs/ai-tool-approvals.md#tool-data-in-the-browser-is-json).
+
+- A tool's `output`, `progress` and `preview` reach the browser as JSON, and are now typed that way there: `Jsonify<T>` of the server type. A `Date` is a `string`, anything with `toJSON()` is what it returns, `undefined`/function/symbol members are dropped (optional when they may be `undefined` or are `void`; `null` inside arrays), `Map`/`Set` are `{}`, `bigint` is `never`. At the top level `undefined` stays (`Foo | undefined` is `Jsonify<Foo> | undefined`, a `void` tool is `undefined`). A type that is JSON already is unchanged, so tools returning plain data see no difference.
+- `MemoryAgentStore` now stores a JSON copy of each message (as the database store always did), so `loadThread`/`readThread` hand back strings for `Date`s and drop `undefined` members in dev and tests too. Server code or tests that read a `Date` instance back from a memory-store thread now get its ISO string.
+- Where: `AgentRouteRPC`'s `tools` is now `JsonToolShapes<AgentToolShapes<agent>>`, so everything `useChat` types from the route takes the JSON form (`messages`, `pending`, `onToolResult`, `onToolProgress`, `initialMessages`, `initialPending`, `setMessages`). `AgentController.readThread` / `ThreadMessage<A>` answers `AgentMessage<JsonToolShapes<AgentToolShapes<A>>>`, so it still goes into the route's `useChat` with no cast.
+- Unchanged: `input` (typed by its schema, JSON already), and every server-side type: `ToolShapesOf`, `AgentToolShapes`, controller hooks, `startTurn`, `AgentRun` results.
+- New exports from `gemi/ai` and `gemi/ai/client`: `Jsonify<T>` and `JsonToolShapes<T>`.
+
+What can stop compiling (only for tools whose output, progress or preview is not plain JSON, such as one holding a `Date`, a class instance, a `Map`, a function or an `undefined` member):
+
+- **Client code that used those values as their server types**, such as `part.output.createdAt.getTime()` or `call.preview.expiresAt.toLocaleString()`. At run time these were already strings; parse them (`new Date(part.output.createdAt)`).
+- **Components whose props take a preview or an output typed with the server type**, such as `function WriteCard(props: { preview: WritePreview })` where `WritePreview` holds a `Date`. Type the prop as the client form, `preview: Jsonify<WritePreview>` (from `gemi/ai/client`), or derive it from `useChat`'s `pending`. Test fixtures that cast ISO strings `as unknown as Date` can use plain strings.
+- **`readThread` results or `useChat` messages annotated with the server-side shapes**, such as `AgentMessage<AgentToolShapes<typeof agent>>[]` (which the 0.176.0 notes suggested), or a helper taking that type. Use `ThreadMessage<typeof agent>[]` or `AgentMessage<JsonToolShapes<AgentToolShapes<typeof agent>>>[]`.
+- **Server-typed messages passed to `useChat`'s `initialMessages`** (for example a list built from `AgentMessage<AgentToolShapes<…>>`). Type them in the JSON form, or let `readThread` type them.
+- **Callbacks annotated with server-side part types**, such as `onToolResult: (part: ToolResultPart<AgentToolShapes<typeof agent>>) => …`. Annotate with `ToolResultPart<JsonToolShapes<AgentToolShapes<typeof agent>>>`, or let it be inferred.
+- **Exact type assertions** on `AgentRouteRPC<…>["tools"]`, such as `toEqualTypeOf<AgentToolShapes<typeof agent>>()`, need `JsonToolShapes<AgentToolShapes<typeof agent>>` (for any agent, since the type is a new mapped type even when every tool is JSON already).
+
 ## ai: `useChat` keeps a pending call until its answer is taken (#1106)
 
 **New behaviour (minor). Workarounds can be removed; nothing has to change.** See [AI Tool Approvals → While the answer is sent](docs/ai-tool-approvals.md#while-the-answer-is-sent).
@@ -14,6 +33,15 @@ What to check:
 - **UIs that show a spinner on `status === "submitted"` right after a click on Approve** now see `awaiting-input` until the server answers; use `call.answering` for that window.
 - **UIs that show a retry message on `status === "error"` after a failed approval.** The calls are back, so `status` is `awaiting-input` with `error` set (it used to be `"error"`, with no calls left to answer). Read `chat.error` for the message. A failure after the server took the answer (the stream drops after a 2xx) still ends `"error"` with `pending` empty.
 - **Exact type assertions** such as `expectTypeOf(chat.pending).toEqualTypeOf<PendingToolCall<…>[]>()` need `ChatPendingToolCall<…>[]`.
+
+## http: route handlers passed by reference receive the request (#1110)
+
+**Fix (patch). Nothing to change in apps.** See [Routing → HTTP method handlers](docs/routing.md#http-method-handlers).
+
+- A function passed by name to `this.get`/`post`/`put`/`patch`/`delete`/`stream`/`file` (`this.get(showUser)`) is now called with the request, as an inline handler is. Before, it got nothing, and the first `req.` threw a 500. A `function` declaration passed this way was also mistaken for a controller class and failed the same way; it now runs as a callback.
+- The same holds for any handler the build does not rewrite: an inline `(req) => ...` with no type annotation, or a controller method declared outside `http/controllers/` or with an untyped parameter.
+- Only handlers that declare a parameter with no default are handed one. Inline handlers, rewritten to `(req = new HttpRequest())` or `(req = new MyRequest())`, keep building their own, so a custom request class on an inline handler or controller method still applies. A function passed by name gets a plain `HttpRequest`; build a custom request class inside it (`new MyRequest()`) to validate against its `schema`.
+- View routes already passed the request; they are unchanged.
 
 ## Views: `cache:public` is lowered to `private` when the response sets a cookie (#1098)
 
