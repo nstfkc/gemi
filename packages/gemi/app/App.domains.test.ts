@@ -368,8 +368,52 @@ describe("what the servers learn from the app", () => {
     expect(views.filter((view) => view === "Home")).toHaveLength(1);
   });
 
-  test("custom domains let Vite answer on any host", () => {
-    expect(app.devAllowedHosts()).toBe(true);
+  // #1088: the resolver is no reason to answer every host. With a fallback
+  // every host resolves, so the dev server could not tell a rebinding host
+  // from a real one.
+  test("custom domains alone add nothing beyond the root and its subdomains", () => {
+    expect(app.devAllowedHosts()).toEqual([".gemi.dev"]);
+  });
+
+  const withDevHosts = (devHosts: unknown) =>
+    class extends Kernel {
+      config = {
+        route: {
+          api: { rootRouter: RootApi },
+          view: { root: createRoot(() => createElement("div")), rootRouter: RootViews },
+          domains: {
+            root: "gemi.dev",
+            groups: [{ subdomain: ":tenant" }],
+            custom: { group: ":tenant", resolve: () => null, fallback: {} },
+            devHosts: devHosts as any,
+          },
+        },
+      };
+    };
+
+  test("`devHosts` adds the hosts listed, lowercased", () => {
+    expect(
+      new App({ kernel: withDevHosts([".shop.test", "App.Acme.test"]) }).devAllowedHosts(),
+    ).toEqual([".gemi.dev", ".shop.test", "app.acme.test"]);
+  });
+
+  test("`devHosts: true` is the only way to answer any host", () => {
+    expect(new App({ kernel: withDevHosts(true) }).devAllowedHosts()).toBe(true);
+  });
+
+  test.each([["https://acme.test"], ["acme.test:3000"], ["*"], ["*.acme.test"], [""], [3]])(
+    "`devHosts` entry %j fails the boot",
+    async (entry) => {
+      await expect(new App({ kernel: withDevHosts([entry]) }).waitForBoot()).rejects.toThrow(
+        /route\.domains\.devHosts\[0\]/,
+      );
+    },
+  );
+
+  test("`devHosts` that is neither a list nor `true` fails the boot", async () => {
+    await expect(new App({ kernel: withDevHosts("acme.test") }).waitForBoot()).rejects.toThrow(
+      /route\.domains\.devHosts/,
+    );
   });
 
   test("without custom domains it is the root and its subdomains", () => {

@@ -72,16 +72,22 @@ export class App {
   }
 
   /**
-   * The hosts the dev server's Vite may answer: the `route.domains` root and
-   * its subdomains, or any host when custom domains are on, since those are
-   * only known to the app's resolver.
+   * The hosts the dev server's Vite may answer, besides the ones it always
+   * admits (`localhost`, `*.localhost`, IP addresses): the `route.domains`
+   * root, its subdomains and `route.domains.devHosts`. `true`, any host, only
+   * when the app sets `devHosts: true` itself. Custom domains are not let
+   * through on their own: the dev server cannot tell a real one from a host
+   * name pointed at it by DNS rebinding, even less so with `custom.fallback`.
    */
   public devAllowedHosts(): true | string[] {
-    const domains = this.kernel.domains();
-    if (!domains.resolver) {
+    const { resolver } = this.kernel.domains();
+    if (!resolver) {
       return [];
     }
-    return domains.acceptsCustomDomains ? true : [`.${domains.resolver.root}`];
+    if (resolver.devHosts === true) {
+      return true;
+    }
+    return [`.${resolver.root}`, ...resolver.devHosts];
   }
 
   /**
