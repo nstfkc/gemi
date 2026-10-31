@@ -91,7 +91,7 @@ approvalPreview: async ({ userId }) => ({ userId, expiresAt: new Date(), note: u
 new Date(call.preview.expiresAt); // parse it back where a Date is needed
 ```
 
-- A `Date`, or anything with a `toJSON()`, is what `toJSON()` returns (`string` for a `Date`).
+- A `Date`, or anything with a `toJSON()`, is what `toJSON()` returns (`string` for a `Date`). A member whose `toJSON()` may answer `undefined` is optional, and gone when it always does.
 - Object members that are `undefined`, functions or symbols are dropped; a member that may be `undefined` (or is `void`) is optional. In arrays they are `null`.
 - At the top level `undefined` stays: a tool returning `Foo | undefined` is `Jsonify<Foo> | undefined` in the browser, and one returning nothing (`void`) is `undefined`.
 - Class instances are read as their public members, getters included. At run time only own enumerable properties are written (an `Error` arrives as `{}`), so give such a type a `toJSON` if it crosses.
