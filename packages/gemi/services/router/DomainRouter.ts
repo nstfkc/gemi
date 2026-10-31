@@ -80,7 +80,8 @@ export class DomainRouter {
   /**
    * Makes the address a proven proxy names the one the rest of gemi reads: the
    * only entry of `X-Forwarded-For`, with `X-Real-IP` dropped. The proxy is
-   * `route.domains.trustProxy` (`clientIpHeader` + `secret`) or, failing that,
+   * the first `route.domains.trustProxy` entry whose secret matches (and that
+   * names the client in its `clientIpHeader`) or, failing that,
    * `GEMI_CLIENT_IP_HEADER` + `GEMI_PROXY_SECRET_HEADER`/`GEMI_PROXY_SECRET`.
    * A request without the secret keeps the address `GEMI_TRUST_PROXY` settled
    * on. Idempotent. Lives here so the secret is withheld from `proxy()` routes
@@ -112,10 +113,12 @@ export class DomainRouter {
     if (!this.resolver) {
       return this.dispatchers(null);
     }
-    // The proxy's secret is for this app alone; a `proxy()` route forwards the
-    // client's headers upstream, and must not hand it to whoever is there.
-    if (this.resolver.proxySecretHeader) {
-      withholdFromUpstream(req, this.resolver.proxySecretHeader);
+    // The proxies' secrets are for this app alone; a `proxy()` route forwards
+    // the client's headers upstream, and must not hand them to whoever is
+    // there. Every entry's header, not just the one that matched: a request
+    // can carry several, as one that came through two trusted proxies does.
+    for (const header of this.resolver.proxySecretHeaders) {
+      withholdFromUpstream(req, header);
     }
     const domain = await this.resolver.resolve(req);
     if (!domain) {

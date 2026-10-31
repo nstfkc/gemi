@@ -380,7 +380,7 @@ Some proxies make a new request to the app, such as a Cloudflare Worker calling 
 
 ### A trusted client-IP header: `GEMI_CLIENT_IP_HEADER`
 
-An app without `route.domains` can trust a proxy's client-IP header through the environment instead. Some proxies set such a header from the TCP connection and also send a value that proves the request came through them. Azure Front Door, for example, sets `X-Azure-ClientIP` and sends the profile's ID in `X-Azure-FDID`. When the proxy provides both, this is more reliable than counting hops:
+An app can also trust a proxy's client-IP header through the environment. Some proxies set such a header from the TCP connection and also send a value that proves the request came through them. Azure Front Door, for example, sets `X-Azure-ClientIP` and sends the profile's ID in `X-Azure-FDID`. When the proxy provides both, this is more reliable than counting hops:
 
 ```bash
 GEMI_CLIENT_IP_HEADER=x-azure-clientip
@@ -399,7 +399,7 @@ On a request whose secret header matches, the address becomes the only entry of 
 - A request without the secret, or with a wrong one, is never trusted. It keeps the address `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. Keep `GEMI_TRUST_PROXY` set as you would without this, as the fallback for such requests (health probes, requests that reach the app directly).
 - Set all three or none. A partial set, an invalid header name, the same header named twice, or a secret under 16 characters fails the boot.
 - The secret header is withheld from what a [`proxy()`](./routing.md) route forwards upstream.
-- With `route.domains.trustProxy.clientIpHeader` also configured, whichever proxy proves itself names the client. The domains setting is checked first.
+- It works with or without `route.domains`. With `route.domains.trustProxy` also configured, its entries are checked first, and this applies to a request none of them names the client for: no entry's secret matched, or the entry that matched has no `clientIpHeader` or sent no address. To trust several proxies, prefer listing them all in [`trustProxy`](./domains.md#several-proxies), where the order is explicit.
 
 ## Idle connections: `SERVER_IDLE_TIMEOUT`
 

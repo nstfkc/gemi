@@ -16,7 +16,8 @@ export function requestDomain(req: Request): ResolvedDomain | null {
   return domains.get(req) ?? null;
 }
 
-// Headers meant for this app alone — `route.domains.trustProxy.secret` — that
+// Headers meant for this app alone — every `route.domains.trustProxy` secret and
+// `GEMI_PROXY_SECRET_HEADER` — that
 // a `proxy()` route must not forward upstream with the rest of the client's.
 const withheld = new WeakMap<Request, string[]>();
 
