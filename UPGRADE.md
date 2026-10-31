@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.175.0 to 0.175.1
 
 ## gemi/testing: `renderStaticDocument` works under happy-dom (#1102)
 
