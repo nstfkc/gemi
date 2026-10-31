@@ -1,3 +1,15 @@
+# Unreleased
+
+## `route.domains.trustProxy` takes a list of proxies (#1013)
+
+**New API (minor). Nothing to change in apps.** See [Several proxies](docs/domains.md#several-proxies).
+
+- `trustProxy` now also accepts an array of `{ hostHeader?, clientIpHeader?, secret }`, one per proxy. On each request the first entry whose secret header is present and matches decides the host and the client's address; the others are not consulted. Put the proxy furthest from the app first.
+- Every entry keeps the existing rules: the secret is compared in constant time, every entry's secret header is withheld from `proxy()` upstreams, and a bad entry fails the boot (now also: an empty list, an entry without `secret`, an entry with neither `hostHeader` nor `clientIpHeader`, two entries with the same secret value). Errors name the entry, e.g. `route.domains.trustProxy[1].secret.value`.
+- An entry without `hostHeader` only proves the client's address and never moves the host. The single-object form keeps its `X-Forwarded-Host` default and behaves exactly as before; `true` too.
+- `GEMI_CLIENT_IP_HEADER` / `GEMI_PROXY_SECRET_HEADER` / `GEMI_PROXY_SECRET` (#958) are unchanged. They already applied to apps with `route.domains` as the fallback after `trustProxy` (the docs said otherwise and are corrected); they still do. With a list, prefer listing every proxy in `trustProxy`.
+- Internal: `DomainResolver.proxySecretHeader` (string or `null`) is now `proxySecretHeaders` (a list).
+
 # Upgrading from 0.167.0 to 0.168.0
 
 ## AI: `onToolResult` gets the call's input (#1079)

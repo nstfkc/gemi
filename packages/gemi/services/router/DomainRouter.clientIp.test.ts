@@ -131,3 +131,72 @@ describe("route.domains.trustProxy.clientIpHeader still applies (#917)", () => {
     ).toBe("203.0.113.10");
   });
 });
+
+describe("route.domains.trustProxy as a list (#1013)", () => {
+  const domains: DomainsConfig = {
+    root: "example.com",
+    trustProxy: [
+      {
+        hostHeader: "x-original-host",
+        clientIpHeader: "x-client-ip",
+        secret: { header: "x-proxy-secret", value: PROXY_SECRET },
+      },
+      { clientIpHeader: "x-azure-clientip", secret: { header: "x-azure-fdid", value: FDID } },
+    ],
+  };
+  const workerThenFrontDoor = {
+    "x-client-ip": "203.0.113.9",
+    "x-proxy-secret": PROXY_SECRET,
+    "x-azure-clientip": "104.28.0.1",
+    "x-azure-fdid": FDID,
+    "x-forwarded-for": "104.28.0.1",
+    "x-real-ip": "104.28.0.1",
+  };
+
+  test("Worker -> Front Door -> app: the buyer, from the Worker's header", () => {
+    expect(applied(router({ domains }), workerThenFrontDoor)).toMatchObject({
+      forwardedFor: "203.0.113.9",
+      realIp: null,
+    });
+  });
+
+  test("Front Door -> app: the user, from Front Door's header", () => {
+    expect(
+      applied(router({ domains }), {
+        "x-azure-clientip": "198.51.100.7",
+        "x-azure-fdid": FDID,
+        "x-forwarded-for": "169.254.0.1",
+      }).forwardedFor,
+    ).toBe("198.51.100.7");
+  });
+
+  test("neither secret: the address GEMI_TRUST_PROXY settled on", () => {
+    expect(
+      applied(router({ domains }), {
+        "x-client-ip": "6.6.6.6",
+        "x-azure-clientip": "6.6.6.7",
+        "x-forwarded-for": "198.51.100.4",
+      }).forwardedFor,
+    ).toBe("198.51.100.4");
+  });
+
+  test("GEMI_CLIENT_IP_HEADER stays the fallback for a request no entry names the client for", () => {
+    const r = router({
+      domains: {
+        root: "example.com",
+        trustProxy: [
+          {
+            clientIpHeader: "x-client-ip",
+            secret: { header: "x-proxy-secret", value: PROXY_SECRET },
+          },
+        ],
+      },
+      clientIpTrust: frontDoor,
+    });
+    expect(applied(r, workerThenFrontDoor).forwardedFor).toBe("203.0.113.9");
+    expect(
+      applied(r, { "x-azure-clientip": "198.51.100.7", "x-azure-fdid": FDID }).forwardedFor,
+    ).toBe("198.51.100.7");
+    expect(applied(r, { "x-azure-clientip": "6.6.6.6" }).forwardedFor).toBeNull();
+  });
+});

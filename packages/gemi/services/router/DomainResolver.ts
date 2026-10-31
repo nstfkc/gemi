@@ -1,6 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
 import { normalizeIpEntry } from "../../http/clientAddress";
-import type { CustomDomainConfig, DomainGroupConfig, DomainsConfig } from "./config";
+import type {
+  CustomDomainConfig,
+  DomainGroupConfig,
+  DomainsConfig,
+  TrustProxyConfig,
+} from "./config";
 
 /** The group key the apex itself is served under. */
 export const ROOT_GROUP = "";
@@ -45,33 +50,94 @@ export function secretMatches(given: string | null, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** `trustProxy` in one shape: which headers, and the secret that unlocks them. */
+/**
+ * One trusted proxy: which headers it writes, and the secret that unlocks
+ * them. `header` is `null` for a list entry without `hostHeader`, which only
+ * names the client's address.
+ */
 interface HostTrust {
-  header: string;
+  header: string | null;
   clientIpHeader: string | null;
   secret: { header: string; value: string } | null;
 }
 
-function hostTrustOf(trustProxy: DomainsConfig["trustProxy"]): HostTrust | null {
+/** `trustProxy` as an ordered list of proxies, `[]` when it is off. */
+function hostTrustsOf(trustProxy: DomainsConfig["trustProxy"]): HostTrust[] {
   if (!trustProxy) {
-    return null;
+    return [];
   }
   if (trustProxy === true) {
-    return { header: DEFAULT_HOST_HEADER, clientIpHeader: null, secret: null };
+    return [{ header: DEFAULT_HOST_HEADER, clientIpHeader: null, secret: null }];
   }
-  return {
-    header: (trustProxy.hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase(),
-    clientIpHeader: trustProxy.clientIpHeader?.toLowerCase() ?? null,
-    secret: trustProxy.secret
-      ? { header: trustProxy.secret.header.toLowerCase(), value: trustProxy.secret.value }
+  const entries = Array.isArray(trustProxy) ? trustProxy : [trustProxy];
+  // The single-object form keeps its `x-forwarded-host` default; a list entry
+  // without `hostHeader` never moves the host.
+  const defaultHostHeader = Array.isArray(trustProxy) ? null : DEFAULT_HOST_HEADER;
+  return entries.map((entry) => ({
+    header: entry.hostHeader?.toLowerCase() ?? defaultHostHeader,
+    clientIpHeader: entry.clientIpHeader?.toLowerCase() ?? null,
+    secret: entry.secret
+      ? { header: entry.secret.header.toLowerCase(), value: entry.secret.value }
       : null,
-  };
+  }));
 }
 
 function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
   if (!trustProxy || trustProxy === true) {
     return;
   }
+  if (!Array.isArray(trustProxy)) {
+    assertValidTrustedProxy(trustProxy, "route.domains.trustProxy", DEFAULT_HOST_HEADER);
+    return;
+  }
+  if (trustProxy.length === 0) {
+    throw new Error(
+      "`route.domains.trustProxy` is an empty list. List at least one proxy, or leave `trustProxy` out.",
+    );
+  }
+  const secrets = new Map<string, number>();
+  trustProxy.forEach((entry, i) => {
+    const path = `route.domains.trustProxy[${i}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(
+        `\`${path}\` must be an object: { hostHeader?, clientIpHeader?, secret }. \`true\` is only accepted on its own.`,
+      );
+    }
+    // In a list the first entry whose secret matches wins, so an entry
+    // without one would claim every request and shadow everything after it.
+    if (!entry.secret) {
+      throw new Error(
+        `\`${path}.secret\` is required: in a list, each proxy proves itself with a secret of its own.`,
+      );
+    }
+    if (entry.hostHeader === undefined && entry.clientIpHeader === undefined) {
+      throw new Error(
+        `\`${path}\` names neither \`hostHeader\` nor \`clientIpHeader\`, so it would trust nothing.`,
+      );
+    }
+    assertValidTrustedProxy(entry, path, null);
+    // Two entries proven by one value are one proxy as far as gemi can tell:
+    // the second is never reached, or the proxies can pose as each other.
+    const seen = secrets.get(entry.secret.value);
+    if (seen !== undefined) {
+      throw new Error(
+        `\`${path}.secret.value\` is the same as \`route.domains.trustProxy[${seen}].secret.value\`. Give each proxy a secret of its own.`,
+      );
+    }
+    secrets.set(entry.secret.value, i);
+  });
+}
+
+/**
+ * One proxy's headers and secret. `defaultHostHeader` is what an absent
+ * `hostHeader` reads: `x-forwarded-host` in the single-object form, nothing
+ * in a list.
+ */
+function assertValidTrustedProxy(
+  trustProxy: TrustProxyConfig,
+  path: string,
+  defaultHostHeader: string | null,
+) {
   const { hostHeader, clientIpHeader, secret } = trustProxy;
   // One header, not a list: every header gemi reads the host from is one a
   // client may have got through, so each has to be one the proxy overwrites.
@@ -80,13 +146,14 @@ function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
     (typeof hostHeader !== "string" || !HEADER_NAME.test(hostHeader))
   ) {
     throw new Error(
-      `\`route.domains.trustProxy.hostHeader\` must be a single header name, e.g. "x-forwarded-host". Got ${JSON.stringify(hostHeader)}.`,
+      `\`${path}.hostHeader\` must be a single header name, e.g. "x-forwarded-host". Got ${JSON.stringify(hostHeader)}.`,
     );
   }
+  const effectiveHostHeader = (hostHeader ?? defaultHostHeader)?.toLowerCase() ?? null;
   if (clientIpHeader !== undefined) {
     if (typeof clientIpHeader !== "string" || !HEADER_NAME.test(clientIpHeader)) {
       throw new Error(
-        `\`route.domains.trustProxy.clientIpHeader\` must be a single header name, e.g. "x-client-ip". Got ${JSON.stringify(clientIpHeader)}.`,
+        `\`${path}.clientIpHeader\` must be a single header name, e.g. "x-client-ip". Got ${JSON.stringify(clientIpHeader)}.`,
       );
     }
     // Unlike the host, a forged address is not one the client "could have
@@ -94,38 +161,32 @@ function assertValidTrustProxy(trustProxy: DomainsConfig["trustProxy"]) {
     // itself may name it.
     if (!secret) {
       throw new Error(
-        "`route.domains.trustProxy.clientIpHeader` needs `secret`: without proof the proxy sent it, any client that reaches the app directly picks its own address.",
+        `\`${path}.clientIpHeader\` needs \`secret\`: without proof the proxy sent it, any client that reaches the app directly picks its own address.`,
       );
     }
-    if (clientIpHeader.toLowerCase() === (hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase()) {
-      throw new Error(
-        "`route.domains.trustProxy.clientIpHeader` names the same header as `hostHeader`.",
-      );
+    if (clientIpHeader.toLowerCase() === effectiveHostHeader) {
+      throw new Error(`\`${path}.clientIpHeader\` names the same header as \`hostHeader\`.`);
     }
     if (typeof secret.header === "string" && clientIpHeader.toLowerCase() === secret.header.toLowerCase()) {
-      throw new Error(
-        "`route.domains.trustProxy.clientIpHeader` names the same header as `secret.header`.",
-      );
+      throw new Error(`\`${path}.clientIpHeader\` names the same header as \`secret.header\`.`);
     }
   }
   if (!secret) {
     return;
   }
   if (typeof secret.header !== "string" || !HEADER_NAME.test(secret.header)) {
-    throw new Error(
-      `\`route.domains.trustProxy.secret.header\` must be a header name. Got "${secret.header}".`,
-    );
+    throw new Error(`\`${path}.secret.header\` must be a header name. Got "${secret.header}".`);
   }
-  if (secret.header.toLowerCase() === (hostHeader ?? DEFAULT_HOST_HEADER).toLowerCase()) {
+  if (secret.header.toLowerCase() === effectiveHostHeader) {
     throw new Error(
-      "`route.domains.trustProxy.secret.header` names the same header as `hostHeader`; the secret needs a header of its own.",
+      `\`${path}.secret.header\` names the same header as \`hostHeader\`; the secret needs a header of its own.`,
     );
   }
   // An unset environment variable lands here as `undefined`, and has to fail
   // the boot rather than quietly trust nothing — or, worse, anything.
   if (typeof secret.value !== "string" || secret.value.length < MIN_SECRET_LENGTH) {
     throw new Error(
-      `\`route.domains.trustProxy.secret.value\` must be at least ${MIN_SECRET_LENGTH} characters. A guessable one lets any client name its own host.`,
+      `\`${path}.secret.value\` must be at least ${MIN_SECRET_LENGTH} characters. A guessable one lets any client name its own host.`,
     );
   }
 }
@@ -240,7 +301,7 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
  */
 export class DomainResolver {
   readonly root: string;
-  private readonly hostTrust: HostTrust | null;
+  private readonly hostTrusts: HostTrust[];
   private readonly fixed = new Map<string, DomainGroupConfig>();
   private readonly param: (DomainGroupConfig & { name: string }) | null = null;
   private readonly custom: CustomDomainConfig | null;
@@ -253,13 +314,13 @@ export class DomainResolver {
   private readonly inFlight = new Map<string, Promise<Record<string, string> | null>>();
   /** The `ask` secret, or `null` when the endpoint is not served. */
   readonly askSecret: string | null;
-  /** The header `trustProxy.secret` arrives in, or `null` when there is none. */
-  readonly proxySecretHeader: string | null;
+  /** The headers every `trustProxy` secret arrives in, lowercased; `[]` when there is none. */
+  readonly proxySecretHeaders: readonly string[];
 
   constructor(config: DomainsConfig) {
     assertValidDomainsConfig(config);
     this.root = normalizeHost(config.root)!;
-    this.hostTrust = hostTrustOf(config.trustProxy);
+    this.hostTrusts = hostTrustsOf(config.trustProxy);
     for (const group of config.groups ?? []) {
       if (isParamSubdomain(group.subdomain)) {
         this.param = { ...group, name: group.subdomain.slice(1) };
@@ -270,42 +331,60 @@ export class DomainResolver {
     this.custom = config.custom ?? null;
     this.cacheTtlMs = this.custom?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     this.askSecret = config.ask?.secret ?? null;
-    this.proxySecretHeader = this.hostTrust?.secret?.header ?? null;
+    this.proxySecretHeaders = Array.from(
+      new Set(this.hostTrusts.flatMap((trust) => (trust.secret ? [trust.secret.header] : []))),
+    );
+  }
+
+  /**
+   * The proxy that sent `req`: the first `trustProxy` entry whose secret is
+   * present and matches (an entry without a secret — only possible in the
+   * single-object form — always does), or `null` when none does.
+   *
+   * Every entry's secret is compared, in constant time each, even after one
+   * matched, so how long this takes does not say which proxy, if any, a
+   * request passed for.
+   */
+  private trustOf(req: Request): HostTrust | null {
+    let found: HostTrust | null = null;
+    for (const trust of this.hostTrusts) {
+      const matches =
+        !trust.secret || secretMatches(req.headers.get(trust.secret.header), trust.secret.value);
+      if (matches && !found) {
+        found = trust;
+      }
+    }
+    return found;
   }
 
   /**
    * The host the trusted proxy says the client addressed — the first entry of
-   * `trustProxy`'s host header, as sent — or `null` when there is no trusted
-   * proxy, its secret is missing or wrong, or it sent no host.
+   * its host header, as sent — or `null` when no proxy's secret matches, the
+   * one that does has no host header, or it sent no host.
    *
    * A request without the secret is not refused, just routed by its own host:
    * that is a host the client could have sent anyway, so it gains nothing, and
    * the platform's health checks and its own domain for the app keep working.
    */
   private forwardedHost(req: Request): string | null {
-    const trust = this.hostTrust;
-    if (!trust) {
+    const header = this.trustOf(req)?.header;
+    if (!header) {
       return null;
     }
-    if (trust.secret && !secretMatches(req.headers.get(trust.secret.header), trust.secret.value)) {
-      return null;
-    }
-    return req.headers.get(trust.header)?.split(",")[0]?.trim() || null;
+    return req.headers.get(header)?.split(",")[0]?.trim() || null;
   }
 
   /**
-   * The client address `trustProxy.clientIpHeader` names — its first entry,
-   * without a port —
-   * or `null` when no such header is configured, the secret is missing or
-   * wrong, or the header is absent or not an IPv4/IPv6 address.
+   * The client address the trusted proxy's `clientIpHeader` names — its first
+   * entry, without a port — or `null` when no proxy's secret matches, the one
+   * that does has no `clientIpHeader`, or the header is absent or not an
+   * IPv4/IPv6 address. Only the proxy whose secret matched is read: a later
+   * entry is not a fallback for an earlier one.
    */
   trustedClientIp(req: Request): string | null {
-    const trust = this.hostTrust;
+    const trust = this.trustOf(req);
     // `clientIpHeader` cannot be configured without `secret` (boot check).
     if (!trust?.clientIpHeader || !trust.secret) {
-      return null;
-    }
-    if (!secretMatches(req.headers.get(trust.secret.header), trust.secret.value)) {
       return null;
     }
     const first = req.headers.get(trust.clientIpHeader)?.split(",")[0];

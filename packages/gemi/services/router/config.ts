@@ -264,6 +264,28 @@ export interface TrustProxyConfig {
   secret?: { header: string; value: string };
 }
 
+/**
+ * One entry of `route.domains.trustProxy` in its list form: a proxy that
+ * proves itself with a secret of its own. Unlike the single-object form,
+ * `secret` is required, and `hostHeader` has no default — an entry without
+ * one only names the client's address and never moves the host.
+ */
+export interface TrustedProxyConfig {
+  /**
+   * The header this proxy writes the client's host into. Left out, a request
+   * this entry claims is routed by its own `Host`.
+   */
+  hostHeader?: string;
+  /** The header this proxy writes the client's IP address into. See {@link TrustProxyConfig.clientIpHeader}. */
+  clientIpHeader?: string;
+  /**
+   * What proves this proxy sent the request: a header and the value it must
+   * carry, at least 16 characters, compared in constant time and withheld
+   * from `proxy()` upstreams. Each entry needs a secret value of its own.
+   */
+  secret: { header: string; value: string };
+}
+
 // Config key: `route.domains`. Optional: without it every host is served by
 // the root routers, exactly as before.
 export interface DomainsConfig {
@@ -283,9 +305,14 @@ export interface DomainsConfig {
    * trusting it depend on a shared secret the proxy sends, and can name a
    * header that carries the client's IP address — see {@link TrustProxyConfig}.
    *
+   * A list trusts several proxies, each proven by its own secret: on each
+   * request the first entry whose secret header is present and matches
+   * decides both the host and the client's address, and the others are not
+   * consulted. See {@link TrustedProxyConfig}.
+   *
    * The scheme is read from `X-Forwarded-Proto` whether or not this is set.
    */
-  trustProxy?: boolean | TrustProxyConfig;
+  trustProxy?: boolean | TrustProxyConfig | TrustedProxyConfig[];
 
   groups?: DomainGroupConfig[];
 

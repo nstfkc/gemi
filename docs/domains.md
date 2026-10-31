@@ -52,7 +52,7 @@ export default defineRouteConfig({
 | Field | Type | Purpose |
 | --- | --- | --- |
 | `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
-| `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? }` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. See [Behind a proxy](#behind-a-proxy). |
+| `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? } \| Array<{ hostHeader?, clientIpHeader?, secret }>` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. A list trusts [several proxies](#several-proxies), each with its own secret. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
@@ -66,7 +66,10 @@ A malformed config fails the boot. That covers a `root` that is not a bare hostn
 path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
 that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, `ask` on an app whose
 param group has no `exists`, a `trustProxy` header that is not a header name, a `trustProxy.secret.value`
-under 16 characters or unset, and a `trustProxy.clientIpHeader` without a `secret`.
+under 16 characters or unset, and a `trustProxy.clientIpHeader` without a `secret`. In the list form it
+also covers an empty list, an entry without a `secret`, an entry with neither `hostHeader` nor
+`clientIpHeader`, and two entries with the same secret value. The error names the entry, e.g.
+`route.domains.trustProxy[1].secret.value`.
 
 ## How a host is matched
 
@@ -232,8 +235,51 @@ On a request that carries the secret, the first comma-separated entry of `client
 
 - **It requires `secret`.** A host the client forges is one it could have sent anyway, but a forged address chooses its own rate-limit bucket. A `clientIpHeader` without a `secret` fails the boot.
 - Without the secret, or with a wrong one, the header is ignored and the address is whatever `GEMI_TRUST_PROXY` settled on. The same applies when the header is missing or is not an IPv4 or IPv6 address. A value with a port (`203.0.113.9:443`, `[2001:db8::1]:443`) is read without it. Requests that reach the app directly keep working as before.
-- An app that does not declare `route.domains` gets the same through the environment: see [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header).
+- An app that does not declare `route.domains` gets the same through the environment: see [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header). With `route.domains`, that is the fallback for a request `trustProxy` names no client for. To trust two proxies, prefer a [list](#several-proxies), which keeps both in one place.
 - It must be a header name, and it must differ from `hostHeader` and `secret.header`. The proxy has to **set** the header, not append to it, so a value the visitor sent cannot get through.
+
+### Several proxies
+
+`trustProxy` also takes a list, for an app that more than one proxy reaches. Each entry is a proxy that proves itself with a secret of its own. On each request, **the first entry whose secret header is present and matches wins**: its `hostHeader` and `clientIpHeader` are read, and the entries after it are not consulted.
+
+A shop served through a Cloudflare Worker that calls Azure Front Door, next to a panel that Front Door serves directly:
+
+```text
+buyer -> Worker (X-Original-Host, X-Client-IP, X-Proxy-Secret) -> Front Door (X-Azure-ClientIP, X-Azure-FDID) -> app
+user  -> Front Door (X-Azure-ClientIP, X-Azure-FDID) -> app
+```
+
+```ts
+domains: {
+  root: "example.com",
+  trustProxy: [
+    // The Worker. Listed first: its requests carry Front Door's FDID too, and
+    // Front Door's X-Azure-ClientIP for them is the Worker's address.
+    {
+      hostHeader: "x-original-host",
+      clientIpHeader: "x-client-ip",
+      secret: { header: "x-proxy-secret", value: process.env.SHOP_PROXY_SECRET! },
+    },
+    // Front Door on its own. It reaches the app with the origin's own host in
+    // `Host` and passes the client's host in X-Forwarded-Host.
+    {
+      hostHeader: "x-forwarded-host",
+      clientIpHeader: "x-azure-clientip",
+      secret: { header: "x-azure-fdid", value: process.env.FRONT_DOOR_ID! },
+    },
+  ],
+  // …
+}
+```
+
+- **Order matters.** Put the proxy furthest from the app first. A request that came through the Worker also carries Front Door's secret, so with Front Door listed first every buyer would get the Worker's address.
+- **`secret` is required on every entry.** An entry without one would match every request and shadow the rest. Each entry needs a secret value of its own; two entries may share a secret header if their values differ.
+- **Each entry names its own `hostHeader`.** An entry without one only proves the client's address and never moves the host, not even to `X-Forwarded-Host`: the request is routed by its own `Host`. (The single-object form keeps its `X-Forwarded-Host` default.) Behind a proxy that reaches the app on the origin's own host, as Front Door does, name the header that carries the client's host, or every request lands on the origin's hostname.
+- **A later entry is not a fallback for an earlier one.** When the winning entry has no `clientIpHeader`, or its header is missing or not an address, the next entry's header is not read: for a request through the Worker, Front Door's header names the Worker. The address is then what [`GEMI_CLIENT_IP_HEADER`](./configuration.md#a-trusted-client-ip-header-gemi_client_ip_header) gives, if set, or else what `GEMI_TRUST_PROXY` settled on.
+- **A request no secret matches** is routed by its own `Host`, and its address is what `GEMI_CLIENT_IP_HEADER` gives, if set, or else what `GEMI_TRUST_PROXY` settled on. A forged `X-Proxy-Secret` sent through Front Door therefore falls through to Front Door's entry.
+- **Every entry's secret header is withheld** from what a `proxy()` route forwards upstream, on every request, whether or not it matched.
+
+The single-object form behaves exactly as before. A one-entry list is the same as the object, except that the list entry requires `secret` and has no default `hostHeader`.
 
 ## On-demand TLS for custom domains
 

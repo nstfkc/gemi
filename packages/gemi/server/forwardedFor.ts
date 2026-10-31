@@ -101,9 +101,9 @@ export function applyForwardedTrust(
 /**
  * A header a proxy in front writes the client's address into, believed only on
  * a request that carries a secret only that proxy sends. Set with
- * `GEMI_CLIENT_IP_HEADER`, `GEMI_PROXY_SECRET_HEADER` and `GEMI_PROXY_SECRET`,
- * for an app that does not declare `route.domains` (whose
- * `trustProxy.clientIpHeader` does the same). Behind Azure Front Door:
+ * `GEMI_CLIENT_IP_HEADER`, `GEMI_PROXY_SECRET_HEADER` and `GEMI_PROXY_SECRET`.
+ * With `route.domains`, its `trustProxy` entries are tried first and this is
+ * the fallback for a request none of them claims. Behind Azure Front Door:
  * `X-Azure-ClientIP`, proven by `X-Azure-FDID` carrying the profile's ID.
  */
 export interface ClientIpHeaderTrust {
