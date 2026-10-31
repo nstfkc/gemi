@@ -140,6 +140,30 @@ export interface ViewRouteConfig {
   meta?: DefaultViewMeta | ((req: HttpRequest) => DefaultViewMeta | Promise<DefaultViewMeta>);
 
   /**
+   * Whether the files the build copied out of `public/` (`/robots.txt`,
+   * `/favicon.ico`, ...) are served on these views' hosts (#1015). `false`
+   * hands those paths to these views' routes instead, e.g. a `route.domains`
+   * group whose `/robots.txt` is a route of its own while the root keeps the
+   * static file. `/.well-known/*` and the build's `/assets/*` are served
+   * either way. A group inherits the root's value or sets its own.
+   * Default: `true`.
+   */
+  publicFiles?: boolean;
+
+  /**
+   * Whether these views' routes may answer under `/assets` (#1015). The build
+   * output is still served first, so the pages' own chunks, islands and
+   * fonts load; a path under `/assets` the build has no file for reaches the
+   * routes instead of gemi's `404`. A missing `/assets/*.js` (or `.mjs`)
+   * chunk keeps gemi's reload stub, so a route there is never reached. With
+   * it the boot no longer refuses routes under `/assets`. Meant for a
+   * `route.domains` group with a URL space of its own there (e.g. legacy
+   * media URLs). A group inherits the root's value or sets its own.
+   * Default: `false`.
+   */
+  assetRoutes?: boolean;
+
+  /**
    * Whether browsers and Google Search may translate these views (#1087).
    * `<Head />` renders `<meta name="google" content="notranslate">` unless
    * this is `true`. Meant for a `route.domains` group of public content (a
@@ -425,6 +449,8 @@ export function viewRouteConfigDefaults(): Omit<
     partialRendering: true,
     localeRouting: "prefix",
     theme: {},
+    publicFiles: true,
+    assetRoutes: false,
     onNotFound: () => {},
     onRequestStart: () => {},
     onRequestEnd: () => {},

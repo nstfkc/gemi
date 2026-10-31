@@ -9,7 +9,7 @@ import {
 } from "./DomainResolver";
 import type { AuthConfig } from "../../auth/config";
 import type { ApiRouteConfig, DomainGroupRouters, DomainsConfig, ViewRouteConfig } from "./config";
-import { setRequestDomain, withholdFromUpstream } from "../../http/requestDomain";
+import { requestDomain, setRequestDomain, withholdFromUpstream } from "../../http/requestDomain";
 import { type ClientIpHeaderTrust, trustedHeaderClientIp } from "../../server/forwardedFor";
 
 /**
@@ -18,6 +18,15 @@ import { type ClientIpHeaderTrust, trustedHeaderClientIp } from "../../server/fo
  * proxy calls it on whatever host it reaches the app by.
  */
 export const DOMAIN_ASK_PATH = "/__gemi__/domains/ask";
+
+/**
+ * How the servers serve static files to a request's host (#1015): see
+ * `ViewRouteConfig.publicFiles` and `ViewRouteConfig.assetRoutes`.
+ */
+export interface StaticFilesPolicy {
+  publicFiles: boolean;
+  assetRoutes: boolean;
+}
 
 export interface DomainDispatchers {
   api: ApiRouteDispatcher;
@@ -43,6 +52,12 @@ export class DomainRouter {
    */
   readonly clientIpTrust: ClientIpHeaderTrust | null;
   private readonly groups = new Map<string, DomainDispatchers>();
+  /**
+   * Whether any group serves static files differently from the root, so a
+   * static file request has to resolve its host first. Without one, the
+   * root's policy answers every request and no host is resolved for it.
+   */
+  private staticFilesVary = false;
 
   constructor(
     root: DomainDispatchers,
@@ -75,6 +90,20 @@ export class DomainRouter {
     if (domains.custom?.fallback) {
       this.groups.set(FALLBACK_GROUP, build(domains.custom.fallback));
     }
+    this.staticFilesVary = this.viewDispatchers().some(
+      (view) => view.publicFiles !== root.view.publicFiles || view.assetRoutes !== root.view.assetRoutes,
+    );
+  }
+
+  /**
+   * How static files are served to `req`'s host (#1015): its group's view
+   * config, or the root's for a host no group serves. Resolves the host (and
+   * records it for `route`, which then reuses it) only when some group
+   * differs from the root.
+   */
+  async staticFiles(req: Request): Promise<StaticFilesPolicy> {
+    const view = (this.staticFilesVary ? await this.route(req) : null)?.view ?? this.dispatchers(null).view;
+    return { publicFiles: view.publicFiles, assetRoutes: view.assetRoutes };
   }
 
   /**
@@ -120,7 +149,8 @@ export class DomainRouter {
     for (const header of this.resolver.proxySecretHeaders) {
       withholdFromUpstream(req, header);
     }
-    const domain = await this.resolver.resolve(req);
+    // `staticFiles` may have resolved it already, for the same request.
+    const domain = requestDomain(req) ?? (await this.resolver.resolve(req));
     if (!domain) {
       return null;
     }

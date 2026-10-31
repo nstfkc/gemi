@@ -189,7 +189,7 @@ export function assertNoReservedRoutePaths(routePaths: string[]) {
       `View route path${many ? "s" : ""} ${reserved.map((path) => `"${path}"`).join(", ")} ` +
         `use${many ? "" : "s"} the reserved "${RESERVED_ROUTE_PREFIX}" prefix. ` +
         `The client build output is served from there before the router runs, so the route would never match. ` +
-        `Mount it somewhere else.`,
+        `Mount it somewhere else, or set \`assetRoutes: true\` on these views' config (route.view or a route.domains group's view).`,
     );
   }
 }
@@ -296,6 +296,12 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.notFound`. */
   readonly notFound: ViewRouteConfig["notFound"];
 
+  /** See `ViewRouteConfig.publicFiles`. */
+  readonly publicFiles: boolean;
+
+  /** See `ViewRouteConfig.assetRoutes`. */
+  readonly assetRoutes: boolean;
+
   /** See `ViewRouteConfig.translate`. */
   readonly translate: boolean | undefined;
 
@@ -311,6 +317,9 @@ export class ViewRouteDispatcher {
     this.theme = config.theme ?? defaults.theme;
     this.defaultMeta = config.meta;
     this.notFound = config.notFound;
+    this.publicFiles = config.publicFiles ?? defaults.publicFiles;
+    this.assetRoutes = config.assetRoutes ?? defaults.assetRoutes;
+
     this.translate = config.translate;
 
     this.hooks = {
@@ -329,7 +338,11 @@ export class ViewRouteDispatcher {
       authViewRequirements(auth).map(({ view, requiredBy }) => [view, requiredBy]),
     );
     this.flatViewRoutes = createFlatViewRoutes(routes);
-    assertNoReservedRoutePaths(Object.keys(this.flatViewRoutes));
+    // A group that owns `/assets` (#1015) is served there whenever the build
+    // has no file, so its routes are reachable.
+    if (!this.assetRoutes) {
+      assertNoReservedRoutePaths(Object.keys(this.flatViewRoutes));
+    }
     this.routeManifest = createRouteManifest(routes);
     this.clientRouteManifest = Object.fromEntries(
       Object.entries(this.routeManifest).filter(([, views]) => views.at(-1) !== "FILE"),

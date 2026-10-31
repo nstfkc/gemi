@@ -58,7 +58,7 @@ export class SeoController extends Controller {
 }
 ```
 
-A static `public/robots.txt` or `public/sitemap.xml` is served before your routes, so remove it when a route takes over.
+A static `public/robots.txt` or `public/sitemap.xml` is served before your routes, so remove it when a route takes over. To keep it for the app and give a [`route.domains`](./domains.md#static-files-on-a-groups-hosts) group (a storefront, published sites) a `/robots.txt` route of its own, set `publicFiles: false` on that group's `view`.
 
 ## Writing a sitemap
 

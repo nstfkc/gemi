@@ -112,6 +112,16 @@ export class App {
     this.kernel.domains().applyClientIp(req);
   }
 
+  /**
+   * How the servers serve static files to `req`'s host (#1015): whether the
+   * files copied out of `public/` are served, and whether a miss under
+   * `/assets` reaches the routes. Resolves the host only when a
+   * `route.domains` group sets either differently from the root.
+   */
+  public async staticFiles(req: Request): Promise<{ publicFiles: boolean; assetRoutes: boolean }> {
+    return this.kernel.run.call(this.kernel, () => this.kernel.domains().staticFiles(req));
+  }
+
   public getRouteManifest() {
     return this.kernel.viewRoutes().routeManifest;
   }

@@ -1,6 +1,6 @@
 import { stringEraRefusal } from "../http/Error";
-import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { join, sep } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import { missingRequiredViewError } from "./requiredViews";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
@@ -218,6 +218,37 @@ function devScript(req: Request): Response | null {
 }
 
 /**
+ * Whether `pathname` names a file in the app's `public/`, which Vite serves
+ * as is. Outside `/assets` and dot-named paths, as in production; a
+ * malformed escape or a path that climbs out of the directory names none.
+ */
+function isPublicFile(vite: ViteDevServer, pathname: string): boolean {
+  const publicDir = vite.config?.publicDir;
+  if (!publicDir || pathname === "/assets" || pathname.startsWith("/assets/")) {
+    return false;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return false;
+  }
+  // Dot-named files (`/.well-known/*`) are served on every host, as in production.
+  if (decoded.split("/").some((segment) => segment.startsWith("."))) {
+    return false;
+  }
+  const path = join(publicDir, decoded);
+  if (!path.startsWith(publicDir + sep)) {
+    return false;
+  }
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The dev server's `fetch` handler, apart from `Bun.serve` and from creating
  * Vite, so a test can hand it a stub Vite server and drive it with plain
  * `Request`s. `httpDev` is the only other caller. This module has no import
@@ -269,7 +300,10 @@ export function createDevFetch(
       }
       try {
         const handler = app.fetch.bind(app);
-        const result = (await viteMiddleware(vite, req)) ?? (await handler(req));
+        // Vite serves `public/` on every host; a host whose views opt out
+        // (#1015) gets its routes there, as in production.
+        const skipVite = isPublicFile(vite, pathname) && !(await app.staticFiles(req)).publicFiles;
+        const result = (skipVite ? null : await viteMiddleware(vite, req)) ?? (await handler(req));
         if (result instanceof Response) {
           return result;
         }
