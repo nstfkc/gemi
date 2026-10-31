@@ -61,6 +61,20 @@ expectTypeOf<Jsonify<{ v: void; n: number }>>().toEqualTypeOf<{ v?: never; n: nu
 const missingVoid: Jsonify<{ v: void; n: number }> extends { v: unknown } ? true : false = true;
 void missingVoid;
 
+// A member whose `toJSON()` answers `undefined` is dropped by
+// `JSON.stringify`: gone when it always does, optional when it may.
+type Hidden = { toJSON(): undefined };
+type Maybe = { toJSON(): string | undefined };
+expectTypeOf<Jsonify<{ secret: Hidden; id: string }>>().toEqualTypeOf<{ id: string }>();
+expectTypeOf<Jsonify<{ m: Maybe; id: string }>>().toEqualTypeOf<{ m?: string; id: string }>();
+// @ts-expect-error may be missing
+const required: Jsonify<{ m: Maybe }> extends { m: string } ? true : false = true;
+void required;
+
+// Weak types (every member optional) are mapped, under strict too.
+expectTypeOf<Jsonify<{ a?: string }>>().toEqualTypeOf<{ a?: string }>();
+expectTypeOf<Jsonify<{ a?: Date }>>().toEqualTypeOf<{ a?: string }>();
+
 // An `any` member stays as it is, required.
 expectTypeOf<Jsonify<{ a: any; d: Date }>>().toEqualTypeOf<{ a: any; d: string }>();
 

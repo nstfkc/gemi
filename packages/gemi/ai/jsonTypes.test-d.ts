@@ -66,10 +66,17 @@ const plainWrite = AgentTool.create({
   execute: async () => ({ rowsAffected: 3 }),
 });
 
+const optionalOnly = AgentTool.create({
+  name: "optionalOnly",
+  description: "An output whose members are all optional",
+  inputSchema: s.object({ q: s.string() }),
+  execute: async (): Promise<{ at?: Date; note?: string }> => ({}),
+});
+
 const jsonAgent = Agent.create({
   name: "json",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [grantAccess, importRows, plainWrite],
+  tools: [grantAccess, importRows, plainWrite, optionalOnly],
 });
 
 class JsonChat extends AgentController<typeof jsonAgent> {
@@ -171,6 +178,28 @@ describe("Jsonify", () => {
     void id;
   });
 
+  test("an object whose members are all optional is not `unknown` (strict: false)", () => {
+    // Without strictNullChecks `unknown` is assignable to a weak type, which
+    // must not make `Jsonify` answer `unknown` for it.
+    expectTypeOf<Jsonify<{ a?: string }>>().toEqualTypeOf<{ a?: string }>();
+    expectTypeOf<Jsonify<{ a?: Date }>>().toEqualTypeOf<{ a?: string }>();
+    expectTypeOf<Jsonify<{ at?: Date; note?: string }>>().toEqualTypeOf<{
+      at?: string;
+      note?: string;
+    }>();
+    expectTypeOf<Jsonify<{ outer?: { at?: Date } }>>().toEqualTypeOf<{
+      outer?: { at?: string };
+    }>();
+    // @ts-expect-error not `unknown`: a wrong member type is refused
+    const wrong: Jsonify<{ a?: Date }> = { a: 1 };
+    void wrong;
+  });
+
+  test("a member whose toJSON() answers undefined is gone", () => {
+    type Hidden = { toJSON(): undefined };
+    expectTypeOf<Jsonify<{ secret: Hidden; id: string }>>().toEqualTypeOf<{ id: string }>();
+  });
+
   test("a Date is not what arrives", () => {
     // @ts-expect-error a Date became a string
     const at: Date = {} as Jsonify<{ at: Date }>["at"];
@@ -243,6 +272,9 @@ describe("output and progress on the client", () => {
     }
     if (part.name === "plainWrite" && part.status === "ok") {
       expectTypeOf(part.output).toEqualTypeOf<{ rowsAffected: number }>();
+    }
+    if (part.name === "optionalOnly" && part.status === "ok") {
+      expectTypeOf(part.output).toEqualTypeOf<{ at?: string; note?: string }>();
     }
   });
 
