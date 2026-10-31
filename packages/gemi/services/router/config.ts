@@ -119,6 +119,12 @@ export interface ViewRouteConfig {
    * With `notFound` set, what it returns is the props of `notFound.view` on
    * the document (e.g. the tenant's name and logo for a branded page). It is
    * not used otherwise: the app's hydrated `404` view takes no props.
+   *
+   * With `localeRouting: "off"`, the not-found page renders in the locale
+   * current when the request ended (#1099), so `Lang.setLocale(locale,
+   * { cookie: false })` here (or in a handler before it threw) sets it: its
+   * `useDictionary`, its `lang` and the default `meta` follow it, matched
+   * pages keep theirs. On locale-routed views the URL decides.
    */
   onNotFound?: (
     req: HttpRequest,

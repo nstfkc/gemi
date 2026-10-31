@@ -1652,6 +1652,26 @@ export class ViewRouteDispatcher {
           notFoundProps = await this.hooks.onNotFound(httpRequest, {
             status: refusedStatus ?? 404,
           });
+          // Out of locale routing, the not-found page renders in the locale
+          // current now, so `onNotFound` (or a handler before it threw) may
+          // pick it with `Lang.setLocale` (#1099). `detectLocale` runs
+          // before anyone knows the request ends here, so a rule meant only
+          // for the 404 (say, `Accept-Language` where pages ignore it) has
+          // nowhere else to live. Matched pages keep the payload decided
+          // above; on locale-routed views the URL decides.
+          if (isI18nEnabled && !localeRouted && ctx.locale && ctx.locale !== i18n.currentLocale) {
+            const locale = ctx.locale;
+            i18n = {
+              ...i18n,
+              currentLocale: locale,
+              dictionary: {
+                [locale]: hasLegacyDictionaries
+                  ? translator.getPageTranslations(locale, httpRequest.routePath)
+                  : {},
+              },
+            };
+            await preloadDictionaries(locale);
+          }
         }
 
         // The app's default fills whatever the handlers left unset (#1042).
