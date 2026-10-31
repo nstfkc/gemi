@@ -1,3 +1,14 @@
+# Unreleased
+
+## `route.domains`: a group may own `/robots.txt` and `/assets/*` (#1015)
+
+**New API (minor). Nothing to change in apps.** See [Static files on a group's hosts](docs/domains.md#static-files-on-a-groups-hosts).
+
+- `view.publicFiles: false` (on a `route.domains` group's `view`, or the root's): the files copied out of `public/` are not served on those hosts; their paths (`/robots.txt`, `/favicon.ico`, ...) reach the group's routes. `/.well-known/*` is served everywhere either way. Applies to `gemi dev` too.
+- `view.assetRoutes: true`: those views' routers may declare routes under `/assets` (the boot check is skipped for them), and a path under `/assets` the build has no file for reaches them instead of a 404. Build files are still served first on every host; a missing `/assets/*.js` / `.mjs` keeps the chunk reload stub.
+- A group inherits the root `view`'s values unless it sets its own. Without either, nothing changes, and no host is resolved for a static file request.
+- New: `App.staticFiles(req)`, which the servers call. `DomainRouter.route` reuses a host the same request already resolved.
+
 # Upgrading from 0.169.0 to 0.170.0
 
 ## `route.view.notFound`: a group's own static not-found page (#828)

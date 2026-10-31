@@ -56,6 +56,8 @@ export default defineRouteConfig({
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
+| `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
 | `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
@@ -323,6 +325,64 @@ Caddy appends `&domain=<host>` to whatever URL you give it, so the secret goes i
 A host served only by `custom.fallback` is never approved, by design. Under on-demand TLS that means the fallback is reachable only over plaintext or with a certificate you already hold.
 
 `custom.resolve` answers are cached for `cacheTtlMs`, and the cache evicts least-recently-used, so a burst of unknown hosts cannot flush your real customers out of it. Concurrent requests for the same cold host share one `resolve` call. `DomainResolver.forget(host)` drops one answer early — call it when a customer changes their domain, rather than waiting out the TTL.
+
+## Static files on a group's hosts
+
+Two kinds of path are answered before host matching, the same on every host:
+the files the build copied out of `public/` (a `public/robots.txt` is
+`/robots.txt` everywhere), and `/assets/*`, the client build's output, where
+the router refuses routes at boot. A group whose hosts serve other content (a
+storefront next to the app's panel) can take either over in its `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    {
+      subdomain: ":shop",
+      view: {
+        rootRouter: ShopViewRouter,
+        // `/robots.txt`, `/favicon.ico`, ... come from ShopViewRouter, not `public/`.
+        publicFiles: false,
+        // `/assets/products/42.jpg` can be a route of ShopViewRouter.
+        assetRoutes: true,
+      },
+    },
+  ],
+  custom: { group: ":shop", resolve: resolveShop },
+},
+```
+
+```typescript
+// app/http/routes/shop.ts
+export default class ShopViewRouter extends ViewRouter {
+  routes = {
+    "/robots.txt": this.file(ShopSeoController, "robots").middleware(["no-locale"]),
+    "/assets/:path*": this.file(ShopMediaController, "legacy"),
+    // ...
+  };
+}
+```
+
+- `publicFiles: false` hands every path that names a file in `public/` to the
+  group's routes; a path with no route there gets the group's 404. The root,
+  and every group that does not set it, keep serving the files.
+  `/.well-known/*` is served on every host either way.
+- `assetRoutes: true` lets the group's routers declare routes under
+  `/assets`. The build's files are still served first, on every host, so the
+  group's own pages load their chunks, islands and fonts; only a path the
+  build has no file for reaches the routes. A missing `/assets/*.js` (or
+  `.mjs`) keeps gemi's [reload stub](./configuration.md) for a chunk of
+  another release, so a route there is never reached.
+- Both are view config, so a group inherits the root `view`'s value unless it
+  sets its own, and a group that brings no `view` serves what the root does.
+  A custom domain is served as its `custom.group`.
+- Other paths, `/image/*` for one, were never reserved: a group's routes
+  answer them as they answer any path.
+- The host is resolved for a static file request only when some group sets
+  either option differently from the root, and only for a path that needs
+  it. The resolution is reused by the route that answers.
 
 ## Development
 

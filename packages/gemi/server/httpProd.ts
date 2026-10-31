@@ -15,7 +15,7 @@ import {
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
-import { isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
+import { isBuildChunkPath, isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
 import { BUILD_HEADER } from "../client/chunkLoadRecovery";
 import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
@@ -226,10 +226,15 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
 
     const distPath = clientFilePath(pathname);
-    const isFileRequest =
-      isReservedAssetPath(pathname) ||
-      pathname.startsWith("/.well-known") ||
-      (distPath !== null && publicFiles.has(distPath));
+    const isAssetPath = isReservedAssetPath(pathname);
+    const isPublicFile = !isAssetPath && distPath !== null && publicFiles.has(distPath);
+    const isFileRequest = isAssetPath || pathname.startsWith("/.well-known") || isPublicFile;
+
+    // A host whose views opt out of `public/` (#1015) gets its routes there,
+    // e.g. a `/robots.txt` of its own.
+    if (isPublicFile && !(await staticFilesPolicy(req)).publicFiles) {
+      return await handleWithApp(req, pathname);
+    }
 
     if (isFileRequest) {
       // Served from here whatever the asset base is: a CDN in front of the
@@ -242,6 +247,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // with the response already committed as 200. So existence is checked
       // here, per request, even for a path `publicFiles` lists.
       if (!distPath || !(await isFile(distPath))) {
+        // A host whose views own `/assets` (#1015) gets its routes for what
+        // the build has no file for; a missing chunk keeps its reload stub.
+        if (isAssetPath && !isBuildChunkPath(pathname) && (await staticFilesPolicy(req)).assetRoutes) {
+          return await handleWithApp(req, pathname);
+        }
         return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
       }
 
@@ -264,6 +274,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       } catch {}
     }
     return response;
+  }
+
+  // How static files are served to the request's host (#1015). An app
+  // built against a gemi without it serves them as before.
+  async function staticFilesPolicy(req: Request) {
+    return (await app.staticFiles?.(req)) ?? { publicFiles: true, assetRoutes: false };
   }
 
   async function handleWithApp(req: Request, pathname: string) {
