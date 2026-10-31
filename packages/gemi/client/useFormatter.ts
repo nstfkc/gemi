@@ -5,7 +5,7 @@ import {
   isValidTimeZone,
   type Formatter,
 } from "../i18n/formatter";
-import { useRouteData } from "./useRouteData";
+import { usePageI18n } from "./IslandI18nContext";
 
 /**
  * Format dates, numbers, relative times and lists in the active locale and the
@@ -28,7 +28,7 @@ import { useRouteData } from "./useRouteData";
 export function useFormatter(
   options: { locale?: string; timeZone?: string } = {},
 ): Formatter {
-  const { i18n } = useRouteData();
+  const i18n = usePageI18n();
   const locale =
     options.locale ?? i18n?.currentLocale ?? i18n?.defaultLocale ?? "en-US";
   // An explicit zone is trusted and throws from `Intl` if it is wrong, like a

@@ -46,6 +46,14 @@ export { h } from ${JSON.stringify(ISLAND_RUNTIME_ID)};
  * `data-uid` is the `identifierPrefix` the server rendered the island with, so
  * `useId` agrees on both sides and two islands never share an id.
  *
+ * When the page carries `#gemi-island-i18n` (its islands read the page's
+ * locale or dictionaries, #1095), the dictionaries in it are seeded into the
+ * dictionary registry through `__GEMI_DICT__` and the island's root gets the
+ * locale and zone in `IslandI18nContext` (found on `globalThis`, where
+ * `gemi/client` puts it), so `useDictionary` resolves synchronously, with the
+ * strings the server rendered, and fetches nothing. An island that does not
+ * import `gemi/client` has no such context to read, and is left as it was.
+ *
  * Written as a function body with `createElement` and `hydrateRoot` free, so a
  * test can run it against real React without a bundler.
  */
@@ -69,7 +77,18 @@ export const ISLAND_HYDRATE_SOURCE = `function h(marker, Component) {
         dangerouslySetInnerHTML: { __html: slot.innerHTML },
       })]
     : [];
-  return hydrateRoot(marker, createElement(Component, props, ...children), {
+  let element = createElement(Component, props, ...children);
+  const i18n = document.getElementById("gemi-island-i18n");
+  const context = globalThis[Symbol.for("gemi.islandI18n")];
+  if (i18n && context) {
+    const payload = (i18n.p = i18n.p || JSON.parse(i18n.textContent));
+    const dictionaries = (self.__GEMI_DICT__ = self.__GEMI_DICT__ || []);
+    for (const entry of payload.dictionaries || []) dictionaries.push(entry);
+    element = createElement(context.Provider, {
+      value: { currentLocale: payload.currentLocale, defaultLocale: payload.defaultLocale, timeZone: payload.timeZone },
+    }, element);
+  }
+  return hydrateRoot(marker, element, {
     identifierPrefix: marker.getAttribute("data-uid") || undefined,
   });
 }`;

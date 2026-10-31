@@ -1,5 +1,14 @@
 # Unreleased
 
+## i18n: `useDictionary` inside islands on static pages (#1095)
+
+**New behaviour (minor). Nothing to change in apps.** See [Context](docs/static-views-and-islands.md#context).
+
+- On a `.static()` page, an island's own root now gets the page's locale and time zone: `useDictionary` and `useFormatter` inside an island render in the page's resolved locale (the URL's, or on a `localeRouting: "off"` group the one `view.detectLocale` or middleware's `Lang.setLocale(locale, { cookie: false })` picked) instead of the dictionary's source language and `en-US`/UTC.
+- The dictionaries islands read go in the document as `<script type="application/json" id="gemi-island-i18n">` (`{ currentLocale, defaultLocale, timeZone, dictionaries: [[id, locale, strings]] }`), and the island runtime hydrates from it with no fetch. Only strings an island read are in it, in the page's locale only; a page whose islands read no locale, zone or dictionary gets no such script.
+- An island that passed translated strings or templates as props keeps working; it can now call `useDictionary` itself, including for strings whose params only exist in the browser.
+- A test that hydrates an island with `ISLAND_HYDRATE_SOURCE` (or `renderStaticDocument` from `gemi/testing`) gets the same behaviour.
+
 ## i18n: `view.detectLocale` for views out of locale routing (#1092)
 
 **New API (minor). Nothing to change in apps.** See [Picking the locale of a group out of locale routing](docs/i18n.md#picking-the-locale-of-a-group-out-of-locale-routing).
