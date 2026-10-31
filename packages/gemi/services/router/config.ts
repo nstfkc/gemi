@@ -359,7 +359,7 @@ export interface DomainsConfig {
    * any web page you visit read the app's source through DNS rebinding. Avoid
    * it; gemi warns at boot when it is set.
    */
-  devHosts?: string[] | true;
+  devHosts?: readonly string[] | true;
 
   /**
    * Turns on the on-demand TLS ask endpoint, which a proxy calls to decide
