@@ -163,6 +163,15 @@ export interface ViewRouteConfig {
    */
   assetRoutes?: boolean;
 
+  /**
+   * Whether browsers and Google Search may translate these views (#1087).
+   * `<Head />` renders `<meta name="google" content="notranslate">` unless
+   * this is `true`. Meant for a `route.domains` group of public content (a
+   * storefront, published sites), which inherits the root's value or sets its
+   * own. A handler's `Meta.translate(allow)` wins over it. Default: `false`.
+   */
+  translate?: boolean;
+
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
   onRequestFail?: (req: HttpRequest, error: any) => void | Promise<void>;
@@ -370,6 +379,22 @@ export interface DomainsConfig {
   custom?: CustomDomainConfig;
 
   /**
+   * Extra hosts the dev server (`gemi dev`) answers, besides the root and its
+   * subdomains, which it always answers, and `localhost`, `*.localhost` and
+   * IP addresses, which Vite always admits. Every other host gets a 403 from
+   * Vite's host check, the guard against DNS rebinding. `gemi start` ignores it.
+   *
+   * List the custom domains you point at `127.0.0.1` in `/etc/hosts` to try
+   * them locally, e.g. `["app.acme.test"]`. Vite's syntax: a leading `.`
+   * admits the domain and every subdomain (`".acme.test"`).
+   *
+   * `true` turns the check off and the dev server answers any host, which lets
+   * any web page you visit read the app's source through DNS rebinding. Avoid
+   * it; gemi warns at boot when it is set.
+   */
+  devHosts?: readonly string[] | true;
+
+  /**
    * Turns on the on-demand TLS ask endpoint, which a proxy calls to decide
    * whether to issue a certificate for a host.
    *
@@ -418,7 +443,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter" | "meta" | "notFound"
+  "root" | "rootRouter" | "meta" | "notFound" | "translate"
 > {
   return {
     partialRendering: true,

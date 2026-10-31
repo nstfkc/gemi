@@ -302,6 +302,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.assetRoutes`. */
   readonly assetRoutes: boolean;
 
+  /** See `ViewRouteConfig.translate`. */
+  readonly translate: boolean | undefined;
+
   /**
    * `auth` is the app's `auth` config: gemi's `/auth` view routes are mounted
    * for the features it turns on (#1040).
@@ -316,6 +319,8 @@ export class ViewRouteDispatcher {
     this.notFound = config.notFound;
     this.publicFiles = config.publicFiles ?? defaults.publicFiles;
     this.assetRoutes = config.assetRoutes ?? defaults.assetRoutes;
+
+    this.translate = config.translate;
 
     this.hooks = {
       onNotFound: config.onNotFound ?? defaults.onNotFound,
@@ -1602,6 +1607,10 @@ export class ViewRouteDispatcher {
               ? await this.defaultMeta(httpRequest)
               : this.defaultMeta,
           );
+        }
+        // And whether these views may be translated (#1087).
+        if (this.translate !== undefined) {
+          ctx.metadata.applyTranslateDefault(this.translate);
         }
 
         const cookies = ctx.cookies;

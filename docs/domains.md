@@ -58,12 +58,14 @@ export default defineRouteConfig({
 | `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
 | `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
 | `custom.cacheTtlMs` | `number` (default `60000`) | How long a `resolve` answer is reused. Both hits and misses are cached. `0` disables the cache. |
 | `custom.fallback` | `{ api?, view? }` | Serves every host `resolve` returned `null` for, instead of a `404`. |
 | `ask` | `{ secret: string }` | Turns on the on-demand TLS endpoint below. Left out, that path is not served at all. |
+| `devHosts` | `string[] \| true` (default `[]`) | Extra hosts `gemi dev` answers, besides `root` and its subdomains, e.g. the custom domains you point at `127.0.0.1` locally. A leading `.` admits the domain and its subdomains. `gemi start` ignores it. See [Development](#development). |
 
 A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
 path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
@@ -72,7 +74,8 @@ param group has no `exists`, a `trustProxy` header that is not a header name, a 
 under 16 characters or unset, and a `trustProxy.clientIpHeader` without a `secret`. In the list form it
 also covers an empty list, an entry without a `secret`, an entry with neither `hostHeader` nor
 `clientIpHeader`, and two entries with the same secret value. The error names the entry, e.g.
-`route.domains.trustProxy[1].secret.value`.
+`route.domains.trustProxy[1].secret.value`. A `devHosts` entry that is not a bare hostname (with an
+optional leading `.`) fails the boot too: no scheme, port, path or `*`.
 
 ## How a host is matched
 
@@ -386,7 +389,34 @@ export default class ShopViewRouter extends ViewRouter {
 
 ## Development
 
-`*.localhost` resolves to the loopback address in Chrome and Firefox, so with `root: "localhost"`, `acme.localhost:5173` and `admin.localhost:5173` work with no setup. For a custom domain, add an `/etc/hosts` entry (`127.0.0.1 app.acme.test`). The dev server lets the root, its subdomains and, when `custom` is set, any host through Vite's host check.
+`*.localhost` resolves to the loopback address in Chrome and Firefox, so with `root: "localhost"`, `acme.localhost:5173` and `admin.localhost:5173` work with no setup.
+
+The dev server answers only the hosts it knows. Vite checks the `Host` of every request before the app sees it, and answers `403` to any other: that check is what stops a web page you visit from reading your app's source through DNS rebinding. It lets through:
+
+- `root` and its subdomains;
+- `localhost`, `*.localhost` and IP addresses (Vite admits these itself);
+- the hosts in `devHosts`.
+
+Custom domains are not let through on their own, even with `custom` set: the dev server cannot tell a customer's domain from a rebinding host, and with `custom.fallback` every host would resolve. To try a custom domain locally, point it at loopback in `/etc/hosts` and list it in `devHosts`:
+
+```
+# /etc/hosts
+127.0.0.1 app.acme.test
+```
+
+```typescript
+domains: {
+  root: process.env.ROOT_DOMAIN ?? "localhost",
+  groups: [{ subdomain: ":tenant", exists: async ({ tenant }) => /* … */ true }],
+  custom: { group: ":tenant", resolve: async (host) => /* … */ null },
+  // Only `gemi dev` reads it. ".acme.test" would admit acme.test and every subdomain.
+  devHosts: ["app.acme.test"],
+},
+```
+
+`http://app.acme.test:5173` then reaches the app, and `custom.resolve` maps it as it would in production; a host your dev data does not know still gets `custom.fallback` or a `404`. Restart `gemi dev` after changing `devHosts`: the dev server keeps its Vite across reloads.
+
+`devHosts: true` turns the check off, so the dev server answers any host, and gemi warns at boot. Prefer listing the hosts. A tunnel (ngrok, Cloudflare Tunnel) that keeps its own hostname in `Host` needs that hostname listed too, e.g. `"my-app.ngrok-free.app"`.
 
 Browsers differ on accepting a cookie scoped to `localhost` itself. To test a shared session across subdomains, use a root that resolves to loopback with its subdomains, such as `lvh.me`. That works over plain http because the session cookie is marked `Secure` by the request's scheme, not by whether the host is named `localhost`.
 

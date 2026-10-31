@@ -437,6 +437,54 @@ The last call wins. On a client-side navigation the tag follows the new page:
 a page that sets none gets none. A `<meta name="robots">` your layout renders
 itself is not touched.
 
+### Translation
+
+`<Head />` renders `<meta name="google" content="notranslate">` on every page,
+so Chrome doesn't offer to translate it and Google Search doesn't offer
+"Translate this page". gemi apps do their own i18n, and a translator that
+rewrites the page before React hydrates causes a hydration mismatch (see the
+`RootLayout` gotcha above).
+
+Public content that visitors may want to read in their own language (a
+storefront, a published site) can allow it. For every view of a
+[`route.domains`](./domains.md) group, set `translate` on its `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    {
+      subdomain: ":shop",
+      view: { rootRouter: ShopViewRouter, translate: true },
+    },
+  ],
+},
+```
+
+or per response, from a handler:
+
+```typescript
+import { Meta } from "gemi/facades";
+
+"/p/:slug": this.view("site/Page", async (req) => {
+  Meta.translate(); // or Meta.translate(false) to keep the tag where `translate: true` dropped it
+  return { page: await loadPage(req) };
+}).static({ layout: "site/SiteLayout" }),
+```
+
+`<Head />` then leaves the tag out. A group inherits the root's `translate`
+or sets its own, and a handler's `Meta.translate(allow)` wins over both.
+Without either, nothing changes.
+
+- The tag is not the only switch: a `translate="no"` on `<html>` (as in the
+  `RootLayout` above) still blocks translation. Leave it off the layout of
+  pages that allow it, e.g. a static view's own `layout`.
+- Prefer it on [static views](./static-views-and-islands.md), which never
+  hydrate as a whole (an island still can). On a hydrated page, a translated
+  page can fail to hydrate.
+- On a client-side navigation the tag follows the new page.
+
 ### Fonts
 
 `Meta.fonts` declares the response's `@font-face` rules and preloads, which

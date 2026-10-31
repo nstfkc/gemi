@@ -31,6 +31,12 @@ const GEMI_FONTS_ATTRIBUTE = "data-gemi-fonts";
  */
 const appliedFontRules = new Set<string>();
 
+/** The `notranslate` tag `<Head />` renders, which `Meta.translate` leaves out (#1087). */
+const NOTRANSLATE_SELECTOR = 'meta[name="google"][content="notranslate"]';
+
+/** Whether a navigation removed `<Head />`'s `notranslate` tag, to put it back on a page that keeps it. */
+let notranslateRemoved = false;
+
 /** Whether a navigation has set `<html>` attributes from metadata. */
 let htmlAttributesApplied = false;
 
@@ -40,7 +46,22 @@ export function updateMeta(meta: any, locale?: string | null) {
   if (!meta) {
     return;
   }
-  const { title, description, htmlAttributes, canonical, alternates, fonts, robots } = meta;
+  const { title, description, htmlAttributes, canonical, alternates, fonts, robots, translate } = meta;
+  // A page that allows translation drops the tag; the next page that doesn't
+  // gets it back. Only the tag gemi removed is put back.
+  if (translate === true) {
+    const notranslate = document.head.querySelector(NOTRANSLATE_SELECTOR);
+    if (notranslate) {
+      notranslate.remove();
+      notranslateRemoved = true;
+    }
+  } else if (notranslateRemoved) {
+    const element = document.createElement("meta");
+    element.setAttribute("name", "google");
+    element.setAttribute("content", "notranslate");
+    document.head.appendChild(element);
+    notranslateRemoved = false;
+  }
   // A page that set `<html>` attributes gets them; after one, a page that set
   // none goes back to its locale's. A layout that never asked keeps its own.
   if (htmlAttributes || htmlAttributesApplied) {
@@ -170,6 +191,11 @@ export const Head = ({
   if (meta?.htmlAttributes) {
     htmlAttributesApplied = true;
   }
+  // The first page left the `notranslate` tag out: a later page that keeps
+  // it has to get it back (`updateMeta`).
+  if (meta?.translate === true && typeof window !== "undefined") {
+    notranslateRemoved = true;
+  }
   const fontRules = fontFaceRules(meta?.fonts);
   // Browser only: on the server the set would be shared by every request.
   if (typeof window !== "undefined") {
@@ -186,8 +212,10 @@ export const Head = ({
         mismatch (Minified React error #418) and then regenerates the tree,
         dropping the server-injected <style> and leaving the page unstyled.
         Pair this with `translate="no"` on the <html> element in RootLayout.
+        `Meta.translate()` (or `route.view.translate`) leaves it out, for
+        public content such as a static storefront (#1087).
       */}
-      <meta name="google" content="notranslate" />
+      {meta?.translate !== true && <meta name="google" content="notranslate" />}
       <title>{meta?.title}</title>
       {meta?.description && (
         <meta name="description" content={meta.description} />

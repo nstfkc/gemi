@@ -38,6 +38,18 @@ export class Meta {
     RequestContext.getStore().metadata.robots(content);
   }
   /**
+   * Lets browsers and Google Search translate this page (#1087): `<Head />`
+   * leaves out `<meta name="google" content="notranslate">`, which it renders
+   * by default. For public content (a storefront, a published site), usually
+   * a static view. `false` keeps the tag where `route.view.translate` dropped
+   * it. On a hydrated page a translator can rewrite the text before React
+   * hydrates, which React rejects as a hydration mismatch. A
+   * `<html translate="no">` in the layout still blocks translation.
+   */
+  static translate(allow = true) {
+    RequestContext.getStore().metadata.translate(allow);
+  }
+  /**
    * `@font-face` rules for this response, and a `<link rel="preload" as="font">`
    * for each font marked `preload`; `<Head />` renders both. Calls add up.
    * Throws a `TypeError` for a descriptor that isn't a valid CSS value.

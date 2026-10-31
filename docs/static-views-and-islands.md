@@ -34,7 +34,7 @@ Everything on the server works as it does for any view:
 - the handler, middleware, redirects, feature gates and status codes;
 - `Query.prefetch`, `useQuery` reads, `useDictionary` and `useRouteData`;
 - `Head` and the `Meta` facade (title, description, Open Graph, canonical and
-  alternates, [fonts](#fonts));
+  alternates, [fonts](#fonts), [translation](./views-and-layouts.md#translation));
 - the app's `404` view: a missing record (`findUniqueOrThrow`) or a closed
   feature gate renders the normal, hydrated 404 page, unless the views set a
   static `notFound` page of their own ([A static not-found page of its
