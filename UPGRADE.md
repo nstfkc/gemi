@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.174.0 to 0.175.0
 
 ## i18n: `onNotFound` picks the not-found page's locale (#1099)
 
