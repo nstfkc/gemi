@@ -168,6 +168,49 @@ describe("unchanged", () => {
   });
 });
 
+describe("cache:public in the global middleware list", () => {
+  class GlobalKernel extends Kernel {
+    config = {
+      middleware: { aliases: { cache: CacheMiddleware }, global: ["cache:public"] },
+      route: {
+        api: {
+          rootRouter: class extends ApiRouter {
+            routes = { "/ping": this.get(() => ({ ok: true })) };
+          },
+        },
+        view: {
+          root: createRoot(Layout),
+          rootRouter: class extends ViewRouter {
+            routes = { "/page": this.view("Page") };
+          },
+        },
+      },
+    };
+  }
+  const globalApp = new App({ kernel: GlobalKernel });
+
+  test("a hydrated page is lowered to private as well", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const render = await globalApp.fetch(new Request("http://gemi.dev/page"));
+    const doc = (await (render as any)(prodParams)) as Response;
+    const json = (await globalApp.fetch(new Request("http://gemi.dev/page.json"))) as Response;
+
+    for (const res of [doc, json]) {
+      expect(res.headers.getSetCookie().length).toBeGreaterThan(0);
+      expect(res.headers.get("Cache-Control")).toBe(
+        "private, max-age=864000, stale-while-revalidate=300, stale-if-error=600",
+      );
+    }
+  });
+
+  test("an api response is left as it was", async () => {
+    const res = (await globalApp.fetch(new Request("http://gemi.dev/api/ping"))) as Response;
+    expect(res.headers.get("Cache-Control")).toBe(
+      "public, max-age=864000, stale-while-revalidate=300, stale-if-error=600",
+    );
+  });
+});
+
 describe("privateWhenSettingCookies()", () => {
   const lower = (cacheControl: string | null, cookie = true) => {
     const headers = new Headers();
