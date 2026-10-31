@@ -64,10 +64,30 @@ export interface ViewRouteConfig {
    * - `"off"`: URLs never carry a locale and nothing redirects. A first
    *   segment like `/tr-TR` is an ordinary path. Nothing is detected from the
    *   cookie or `Accept-Language`, and no `i18n-locale` cookie is set. The
-   *   request renders in `translation.defaultLocale` unless middleware picks
-   *   one with `Lang.setLocale(locale, { cookie: false })`.
+   *   request renders in `translation.defaultLocale` unless `detectLocale`
+   *   or middleware (`Lang.setLocale(locale, { cookie: false })`) picks one.
    */
   localeRouting?: LocaleRouting;
+
+  /**
+   * The locale of a request to these views when they are out of locale
+   * routing (`localeRouting: "off"`, required), e.g. from `?locale=` or
+   * `Accept-Language` (#1092). It runs for every document and `.json`
+   * request of these views before their middleware, matched or not, so the
+   * not-found page (`notFound`, `onNotFound`) and `meta` see it too.
+   *
+   * What it returns is matched against `translation.supportedLocales` like
+   * a URL's locale (`resolveLocale`: exact, then same language, so `de`
+   * names `de-DE`); `null` or no match leaves `translation.defaultLocale`.
+   * It sets no `i18n-locale` cookie, so a static page stays one body per
+   * URL. Middleware may still override it with
+   * `Lang.setLocale(locale, { cookie: false })`. A `route.domains` group's
+   * `view` inherits it or sets its own.
+   */
+  detectLocale?: (
+    req: HttpRequest,
+    locales: { supportedLocales: string[]; defaultLocale: string },
+  ) => string | null | undefined | Promise<string | null | undefined>;
 
   /**
    * The theme script gemi renders before the body and `useTheme()`.
@@ -443,7 +463,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter" | "meta" | "notFound" | "translate"
+  "root" | "rootRouter" | "meta" | "notFound" | "translate" | "detectLocale"
 > {
   return {
     partialRendering: true,

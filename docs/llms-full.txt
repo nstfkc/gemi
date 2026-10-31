@@ -2216,6 +2216,8 @@ export default function NotFound(props: { store: { name: string; logoUrl: string
 
 `static` takes the [`.static()` options](./static-views-and-islands.md): islands, `script` and `navigation` work as on any static page. `cacheControl` applies to an unmatched path only, since a route that became a 404 depends on who asked: a refusal or a missing record is sent `Cache-Control: no-store`, and a gated route no `Cache-Control` at all. A client-side navigation from a hydrated page of the group still lands on the app's `404` view, as the client router has only that one. Left out, the group renders the app's `404` view as before. Set on the root `view`, it applies to the root (and to every group that does not set its own, as groups inherit the root's hooks).
 
+On a group with `localeRouting: "off"`, no route middleware runs for a path no route matches, so a locale middleware cannot reach the not-found page. Pick the locale with the group's [`view.detectLocale`](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing) instead: it runs for matched and unmatched paths alike, before `onNotFound`, and the not-found view's `useDictionary` renders in it.
+
 ### Nesting view routers
 
 Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:
@@ -2341,6 +2343,7 @@ export default defineRouteConfig({
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
+| `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
@@ -22159,14 +22162,59 @@ Out of locale routing, a request:
 
 - is never redirected, and a first segment like `/tr-TR` is an ordinary path;
 - renders in `defaultLocale`, whatever the cookie or `Accept-Language` say, so
-  a `.static()` page is still one body for everyone; middleware may pick
-  another with `Lang.setLocale(locale, { cookie: false })`;
+  a `.static()` page is still one body for everyone, unless the views'
+  [`detectLocale`](#picking-the-locale-of-a-group-out-of-locale-routing) or
+  middleware (`Lang.setLocale(locale, { cookie: false })`) picks another;
 - sets no `i18n-locale` cookie, and client-side links get no locale prefix.
 
 Set the document's language with
 [`Meta.htmlAttributes`](./views-and-layouts.md#html-lang-dir-canonical-and-alternates).
 To negotiate a locale yourself with gemi's matching rules, see
 [Negotiating a locale yourself](#negotiating-a-locale-yourself).
+
+### Picking the locale of a group out of locale routing
+
+A group out of locale routing can still serve several languages, picked from
+the request rather than the path: a storefront that takes `?locale=`, falling
+back to `Accept-Language`. Give its `view` a `detectLocale(req, locales)`:
+
+```typescript
+// app/config/route.ts
+import { negotiateLocale, resolveLocale } from "gemi/i18n";
+
+domains: {
+  root: "example.shop",
+  groups: [
+    {
+      subdomain: ":shop",
+      view: {
+        rootRouter: ShopViewRouter,
+        localeRouting: "off",
+        detectLocale: (req, { supportedLocales, defaultLocale }) =>
+          resolveLocale(new URL(req.rawRequest.url).searchParams.get("locale"), supportedLocales, defaultLocale) ??
+          negotiateLocale(req.headers.get("accept-language"), supportedLocales, defaultLocale),
+      },
+    },
+  ],
+},
+```
+
+- It runs for every document and `.json` request of those views, before their
+  middleware, **whether or not a route matched**. So the group's not-found page
+  ([`notFound`](./routing.md#a-static-not-found-page-of-its-own), `onNotFound`),
+  `meta`, handlers (`Lang.locale()`) and every `useDictionary` render in that
+  locale.
+- What it returns is matched against `supportedLocales` like a URL's locale
+  (`resolveLocale`: `de` names `de-DE`). `null`, or a locale the app does not
+  support, leaves `defaultLocale`. It is passed the app's `supportedLocales`
+  and `defaultLocale` for its own matching.
+- It sets no `i18n-locale` cookie. A `.static()` page whose body now depends on
+  the query or a header is the app's choice: keep its `cacheControl` in line
+  (a shared cache keys on the URL, not on `Accept-Language`).
+- Middleware may still override it with `Lang.setLocale(locale, { cookie: false })`.
+- It needs `localeRouting: "off"` on the same views; elsewhere the URL, the
+  cookie and `Accept-Language` decide, and the boot fails. A group inherits the
+  root `view`'s `detectLocale` like its other hooks.
 
 ### Negotiating a locale yourself
 
