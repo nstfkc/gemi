@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.173.0 to 0.174.0
 
 ## i18n: `useDictionary` inside islands on static pages (#1095)
 
