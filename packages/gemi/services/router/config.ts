@@ -139,6 +139,15 @@ export interface ViewRouteConfig {
    */
   meta?: DefaultViewMeta | ((req: HttpRequest) => DefaultViewMeta | Promise<DefaultViewMeta>);
 
+  /**
+   * Whether browsers and Google Search may translate these views (#1087).
+   * `<Head />` renders `<meta name="google" content="notranslate">` unless
+   * this is `true`. Meant for a `route.domains` group of public content (a
+   * storefront, published sites), which inherits the root's value or sets its
+   * own. A handler's `Meta.translate(allow)` wins over it. Default: `false`.
+   */
+  translate?: boolean;
+
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
   onRequestFail?: (req: HttpRequest, error: any) => void | Promise<void>;
@@ -410,7 +419,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter" | "meta" | "notFound"
+  "root" | "rootRouter" | "meta" | "notFound" | "translate"
 > {
   return {
     partialRendering: true,
