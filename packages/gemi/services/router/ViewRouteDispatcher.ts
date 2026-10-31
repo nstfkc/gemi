@@ -293,6 +293,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.meta`. */
   readonly defaultMeta: ViewRouteConfig["meta"];
 
+  /** See `ViewRouteConfig.notFound`. */
+  readonly notFound: ViewRouteConfig["notFound"];
+
   /**
    * `auth` is the app's `auth` config: gemi's `/auth` view routes are mounted
    * for the features it turns on (#1040).
@@ -304,6 +307,7 @@ export class ViewRouteDispatcher {
     this.localeRouting = config.localeRouting ?? defaults.localeRouting;
     this.theme = config.theme ?? defaults.theme;
     this.defaultMeta = config.meta;
+    this.notFound = config.notFound;
 
     this.hooks = {
       onNotFound: config.onNotFound ?? defaults.onNotFound,
@@ -338,6 +342,15 @@ export class ViewRouteDispatcher {
       const layout = this.flatViewRoutes[path].static?.layout;
       if (layout && !this.flatComponentTree.includes(layout)) {
         this.flatComponentTree.push(layout);
+      }
+    }
+    // The not-found view and its layout (#828): in no route's chain either,
+    // and loaded up front like the rest.
+    if (this.notFound) {
+      for (const view of [this.notFound.view, this.notFound.static?.layout]) {
+        if (view && !this.flatComponentTree.includes(view)) {
+          this.flatComponentTree.push(view);
+        }
       }
     }
     this.root = config.root;
@@ -457,6 +470,7 @@ export class ViewRouteDispatcher {
     viewModules?: Record<string, any>;
     resolveIsland?: IslandResolver;
     buildId?: string;
+    status: number;
   }) {
     const { req, runInRequestScope, staticView, currentViews, data, serverQueries, headers } =
       args;
@@ -566,7 +580,7 @@ export class ViewRouteDispatcher {
           navigation,
           script,
         ),
-        { status: 200, headers },
+        { status: args.status, headers },
       );
     } finally {
       clearTimeout(deadlineTimer);
@@ -857,6 +871,35 @@ export class ViewRouteDispatcher {
           viewModules,
           resolveIsland,
           buildId,
+          status: 200,
+        });
+      }
+
+      // `notFound` (#828): the not-found document is a static one, rendered
+      // with these views' own not-found view where the app's `404` would be.
+      // The client router mounts `"404"` for it, so that is the name it is
+      // given here; `onNotFound`'s props are under it in `pageData`.
+      if (staticView && !currentPathName && this.notFound) {
+        const view = this.notFound.view;
+        if (!viewImportMap[view]) {
+          throw new Error(
+            `The not-found view "${view}" (route.view.notFound) was not found. It is a view path: a file at app/views/${view}.tsx.`,
+          );
+        }
+        return await this.renderStatic({
+          req,
+          runInRequestScope,
+          staticView,
+          currentViews: [view],
+          data: result.data,
+          serverQueries,
+          headers,
+          getStyles,
+          viewImportMap: { ...viewImportMap, "404": viewImportMap[view] },
+          viewModules: viewModules && { ...viewModules, "404": viewModules[view] },
+          resolveIsland,
+          buildId,
+          status: props.refusedStatus ?? 404,
         });
       }
 
@@ -1233,6 +1276,8 @@ export class ViewRouteDispatcher {
     let featureGates: string[] = [];
     // The matched route's `.static()` options, if it has any.
     let staticView: StaticViewOptions | undefined;
+    // Whether the path names a route at all, whatever happens to it later.
+    let matched = false;
 
     try {
       let match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -1242,6 +1287,7 @@ export class ViewRouteDispatcher {
         match = null;
       }
       if (match) {
+        matched = true;
         currentPathName = match.routePath;
         params = match.params;
         handlers = match.route.exec;
@@ -1340,7 +1386,13 @@ export class ViewRouteDispatcher {
       // its own — no `i18n-locale`, `session_id` or `csrf_token` — unless it
       // asked for one. A per-visitor `Set-Cookie` is what keeps a CDN from
       // caching a page. The handler and middleware still set what they set.
-      const staticCookies = staticCookiePolicy(staticView);
+      //
+      // A path no route matches is already known to render `notFound`, so it
+      // takes that page's policy (#828).
+      const staticCookies = staticCookiePolicy(
+        staticView ??
+          (currentPathName === null && !isViewDataRequest ? this.notFound?.static : undefined),
+      );
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -1524,8 +1576,11 @@ export class ViewRouteDispatcher {
 
         // The `404` view has no handler of its own: this is where the app
         // gives it a title and metadata (#954).
+        let notFoundProps: void | Record<string, unknown> = undefined;
         if (currentPathName === null) {
-          await this.hooks.onNotFound(httpRequest, { status: refusedStatus ?? 404 });
+          notFoundProps = await this.hooks.onNotFound(httpRequest, {
+            status: refusedStatus ?? 404,
+          });
         }
 
         // The app's default fills whatever the handlers left unset (#1042).
@@ -1575,6 +1630,15 @@ export class ViewRouteDispatcher {
           }
           breadcrumbs[`${key}:${currentPathName}`] = (value as any).breadcrumb;
           viewData[key] = value;
+        }
+        // The static not-found document's props (#828). Only there: the app's
+        // hydrated `404` would ship them in its payload to a view that takes none.
+        const notFoundDocument =
+          currentPathName === null && this.notFound && !isViewDataRequest
+            ? this.notFound.static
+            : undefined;
+        if (notFoundDocument && notFoundProps) {
+          viewData["404"] = notFoundProps;
         }
 
         const fileOutput: FileOutput | undefined = (viewData as any).FILE;
@@ -1654,14 +1718,18 @@ export class ViewRouteDispatcher {
         // without the (CDN-hostile) Vary.
         // A static view is one settled body for everyone, like `no-stream` —
         // unless the request became a 404, which renders as usual.
-        if (!noStream && !(staticView && currentPathName)) {
+        //
+        // A missing record turned a static route into the app's hydrated
+        // `404`, which gets the cookies a hydrated page does — or into the
+        // static `notFound` document, which gets that page's (#828).
+        const documentStatic = currentPathName ? staticView : notFoundDocument;
+        const staticDocument = Boolean(documentStatic);
+        const documentCookies = staticCookiePolicy(documentStatic);
+        if (!noStream && !staticDocument) {
           headers.append("Vary", "User-Agent");
         }
 
-        // A missing record turned a static route into the app's hydrated
-        // `404`, which gets the cookies a hydrated page does.
-        const staticDocument = Boolean(staticView && currentPathName);
-        if (!staticDocument || staticCookies.session) {
+        if (!staticDocument || documentCookies.session) {
           ensureSessionId();
         }
 
@@ -1671,7 +1739,7 @@ export class ViewRouteDispatcher {
 
         // const { csrfToken, csrfTokenHMAC } = this.generateCSRFTokenWithHmac();
 
-        if (!staticDocument || staticCookies.csrf) {
+        if (!staticDocument || documentCookies.csrf) {
           const csrfToken = Bun.CSRF.generate(process.env.SECRET);
           headers.append(
             "Set-Cookie",
@@ -1681,7 +1749,7 @@ export class ViewRouteDispatcher {
 
         try {
           await this.onRequestEnd(httpRequest, {
-            mintSession: !staticDocument || staticCookies.session,
+            mintSession: !staticDocument || documentCookies.session,
           });
         } catch (err) {
           Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
@@ -1689,8 +1757,11 @@ export class ViewRouteDispatcher {
           });
         }
 
-        if (staticDocument) {
-          applyStaticCacheControl(headers, staticView!);
+        // The `notFound` page's `cacheControl` is for a path no route has
+        // (#828). A route that became a 404 (a refusal, a missing record, a
+        // feature gate) depends on who asked, so a shared cache must not keep it.
+        if (staticDocument && (currentPathName || !matched)) {
+          applyStaticCacheControl(headers, documentStatic!);
         }
 
         return await this.render({
@@ -1716,8 +1787,9 @@ export class ViewRouteDispatcher {
           features: pageData.features,
           isOgRequest,
           // Not when the request became a 404 (a gate or a missing record):
-          // that renders the app's `404` view, which hydrates as usual.
-          staticView: currentPathName ? staticView : undefined,
+          // that renders the app's `404` view, which hydrates as usual —
+          // unless these views have a static `notFound` (#828).
+          staticView: documentStatic,
           refusedStatus: refusedStatus ?? undefined,
         });
       } catch (err) {

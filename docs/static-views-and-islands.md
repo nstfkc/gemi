@@ -36,7 +36,9 @@ Everything on the server works as it does for any view:
 - `Head` and the `Meta` facade (title, description, Open Graph, canonical and
   alternates, [fonts](#fonts));
 - the app's `404` view: a missing record (`findUniqueOrThrow`) or a closed
-  feature gate renders the normal, hydrated 404 page.
+  feature gate renders the normal, hydrated 404 page, unless the views set a
+  static `notFound` page of their own ([A static not-found page of its
+  own](./routing.md#a-static-not-found-page-of-its-own)).
 
 What changes is the document. gemi waits for the whole tree to settle (no
 streaming, every `Suspense` boundary resolved) and sends it without:

@@ -2177,6 +2177,45 @@ export default defineRouteConfig({
 });
 ```
 
+#### A static not-found page of its own
+
+A `route.domains` group whose pages are [`.static()`](./static-views-and-islands.md) with their own `layout` (a storefront, a published site) can answer a missing page in the same spirit: `view.notFound` names a view rendered as a static document, with the `layout` it gives, instead of the app's hydrated `404` in the app's `RootLayout`. It answers everything the `404` view would on a document request: a path no route matches, a handler or middleware that throws `NotFoundError`, `FileNotFoundError` or `RecordNotFoundError`, a refusal (under its `403`) and a gated feature. The status stays `404` (or `403`), and the page ships no app bundle, like any static view.
+
+The view's props are what `onNotFound` returns, so the page can be branded from the host:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.shop",
+  groups: [
+    {
+      subdomain: ":shop",
+      view: {
+        rootRouter: ShopViewRouter,
+        notFound: {
+          view: "shop/NotFound",
+          static: { layout: "shop/ShopLayout" },
+        },
+        async onNotFound(req: HttpRequest, { status }) {
+          const store = await Store.findFirst({ where: { slug: req.domain?.params.shop } });
+          Meta.title(store ? `${store.name}: page not found` : "Store unavailable");
+          return { store: store && { name: store.name, logoUrl: store.logoUrl } };
+        },
+      },
+    },
+  ],
+},
+```
+
+```tsx
+// app/views/shop/NotFound.tsx
+export default function NotFound(props: { store: { name: string; logoUrl: string } | null }) {
+  return <main>{props.store ? `${props.store.name} has no such page.` : "This store is unavailable."}</main>;
+}
+```
+
+`static` takes the [`.static()` options](./static-views-and-islands.md): islands, `script` and `navigation` work as on any static page. `cacheControl` applies to an unmatched path only, since a route that became a 404 depends on who asked: a refusal or a missing record is sent `Cache-Control: no-store`, and a gated route no `Cache-Control` at all. A client-side navigation from a hydrated page of the group still lands on the app's `404` view, as the client router has only that one. Left out, the group renders the app's `404` view as before. Set on the root `view`, it applies to the root (and to every group that does not set its own, as groups inherit the root's hooks).
+
 ### Nesting view routers
 
 Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:
@@ -2301,6 +2340,7 @@ export default defineRouteConfig({
 | `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? } \| Array<{ hostHeader?, clientIpHeader?, secret }>` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. A list trusts [several proxies](#several-proxies), each with its own secret. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
+| `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
 | `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
@@ -4880,7 +4920,9 @@ Everything on the server works as it does for any view:
 - `Head` and the `Meta` facade (title, description, Open Graph, canonical and
   alternates, [fonts](#fonts));
 - the app's `404` view: a missing record (`findUniqueOrThrow`) or a closed
-  feature gate renders the normal, hydrated 404 page.
+  feature gate renders the normal, hydrated 404 page, unless the views set a
+  static `notFound` page of their own ([A static not-found page of its
+  own](./routing.md#a-static-not-found-page-of-its-own)).
 
 What changes is the document. gemi waits for the whole tree to settle (no
 streaming, every `Suspense` boundary resolved) and sends it without:
