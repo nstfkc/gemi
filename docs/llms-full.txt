@@ -5350,11 +5350,19 @@ export default function VatLines() {
   `<script type="application/json" id="gemi-island-i18n">{"currentLocale":"tr-TR","defaultLocale":"en-US","timeZone":"Europe/Istanbul","dictionaries":[["<dictionary id>","tr-TR",{"rate":"KDV (%{{rate}})"}]]}</script>`.
   The island hydrates from it synchronously, with **no request for the
   strings**, and `t("rate", { rate })` re-renders with new params as its state
-  changes. Only dictionaries an island read are in it; a page whose islands
-  read no locale, zone or dictionary gets no such script.
+  changes. Only dictionaries an island read during the server render are in
+  it (with all their keys, in the page's locale). In an app with a locale
+  configured, every page with islands carries the locale and zone even when
+  no island read them, so an island that first calls `useDictionary` after a
+  click still renders in the page's locale (its dictionary is then loaded in
+  that locale). In an app without one, a page whose islands read no zone or
+  dictionary gets no such script.
 - It is a JSON block, not a script, so a Content Security Policy needs nothing
   new for it. Its strings are visible in the page source, like the island's
   props.
+- An island inside a [`data-gemi-persist`](#opting-a-link-or-an-element-out)
+  element keeps its root across a navigation, and so the locale it hydrated
+  with, even when the next page is in another locale.
 - `useLocale` and gemi's other providers still don't reach an island:
   changing the locale is the page's job (a link to the other locale's URL).
 

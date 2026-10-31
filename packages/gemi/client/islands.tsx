@@ -90,9 +90,15 @@ export interface StaticRenderCollector {
   count: number;
   /**
    * What an island's own root gets of the page's i18n (#1095). Each read of
-   * it sets `i18nUsed`, so only a page whose islands read it carries it.
+   * it sets `i18nUsed`.
    */
   i18n: IslandI18n;
+  /**
+   * The app has a locale configured: the page then always carries its i18n
+   * for its islands, read or not, since an island may first read it in the
+   * browser (a subtree that mounts after a click).
+   */
+  localeAware: boolean;
   /** The dictionary sink `useDictionary` reports into inside an island's root. */
   sink: DictionarySink;
   /** An island read the page's locale or zone (`useDictionary`, `useFormatter`). */
@@ -125,6 +131,7 @@ export function createStaticRenderCollector(
     instances: new WeakMap(),
     count: 0,
     i18n: {},
+    localeAware: Boolean(i18n.currentLocale),
     i18nUsed: false,
     dictionaries: [],
     sink: {
@@ -138,7 +145,8 @@ export function createStaticRenderCollector(
     },
   };
   // Read through getters so the collector learns whether any island needed
-  // the page's i18n: one that did not leaves the document as it was.
+  // the page's i18n: in an app without a locale, a page whose islands read
+  // none of it is left as it was.
   for (const key of ["currentLocale", "defaultLocale", "timeZone"] as const) {
     Object.defineProperty(collector.i18n, key, {
       enumerable: true,
@@ -152,11 +160,12 @@ export function createStaticRenderCollector(
 }
 
 /**
- * @internal The payload for a page whose islands read its i18n, or
- * `undefined` when none did.
+ * @internal The payload for a page with islands: always in an app with a
+ * locale, else only when an island read the zone or a dictionary. Its
+ * `dictionaries` are only the ones islands read during the server render.
  */
 export function islandI18nPayload(collector: StaticRenderCollector): IslandI18nPayload | undefined {
-  if (!collector.i18nUsed) return undefined;
+  if (!collector.i18nUsed && !collector.localeAware) return undefined;
   const { currentLocale, defaultLocale, timeZone } = collector.i18n;
   return {
     ...(currentLocale ? { currentLocale } : {}),

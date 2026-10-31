@@ -31,6 +31,7 @@ const viaPlugin = (key: string, mod: Record<string, unknown>) =>
 const VatLine = island(viaPlugin("app/views/shop/Cart.tsx", Cart));
 const PlainCounter = island(viaPlugin("app/views/shop/Cart.tsx", Cart), { export: "PlainCounter" });
 const Amount = island(viaPlugin("app/views/shop/Cart.tsx", Cart), { export: "Amount" });
+const Hostile = island(viaPlugin("app/views/shop/Cart.tsx", Cart), { export: "Hostile" });
 
 const Layout = (props: { children?: ReactNode }) => (
   <html>
@@ -58,6 +59,11 @@ const views: Record<string, any> = {
       <Amount />
     </main>
   ),
+  "shop/Hostile": () => (
+    <main>
+      <Hostile />
+    </main>
+  ),
 };
 
 class ForceGerman extends Middleware {
@@ -71,6 +77,7 @@ class ShopViewRouter extends ViewRouter {
     "/cart": this.view("shop/Cart").static({ layout: "shop/Layout" }),
     "/plain": this.view("shop/Plain").static({ layout: "shop/Layout" }),
     "/amount": this.view("shop/Amount").static({ layout: "shop/Layout" }),
+    "/hostile": this.view("shop/Hostile").static({ layout: "shop/Layout" }),
   };
 }
 
@@ -169,11 +176,41 @@ describe("useDictionary in an island on a static page", () => {
     expect(html.indexOf('id="gemi-island-i18n"')).toBeLessThan(html.indexOf('<script type="module">'));
   });
 
-  test("carries no payload when the page's islands read no i18n", async () => {
+  test("carries the locale but no dictionaries when the page's islands read none", async () => {
+    // An island may first read it in the browser, after a click.
     const html = await fetchDocument("http://example.test/tr-TR/plain");
     expect(html).toContain('id="gemi-islands"');
-    expect(html).not.toContain("gemi-island-i18n");
+    expect(payload(html)).toEqual({
+      currentLocale: "tr-TR",
+      defaultLocale: "en-US",
+      timeZone: expect.any(String),
+    });
     expect(html).not.toContain("__GEMI_DICT__");
+  });
+
+  test("escapes strings that would end the block", async () => {
+    const html = await fetchDocument("http://example.test/hostile");
+    const block = html.match(/<script type="application\/json" id="gemi-island-i18n">([\s\S]*?)<\/script>/)![1];
+    expect(block).not.toMatch(/<|\u2028|\u2029/);
+    expect(payload(html).dictionaries).toEqual([
+      [Cart.hostileDict.id, "en-US", { note: "a</script><script>alert(1)</script><!--b\u2028c\u2029d" }],
+    ]);
+    // The block ends where it should: the loader still follows it.
+    expect(html.indexOf('id="gemi-island-i18n"')).toBeLessThan(html.indexOf('<script type="module">'));
+  });
+
+  test("concurrent requests in different locales each carry their own", async () => {
+    const [tr, de, en] = await Promise.all([
+      fetchDocument("http://example.test/tr-TR/cart"),
+      fetchDocument("http://example.test/de-DE/cart"),
+      fetchDocument("http://example.test/cart"),
+    ]);
+    expect(outputs(tr)).toEqual(["KDV (%18)", "KDV (%8)"]);
+    expect(outputs(de)).toEqual(["MwSt. (18 %)", "MwSt. (8 %)"]);
+    expect(outputs(en)).toEqual(["VAT (18%)", "VAT (8%)"]);
+    expect(payload(tr).dictionaries).toEqual([[Cart.cartDict.id, "tr-TR", Cart.strings["tr-TR"]]]);
+    expect(payload(de).dictionaries).toEqual([[Cart.cartDict.id, "de-DE", Cart.strings["de-DE"]]]);
+    expect(payload(en).dictionaries).toEqual([[Cart.cartDict.id, "en-US", Cart.strings["en-US"]]]);
   });
 
   test("an island that only formats gets the locale and zone, and no dictionaries", async () => {

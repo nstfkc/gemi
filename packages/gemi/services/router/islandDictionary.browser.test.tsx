@@ -28,8 +28,12 @@ const PlainCounter = island(tagged("Cart", Cart), { export: "PlainCounter" }) as
   start: number;
 }) => ReactElement;
 const Amount = island(tagged("Cart", Cart), { export: "Amount" }) as () => ReactElement;
+const Coupon = island(tagged("Cart", Cart), { export: "Coupon" }) as () => ReactElement;
 
-/** A static document in `locale`, with `navigation` on so pages can be swapped. */
+/**
+ * A static document in `locale`, with `navigation` on so pages can be swapped.
+ * An empty `locale` is an app with none configured.
+ */
 async function page(locale: string, body: ReactElement, links = "") {
   await preloadDictionaries(locale);
   const collector = createStaticRenderCollector(
@@ -38,14 +42,16 @@ async function page(locale: string, body: ReactElement, links = "") {
       await stream.allReady;
       return await new Response(stream).text();
     },
-    { currentLocale: locale, defaultLocale: "en-US", timeZone: "Europe/Istanbul" },
+    locale
+      ? { currentLocale: locale, defaultLocale: "en-US", timeZone: "Europe/Istanbul" }
+      : { defaultLocale: "en-US", timeZone: "Europe/Istanbul" },
   );
   const stream = await renderToReadableStream(
     createElement(StaticRenderContext.Provider, { value: collector }, body),
   );
   await stream.allReady;
   const html =
-    `<!DOCTYPE html><html lang="${locale}"><head><title>${locale}</title></head><body>` +
+    `<!DOCTYPE html><html lang="${locale || "en"}"><head><title>${locale}</title></head><body>` +
     `${links}${spliceIslandSlots(await new Response(stream).text())}</body></html>`;
   return injectIslands(
     html,
@@ -120,8 +126,24 @@ describe("useDictionary in an island, hydrating", () => {
     expect(errors(error)).toEqual([]);
   });
 
-  test("a page whose islands read no i18n hydrates as before", async () => {
-    const html = await page("tr-TR", createElement("main", null, createElement(PlainCounter, { start: 1 })));
+  test("an island that reads the dictionary only after a click renders in the page's locale", async () => {
+    const html = await page("tr-TR", createElement("main", null, createElement(Coupon)));
+    // The server render read no i18n; the page still carries its locale.
+    expect(html).toContain('id="gemi-island-i18n"');
+    expect(html).not.toContain("dictionaries");
+    const error = vi.spyOn(console, "error");
+
+    await open(html);
+    await act(() => document.querySelector<HTMLButtonElement>("button.apply")!.click());
+    await settle();
+    expect(document.querySelector("p.applied")!.textContent).toBe("SAVE10 uygulandı");
+    // Not in the document, so its chunk is loaded, in the page's locale.
+    expect(Cart.loads.mock.calls).toEqual([["tr-TR"]]);
+    expect(errors(error)).toEqual([]);
+  });
+
+  test("in an app with no locale, a page whose islands read no i18n hydrates as before", async () => {
+    const html = await page("", createElement("main", null, createElement(PlainCounter, { start: 1 })));
     expect(html).not.toContain("gemi-island-i18n");
     const error = vi.spyOn(console, "error");
 
