@@ -3,6 +3,7 @@ import {
   ISLAND_SLOT_ATTRIBUTE,
   ISLAND_SLOT_TAG,
   ISLAND_SLOT_TEMPLATE_ATTRIBUTE,
+  islandI18nPayload,
   type StaticRenderCollector,
 } from "../../client/islands";
 import { htmlSafeJson } from "./streamQueryInjection";
@@ -25,6 +26,13 @@ export type IslandResolver = (moduleKey: string) => IslandAsset | undefined;
 
 /** The id of the JSON block the loader reads its island table from. */
 export const ISLAND_DATA_ID = "gemi-islands";
+
+/**
+ * The id of the JSON block with the page's i18n for its islands (#1095): the
+ * locale, zone and the dictionaries islands read. Only on a page whose
+ * islands read any of it. Its id is also in `ISLAND_HYDRATE_SOURCE`.
+ */
+export const ISLAND_I18N_DATA_ID = "gemi-island-i18n";
 
 /**
  * `'sha256-…'` for the production island loader, ready to put in a
@@ -104,6 +112,10 @@ export interface DocumentScript {
  * Without a resolver (a test rendering through `app.fetch`), no island table
  * is injected and nothing is logged.
  *
+ * When islands read the page's i18n (`useDictionary`, `useFormatter`), the
+ * locale, zone and the dictionaries they read go next to the table, so they
+ * hydrate with the strings they rendered without fetching them (#1095).
+ *
  * A `script` (`.static({ script })`) is inlined at the end of the head as a
  * module script, whatever else the page has. The navigation runtime leaves
  * the head's scripts alone when it swaps a page in, so it runs once per
@@ -160,10 +172,15 @@ export function injectIslands(
     [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("") +
     documentScript;
   const source = navigation ? STATIC_NAVIGATION_SOURCE : ISLAND_LOADER_SOURCE;
+  const i18n = hasIslands ? islandI18nPayload(collector) : undefined;
   const body =
     (hasIslands
       ? `<script type="application/json" id="${ISLAND_DATA_ID}">${htmlSafeJson({ i: entries })}</script>`
-      : "") + `<script type="module">${dev ? DEV_PREAMBLE + source : source}</script>`;
+      : "") +
+    (i18n
+      ? `<script type="application/json" id="${ISLAND_I18N_DATA_ID}">${htmlSafeJson(i18n)}</script>`
+      : "") +
+    `<script type="module">${dev ? DEV_PREAMBLE + source : source}</script>`;
 
   return insertBefore(insertBefore(html, "</head>", head, false), "</body>", body, true);
 }

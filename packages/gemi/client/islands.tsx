@@ -10,6 +10,10 @@ import {
   use,
   useContext,
 } from "react";
+import type { DictionarySink } from "../i18n/dictionarySink";
+import type { LocaleStrings } from "../i18n/dictionaryShape";
+import { DictionarySinkContext } from "./DictionarySinkContext";
+import { type IslandI18n, IslandI18nContext } from "./IslandI18nContext";
 
 /**
  * When an island's code is fetched and hydrated, per marker.
@@ -84,13 +88,91 @@ export interface StaticRenderCollector {
   instances: WeakMap<object, IslandInstance>;
   /** Instances rendered so far, for each one's `identifierPrefix`. */
   count: number;
+  /**
+   * What an island's own root gets of the page's i18n (#1095). Each read of
+   * it sets `i18nUsed`.
+   */
+  i18n: IslandI18n;
+  /**
+   * The app has a locale configured: the page then always carries its i18n
+   * for its islands, read or not, since an island may first read it in the
+   * browser (a subtree that mounts after a click).
+   */
+  localeAware: boolean;
+  /** The dictionary sink `useDictionary` reports into inside an island's root. */
+  sink: DictionarySink;
+  /** An island read the page's locale or zone (`useDictionary`, `useFormatter`). */
+  i18nUsed: boolean;
+  /** The dictionaries islands read, as `[id, locale, strings]`, once each. */
+  dictionaries: IslandDictionary[];
+}
+
+/** @internal One dictionary an island read: what the island runtime seeds. */
+export type IslandDictionary = [id: string, locale: string, strings: LocaleStrings];
+
+/**
+ * @internal The page's i18n as the island runtime reads it, from the
+ * document's `<script type="application/json" id="gemi-island-i18n">`.
+ */
+export interface IslandI18nPayload extends IslandI18n {
+  /** Seeded into the dictionary registry before the island hydrates. */
+  dictionaries?: IslandDictionary[];
 }
 
 /** @internal */
 export function createStaticRenderCollector(
   render: StaticRenderCollector["render"],
+  i18n: IslandI18n = {},
 ): StaticRenderCollector {
-  return { islands: [], render, instances: new WeakMap(), count: 0 };
+  const seen = new Set<string>();
+  const collector: StaticRenderCollector = {
+    islands: [],
+    render,
+    instances: new WeakMap(),
+    count: 0,
+    i18n: {},
+    localeAware: Boolean(i18n.currentLocale),
+    i18nUsed: false,
+    dictionaries: [],
+    sink: {
+      use(id, locale, strings) {
+        const key = `${id} ${locale}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        collector.dictionaries.push([id, locale, strings]);
+      },
+      onUse() {},
+    },
+  };
+  // Read through getters so the collector learns whether any island needed
+  // the page's i18n: in an app without a locale, a page whose islands read
+  // none of it is left as it was.
+  for (const key of ["currentLocale", "defaultLocale", "timeZone"] as const) {
+    Object.defineProperty(collector.i18n, key, {
+      enumerable: true,
+      get() {
+        collector.i18nUsed = true;
+        return i18n[key];
+      },
+    });
+  }
+  return collector;
+}
+
+/**
+ * @internal The payload for a page with islands: always in an app with a
+ * locale, else only when an island read the zone or a dictionary. Its
+ * `dictionaries` are only the ones islands read during the server render.
+ */
+export function islandI18nPayload(collector: StaticRenderCollector): IslandI18nPayload | undefined {
+  if (!collector.i18nUsed && !collector.localeAware) return undefined;
+  const { currentLocale, defaultLocale, timeZone } = collector.i18n;
+  return {
+    ...(currentLocale ? { currentLocale } : {}),
+    ...(defaultLocale ? { defaultLocale } : {}),
+    ...(timeZone ? { timeZone } : {}),
+    ...(collector.dictionaries.length > 0 ? { dictionaries: collector.dictionaries } : {}),
+  };
 }
 
 /** @internal The element an island's static children land in. */
@@ -211,7 +293,9 @@ type AnyComponent = ComponentType<any>;
  *
  * Props must be plain data (checked in dev). `children` are rendered on the
  * server as static HTML and passed through untouched. On a static page the
- * island is a separate React root, so context from the page does not reach it.
+ * island is a separate React root, so context from the page does not reach it,
+ * except the page's locale and time zone: `useDictionary` and `useFormatter`
+ * work inside it, and the strings it read travel with the page.
  */
 export function island<M extends { default: AnyComponent }>(
   loader: () => Promise<M>,
@@ -278,18 +362,30 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
     // children are not rendered here: they belong to the page (and its
     // context), so the page tree renders them next to the marker and
     // `spliceIslandSlots` moves their HTML into this empty slot.
+    //
+    // It gets the page's locale and zone, and the island's sink records the
+    // dictionaries it reads, so the browser can hydrate it with the same
+    // strings without fetching them (#1095).
     const html = component.then((Component) =>
       collector.render(
         createElement(
           StaticRenderContext.Provider,
           { value: null },
-          hasChildren(children)
-            ? createElement(
-                Component,
-                rest,
-                createElement(ISLAND_SLOT_TAG, { [ISLAND_SLOT_ATTRIBUTE]: uid, style: { display: "contents" } }),
-              )
-            : createElement(Component, rest),
+          createElement(
+            IslandI18nContext.Provider,
+            { value: collector.i18n },
+            createElement(
+              DictionarySinkContext.Provider,
+              { value: collector.sink },
+              hasChildren(children)
+                ? createElement(
+                    Component,
+                    rest,
+                    createElement(ISLAND_SLOT_TAG, { [ISLAND_SLOT_ATTRIBUTE]: uid, style: { display: "contents" } }),
+                  )
+                : createElement(Component, rest),
+            ),
+          ),
         ),
         uid,
       ),

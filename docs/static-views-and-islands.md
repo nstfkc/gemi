@@ -274,13 +274,54 @@ target them with a descendant selector or style them directly.
 ### Context
 
 On a static page each island is its **own React root**. Context from the page
-(a theme, gemi's router, query and i18n providers) doesn't reach the island's
-component, on the server or in the browser (its `children` do, see above), so
-pass what it needs as props: translated strings,
-the current locale, URLs. An island that needs a provider of its own renders it
-itself; make a small component that wraps the real one in its providers and
-declare that as the island. In a hydrated view the island is an ordinary
-component and sees the page's context as usual.
+(a theme, gemi's router and query providers, your own) doesn't reach the
+island's component, on the server or in the browser (its `children` do, see
+above), so pass what it needs as props: data, URLs. An island that needs a
+provider of its own renders it itself; make a small component that wraps the
+real one in its providers and declare that as the island. In a hydrated view
+the island is an ordinary component and sees the page's context as usual.
+
+The page's **locale and time zone** are the exception: an island gets them, so
+[`useDictionary`](./i18n.md#usedictionary) and
+[`useFormatter`](./i18n.md#formatting-dates-and-numbers) work inside it, in
+the page's locale. That covers strings whose params only exist in the browser:
+
+```tsx
+// app/views/shop/components/VatLines.tsx: an island
+import { useDictionary } from "gemi/client";
+import { cartDict } from "./cart.dict";
+
+export default function VatLines() {
+  const t = useDictionary(cartDict);
+  const rates = useCartRates(); // read from localStorage
+  return rates.map((rate) => <p key={rate}>{t("rate", { rate })}</p>);
+}
+```
+
+- On the server, the island renders in the page's resolved locale: the URL's,
+  or on a `localeRouting: "off"` group the one
+  [`view.detectLocale`](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing)
+  or middleware (`Lang.setLocale(locale, { cookie: false })`) picked.
+- The dictionaries islands read, in that locale only, go in the document next
+  to the island table:
+  `<script type="application/json" id="gemi-island-i18n">{"currentLocale":"tr-TR","defaultLocale":"en-US","timeZone":"Europe/Istanbul","dictionaries":[["<dictionary id>","tr-TR",{"rate":"KDV (%{{rate}})"}]]}</script>`.
+  The island hydrates from it synchronously, with **no request for the
+  strings**, and `t("rate", { rate })` re-renders with new params as its state
+  changes. Only dictionaries an island read during the server render are in
+  it (with all their keys, in the page's locale). In an app with a locale
+  configured, every page with islands carries the locale and zone even when
+  no island read them, so an island that first calls `useDictionary` after a
+  click still renders in the page's locale (its dictionary is then loaded in
+  that locale). In an app without one, a page whose islands read no zone or
+  dictionary gets no such script.
+- It is a JSON block, not a script, so a Content Security Policy needs nothing
+  new for it. Its strings are visible in the page source, like the island's
+  props.
+- An island inside a [`data-gemi-persist`](#opting-a-link-or-an-element-out)
+  element keeps its root across a navigation, and so the locale it hydrated
+  with, even when the next page is in another locale.
+- `useLocale` and gemi's other providers still don't reach an island:
+  changing the locale is the page's job (a link to the other locale's URL).
 
 An island rendered inside another island's own render is just a component of
 that root.

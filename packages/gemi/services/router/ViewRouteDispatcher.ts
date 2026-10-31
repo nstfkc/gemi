@@ -532,16 +532,28 @@ export class ViewRouteDispatcher {
     // one here too: the HTML `hydrateRoot` sees is exactly what this produced,
     // `useId` included (hence the prefix), and nothing from the page's context
     // leaks in on the server that the browser would not have.
-    const collector = createStaticRenderCollector(async (element, identifierPrefix) => {
-      const stream = await renderToReadableStream(element, {
-        signal: deadline.signal,
-        identifierPrefix,
-        progressiveChunkSize: Number.MAX_SAFE_INTEGER,
-        onError,
-      });
-      await stream.allReady.catch(() => {});
-      return await new Response(stream).text();
-    });
+    //
+    // The page's locale and zone are the one exception (#1095): an island
+    // gets them, so `useDictionary` resolves in the page's locale, including
+    // one middleware or `view.detectLocale` chose, and the browser is handed
+    // the same in the document.
+    const collector = createStaticRenderCollector(
+      async (element, identifierPrefix) => {
+        const stream = await renderToReadableStream(element, {
+          signal: deadline.signal,
+          identifierPrefix,
+          progressiveChunkSize: Number.MAX_SAFE_INTEGER,
+          onError,
+        });
+        await stream.allReady.catch(() => {});
+        return await new Response(stream).text();
+      },
+      {
+        currentLocale: data?.i18n?.currentLocale,
+        defaultLocale: data?.i18n?.defaultLocale,
+        timeZone: data?.i18n?.timeZone,
+      },
+    );
 
     try {
       // `.static({ script })` (#919): picked after the handler, like `version`.

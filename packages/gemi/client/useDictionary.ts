@@ -6,7 +6,7 @@ import { parseTranslation } from "../utils/parseTranslation";
 import type { ParseTranslationParams, Prettify } from "../utils/type";
 import { DictionarySinkContext } from "./DictionarySinkContext";
 import { useFormatter } from "./useFormatter";
-import { useRouteData } from "./useRouteData";
+import { usePageI18n } from "./IslandI18nContext";
 
 type Parser<T extends Record<string, string>> = Prettify<
   {
@@ -41,7 +41,9 @@ type ParamsOrNever<T> = T extends Record<string, never>
 export function useDictionary<const T extends DictionaryTranslations>(
   dictionary: DictionaryHandle<T>,
 ) {
-  const { i18n } = useRouteData();
+  // In an island on a static page, the island's own copy of the page's
+  // locale (#1095): the route's does not reach a root of its own.
+  const i18n = usePageI18n();
   const sink = useContext(DictionarySinkContext);
   // An app with i18n switched off still renders dictionaries — fall back to the
   // source language rather than blowing up on an empty `i18n` payload.
