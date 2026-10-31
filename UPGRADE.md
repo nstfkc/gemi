@@ -1,3 +1,15 @@
+# Unreleased
+
+## i18n: `view.detectLocale` for views out of locale routing (#1092)
+
+**New API (minor). Nothing to change in apps.** See [Picking the locale of a group out of locale routing](docs/i18n.md#picking-the-locale-of-a-group-out-of-locale-routing).
+
+- `view.detectLocale(req, { supportedLocales, defaultLocale })` on a `view` with `localeRouting: "off"` (a `route.domains` group's, which inherits the root's unless set) returns the request's locale, e.g. from `?locale=` or `Accept-Language`. It runs for every document and `.json` request of those views before their middleware, matched or not, so a group's not-found page (`notFound`, `onNotFound`), `meta`, handlers and `useDictionary` render in it.
+- The result is matched with `resolveLocale` against `translation.supportedLocales`; `null` or an unsupported locale leaves `defaultLocale`. No `i18n-locale` cookie is set. Middleware's `Lang.setLocale` still wins.
+- Declaring it on locale-routed views fails the boot. A group that keeps locale routing under a root `view` that has one sets `detectLocale: undefined`.
+- Without it nothing changes: out of locale routing a request still renders in `defaultLocale` unless middleware picks one.
+- An app that picks the locale of such a group in a router-level middleware can move that into `detectLocale` to reach its not-found page too.
+
 # Upgrading from 0.171.0 to 0.172.0
 
 ## `route.domains`: a group may own `/robots.txt` and `/assets/*` (#1015)

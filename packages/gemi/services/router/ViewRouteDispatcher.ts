@@ -287,6 +287,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.localeRouting`. */
   readonly localeRouting: LocaleRouting;
 
+  /** See `ViewRouteConfig.detectLocale`. */
+  readonly detectLocale: ViewRouteConfig["detectLocale"];
+
   /** See `ViewRouteConfig.theme`. */
   readonly theme: ThemeConfig | false;
 
@@ -314,6 +317,13 @@ export class ViewRouteDispatcher {
 
     this.partialRendering = config.partialRendering ?? defaults.partialRendering;
     this.localeRouting = config.localeRouting ?? defaults.localeRouting;
+    this.detectLocale = config.detectLocale;
+    // On locale-routed views the URL, cookie and `Accept-Language` decide.
+    if (this.detectLocale && this.localeRouting !== "off") {
+      throw new Error(
+        '`view.detectLocale` needs `view.localeRouting: "off"`: on locale-routed views the URL, the `i18n-locale` cookie and `Accept-Language` decide the locale. A `route.domains` group that inherits it and keeps locale routing can set `detectLocale: undefined`.',
+      );
+    }
     this.theme = config.theme ?? defaults.theme;
     this.defaultMeta = config.meta;
     this.notFound = config.notFound;
@@ -1416,7 +1426,8 @@ export class ViewRouteDispatcher {
         Lang.setLocale(locale, { cookie: staticCookies.locale });
       } else if (translator.isLocaleAware && !localeRouted) {
         // Out of locale routing: the default locale, not the visitor's, and no
-        // cookie. Middleware may still pick one with `Lang.setLocale`.
+        // cookie, unless `detectLocale` names one below. Middleware may still
+        // pick one with `Lang.setLocale`.
         ctx.setLocale(translator.defaultLocale);
       } else {
         Lang.setLocale(undefined, { cookie: staticCookies.locale });
@@ -1448,6 +1459,22 @@ export class ViewRouteDispatcher {
         // as a blank page. It renders the app's `404` view instead, under the
         // refusal's own status.
         let refusedStatus: number | null = null;
+
+        // These views' own locale (#1092): before middleware and whether or
+        // not a route matched, so the not-found page sees it too. Here rather
+        // than above so a throw reaches `onRequestFail`.
+        if (this.detectLocale && !localeRouted && app(Translator).isLocaleAware) {
+          const { supportedLocales, defaultLocale } = app(Translator);
+          const detected = await this.detectLocale(httpRequest, { supportedLocales, defaultLocale });
+          const locale =
+            typeof detected === "string"
+              ? resolveLocale(detected, supportedLocales, defaultLocale)
+              : null;
+          if (locale) {
+            ctx.setLocale(locale);
+          }
+        }
+
         try {
           await app(MiddlewareRegistry).runMiddleware(middlewares);
         } catch (err) {
