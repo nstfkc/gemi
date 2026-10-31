@@ -79,9 +79,12 @@ export type {
   ToolApprovalRecord,
   ToolResultPart,
   ToolSearchRecord,
+  JsonToolShapes,
   ToolShape,
   ToolShapes,
 } from "./types";
+// The JSON form of a type, as the browser receives it (#1107).
+export type { Jsonify } from "../utils/jsonify";
 
 // --- agents, tools and skills ---------------------------------------------
 export {
