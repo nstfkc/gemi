@@ -2234,7 +2234,7 @@ export default function NotFound(props: { store: { name: string; logoUrl: string
 
 `static` takes the [`.static()` options](./static-views-and-islands.md): islands, `script` and `navigation` work as on any static page. `cacheControl` applies to an unmatched path only, since a route that became a 404 depends on who asked: a refusal or a missing record is sent `Cache-Control: no-store`, and a gated route no `Cache-Control` at all. A client-side navigation from a hydrated page of the group still lands on the app's `404` view, as the client router has only that one. Left out, the group renders the app's `404` view as before. Set on the root `view`, it applies to the root (and to every group that does not set its own, as groups inherit the root's hooks).
 
-On a group with `localeRouting: "off"`, no route middleware runs for a path no route matches, so a locale middleware cannot reach the not-found page. Pick the locale with the group's [`view.detectLocale`](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing) instead: it runs for matched and unmatched paths alike, before `onNotFound`, and the not-found view's `useDictionary` renders in it.
+On a group with `localeRouting: "off"`, no route middleware runs for a path no route matches, so a locale middleware cannot reach the not-found page. Pick the locale with the group's [`view.detectLocale`](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing) instead: it runs for matched and unmatched paths alike, before `onNotFound`, and the not-found view's `useDictionary` renders in it. When the not-found page needs a rule of its own (`Accept-Language` on the 404 only, say), `onNotFound` can call `Lang.setLocale(locale, { cookie: false })`: the not-found view, its `<html lang>` and the default `meta` render in that locale, and matched pages keep theirs ([A different rule for the not-found page](./i18n.md#a-different-rule-for-the-not-found-page)).
 
 ### Nesting view routers
 
@@ -22274,6 +22274,58 @@ domains: {
 - It needs `localeRouting: "off"` on the same views; elsewhere the URL, the
   cookie and `Accept-Language` decide, and the boot fails. A group inherits the
   root `view`'s `detectLocale` like its other hooks.
+
+#### A different rule for the not-found page
+
+`detectLocale` runs before gemi knows whether the request ends on the
+not-found page, so it applies one rule to every page. When the 404 needs its
+own (pages read `?locale=` only, while the plain 404 has no `?locale=` and
+falls back to `Accept-Language`), pick it in `onNotFound` with
+`Lang.setLocale(locale, { cookie: false })`:
+
+```typescript
+// app/config/route.ts
+import { Lang } from "gemi/facades";
+import { negotiateLocale, resolveLocale } from "gemi/i18n";
+
+view: {
+  rootRouter: ShopViewRouter,
+  localeRouting: "off",
+  // Pages: `?locale=` only, else `defaultLocale`.
+  detectLocale: (req, { supportedLocales, defaultLocale }) =>
+    resolveLocale(new URL(req.rawRequest.url).searchParams.get("locale"), supportedLocales, defaultLocale),
+  // The 404: `?locale=`, else `Accept-Language`.
+  onNotFound(req) {
+    if (!req.search.has("locale")) {
+      Lang.setLocale(
+        negotiateLocale(req.headers.get("accept-language"), Lang.getSupportedLocales(), Lang.getDefaultLocale()) ??
+          Lang.getDefaultLocale(),
+        { cookie: false },
+      );
+    }
+  },
+},
+```
+
+- It covers every request that ends on the not-found page: a path no route
+  matches, and a matched route whose middleware or handler throws
+  `RecordNotFoundError`, `NotFoundError` or a refusal.
+- The not-found view's `useDictionary`, its `<html lang>`, the default
+  [`meta`](./views-and-layouts.md#the-apps-default-title-and-metadata) and a
+  `.json` navigation's `i18n` follow it. `Lang.locale()` answers with it from
+  the call on, so call it before `Meta.title`.
+- Matched pages are not affected: their locale is decided before their
+  handlers run.
+- Without the call, the not-found page keeps the locale `detectLocale` or
+  middleware picked.
+- Pass `{ cookie: false }`. Without it `Lang.setLocale` writes the
+  `i18n-locale` cookie, and a static `notFound` page that sets a cookie is sent
+  `private, no-store`. A 404 whose body depends on `Accept-Language` must not
+  be kept by a shared cache under its URL alone either, so keep
+  `notFound.static.cacheControl` in line.
+- Only out of locale routing (`localeRouting: "off"`). On locale-routed views
+  the URL decides, and a `Lang.setLocale` in `onNotFound` does not change the
+  page's locale.
 
 ### Negotiating a locale yourself
 
