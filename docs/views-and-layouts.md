@@ -485,7 +485,7 @@ Meta.tags([
 ```
 
 Calls add up, so a layout handler and its page handler can both add tags. Each
-tag has either `name` or `property` (a `TypeError` otherwise). On a client-side
+tag has either `name` or `property`, and a string `content` (a `TypeError` otherwise). On a client-side
 navigation the tags follow the new page: a page that adds none gets none. A tag
 your layout renders itself is not touched. A partially rendered response whose
 handlers set no metadata at all leaves the tags as they are, but one that sets

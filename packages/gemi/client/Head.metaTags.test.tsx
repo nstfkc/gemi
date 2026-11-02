@@ -45,11 +45,12 @@ test("no tags unless some are added", () => {
   expect(render(metadata)).not.toContain("data-gemi-meta");
 });
 
-test("a tag needs exactly one of name and property", () => {
+test("a tag needs exactly one of name and property, and a string content", () => {
   const metadata = new Metadata();
   expect(() => metadata.tags([{ content: "x" } as never])).toThrow(TypeError);
   expect(() => metadata.tags([{ name: "", content: "x" }])).toThrow(TypeError);
   expect(() => metadata.tags([{ name: "a", property: "b", content: "x" } as never])).toThrow(TypeError);
+  expect(() => metadata.tags([{ name: "a", content: undefined } as never])).toThrow(TypeError);
   expect(metadata.touched).toBe(false);
 });
 

@@ -182,7 +182,10 @@ export class Metadata {
       if (typeof value !== "string" || value === "" || (tag.name !== undefined && tag.property !== undefined)) {
         throw new TypeError("Meta.tags: each tag needs either a `name` or a `property`.");
       }
-      return { [key]: value, content: String(tag.content) } as MetaTag;
+      if (typeof tag.content !== "string") {
+        throw new TypeError(`Meta.tags: the tag ${value} has no string \`content\`.`);
+      }
+      return { [key]: value, content: tag.content } as MetaTag;
     });
     this.touched = true;
     this.content.tags = [...(this.content.tags ?? []), ...normalized];
