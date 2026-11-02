@@ -274,11 +274,12 @@ export default defineLogConfig({
 
 - `Meta.title(title)` — set the page title.
 - `Meta.description(description)` — set the meta description.
-- `Meta.openGraph(params)` — set Open Graph tags and `twitter:card`. `image` is optional; without one the card is `summary`.
+- `Meta.openGraph(params)` — set Open Graph tags and `twitter:card`. `image` is optional; without one the card is `summary`. `siteName`, `twitterTitle` and `twitterDescription` are rendered only when set; `null` leaves out `twitterImageAlt|Width|Height`.
 - `Meta.htmlAttributes({ lang, dir })` — the `<html>` attributes the layout receives as `htmlAttributes` (default: the request's locale and its direction).
 - `Meta.canonical(url)` — a `<link rel="canonical">`.
 - `Meta.robots(content)` — a `<meta name="robots">`, e.g. `"noindex, nofollow"`.
-- `Meta.alternates([{ hrefLang, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in.
+- `Meta.alternates([{ hrefLang, href } | { type, href }])` — `<link rel="alternate" hreflang>` for each language the page exists in, or `<link rel="alternate" type>` (no `hreflang`) for the page in another format, e.g. `text/markdown`.
+- `Meta.tags([{ name | property, content }])` — extra `<meta>` tags, e.g. a per-site verification token. Calls add up; a client-side navigation replaces them.
 - `Meta.fonts([{ family, src, weight?, style?, stretch?, display?, unicodeRange?, preload? }])` — `@font-face` rules, and `<link rel="preload" as="font">` for the fonts marked `preload` (see [Fonts](./static-views-and-islands.md#fonts)).
 
 ```typescript

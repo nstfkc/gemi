@@ -1,3 +1,16 @@
+# Unreleased
+
+## views: more `Meta` tags (#1115)
+
+**New APIs (minor). Nothing to change in apps; existing output is unchanged.** See [Views and Layouts → Page metadata](docs/views-and-layouts.md#page-metadata-head-and-the-meta-facade).
+
+- `Meta.openGraph` takes `siteName` (`og:site_name`), `twitterTitle` (`twitter:title`) and `twitterDescription` (`twitter:description`). Each is rendered only when set; the Twitter ones do not default to `title`/`description`.
+- `twitterImageAlt`, `twitterImageWidth` and `twitterImageHeight` accept `null`, which leaves the tag out instead of following `imageAlt`/`imageWidth`/`imageHeight`.
+- `Meta.tags([{ name | property, content }])` adds `<meta>` tags (e.g. site-verification tokens) that `<Head />` renders and a client-side navigation replaces, like the robots tag. Calls add up.
+- `Meta.alternates` also takes `{ type, href }`: a `<link rel="alternate" type>` without `hreflang`, e.g. the page as `text/markdown`.
+- New types exported from `gemi/http`: `MetaTag`, `MetaAlternate`, `TypedAlternateLink`. `AlternateLink` (and the sitemap's use of it) is unchanged.
+- Type-level: `OpenGraphParams.twitterImageAlt|Width|Height` now include `null`; code that reads them back from the type needs to handle it.
+
 # Upgrading from 0.176.0 to 0.177.0
 
 ## ai: client-side tool data is typed as its JSON form (#1107)

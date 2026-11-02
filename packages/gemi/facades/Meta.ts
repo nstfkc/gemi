@@ -1,4 +1,4 @@
-import type { AlternateLink, HtmlAttributes, MetaFont, OpenGraphParams } from "../http/Metadata";
+import type { HtmlAttributes, MetaAlternate, MetaFont, MetaTag, OpenGraphParams } from "../http/Metadata";
 import { RequestContext } from "../http/requestContext";
 
 export class Meta {
@@ -24,9 +24,24 @@ export class Meta {
   static canonical(url: string) {
     RequestContext.getStore().metadata.canonical(url);
   }
-  /** `<link rel="alternate" hreflang>` for each language this page exists in, rendered by `<Head />`. */
-  static alternates(links: AlternateLink[]) {
+  /**
+   * `<link rel="alternate">`s, rendered by `<Head />`: `{ hrefLang, href }` for
+   * each language this page exists in, `{ type, href }` for the page in
+   * another format (e.g. `type: "text/markdown"`, rendered without `hreflang`).
+   * The last call wins.
+   */
+  static alternates(links: MetaAlternate[]) {
     RequestContext.getStore().metadata.alternates(links);
+  }
+  /**
+   * Extra `<meta name|property content>` tags for this response, rendered by
+   * `<Head />` and replaced on a client-side navigation, e.g. a per-site
+   * verification token: `Meta.tags([{ name: "google-site-verification", content: token }])`.
+   * Calls add up. Throws a `TypeError` for a tag with neither (or both) of
+   * `name` and `property`.
+   */
+  static tags(tags: MetaTag[]) {
+    RequestContext.getStore().metadata.tags(tags);
   }
   /**
    * `<meta name="robots">` for this response, rendered by `<Head />`, e.g.

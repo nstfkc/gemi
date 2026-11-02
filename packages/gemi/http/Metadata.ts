@@ -13,10 +13,19 @@ export type OpenGraphParams = {
   imageAlt?: string;
   imageWidth?: number;
   imageHeight?: number;
+  /** `og:site_name`, rendered only when set. */
+  siteName?: string;
+  /** `twitter:title`, rendered only when set (it does not follow `title`). */
+  twitterTitle?: string;
+  /** `twitter:description`, rendered only when set (it does not follow `description`). */
+  twitterDescription?: string;
   twitterImage?: string;
-  twitterImageAlt?: string;
-  twitterImageWidth?: number;
-  twitterImageHeight?: number;
+  /** Defaults to `imageAlt`; `null` leaves `twitter:image:alt` out. */
+  twitterImageAlt?: string | null;
+  /** Defaults to `imageWidth`; `null` leaves `twitter:image:width` out. */
+  twitterImageWidth?: number | null;
+  /** Defaults to `imageHeight`; `null` leaves `twitter:image:height` out. */
+  twitterImageHeight?: number | null;
   /**
    * The `twitter:card` type. Defaults to `"summary_large_image"` when the page
    * has an image (`twitterImage ?? image`), `"summary"` otherwise.
@@ -55,6 +64,27 @@ export type AlternateLink = {
   href: string;
 };
 
+/**
+ * A `<link rel="alternate" type>` without `hreflang`: the same page in another
+ * format, e.g. `{ type: "text/markdown", href: "/docs/intro.md" }`.
+ */
+export type TypedAlternateLink = {
+  /** The linked document's media type. */
+  type: string;
+  href: string;
+};
+
+/** What `Meta.alternates` takes: a language alternate, or one in another format. */
+export type MetaAlternate = AlternateLink | TypedAlternateLink;
+
+/**
+ * One `<meta>` that `Meta.tags` adds: `name` (e.g. a site-verification token,
+ * `{ name: "google-site-verification", content }`) or `property`.
+ */
+export type MetaTag =
+  | { name: string; property?: never; content: string }
+  | { property: string; name?: never; content: string };
+
 export class Metadata {
   content: any = {
     title: "Gemi App",
@@ -66,6 +96,7 @@ export class Metadata {
     fonts: null,
     robots: null,
     translate: null,
+    tags: null,
   };
 
   /**
@@ -89,6 +120,7 @@ export class Metadata {
       fonts: this.content.fonts,
       robots: this.content.robots,
       translate: this.content.translate,
+      tags: this.content.tags,
     };
   }
 
@@ -137,9 +169,26 @@ export class Metadata {
     }
   }
 
-  alternates(links: AlternateLink[]) {
+  alternates(links: MetaAlternate[]) {
     this.touched = true;
     this.content.alternates = links;
+  }
+
+  /** Added to what earlier calls set, so a layout and its page can both add tags. */
+  tags(tags: MetaTag[]) {
+    const normalized = tags.map((tag) => {
+      const key = tag.name !== undefined ? "name" : "property";
+      const value = tag.name ?? tag.property;
+      if (typeof value !== "string" || value === "" || (tag.name !== undefined && tag.property !== undefined)) {
+        throw new TypeError("Meta.tags: each tag needs either a `name` or a `property`.");
+      }
+      if (typeof tag.content !== "string") {
+        throw new TypeError(`Meta.tags: the tag ${value} has no string \`content\`.`);
+      }
+      return { [key]: value, content: tag.content } as MetaTag;
+    });
+    this.touched = true;
+    this.content.tags = [...(this.content.tags ?? []), ...normalized];
   }
 
   /** Added to what earlier calls declared, so a layout and its page can both declare fonts. */
@@ -208,6 +257,9 @@ export class Metadata {
     imageAlt,
     imageWidth,
     imageHeight,
+    siteName,
+    twitterTitle,
+    twitterDescription,
     twitterImage = image,
     twitterImageAlt = imageAlt,
     twitterImageWidth = imageWidth,
@@ -226,12 +278,17 @@ export class Metadata {
         imageAlt,
         imageWidth,
         imageHeight,
+        siteName,
+        twitterTitle,
+        twitterDescription,
         twitterImage: absolute(twitterImage),
         twitterImageAlt,
         twitterImageWidth,
         twitterImageHeight,
         twitterCard,
-      }).filter(([_, value]) => value !== undefined),
+      })
+        // `null` (a twitter image field turned off) is left out like `undefined`.
+        .filter(([_, value]) => value !== undefined && value !== null),
     );
   }
 }
