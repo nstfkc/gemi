@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.177.0 to 0.178.0
 
 ## views: more `Meta` tags (#1115)
 
