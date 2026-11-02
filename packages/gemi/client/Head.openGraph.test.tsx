@@ -81,3 +81,49 @@ test("image paths get the app origin, each on its own", () => {
   );
   expect(render({ ...page, twitterImage: "/t.png" })).toContain("twitter:image=https://app.example.com/t.png");
 });
+
+test("siteName, twitterTitle and twitterDescription are rendered only when set (#1115)", () => {
+  expect(render({ ...page, title: "Home", description: "Hello" })).not.toEqual(
+    expect.arrayContaining([expect.stringMatching(/^(og:site_name|twitter:title|twitter:description)=/)]),
+  );
+  expect(
+    render({ ...page, description: "Hello", siteName: "Acme", twitterTitle: "Home", twitterDescription: "Hello" }),
+  ).toEqual([
+    "og:title=Home",
+    "og:type=website",
+    "og:url=https://example.com/",
+    "og:description=Hello",
+    "og:site_name=Acme",
+    "twitter:card=summary",
+    "twitter:title=Home",
+    "twitter:description=Hello",
+  ]);
+});
+
+test("null leaves a twitter image field out instead of following the og one (#1115)", () => {
+  expect(
+    render({
+      ...page,
+      image: "https://cdn.example.com/a.png",
+      imageAlt: "A",
+      imageWidth: 1200,
+      imageHeight: 630,
+      twitterImageAlt: null,
+      twitterImageWidth: null,
+      twitterImageHeight: null,
+    }),
+  ).toEqual([
+    "og:title=Home",
+    "og:type=website",
+    "og:url=https://example.com/",
+    "og:image=https://cdn.example.com/a.png",
+    "og:image:alt=A",
+    "og:image:width=1200",
+    "og:image:height=630",
+    "twitter:image=https://cdn.example.com/a.png",
+    "twitter:card=summary_large_image",
+  ]);
+  expect(render({ ...page, image: "https://cdn.example.com/a.png", imageAlt: "A", twitterImageAlt: null })).not.toContain(
+    "twitter:image:alt=A",
+  );
+});

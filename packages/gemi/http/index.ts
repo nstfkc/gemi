@@ -170,4 +170,4 @@ export {
   type RobotsRule,
   type RobotsStatus,
 } from "./sitemap/index";
-export type { AlternateLink } from "./Metadata";
+export type { AlternateLink, MetaAlternate, MetaTag, TypedAlternateLink } from "./Metadata";

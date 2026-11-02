@@ -332,6 +332,28 @@ import { Meta } from "gemi/facades";
 origin. `twitter:card` is `summary_large_image` when the page has an image
 (`twitterImage ?? image`) and `summary` otherwise; pass `twitterCard` to choose it.
 
+A few tags are rendered only when you pass them: `siteName` (`og:site_name`),
+`twitterTitle` (`twitter:title`) and `twitterDescription` (`twitter:description`).
+The Twitter ones don't follow `title` and `description`; pass them when you want
+them. `twitter:image:alt`, `twitter:image:width` and `twitter:image:height` follow
+`imageAlt`, `imageWidth` and `imageHeight` unless you pass `twitterImageAlt`,
+`twitterImageWidth` or `twitterImageHeight`; pass `null` to leave one out:
+
+```typescript
+Meta.openGraph({
+  title: product.name,
+  description: product.summary,
+  type: "website",
+  url: `https://shop.example.com/p/${product.slug}`,
+  siteName: shop.name,
+  twitterTitle: product.name,
+  twitterDescription: product.summary,
+  image: product.imageUrl,
+  imageAlt: product.name,
+  twitterImageAlt: null, // only twitter:image, no twitter:image:alt
+});
+```
+
 `Meta.title`, `Meta.description`, and `Meta.openGraph` populate what `<Head />`
 renders on the server; the client keeps `document.title` and the description tag in
 sync on navigation. You can also pass extra elements as `children` to `<Head>` if a
@@ -418,6 +440,17 @@ Meta.alternates([
 ]);
 ```
 
+An alternate with a `type` and no `hrefLang` links the page in another format,
+rendered without `hreflang`:
+
+```typescript
+Meta.alternates([
+  { hrefLang: "tr", href: "https://acme.example.com/tr/hakkinda" },
+  { type: "text/markdown", href: "https://acme.example.com/about.md" },
+]);
+// <link rel="alternate" href="https://acme.example.com/about.md" type="text/markdown">
+```
+
 On a client-side navigation the `<html>` attributes and these links follow the
 new page.
 
@@ -436,6 +469,30 @@ req.ctx().setHeaders("X-Robots-Tag", "noindex, nofollow");
 The last call wins. On a client-side navigation the tag follows the new page:
 a page that sets none gets none. A `<meta name="robots">` your layout renders
 itself is not touched.
+
+### Other meta tags
+
+`Meta.tags` adds `<meta name content>` or `<meta property content>` tags to the
+response, which `<Head />` renders. Use it for tags whose value depends on the
+request, such as a per-site verification token that a static layout can't know:
+
+```typescript
+Meta.tags([
+  { name: "google-site-verification", content: site.googleVerification },
+  { name: "msvalidate.01", content: site.bingVerification },
+  { property: "fb:app_id", content: "1234567890" },
+]);
+```
+
+Calls add up, so a layout handler and its page handler can both add tags. Each
+tag has either `name` or `property` (a `TypeError` otherwise). On a client-side
+navigation the tags follow the new page: a page that adds none gets none. A tag
+your layout renders itself is not touched. A partially rendered response whose
+handlers set no metadata at all leaves the tags as they are, but one that sets
+any metadata replaces them with its own, so a tag a skipped layout added is
+dropped in the browser (crawlers read the full server render, which has it).
+Tags already rendered from other APIs (`description`, `robots`, Open Graph) have
+their own calls; don't add them here too.
 
 ### Translation
 

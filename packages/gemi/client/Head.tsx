@@ -1,24 +1,37 @@
-import type { AlternateLink } from "../http/Metadata";
+import type { MetaAlternate, MetaTag } from "../http/Metadata";
 import { type ReactNode, useContext } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
 import { resolveHtmlAttributes } from "./htmlAttributes";
 import { fontFaceRules, fontPreloads } from "./fonts";
 
-/** Marks the `<link>`s and `<meta name="robots">` rendered from metadata, so a navigation can replace them. */
+/**
+ * Marks the `<link>`s, `<meta name="robots">` and `Meta.tags` rendered from
+ * metadata, so a navigation can replace them.
+ */
 const GEMI_META_ATTRIBUTE = "data-gemi-meta";
 
-type MetaLink = { rel: "canonical" | "alternate"; href: string; hrefLang?: string };
+type MetaLink = { rel: "canonical" | "alternate"; href: string; hrefLang?: string; type?: string };
 
 function metaLinks(
   canonical: string | null | undefined,
-  alternates: AlternateLink[] | null | undefined,
+  alternates: MetaAlternate[] | null | undefined,
 ): MetaLink[] {
   const links: MetaLink[] = [];
   if (canonical) links.push({ rel: "canonical", href: canonical });
-  for (const { hrefLang, href } of alternates ?? []) {
-    links.push({ rel: "alternate", href, hrefLang });
+  for (const alternate of alternates ?? []) {
+    links.push({
+      rel: "alternate",
+      href: alternate.href,
+      hrefLang: "hrefLang" in alternate ? alternate.hrefLang : undefined,
+      type: "type" in alternate ? alternate.type : undefined,
+    });
   }
   return links;
+}
+
+/** The attribute (`name` or `property`) and its value of a `Meta.tags` entry. */
+function tagKey(tag: MetaTag): ["name" | "property", string] {
+  return tag.name !== undefined ? ["name", tag.name] : ["property", tag.property as string];
 }
 
 /** Marks the `<style>`s holding `Meta.fonts`' `@font-face` rules. */
@@ -46,7 +59,7 @@ export function updateMeta(meta: any, locale?: string | null) {
   if (!meta) {
     return;
   }
-  const { title, description, htmlAttributes, canonical, alternates, fonts, robots, translate } = meta;
+  const { title, description, htmlAttributes, canonical, alternates, fonts, robots, translate, tags } = meta;
   // A page that allows translation drops the tag; the next page that doesn't
   // gets it back. Only the tag gemi removed is put back.
   if (translate === true) {
@@ -84,11 +97,20 @@ export function updateMeta(meta: any, locale?: string | null) {
     element.setAttribute(GEMI_META_ATTRIBUTE, "");
     document.head.appendChild(element);
   }
+  for (const tag of (tags ?? []) as MetaTag[]) {
+    const [key, value] = tagKey(tag);
+    const element = document.createElement("meta");
+    element.setAttribute(key, value);
+    element.setAttribute("content", tag.content);
+    element.setAttribute(GEMI_META_ATTRIBUTE, "");
+    document.head.appendChild(element);
+  }
   for (const link of metaLinks(canonical, alternates)) {
     const element = document.createElement("link");
     element.setAttribute("rel", link.rel);
     element.setAttribute("href", link.href);
     if (link.hrefLang) element.setAttribute("hreflang", link.hrefLang);
+    if (link.type) element.setAttribute("type", link.type);
     element.setAttribute(GEMI_META_ATTRIBUTE, "");
     document.head.appendChild(element);
   }
@@ -125,6 +147,9 @@ const OpenGraph = (props: {
   imageAlt?: string;
   imageWidth?: number;
   imageHeight?: number;
+  siteName?: string;
+  twitterTitle?: string;
+  twitterDescription?: string;
   twitterImage?: string;
   twitterImageAlt?: string;
   twitterImageWidth?: number;
@@ -140,6 +165,9 @@ const OpenGraph = (props: {
     imageAlt,
     imageWidth,
     imageHeight,
+    siteName,
+    twitterTitle,
+    twitterDescription,
     twitterImage,
     twitterImageAlt,
     twitterImageWidth,
@@ -162,8 +190,13 @@ const OpenGraph = (props: {
       {imageHeight && (
         <meta property="og:image:height" content={String(imageHeight)} />
       )}
+      {siteName && <meta property="og:site_name" content={siteName} />}
       {twitterImage && <meta name="twitter:image" content={twitterImage} />}
       <meta name="twitter:card" content={twitterCard} />
+      {twitterTitle && <meta name="twitter:title" content={twitterTitle} />}
+      {twitterDescription && (
+        <meta name="twitter:description" content={twitterDescription} />
+      )}
       {twitterImageAlt && (
         <meta name="twitter:image:alt" content={twitterImageAlt} />
       )}
@@ -224,12 +257,24 @@ export const Head = ({
         <meta name="robots" content={meta.robots} {...{ [GEMI_META_ATTRIBUTE]: "" }} />
       )}
       {meta?.openGraph && <OpenGraph {...meta.openGraph} />}
+      {((meta?.tags ?? []) as MetaTag[]).map((tag, index) => {
+        const [key, value] = tagKey(tag);
+        return (
+          <meta
+            key={`${index}:${key}:${value}`}
+            {...{ [key]: value }}
+            content={tag.content}
+            {...{ [GEMI_META_ATTRIBUTE]: "" }}
+          />
+        );
+      })}
       {metaLinks(meta?.canonical, meta?.alternates).map((link) => (
         <link
-          key={`${link.rel}:${link.hrefLang ?? ""}:${link.href}`}
+          key={`${link.rel}:${link.hrefLang ?? ""}:${link.type ?? ""}:${link.href}`}
           rel={link.rel}
           href={link.href}
           hrefLang={link.hrefLang}
+          type={link.type}
           {...{ [GEMI_META_ATTRIBUTE]: "" }}
         />
       ))}
