@@ -211,7 +211,7 @@ async function call(url: string, what: string, init: RequestInit): Promise<Recor
       cause,
     });
   }
-  const payload = parseJson(await response.text().catch(() => ""));
+  const payload = parseInstagramJson(await response.text().catch(() => ""));
   if (!response.ok) {
     // `{ error_type, code, error_message }` from api.instagram.com,
     // `{ error: { type, code, message } }` from graph.instagram.com. Only the
@@ -234,7 +234,7 @@ async function call(url: string, what: string, init: RequestInit): Promise<Recor
  * account ids (17841…, 17 digits) do not fit a double, and parsing them as
  * numbers rounds them to another account's id.
  */
-function parseJson(text: string): Record<string, unknown> {
+export function parseInstagramJson(text: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(text.replace(/("(?:user_id|id)"\s*:\s*)(-?\d+)(?=\s*[,}\]])/g, '$1"$2"'));
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};

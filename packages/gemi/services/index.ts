@@ -396,6 +396,22 @@ export type {
 export { OAuthConnectionProvider } from "../auth/connections/OAuthConnectionProvider";
 export { InstagramConnectionProvider } from "../auth/connections/InstagramConnectionProvider";
 export type { InstagramConnectionProviderConfig } from "../auth/connections/InstagramConnectionProvider";
+export { Instagram, InstagramPublisher, InstagramPublishError, INSTAGRAM_LIMITS } from "../auth/connections/InstagramPublisher";
+export type {
+  InstagramCarouselItem,
+  InstagramCarouselPost,
+  InstagramContainerStatus,
+  InstagramContainerStatusCode,
+  InstagramImagePost,
+  InstagramPublished,
+  InstagramPublisherOptions,
+  InstagramPublishErrorCode,
+  InstagramPublishingLimit,
+  InstagramPublishOptions,
+  InstagramReelPost,
+  InstagramStoryPost,
+  InstagramUserTag,
+} from "../auth/connections/InstagramPublisher";
 export type {
   ConnectionRefreshContext,
   ConnectionRefreshStrategy,

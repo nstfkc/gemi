@@ -137,24 +137,123 @@ The connect callback runs the whole chain:
 Instagram ids have 17 digits, more than a JavaScript number holds exactly. gemi reads them as
 strings, so compare and store them as strings too.
 
-### Calling the API
+### Publishing
+
+`Instagram.for(connection)` publishes to a connected account. It needs a connection that was
+granted `instagram_business_content_publish`:
 
 ```typescript
 import { Connections } from "gemi/facades";
+import { Instagram, InstagramPublishError } from "gemi/services";
 
 const ig = await Connections.for(user, "instagram", igAccountId);
 if (!ig) return { connected: false };
+const instagram = Instagram.for(ig);
 
-// Publish an image: a container, then publish it.
-const created = await ig.fetch(`/v25.0/${ig.providerAccountId}/media`, {
-  method: "POST",
-  body: new URLSearchParams({ image_url: imageUrl, caption }),
+const { mediaId, permalink } = await instagram.publishImage({
+  imageUrl: "https://media.example.com/posts/42.jpg",
+  caption: "New in store #spring",
+  altText: "A green jacket on a hanger",
+  userTags: [{ username: "friend", x: 0.5, y: 0.4 }], // optional
+  locationId: "110843418940484", // optional, a Facebook Page's location id
 });
-const { id: creationId } = await created.json();
-await ig.fetch(`/v25.0/${ig.providerAccountId}/media_publish`, {
-  method: "POST",
-  body: new URLSearchParams({ creation_id: creationId }),
+
+await instagram.publishCarousel({
+  items: [{ imageUrl: first }, { videoUrl: second }], // 2 to 10 items
+  caption: "Three looks",
 });
+
+await instagram.publishReel({
+  videoUrl,
+  caption,
+  coverUrl, // optional
+  shareToFeed: true, // optional
+  thumbOffset: 2000, // optional, ms into the video
+});
+
+await instagram.publishStory({ imageUrl }); // or { videoUrl }
+```
+
+Each `publish*` creates the media container(s), waits for Instagram to process video, calls
+`media_publish` and resolves `{ mediaId, permalink? }`. `permalink` is undefined when Instagram
+does not answer for it after publishing; the post is live either way.
+
+| Method | Returns |
+| --- | --- |
+| `publishImage({ imageUrl, caption?, altText?, userTags?, locationId? })` | `{ mediaId, permalink? }` |
+| `publishCarousel({ items: [{ imageUrl } \| { videoUrl }], caption? })` | `{ mediaId, permalink? }` |
+| `publishReel({ videoUrl, caption?, coverUrl?, shareToFeed?, thumbOffset? })` | `{ mediaId, permalink? }` |
+| `publishStory({ imageUrl } \| { videoUrl })` | `{ mediaId, permalink? }` |
+| `publishingLimit()` | `{ quotaUsage, quotaTotal, quotaDurationSeconds, remaining }` |
+| `containerStatus(containerId)` | `{ id, statusCode, status? }` |
+
+**Media URLs.** Instagram downloads the media itself, so every `imageUrl`, `videoUrl` and
+`coverUrl` must be an `https` URL reachable from the internet: a file in a public bucket, or a
+signed URL from your storage that stays valid while Instagram fetches it (for a video, until the
+container finishes). A local or private address (`localhost`, `10.x`, a single-label host) is
+refused before anything is sent. Files you keep with [`Storage`](./file-storage.md) can be served
+from a public bucket for this. Instagram wants JPEG images and MP4/MOV video within its size and
+aspect ratio limits.
+
+**Waiting for video.** Containers that hold video (reels, video stories, carousel videos and a
+carousel with a video in it) are polled until their `status_code` is `FINISHED`: first after
+2 seconds, then 1.5 times longer each time up to 10 seconds, for at most 5 minutes. Image
+containers are published straight away; when Instagram answers that one is not ready yet, it is
+polled and published once more. Tune the waits per publisher, and stop a call with a signal:
+
+```typescript
+const instagram = Instagram.for(ig, {
+  graphApiVersion: "v25.0", // default: the provider's graphApiVersion, else unversioned
+  pollIntervalMs: 2000,
+  maxPollIntervalMs: 10_000,
+  timeoutMs: 300_000,
+});
+await instagram.publishReel({ videoUrl }, { signal: AbortSignal.timeout(60_000), timeoutMs: 120_000 });
+```
+
+An abort rejects with the signal's reason. A timeout fails with `timeout` and leaves the
+container processing on Instagram's side: `error.containerId` names it, and
+`containerStatus(id)` reads it.
+
+**Checked before sending** (`invalid_input`): a caption of at most 2,200 characters, 30 hashtags
+and 20 @mentions; 2 to 10 carousel items, each exactly one of `imageUrl` and `videoUrl`; a story
+with exactly one of them; at most 20 user tags with `x` and `y` between 0 and 1; a whole,
+non-negative `thumbOffset`; public `https` media URLs. A connection without
+`instagram_business_content_publish` fails with `permission_denied` without calling Instagram.
+
+**Errors.** A refusal throws `InstagramPublishError`, with `code`, `status`, Graph's `graphCode`
+and `graphSubcode`, and the `containerId` when there is one. Its message has Graph's message
+with anything token-like removed, and never a URL or a token.
+
+| `code` | When |
+| --- | --- |
+| `invalid_input` | The checks above, or Instagram refused the caption. |
+| `permission_denied` | The scope is missing, or Graph codes 3, 10 and 200 to 299. |
+| `rate_limited` | Graph's call rate limits (codes 4, 17, 32, 613, 80002, or HTTP 429). |
+| `quota_exceeded` | The account reached its publishing limit (100 posts in 24 hours). Check `publishingLimit()` first. |
+| `invalid_media` | Instagram could not fetch or accept the media (format, size, aspect ratio), or the container ended in `ERROR`. |
+| `expired` | The container expired before it was published. |
+| `reconnect_required` | The token was refused even after a renewal. |
+| `transient` | A temporary failure (HTTP 5xx, `is_transient`, the network), after one retry. |
+| `unconfirmed` | `media_publish` failed, but the container reads `PUBLISHED`: the post is probably live, so do not publish it again. |
+| `timeout` | The container did not finish in time. |
+| `graph_error` | Anything else. |
+
+A transient failure is retried once, except `media_publish`: it is retried only while the
+container still reads `FINISHED`, so a publish that went through is never posted twice. A
+revoked or expired token goes through `connection.fetch` as usual: the connection is marked
+`needs_reconnect` and `OAuthReconnectRequiredError` is thrown, unchanged.
+
+In tests, `Connections.fake({ instagram: (request) => ... })` answers the Graph calls the
+publisher makes; `Connections.fake(...).fakeRequests` has what it sent.
+
+### Calling the API
+
+For anything else, call the Graph API through the connection:
+
+```typescript
+const res = await ig.fetch(`/${ig.providerAccountId}/media?fields=id,caption,permalink`);
+const { data } = await res.json();
 ```
 
 `connection.fetch` sends the token as the `access_token` query parameter, the only placement

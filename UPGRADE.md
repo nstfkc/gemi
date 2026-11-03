@@ -1,3 +1,15 @@
+# Unreleased
+
+## services: Instagram publishing helper (#1117)
+
+**New APIs (minor). Nothing to change in apps.** See [Instagram → Publishing](docs/instagram.md#publishing).
+
+- `Instagram.for(connection, options?)` (from `gemi/services`) publishes to a connected Instagram account: `publishImage`, `publishCarousel`, `publishReel`, `publishStory` (each resolves `{ mediaId, permalink? }` and takes `{ signal?, timeoutMs? }`), `publishingLimit()` and `containerStatus(id)`.
+- Containers holding video are polled until `FINISHED` (2 s backoff up to 10 s, 5 minute timeout, configurable per publisher with `pollIntervalMs`, `maxPollIntervalMs`, `timeoutMs`). The Graph API version is the provider's `graphApiVersion` unless `graphApiVersion` is passed.
+- Inputs are checked before any call (caption length, hashtags, @mentions, carousel size, public https media URLs, user tags). Failures throw `InstagramPublishError` with a `code` (`invalid_input`, `permission_denied`, `rate_limited`, `quota_exceeded`, `invalid_media`, `expired`, `reconnect_required`, `transient`, `unconfirmed`, `timeout`, `graph_error`). A dead token still marks the connection and throws `OAuthReconnectRequiredError`.
+- Apps that publish through `connection.fetch` by hand keep working; switching is optional.
+- New exports from `gemi/services`: `Instagram`, `InstagramPublisher`, `InstagramPublishError`, `INSTAGRAM_LIMITS` and the `Instagram*Post`, `InstagramPublished`, `InstagramPublishingLimit`, `InstagramContainerStatus`, `InstagramPublisherOptions`, `InstagramPublishOptions`, `InstagramPublishErrorCode` types.
+
 # Upgrading from 0.177.0 to 0.178.0
 
 ## views: more `Meta` tags (#1115)
