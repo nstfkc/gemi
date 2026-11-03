@@ -287,6 +287,12 @@ describe("publishCarousel", () => {
     ]);
     // The video item twice, the carousel (it holds a video) once; never the image.
     expect(statusPolls().map((call) => call.path)).toEqual(["/1001", "/1001", "/1002"]);
+    // Every item is created before any is waited for.
+    expect(calls.map((call) => `${call.method} ${call.path}`).slice(0, 3)).toEqual([
+      `POST /${IG_ID}/media`,
+      `POST /${IG_ID}/media`,
+      "GET /1001",
+    ]);
   });
 
   test("an image-only carousel is not polled", async () => {

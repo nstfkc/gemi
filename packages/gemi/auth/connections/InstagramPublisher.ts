@@ -226,14 +226,18 @@ export class InstagramPublisher {
 
     const children: string[] = [];
     for (const item of items) {
-      const id = await this.createContainer(
-        item.videoUrl !== undefined
-          ? { media_type: "VIDEO", video_url: item.videoUrl, is_carousel_item: "true" }
-          : { image_url: item.imageUrl, is_carousel_item: "true" },
-        context,
+      children.push(
+        await this.createContainer(
+          item.videoUrl !== undefined
+            ? { media_type: "VIDEO", video_url: item.videoUrl, is_carousel_item: "true" }
+            : { image_url: item.imageUrl, is_carousel_item: "true" },
+          context,
+        ),
       );
-      if (item.videoUrl !== undefined) await this.waitUntilFinished(id, context);
-      children.push(id);
+    }
+    // Created first, so the videos process side by side while we wait.
+    for (const [at, item] of items.entries()) {
+      if (item.videoUrl !== undefined) await this.waitUntilFinished(children[at]!, context);
     }
     const hasVideo = items.some((item) => item.videoUrl !== undefined);
     const container = await this.createContainer(
