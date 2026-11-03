@@ -374,6 +374,16 @@ export class ProviderConnection {
     return "connected";
   }
 
+  /**
+   * The provider this connection belongs to, as configured in
+   * `auth.connections` (for helpers built on a connection).
+   *
+   * @internal
+   */
+  connectionProvider(): OAuthConnectionProvider {
+    return this.manager.provider(this.provider);
+  }
+
   /** Whether every one of `scopes` was granted. */
   hasScopes(...scopes: string[]): boolean {
     return scopes.every((scope) => this.record.scopes.includes(scope));
