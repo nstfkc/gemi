@@ -154,6 +154,17 @@ describe("publishImage", () => {
     expect(await Instagram.for(ig, FAST).publishImage({ imageUrl: IMAGE })).toEqual({ mediaId: "90001", permalink: undefined });
   });
 
+  test("an abort after media_publish still resolves the published media", async () => {
+    const controller = new AbortController();
+    on("GET /90001", () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    const ig = await connect();
+    const result = await Instagram.for(ig, FAST).publishImage({ imageUrl: IMAGE }, { signal: controller.signal });
+    expect(result).toEqual({ mediaId: "90001", permalink: undefined });
+  });
+
   test("an image not ready yet is polled, then published once more", async () => {
     on(
       `POST /${IG_ID}/media_publish`,

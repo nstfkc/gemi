@@ -391,9 +391,9 @@ export class InstagramPublisher {
     try {
       const payload = await this.call("permalink request", `/${mediaId}?fields=permalink`, undefined, context, { retry: false });
       return typeof payload.permalink === "string" ? payload.permalink : undefined;
-    } catch (error) {
-      if (error instanceof InstagramPublishError) return undefined;
-      throw error;
+    } catch {
+      // The post is live: an abort or a refused token now must not read as a failed publish.
+      return undefined;
     }
   }
 
