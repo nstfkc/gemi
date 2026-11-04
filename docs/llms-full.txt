@@ -8459,6 +8459,41 @@ The same `context()` builds the context of a chat turn, a [server turn](./ai-ser
 
 TypeScript can't make an inherited method abstract for some agents only. So a controller that doesn't override `context()` at all still compiles, and its runs get gemi's default `{}` (or the `context` hook's answer). What an override returns is checked.
 
+## Tools per turn
+
+An agent's `tools` are fixed at `Agent.create`. A turn can change them (#1123):
+
+- `tools`: tools (or namespaces) for this run only, beside the agent's. They're lowered like the agent's own, after them and before skills, and a per-run `inputSchema` function on one is resolved per run as usual. A name the agent already uses throws.
+- `activeTools`: the names the model is offered in this run: tools, run tools, or namespaces (a namespace name offers all of it). The rest aren't sent, and a call to one is answered as a call to a tool that doesn't exist. Skills and memory tools aren't filtered. An unknown name throws.
+
+In a controller, `runTools()` decides both once per turn, after `context()`, whose answer it's handed:
+
+```ts
+export class PageChatController extends AgentController<typeof pageAgent, { pageId: string }> {
+  agent = pageAgent;
+
+  protected async runTools(req, { context }) {
+    const site = await Site.find(context.siteId);
+    return {
+      // The site's own integrations, as tools.
+      tools: site.integrations.map((integration) => integrationTool(integration)),
+      // Publishing is off on a site without a plan: the model is never shown it.
+      activeTools: site.plan ? undefined : ["edit", "drawPicture", "integrations"],
+    };
+  }
+}
+```
+
+The same hook is on [`hooks`](./ai-controller-hooks.md) as `runTools`. Running the agent yourself, pass `tools` and `activeTools` to `agent.stream()`.
+
+Things to know:
+
+- A call already pending from an earlier turn (an approval, a client tool) is still answered on a turn that no longer offers its tool, so turning a tool off never strands a question the user can see.
+- A run tool that asks for approval or is answered by the client has to be returned again on the turn that answers it: the answer is checked against the run's tools.
+- Run tools aren't part of the agent's type, so `useChat` sees their parts by name, untyped.
+- A different tool list is a different request prefix, which the provider's prompt cache keys on. Keep the list stable across a conversation where you can.
+- A sub-agent started with `ctx.runAgent` gets its own agent's tools, not the parent run's.
+
 ## Running the agent yourself
 
 `agent.stream({ context })` takes the agent's context. It's required when the context has a required field, and optional otherwise.
@@ -10528,7 +10563,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | Hook | |
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
-| `instructions`, `reasoning`, `skills`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
+| `instructions`, `reasoning`, `skills`, `runTools`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` gets `{ body, context }` and answers `{ tools?, activeTools? }`; see [Tools per turn](./ai-agent-context.md#tools-per-turn). |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |

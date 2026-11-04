@@ -18,6 +18,7 @@ import type {
   PrepareStepResult,
   ReasoningEffort,
   SkillDefinition,
+  ToolEntry,
   ToolShapesOf,
 } from "./Agent";
 import type { ContextWindowOptions } from "./contextWindow";
@@ -666,6 +667,16 @@ export type AuthorizeRequestParams<Body extends object = Record<string, unknown>
   | { route: "attach" | "stop"; threadId?: string; body?: undefined };
 
 /**
+ * What `AgentController.runTools()` answers for a turn (#1123): tools added to
+ * the agent's for this run, and which tools the model is offered. Both are
+ * optional; see `AgentStreamParams.tools` and `AgentStreamParams.activeTools`.
+ */
+export type AgentRunTools = {
+  tools?: readonly ToolEntry[];
+  activeTools?: readonly string[];
+};
+
+/**
  * HOOKS SHARED BY SEVERAL AGENT CONTROLLERS (#989), assigned to a controller's
  * `hooks`. Each one stands in for gemi's default of the controller method with
  * the same name, and takes the same arguments. See `AgentController.hooks`.
@@ -697,6 +708,10 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ) => readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void>;
+  runTools?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: Ctx },
+  ) => AgentRunTools | void | Promise<AgentRunTools | void>;
   /** Builds the run's context. `Ctx` is the agents' (see `defineAgentHooks`). */
   context?: (req: HttpRequest<any, any>, extra: { body: Body }) => Ctx | Promise<Ctx>;
   memoryScopes?: (
@@ -1050,6 +1065,38 @@ export abstract class AgentController<
     extra: { body: Body },
   ): readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void> {
     return this.hooks?.skills?.(req, extra);
+  }
+
+  /**
+   * THE TURN'S TOOLS (#1123): tools added to the agent's for this run, and
+   * which of them the model is offered, decided per turn from the request and
+   * the run's context.
+   *
+   * ```ts
+   * protected async runTools(req, { context }) {
+   *   const tenant = context.tenant;
+   *   return {
+   *     // The tenant's own tools, built from its configuration.
+   *     tools: tenant.integrations.map((integration) => integrationTool(integration)),
+   *     // A feature that is off is not offered at all.
+   *     activeTools: tenant.billingEnabled ? undefined : everythingBut("billing"),
+   *   };
+   * }
+   * ```
+   *
+   * Called once per turn, after `context()` (whose answer it is handed) and
+   * before anything is asked of the model, on turns from `useChat`,
+   * `startTurn` and voice alike. Answer nothing for the agent's own tools,
+   * all offered: the default. A name that clashes with the agent's, or an
+   * `activeTools` entry naming no tool, fails the turn. A turn that answers a
+   * pending call of a run tool has to return that tool again. `body` is
+   * client-controlled, as in `instructions()`.
+   */
+  protected runTools(
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: ContextOf<A> },
+  ): AgentRunTools | void | Promise<AgentRunTools | void> {
+    return this.hooks?.runTools?.(req, extra);
   }
 
   /**
@@ -1662,6 +1709,7 @@ export abstract class AgentController<
       const context = await this.context(req, { body: extraBody });
       const reasoning = (await this.reasoning(req, { body: extraBody })) || undefined;
       const skills = (await this.skills(req, { body: extraBody })) || undefined;
+      const runTools = (await this.runTools(req, { body: extraBody, context })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -1725,6 +1773,9 @@ export abstract class AgentController<
         // Only when answered, so the agent's own applies otherwise.
         ...(reasoning ? { reasoning } : {}),
         ...(skills && skills.length > 0 ? { skills } : {}),
+        // The turn's own tools and which tools are offered (#1123).
+        ...(runTools?.tools && runTools.tools.length > 0 ? { tools: runTools.tools } : {}),
+        ...(runTools?.activeTools ? { activeTools: runTools.activeTools } : {}),
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
         // `AgentContext` — so a tool that needs the user reads it from this.

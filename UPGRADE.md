@@ -1,5 +1,14 @@
 # Unreleased
 
+## ai: an agent's tools per turn (#1123)
+
+**New APIs (minor). No default behaviour change; nothing to change in apps.** See [AI Agent Context → Tools per turn](docs/ai-agent-context.md#tools-per-turn).
+
+- `Agent.stream({ tools })`: tools (or namespaces) for that run only, beside the agent's. A name the agent already uses throws from `stream`.
+- `Agent.stream({ activeTools })`: the tool and namespace names the model is offered in that run; others aren't sent, and a call to one is answered as an unknown tool. Calls pending from an earlier turn still resolve. Skills and memory tools aren't filtered. An unknown name throws.
+- `AgentController.runTools(req, { body, context })` (and the `runTools` hook) answers `{ tools?, activeTools? }` once per turn, after `context()`.
+- New type export from `gemi/ai`: `AgentRunTools`.
+
 ## auth: partition the auth rate-limit keys, e.g. per tenant (#1125)
 
 **New API (minor). No default behaviour change; nothing to change in apps.** See [Authentication → Email codes](docs/authentication.md#email-codes-sign-up-or-sign-in).
