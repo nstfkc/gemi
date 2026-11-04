@@ -182,7 +182,11 @@ describe("InstagramOAuthProvider", () => {
     expect(seen.socialAccounts[0].email).toBeUndefined();
     expect(seen.userCreated).toHaveLength(1);
     // OAuth carries nothing the application's form sent.
-    expect(seen.userCreated[0].context).toEqual({ method: "oauth", input: {} });
+    expect(seen.userCreated[0].context).toEqual({
+      method: "oauth",
+      input: {},
+      req: expect.any(HttpRequest),
+    });
     expect(seen.sessions[0]).toEqual({ email: null, id: 99 });
   });
 

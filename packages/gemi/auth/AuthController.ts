@@ -288,7 +288,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await auth.config.onSignIn(session, req.search.toJSON());
+    await auth.config.onSignIn(session, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return { session };
@@ -349,7 +349,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await auth.config.onSignIn(session, req.search.toJSON());
+    await auth.config.onSignIn(session, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return session;
@@ -369,7 +369,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await auth.config.onSignIn(session, req.search.toJSON());
+    await auth.config.onSignIn(session, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, isNewUser: false, method: "magic-link", req });
 
     return { session };
@@ -415,7 +415,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await auth.config.onSignIn(user, req.search.toJSON());
+    await auth.config.onSignIn(user, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, user, isNewUser: false, method: "password", req });
 
     const { password: _, ...rest } = user;
@@ -463,7 +463,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await auth.config.onSignIn(user, req.search.toJSON());
+    await auth.config.onSignIn(user, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, user, isNewUser: false, method: "password", req });
 
     const { password: _, ...rest } = user;
@@ -486,6 +486,7 @@ export class AuthController extends Controller {
     const created: UserCreatedContext = {
       method: "password",
       input: withoutCredentials(input.toJSON()),
+      req,
     };
 
     // `signUpRequest` is the application's to replace, so the types the
@@ -576,7 +577,7 @@ export class AuthController extends Controller {
       });
     }
 
-    await config.onSignUp(newUser, verificationToken, req.search.toJSON());
+    await config.onSignUp(newUser, verificationToken, req.search.toJSON(), { req });
 
     return newUser;
   }
@@ -624,7 +625,7 @@ export class AuthController extends Controller {
       // so each client reconnects and every channel is authorized again.
       revokeSockets(session.user);
       session.user["extension"] = await config.extendSession(session.user);
-      await config.onSignOut(session.user);
+      await config.onSignOut(session.user, { req });
     }
 
     return {};
@@ -659,7 +660,7 @@ export class AuthController extends Controller {
       token,
     });
 
-    await config.onForgotPassword(user, token);
+    await config.onForgotPassword(user, token, { req });
 
     return {};
   }
@@ -715,7 +716,7 @@ export class AuthController extends Controller {
 
     await userProvider.deleteAllUserSessions(user.id);
 
-    await config.onResetPassword(user);
+    await config.onResetPassword(user, { req });
 
     return {};
   }
@@ -929,6 +930,7 @@ export class AuthController extends Controller {
           name,
           username,
           locale: app(Translator).detectLocale(req),
+          req,
         });
         action = "signup";
       } catch (error) {
@@ -973,6 +975,7 @@ export class AuthController extends Controller {
           name,
           username,
           locale,
+          req,
           linkExisting: oauthProvider.linkByEmail !== false,
           createUser: oauthProvider.createUsers !== false,
         });
@@ -1043,9 +1046,9 @@ export class AuthController extends Controller {
       // it is the one the email path already passes under `verifyEmail: false`.
       // An app that does want to hand new OAuth users a magic link should mint
       // a persisted one with `Auth.createMagicLink(user.email)` from the hook.
-      await config.onSignUp(user, "", req.search.toJSON());
+      await config.onSignUp(user, "", req.search.toJSON(), { req });
     } else {
-      await config.onSignIn(user, req.search.toJSON());
+      await config.onSignIn(user, req.search.toJSON(), { req });
     }
     await notifyAuthenticated(auth.config, {
       session,
@@ -1080,6 +1083,8 @@ export class AuthController extends Controller {
    * Not a route — `protected` keeps it off the controller's public surface.
    */
   protected async createOAuthUserWithoutEmail(args: {
+    /** The callback request, handed to `onUserCreated` (#1126). */
+    req: HttpRequest<any, any>;
     provider: string;
     providerId: string;
     name?: string;
@@ -1102,7 +1107,7 @@ export class AuthController extends Controller {
         accessToken: "",
         refreshToken: "",
       });
-      await config.onUserCreated(created, { method: "oauth", input: {} });
+      await config.onUserCreated(created, { method: "oauth", input: {}, req: args.req });
       return created;
     });
   }
@@ -1148,6 +1153,8 @@ export class AuthController extends Controller {
    * Not a route — `protected` keeps it off the controller's public surface.
    */
   protected async linkOAuthAccount(args: {
+    /** The callback request, handed to `onUserCreated` (#1126). */
+    req: HttpRequest<any, any>;
     provider: string;
     providerId?: string;
     /** Normalised: trimmed and lower-cased. */
@@ -1264,7 +1271,7 @@ export class AuthController extends Controller {
         await userProvider.createSocialAccount(socialAccount(created.id));
       }
 
-      await config.onUserCreated(created, { method: "oauth", input: {} });
+      await config.onUserCreated(created, { method: "oauth", input: {}, req: args.req });
 
       return created;
     });
@@ -1288,7 +1295,7 @@ export class AuthController extends Controller {
     const { user, pin, token } = await auth.createMagicLinkToken(email);
 
     if (user) {
-      await auth.config.onMagicLinkCreated(user, { email, pin, token });
+      await auth.config.onMagicLinkCreated(user, { email, pin, token, req });
       return {
         email,
       };
@@ -1400,6 +1407,7 @@ export class AuthController extends Controller {
           await config.onUserCreated(created, {
             method: "email-code",
             input: withoutCredentials(input.toJSON()),
+            req,
           });
           return created;
         });
@@ -1426,7 +1434,7 @@ export class AuthController extends Controller {
         app(AuthManager).accessTokenCookieOptions(req, session.expiresAt),
       );
 
-    await config.onSignIn(session, req.search.toJSON());
+    await config.onSignIn(session, req.search.toJSON(), { req });
     await notifyAuthenticated(auth.config, { session, isNewUser, method: "email-code", req });
 
     return { session, isNewUser };
