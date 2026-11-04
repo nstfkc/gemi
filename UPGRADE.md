@@ -1,3 +1,14 @@
+# Unreleased
+
+## ai: an agent's tools per turn (#1123)
+
+**New APIs (minor). No default behaviour change; nothing to change in apps.** See [AI Agent Context → Tools per turn](docs/ai-agent-context.md#tools-per-turn).
+
+- `Agent.stream({ tools })`: tools (or namespaces) for that run only, beside the agent's. A name the agent already uses throws from `stream`.
+- `Agent.stream({ activeTools })`: the tool and namespace names the model is offered in that run; others aren't sent, and a call to one is answered as an unknown tool. Calls pending from an earlier turn still resolve. Skills and memory tools aren't filtered. An unknown name throws.
+- `AgentController.runTools(req, { body, context })` (and the `runTools` hook) answers `{ tools?, activeTools? }` once per turn, after `context()`.
+- New type export from `gemi/ai`: `AgentRunTools`.
+
 # Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change

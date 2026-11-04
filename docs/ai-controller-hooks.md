@@ -71,7 +71,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | Hook | |
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
-| `instructions`, `reasoning`, `skills`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. |
+| `instructions`, `reasoning`, `skills`, `runTools`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` gets `{ body, context }` and answers `{ tools?, activeTools? }`; see [Tools per turn](./ai-agent-context.md#tools-per-turn). |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
