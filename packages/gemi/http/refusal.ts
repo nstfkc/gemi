@@ -13,6 +13,16 @@
  */
 
 /**
+ * The response header an `authentication` refusal to an `/api` request
+ * carries: the sign-in page the request would have been sent to as a page —
+ * `auth.signInPath`, or the route's own from `"auth:/admin/sign-in"` — without
+ * an intended-URL parameter, since an API request is not a page to return to.
+ * The web client reads it to build the sign-in URL it hands
+ * `onAuthenticationError`, so the path is never hardcoded there (#1119).
+ */
+export const SIGN_IN_HEADER = "x-gemi-sign-in";
+
+/**
  * Which refusal this is. `validation_error` and `form_error` predate the rest
  * and keep their spelling, and `server_error` is the kind `useUpload` already
  * reported for a failed upload, so a 500 has one name wherever it comes from.

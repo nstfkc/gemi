@@ -1777,3 +1777,51 @@ export default function OauthCallback({ session, redirectTo }) {
 A **magic link** is opened from an email, not from the sign-in page, so it carries no
 `?redirect=` unless your `onMagicLinkCreated` / `onSignUp` hook puts one on the link it
 mails; when it does, `useIntendedUrl()` in the `auth/MagicLinkSignIn` view reads it.
+
+### A session that ends while the page is open
+
+A page load or a navigation to an `auth` route with no session is sent to sign-in. A tab that
+stays open past the session's end gets no navigation, though: its `/api` queries and mutations
+are refused with a 401 `authentication`, a query keeps the data it had next to its `error`, and
+a mutation hands the error to its caller. Nothing sends the user anywhere, unless the app asks
+for it with `onAuthenticationError` on `init()`:
+
+```tsx
+// app/client.tsx
+import { init } from "gemi/client";
+
+init(RootLayout, { onAuthenticationError: "redirect" });
+```
+
+- **Confirmed first.** A 401 alone is not proof that the session ended, so a second after the
+  refusal gemi asks `/auth/me` once, uncached. Only when that is refused as well does it act.
+  When `/auth/me` still has a user — or gives no clear answer (a 5xx, no connection) — the
+  failed queries are fetched again and nothing else happens. A page gets at most two such
+  checks, so a route refused for a reason `/auth/me` does not share cannot loop.
+- **Once per incident.** However many queries fail together, there is one check and one call.
+  The next page is a new incident.
+- **Only `authentication`.** `authorization` and `permission` refusals (a signed-in user who may
+  not do this, 401 or 403) are never reported; they reach the query or the caller as before.
+  Neither is a refusal of `/auth/me` itself, which is how `useUser()` on a public page learns
+  that nobody is signed in.
+- **`"redirect"`** replaces the page with the sign-in page, through the router, carrying the
+  page on screen as `?redirect=` — the parameter `Auth.intendedUrl()` and `useIntendedUrl()`
+  read. The sign-in path is the one the server refused with: `auth.signInPath`, or the route's
+  own from `"auth:/admin/sign-in"`; the server sends it in an `x-gemi-sign-in` header. A
+  sign-in page on another origin gets a full load, with the path only, as the server's own
+  redirect does. The sign-in page itself is never sent to itself.
+- **A function** is called instead, with `{ source, path, error, signInUrl, redirect }`, and
+  decides: show a "your session has expired" prompt (which keeps unsaved input on the page),
+  clear local state, or call `redirect()`:
+
+```tsx
+init(RootLayout, {
+  onAuthenticationError: ({ signInUrl, redirect }) => {
+    if (hasUnsavedChanges()) showSessionExpiredBanner(signInUrl);
+    else redirect();
+  },
+});
+```
+
+A mutation's caller still gets its error, unchanged (`isAuthenticationError(error)` is true),
+before the check runs, so code that already handles it keeps working.

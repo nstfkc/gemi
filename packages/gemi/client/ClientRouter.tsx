@@ -40,6 +40,10 @@ import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { loadRoutePayload } from "./helpers/loadRoutePayload";
 import { isExternalRedirect } from "../utils/intendedUrl";
+import {
+  resetAuthenticationIncident,
+  setAuthenticationNavigator,
+} from "./authenticationErrors";
 import { navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
 
 declare global {
@@ -251,6 +255,29 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   });
 
   const { replace } = useNavigate();
+
+  // `onAuthenticationError`'s `redirect()` navigates through the router, and
+  // its sign-in URL carries the page on screen without the locale segment, as
+  // the server's redirect does (#1119). `replace` is rebuilt every render.
+  const replaceRef = useRef(replace);
+  replaceRef.current = replace;
+  useEffect(
+    () =>
+      setAuthenticationNavigator({
+        replace: (path) => {
+          void replaceRef.current(path);
+        },
+        current: () => {
+          const state = routerSubject?.getValue();
+          return state ? { pathname: state.pathname, search: state.search ?? "" } : null;
+        },
+      }),
+    [routerSubject],
+  );
+  // A new page is a new incident.
+  useEffect(() => {
+    resetAuthenticationIncident();
+  }, [routeState.pathname, routeState.search]);
 
   // Adopt what the document was rendered with. Without this the initial payload
   // only ever reaches a component that mounts on the first render, and one that

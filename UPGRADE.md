@@ -1,3 +1,16 @@
+# Unreleased
+
+## client: `onAuthenticationError` on `init()` for a session that ends on an open page (#1119)
+
+**New API (minor). No default behaviour change; nothing to change in apps.** See [Authentication → A session that ends while the page is open](docs/authentication.md#a-session-that-ends-while-the-page-is-open).
+
+- `init(RootLayout, { onAuthenticationError: "redirect" })` sends the tab to the sign-in page, with the current page as `?redirect=`, when an `/api` query or mutation is refused with a 401 `authentication`. A function `({ source, path, error, signInUrl, redirect }) => void` is called instead, for a prompt or anything else.
+- Before acting, gemi asks `/auth/me` once, uncached, a second after the refusal; only a second `authentication` refusal triggers the hook. A session that is still there, or no clear answer, refetches the failed queries instead. One check and one call per incident (per page); at most two checks per page.
+- Never for `authorization` / `permission` refusals, and never for `/auth/me` itself.
+- Mutation callers still get their error unchanged.
+- **Server:** an `authentication` 401 to an `/api` request now carries an `x-gemi-sign-in` header with the sign-in path (`auth.signInPath`, or the route's `"auth:/x"`). Against an older server without it, the client falls back to `/auth/sign-in`.
+- New type exports from `gemi/client`: `OnAuthenticationError`, `AuthenticationErrorContext`.
+
 # Upgrading from 0.178.0 to 0.179.0
 
 ## services: Instagram publishing helper (#1117)

@@ -1,4 +1,5 @@
 import { refusal, RequestBreakerError, stringEraRefusal } from "./Error";
+import { SIGN_IN_HEADER } from "./refusal";
 import { formatUnsatisfiedContentRange } from "./range";
 
 export class AuthorizationError extends RequestBreakerError {
@@ -154,6 +155,10 @@ export class AuthenticationError extends RequestBreakerError {
       api: {
         status: 401,
         data: { error: stringEraRefusal("authentication", "Authentication error", 401) },
+        // Where a page would have been sent, for the web client's
+        // `onAuthenticationError` (#1119). For an API request `signInLocation`
+        // adds no intended URL; the client adds the page on screen.
+        headers: { [SIGN_IN_HEADER]: location },
       },
       viewData: {
         status: 200,

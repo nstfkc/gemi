@@ -12,6 +12,7 @@ import {
   type WithMutationErrorHelpers,
 } from "./MutationError";
 import { realtime } from "./realtime/loader";
+import { reportAuthenticationRefusal } from "./authenticationErrors";
 import { SOCKET_ID_HEADER } from "../services/broadcast/socketHeader";
 import { QueryManagerContext } from "./QueryManagerContext";
 import type { QueryUpdate } from "./useSetQueryData";
@@ -314,6 +315,16 @@ export function useMutation<
 
         options.onError(error!);
         call.onError?.(error!);
+        // The caller has its error, unchanged; `onAuthenticationError` hears
+        // about an `authentication` refusal as well (#1119).
+        reportAuthenticationRefusal({
+          source: "mutation",
+          path: finalUrl,
+          status: response.status,
+          body: data,
+          headers: response.headers,
+          error,
+        });
         return;
       }
 
@@ -578,6 +589,20 @@ export function useUpload<
         const failure = await withErrorHelpers(error);
         setState("error");
         options?.onError?.(failure);
+        let body: unknown = null;
+        try {
+          body = JSON.parse(outcome.body);
+        } catch {
+          // Not JSON: not a refusal of gemi's.
+        }
+        reportAuthenticationRefusal({
+          source: "mutation",
+          path: finalUrl,
+          status: outcome.status,
+          body,
+          headers: { get: (name) => xhr.getResponseHeader(name) },
+          error: failure,
+        });
         return;
       }
       const json = JSON.parse(outcome.body);

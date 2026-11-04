@@ -215,6 +215,8 @@ Every path under `/assets/` is answered from `dist/client`, whatever its extensi
 
 **The stand-in and `previousAssets` do not apply once you set an asset base.** With a base, every chunk URL in the document points at the CDN, so a missing chunk is a request the origin never sees and the CDN answers with its own 404 — the lazy `import()` rejects and the page stays broken where it stood. Keep the last few releases' `assets/` on the CDN rather than pruning on deploy, which is what the immutable, content-hashed filenames are for. The router's reload still applies.
 
+**A session that ends while a page is open** is left to the page by default. `onAuthenticationError` on `init` sends the tab to sign-in (`"redirect"`) or calls a function of yours, after confirming with `/auth/me` that the session really ended. See [Authentication → A session that ends while the page is open](./authentication.md#a-session-that-ends-while-the-page-is-open).
+
 ### Deploys and mixed builds
 
 While a deploy rolls out, two releases can serve the same tab: a rolling or blue/green deploy, or two origins behind one load balancer with no session affinity. A page loaded from one release can then get the next page's navigation data (`/<path>.json`) from the other. That data was produced for the other release's views. Rendered with this page's views, a renamed or reshaped prop makes a view throw, and the tab shows the error boundary until the user reloads.

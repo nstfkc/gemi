@@ -102,6 +102,10 @@ export type { ExternalLinkProps, LinkProps, PrefetchStrategy } from "./Link";
 export { Redirect } from "./Redirect";
 export { init, create } from "./init";
 export type { InitOptions } from "./init";
+export type {
+  AuthenticationErrorContext,
+  OnAuthenticationError,
+} from "./authenticationErrors";
 export {
   isChunkLoadError,
   recoverFromChunkLoadError,

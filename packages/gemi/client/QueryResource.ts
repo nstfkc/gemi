@@ -2,6 +2,7 @@ import { Subject } from "../utils/Subject";
 import { QueryError } from "./QueryError";
 import { parseRetryAfter } from "./retryPolicy";
 import { readResponseBody } from "./helpers/readResponseBody";
+import { reportAuthenticationRefusal } from "./authenticationErrors";
 
 type State = {
   loading: boolean;
@@ -627,15 +628,28 @@ export class QueryResource {
         this.lastFetchRecord.set(variantKey, Date.now());
         this.failures.delete(variantKey);
       } else {
-        writeError(
-          new QueryError(
-            this.key,
-            variantKey,
-            response!.status,
-            data,
-            parseRetryAfter(response!.headers?.get?.("retry-after")),
-          ),
+        const error = new QueryError(
+          this.key,
+          variantKey,
+          response!.status,
+          data,
+          parseRetryAfter(response!.headers?.get?.("retry-after")),
         );
+        writeError(error);
+        // An `authentication` refusal on an open page: the session may have
+        // ended. Reported to `onAuthenticationError` (#1119), which checks
+        // first and fetches this variant again if the session is still there.
+        if (isLatest()) {
+          reportAuthenticationRefusal({
+            source: "query",
+            path: this.key,
+            status: response!.status,
+            body: data,
+            headers: response!.headers,
+            error,
+            refetch: () => this.resolveVariant(variantKey, true, false),
+          });
+        }
       }
     } finally {
       if (controller) {
