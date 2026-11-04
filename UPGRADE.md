@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.181.0 to 0.182.0
 
 ## client: jittered reconnect backoff for `useSubscription` (#1132) — behaviour change
 
