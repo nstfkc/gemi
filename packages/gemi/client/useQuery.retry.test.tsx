@@ -105,6 +105,9 @@ let net: ReturnType<typeof createNetwork>;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // The default backoff is jittered; at 1 it lands on the top of each step
+  // (1s, 2s, 4s), which the timings below are written against.
+  vi.spyOn(Math, "random").mockReturnValue(1);
   net = createNetwork();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -683,11 +686,35 @@ describe("retryPolicy helpers", () => {
   });
 
   test("retryDelayFor: exponential, capped at 30s, Retry-After wins", () => {
+    const top = () => 1;
     expect(
-      [1, 2, 3, 4, 5, 6, 7].map((n) => retryDelayFor(n, err(500), undefined)),
+      [1, 2, 3, 4, 5, 6, 7].map((n) => retryDelayFor(n, err(500), undefined, undefined, top)),
     ).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
     expect(retryDelayFor(1, err(429, 12_000), 50)).toBe(12_000);
-    expect(retryDelayFor(2, err(500), undefined, 300)).toBe(600);
+    expect(retryDelayFor(2, err(500), undefined, 300, top)).toBe(600);
+  });
+
+  test("retryDelayFor: the default backoff is jittered between half and all of each step", () => {
+    const bottom = () => 0;
+    const middle = () => 0.5;
+    expect(
+      [1, 2, 3, 6, 7].map((n) => retryDelayFor(n, err(500), undefined, undefined, bottom)),
+    ).toEqual([500, 1000, 2000, 15000, 15000]);
+    expect(retryDelayFor(3, err(500), undefined, undefined, middle)).toBe(3000);
+    // Never past the cap, whatever the draw.
+    expect(retryDelayFor(9, err(500), undefined, undefined, () => 0.999999)).toBeLessThanOrEqual(30_000);
+    // Two tabs failing together come back apart.
+    expect(retryDelayFor(2, err(500), undefined, undefined, () => 0.1)).not.toBe(
+      retryDelayFor(2, err(500), undefined, undefined, () => 0.9),
+    );
+  });
+
+  test("retryDelayFor: an explicit retryDelay and Retry-After are not jittered", () => {
+    const random = vi.fn(() => 0);
+    expect(retryDelayFor(3, err(500), 750, undefined, random)).toBe(750);
+    expect(retryDelayFor(3, err(500), (n) => n * 100, undefined, random)).toBe(300);
+    expect(retryDelayFor(3, err(503, 9_000), undefined, undefined, random)).toBe(9_000);
+    expect(random).not.toHaveBeenCalled();
   });
 
   test("parseRetryAfter", () => {

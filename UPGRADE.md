@@ -1,3 +1,28 @@
+# Unreleased
+
+## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change
+
+`UserProvider.findSession` caught every error from the session query and returned `null`, so a database blip (a dropped connection, a pool timeout) or a schema mismatch in the session `select` read as "no session": `auth` API routes answered 401 `authentication`, page loads and navigations were redirected to sign-in, and `Auth.userOrNull()` returned `null`. It now lets the error through:
+
+- **API routes** behind `auth`, or calling `Auth.user()` / `Auth.userOrNull()`, answer **500** `server_error` during such a failure. `useQuery` retries 5xx; mutations get `kind: "server_error"`.
+- **Page loads and navigations** get the error page, not the sign-in redirect.
+- **`Auth.userOrNull()`** throws, as its documentation already said.
+- **A missing, unknown or expired session** is unchanged: 401 and the sign-in redirect.
+- **Sign-in** is unaffected: reading the new session back after it was written falls back to the row just created if the read fails, as it already did when the read came back empty.
+- **Sign-out** during a database failure now answers 500 instead of clearing the cookie while the session row stays live.
+
+**What to check:**
+- A `findSession` override that calls `super.findSession` and relied on it never throwing: it now can. Return `null` only for a missing session and let lookup errors throw (see [Lookup errors](docs/authentication.md#lookup-errors)).
+- A session `select` (`sessionSelect()`) naming a column your schema does not have used to sign everyone out silently; it now fails every signed-in request with a 500, with the Prisma error in your logs.
+- Error tracking (`onException`, `onRequestFail`) now sees these failures as 500s.
+
+## client: jittered default retry backoff for `useQuery` — behaviour change
+
+The default background-retry wait of a `suspense: false` query is now jittered ("equal jitter"): each wait is a random point between half and all of the exponential step, so 0.5–1s, 1–2s, 2–4s, … still capped at 30s. A failure every open tab sees at once (a database blip, now a retried 500 per the entry above) no longer brings all of them back in the same instant on every retry.
+
+- An explicit `retryDelay` (a number or a function, per call or in `queryConfig`) and a server's `Retry-After` are still used exactly.
+- `retryDelayFor` (internal) takes an optional `random` source; tests that assert exact default delays can pin `Math.random` (`vi.spyOn(Math, "random").mockReturnValue(1)` gives the old 1s, 2s, 4s).
+
 # Upgrading from 0.178.0 to 0.179.0
 
 ## services: Instagram publishing helper (#1117)

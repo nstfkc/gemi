@@ -63,24 +63,37 @@ export function shouldRetryQuery(
 }
 
 /**
- * `baseDelay * 2^(failureCount - 1)`, capped at 30s: 1s, 2s, 4s, … by default.
- * A `Retry-After` the server sent (a 429 or 503) is honoured as is.
+ * The wait before a retry. The default is exponential backoff with "equal
+ * jitter": the step `baseDelay * 2^(failureCount - 1)`, capped at 30s, of
+ * which half is fixed and half random — 0.5–1s, 1–2s, 2–4s, … by default.
+ *
+ * The jitter is there for failures many clients see at once. A database blip
+ * fails every open tab's queries in the same second, and an exact schedule
+ * would bring them all back in the same second, retry after retry. The fixed
+ * half keeps a floor, so a retry never lands right on top of the failure.
+ *
+ * Only the default is jittered. A `retryDelay` the caller set (a number or a
+ * function) and a `Retry-After` the server sent are honoured exactly.
+ *
+ * `random` is `Math.random` unless a test passes its own.
  */
 export function retryDelayFor(
   failureCount: number,
   error: QueryFailure,
   retryDelay: RetryDelayOption | undefined,
   baseDelay: number = DEFAULT_RETRY_BASE_DELAY,
+  random: () => number = Math.random,
 ): number {
   if (error instanceof QueryError && error.retryAfter !== undefined) {
     return error.retryAfter;
   }
   if (typeof retryDelay === "function") return retryDelay(failureCount, error);
   if (typeof retryDelay === "number") return retryDelay;
-  return Math.min(
+  const step = Math.min(
     baseDelay * 2 ** Math.max(0, failureCount - 1),
     Math.max(MAX_RETRY_DELAY, baseDelay),
   );
+  return Math.round(step / 2 + (step / 2) * random());
 }
 
 /**

@@ -422,6 +422,28 @@ describe("a provider that shapes the session in findSession", () => {
     expect(result.token).toMatch(/^v2\./);
     expect(accountIds(result)).toEqual(STORED);
   });
+
+  // `findSession` lets a lookup error through since #1120; the sign-in it
+  // reads back for has already written its row, and must not fail on the read.
+  test("a sign-in whose read-back throws still returns the session it created", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(provider, "findSession").mockRejectedValue(new Error("connection reset"));
+    const { result } = await inRequest({}, () =>
+      auth.createOrUpdateSession({ email: "a@example.com", id: 1 }),
+    );
+    expect(result.token).toMatch(/^v2\./);
+    expect(provider.rows.has(result.token)).toBe(true);
+  });
+});
+
+describe("a lookup that fails", () => {
+  test("is an error, not 'no session'", async () => {
+    const token = `v2.${"b".repeat(64)}`;
+    vi.spyOn(provider, "findSession").mockRejectedValue(new Error("pool timeout"));
+    await expect(inRequest({ access_token: token }, () => auth.getSession(token, UA))).rejects.toThrow(
+      "pool timeout",
+    );
+  });
 });
 
 /**
