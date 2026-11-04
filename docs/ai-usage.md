@@ -156,3 +156,41 @@ Unlike `result.usage`, which is one sum across every model the run used, `result
 - **A tool called by a remote MCP client** has no run. Its `ctx.meter` is a meter of its own whose `add`s still reach any `Usage.meter` open around the request.
 
 Concurrent meters don't see each other's calls, and `measureUsage` (tokens only, used by evals) is the same meter without costs.
+
+## Usage limits
+
+A meter tells you what was spent. `usageLimits` stops a run when a budget is spent (#1124). It counts three things:
+
+- `tokens`: the run's `usage.totalTokens`, including its tools' sub-runs, `generate` calls and images;
+- `steps`: the run's own model calls;
+- `toolCalls`: the tool calls the model made in the run that were executed.
+
+`run` is the run's own budget. `scopes` are budgets shared by every run that names the same key, kept in a `UsageLimitStore`: a user, a tenant, a billing period (put the period in the key). In a controller, `usageLimits()` answers them once per turn, after `context()`:
+
+```ts
+export class ChatController extends AgentController<typeof chatAgent> {
+  agent = chatAgent;
+
+  protected usageLimits(req, { context }) {
+    const month = new Date().toISOString().slice(0, 7);
+    return {
+      run: { tokens: 200_000, toolCalls: 50 },
+      scopes: [{ key: `tenant:${context.tenantId}:${month}`, limit: { tokens: 5_000_000 } }],
+      onUsage: async (report) => {
+        await UsageRecord.create({ data: { tenantId: context.tenantId, tokens: report.delta.tokens } });
+      },
+    };
+  }
+}
+```
+
+The same hook is on [`hooks`](./ai-controller-hooks.md) as `usageLimits`. Running the agent yourself, pass `usageLimits` to `agent.stream()`.
+
+How a limit is applied:
+
+- **Checked before what it limits.** `steps` and `tokens` before every model call, `toolCalls` before every tool call. Tokens are only known after a call, so a run stops once it has reached its token limit; the call that crossed it isn't undone.
+- **Over a limit,** the run ends with `finishReason: "error"` and the error code `"usage_limit"` (not retryable). The client is told which kind of limit, never a scope's key. `result().error.usageLimit` and the controller's `onError` get `{ scope, metric, limit, used }`, where `scope` is `"run"` or the key. A tool call refused by a limit gets a `usage_limit` result, and the run ends after that step. A scope that's already spent ends the turn before the model is called.
+- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys. A throw is logged and the run goes on.
+- **The store.** The default `MemoryUsageLimitStore` counts per process and forgets on restart. Give a shared store when you run more than one instance: an object with `get(key)` and `add(key, delta)`, backed by a database row or Redis. A store whose `get` throws fails the run (code `unknown`, retryable) rather than letting it go on unmetered; an `add` that throws is logged.
+- **Concurrency.** Limits are soft under concurrency: two runs of one key can each take their next step before either has added what it spent.
+- **Sub-agents.** A sub-run started by `ctx.runAgent` has no limits of its own, but its tokens count toward the parent run's.

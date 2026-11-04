@@ -161,6 +161,10 @@ export type AgentErrorCode =
    *  `error`), or a tool's `timeoutMs` (on that call's `tool-result`, with
    *  `toolCallId` set, and the run carries on). */
   | "timeout"
+  /** A usage limit was reached (#1124): the run's own or a scope's
+   *  (`usageLimits`). On the run's `error`, and on the result of a tool call
+   *  refused by one. Not retryable until the budget is raised or renewed. */
+  | "usage_limit"
   | "aborted"
   | "unknown";
 

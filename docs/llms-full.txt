@@ -62,7 +62,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[AI Tools That End the Run](./ai-tool-ends-run.md)** — `endsRun` on a tool: a successful call ends the run with an optional closing text, so the model isn't asked again just to confirm what the tool did.
 - **[AI Tool Output for the Model](./ai-tool-model-output.md)** — `toModel` on a tool: the client gets the whole output, the model reads a smaller projection of it (`modelOutput`), such as a row count and the first rows.
 - **[AI Evals](./ai-evals.md)** — `Eval.create`: cases × runs through a task, deterministic checks and LLM judges (with calibration), gates, pass rates and scores with 95% intervals, metered tokens and cost (`measureUsage`), and `Eval.compare` / `Eval.format` against a saved baseline.
-- **[AI Usage and Cost](./ai-usage.md)** — `Usage.meter`, `ctx.meter` and `result.metered`: every model call of a run or a scope (steps, `generate`, images, sub-runs) priced at its own model's prices, costs that aren't model calls added under a label, totals by model and by label.
+- **[AI Usage and Cost](./ai-usage.md)** — `Usage.meter`, `ctx.meter` and `result.metered`: every model call of a run or a scope (steps, `generate`, images, sub-runs) priced at its own model's prices, costs that aren't model calls added under a label, totals by model and by label; usage limits (`usageLimits`) per run and per key, with `onUsage`.
 - **[AI Skills](./ai-skills.md)** — `Skill.create` and `skills` on an agent: instructions the model loads on demand from the reserved `skills` namespace; skills for one run (`Agent.stream({ skills })`, `AgentController.skills()`), and how loaded skills are summarised.
 - **[AI Prompt Files](./ai-prompts.md)** — `Prompt.render` from `gemi/ai`: Markdown prompts with `{{placeholders}}` and `{{> partials}}`, beside their agent or shared, cached in production.
 - **[AI Server Turns](./ai-server-turns.md)** — `AgentController.startTurn`: an agent turn started from a queue job, a command or an MCP tool, run through the controller and stored on the thread like a chat turn; `AgentTurnError`, pending approvals, and where the run lives.
@@ -10199,6 +10199,44 @@ Unlike `result.usage`, which is one sum across every model the run used, `result
 
 Concurrent meters don't see each other's calls, and `measureUsage` (tokens only, used by evals) is the same meter without costs.
 
+## Usage limits
+
+A meter tells you what was spent. `usageLimits` stops a run when a budget is spent (#1124). It counts three things:
+
+- `tokens`: the run's `usage.totalTokens`, including its tools' sub-runs, `generate` calls and images;
+- `steps`: the run's own model calls;
+- `toolCalls`: the tool calls the model made in the run that were executed.
+
+`run` is the run's own budget. `scopes` are budgets shared by every run that names the same key, kept in a `UsageLimitStore`: a user, a tenant, a billing period (put the period in the key). In a controller, `usageLimits()` answers them once per turn, after `context()`:
+
+```ts
+export class ChatController extends AgentController<typeof chatAgent> {
+  agent = chatAgent;
+
+  protected usageLimits(req, { context }) {
+    const month = new Date().toISOString().slice(0, 7);
+    return {
+      run: { tokens: 200_000, toolCalls: 50 },
+      scopes: [{ key: `tenant:${context.tenantId}:${month}`, limit: { tokens: 5_000_000 } }],
+      onUsage: async (report) => {
+        await UsageRecord.create({ data: { tenantId: context.tenantId, tokens: report.delta.tokens } });
+      },
+    };
+  }
+}
+```
+
+The same hook is on [`hooks`](./ai-controller-hooks.md) as `usageLimits`. Running the agent yourself, pass `usageLimits` to `agent.stream()`.
+
+How a limit is applied:
+
+- **Checked before what it limits.** `steps` and `tokens` before every model call, `toolCalls` before every tool call. Tokens are only known after a call, so a run stops once it has reached its token limit; the call that crossed it isn't undone.
+- **Over a limit,** the run ends with `finishReason: "error"` and the error code `"usage_limit"` (not retryable). The client is told which kind of limit, never a scope's key. `result().error.usageLimit` and the controller's `onError` get `{ scope, metric, limit, used }`, where `scope` is `"run"` or the key. A tool call refused by a limit gets a `usage_limit` result, and the run ends after that step. A scope that's already spent ends the turn before the model is called.
+- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys. A throw is logged and the run goes on.
+- **The store.** The default `MemoryUsageLimitStore` counts per process and forgets on restart. Give a shared store when you run more than one instance: an object with `get(key)` and `add(key, delta)`, backed by a database row or Redis. A store whose `get` throws fails the run (code `unknown`, retryable) rather than letting it go on unmetered; an `add` that throws is logged.
+- **Concurrency.** Limits are soft under concurrency: two runs of one key can each take their next step before either has added what it spent.
+- **Sub-agents.** A sub-run started by `ctx.runAgent` has no limits of its own, but its tokens count toward the parent run's.
+
 ---
 
 ## AI Skills
@@ -10563,7 +10601,7 @@ A hook has the same name, the same arguments and the same return type as the con
 | Hook | |
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
-| `instructions`, `reasoning`, `skills`, `runTools`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` gets `{ body, context }` and answers `{ tools?, activeTools? }`; see [Tools per turn](./ai-agent-context.md#tools-per-turn). |
+| `instructions`, `reasoning`, `skills`, `runTools`, `usageLimits`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` and `usageLimits` get `{ body, context }`; `runTools` answers `{ tools?, activeTools? }` (see [Tools per turn](./ai-agent-context.md#tools-per-turn)), `usageLimits` the run's budgets (see [Usage limits](./ai-usage.md#usage-limits)). |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onStreamComplete` | The run's events. `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
