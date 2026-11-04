@@ -621,12 +621,14 @@ export {
   authConfigDefaults,
   type AuthConfig,
   type AuthenticatedArgs,
+  type AuthHookContext,
   type EmailCodeConfig,
   type EmailCodeSendArgs,
   type LegacySessionMigrator,
   type OAuthProviderEntry,
   type UserCreatedContext,
 } from "../auth/config";
+export type { AuthRateLimitKey, AuthRateLimitKeyArgs } from "../auth/oneTimeCode";
 export {
   defineTranslationConfig,
   translationConfigDefaults,

@@ -32,7 +32,7 @@ const auth = {
     generateEmailVerificationToken: vi.fn(async () => "verify-token"),
     emailCode: { ...defaults.emailCode, enabled: true, createUser: true },
     onSignIn: async () => {},
-    onSignUp: async () => {},
+    onSignUp: vi.fn(async () => {}),
     onUserCreated: async (user: unknown, context: UserCreatedContext) => {
       userCreated.push([user, context]);
     },
@@ -87,6 +87,11 @@ describe("onUserCreated", () => {
     expect(context.method).toBe("password");
     expect(context.input).toMatchObject({ email: "ada@example.com", marketingEmails: "on" });
     expect(context.input).not.toHaveProperty("password");
+    // The creating request (#1126), and `onSignUp` gets it last.
+    expect(context.req).toBeInstanceOf(HttpRequest);
+    expect(context.req.rawRequest.url).toBe("https://app.example/api/auth");
+    const signUp = auth.config.onSignUp.mock.calls[0] as unknown[];
+    expect(signUp[3]).toEqual({ req: context.req });
   });
 
   test("an invited sign-up hands over the same", async () => {
@@ -116,5 +121,6 @@ describe("onUserCreated", () => {
     const [, context] = userCreated[0]!;
     expect(context.method).toBe("email-code");
     expect(context.input).toEqual({ email: "ada@example.com", name: "Ada", marketingEmails: true });
+    expect(context.req.rawRequest.url).toBe("https://app.example/api/auth");
   });
 });
