@@ -4238,6 +4238,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   ): Promise<PendingToolCall[]> {
     const pending: PendingToolCall[] = [];
     const running: Promise<void>[] = [];
+    // A usage-limit store that failed during this batch (#1124): thrown once
+    // the calls already started have settled, so none lands after the run ends.
+    let limitStoreError: UsageLimitStoreError | null = null;
 
     for (const call of calls) {
       const resolved = this.config.registry.get(String(call.name));
@@ -4331,7 +4334,30 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       if (this.limiter) {
-        const hit = this.limitHit ?? (await this.limiter.check(this.spent(), { toolCalls: 1 }));
+        let hit = this.limitHit;
+        if (!hit && !limitStoreError) {
+          try {
+            hit = await this.limiter.check(this.spent(), { toolCalls: 1 });
+          } catch (error) {
+            if (!(error instanceof UsageLimitStoreError)) throw error;
+            limitStoreError = error;
+          }
+        }
+        if (limitStoreError) {
+          this.addResult(message, {
+            type: "tool-result",
+            toolCallId: call.toolCallId,
+            name: call.name,
+            status: "error",
+            error: {
+              code: "unknown",
+              message: limitStoreError.message,
+              toolCallId: call.toolCallId,
+              retryable: true,
+            },
+          });
+          continue;
+        }
         if (hit) {
           this.limitHit = hit;
           this.addResult(message, {
@@ -4386,6 +4412,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       Promise.all(running).then(() => undefined),
       this.controller.signal,
     );
+    if (limitStoreError) throw limitStoreError;
     return pending;
   }
 

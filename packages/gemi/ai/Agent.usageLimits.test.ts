@@ -250,3 +250,34 @@ describe("onUsage", () => {
     vi.restoreAllMocks();
   });
 });
+
+describe("a store that fails mid-step", () => {
+  test("lets the step's started tool calls settle, then fails the run", async () => {
+    let reads = 0;
+    const { agent, calls } = setup([toolCall("c1"), toolCall("c2"), finish()], [text("never"), finish()]);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await agent
+      .stream({
+        messages: [],
+        usageLimits: {
+          scopes: [{ key: "k", limit: { toolCalls: 10 } }],
+          store: {
+            // The model call's check and the first tool's pass; the second tool's fails.
+            get: () => {
+              if (++reads > 2) throw new Error("down");
+              return { tokens: 0, steps: 0, toolCalls: 0 };
+            },
+            add: () => {},
+          },
+        },
+      })
+      .result();
+    expect(calls).toEqual(["work"]);
+    const byCall = Object.fromEntries(results(result.messages).map((part) => [part.toolCallId, part]));
+    expect(byCall.c1.status).toBe("ok");
+    expect(byCall.c2.error).toMatchObject({ code: "unknown", retryable: true });
+    expect(result.finishReason).toBe("error");
+    expect(result.error).toMatchObject({ code: "unknown", retryable: true });
+    vi.restoreAllMocks();
+  });
+});
