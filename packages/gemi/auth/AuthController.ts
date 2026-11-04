@@ -262,9 +262,13 @@ export class AuthController extends Controller {
     // Per IP only. A 256-bit token is not guessed, so the link spends no
     // per-address budget: a user locked out of PINs by somebody else's
     // guesses can still sign in with the link from the same email (#708).
-    await enforceCodeRateLimits("link", null, req, {
-      perIp: auth.config.emailCode.verifyLimit.perIp,
-    });
+    await enforceCodeRateLimits(
+      "link",
+      null,
+      req,
+      { perIp: auth.config.emailCode.verifyLimit.perIp },
+      auth.config.rateLimitKey,
+    );
 
     // The row's hash is compared in constant time, its age checked against
     // `emailCode.linkExpiresInMinutes`, and it is deleted by whichever request
@@ -304,7 +308,13 @@ export class AuthController extends Controller {
     const email = foldEmail(rawEmail);
     const pin = pinValue(rawPin);
 
-    await enforceCodeRateLimits("verify", email, req, auth.config.emailCode.verifyLimit);
+    await enforceCodeRateLimits(
+      "verify",
+      email,
+      req,
+      auth.config.emailCode.verifyLimit,
+      auth.config.rateLimitKey,
+    );
 
     // A PIN that is not a string never reaches the lookup or spends an attempt.
     if (!email || !pin) {
@@ -1276,7 +1286,7 @@ export class AuthController extends Controller {
     const auth = app(AuthManager);
     const { uniformMagicLinkResponse, requestLimit } = auth.config.emailCode;
 
-    await enforceCodeRateLimits("request", email, req, requestLimit);
+    await enforceCodeRateLimits("request", email, req, requestLimit, auth.config.rateLimitKey);
 
     if (!email) {
       return { email: null };
@@ -1313,7 +1323,7 @@ export class AuthController extends Controller {
 
     const input = await req.input();
     const email = normalizeEmail(input.get("email"));
-    await enforceCodeRateLimits("request", email, req, config.requestLimit);
+    await enforceCodeRateLimits("request", email, req, config.requestLimit, auth.config.rateLimitKey);
     if (!email) {
       throw new ValidationError({ email: ["Invalid email"] });
     }
@@ -1350,7 +1360,13 @@ export class AuthController extends Controller {
     const { email: rawEmail, code: rawCode, name } = input.toJSON();
     const email = normalizeEmail(rawEmail);
     const code = pinValue(rawCode);
-    await enforceCodeRateLimits("verify", email, req, config.emailCode.verifyLimit);
+    await enforceCodeRateLimits(
+      "verify",
+      email,
+      req,
+      config.emailCode.verifyLimit,
+      config.rateLimitKey,
+    );
     if (!email || !code) {
       throw new ValidationError({ code: ["invalid_code"] });
     }

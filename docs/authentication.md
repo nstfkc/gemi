@@ -782,6 +782,20 @@ churning one-hit keys (spoofed IPs, random addresses) does not push out a code's
 or an address's budget until every less-spent key has gone. Enough churn can still reset one,
 so **use `RedisRateLimiter` in production**: it has no such cap.
 
+In an app where one address can be a separate account in several tenants, give each tenant
+its own budget with `rateLimitKey`. It is asked, per request and per counter, for a partition
+of the key: answer the tenant the request is for and that counter is kept per tenant; answer
+nothing to keep the shared one. `limit` is `"perEmail"` or `"perIp"`, and `scope` is
+`"request"`, `"verify"` or `"link"`. Unset, every key is unchanged.
+
+```ts
+export default defineAuthConfig({
+  // One budget per address per tenant; one per-IP budget across all tenants.
+  rateLimitKey: ({ req, limit }) =>
+    limit === "perEmail" ? (req.headers.get("host") ?? undefined) : undefined,
+});
+```
+
 Codes and links are stored as HMAC-SHA256 under `SECRET`, keyed to the address, so a code
 issued for one address never matches another's row, and rotating `SECRET` invalidates the
 ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,

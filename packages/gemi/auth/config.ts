@@ -7,7 +7,7 @@ import type { ConnectionStore } from "./connections/ConnectionStore";
 import type { ProviderConnection } from "./connections/ConnectionManager";
 import type { OAuthConnectionProvider } from "./connections/OAuthConnectionProvider";
 import { SignUpRequest } from "./requests";
-import type { CodeRateLimits } from "./oneTimeCode";
+import type { AuthRateLimitKey, CodeRateLimits } from "./oneTimeCode";
 
 /** What `emailCode.send` is handed. */
 export interface EmailCodeSendArgs {
@@ -396,6 +396,25 @@ export interface AuthConfig {
   emailCode?: EmailCodeConfig;
 
   /**
+   * Partitions the keys of gemi's auth rate limits (#1125): the email-code and
+   * magic-link request, verify and link limits (`emailCode.requestLimit`,
+   * `emailCode.verifyLimit`), per address and per IP. Answer a string derived
+   * from the request, such as the tenant the host names, and that counter is
+   * kept per partition, so the same address in two tenants does not share a
+   * budget. `args.limit` says which counter is asked about, so an app can
+   * partition the per-address counter and keep one per-IP budget across
+   * tenants. Answer nothing to keep the key as it is.
+   *
+   * Unset (the default), every key is exactly what it was.
+   *
+   *     rateLimitKey: ({ req, limit }) =>
+   *       limit === "perEmail" ? (req.headers.get("host") ?? undefined) : undefined,
+   *
+   * A throw fails the request (500), the limit unspent.
+   */
+  rateLimitKey?: AuthRateLimitKey;
+
+  /**
    * The code to issue for `email`, on `/auth/magic-link`, `Auth.createMagicLink`
    * and `/auth/email-code`. Return nothing for the default, random digits.
    *
@@ -629,6 +648,7 @@ export function authConfigDefaults(
     onMagicLinkCreated: () => {},
     emailCode: emailCodeDefaults(config.emailCode),
     generateCode: () => undefined,
+    rateLimitKey: () => undefined,
     onAuthenticated: () => {},
   };
 }

@@ -164,6 +164,28 @@ export function limiterKeyPart(value: string): string {
   return value.length <= 64 ? value : `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+/** What `auth.rateLimitKey` is handed (#1125). */
+export interface AuthRateLimitKeyArgs {
+  req: HttpRequest<any, any>;
+  /**
+   * Which counter: `"request"` (asking for a code or link: `/auth/email-code`,
+   * `/auth/magic-link`), `"verify"` (guessing one: `/auth/email-code/verify`,
+   * `/auth/sign-in-with-pin(-v2)`) or `"link"` (`/auth/sign-in/magic-link`).
+   */
+  scope: "request" | "verify" | "link";
+  /** The per-address or the per-IP counter of that scope. */
+  limit: "perEmail" | "perIp";
+}
+
+/**
+ * A partition of gemi's auth rate-limit keys, from the request (#1125): a
+ * tenant id, so the same address in two tenants does not share a budget.
+ * Nothing (`null`, `undefined`, `""`) keeps the key as it is.
+ */
+export type AuthRateLimitKey = (
+  args: AuthRateLimitKeyArgs,
+) => string | null | undefined | Promise<string | null | undefined>;
+
 /**
  * Spends one hit of each configured limit for `scope`, per IP first and then
  * per email, and throws the middleware's 429 (`{ error: { kind: "rate_limit" } }`)
@@ -174,22 +196,35 @@ export function limiterKeyPart(value: string): string {
  * `email: null` spends the IP budget only: a request whose address was refused
  * (missing, malformed, over `MAX_EMAIL_LENGTH`) still counts against its IP,
  * but never makes a per-address key.
+ *
+ * `partition` is `auth.rateLimitKey`: what it answers for a counter is added
+ * to that counter's key (`auth:code-request:p:<partition>:email:<email>`), so
+ * an app can give each tenant its own budget. Asked only for a limit that is
+ * on, and only for the per-address counter when there is an address.
  */
 export async function enforceCodeRateLimits(
   scope: "request" | "verify" | "link",
   email: string | null,
   req: HttpRequest<any, any>,
   limits: CodeRateLimits,
+  partition?: AuthRateLimitKey,
 ) {
   const limiter = codeLimiter();
-  const checks: Array<[string, CodeRateLimit | undefined]> = [
-    [`auth:code-${scope}:ip:${limiterKeyPart(clientIp(req))}`, limits.perIp],
+  const checks: Array<["perIp" | "perEmail", string, CodeRateLimit | undefined]> = [
+    ["perIp", `ip:${limiterKeyPart(clientIp(req))}`, limits.perIp],
   ];
   if (email !== null) {
-    checks.push([`auth:code-${scope}:email:${limiterKeyPart(email)}`, limits.perEmail]);
+    checks.push(["perEmail", `email:${limiterKeyPart(email)}`, limits.perEmail]);
   }
-  for (const [key, limit] of checks) {
+  for (const [limitName, subject, limit] of checks) {
     if (!limit) continue;
+    const part = partition ? await partition({ req, scope, limit: limitName }) : undefined;
+    // Without a partition the key is exactly what it was before #1125, so
+    // turning the hook on (or upgrading) does not reset anybody's counters
+    // beyond those of the tenants it names.
+    const key = part
+      ? `auth:code-${scope}:p:${limiterKeyPart(String(part))}:${subject}`
+      : `auth:code-${scope}:${subject}`;
     const [count, window] = limit;
     const result = await limiter.consume(key, { limit: count, window });
     if (!result.allowed) {
