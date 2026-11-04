@@ -471,10 +471,11 @@ export class AuthManager {
    * row `createSessionV2` returns has the base select and none of a provider's
    * `findSession` shaping, and every sign-in path returns this to the client or
    * passes its `user` to `extendSession` (#619). One extra lookup by its unique
-   * token, on sign-in only. Should the read come back empty — a `findSession`
-   * that caught a database error, or one that filters more narrowly than the
-   * row just written — the created row is returned rather than failing a
-   * sign-in that has already succeeded.
+   * token, on sign-in only. Should the read fail or come back empty — a
+   * database error on the read (which `findSession` no longer swallows, #1120),
+   * or an override that filters more narrowly than the row just written — the
+   * created row is returned rather than failing a sign-in that has already
+   * succeeded.
    */
   async createOrUpdateSession(user: { email: string; id?: number }) {
     const req = new HttpRequest();
@@ -497,10 +498,15 @@ export class AuthManager {
       userAgent,
       ...this.freshLifetime(Date.now()),
     });
-    const found = await this.userProvider.findSession({
-      token,
-      userAgent: userAgent ?? "",
-    });
+    let found: Awaited<ReturnType<typeof this.userProvider.findSession>> = null;
+    try {
+      found = await this.userProvider.findSession({
+        token,
+        userAgent: userAgent ?? "",
+      });
+    } catch (error) {
+      console.error("Reading the new session back failed:", error);
+    }
     return found?.user ? found : created;
   }
 
