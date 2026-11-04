@@ -120,11 +120,15 @@ describe("signing out", () => {
   test("hands the hook the user the token belongs to, extended as it always was", async () => {
     await signOut({ access_token: "v2.abc" });
 
-    expect(onSignOut).toHaveBeenCalledWith({
-      id: 1,
-      email: "a@example.com",
-      extension: { plan: "pro" },
-    });
+    expect(onSignOut).toHaveBeenCalledWith(
+      {
+        id: 1,
+        email: "a@example.com",
+        extension: { plan: "pro" },
+      },
+      // The request that signed out (#1126).
+      { req: expect.any(HttpRequest) },
+    );
   });
 
   /**

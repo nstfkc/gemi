@@ -1,3 +1,13 @@
+# Unreleased
+
+## auth: lifecycle hooks are handed the request (#1126)
+
+**New API (minor). Nothing to change in apps.** See [Authentication → hooks](docs/authentication.md).
+
+- `onSignIn(session, search, { req })`, `onSignUp(user, token, search, { req })`, `onSignOut(user, { req })`, `onForgotPassword(user, token, { req })` and `onResetPassword(user, { req })` get a trailing `{ req }`; `onMagicLinkCreated` and `onUserCreated` get `req` in their object argument. Existing hooks that declare fewer parameters keep working.
+- New type export from `gemi/services`: `AuthHookContext`.
+- Type-level: the protected `AuthController.linkOAuthAccount` and `createOAuthUserWithoutEmail` take a required `req` in their argument object. A subclass that forwards its `args` to `super` is unaffected; one that builds the object itself has to pass the request.
+
 # Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change

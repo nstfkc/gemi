@@ -126,6 +126,22 @@ export interface UserCreatedContext {
    * carries nothing the application's form sent.
    */
   input: Record<string, unknown>;
+  /**
+   * The request that created the user (#1126): the sign-up, the email-code
+   * verify, or the OAuth callback. For the host, a header or a cookie, such as
+   * which tenant the user belongs to.
+   */
+  req: HttpRequest<any, any>;
+}
+
+/**
+ * What the positional lifecycle hooks (`onSignIn`, `onSignUp`, `onSignOut`,
+ * `onForgotPassword`, `onResetPassword`) are handed last (#1126): the request
+ * that triggered them. A hook written before it existed ignores the extra
+ * argument and keeps working.
+ */
+export interface AuthHookContext {
+  req: HttpRequest<any, any>;
 }
 
 /** What `onAuthenticated` is handed. */
@@ -350,24 +366,30 @@ export interface AuthConfig {
    */
   onUserCreated?: (user: User, context: UserCreatedContext) => Promise<void>;
 
+  // Each hook below is handed the request that triggered it last (#1126):
+  // `{ req }` after the positional arguments, or `req` beside the fields of
+  // `onMagicLinkCreated`'s object.
   onSignUp?: (
     user: User,
     verificationToken: string,
     search: Record<string, string>,
+    context: AuthHookContext,
   ) => Promise<void> | void;
   onSignIn?: (
     session: any,
     search: Record<string, string>,
+    context: AuthHookContext,
   ) => Promise<void> | void;
-  onSignOut?: (session: any) => Promise<void> | void;
+  onSignOut?: (session: any, context: AuthHookContext) => Promise<void> | void;
   onForgotPassword?: (
     user: any,
     verificationToken: string,
+    context: AuthHookContext,
   ) => Promise<void> | void;
-  onResetPassword?: (session: any) => Promise<void> | void;
+  onResetPassword?: (session: any, context: AuthHookContext) => Promise<void> | void;
   onMagicLinkCreated?: (
     session: any,
-    args: { email: string; token: string; pin: string },
+    args: { email: string; token: string; pin: string; req: HttpRequest<any, any> },
   ) => Promise<void> | void;
 
   /** One-time email codes, and the limits on the magic-link PIN routes. See `EmailCodeConfig`. */
