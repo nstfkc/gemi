@@ -9,6 +9,31 @@
 - Type-level: `AgentErrorCode` has a new member, `"usage_limit"`. An exhaustive `switch` over it needs a case.
 - New exports from `gemi/ai`: `MemoryUsageLimitStore`, `defaultUsageLimitStore` and the types `AgentUsageLimits`, `UsageLimit`, `UsageCounts`, `UsageLimitHit`, `UsageLimitStore`, `UsageReport`.
 
+## ai: an agent's tools per turn (#1123)
+
+**New APIs (minor). No default behaviour change; nothing to change in apps.** See [AI Agent Context → Tools per turn](docs/ai-agent-context.md#tools-per-turn).
+
+- `Agent.stream({ tools })`: tools (or namespaces) for that run only, beside the agent's. A name the agent already uses throws from `stream`.
+- `Agent.stream({ activeTools })`: the tool and namespace names the model is offered in that run; others aren't sent, and a call to one is answered as an unknown tool. Calls pending from an earlier turn still resolve. Skills and memory tools aren't filtered. An unknown name throws.
+- `AgentController.runTools(req, { body, context })` (and the `runTools` hook) answers `{ tools?, activeTools? }` once per turn, after `context()`.
+- New type export from `gemi/ai`: `AgentRunTools`.
+
+## auth: partition the auth rate-limit keys, e.g. per tenant (#1125)
+
+**New API (minor). No default behaviour change; nothing to change in apps.** See [Authentication → Email codes](docs/authentication.md#email-codes-sign-up-or-sign-in).
+
+- `auth.rateLimitKey({ req, scope, limit })` answers a partition (a tenant id) that is added to the key of the email-code and magic-link rate limits (`emailCode.requestLimit`, `emailCode.verifyLimit`; `scope` is `"request"`, `"verify"` or `"link"`, `limit` is `"perEmail"` or `"perIp"`). The same address in two tenants then has two budgets. Answering nothing keeps the key exactly as before.
+- New type exports from `gemi/services`: `AuthRateLimitKey`, `AuthRateLimitKeyArgs`.
+- `enforceCodeRateLimits` (internal) takes the hook as an optional fifth argument.
+
+## auth: lifecycle hooks are handed the request (#1126)
+
+**New API (minor). Nothing to change in apps.** See [Authentication → hooks](docs/authentication.md).
+
+- `onSignIn(session, search, { req })`, `onSignUp(user, token, search, { req })`, `onSignOut(user, { req })`, `onForgotPassword(user, token, { req })` and `onResetPassword(user, { req })` get a trailing `{ req }`; `onMagicLinkCreated` and `onUserCreated` get `req` in their object argument. Existing hooks that declare fewer parameters keep working.
+- New type export from `gemi/services`: `AuthHookContext`.
+- Type-level: the protected `AuthController.linkOAuthAccount` and `createOAuthUserWithoutEmail` take a required `req` in their argument object. A subclass that forwards its `args` to `super` is unaffected; one that builds the object itself has to pass the request.
+
 # Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change

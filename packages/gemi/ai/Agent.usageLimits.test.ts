@@ -281,3 +281,50 @@ describe("a store that fails mid-step", () => {
     vi.restoreAllMocks();
   });
 });
+
+describe("with run tools and activeTools (#1123)", () => {
+  test("calls to run tools count toward toolCalls; calls to tools not offered do not", async () => {
+    const ran: string[] = [];
+    const extra = AgentTool.create({
+      name: "extra",
+      description: "A tool of this run only",
+      inputSchema: s.object({}),
+      execute: async () => {
+        ran.push("extra");
+        return "done";
+      },
+    });
+    const { agent, provider, calls } = setup(
+      [
+        toolCall("c1", "extra"),
+        // `work` is the agent's, but not offered in this run.
+        toolCall("c2", "work"),
+        toolCall("c3", "extra"),
+        toolCall("c4", "extra"),
+        finish(),
+      ],
+      [text("never"), finish()],
+    );
+    const result = await agent
+      .stream({
+        messages: [],
+        tools: [extra],
+        activeTools: ["extra"],
+        usageLimits: { run: { toolCalls: 2 } },
+      })
+      .result();
+
+    expect(calls).toEqual([]);
+    expect(ran).toEqual(["extra", "extra"]);
+    expect(provider.calls).toHaveLength(1);
+    const byCall = Object.fromEntries(results(result.messages).map((part) => [part.toolCallId, part]));
+    expect(byCall.c1.status).toBe("ok");
+    expect(byCall.c2.error).toMatchObject({ code: "tool_error" });
+    expect(byCall.c3.status).toBe("ok");
+    expect(byCall.c4.error).toMatchObject({ code: "usage_limit" });
+    expect(result.error).toMatchObject({
+      code: "usage_limit",
+      usageLimit: { scope: "run", metric: "toolCalls", limit: 2, used: 2 },
+    });
+  });
+});

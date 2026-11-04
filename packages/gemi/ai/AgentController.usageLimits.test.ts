@@ -5,15 +5,24 @@ import { describe, expect, test } from "vitest";
 import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
 import type { AgentStreamParams } from "./Agent";
-import { AgentController, MemoryAgentStore, MemoryLiveRuns } from "./AgentController";
+import {
+  AgentController,
+  type AgentRunTools,
+  MemoryAgentStore,
+  MemoryLiveRuns,
+} from "./AgentController";
 import { StubAgentRun } from "./store/stubAgentRun";
 import type { AgentUsageLimits } from "./usageLimits";
 
 /** #1124: `usageLimits()` decides a turn's budgets and hands them to `Agent.stream`. */
 
-function setup(answer?: (extra: { body: any; context: any }) => AgentUsageLimits | void) {
+function setup(
+  answer?: (extra: { body: any; context: any }) => AgentUsageLimits | void,
+  runTools?: (extra: { body: any; context: any }) => AgentRunTools | void,
+) {
   const calls: AgentStreamParams[] = [];
   const seen: { body: unknown; context: unknown }[] = [];
+  const order: string[] = [];
   const agent = {
     name: "stub",
     tools: [] as const,
@@ -34,27 +43,35 @@ function setup(answer?: (extra: { body: any; context: any }) => AgentUsageLimits
       return { tenant: "t_1" } as any;
     }
     protected usageLimits(_req: HttpRequest<any, any>, extra: { body: any; context: any }) {
+      order.push("usageLimits");
       seen.push(extra);
       return answer?.(extra);
     }
+    protected runTools(_req: HttpRequest<any, any>, extra: { body: any; context: any }) {
+      order.push("runTools");
+      return runTools?.(extra);
+    }
   }
-  const req = new HttpRequest(
-    new Request("http://localhost/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ turn: { text: "hi" }, pageId: "p_1" }),
-    }),
-    {},
-    "api",
-    "/chat",
-  );
-  const send = () =>
-    RequestContext.run(req as any, async () => {
+  const request = () =>
+    new HttpRequest(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ turn: { text: "hi" }, pageId: "p_1" }),
+      }),
+      {},
+      "api",
+      "/chat",
+    );
+  const send = () => {
+    const req = request();
+    return RequestContext.run(req as any, async () => {
       RequestContext.getStore().setUser({ id: 1 });
       const response = await new Chat().stream(req);
       await response.text();
     });
-  return { calls, seen, send };
+  };
+  return { calls, seen, order, send };
 }
 
 describe("AgentController.usageLimits (#1124)", () => {
@@ -75,5 +92,17 @@ describe("AgentController.usageLimits (#1124)", () => {
     const { calls, send } = setup();
     await send();
     expect("usageLimits" in calls[0]!).toBe(false);
+  });
+
+  test("runs beside runTools, both once per turn, and the run gets both answers", async () => {
+    const limits: AgentUsageLimits = { run: { toolCalls: 5 } };
+    const tools: AgentRunTools = { tools: [], activeTools: ["search"] };
+    const { calls, order, send } = setup(() => limits, () => tools);
+    await send();
+    await send();
+    expect(order).toEqual(["runTools", "usageLimits", "runTools", "usageLimits"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.usageLimits).toBe(limits);
+    expect(calls[1]!.activeTools).toEqual(["search"]);
   });
 });

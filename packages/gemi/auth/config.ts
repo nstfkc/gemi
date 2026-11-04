@@ -7,7 +7,7 @@ import type { ConnectionStore } from "./connections/ConnectionStore";
 import type { ProviderConnection } from "./connections/ConnectionManager";
 import type { OAuthConnectionProvider } from "./connections/OAuthConnectionProvider";
 import { SignUpRequest } from "./requests";
-import type { CodeRateLimits } from "./oneTimeCode";
+import type { AuthRateLimitKey, CodeRateLimits } from "./oneTimeCode";
 
 /** What `emailCode.send` is handed. */
 export interface EmailCodeSendArgs {
@@ -126,6 +126,22 @@ export interface UserCreatedContext {
    * carries nothing the application's form sent.
    */
   input: Record<string, unknown>;
+  /**
+   * The request that created the user (#1126): the sign-up, the email-code
+   * verify, or the OAuth callback. For the host, a header or a cookie, such as
+   * which tenant the user belongs to.
+   */
+  req: HttpRequest<any, any>;
+}
+
+/**
+ * What the positional lifecycle hooks (`onSignIn`, `onSignUp`, `onSignOut`,
+ * `onForgotPassword`, `onResetPassword`) are handed last (#1126): the request
+ * that triggered them. A hook written before it existed ignores the extra
+ * argument and keeps working.
+ */
+export interface AuthHookContext {
+  req: HttpRequest<any, any>;
 }
 
 /** What `onAuthenticated` is handed. */
@@ -350,28 +366,53 @@ export interface AuthConfig {
    */
   onUserCreated?: (user: User, context: UserCreatedContext) => Promise<void>;
 
+  // Each hook below is handed the request that triggered it last (#1126):
+  // `{ req }` after the positional arguments, or `req` beside the fields of
+  // `onMagicLinkCreated`'s object.
   onSignUp?: (
     user: User,
     verificationToken: string,
     search: Record<string, string>,
+    context: AuthHookContext,
   ) => Promise<void> | void;
   onSignIn?: (
     session: any,
     search: Record<string, string>,
+    context: AuthHookContext,
   ) => Promise<void> | void;
-  onSignOut?: (session: any) => Promise<void> | void;
+  onSignOut?: (session: any, context: AuthHookContext) => Promise<void> | void;
   onForgotPassword?: (
     user: any,
     verificationToken: string,
+    context: AuthHookContext,
   ) => Promise<void> | void;
-  onResetPassword?: (session: any) => Promise<void> | void;
+  onResetPassword?: (session: any, context: AuthHookContext) => Promise<void> | void;
   onMagicLinkCreated?: (
     session: any,
-    args: { email: string; token: string; pin: string },
+    args: { email: string; token: string; pin: string; req: HttpRequest<any, any> },
   ) => Promise<void> | void;
 
   /** One-time email codes, and the limits on the magic-link PIN routes. See `EmailCodeConfig`. */
   emailCode?: EmailCodeConfig;
+
+  /**
+   * Partitions the keys of gemi's auth rate limits (#1125): the email-code and
+   * magic-link request, verify and link limits (`emailCode.requestLimit`,
+   * `emailCode.verifyLimit`), per address and per IP. Answer a string derived
+   * from the request, such as the tenant the host names, and that counter is
+   * kept per partition, so the same address in two tenants does not share a
+   * budget. `args.limit` says which counter is asked about, so an app can
+   * partition the per-address counter and keep one per-IP budget across
+   * tenants. Answer nothing to keep the key as it is.
+   *
+   * Unset (the default), every key is exactly what it was.
+   *
+   *     rateLimitKey: ({ req, limit }) =>
+   *       limit === "perEmail" ? (req.headers.get("host") ?? undefined) : undefined,
+   *
+   * A throw fails the request (500), the limit unspent.
+   */
+  rateLimitKey?: AuthRateLimitKey;
 
   /**
    * The code to issue for `email`, on `/auth/magic-link`, `Auth.createMagicLink`
@@ -607,6 +648,7 @@ export function authConfigDefaults(
     onMagicLinkCreated: () => {},
     emailCode: emailCodeDefaults(config.emailCode),
     generateCode: () => undefined,
+    rateLimitKey: () => undefined,
     onAuthenticated: () => {},
   };
 }

@@ -495,6 +495,7 @@ export type {
 } from "./AgentController";
 export type {
   AgentControllerHooks,
+  AgentRunTools,
   AgentHookContext,
   AgentMiddlewareConfig,
   AgentRoute,

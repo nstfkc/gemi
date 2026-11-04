@@ -1761,6 +1761,39 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    */
   skills?: readonly SkillDefinition[];
   /**
+   * Tools for this run only (#1123), beside the agent's own: tools (or
+   * namespaces of them) built for this caller, from its data or its settings.
+   * Lowered exactly like the agent's tools, after them and before its skills
+   * and memory tools, with their `inputSchema` functions resolved per run.
+   *
+   * Nothing outlives the run, and a sub-run started with `ctx.runAgent` gets
+   * its own agent's tools, not these. A name already used by one of the
+   * agent's tools, skills or namespaces (or twice here) throws from `stream`.
+   * A turn that answers a pending call of one of these tools (an approval, a
+   * client tool) has to be given the tool again, or the answer is refused.
+   * The client sees their parts by name, untyped by the agent's tool shapes.
+   * `AgentController` sets this from its `runTools()` method.
+   */
+  tools?: readonly ToolEntry[];
+  /**
+   * Which tools the model is offered in this run (#1123): names of the
+   * agent's tools, of this run's `tools`, or of a namespace of either, which
+   * offers the whole namespace. Tools left out are not sent to the provider,
+   * and a call the model makes to one anyway is answered like a call to a tool
+   * that does not exist. Skills and the memory tools are not filtered: they
+   * have their own per-run switches (`skills`, `memory`).
+   *
+   * A call left pending by an earlier turn (an approval, a client tool) is
+   * still answered on this one even when its tool is not offered, so turning
+   * a tool off never strands a question the user can see.
+   *
+   * Omitted, every tool is offered, as before. An unknown name throws from
+   * `stream`. Changing the list between turns changes the request's tool
+   * list, which the provider's prompt cache keys on: keep it stable where you
+   * can. `AgentController` sets this from its `runTools()` method.
+   */
+  activeTools?: readonly string[];
+  /**
    * The app's own fields from the turn's request body, handed to every tool of
    * this run as `ctx.body`.
    *
@@ -2123,6 +2156,12 @@ type RunConfig = {
   provider: AgentProvider;
   registry: Map<string, ResolvedTool>;
   providerTools: (ProviderToolSpec | ProviderToolNamespace)[];
+  /**
+   * The registry's names the model may call in this run, when the run was
+   * given `activeTools` (#1123). Undefined: all of them. The registry itself
+   * keeps every tool, so a pending call to one left out still resolves.
+   */
+  offered?: ReadonlySet<string>;
   output?: Schema<any>;
   maxSteps: number;
   maxDepth: number;
@@ -2422,6 +2461,12 @@ export class Agent<
     if (params.usageLimits) {
       assertUsageLimits(params.usageLimits, `Agent.stream for "${this.name}"`);
     }
+    if (params.tools && params.tools.length > 0) {
+      config = withRunTools(config, params.tools, `Agent.stream for "${this.name}"`);
+    }
+    if (params.activeTools) {
+      config = withActiveTools(config, params.activeTools, `Agent.stream for "${this.name}"`);
+    }
     // The run is untyped inside: what it holds of `Ctx` it only hands on.
     return new AgentRunImpl(config, params as AgentStreamParams) as unknown as AgentRun<
       ToolShapesWithMemory<T, M>,
@@ -2713,6 +2758,98 @@ function withRunSkills(
     });
   }
   return { ...config, registry, providerTools };
+}
+
+/** Whether a provider tool entry is one of gemi's reserved namespaces. */
+function isReservedNamespace(tool: ProviderToolSpec | ProviderToolNamespace): boolean {
+  return "tools" in tool && (tool.name === SKILLS_NAMESPACE || tool.name === MEMORY_NAMESPACE);
+}
+
+/**
+ * The agent's lowered tools with a run's own tools added (#1123): one
+ * `AgentStreamParams.tools`, lowered as `Agent.create` lowers the agent's and
+ * placed after them, before the skills and memory namespaces.
+ *
+ * A copy, never an edit, for the reason `withRunSkills` gives. A name already
+ * taken, by a tool, a skill or a namespace, throws.
+ */
+function withRunTools(config: RunConfig, entries: readonly ToolEntry[], owner: string): RunConfig {
+  for (const entry of entries) {
+    // Reserved only on an agent with memory, as at `Agent.create`.
+    if (config.memory && entry instanceof ToolNamespace && entry.name === MEMORY_NAMESPACE) {
+      throw new Error(
+        `${owner} is given a namespace named "${MEMORY_NAMESPACE}", which is reserved for the memory tools. Rename the namespace.`,
+      );
+    }
+  }
+  // The same lowering, collision checks within `entries` included.
+  const lowered = lowerTools(entries, []);
+  const registry = new Map(config.registry);
+  const names = new Set(
+    config.providerTools.filter((tool) => "tools" in tool).map((tool) => tool.name),
+  );
+  for (const [name, resolved] of lowered.registry) {
+    if (registry.has(name) || names.has(name)) {
+      throw new Error(
+        `${owner} is given the tool "${name}", but that name is already taken by the agent. Tool names are global within a run: the client discriminates a tool part by name alone. Rename the tool.`,
+      );
+    }
+    registry.set(name, resolved);
+  }
+  for (const tool of lowered.providerTools) {
+    if ("tools" in tool && (names.has(tool.name) || config.registry.has(tool.name))) {
+      throw new Error(
+        `${owner} is given the namespace "${tool.name}", but that name is already taken by the agent. Rename the namespace.`,
+      );
+    }
+  }
+  const providerTools = [...config.providerTools];
+  const at = providerTools.findIndex(isReservedNamespace);
+  providerTools.splice(at >= 0 ? at : providerTools.length, 0, ...lowered.providerTools);
+  return { ...config, registry, providerTools };
+}
+
+/**
+ * Narrows what the model is offered to `names` (#1123): the run's
+ * `AgentStreamParams.activeTools`. The provider tool list loses what is left
+ * out, and `offered` lets `runTools` refuse a call to it. The registry keeps
+ * every tool, so a pending call answered on this turn still resolves.
+ */
+function withActiveTools(
+  config: RunConfig,
+  names: readonly string[],
+  owner: string,
+): RunConfig {
+  const wanted = new Set(names);
+  const known = new Set<string>();
+  for (const tool of config.providerTools) {
+    if (isReservedNamespace(tool)) continue;
+    known.add(tool.name);
+    if ("tools" in tool) for (const member of tool.tools) known.add(member.name);
+  }
+  for (const name of wanted) {
+    if (!known.has(name)) {
+      throw new Error(
+        `${owner} is given \`activeTools\` naming "${name}", which is not one of the run's tools or namespaces. Skills and memory tools are not filtered by \`activeTools\`.`,
+      );
+    }
+  }
+  const providerTools: (ProviderToolSpec | ProviderToolNamespace)[] = [];
+  for (const tool of config.providerTools) {
+    if (isReservedNamespace(tool) || wanted.has(tool.name)) {
+      providerTools.push(tool);
+      continue;
+    }
+    if (!("tools" in tool)) continue;
+    const members = tool.tools.filter((member) => wanted.has(member.name));
+    if (members.length > 0) providerTools.push({ ...tool, tools: members });
+  }
+  const offered = new Set<string>();
+  for (const tool of providerTools) {
+    if ("tools" in tool) for (const member of tool.tools) offered.add(member.name);
+    else offered.add(tool.name);
+  }
+  return { ...config, providerTools, offered };
 }
 
 /** The zero-parameter tool a skill becomes. */
@@ -4243,7 +4380,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     let limitStoreError: UsageLimitStoreError | null = null;
 
     for (const call of calls) {
-      const resolved = this.config.registry.get(String(call.name));
+      const name = String(call.name);
+      // A tool the run did not offer (`activeTools`, #1123) is answered as one
+      // that does not exist: the model was never shown it.
+      const offered = !this.config.offered || this.config.offered.has(name);
+      const resolved = offered ? this.config.registry.get(name) : undefined;
 
       if (!resolved) {
         this.addResult(message, {

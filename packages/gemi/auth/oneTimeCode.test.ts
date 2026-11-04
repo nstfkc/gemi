@@ -13,8 +13,10 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
+const { HttpRequest } = await import("../http/HttpRequest");
 const {
   countCodeAttempt,
+  enforceCodeRateLimits,
   foldEmail,
   hashOneTimeSecret,
   limiterKeyPart,
@@ -147,6 +149,60 @@ describe("limiterKeyPart", () => {
     expect(long).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(limiterKeyPart("x".repeat(100_000))).toBe(long);
     expect(limiterKeyPart("y".repeat(100_000))).not.toBe(long);
+  });
+});
+
+describe("enforceCodeRateLimits and auth.rateLimitKey (#1125)", () => {
+  const request = (host: string) =>
+    new HttpRequest(new Request(`https://${host}/api/auth/email-code`, { method: "POST" }), {}, "api");
+  const limits = { perEmail: [2, 900] as [number, number], perIp: false as const };
+  const spend = (host: string, partition?: Parameters<typeof enforceCodeRateLimits>[4]) =>
+    enforceCodeRateLimits("request", "ada@example.com", request(host), limits, partition).then(
+      () => "ok",
+      (error: Error) => error.constructor.name,
+    );
+
+  test("without a partition, one address shares its budget across hosts, as before", async () => {
+    expect(await spend("a.example")).toBe("ok");
+    expect(await spend("b.example")).toBe("ok");
+    expect(await spend("a.example")).toBe("RateLimitExceededError");
+  });
+
+  test("a partition keeps a budget per tenant for the same address", async () => {
+    const byHost = ({ req }: { req: InstanceType<typeof HttpRequest> }) =>
+      new URL(req.rawRequest.url).host;
+    expect(await spend("a.example", byHost)).toBe("ok");
+    expect(await spend("a.example", byHost)).toBe("ok");
+    expect(await spend("a.example", byHost)).toBe("RateLimitExceededError");
+    // Tenant b's budget is untouched by a's.
+    expect(await spend("b.example", byHost)).toBe("ok");
+    expect(await spend("b.example", byHost)).toBe("ok");
+    expect(await spend("b.example", byHost)).toBe("RateLimitExceededError");
+  });
+
+  test("an empty answer keeps the original key, so its budget is the shared one", async () => {
+    expect(await spend("a.example")).toBe("ok");
+    expect(await spend("a.example", () => undefined)).toBe("ok");
+    expect(await spend("a.example", async () => "")).toBe("RateLimitExceededError");
+  });
+
+  test("the hook is told which counter it is asked about, and only for limits that are on", async () => {
+    const seen: string[] = [];
+    await enforceCodeRateLimits(
+      "verify",
+      "ada@example.com",
+      request("a.example"),
+      { perEmail: [5, 900], perIp: [5, 900] },
+      ({ scope, limit }) => {
+        seen.push(`${scope}:${limit}`);
+        return limit === "perEmail" ? "tenant-a" : null;
+      },
+    );
+    await enforceCodeRateLimits("link", null, request("a.example"), { perIp: false }, () => {
+      seen.push("never");
+      return "x";
+    });
+    expect(seen).toEqual(["verify:perIp", "verify:perEmail"]);
   });
 });
 
