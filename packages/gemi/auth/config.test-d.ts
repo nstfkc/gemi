@@ -12,6 +12,7 @@
 import { describe, expectTypeOf, test } from "vitest";
 
 import { defineAuthConfig, type AuthConfig, type OAuthProviderEntry } from "./config";
+import type { HttpRequest } from "../http/HttpRequest";
 import { GoogleOAuthProvider } from "./oauth/GoogleOAuthProvider";
 import { InstagramOAuthProvider } from "./oauth/InstagramOAuthProvider";
 
@@ -70,5 +71,50 @@ describe("defineAuthConfig", () => {
     });
     // @ts-expect-error a number is not a path
     defineAuthConfig({ redirectPath: 1 });
+  });
+});
+
+describe("lifecycle hooks and the request (#1126)", () => {
+  test("hooks written before they were handed the request still type-check", () => {
+    defineAuthConfig({
+      onSignIn: async (_session, _search) => {},
+      onSignUp: async (_user, _token, _search) => {},
+      onSignOut: async (_session) => {},
+      onForgotPassword: async (_user, _token) => {},
+      onResetPassword: async (_session) => {},
+      onMagicLinkCreated: async (_session, { email, pin }) => {
+        expectTypeOf(email).toEqualTypeOf<string>();
+        expectTypeOf(pin).toEqualTypeOf<string>();
+      },
+      onUserCreated: async (_user, { method }) => {
+        expectTypeOf(method).toEqualTypeOf<"password" | "email-code" | "oauth">();
+      },
+    });
+  });
+
+  test("each hook can read the request", () => {
+    defineAuthConfig({
+      onSignIn: async (_session, _search, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onSignUp: async (_user, _token, _search, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onSignOut: async (_session, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onForgotPassword: async (_user, _token, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onResetPassword: async (_session, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onMagicLinkCreated: async (_session, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+      onUserCreated: async (_user, { req }) => {
+        expectTypeOf(req).toEqualTypeOf<HttpRequest<any, any>>();
+      },
+    });
   });
 });
