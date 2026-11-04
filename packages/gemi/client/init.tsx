@@ -12,6 +12,10 @@ import {
 } from "./chunkLoadRecovery";
 import { configureRealtime } from "./realtime/loader";
 import type { RealtimeOptions } from "./realtime/RealtimeClient";
+import {
+  configureAuthenticationErrors,
+  type OnAuthenticationError,
+} from "./authenticationErrors";
 
 export interface InitOptions {
   /**
@@ -35,6 +39,20 @@ export interface InitOptions {
    * 60 000).
    */
   realtime?: RealtimeOptions;
+  /**
+   * What happens when an `/api` query or mutation on an open page is refused
+   * because nobody is signed in any more (an `authentication` 401 — a session
+   * that ended while the tab stayed open). Off by default: the query keeps its
+   * error and the mutation's caller gets it, as before.
+   *
+   * gemi first asks `/auth/me` once, uncached, a second later; only when that
+   * is refused as well does it act, once per incident. `"redirect"` sends the
+   * tab to the sign-in page with the current page as `?redirect=`; a function
+   * gets `{ source, path, error, signInUrl, redirect }` and decides. When
+   * `/auth/me` still has a user, the failed queries are fetched again instead.
+   * `authorization` and `permission` refusals are never reported.
+   */
+  onAuthenticationError?: OnAuthenticationError;
 }
 
 /**
@@ -75,6 +93,7 @@ export function init(
   options: InitOptions = {},
 ) {
   configureChunkLoadRecovery(options.chunkLoadRecovery);
+  configureAuthenticationErrors(options.onAuthenticationError);
   if (options.realtime) configureRealtime(options.realtime);
   if (typeof window !== "undefined" && options.chunkLoadRecovery !== false) {
     installPreloadErrorRecovery();
