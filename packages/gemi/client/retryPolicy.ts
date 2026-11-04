@@ -93,6 +93,15 @@ export function retryDelayFor(
     baseDelay * 2 ** Math.max(0, failureCount - 1),
     Math.max(MAX_RETRY_DELAY, baseDelay),
   );
+  return equalJitter(step, random);
+}
+
+/**
+ * "Equal jitter": a random point between half of `step` and all of it, in
+ * whole ms. Shared by `useQuery`'s default retries and `useSubscription`'s
+ * reconnects.
+ */
+export function equalJitter(step: number, random: () => number = Math.random): number {
   return Math.round(step / 2 + (step / 2) * random());
 }
 

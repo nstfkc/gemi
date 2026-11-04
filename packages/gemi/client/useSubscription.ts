@@ -61,8 +61,9 @@ export const streamModule = {
  * );
  * ```
  *
- * It reconnects after a drop with backoff (1 s doubling to 30 s, or the
- * server's `Retry-After`), resuming with `Last-Event-ID` from the last event
+ * It reconnects after a drop with jittered backoff (a random wait between half
+ * and all of a step of 1 s doubling to 30 s, or exactly the server's
+ * `Retry-After`), resuming with `Last-Event-ID` from the last event
  * it saw. A `4xx` other than `408` and `429` stops it, with status `closed`.
  * The callbacks may change between renders without reconnecting.
  */

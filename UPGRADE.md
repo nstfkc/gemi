@@ -1,3 +1,13 @@
+# Unreleased
+
+## client: jittered reconnect backoff for `useSubscription` (#1132) — behaviour change
+
+`useSubscription`'s reconnect wait is now jittered the way `useQuery`'s default retries are since 0.180.0 ("equal jitter"): each wait is a random point between half and all of the backoff step, so 0.5–1s, 1–2s, 2–4s, … still capped at 30s, and 0.5–1s after a stream that had connected. A server restart ends every open tab's stream in the same instant; they no longer all reconnect in the same instant too.
+
+- A server's `Retry-After` (on a `429`/`503`) is still waited out exactly.
+- Nothing to change in apps. Tests that drove the reconnect by advancing fake timers exactly 1s still pass (the jittered wait is never longer than the step); a test asserting a reconnect could not happen before 1s can pin `Math.random` (`vi.spyOn(Math, "random").mockReturnValue(1)` gives the old 1s, 2s, 4s).
+- `follow` (internal, `client/subscriptionStream`) takes an optional `random` source; `equalJitter(step, random?)` is a new internal helper in `client/retryPolicy`, also used by `retryDelayFor`.
+
 # Upgrading from 0.180.0 to 0.181.0
 
 ## ai: usage limits for agent runs (#1124)
