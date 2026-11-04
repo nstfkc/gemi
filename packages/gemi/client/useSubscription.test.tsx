@@ -14,7 +14,7 @@ vi.mock("../orm/context", () => ({
 }));
 
 import { ChangeFeedManager } from "../services/change-feed/ChangeFeedManager";
-import { readEvents } from "./subscriptionStream";
+import { follow, readEvents } from "./subscriptionStream";
 import { streamModule, useSubscription } from "./useSubscription";
 
 /**
@@ -239,6 +239,88 @@ describe("useSubscription's lazy connection", () => {
     expect(seen.status).toBe("closed");
     expect(error).toBeInstanceOf(Error);
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe("follow's reconnect backoff", () => {
+  /** Follows a route that fails with `response()` every time; returns when each attempt was made. */
+  function failing(response: () => Response, random: () => number) {
+    vi.useFakeTimers();
+    const attempts: number[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        attempts.push(Date.now());
+        return response();
+      }),
+    );
+    const start = Date.now();
+    const stop = follow({
+      endpoint: "/api/feed",
+      pauseWhenHidden: false,
+      cursor: { current: null },
+      callbacks: { current: {} },
+      setState: () => {},
+      random,
+    });
+    return { attempts, start, stop };
+  }
+
+  test("each wait is a random point between half the step and all of it", async () => {
+    const low = failing(() => new Response("{}", { status: 503 }), () => 0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    low.stop();
+    // Steps 1s, 2s, 4s, 8s: waits 0.5s, 1s, 2s, 4s.
+    expect(low.attempts.map((at) => at - low.start)).toEqual([0, 500, 1_500, 3_500, 7_500]);
+
+    const high = failing(() => new Response("{}", { status: 503 }), () => 1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    high.stop();
+    // The top of each step is the old exact schedule: 1s, 2s, 4s.
+    expect(high.attempts.map((at) => at - high.start)).toEqual([0, 1_000, 3_000, 7_000]);
+  });
+
+  test("the step is still capped at 30s", async () => {
+    const run = failing(() => new Response("{}", { status: 503 }), () => 1);
+    await vi.advanceTimersByTimeAsync(200_000);
+    run.stop();
+    const waits = run.attempts.slice(1).map((at, i) => at - run.attempts[i]!);
+    expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
+  });
+
+  test("a server's Retry-After is waited out exactly", async () => {
+    const run = failing(
+      () => new Response("{}", { status: 503, headers: { "Retry-After": "7" } }),
+      () => 0,
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    run.stop();
+    expect(run.attempts.map((at) => at - run.start)).toEqual([0, 7_000, 14_000]);
+  });
+
+  test("the default random source is Math.random", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers();
+    const attempts: number[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        attempts.push(Date.now());
+        return new Response("{}", { status: 503 });
+      }),
+    );
+    const start = Date.now();
+    const stop = follow({
+      endpoint: "/api/feed",
+      pauseWhenHidden: false,
+      cursor: { current: null },
+      callbacks: { current: {} },
+      setState: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    stop();
+    // 0.75s, then 1.5s.
+    expect(attempts.map((at) => at - start)).toEqual([0, 750]);
   });
 });
 

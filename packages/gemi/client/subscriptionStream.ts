@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import type { ChangeFeedMessage } from "../services/change-feed/wire";
+import { equalJitter } from "./retryPolicy";
 import type { SubscriptionConfig, SubscriptionStatus } from "./useSubscription";
 
 // `useSubscription`'s connection: the SSE request, its reader and the
@@ -31,12 +32,21 @@ export interface FollowOptions {
   cursor: { current: string | null };
   callbacks: { current: SubscriptionConfig<unknown> };
   setState: Dispatch<SetStateAction<SubscriptionState>>;
+  /** The jitter's random source; `Math.random` unless a test passes its own. */
+  random?: () => number;
 }
 
 /**
  * Follows `endpoint` until the returned function is called: connects,
  * reconnects with backoff, pauses while the tab is hidden, and reports
  * through `setState` and `callbacks`.
+ *
+ * The backoff step is 1s, doubling per failed attempt up to 30s, and back to
+ * 1s once a stream reaches `ready`. Each wait is jittered ("equal jitter", a
+ * random point between half the step and all of it): a server restart ends
+ * every open tab's stream in the same instant, and an exact schedule would
+ * bring them all back in the same instant too. A `Retry-After` the server
+ * sent is waited out exactly.
  */
 export function follow({
   endpoint,
@@ -44,6 +54,7 @@ export function follow({
   cursor,
   callbacks,
   setState,
+  random = Math.random,
 }: FollowOptions): () => void {
   let stopped = false;
   let request: AbortController | null = null;
@@ -81,6 +92,7 @@ export function follow({
       setState((s) => ({ ...s, status: "connecting" }));
       const controller = (request = new AbortController());
       let delay = retryMs;
+      let exact = false;
       try {
         const headers: Record<string, string> = { Accept: "text/event-stream" };
         if (cursor.current) headers["Last-Event-ID"] = cursor.current;
@@ -91,7 +103,10 @@ export function follow({
             throw new FatalStatus(status);
           }
           const retryAfter = Number(response.headers.get("Retry-After"));
-          if (Number.isFinite(retryAfter) && retryAfter > 0) delay = retryAfter * 1000;
+          if (Number.isFinite(retryAfter) && retryAfter > 0) {
+            delay = retryAfter * 1000;
+            exact = true;
+          }
           throw new Error(`The subscription answered ${status}.`);
         }
         for await (const { id, message } of readEvents(response.body)) {
@@ -120,7 +135,7 @@ export function follow({
       if (stopped || controller.signal.aborted) continue;
       // The stream ended or failed: try again, a little later each time.
       setState((s) => ({ ...s, status: "connecting" }));
-      await wait(delay);
+      await wait(exact ? delay : equalJitter(delay, random));
       retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
     }
   })();

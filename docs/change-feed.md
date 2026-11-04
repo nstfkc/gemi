@@ -95,7 +95,7 @@ const { status, cursor, error } = useSubscription(
 ```
 
 - `status` is `"connecting"`, `"open"`, `"paused"` (tab hidden) or `"closed"` (disabled or refused).
-- After a drop it reconnects with `Last-Event-ID`, backing off from 1 second up to 30, or by the server's `Retry-After`.
+- After a drop it reconnects with `Last-Event-ID`, backing off from 1 second up to 30, or exactly by the server's `Retry-After`. Each backoff wait is jittered: a random point between half the step and all of it (0.5–1s, 1–2s, 2–4s, …), so the tabs a server restart disconnects at once don't all reconnect at once.
 - While the tab is hidden it disconnects, and catches up from its cursor once the tab is shown.
 - A `4xx` other than `408` and `429` stops it.
 - The callbacks may change between renders without reconnecting.
