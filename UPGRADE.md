@@ -1,3 +1,13 @@
+# Unreleased
+
+## auth: partition the auth rate-limit keys, e.g. per tenant (#1125)
+
+**New API (minor). No default behaviour change; nothing to change in apps.** See [Authentication → Email codes](docs/authentication.md#email-codes-sign-up-or-sign-in).
+
+- `auth.rateLimitKey({ req, scope, limit })` answers a partition (a tenant id) that is added to the key of the email-code and magic-link rate limits (`emailCode.requestLimit`, `emailCode.verifyLimit`; `scope` is `"request"`, `"verify"` or `"link"`, `limit` is `"perEmail"` or `"perIp"`). The same address in two tenants then has two budgets. Answering nothing keeps the key exactly as before.
+- New type exports from `gemi/services`: `AuthRateLimitKey`, `AuthRateLimitKeyArgs`.
+- `enforceCodeRateLimits` (internal) takes the hook as an optional fifth argument.
+
 # Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change

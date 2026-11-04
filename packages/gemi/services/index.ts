@@ -627,6 +627,7 @@ export {
   type OAuthProviderEntry,
   type UserCreatedContext,
 } from "../auth/config";
+export type { AuthRateLimitKey, AuthRateLimitKeyArgs } from "../auth/oneTimeCode";
 export {
   defineTranslationConfig,
   translationConfigDefaults,
