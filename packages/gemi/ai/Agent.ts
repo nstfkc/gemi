@@ -101,6 +101,15 @@ import type {
   Usage,
 } from "./types";
 import { modelOutputOf } from "./toolModelOutput";
+import {
+  assertUsageLimits,
+  RunUsageLimiter,
+  usageLimitMessage,
+  UsageLimitStoreError,
+  type AgentUsageLimits,
+  type UsageCounts,
+  type UsageLimitHit,
+} from "./usageLimits";
 
 // --- tools ---------------------------------------------------------------
 
@@ -1763,6 +1772,17 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Per-request model choice, e.g. letting a user pick. */
   provider?: AgentProvider;
   maxSteps?: number;
+  /**
+   * Budgets on what this run may spend (#1124): its own (`run`), and shared
+   * ones for keys the app chooses (`scopes`, kept in `store`), on tokens,
+   * model calls and tool calls, plus `onUsage` to hear what was spent.
+   * Checked before each model call and each tool call; a run that reaches a
+   * limit ends with `finishReason: "error"` and the error code
+   * `"usage_limit"`, and `result().error.usageLimit` says which. See
+   * `AgentUsageLimits`. Not handed down to a sub-run, whose tokens count
+   * here anyway. `AgentController` sets this from its `usageLimits()`.
+   */
+  usageLimits?: AgentUsageLimits;
   reasoning?: ReasoningEffort;
   /** Overrides the agent's own for this run. A generation whose size varies by
    *  request — a page with ten components against one with two — is the case
@@ -1957,6 +1977,12 @@ export type NestedContext = {
 export type AgentRunFailure = AgentError & {
   /** The provider's HTTP status, when the failure was a non-2xx response. */
   status?: number;
+  /**
+   * The limit a `usage_limit` failure reached (#1124): `"run"` or the
+   * scope's key, which of `tokens`, `steps` and `toolCalls`, the limit and
+   * what had been used. Server-side only, like `status`.
+   */
+  usageLimit?: UsageLimitHit;
   /** The provider's request id (`x-request-id`), when it sent one. */
   requestId?: string;
 };
@@ -2392,6 +2418,9 @@ export class Agent<
     }
     if (params.skills && params.skills.length > 0) {
       config = withRunSkills(config, params.skills, `Agent.stream for "${this.name}"`);
+    }
+    if (params.usageLimits) {
+      assertUsageLimits(params.usageLimits, `Agent.stream for "${this.name}"`);
     }
     // The run is untyped inside: what it holds of `Ctx` it only hands on.
     return new AgentRunImpl(config, params as AgentStreamParams) as unknown as AgentRun<
@@ -3085,6 +3114,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly unreported = new Set<AgentMessage>();
 
   private usage: Usage = emptyUsage();
+  /** The run's own model calls and executed tool calls, for `usageLimits` (#1124). */
+  private modelSteps = 0;
+  private toolCallCount = 0;
+  /** `params.usageLimits`, when it was given. */
+  private readonly limiter: RunUsageLimiter | null;
+  /** The limit a tool call of the current step was refused by. */
+  private limitHit: UsageLimitHit | null = null;
   /**
    * The approvals this run accepted, by tool call id (#1062), read by
    * `runToolBody` for `ctx.approval`. Set just before the approved call
@@ -3160,6 +3196,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.context = params.context ?? ({} as AgentContext);
     this.runId = params.runId ?? `run_${crypto.randomUUID()}`;
     this.history = [...params.messages];
+    this.limiter = params.usageLimits
+      ? new RunUsageLimiter(
+          params.usageLimits,
+          {
+            runId: this.runId,
+            agent: config.name,
+            ...(params.threadId ? { threadId: params.threadId } : {}),
+          },
+          (error) =>
+            this.writeLog(`[gemi/ai] agent "${config.name}" usageLimits.onUsage threw`, { error }),
+        )
+      : null;
 
     const nesting = params.nesting;
     this.depth = nesting?.depth ?? 0;
@@ -3384,6 +3432,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     } catch (error) {
       if (error instanceof RunAborted || this.controller.signal.aborted) {
         await this.finalizeAborted();
+      } else if (error instanceof UsageLimitStoreError) {
+        this.fail({ code: "unknown", message: error.message, retryable: true });
+        await this.finalizeMessage("error");
+        this.finishReason = "error";
+        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not read its usage limits`, {
+          error: error.cause,
+        });
       } else {
         this.fail(this.config.provider.normalizeError(error), httpErrorDetail(error));
         await this.finalizeMessage("error");
@@ -3391,6 +3446,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
     }
     this.cancelDeadline();
+    if (this.limiter) {
+      try {
+        await this.limiter.report(this.spent(), true);
+      } catch (error) {
+        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record its usage`, { error });
+      }
+    }
 
     this.emit({ type: "usage", usage: this.usage });
     this.emit({ type: "run-end", runId: this.runId, finishReason: this.finishReason });
@@ -3547,7 +3609,28 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * only, named one by one so a field added to `AgentRunFailure` cannot reach
    * a browser by accident, and a message gemi did not write replaced (#446).
    */
-  private fail(error: AgentError, detail: { status?: number; requestId?: string } = {}): void {
+  /** What the run has spent, as `usageLimits` counts it. */
+  private spent(): UsageCounts {
+    return {
+      tokens: this.usage.totalTokens,
+      steps: this.modelSteps,
+      toolCalls: this.toolCallCount,
+    };
+  }
+
+  /** Ends the run on a usage limit (#1124). No message is open. */
+  private failOverLimit(hit: UsageLimitHit): void {
+    this.fail(
+      { code: "usage_limit", message: usageLimitMessage(hit), retryable: false },
+      { usageLimit: hit },
+    );
+    this.finishReason = "error";
+  }
+
+  private fail(
+    error: AgentError,
+    detail: { status?: number; requestId?: string; usageLimit?: UsageLimitHit } = {},
+  ): void {
     const failure: AgentRunFailure = { ...error, ...detail };
     this.failure = failure;
     this.emit({ type: "error", error: this.redact(failure, { source: "run", failure }) });
@@ -3621,9 +3704,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const maxSteps = Math.max(1, this.config.maxSteps);
 
     for (let step = 1; step <= maxSteps; step++) {
+      if (this.limiter) {
+        const hit = await this.limiter.check(this.spent(), { steps: 1, tokens: 1 });
+        if (hit) {
+          this.failOverLimit(hit);
+          return;
+        }
+      }
       const message = this.startMessage();
       const outcome = await this.runStep(message, step);
+      this.modelSteps++;
       this.lastStep = { reason: outcome.reason, usage: message.usage };
+      await this.limiter?.report(this.spent());
 
       if (outcome.error) {
         this.fail(outcome.error, outcome.detail);
@@ -3643,6 +3735,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       const pending = await this.runTools(message, calls, step);
+      await this.limiter?.report(this.spent());
+      // A tool call refused by a limit ends the run once its step is closed:
+      // another model call would only meet the same refusal. A step that left
+      // a question for the user ends as that instead, below.
+      if (this.limitHit && pending.length === 0) {
+        const hit = this.limitHit;
+        await this.finalizeMessage(outcome.reason);
+        this.failOverLimit(hit);
+        return;
+      }
 
       if (pending.length > 0) {
         // The message closes first, then the run says what it is waiting for:
@@ -4227,6 +4329,27 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
         continue;
       }
+
+      if (this.limiter) {
+        const hit = this.limitHit ?? (await this.limiter.check(this.spent(), { toolCalls: 1 }));
+        if (hit) {
+          this.limitHit = hit;
+          this.addResult(message, {
+            type: "tool-result",
+            toolCallId: call.toolCallId,
+            name: call.name,
+            status: "error",
+            error: {
+              code: "usage_limit",
+              message: usageLimitMessage(hit),
+              toolCallId: call.toolCallId,
+              retryable: false,
+            },
+          });
+          continue;
+        }
+      }
+      this.toolCallCount++;
 
       running.push(
         this.executeTool(resolved, message.id, call, parsed.value, step)

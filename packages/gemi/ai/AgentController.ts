@@ -78,6 +78,7 @@ import { markOrphans, overlayJobs } from "./jobs/overlay";
 import { DEFAULT_JOBS_CONTEXT_MAX, renderJobsBlock } from "./jobs/contextBlock";
 import type { AgentJobRecord } from "./jobs/AgentJobStore";
 import type { AgentMemoryScopes } from "./memory/runMemory";
+import type { AgentUsageLimits } from "./usageLimits";
 import type { Schema } from "./Schema";
 import { RealtimeRequestError, type RealtimeSession } from "./providers/realtime";
 import type { VoiceConfig } from "./voiceConfig";
@@ -697,6 +698,10 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     extra: { body: Body },
   ) => readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void>;
+  usageLimits?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: Ctx },
+  ) => AgentUsageLimits | void | Promise<AgentUsageLimits | void>;
   /** Builds the run's context. `Ctx` is the agents' (see `defineAgentHooks`). */
   context?: (req: HttpRequest<any, any>, extra: { body: Body }) => Ctx | Promise<Ctx>;
   memoryScopes?: (
@@ -1050,6 +1055,37 @@ export abstract class AgentController<
     extra: { body: Body },
   ): readonly SkillDefinition[] | void | Promise<readonly SkillDefinition[] | void> {
     return this.hooks?.skills?.(req, extra);
+  }
+
+  /**
+   * THE TURN'S USAGE LIMITS (#1124): budgets on what its run may spend, its
+   * own and shared ones under keys this decides (the user, the tenant, the
+   * month), and `onUsage` to hear what was spent.
+   *
+   * ```ts
+   * protected usageLimits(req, { context }) {
+   *   const month = new Date().toISOString().slice(0, 7);
+   *   return {
+   *     run: { tokens: 200_000, toolCalls: 50 },
+   *     scopes: [{ key: `tenant:${context.tenantId}:${month}`, limit: { tokens: 5_000_000 } }],
+   *     store: this.usageStore, // shared across instances
+   *     onUsage: (report) => Billing.record(context.tenantId, report.delta.tokens),
+   *   };
+   * }
+   * ```
+   *
+   * Called once per turn, after `context()` (whose answer it is handed), on
+   * turns from `useChat`, `startTurn` and voice alike. A run over a limit
+   * ends with the error code `"usage_limit"` (`onError` and `result().error`
+   * carry `usageLimit`, which says which limit); a scope already spent ends
+   * the turn before the model is called. Answer nothing for no limits: the
+   * default. See `AgentUsageLimits`.
+   */
+  protected usageLimits(
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: ContextOf<A> },
+  ): AgentUsageLimits | void | Promise<AgentUsageLimits | void> {
+    return this.hooks?.usageLimits?.(req, extra);
   }
 
   /**
@@ -1662,6 +1698,7 @@ export abstract class AgentController<
       const context = await this.context(req, { body: extraBody });
       const reasoning = (await this.reasoning(req, { body: extraBody })) || undefined;
       const skills = (await this.skills(req, { body: extraBody })) || undefined;
+      const usageLimits = (await this.usageLimits(req, { body: extraBody, context })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -1725,6 +1762,8 @@ export abstract class AgentController<
         // Only when answered, so the agent's own applies otherwise.
         ...(reasoning ? { reasoning } : {}),
         ...(skills && skills.length > 0 ? { skills } : {}),
+        // Budgets on what the run may spend (#1124).
+        ...(usageLimits ? { usageLimits } : {}),
         // Built from this request once, here, and the only thing the run knows
         // about who asked. The run has no request of its own — see
         // `AgentContext` — so a tool that needs the user reads it from this.

@@ -1,3 +1,14 @@
+# Unreleased
+
+## ai: usage limits for agent runs (#1124)
+
+**New APIs (minor). No default behaviour change; nothing to change in apps.** See [AI Usage and Cost → Usage limits](docs/ai-usage.md#usage-limits).
+
+- `Agent.stream({ usageLimits })` and `AgentController.usageLimits(req, { body, context })` (and the `usageLimits` hook): budgets on `tokens`, `steps` (model calls) and `toolCalls`, for the run (`run`) and for keys shared across runs (`scopes`, kept in a `UsageLimitStore`; `MemoryUsageLimitStore` by default), plus `onUsage` to hear what was spent.
+- A run over a limit ends with `finishReason: "error"` and the new `AgentErrorCode` `"usage_limit"`; `result().error.usageLimit` (`AgentRunFailure`, server-side) says which limit.
+- Type-level: `AgentErrorCode` has a new member, `"usage_limit"`. An exhaustive `switch` over it needs a case.
+- New exports from `gemi/ai`: `MemoryUsageLimitStore`, `defaultUsageLimitStore` and the types `AgentUsageLimits`, `UsageLimit`, `UsageCounts`, `UsageLimitHit`, `UsageLimitStore`, `UsageReport`.
+
 # Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change

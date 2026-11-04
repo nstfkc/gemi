@@ -313,6 +313,15 @@ export type {
 export type { Delta, Estimate } from "./eval/stats";
 // `Usage` is the token type and, as a value, the meter (#1021).
 export { measureUsage, Usage } from "./usageMeter";
+export { MemoryUsageLimitStore, defaultUsageLimitStore } from "./usageLimits";
+export type {
+  AgentUsageLimits,
+  UsageCounts,
+  UsageLimit,
+  UsageLimitHit,
+  UsageLimitStore,
+  UsageReport,
+} from "./usageLimits";
 export type {
   MeasuredUsage,
   MeteredUsage,
