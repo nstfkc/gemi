@@ -2746,7 +2746,8 @@ function isReservedNamespace(tool: ProviderToolSpec | ProviderToolNamespace): bo
  */
 function withRunTools(config: RunConfig, entries: readonly ToolEntry[], owner: string): RunConfig {
   for (const entry of entries) {
-    if (entry instanceof ToolNamespace && entry.name === MEMORY_NAMESPACE) {
+    // Reserved only on an agent with memory, as at `Agent.create`.
+    if (config.memory && entry instanceof ToolNamespace && entry.name === MEMORY_NAMESPACE) {
       throw new Error(
         `${owner} is given a namespace named "${MEMORY_NAMESPACE}", which is reserved for the memory tools. Rename the namespace.`,
       );
