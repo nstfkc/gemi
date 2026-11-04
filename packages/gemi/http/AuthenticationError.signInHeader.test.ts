@@ -8,7 +8,7 @@ import { ApiRouter } from "./ApiRouter";
 import { AuthenticationMiddleware } from "./AuthenticationMiddlware";
 import { ViewRouter } from "./ViewRouter";
 import { Kernel } from "../kernel";
-import { SIGN_IN_HEADER } from "./refusal";
+import { SIGN_IN_HEADER } from "./signInHeader";
 
 process.env.SECRET ??= "test-secret";
 

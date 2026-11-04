@@ -1,5 +1,5 @@
 import { refusal, RequestBreakerError, stringEraRefusal } from "./Error";
-import { SIGN_IN_HEADER } from "./refusal";
+import { SIGN_IN_HEADER } from "./signInHeader";
 import { formatUnsatisfiedContentRange } from "./range";
 
 export class AuthorizationError extends RequestBreakerError {

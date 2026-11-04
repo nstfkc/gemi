@@ -1,4 +1,4 @@
-import { SIGN_IN_HEADER } from "../http/refusal";
+import { SIGN_IN_HEADER } from "../http/signInHeader";
 import { INTENDED_URL_PARAM, isExternalRedirect } from "../utils/intendedUrl";
 
 /**
