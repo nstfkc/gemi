@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.179.0 to 0.180.0
 
 ## auth: a failed session lookup is a 500, not "signed out" (#1120) — behaviour change
 
