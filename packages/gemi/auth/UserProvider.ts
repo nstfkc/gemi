@@ -145,9 +145,9 @@ function deepFreeze<T>(value: T): T {
  * This used to also select `User.organizationId`. Nothing in the framework read
  * it — it was selected here and nowhere else — and selecting it made every
  * application's `User` table have to carry the starter template's column: a
- * schema without it fails `UnknownFieldError` inside `findSession`, which
- * catches, logs, and returns null, so every request looks like an expired
- * session rather than a misconfiguration.
+ * schema without it fails `UnknownFieldError` inside `findSession`. Before
+ * #1120 that was caught and returned as null, so every request looked like an
+ * expired session rather than a misconfiguration; it now surfaces as a 500.
  *
  * Note for a policy that scopes by tenant: `ctx.user.organizationId` is
  * therefore no longer a thing to read. Scope through the membership —
@@ -182,7 +182,7 @@ const SESSION_USER = {
  * Exported so that an override can **build on it rather than copy it**. A copy
  * made field for field goes stale silently: it is how an application came to
  * keep selecting `User.organizationId` after gemi stopped (#346), and a schema
- * error inside `findSession` is caught and reads as "signed out", not as a bug.
+ * error inside `findSession` fails every signed-in request.
  * Spread this, and the columns gemi adds later arrive on their own.
  *
  * Frozen, because it is shared: assigning into it would change every
@@ -427,23 +427,19 @@ export class UserProvider<TSession = SessionWithUser> {
   async findSession(args: FindSessionArgs): Promise<TSession | null> {
     if (!args.token) return null;
 
-    // `findUnique` returns null on no match rather than raising, so the
-    // try/catch Prisma's adapter wraps this in is not needed for the
-    // not-found case. It is kept for the *connection* case — a sign-in path
-    // that throws on a database blip becomes a 500 where returning null is a
-    // redirect to the login page. The error is logged rather than swallowed
-    // silently.
-    try {
-      return await this.run(() =>
-        this.models.Session.findUnique({
-          where: { token: args.token },
-          select: this.sessionSelect(),
-        }),
-      );
-    } catch (error) {
-      console.error("findSession failed:", error);
-      return null;
-    }
+    // `findUnique` answers null when no row matches: that, and only that, is
+    // "no session". Anything it throws — a dropped connection, a pool timeout,
+    // a column the schema does not have — is left to propagate (#1120). It
+    // used to be caught and turned into null, so a database blip answered
+    // every `auth` API route with a 401 `authentication` and sent page
+    // navigations to the sign-in page: indistinguishable, to a client, from a
+    // session that really ended. Thrown, it is a 500, which `useQuery` retries.
+    return await this.run(() =>
+      this.models.Session.findUnique({
+        where: { token: args.token },
+        select: this.sessionSelect(),
+      }),
+    );
   }
 
   /**

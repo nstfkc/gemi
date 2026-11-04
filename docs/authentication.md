@@ -263,7 +263,7 @@ The twenty-six query methods, all overridable, and the `select` the session quer
 | `findUserByEmailAddress(email, verifyEmail)` | Look up a user; when `verifyEmail` is true, only return verified users. |
 | `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). A sign-in reads the new session back through `findSession`. |
 | `updateSession(args)` | Push a session's `expiresAt` forward. Only the `expiresAt` it returns is used. |
-| `findSession(args)` | Load a session (+ its user) by token. The one place a session's shape comes from — see [Shaping the session](#shaping-the-session). |
+| `findSession(args)` | Load a session (+ its user) by token, or `null` when there is none. The one place a session's shape comes from — see [Shaping the session](#shaping-the-session). Return `null` only for a session that does not exist; let a lookup error (database down, pool timeout) throw, so it answers 500 rather than "signed out" — see [Lookup errors](#lookup-errors). |
 | `sessionSelect()` *(protected)* | The `select` `findSession`, `updateSession` and `createSessionV2` share. Override it to add a column or order/filter `accounts` — see [Changing the session query](#changing-the-session-query). |
 | `deleteSession(args)` | Delete a session by token (sign-out). |
 | `claimLegacySession(args)` | Delete a pre-0.64 session row and answer whether this call deleted it; a conversion writes the new session only on `true`. |
@@ -383,8 +383,7 @@ export class AppUserProvider extends UserProvider<AppSession> {
 ```
 
 - **Spread `SESSION_SELECT`, do not copy it.** A copy goes stale when gemi changes its select,
-  and a column the schema does not have makes `findSession` catch, log and return `null` —
-  which reads as "signed out", not as a bug. Keep the fields it selects; `AuthManager` reads
+  and a column the schema does not have makes `findSession` throw on every signed-in request. Keep the fields it selects; `AuthManager` reads
   `token`, `expiresAt`, `absoluteExpiresAt` and `user`, and clients decode the rest.
 - **The type comes from the select.** `satisfies SelectInput<SessionTypes>` checks every
   column, relation, `orderBy` and `where` against your schema, and `Payload` turns the same
@@ -1712,6 +1711,21 @@ The middleware parameter is a **path only**. Alias arguments are split on `:` an
 `"auth:https://sso.example/login"` would arrive as the bare word `https` — that is refused
 rather than redirected to. Put a sign-in page on another origin in `signInPath`, where the
 whole URL survives.
+
+### Lookup errors
+
+Only a session that is not there is "no user": no token, an unknown token, an expired
+session. A lookup that **fails** — the database is down, the pool timed out, the session
+`select` names a column the schema does not have — throws, and the request answers **500**:
+an API route gets `{ error: { kind: "server_error", … } }` (which `useQuery` retries), and a
+page load or navigation gets the error page rather than the sign-in page. `Auth.userOrNull()`
+throws in the same case, so an outage is never served as a signed-out page.
+
+Before 0.180 the default `UserProvider.findSession` caught every error and returned `null`, so
+a database blip signed every request out: a 401 `authentication` to API clients and a redirect
+to sign-in for pages, which a client cannot tell from a session that really ended. A
+`findSession` override should keep to the same rule: return `null` for a missing session, and
+let anything else throw.
 
 ### Returning to the intended page
 

@@ -176,7 +176,7 @@ const { data } = useQuery("/feed", {}, {
   keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
   retry: 3,                // background retries of a failed query — suspense: false only
-  retryDelay: (n) => 1000 * 2 ** (n - 1), // wait before retry n (default: 1s, 2s, 4s, capped at 30s)
+  retryDelay: (n) => 1000 * 2 ** (n - 1), // wait before retry n (default: 1s, 2s, 4s, capped at 30s, jittered)
   revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
   focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
@@ -279,8 +279,11 @@ because sending the same request again gets the same answer. That is what lets
   retry a status the default never does. `failureCount` is 1 after the first
   failure.
 - **`retryDelay`** — the wait before each retry, in ms, or
-  `(failureCount, error) => ms`. The default backs off exponentially: 1s, 2s,
-  4s, … capped at 30s.
+  `(failureCount, error) => ms`. The default backs off exponentially with
+  jitter: each wait is a random point in the upper half of the step — 0.5–1s,
+  1–2s, 2–4s, … capped at 30s — so tabs that failed together (a server blip
+  hits every open tab at once) do not all retry in the same instant. A
+  `retryDelay` you set is used exactly, without jitter.
 - **`Retry-After`** — when the failed response carries one (a `429` or `503`),
   the retry waits exactly that long, whatever `retryDelay` says. It is also on
   the error, in ms, as `error.retryAfter`. The retry still counts toward
