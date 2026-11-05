@@ -15,8 +15,9 @@
 //   `unmount()` it.
 // - Clicks on eligible same-origin links fetch the next document. It is swapped
 //   in only when its `<meta name="gemi-static">` (layout | build | version) and
-//   its document-level stylesheets equal this one's (`COMPARED`); anything else,
-//   an error or a timeout is a full load (`location.assign`).
+//   its document-level stylesheets equal the ones the server sent for this page
+//   (`COMPARED`, read before any island runs); anything else, an error or a
+//   timeout is a full load (`location.assign`).
 // - The swap: title, `<html lang dir>`, the head tags `Head`/`Meta` own, then the
 //   body (`data-gemi-persist` elements and the body's own stylesheets stay in
 //   place; a `<style>` nested in the content leaves and arrives with it).
@@ -90,6 +91,12 @@ const HEAD =
 const identity = (doc) => doc.querySelector(IDENTITY)?.content;
 const sheets = (doc) => [...doc.querySelectorAll(COMPARED)].map((e) => e.outerHTML).join();
 const withoutHash = (url) => url.href.split("#")[0];
+// The stylesheets the server sent, read now, before `hydrate` imports any island
+// (#1153). Code that injects a `<style>` later (vaul, sonner, emotion) changes the
+// live document, not what the server sends, so comparing with the live document
+// would make every navigation a full load. A swap needs equal stylesheets, so
+// this stays what every page shown since was sent with.
+const served = sheets(d);
 
 // The polite live region that announces each new page's title.
 const live = d.createElement("div");
@@ -237,7 +244,7 @@ const go = async (url, push) => {
     const [final, html] = await get(withoutHash(url));
     if (run != current) return;
     const doc = new DOMParser().parseFromString(html, "text/html");
-    if (identity(doc) == null || identity(doc) != identity(d) || sheets(doc) != sheets(d)) throw 0;
+    if (identity(doc) == null || identity(doc) != identity(d) || sheets(doc) != served) throw 0;
     if (push) {
       const next = new URL(final);
       next.hash = url.hash;

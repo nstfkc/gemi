@@ -480,7 +480,10 @@ in instead of loading it:
   unstyled meanwhile). Another layout (a hydrated app page, the app's 404), a
   new deploy, another `version` (see below), a different stylesheet, a response
   that isn't a 2xx HTML page, a redirect to another origin, a network error or
-  a 10-second timeout all become an ordinary page load of the link.
+  a 10-second timeout all become an ordinary page load of the link. The
+  comparison is with the stylesheets the server sent, so a `<style>` that
+  client code injects at runtime (vaul, sonner, emotion and other libraries do)
+  doesn't count, and it stays where the library put it.
 - **A page's own `<style>`.** A `<style>` nested in the body's content (a
   component rendering its CSS next to its markup) is part of the content, not
   compared: the old page's leave with the old content and the next page's

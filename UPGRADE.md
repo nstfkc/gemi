@@ -1,3 +1,12 @@
+# Unreleased
+
+## static views: a `<style>` injected at runtime no longer turns client navigation off (#1153)
+
+**Fix (patch). Nothing to change in apps.** See [Static views and islands](docs/static-views-and-islands.md).
+
+- With `.static({ navigation })`, the next page's stylesheets are compared with the ones the server sent for the current page, not with the live `<head>`. A `<style>` that client code adds after load (vaul, sonner, emotion) no longer makes every link a full page load; it stays where the library put it. A real stylesheet difference between two pages is still a full load.
+- The runtime's source changed, so `STATIC_NAVIGATION_CSP_HASH` has a new value. Apps that use the constant get it automatically; a hash copied into a CSP by hand must be updated.
+
 # Upgrading from 0.185.0 to 0.186.0
 
 ## ai: `useChat` keeps the HTTP status of a refused request (#1151)
