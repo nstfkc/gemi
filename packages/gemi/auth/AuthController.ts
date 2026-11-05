@@ -8,7 +8,12 @@ import { AuthorizationError } from "../http/errors";
 import { RequestBreakerError } from "../http/Error";
 import { enabledOAuthProvider } from "./oauth/providers";
 import { enforceCodeRateLimits, foldEmail, normalizeEmail } from "./oneTimeCode";
-import type { AuthConfig, AuthenticatedArgs, UserCreatedContext } from "./config";
+import {
+  authSwitchOn,
+  type AuthConfig,
+  type AuthenticatedArgs,
+  type UserCreatedContext,
+} from "./config";
 import { Auth } from "../facades";
 import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
@@ -205,15 +210,23 @@ class ResetPasswordRequest extends HttpRequest<
   };
 }
 
+function notFound(): never {
+  throw new RequestBreakerError("Not found", { status: 404 });
+}
+
 /**
  * A 404 for a route whose flow the app switched off (`auth.password`,
- * `auth.magicLink`, #879), thrown before the body is read: a validation error
- * would tell a client the route is there.
+ * `auth.magicLink`, #879), for every request or for this one (#1135), thrown
+ * before the body is read: a validation error would tell a client the route
+ * is there.
  */
-function requireFlow(flow: "password" | "magicLink") {
-  if (app(AuthManager).config[flow] === false) {
-    throw new RequestBreakerError("Not found", { status: 404 });
-  }
+async function requireFlow(flow: "password" | "magicLink", req: HttpRequest<any, any>) {
+  if (!(await authSwitchOn(app(AuthManager).config[flow], req))) notFound();
+}
+
+/** `auth.verifyEmail` for this request (#1135). */
+async function verifyEmailOn(req: HttpRequest<any, any>) {
+  return await authSwitchOn(app(AuthManager).config.verifyEmail, req);
 }
 
 export class AuthController extends Controller {
@@ -228,7 +241,7 @@ export class AuthController extends Controller {
   }
 
   async verifyEmail(req = new HttpRequest<{ token: string }>()) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const input = await req.input();
     const { userProvider } = app(AuthManager);
 
@@ -253,6 +266,14 @@ export class AuthController extends Controller {
   async signInWithMagicLink(req = new HttpRequest()) {
     const auth = app(AuthManager);
     const { userProvider } = auth;
+    // Mounted while either flow can be on; a request where both are off
+    // answers as an unmounted page would (#1135).
+    if (
+      !(await authSwitchOn(auth.config.magicLink, req)) &&
+      !(await authSwitchOn(auth.config.emailCode.enabled, req))
+    ) {
+      notFound();
+    }
     const token = nonEmptyString(req.search.get("token"));
     let email: string | null = null;
     try {
@@ -301,7 +322,7 @@ export class AuthController extends Controller {
    * showed "Invalid pin"; a rate limit is the middleware's 429.
    */
   private async verifyPinRequest(req: HttpRequest<{ email: string; pin: string }>) {
-    requireFlow("magicLink");
+    await requireFlow("magicLink", req);
     const auth = app(AuthManager);
     const input = await req.input();
     const { email: rawEmail, pin: rawPin } = input.toJSON();
@@ -376,7 +397,7 @@ export class AuthController extends Controller {
   }
 
   async signInV2(req = new SignInRequest()) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -385,7 +406,7 @@ export class AuthController extends Controller {
 
     const user = await auth.userProvider.findUserByEmailAddress(
       email,
-      auth.config.verifyEmail,
+      await verifyEmailOn(req),
     );
 
     // An unknown address is checked too, against a decoy, so it answers like a
@@ -424,7 +445,7 @@ export class AuthController extends Controller {
   }
 
   async signIn(req = new SignInRequest()) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -433,7 +454,7 @@ export class AuthController extends Controller {
 
     const user = await auth.userProvider.findUserByEmailAddress(
       email,
-      auth.config.verifyEmail,
+      await verifyEmailOn(req),
     );
 
     // An unknown address is checked too, against a decoy, so it answers like a
@@ -472,10 +493,11 @@ export class AuthController extends Controller {
   }
 
   async signUp() {
-    requireFlow("password");
     const auth = app(AuthManager);
     const { userProvider, config } = auth;
+    // Constructing the request reads nothing; the body waits for the switch.
     const req = new config.signUpRequest();
+    await requireFlow("password", req);
     const input = await req.input();
     const {
       email: _email,
@@ -561,6 +583,11 @@ export class AuthController extends Controller {
       // Outside the transaction: it is a hash, not a query, and the
       // transaction holds a connection for as long as it is open.
       verificationToken = await config.generateEmailVerificationToken(email);
+      // A per-request `verifyEmail` that is off for this request stores no
+      // token, as the static `false` does (#1135).
+      if (typeof config.verifyEmail === "function" && !(await verifyEmailOn(req))) {
+        verificationToken = "";
+      }
 
       newUser = await userProvider.transaction(async () => {
         const user = await userProvider.createUser({
@@ -632,7 +659,7 @@ export class AuthController extends Controller {
   }
 
   async forgotPassword(req = new ForgotPasswordRequest()) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const input = await req.input();
     const email = emailInput(input.get("email"));
 
@@ -644,7 +671,7 @@ export class AuthController extends Controller {
 
     const user = await userProvider.findUserByEmailAddress(
       email,
-      config.verifyEmail,
+      await verifyEmailOn(req),
     );
 
     if (!user) {
@@ -666,7 +693,7 @@ export class AuthController extends Controller {
   }
 
   async resetPassword(req = new ResetPasswordRequest()) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const { userProvider, config } = app(AuthManager);
     const input = await req.input();
     const { password, token: rawToken } = input.toJSON();
@@ -698,7 +725,7 @@ export class AuthController extends Controller {
 
     const user = await userProvider.findUserByEmailAddress(
       passwordResetToken.user.email,
-      config.verifyEmail,
+      await verifyEmailOn(req),
     );
 
     if (!user) {
@@ -724,7 +751,7 @@ export class AuthController extends Controller {
   async changePassword(
     req = new HttpRequest<{ oldPassword: string; newPassword: string }>(),
   ) {
-    requireFlow("password");
+    await requireFlow("password", req);
     const { userProvider, config } = app(AuthManager);
     const user = await Auth.user();
     const input = await req.input();
@@ -738,7 +765,7 @@ export class AuthController extends Controller {
 
     const stored = await userProvider.findUserByEmailAddress(
       user.email,
-      config.verifyEmail,
+      await verifyEmailOn(req),
     );
 
     const isPasswordValid =
@@ -766,10 +793,11 @@ export class AuthController extends Controller {
     const { provider } = req.params;
     const providers = app(AuthManager).config.oauthProviders;
     const configured = Object.hasOwn(providers, provider as string);
-    const oauthProvider = await enabledOAuthProvider(providers, provider as string);
+    const oauthProvider = await enabledOAuthProvider(providers, provider as string, req);
 
     if (!oauthProvider) {
-      // Configured, but switched off by its `feature` for this request (#885):
+      // Configured, but switched off by its `feature` (#885) or `enabled`
+      // (#1135) for this request:
       // a 404, before any cookie is written, so the route reads as absent.
       if (configured) throw new RequestBreakerError("Not found", { status: 404 });
       throw new Error(`Invalid provider: ${provider}`);
@@ -822,8 +850,9 @@ export class AuthController extends Controller {
     const auth = app(AuthManager);
     const { userProvider, config } = auth;
     const configured = Object.hasOwn(config.oauthProviders, provider as string);
-    const oauthProvider = await enabledOAuthProvider(config.oauthProviders, provider as string);
-    // Configured, but switched off by its `feature` for this request (#885):
+    const oauthProvider = await enabledOAuthProvider(config.oauthProviders, provider as string, req);
+    // Configured, but switched off by its `feature` (#885) or `enabled`
+    // (#1135) for this request:
     // a 404, before the round trip's cookie is read or cleared.
     if (configured && !oauthProvider) {
       throw new RequestBreakerError("Not found", { status: 404 });
@@ -1280,7 +1309,7 @@ export class AuthController extends Controller {
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
-    requireFlow("magicLink");
+    await requireFlow("magicLink", req);
     const input = await req.input();
     const email = foldEmail(input.get("email"));
     const auth = app(AuthManager);
@@ -1317,9 +1346,7 @@ export class AuthController extends Controller {
   async requestEmailCode(req = new HttpRequest<{ email: string }>()) {
     const auth = app(AuthManager);
     const config = auth.config.emailCode;
-    if (!config.enabled) {
-      throw new RequestBreakerError("Not found", { status: 404 });
-    }
+    if (!(await authSwitchOn(config.enabled, req))) notFound();
 
     const input = await req.input();
     const email = normalizeEmail(input.get("email"));
@@ -1352,9 +1379,7 @@ export class AuthController extends Controller {
   ) {
     const auth = app(AuthManager);
     const { userProvider, config } = auth;
-    if (!config.emailCode.enabled) {
-      throw new RequestBreakerError("Not found", { status: 404 });
-    }
+    if (!(await authSwitchOn(config.emailCode.enabled, req))) notFound();
 
     const input = await req.input();
     const { email: rawEmail, code: rawCode, name } = input.toJSON();
