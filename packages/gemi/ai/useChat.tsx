@@ -227,7 +227,7 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * arrives inside nested frames and belongs to the call that started them.
    */
   onToolProgress?: (progress: ToolProgress<ToolsOf<P>>) => void;
-  onError?: (error: AgentError) => void;
+  onError?: (error: ChatError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
    * The mount probe found no run to attach to. So did a `reattachOnFocus`
@@ -275,8 +275,14 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    */
   messages: AgentMessage<ToolsOf<P>, OutputOf<P>>[];
   status: ChatStatus;
-  /** Cleared by the next successful send, so a retry does not have to clear it. */
-  error: AgentError | null;
+  /**
+   * Cleared by the next successful send, so a retry does not have to clear it.
+   *
+   * A request the server refused before its stream started (a 401 from the
+   * route's middleware, a 402 or 403 from `authorizeRequest`, a 429) also has
+   * the answer's `status`, its `error.code` as `serverCode` and its `body`.
+   */
+  error: ChatError | null;
   /** Set once the server has assigned one. */
   threadId?: string;
   /** The run being streamed or attached to, if any. */
@@ -495,6 +501,27 @@ export type AttachOptions = {
 };
 
 /**
+ * `useChat`'s `error` and what `onError` gets: an `AgentError`, plus, for a
+ * request the server refused before its stream started, the HTTP answer
+ * (#1151). An app tells a 401, a 402 or a 403 apart by `status` instead of by
+ * `message`.
+ *
+ * All three are absent for an error that came on the stream (the run's own
+ * `error` event, after a 2xx) and for a request that got no answer at all.
+ */
+export type ChatError = AgentError & {
+  /** The response's HTTP status. */
+  status?: number;
+  /** The `error.code` of the server's JSON answer, as it was sent, when it had
+   *  one. `code` names only the codes the client acts on (`rate_limited`,
+   *  `thread_not_found`); this keeps the rest, such as an app's own codes. */
+  serverCode?: string;
+  /** The response body, parsed as JSON, or its text when it was not JSON.
+   *  Absent when the body was empty. */
+  body?: unknown;
+};
+
+/**
  * Why `attach()` rejected, for that file alone.
  *
  * `code` is the server's when it sent one — `unsupported_file_type`,
@@ -631,33 +658,53 @@ function isAbort(error: unknown) {
   );
 }
 
-async function httpError(response: Response): Promise<AgentError> {
+async function httpError(response: Response): Promise<ChatError> {
   // Anything that fails before the headers flush is an ordinary HTTP error —
   // auth, validation, an unknown agent — and never reaches the stream's own
   // error event, so it has to be translated into the same shape here.
   let message = response.statusText || `Request failed with status ${response.status}`;
   let code: AgentError["code"] = response.status === 429 ? "rate_limited" : "unknown";
+  // The status, the server's own code and the body are kept beside `code`
+  // (#1151): an app has its own states for a 401, a 402 or a 403 (a sign-in
+  // prompt, a paywall) and should not have to match on the message for them.
+  let serverCode: string | undefined;
+  let body: unknown;
   try {
-    const data = (await response.json()) as {
-      error?: { code?: string; message?: string };
-      message?: string;
-    };
-    message = data?.error?.message ?? data?.message ?? message;
+    const text = await response.text();
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // Not JSON: a proxy's error page, say. Kept as text; the status line
+        // is the message.
+        body = text;
+      }
+    }
+  } catch {
+    // The body could not be read at all. The status line is all there is.
+  }
+  if (body && typeof body === "object") {
+    const data = body as { error?: { code?: unknown; message?: unknown }; message?: unknown };
+    const errorMessage = typeof data.error?.message === "string" ? data.error.message : undefined;
+    const topMessage = typeof data.message === "string" ? data.message : undefined;
+    message = errorMessage ?? topMessage ?? message;
+    if (typeof data.error?.code === "string") serverCode = data.error.code;
     // The one server code an app has something to do about: the thread it
     // holds is gone, and the fix is a new one or a stateless send, neither of
     // which "unknown" would suggest. Other codes stay folded into the status,
     // because the union names what the client can act on, not what the server
-    // can say.
-    if (data?.error?.code === "thread_not_found") {
+    // can say; they are still on `serverCode`.
+    if (serverCode === "thread_not_found") {
       code = "thread_not_found";
     }
-  } catch {
-    // Not JSON. The status line is all there is.
   }
   return {
     code,
     message,
     retryable: response.status === 429 || response.status >= 500,
+    status: response.status,
+    ...(serverCode !== undefined ? { serverCode } : {}),
+    ...(body !== undefined ? { body } : {}),
   };
 }
 
@@ -995,7 +1042,7 @@ export function useChat<P extends keyof AgentRoutes>(
    * clears it in the reducer.
    */
   const fail = useCallback(
-    (error: AgentError) => {
+    (error: ChatError) => {
       commit({ ...stateRef.current!, error });
       handlers.current.onError?.(error);
     },
@@ -1020,7 +1067,7 @@ export function useChat<P extends keyof AgentRoutes>(
    * is depends on who asked.
    */
   const postStop = useCallback(
-    async (body: AgentStopBody, report: (error: AgentError) => void) => {
+    async (body: AgentStopBody, report: (error: ChatError) => void) => {
       const { base: url } = requestRef.current;
       try {
         const response = await post(`${url}/stop`, body);

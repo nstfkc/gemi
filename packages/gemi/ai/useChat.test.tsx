@@ -1152,7 +1152,13 @@ describe("errors", () => {
     });
 
     expect(box.api.status).toBe("error");
-    expect(box.api.error).toEqual({ code: "unknown", message: "not signed in", retryable: false });
+    expect(box.api.error).toEqual({
+      code: "unknown",
+      message: "not signed in",
+      retryable: false,
+      status: 401,
+      body: { error: { message: "not signed in" } },
+    });
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
@@ -1188,15 +1194,87 @@ describe("errors", () => {
     });
 
     expect(box.api.status).toBe("error");
-    expect(box.api.error).toEqual({
+    expect(box.api.error).toMatchObject({
       code: "thread_not_found",
       message: "Thread th_9 does not exist here.",
       retryable: false,
+      status: 404,
+      serverCode: "thread_not_found",
     });
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "thread_not_found" }));
     // The turn that failed is still on screen, so an app that remounts without
     // the thread has the message to resend.
     expect(box.api.messages.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  test("a refusal keeps its status, the server's code and the body (#1151)", async () => {
+    // A 402 and a 403 are both "unknown" to the union, and an app shows a
+    // paywall for one and a sign-in prompt or nothing for the other.
+    const answer = { error: { code: "insufficient_credits", message: "Out of credits." }, balance: 0 };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(answer), { status: 402 }));
+    const onError = vi.fn();
+    const { box } = mount({ attach: false, onError });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    const expected = {
+      code: "unknown",
+      message: "Out of credits.",
+      retryable: false,
+      status: 402,
+      serverCode: "insufficient_credits",
+      body: answer,
+    };
+    expect(box.api.error).toEqual(expected);
+    expect(onError).toHaveBeenCalledWith(expected);
+  });
+
+  test("a body that is not JSON is kept as text, and an empty one is left out", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("<html>Bad gateway</html>", { status: 502, statusText: "Bad Gateway" }),
+    );
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+    expect(box.api.error).toEqual({
+      code: "unknown",
+      message: "Bad Gateway",
+      retryable: true,
+      status: 502,
+      body: "<html>Bad gateway</html>",
+    });
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+    await act(async () => {
+      await box.api.sendMessage("hi again");
+    });
+    expect(box.api.error).toEqual({
+      code: "unknown",
+      message: "Request failed with status 401",
+      retryable: false,
+      status: 401,
+    });
+  });
+
+  test("a 429 keeps its status beside rate_limited", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: "too_many_runs", message: "Busy." } }), {
+        status: 429,
+      }),
+    );
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+    expect(box.api.error).toMatchObject({
+      code: "rate_limited",
+      retryable: true,
+      status: 429,
+      serverCode: "too_many_runs",
+    });
   });
 
   test("an error event after the headers flushed reaches error and onError", async () => {
@@ -1221,6 +1299,9 @@ describe("errors", () => {
     });
 
     expect(box.api.error).toMatchObject({ code: "provider_error" });
+    // The run's own error came after a 2xx: there is no refusal to describe.
+    expect(box.api.error).not.toHaveProperty("status");
+    expect(box.api.error).not.toHaveProperty("body");
     expect(onError).toHaveBeenCalledTimes(1);
   });
 

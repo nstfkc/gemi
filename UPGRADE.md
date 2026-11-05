@@ -1,3 +1,13 @@
+# Unreleased
+
+## ai: `useChat` keeps the HTTP status of a refused request (#1151)
+
+**New API (minor). Nothing to change in apps.** See [Mobile Clients → Behaviour worth knowing](docs/mobile-clients.md#behaviour-worth-knowing).
+
+- `useChat`'s `error` and `onError` are typed `ChatError` (exported from `gemi/ai/client`): an `AgentError` plus, for a request the server refused before its stream started, `status` (the HTTP status), `serverCode` (the `error.code` of the server's JSON answer, as sent, including codes the `AgentErrorCode` union does not name) and `body` (the parsed JSON, or the text when it was not JSON; absent when empty). This covers sends, tool answers and `stop`.
+- `code`, `message` and `retryable` are unchanged. A test that compares such an error with `toEqual` now sees the new fields; use `toMatchObject` or add them.
+- The run's own `error` event (after a 2xx) and a request with no answer have none of the three.
+
 # Upgrading from 0.184.0 to 0.185.0
 
 ## ai: `generate({ onPartial })` and `parsePartialJson` (#1149)
