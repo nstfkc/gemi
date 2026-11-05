@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.186.0 to 0.186.1
 
 ## static views: a `<style>` injected at runtime no longer turns client navigation off (#1153)
 
