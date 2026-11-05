@@ -15,8 +15,9 @@ function ambientRequest(): HttpRequest<any, any> | null {
 
 /**
  * The sign-in provider `name` names in `auth.oauthProviders`, or `null` when
- * there is none, its `feature` is off for this request (#885), or its
- * `enabled` answers false for it (#1135).
+ * there is none, its `feature` is off for this request (#885), its
+ * `enabled` answers false for it (#1135), or the provider itself is not
+ * offered on it (its `resolve` answers `null`, #1140).
  *
  * An `enabled` function is asked with `req`, else the ambient request. With
  * no request at all it answers off, as a feature read outside one does.
@@ -33,7 +34,11 @@ export async function enabledOAuthProvider(
     if (typeof entry.enabled === "function" && !req) return null;
     if (!(await authSwitchOn(entry.enabled, req as HttpRequest<any, any>))) return null;
   }
-  return entry.provider;
+  const provider = entry.provider;
+  if (typeof provider.isAvailable === "function" && !(await provider.isAvailable(req))) {
+    return null;
+  }
+  return provider;
 }
 
 /** The names of the providers that are on for this request, in declaration order. */

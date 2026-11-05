@@ -7,14 +7,16 @@ import {
   type OAuthProfile,
 } from "./OAuthProvider";
 import { configuredAppOrigin } from "../../utils/appOrigin";
+import { type OAuthClientResolver, type ResolvedOAuthClient, resolveOAuthClient } from "./client";
 
 type Config = {
   clientId: string;
   scope: string;
   clientSecret: string;
   /**
-   * The callback path, on `HOST_NAME`. Used for the `redirect_uri` of both the
-   * authorization URL and the token exchange, which Google requires to match.
+   * The callback path, on `HOST_NAME` (or the origin `resolve` answers). Used
+   * for the `redirect_uri` of both the authorization URL and the token
+   * exchange, which Google requires to match.
    */
   redirectPath: string;
   /**
@@ -23,6 +25,15 @@ type Config = {
    * replace `state`, the PKCE challenge, `redirect_uri` or `client_id`.
    */
   authorizationParams: Record<string, string>;
+  /**
+   * The client and callback origin per request (#1140), for an app that
+   * serves several hosts with a Google client each:
+   * `({ req, origin }) => ({ clientId, clientSecret, origin })`. What it
+   * leaves out comes from the options above; `null` turns the provider off
+   * for the request. Without it, every request uses the static client and
+   * `HOST_NAME`.
+   */
+  resolve?: OAuthClientResolver;
 };
 
 const defaultConfig: Config = {
@@ -51,15 +62,46 @@ export class GoogleOAuthProvider extends OAuthProvider {
     return `${configuredAppOrigin() ?? ""}${this.config.redirectPath}`;
   }
 
-  getRedirectUrl(_req?: HttpRequest, ctx?: OAuthAuthorizationContext) {
+  protected override clientFor(req: HttpRequest<any, any> | null) {
+    return resolveOAuthClient(this, req, {
+      name: "GoogleOAuthProvider",
+      resolve: this.config.resolve,
+      clientId: this.config.clientId,
+      clientSecret: this.config.clientSecret,
+      redirectPath: this.config.redirectPath,
+      staticRedirectUri: () => this.redirectUri(),
+      staticOrigin: () => configuredAppOrigin() ?? "",
+    });
+  }
+
+  /** Synchronous without `resolve`, as it has always been. */
+  getRedirectUrl(req?: HttpRequest, ctx?: OAuthAuthorizationContext): string | Promise<string> {
+    if (!this.config.resolve) {
+      return this.authorizationUrl(this.staticClient(), ctx);
+    }
+    return this.clientFor(req ?? null).then((client) => {
+      if (!client) throw new Error("GoogleOAuthProvider is not offered on this request.");
+      return this.authorizationUrl(client, ctx);
+    });
+  }
+
+  private staticClient(): ResolvedOAuthClient {
+    return {
+      clientId: this.config.clientId,
+      clientSecret: this.config.clientSecret,
+      redirectUri: this.redirectUri(),
+    };
+  }
+
+  private authorizationUrl(client: ResolvedOAuthClient, ctx?: OAuthAuthorizationContext) {
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     const params: Record<string, string> = {
       include_granted_scopes: "true",
       ...this.config.authorizationParams,
       scope: this.config.scope,
       response_type: "code",
-      redirect_uri: this.redirectUri(),
-      client_id: this.config.clientId,
+      redirect_uri: client.redirectUri,
+      client_id: client.clientId,
     };
     if (ctx) {
       params.state = ctx.state;
@@ -77,15 +119,17 @@ export class GoogleOAuthProvider extends OAuthProvider {
   async onCallback(req: HttpRequest, ctx?: OAuthCallbackContext): Promise<OAuthProfile> {
     const code = req.search.get("code");
     if (!code) throw new OAuthCallbackError("missing_code");
+    const client = this.config.resolve ? await this.clientFor(req) : this.staticClient();
+    if (!client) throw new OAuthCallbackError("unknown_provider");
 
     // In the body, not the query string: a URL carrying the client secret ends
     // up in proxy and server logs.
     const body = new URLSearchParams({
       code,
-      client_id: this.config.clientId,
-      client_secret: this.config.clientSecret,
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
       grant_type: "authorization_code",
-      redirect_uri: this.redirectUri(),
+      redirect_uri: client.redirectUri,
     });
     if (ctx?.codeVerifier) body.set("code_verifier", ctx.codeVerifier);
 

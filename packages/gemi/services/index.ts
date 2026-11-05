@@ -392,6 +392,12 @@ export type {
   OAuthCallbackContext,
   OAuthProfile,
 } from "../auth/oauth/OAuthProvider";
+export type {
+  OAuthClient,
+  OAuthClientContext,
+  OAuthClientResolver,
+  ResolvedOAuthClient,
+} from "../auth/oauth/client";
 // OAuth connections (#845): calling a provider's API on a user's behalf.
 export { OAuthConnectionProvider } from "../auth/connections/OAuthConnectionProvider";
 export { InstagramConnectionProvider } from "../auth/connections/InstagramConnectionProvider";

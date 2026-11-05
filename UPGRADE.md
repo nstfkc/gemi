@@ -1,3 +1,15 @@
+# Unreleased
+
+## auth: OAuth providers resolve their client and callback origin per request (#1140)
+
+**New API (minor). No default behaviour change.** See [Authentication → One provider, many hosts](docs/authentication.md#one-provider-many-hosts).
+
+- `GoogleOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider` take `resolve: ({ req, origin }) => ({ clientId?, clientSecret?, origin? }) | null`, asked once per request. The `redirect_uri` becomes the resolved `origin` + `redirectPath` for both the authorization URL and the token exchange; `origin` in the context is the request's public origin (`route.domains`' host, trusted proxy included, with `X-Forwarded-Proto`'s scheme). Fields left out fall back to the static options and `HOST_NAME`. `null` turns the provider off for the request (404 on its routes, left out of `Auth.oauthProviders()`), as `enabled` does; outside a request such a provider is off.
+- The round trip's signed state cookie now also records the `redirect_uri` the authorization URL carried. A callback for which the provider answers a different one is refused with the new failure code `redirect_mismatch`, before the code is exchanged. A cookie minted before the upgrade has none and is not checked.
+- `OAuthProvider` gains `protected clientFor(req)` (default: no per-request client), `isAvailable(req)` and `redirectUriFor(req)`. A custom provider needs no change; one that defines its own methods with these names should rename them.
+- Type-level: the built-in providers' `getRedirectUrl` is typed `string | Promise<string>` (it was `string`). It is still synchronous without `resolve`; code calling it directly can `await` it.
+- New type exports from `gemi/services`: `OAuthClient`, `OAuthClientContext`, `OAuthClientResolver`, `ResolvedOAuthClient`.
+
 # Upgrading from 0.183.0 to 0.183.1
 
 ## client: `useRoute()` is the route template and `useLocation()` the URL, on every render (#1134) — behaviour change (fix)

@@ -1063,6 +1063,58 @@ A plain provider entry is never gated. An entry that is neither a provider nor
 (the tenant the host names, say), give it `enabled` instead; see
 [Per-request switches](#per-request-switches).
 
+### One provider, many hosts
+
+An app that serves several hosts (tenant subdomains, custom domains), each with an OAuth app of
+its own, gives a built-in provider a `resolve` function. It is asked once per request with the
+request and the origin its client addressed, and answers the client to use there:
+
+```typescript
+export default defineAuthConfig({
+  oauthProviders: {
+    google: new GoogleOAuthProvider({
+      redirectPath: "/auth/oauth/google/callback",
+      resolve: async ({ req, origin }) => {
+        const tenant = await Tenant.forHost(new URL(origin).host);
+        if (!tenant?.googleClientId) return null; // not offered on this host
+        return {
+          clientId: tenant.googleClientId,
+          clientSecret: tenant.googleClientSecret,
+          origin, // the user comes back to the host they started on
+        };
+      },
+    }),
+  },
+});
+```
+
+- The `redirect_uri` is `origin` + `redirectPath`, for the authorization URL and the token
+  exchange alike, so register `https://<each host><redirectPath>` with that host's client.
+- `origin` is the request's public origin: the host `route.domains` routes by (a
+  [`trustProxy`](./domains.md) proxy's forwarded host included), with `X-Forwarded-Proto`'s
+  scheme. Pass it back as `origin`: the round trip's cookie is host-only, so the provider has to
+  send the browser back to the host that started the sign-in.
+- What `resolve` leaves out comes from the static options: `clientId` and `clientSecret` (or
+  the environment), and `HOST_NAME` for `origin`. `resolve: ({ origin }) => ({ origin })` keeps
+  one client and only moves the callback to each host.
+- `null` turns the provider off for the request, like an `enabled` that answers false: its
+  routes answer 404 and `Auth.oauthProviders()` leaves it out. Outside a request a provider
+  with `resolve` is off.
+- An `origin` that is not a bare http(s) origin (`https://example.com`, no path) fails the
+  request.
+- The `redirect_uri` the sign-in started with is kept in the round trip's signed cookie. A
+  callback for which `resolve` now answers another (the tenant's client changed mid sign-in,
+  say) is refused with `redirect_mismatch` before the code is exchanged.
+
+`GoogleOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider` take `resolve`. Without
+it they behave as before: the static client and `HOST_NAME` on every host, and
+`getRedirectUrl` answers synchronously. With it, `getRedirectUrl(req, ctx)` returns a promise.
+
+A custom provider can join in by overriding `protected clientFor(req)` to answer a
+`ResolvedOAuthClient` (`{ clientId, clientSecret, redirectUri }`) or `null`: gemi then asks it
+whether the provider is offered (`isAvailable(req)`) and binds the callback to its
+`redirectUri` (`redirectUriFor(req)`), as for the built-in providers.
+
 ### State and PKCE
 
 Every round trip is tied to the browser that started it. `/auth/oauth/:provider` mints a random
@@ -1183,6 +1235,7 @@ export default defineAuthConfig({
 | `account_conflict` | The email belongs to a user already linked to a different account at this provider. |
 | `account_exists` | The email belongs to an existing user, and the provider has `linkByEmail = false`. |
 | `signup_disabled` | The identity is not linked to a user, and the provider has `createUsers = false`. |
+| `redirect_mismatch` | The provider's `redirect_uri` for the callback is not the one the sign-in started with (see [One provider, many hosts](#one-provider-many-hosts)). |
 | `unknown_provider` | No provider is registered under this name. |
 
 The `intended_url` cookie is cleared whether the callback succeeds or fails.
