@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.185.0 to 0.186.0
 
 ## ai: `useChat` keeps the HTTP status of a refused request (#1151)
 
