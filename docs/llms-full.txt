@@ -8705,6 +8705,44 @@ A loop is logged once, when it ends without a passing answer, not once per attem
 
 `attempts` alone retries what gemi can judge by itself: a schema mismatch, a cut-off answer, an attempt timeout and a retryable provider error. Without `validate` or `attempts`, `generate` makes exactly one call, as it always has.
 
+## Streaming the answer
+
+`generate` resolves once the whole answer is in. To show a large answer (a UI tree, a long list) while the model is still writing it, pass `onPartial`. It is called with the JSON so far, already parsed:
+
+```ts
+const result = await ctx.generate({
+  provider, instructions, prompt, output,
+  validate, attempts: 3,
+  onPartial: (partial, info) => {
+    if (info.attempt !== shownAttempt) {
+      // A retry started over: what the previous attempt showed is not the answer.
+      shownAttempt = info.attempt;
+      clear();
+    }
+    render(partial);
+    for (const path of info.closed) finished(path);
+  },
+});
+```
+
+- **`partial`** is the answer so far, typed as a deep partial of the schema's output. Open strings, objects and arrays are closed. A key whose value has not started, a number with nothing after it yet (`12` may become `125`) and a half-written `true`/`false`/`null` are left out. It is not checked against the schema: fields are missing until they arrive, and a string can still grow.
+- **`info.attempt`** is the attempt the answer belongs to, 1 for the first. When it goes up, the model started over and the next `partial` is a new document.
+- **`info.closed`** lists the JSON paths of the arrays and objects this piece of the answer finished, outermost last: `$` is the whole answer, then `.key`, `["odd key"]` and `[index]`, as in `$.items[3]`. Use it to handle each finished subtree once, without diffing.
+
+It is called after a piece of output only when the parsed value changed, or when a container was closed. It changes nothing about the call: the result, retries, usage and logging are the same with or without it. It is not awaited, and if it throws, the error is logged with `Log.warning` and the stream carries on. Closed subtrees are shared between calls, so don't mutate them.
+
+The same parser is exported as `parsePartialJson(text)`, for other streams such as tool-call arguments:
+
+```ts
+import { parsePartialJson } from "gemi/ai";
+
+parsePartialJson('{"title": "Hel');     // { title: "Hel" }
+parsePartialJson('{"items": [1, 2, 3'); // { items: [1, 2] }
+parsePartialJson('{"done": tr');        // {}
+```
+
+It returns `undefined` when nothing usable has arrived, and the value read so far when the text stops being valid JSON. It never throws.
+
 ---
 
 ## AI Context Window
