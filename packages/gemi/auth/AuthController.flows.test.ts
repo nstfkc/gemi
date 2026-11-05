@@ -126,3 +126,17 @@ test("a non-boolean switch in app config fails the boot", async () => {
 
   await expect(app.waitForBoot()).rejects.toThrow("auth.password must be true, false or a function of the request");
 });
+
+describe("auth.passwordLimits (#1136)", () => {
+  const app = appWith({ passwordLimits: { reset: { perIp: [1, 900] } } });
+
+  test("a refused attempt answers the middleware's 429", async () => {
+    const body = { password: "Str0ng-password!", token: "" };
+    const first = await post(app, "/reset-password", body);
+    expect(first.status).toBe(400);
+
+    const second = await post(app, "/reset-password", body);
+    expect(second.status).toBe(429);
+    expect((await second.json()).error.kind).toBe("rate_limit");
+  });
+});

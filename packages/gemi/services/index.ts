@@ -628,9 +628,14 @@ export {
   type EmailCodeSendArgs,
   type LegacySessionMigrator,
   type OAuthProviderEntry,
+  type PasswordRateLimits,
   type UserCreatedContext,
 } from "../auth/config";
-export type { AuthRateLimitKey, AuthRateLimitKeyArgs } from "../auth/oneTimeCode";
+export type {
+  AuthRateLimitKey,
+  AuthRateLimitKeyArgs,
+  AuthRateLimitScope,
+} from "../auth/oneTimeCode";
 export {
   defineTranslationConfig,
   translationConfigDefaults,

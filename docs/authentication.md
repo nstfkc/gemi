@@ -79,6 +79,7 @@ a binding into the container, and a facade resolves it.**
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
 | `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
 | `password` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. A function decides per request. See [Switching flows off](#switching-flows-off). |
+| `passwordLimits` | `{ signIn?, signUp?, forgot?, reset? }` | see [Password rate limits](#password-rate-limits) | Rate limits on the password routes, per address and per IP. |
 | `magicLink` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. A function decides per request. See [Switching flows off](#switching-flows-off). |
 | `verifyEmail` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | When on, password sign-in, forgot/reset and change password only find users whose `emailVerifiedAt` is set; when off, sign-up stores no verification token. A function decides per request ([Per-request switches](#per-request-switches)). |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
@@ -786,7 +787,8 @@ In an app where one address can be a separate account in several tenants, give e
 its own budget with `rateLimitKey`. It is asked, per request and per counter, for a partition
 of the key: answer the tenant the request is for and that counter is kept per tenant; answer
 nothing to keep the shared one. `limit` is `"perEmail"` or `"perIp"`, and `scope` is
-`"request"`, `"verify"` or `"link"`. Unset, every key is unchanged.
+`"request"`, `"verify"` or `"link"`, or for the [password limits](#password-rate-limits)
+`"sign-in"`, `"sign-up"`, `"forgot"` or `"reset"`. Unset, every key is unchanged.
 
 ```ts
 export default defineAuthConfig({
@@ -801,6 +803,41 @@ issued for one address never matches another's row, and rotating `SECRET` invali
 ones outstanding. In tests, turn the limits off with `requestLimit: { perEmail: false,
 perIp: false }` (and the same for `verifyLimit`), and give fixed test accounts a known code
 with `generateCode` rather than writing `MagicLinkToken` yourself.
+
+## Password rate limits
+
+The email + password routes are limited through the same limiter and keys as the email codes,
+so a password cannot be guessed online and sign-up cannot be scripted from one address.
+`passwordLimits` sets them; each limit is `[count, windowSeconds]`, or `false` to turn it off:
+
+| `passwordLimits` field | Routes | Default |
+| --- | --- | --- |
+| `signIn` | `/auth/sign-in`, `/auth/sign-in-v2`, and `/auth/change-password` (per signed-in address) | `{ perEmail: [10, 900], perIp: [50, 900] }` |
+| `signUp` | `/auth/sign-up` | `{ perEmail: false, perIp: [10, 3600] }` |
+| `forgot` | `/auth/forgot-password` | `{ perEmail: [5, 900], perIp: [20, 900] }` |
+| `reset` | `/auth/reset-password` (per IP; a reset token names no address) | `{ perEmail: false, perIp: [20, 900] }` |
+
+```ts
+export default defineAuthConfig({
+  passwordLimits: {
+    signIn: { perEmail: [5, 900] }, // the per-IP limit keeps its default
+    signUp: { perIp: [3, 3600] },
+  },
+});
+```
+
+A refused attempt answers the middleware's `429` with `{ error: { kind: "rate_limit" } }`
+and a `Retry-After`, before the password is checked: the right password is refused too until
+the window has room. The per-IP limit is spent first, and an IP over it does not spend the
+address's budget. An address over its sign-in limit is still put through a hash check before
+the `429`, so the refusal takes as long as a wrong password and says nothing about whether
+the address has an account. The address is folded (trimmed, lowercased), so `Ada@Example.com`
+and `ada@example.com` share one budget.
+
+The counters are partitioned by [`rateLimitKey`](#email-codes-sign-up-or-sign-in) like the
+code limits, with the scopes `"sign-in"`, `"sign-up"`, `"forgot"` and `"reset"`. In tests that
+sign in many times, turn the limits off (`passwordLimits: { signIn: { perEmail: false,
+perIp: false } }`).
 
 ## Switching flows off
 
