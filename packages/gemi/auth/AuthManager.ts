@@ -13,6 +13,7 @@ import {
   authConfigDefaults,
   checkOAuthProviders,
   emailCodeDefaults,
+  passwordLimitDefaults,
   type AuthConfig,
   type LegacySessionMigrator,
 } from "./config";
@@ -88,6 +89,7 @@ export class AuthManager {
       // Nested, so the shallow merge above would drop the defaults of every
       // key the app's `emailCode` leaves out.
       emailCode: emailCodeDefaults(config.emailCode),
+      passwordLimits: passwordLimitDefaults(config.passwordLimits),
     };
     this.provider = provider;
   }

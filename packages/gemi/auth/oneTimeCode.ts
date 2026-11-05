@@ -164,15 +164,32 @@ export function limiterKeyPart(value: string): string {
   return value.length <= 64 ? value : `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+/**
+ * Which of gemi's auth rate limits a counter belongs to. The first three are
+ * the email-code and magic-link limits (#1125); the rest are the password
+ * routes' (#1136).
+ */
+export type AuthRateLimitScope =
+  | "request"
+  | "verify"
+  | "link"
+  | "sign-in"
+  | "sign-up"
+  | "forgot"
+  | "reset";
+
 /** What `auth.rateLimitKey` is handed (#1125). */
 export interface AuthRateLimitKeyArgs {
   req: HttpRequest<any, any>;
   /**
    * Which counter: `"request"` (asking for a code or link: `/auth/email-code`,
    * `/auth/magic-link`), `"verify"` (guessing one: `/auth/email-code/verify`,
-   * `/auth/sign-in-with-pin(-v2)`) or `"link"` (`/auth/sign-in/magic-link`).
+   * `/auth/sign-in-with-pin(-v2)`), `"link"` (`/auth/sign-in/magic-link`), and
+   * since #1136 the password routes: `"sign-in"` (`/auth/sign-in(-v2)`,
+   * `/auth/change-password`), `"sign-up"`, `"forgot"` (`/auth/forgot-password`)
+   * and `"reset"` (`/auth/reset-password`).
    */
-  scope: "request" | "verify" | "link";
+  scope: AuthRateLimitScope;
   /** The per-address or the per-IP counter of that scope. */
   limit: "perEmail" | "perIp";
 }
@@ -186,10 +203,19 @@ export type AuthRateLimitKey = (
   args: AuthRateLimitKeyArgs,
 ) => string | null | undefined | Promise<string | null | undefined>;
 
+/** The limiter key prefix of a scope: the code scopes keep their pre-#1136 keys. */
+function scopeKeyPrefix(scope: AuthRateLimitScope): string {
+  return scope === "request" || scope === "verify" || scope === "link"
+    ? `auth:code-${scope}`
+    : `auth:${scope}`;
+}
+
 /**
  * Spends one hit of each configured limit for `scope`, per IP first and then
  * per email, and throws the middleware's 429 (`{ error: { kind: "rate_limit" } }`)
- * on the first one that is spent. An IP over its limit does not also spend the
+ * on the first one that is spent. `onRefused`, when given, runs before that
+ * throw with the counter that refused, so a caller can spend what an allowed
+ * attempt would have (the password sign-in's decoy hash). An IP over its limit does not also spend the
  * address's budget, so somebody hammering from one address cannot use up a
  * victim's.
  *
@@ -203,11 +229,12 @@ export type AuthRateLimitKey = (
  * on, and only for the per-address counter when there is an address.
  */
 export async function enforceCodeRateLimits(
-  scope: "request" | "verify" | "link",
+  scope: AuthRateLimitScope,
   email: string | null,
   req: HttpRequest<any, any>,
   limits: CodeRateLimits,
   partition?: AuthRateLimitKey,
+  onRefused?: (limit: "perEmail" | "perIp") => Promise<void> | void,
 ) {
   const limiter = codeLimiter();
   const checks: Array<["perIp" | "perEmail", string, CodeRateLimit | undefined]> = [
@@ -222,12 +249,14 @@ export async function enforceCodeRateLimits(
     // Without a partition the key is exactly what it was before #1125, so
     // turning the hook on (or upgrading) does not reset anybody's counters
     // beyond those of the tenants it names.
+    const prefix = scopeKeyPrefix(scope);
     const key = part
-      ? `auth:code-${scope}:p:${limiterKeyPart(String(part))}:${subject}`
-      : `auth:code-${scope}:${subject}`;
+      ? `${prefix}:p:${limiterKeyPart(String(part))}:${subject}`
+      : `${prefix}:${subject}`;
     const [count, window] = limit;
     const result = await limiter.consume(key, { limit: count, window });
     if (!result.allowed) {
+      await onRefused?.(limitName);
       throw new RateLimitExceededError(result);
     }
   }

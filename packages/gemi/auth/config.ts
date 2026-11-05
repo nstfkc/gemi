@@ -135,6 +135,57 @@ export interface EmailCodeConfig {
   send?: (args: EmailCodeSendArgs) => Promise<void> | void;
 }
 
+/**
+ * Rate limits on the email + password routes (#1136), through the same
+ * limiter and keys (`auth.rateLimitKey`) as the email-code limits. Each is
+ * `[count, windowSeconds]` per address and per IP, or `false` to turn one
+ * off. Over a limit: 429 `{ error: { kind: "rate_limit" } }`.
+ */
+export interface PasswordRateLimits {
+  /**
+   * Password guesses: `/auth/sign-in`, `/auth/sign-in-v2` and
+   * `/auth/change-password` (per signed-in address). Default
+   * `{ perEmail: [10, 900], perIp: [50, 900] }`.
+   */
+  signIn?: CodeRateLimits;
+  /** `/auth/sign-up`. Default `{ perEmail: false, perIp: [10, 3600] }`. */
+  signUp?: CodeRateLimits;
+  /**
+   * `/auth/forgot-password`, which mails a link. Default
+   * `{ perEmail: [5, 900], perIp: [20, 900] }`.
+   */
+  forgot?: CodeRateLimits;
+  /**
+   * `/auth/reset-password`, per IP (a reset token is 256 random bits and
+   * names no address). Default `{ perIp: [20, 900] }`.
+   */
+  reset?: CodeRateLimits;
+}
+
+/** `PasswordRateLimits` with every limit set, from the defaults where left out. */
+export function passwordLimitDefaults(
+  config: PasswordRateLimits = {},
+): Required<{ [K in keyof PasswordRateLimits]: Required<CodeRateLimits> }> {
+  return {
+    signIn: {
+      perEmail: config.signIn?.perEmail ?? [10, 900],
+      perIp: config.signIn?.perIp ?? [50, 900],
+    },
+    signUp: {
+      perEmail: config.signUp?.perEmail ?? false,
+      perIp: config.signUp?.perIp ?? [10, 3600],
+    },
+    forgot: {
+      perEmail: config.forgot?.perEmail ?? [5, 900],
+      perIp: config.forgot?.perIp ?? [20, 900],
+    },
+    reset: {
+      perEmail: config.reset?.perEmail ?? false,
+      perIp: config.reset?.perIp ?? [20, 900],
+    },
+  };
+}
+
 /** What `onConnected` is handed. */
 export interface ConnectedArgs {
   user: User;
@@ -231,6 +282,12 @@ export interface AuthConfig {
    * several hosts or tenants (#1135): off, the same 404.
    */
   password?: AuthSwitch;
+  /**
+   * Rate limits on the password routes (#1136): sign-in (and change
+   * password), sign-up, forgot and reset password. See `PasswordRateLimits`
+   * for the defaults; partitioned by `rateLimitKey` like the email-code limits.
+   */
+  passwordLimits?: PasswordRateLimits;
   /**
    * The magic-link + PIN pair. Default `true`. `false` answers 404 on
    * `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`
@@ -451,7 +508,8 @@ export interface AuthConfig {
   /**
    * Partitions the keys of gemi's auth rate limits (#1125): the email-code and
    * magic-link request, verify and link limits (`emailCode.requestLimit`,
-   * `emailCode.verifyLimit`), per address and per IP. Answer a string derived
+   * `emailCode.verifyLimit`) and the password limits (`passwordLimits`, #1136),
+   * per address and per IP. Answer a string derived
    * from the request, such as the tenant the host names, and that counter is
    * kept per partition, so the same address in two tenants does not share a
    * budget. `args.limit` says which counter is asked about, so an app can
@@ -692,6 +750,7 @@ export function authConfigDefaults(
     basePath: "/auth",
     verifyEmail: true,
     password: true,
+    passwordLimits: passwordLimitDefaults(config.passwordLimits),
     magicLink: true,
     redirectPath: "/dashboard",
     signInPath: "/auth/sign-in",

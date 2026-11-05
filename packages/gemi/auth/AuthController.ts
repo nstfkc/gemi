@@ -224,6 +224,47 @@ async function requireFlow(flow: "password" | "magicLink", req: HttpRequest<any,
   if (!(await authSwitchOn(app(AuthManager).config[flow], req))) notFound();
 }
 
+/**
+ * Spends a hit of `auth.passwordLimits[kind]` (#1136), per IP and, when there
+ * is an address, per address, partitioned by `auth.rateLimitKey` like the
+ * email-code limits. Over it: the middleware's 429.
+ */
+async function enforcePasswordLimit(
+  kind: "signIn" | "signUp" | "forgot" | "reset",
+  email: string | null,
+  req: HttpRequest<any, any>,
+  onRefused?: (limit: "perEmail" | "perIp") => Promise<void> | void,
+) {
+  const { config } = app(AuthManager);
+  const scope = ({ signIn: "sign-in", signUp: "sign-up", forgot: "forgot", reset: "reset" } as const)[kind];
+  await enforceCodeRateLimits(
+    scope,
+    email,
+    req,
+    config.passwordLimits?.[kind] ?? {},
+    config.rateLimitKey,
+    onRefused,
+  );
+}
+
+/**
+ * The sign-in limit, for `/auth/sign-in(-v2)`. An address over its limit
+ * still costs a hash check before the 429, so the refusal takes what a wrong
+ * password takes; an IP over its limit is refused at once.
+ */
+async function enforceSignInLimit(
+  rawEmail: unknown,
+  password: unknown,
+  req: HttpRequest<any, any>,
+) {
+  const { config } = app(AuthManager);
+  await enforcePasswordLimit("signIn", foldEmail(rawEmail), req, async (limit) => {
+    if (limit === "perEmail" && typeof password === "string") {
+      await passwordMatches(config, password, null);
+    }
+  });
+}
+
 /** `auth.verifyEmail` for this request (#1135). */
 async function verifyEmailOn(req: HttpRequest<any, any>) {
   return await authSwitchOn(app(AuthManager).config.verifyEmail, req);
@@ -404,6 +445,8 @@ export class AuthController extends Controller {
 
     const auth = app(AuthManager);
 
+    await enforceSignInLimit(_email, password, req);
+
     const user = await auth.userProvider.findUserByEmailAddress(
       email,
       await verifyEmailOn(req),
@@ -451,6 +494,8 @@ export class AuthController extends Controller {
     const email = _email.toLowerCase().trim();
 
     const auth = app(AuthManager);
+
+    await enforceSignInLimit(_email, password, req);
 
     const user = await auth.userProvider.findUserByEmailAddress(
       email,
@@ -514,6 +559,7 @@ export class AuthController extends Controller {
     // `signUpRequest` is the application's to replace, so the types the
     // queries below depend on are checked here as well as by its schema.
     const email = emailInput(_email);
+    await enforcePasswordLimit("signUp", email, req);
     if (!email) {
       throw new ValidationError({ email: ["Invalid email"] });
     }
@@ -663,6 +709,8 @@ export class AuthController extends Controller {
     const input = await req.input();
     const email = emailInput(input.get("email"));
 
+    await enforcePasswordLimit("forgot", email, req);
+
     if (!email) {
       return {};
     }
@@ -698,6 +746,8 @@ export class AuthController extends Controller {
     const input = await req.input();
     const { password, token: rawToken } = input.toJSON();
     const token = nonEmptyString(rawToken);
+
+    await enforcePasswordLimit("reset", null, req);
 
     const passwordResetToken = token
       ? await userProvider.findPasswordResetToken({ token })
@@ -756,6 +806,9 @@ export class AuthController extends Controller {
     const user = await Auth.user();
     const input = await req.input();
     const { oldPassword, newPassword } = input.toJSON();
+
+    // A guess at the signed-in user's password: the sign-in budget.
+    await enforcePasswordLimit("signIn", foldEmail(user?.email), req);
 
     if (typeof newPassword !== "string") {
       throw new ValidationError({

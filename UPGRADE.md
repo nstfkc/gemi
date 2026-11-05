@@ -1,5 +1,15 @@
 # Unreleased
 
+## auth: rate limits on the password routes (#1136) — behaviour change
+
+The email + password routes are now rate limited, through the limiter and keys the email-code routes use. See [Authentication → Password rate limits](docs/authentication.md#password-rate-limits).
+
+- Defaults (`[count, windowSeconds]`): sign-in (`/auth/sign-in`, `/auth/sign-in-v2`, and `/auth/change-password` per signed-in address) `{ perEmail: [10, 900], perIp: [50, 900] }`; sign-up `{ perIp: [10, 3600] }`; forgot password `{ perEmail: [5, 900], perIp: [20, 900] }`; reset password `{ perIp: [20, 900] }`. Over a limit: 429 `{ error: { kind: "rate_limit" } }`.
+- New config `auth.passwordLimits: { signIn?, signUp?, forgot?, reset? }`, each a `CodeRateLimits` (`false` turns one off).
+- `auth.rateLimitKey` is also asked with the scopes `"sign-in"`, `"sign-up"`, `"forgot"` and `"reset"`, so a partition per tenant covers these limits too. A `rateLimitKey` that switches on `scope` exhaustively needs the new cases (type-level: `AuthRateLimitKeyArgs["scope"]` is now `AuthRateLimitScope`).
+- **What to check:** end-to-end tests that sign in or sign up many times from one client now hit the limits; turn them off in the test config (`passwordLimits: { signIn: { perEmail: false, perIp: false }, signUp: { perIp: false } }`). An app that already limits these routes itself can turn gemi's off the same way.
+- New type exports from `gemi/services`: `PasswordRateLimits`, `AuthRateLimitScope`. `enforceCodeRateLimits` (internal) takes the new scopes and an optional `onRefused` callback.
+
 ## auth: per-request flow switches (#1135)
 
 **New API (minor). No default behaviour change for boolean switches.** See [Authentication → Per-request switches](docs/authentication.md#per-request-switches).
