@@ -61,6 +61,12 @@ export interface OAuthStatePayload {
   subject?: string;
   /** A same-origin path to return to after the callback. */
   returnTo?: string;
+  /**
+   * The `redirect_uri` the authorization URL carried, when the provider
+   * reports one (#1140). The callback is refused if the provider answers
+   * another for it.
+   */
+  redirectUri?: string;
 }
 
 function base64url(buffer: Buffer): string {
@@ -82,7 +88,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 export function createOAuthState(
   provider: string,
   now = Date.now(),
-  extra: Pick<OAuthStatePayload, "subject" | "returnTo"> = {},
+  extra: Pick<OAuthStatePayload, "subject" | "returnTo" | "redirectUri"> = {},
 ) {
   const state = base64url(randomBytes(32));
   // 32 random bytes → 43 base64url characters, inside RFC 7636's 43–128.
@@ -95,6 +101,7 @@ export function createOAuthState(
     expiresAt: now + OAUTH_STATE_TTL_SECONDS * 1000,
     ...(extra.subject !== undefined ? { subject: extra.subject } : {}),
     ...(extra.returnTo !== undefined ? { returnTo: extra.returnTo } : {}),
+    ...(extra.redirectUri !== undefined ? { redirectUri: extra.redirectUri } : {}),
   };
   return { state, codeVerifier, codeChallenge, cookieValue: sealOAuthState(payload) };
 }
@@ -128,7 +135,8 @@ export function openOAuthState(value: string | null | undefined): OAuthStatePayl
       typeof payload?.codeVerifier !== "string" ||
       typeof payload?.expiresAt !== "number" ||
       (payload.subject !== undefined && typeof payload.subject !== "string") ||
-      (payload.returnTo !== undefined && typeof payload.returnTo !== "string")
+      (payload.returnTo !== undefined && typeof payload.returnTo !== "string") ||
+      (payload.redirectUri !== undefined && typeof payload.redirectUri !== "string")
     ) {
       return null;
     }

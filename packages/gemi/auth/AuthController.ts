@@ -881,7 +881,17 @@ export class AuthController extends Controller {
 
     // The round trip's `state` and PKCE verifier, kept in this browser for
     // the callback to check (#822). See `oauth/oauthState.ts`.
-    const { state, codeChallenge, cookieValue } = createOAuthState(provider as string);
+    // With the `redirect_uri` the provider sends for this request (#1140), so
+    // the callback is finished by the same client and callback URL.
+    const redirectUri =
+      typeof oauthProvider.redirectUriFor === "function"
+        ? await oauthProvider.redirectUriFor(req)
+        : undefined;
+    const { state, codeChallenge, cookieValue } = createOAuthState(
+      provider as string,
+      Date.now(),
+      redirectUri !== undefined ? { redirectUri } : {},
+    );
     req.ctx().setCookie(oauthStateCookieName(secure), cookieValue, {
       httpOnly: true,
       sameSite: "Lax",
@@ -948,6 +958,17 @@ export class AuthController extends Controller {
     if ("reason" in check) {
       console.error(`Authentication error: OAuth callback refused (${check.reason})`);
       return this.oauthFailure(req, check.reason);
+    }
+
+    // The round trip started with one `redirect_uri` (the host's own, with
+    // `resolve`): a provider that now answers another for this request would
+    // exchange the code with a client or callback URL that did not ask for it.
+    if (check.payload.redirectUri !== undefined && typeof oauthProvider.redirectUriFor === "function") {
+      const redirectUri = await oauthProvider.redirectUriFor(req);
+      if (redirectUri !== undefined && redirectUri !== check.payload.redirectUri) {
+        console.error("Authentication error: OAuth callback refused (redirect_mismatch)");
+        return this.oauthFailure(req, "redirect_mismatch");
+      }
     }
 
     if (!req.search.get("code")) {

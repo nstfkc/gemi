@@ -15,6 +15,7 @@ import {
   type OAuthProfile,
 } from "./OAuthProvider";
 import { configuredAppOrigin } from "../../utils/appOrigin";
+import { type OAuthClientResolver, type ResolvedOAuthClient, resolveOAuthClient } from "./client";
 
 export interface InstagramOAuthProviderConfig extends InstagramEndpoints {
   /** The Instagram app id. Default `process.env.INSTAGRAM_CLIENT_ID`. */
@@ -30,6 +31,13 @@ export interface InstagramOAuthProviderConfig extends InstagramEndpoints {
   redirectPath: string;
   /** Extra authorization URL parameters, e.g. `{ enable_fb_login: "false" }` or `{ force_reauth: "true" }`. */
   authorizationParams: Record<string, string>;
+  /**
+   * The app and callback origin per request (#1140):
+   * `({ req, origin }) => ({ clientId, clientSecret, origin })`. What it
+   * leaves out comes from the options above; `null` turns the provider off
+   * for the request.
+   */
+  resolve?: OAuthClientResolver;
 }
 
 /**
@@ -73,12 +81,40 @@ export class InstagramOAuthProvider extends OAuthProvider {
     return `${configuredAppOrigin() ?? ""}${this.config.redirectPath}`;
   }
 
-  getRedirectUrl(_req?: HttpRequest, ctx?: OAuthAuthorizationContext) {
+  protected override clientFor(req: HttpRequest<any, any> | null) {
+    return resolveOAuthClient(this, req, {
+      name: "InstagramOAuthProvider",
+      resolve: this.config.resolve,
+      clientId: this.config.clientId,
+      clientSecret: this.config.clientSecret,
+      redirectPath: this.config.redirectPath,
+      staticRedirectUri: () => this.redirectUri(),
+      staticOrigin: () => configuredAppOrigin() ?? "",
+    });
+  }
+
+  private staticClient(): ResolvedOAuthClient {
+    return {
+      clientId: this.config.clientId,
+      clientSecret: this.config.clientSecret,
+      redirectUri: this.redirectUri(),
+    };
+  }
+
+  getRedirectUrl(req?: HttpRequest, ctx?: OAuthAuthorizationContext): string | Promise<string> {
+    if (!this.config.resolve) return this.authorizationUrl(this.staticClient(), ctx);
+    return this.clientFor(req ?? null).then((client) => {
+      if (!client) throw new Error("InstagramOAuthProvider is not offered on this request.");
+      return this.authorizationUrl(client, ctx);
+    });
+  }
+
+  private authorizationUrl(client: ResolvedOAuthClient, ctx?: OAuthAuthorizationContext) {
     const url = new URL(this.config.authorizeUrl ?? INSTAGRAM_ENDPOINTS.authorizeUrl);
     const params: Record<string, string> = {
       ...this.config.authorizationParams,
-      client_id: this.config.clientId,
-      redirect_uri: this.redirectUri(),
+      client_id: client.clientId,
+      redirect_uri: client.redirectUri,
       response_type: "code",
       scope: this.config.scopes.join(","),
     };
@@ -92,15 +128,17 @@ export class InstagramOAuthProvider extends OAuthProvider {
   async onCallback(req: HttpRequest): Promise<OAuthProfile> {
     const code = req.search.get("code");
     if (!code) throw new OAuthCallbackError("missing_code");
+    const client = this.config.resolve ? await this.clientFor(req) : this.staticClient();
+    if (!client) throw new OAuthCallbackError("unknown_provider");
 
     let profile: InstagramProfile;
     try {
       // The short-lived token is enough for `/me`; sign-in keeps no token.
       const token = await exchangeInstagramCode({
         code,
-        clientId: this.config.clientId,
-        clientSecret: this.config.clientSecret,
-        redirectUri: this.redirectUri(),
+        clientId: client.clientId,
+        clientSecret: client.clientSecret,
+        redirectUri: client.redirectUri,
         tokenUrl: this.config.tokenUrl,
       });
       profile = await fetchInstagramProfile({

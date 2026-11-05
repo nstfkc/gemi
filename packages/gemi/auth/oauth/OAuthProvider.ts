@@ -1,4 +1,5 @@
 import { HttpRequest } from "../../http/HttpRequest";
+import type { ResolvedOAuthClient } from "./client";
 
 /**
  * What `oauthRedirect` hands `getRedirectUrl`: the round trip's `state` and
@@ -94,6 +95,39 @@ export abstract class OAuthProvider {
    * email. `createUsers = false` still refuses them with `signup_disabled`.
    */
   createUsersWithoutEmail?: boolean = false;
+
+  /**
+   * The client this provider uses for `req`, for a provider whose client or
+   * callback origin depends on the request (#1140). The built-in providers
+   * answer from their `resolve` option, else their static config. `null`:
+   * the provider is not offered on this request, so its routes answer 404 and
+   * `Auth.oauthProviders()` leaves it out. `undefined` (the default): the
+   * provider has no per-request client, and is always offered.
+   *
+   * `req` is `null` outside a request, where a per-request client cannot be
+   * resolved.
+   */
+  protected clientFor(
+    _req: HttpRequest<any, any> | null,
+  ): Promise<ResolvedOAuthClient | null | undefined> {
+    return Promise.resolve(undefined);
+  }
+
+  /** Whether this provider is offered on `req`: `clientFor` does not answer `null`. */
+  async isAvailable(req: HttpRequest<any, any> | null): Promise<boolean> {
+    return (await this.clientFor(req)) !== null;
+  }
+
+  /**
+   * The `redirect_uri` this provider sends for `req`, when it has one to
+   * report. `oauthRedirect` keeps it with the round trip's state, and
+   * `oauthCallback` refuses a callback for which it answers otherwise
+   * (`redirect_mismatch`): the code is then exchanged by the client, and with
+   * the `redirect_uri`, that asked for it.
+   */
+  async redirectUriFor(req: HttpRequest<any, any>): Promise<string | undefined> {
+    return (await this.clientFor(req))?.redirectUri;
+  }
 
   /**
    * The provider's authorization URL. Put `ctx.state` on it unchanged — a
