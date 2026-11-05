@@ -1,3 +1,12 @@
+# Unreleased
+
+## ai: `generate({ onPartial })` and `parsePartialJson` (#1149)
+
+**New API (minor). Nothing to change in apps.** See [AI Generate → Streaming the answer](docs/ai-generate.md#streaming-the-answer).
+
+- `GenerateParams.onPartial(partial, info)`, on `generate` and `ctx.generate` (and `job.generate`): called while the answer streams, with the JSON so far parsed leniently (open strings, objects and arrays closed; a key with no value yet, an unfinished number and a half-written literal left out), only when the parsed value changed or a container closed. `info.attempt` goes up when a retry starts over; `info.closed` lists the JSON paths (`$`, `$.items[0]`, `$["a key"]`) of the arrays and objects the piece closed. It does not change the result, retries, usage or logging; a throw is logged with `Log.warning` and ignored.
+- `parsePartialJson(text)` exported from `gemi/ai`, with the types `DeepPartial` and `GeneratePartialInfo`.
+
 # Upgrading from 0.183.1 to 0.184.0
 
 ## auth: `GitHubOAuthProvider` (#1141)

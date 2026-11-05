@@ -16,6 +16,7 @@ import { OpenAIProvider } from "./AgentProvider";
 import {
   generate,
   type GenerateAttempt,
+  type GeneratePartialInfo,
   type GenerateRejection,
   type GenerateResult,
   type GenerateSuccess,
@@ -34,6 +35,20 @@ describe("generate", () => {
   test("the output is typed by the schema", async () => {
     const result = await generate({ provider, prompt: "go", output });
     expectTypeOf(result).toEqualTypeOf<GenerateResult<Copies>>();
+  });
+
+  test("onPartial hears a deep partial of the output", async () => {
+    await generate({
+      provider,
+      prompt: "go",
+      output,
+      onPartial: (partial, info) => {
+        expectTypeOf(partial).toEqualTypeOf<{
+          copies?: { headline?: string; cta?: string }[];
+        }>();
+        expectTypeOf(info).toEqualTypeOf<GeneratePartialInfo>();
+      },
+    });
   });
 
   test("messages, usage and finishReason are on both arms", async () => {

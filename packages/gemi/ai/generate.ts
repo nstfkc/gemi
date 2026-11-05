@@ -1,6 +1,7 @@
 import { Log } from "../facades/Log";
 import { AgentRunError, type AgentRunFailure, type ReasoningEffort } from "./Agent";
 import type { AgentProvider } from "./AgentProvider";
+import { type DeepPartial, PartialJsonParser } from "./partialJson";
 import { httpErrorDetail } from "./providers/errors";
 import {
   addUsage,
@@ -247,12 +248,15 @@ async function repairLoop(
       );
     let result: Called<unknown>;
     try {
-      result = await callModel({
-        ...params,
-        messages: base,
-        prompt: note ? [request, note].filter(Boolean).join("\n\n") : request,
-        signal: anySignal(outer, timer?.signal),
-      });
+      result = await callModel(
+        {
+          ...params,
+          messages: base,
+          prompt: note ? [request, note].filter(Boolean).join("\n\n") : request,
+          signal: anySignal(outer, timer?.signal),
+        },
+        attempt,
+      );
     } finally {
       clearTimeout(handle);
     }
@@ -451,6 +455,7 @@ type Called<O> =
 
 async function callModel<O extends Schema<any>>(
   params: GenerateParams<O>,
+  attempt: number,
 ): Promise<Called<Infer<O>>> {
   const prior = params.messages ?? [];
   if (prior.length === 0 && !params.prompt) {
@@ -485,6 +490,8 @@ async function callModel<O extends Schema<any>>(
   // run records them on `result().error` (#656). Server-side only.
   let detail: { status?: number; requestId?: string } = {};
   let outputText = "";
+  // Only with `onPartial`: a call without it parses nothing until the end.
+  const partial = params.onPartial ? new PartialJsonParser() : undefined;
 
   try {
     const stream = params.provider.stream({
@@ -509,6 +516,12 @@ async function callModel<O extends Schema<any>>(
         switch (event.type) {
           case "output-delta":
             outputText += event.delta;
+            if (partial) {
+              const closed = partial.push(event.delta);
+              if (partial.changed || closed.length > 0) {
+                notifyPartial(params.onPartial!, partial.snapshot(), { attempt, closed });
+              }
+            }
             break;
           // Kept on the reply for what they are worth to a retry: reasoning
           // carries its item id so a continuation echoes it back and keeps the
@@ -615,6 +628,34 @@ async function callModel<O extends Schema<any>>(
     return { ok: true, output: output as Infer<O>, messages, usage, finishReason: reason };
   }
   return { ok: false, error: { ...error!, ...detail }, messages, usage, finishReason: reason };
+}
+
+/**
+ * `onPartial`, kept from touching the call: a throw (or a rejected promise) is
+ * reported and the stream goes on, so a bug in a progress display can never
+ * turn into a failed answer, a retry or a different result. Not awaited: the
+ * stream does not wait for the listener.
+ */
+function notifyPartial(
+  listener: NonNullable<GenerateParams["onPartial"]>,
+  value: unknown,
+  info: GeneratePartialInfo,
+): void {
+  const report = (thrown: unknown) => {
+    const message = `[gemi/ai] generate() onPartial threw: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+    try {
+      Log.warning(message, { error: thrown });
+    } catch {
+      // No application to resolve a logger from.
+      console.error(message, thrown);
+    }
+  };
+  try {
+    const returned = listener(value, info) as unknown;
+    if (returned instanceof Promise) returned.catch(report);
+  } catch (thrown) {
+    report(thrown);
+  }
 }
 
 function abortError(signal: AbortSignal): AgentError {
@@ -758,6 +799,38 @@ export interface GenerateParams<O extends Schema<any> = Schema<any>, R = Infer<O
    * `result.attemptLog`.
    */
   onAttempt?: (attempt: GenerateAttempt) => void;
+
+  // --- streaming ------------------------------------------------------------
+
+  /**
+   * Hears the answer while the model writes it (#1149): after each piece of
+   * output that changed the parsed value, the JSON so far, parsed leniently —
+   * open strings, objects and arrays closed; a key with no value yet, a number
+   * with nothing after it and a half-written literal left out. Not validated
+   * against the schema: a field can be missing or still growing.
+   *
+   * `info.attempt` is the attempt the piece belongs to. When it goes up, the
+   * model started over and what the previous attempt showed is not the answer
+   * (the next partial is a fresh document). `info.closed` lists the JSON paths
+   * (`$`, `$.items[3]`, `$["a key"]`) of the arrays and objects this piece
+   * finished, outermost last, so a finished subtree can be used exactly once
+   * without diffing. A call is also made when only `closed` is new.
+   *
+   * It changes nothing about the call: the result, retries, usage and logging
+   * are the same with or without it. It is not awaited, and a throw is logged
+   * (`Log.warning`) and ignored. The value's closed subtrees are shared
+   * between calls: read them, do not mutate them. See `parsePartialJson`.
+   */
+  onPartial?: (partial: DeepPartial<Infer<O>>, info: GeneratePartialInfo) => void;
+}
+
+/** The second argument of `onPartial`. */
+export interface GeneratePartialInfo {
+  /** 1 for the first answer; higher after a retry started over. */
+  attempt: number;
+  /** The JSON paths of the arrays and objects this piece closed, outermost
+   *  last: `$` is the whole answer, then `.key`, `["odd key"]` and `[index]`. */
+  closed: string[];
 }
 
 type MaybePromise<T> = T | Promise<T>;
