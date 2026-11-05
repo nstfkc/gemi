@@ -1,7 +1,7 @@
 import { ApiRouter } from "../http/ApiRouter";
 import { SameSiteBounceMiddleware } from "../http/SameSiteBounceMiddleware";
 import { ViewRouter, type ViewRoutes } from "../http/ViewRouter";
-import type { AuthConfig } from "./config";
+import { authSwitchMayBeOn, type AuthConfig } from "./config";
 import { AuthController } from "./AuthController";
 import { ConnectionsController } from "./connections/ConnectionsController";
 
@@ -19,10 +19,12 @@ export interface AuthViewRequirement {
 
 /**
  * The magic-link page takes the links `POST /auth/magic-link` mails and the
- * ones `emailCode.send` is handed, so it is on while either is.
+ * ones `emailCode.send` is handed, so it is on while either is. A per-request
+ * switch (#1135) may be on, so it mounts the page; the controller answers 404
+ * on a request where both are off.
  */
 function magicLinkPageEnabled(config: AuthConfig) {
-  return config.magicLink !== false || config.emailCode?.enabled === true;
+  return config.magicLink !== false || authSwitchMayBeOn(config.emailCode?.enabled);
 }
 
 function oauthEnabled(config: AuthConfig) {
@@ -36,7 +38,7 @@ export function authViewRequirements(config: AuthConfig = {}): AuthViewRequireme
     views.push({
       view: "auth/MagicLinkSignIn",
       requiredBy:
-        config.emailCode?.enabled === true && config.magicLink === false
+        authSwitchMayBeOn(config.emailCode?.enabled) && config.magicLink === false
           ? "auth.emailCode.enabled"
           : `auth.magicLink${config.magicLink === undefined ? " (on by default; set `magicLink: false` to turn it off)" : ""}`,
     });

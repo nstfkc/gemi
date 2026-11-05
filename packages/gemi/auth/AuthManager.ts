@@ -94,7 +94,8 @@ export class AuthManager {
 
   /**
    * The OAuth sign-in provider `name` names, or `null` when there is none or
-   * its `feature` is off for this request (#885) — the two answer alike.
+   * its `feature` (#885) or `enabled` (#1135) is off for this request — they
+   * answer alike.
    */
   async oauthProvider(name: string): Promise<OAuthProvider | null> {
     return await enabledOAuthProvider(this.config.oauthProviders, name);

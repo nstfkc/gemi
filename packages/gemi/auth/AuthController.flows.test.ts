@@ -116,7 +116,7 @@ describe("a switch that is not a boolean", () => {
     ["password", null],
   ] as const)("auth.%s = %j fails at boot", (name, value) => {
     expect(() => authConfigDefaults({ [name]: value } as AuthConfig)).toThrow(
-      `auth.${name} must be true or false`,
+      `auth.${name} must be true, false or a function of the request`,
     );
   });
 });
@@ -124,5 +124,5 @@ describe("a switch that is not a boolean", () => {
 test("a non-boolean switch in app config fails the boot", async () => {
   const app = appWith({ password: "false" } as unknown as AuthConfig);
 
-  await expect(app.waitForBoot()).rejects.toThrow("auth.password must be true or false");
+  await expect(app.waitForBoot()).rejects.toThrow("auth.password must be true, false or a function of the request");
 });
