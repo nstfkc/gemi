@@ -268,11 +268,14 @@ export type { ErrorRedactionInfo, ErrorRedactor } from "./redact";
 // A typed answer with no tool loop. Inside a tool, `ctx.generate` is the same
 // function bound to the turn — see `ToolContext.generate`.
 export { generate } from "./generate";
+export { parsePartialJson } from "./partialJson";
+export type { DeepPartial } from "./partialJson";
 export type {
   GenerateAttempt,
   GenerateFeedbackCause,
   GenerateFeedbackInfo,
   GenerateParams,
+  GeneratePartialInfo,
   GenerateProblem,
   GenerateRejection,
   GenerateResult,
