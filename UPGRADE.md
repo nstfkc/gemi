@@ -1,5 +1,14 @@
 # Unreleased
 
+## auth: `GitHubOAuthProvider` (#1141)
+
+**New API (minor). Nothing to change in apps.** See [Authentication → OAuth](docs/authentication.md#oauth).
+
+- `new GitHubOAuthProvider({ clientId?, clientSecret?, redirectPath?, scope?, authorizationParams?, resolve? })`, exported from `gemi/services` (with the type `GitHubOAuthProviderConfig`). Defaults: `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, `/auth/oauth/github/callback`, scope `read:user user:email`.
+- State and PKCE (S256) on the authorization URL; the exchange posts the secret in the body with `Accept: application/json`.
+- `providerId` is the numeric GitHub user id as a string. The email is the primary verified address from `GET /user/emails` (`emailVerified: true`); otherwise the public profile email, unverified.
+- Takes the per-request `resolve` of #1140.
+
 ## auth: OAuth providers resolve their client and callback origin per request (#1140)
 
 **New API (minor). No default behaviour change.** See [Authentication → One provider, many hosts](docs/authentication.md#one-provider-many-hosts).

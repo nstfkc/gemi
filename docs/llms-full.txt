@@ -15535,8 +15535,8 @@ The starter templates ship all three.
 ## OAuth
 
 Register providers under `oauthProviders`, keyed by the name that appears in the callback
-URL. `GoogleOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider` (see
-[Instagram](./instagram.md)) are exported from `gemi/services`:
+URL. `GoogleOAuthProvider`, `GitHubOAuthProvider`, `XOAuthProvider` and
+`InstagramOAuthProvider` (see [Instagram](./instagram.md)) are exported from `gemi/services`:
 
 ```typescript
 import {
@@ -15562,6 +15562,18 @@ Google's consent URL, e.g. `{ prompt: "select_account" }`). `HOST_NAME` + `redir
 be registered with Google and routed to the callback. It reads `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, and `HOST_NAME` from the environment by default. `XOAuthProvider` reads
 `X_CLIENT_ID` / `X_SECRET` and takes a `scope` array.
+
+`GitHubOAuthProvider` config: `clientId`, `clientSecret` (default `GITHUB_CLIENT_ID` /
+`GITHUB_CLIENT_SECRET`), `redirectPath` (default `/auth/oauth/github/callback`), `scope`
+(default `read:user user:email`) and `authorizationParams` (e.g. `{ allow_signup: "false" }`).
+It sends the state and a PKCE challenge, and exchanges the code with the secret in the body.
+`providerId` is the account's numeric GitHub id (never the login, which can be renamed and
+taken by someone else). The email is the **primary, verified** address from
+`GET /user/emails`, which also finds an address the user keeps private, reported with
+`emailVerified: true`. Without one (no verified primary address, or `user:email` not
+granted), the profile's public email comes back unverified, which signs into no existing
+user and creates none (`email_not_verified`). Register
+`HOST_NAME` + `redirectPath` as the OAuth app's callback URL.
 
 The framework mounts two view routes per provider automatically:
 
@@ -15697,7 +15709,8 @@ export default defineAuthConfig({
   callback for which `resolve` now answers another (the tenant's client changed mid sign-in,
   say) is refused with `redirect_mismatch` before the code is exchanged.
 
-`GoogleOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider` take `resolve`. Without
+`GoogleOAuthProvider`, `GitHubOAuthProvider`, `XOAuthProvider` and `InstagramOAuthProvider`
+take `resolve`. Without
 it they behave as before: the static client and `HOST_NAME` on every host, and
 `getRedirectUrl` answers synchronously. With it, `getRedirectUrl(req, ctx)` returns a promise.
 

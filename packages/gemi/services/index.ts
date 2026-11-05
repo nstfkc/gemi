@@ -379,6 +379,8 @@ export {
   mintSessionToken,
 } from "../auth/sessionToken";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
+export { GitHubOAuthProvider } from "../auth/oauth/GitHubOAuthProvider";
+export type { GitHubOAuthProviderConfig } from "../auth/oauth/GitHubOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
 export { InstagramOAuthProvider } from "../auth/oauth/InstagramOAuthProvider";
 export type { InstagramOAuthProviderConfig } from "../auth/oauth/InstagramOAuthProvider";
