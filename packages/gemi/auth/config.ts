@@ -9,6 +9,42 @@ import type { OAuthConnectionProvider } from "./connections/OAuthConnectionProvi
 import { SignUpRequest } from "./requests";
 import type { AuthRateLimitKey, CodeRateLimits } from "./oneTimeCode";
 
+/** What a per-request switch (`AuthSwitch`) is handed (#1135). */
+export interface AuthSwitchContext {
+  req: HttpRequest<any, any>;
+}
+
+/**
+ * An auth flow switch: a boolean, or a function of the request for an app
+ * whose flows differ by host or tenant (#1135). The function is asked on each
+ * request the switch guards, before the body is read; a throw fails the
+ * request (500).
+ *
+ *     password: ({ req }) => req.headers.get("host") !== "app.example.com",
+ */
+export type AuthSwitch =
+  | boolean
+  | ((ctx: AuthSwitchContext) => boolean | Promise<boolean>);
+
+/**
+ * Whether `value` is on for `req`. A function is asked; anything else is read
+ * as a boolean (the config check refuses what is not one at boot).
+ */
+export async function authSwitchOn(
+  value: AuthSwitch | undefined,
+  req: HttpRequest<any, any>,
+): Promise<boolean> {
+  if (typeof value === "function") {
+    return (await value({ req })) === true;
+  }
+  return Boolean(value);
+}
+
+/** Whether `value` can be on for some request: `true`, or a function. */
+export function authSwitchMayBeOn(value: AuthSwitch | undefined): boolean {
+  return value === true || typeof value === "function";
+}
+
 /** What `emailCode.send` is handed. */
 export interface EmailCodeSendArgs {
   /** Normalized: trimmed and lowercased. */
@@ -33,8 +69,12 @@ export interface EmailCodeSendArgs {
  * are for `POST /auth/email-code` and `/auth/email-code/verify` only.
  */
 export interface EmailCodeConfig {
-  /** Serves `/auth/email-code` and `/auth/email-code/verify`. Default `false`: both answer 404. */
-  enabled?: boolean;
+  /**
+   * Serves `/auth/email-code` and `/auth/email-code/verify`. Default `false`:
+   * both answer 404. A function of the request turns them on per request
+   * (#1135); off, they answer the same 404.
+   */
+  enabled?: AuthSwitch;
   /**
    * Sign-up-or-sign-in: an address with no user gets a code too, and verifying
    * it creates the user (verified, inside the same transaction as
@@ -171,7 +211,13 @@ export type LegacySessionMigrator = (
 // Config key: `auth`.
 export interface AuthConfig {
   basePath?: string;
-  verifyEmail?: boolean;
+  /**
+   * Password sign-in, forgot/reset and change password accept only a verified
+   * address. Default `true`. With `false`, sign-up stores no verification
+   * token and hands `onSignUp` `""`. A function of the request decides it per
+   * request (#1135).
+   */
+  verifyEmail?: AuthSwitch;
   /**
    * The email + password routes. Default `true`. `false` answers 404 on
    * `POST /auth/sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`,
@@ -180,16 +226,23 @@ export interface AuthConfig {
    * Nothing else changes: sign-out, `/auth/me`, email codes and OAuth keep
    * working, and so do `verifyPassword` and `hashPassword` for an app that
    * calls them itself.
+   *
+   * A function of the request switches them per request, for an app serving
+   * several hosts or tenants (#1135): off, the same 404.
    */
-  password?: boolean;
+  password?: AuthSwitch;
   /**
    * The magic-link + PIN pair. Default `true`. `false` answers 404 on
    * `POST /auth/magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`
    * (#879). The `/auth/sign-in/magic-link` page (the `auth/MagicLinkSignIn`
    * view) stays while `emailCode.enabled` is on, since it takes the link
    * `emailCode.send` is handed; with both off it is not mounted (#1040).
+   *
+   * A function of the request switches them per request (#1135): off, the
+   * same 404. The `/auth/sign-in/magic-link` page answers 404 on a request
+   * where both this and `emailCode.enabled` are off.
    */
-  magicLink?: boolean;
+  magicLink?: AuthSwitch;
   /**
    * Where a signed-in user goes when there is no intended URL to return to —
    * the fallback of `Auth.intendedUrl()` and of the OAuth callback's
@@ -454,15 +507,23 @@ function checkEmailCodeNumber(name: string, value: number, min: number, max = In
 }
 
 /**
- * Throws on a `password` or `magicLink` that is not a boolean: `"false"` would
+ * Throws on a `password`, `magicLink`, `verifyEmail` or `emailCode.enabled`
+ * that is neither a boolean nor a function of the request: `"false"` would
  * leave the routes on. Run at boot by `AuthServiceProvider`, and again when
  * the config is merged.
  */
 export function checkAuthFlowSwitches(config: AuthConfig | null = {}) {
-  for (const name of ["password", "magicLink"] as const) {
-    const value: unknown = config?.[name];
-    if (value !== undefined && typeof value !== "boolean") {
-      throw new Error(`auth.${name} must be true or false, got ${JSON.stringify(value)}`);
+  const switches: Array<[string, unknown]> = [
+    ["password", config?.password],
+    ["magicLink", config?.magicLink],
+    ["verifyEmail", config?.verifyEmail],
+    ["emailCode.enabled", config?.emailCode?.enabled],
+  ];
+  for (const [name, value] of switches) {
+    if (value !== undefined && typeof value !== "boolean" && typeof value !== "function") {
+      throw new Error(
+        `auth.${name} must be true, false or a function of the request, got ${JSON.stringify(value)}`,
+      );
     }
   }
 }
@@ -532,8 +593,8 @@ export async function verifyPasswordHash(
 }
 
 /**
- * One `oauthProviders` entry: a provider, or a provider behind a feature flag.
- * See `AuthConfig.oauthProviders`.
+ * One `oauthProviders` entry: a provider, or a provider behind a feature flag
+ * or a per-request switch. See `AuthConfig.oauthProviders`.
  */
 export type OAuthProviderEntry =
   | OAuthProvider
@@ -545,19 +606,35 @@ export type OAuthProviderEntry =
        * leaves it out.
        */
       feature?: FeatureKey;
+      /**
+       * Whether the provider is offered, as a boolean or a function of the
+       * request (#1135), such as whether the tenant the host names has
+       * configured its own client. Off answers like an off `feature`. Both
+       * set, both must be on. Default `true`.
+       */
+      enabled?: AuthSwitch;
     };
 
-/** Splits an `oauthProviders` entry into its provider and its feature gate. */
+/** Splits an `oauthProviders` entry into its provider and its gates. */
 export function oauthProviderEntry(entry: OAuthProviderEntry | undefined): {
   provider: OAuthProvider;
   feature?: string;
+  enabled?: AuthSwitch;
 } | null {
   if (!entry) return null;
   if (typeof (entry as OAuthProvider).getRedirectUrl === "function") {
     return { provider: entry as OAuthProvider };
   }
-  const { provider, feature } = entry as { provider: OAuthProvider; feature?: string };
-  return { provider, ...(feature !== undefined ? { feature } : {}) };
+  const { provider, feature, enabled } = entry as {
+    provider: OAuthProvider;
+    feature?: string;
+    enabled?: AuthSwitch;
+  };
+  return {
+    provider,
+    ...(feature !== undefined ? { feature } : {}),
+    ...(enabled !== undefined ? { enabled } : {}),
+  };
 }
 
 /**
@@ -567,10 +644,21 @@ export function oauthProviderEntry(entry: OAuthProviderEntry | undefined): {
 export function checkOAuthProviders(providers: Record<string, OAuthProviderEntry> | undefined) {
   for (const [name, entry] of Object.entries(providers ?? {})) {
     if (typeof (entry as OAuthProvider)?.getRedirectUrl === "function") continue;
-    const wrapped = entry as { provider?: OAuthProvider; feature?: unknown } | null;
+    const wrapped = entry as
+      | { provider?: OAuthProvider; feature?: unknown; enabled?: unknown }
+      | null;
     if (typeof wrapped?.provider?.getRedirectUrl !== "function") {
       throw new Error(
-        `auth.oauthProviders.${name} must be an OAuthProvider, or { provider, feature } with an OAuthProvider.`,
+        `auth.oauthProviders.${name} must be an OAuthProvider, or { provider, feature, enabled } with an OAuthProvider.`,
+      );
+    }
+    if (
+      wrapped.enabled !== undefined &&
+      typeof wrapped.enabled !== "boolean" &&
+      typeof wrapped.enabled !== "function"
+    ) {
+      throw new Error(
+        `auth.oauthProviders.${name}.enabled must be true, false or a function of the request.`,
       );
     }
     if (
@@ -628,7 +716,9 @@ export function authConfigDefaults(
     // choose and the millisecond is within a second of their own request.
     generateForgotPasswordToken: async () => randomBytes(32).toString("hex"),
     generateEmailVerificationToken: () => {
-      if (!(config.verifyEmail ?? true)) {
+      // A per-request `verifyEmail` is decided by `signUp`, which has the
+      // request; this only knows the static switch.
+      if (config.verifyEmail === false) {
         return "";
       }
       return randomBytes(32).toString("hex");

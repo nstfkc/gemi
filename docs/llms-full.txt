@@ -14663,15 +14663,15 @@ a binding into the container, and a facade resolves it.**
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `oauthProviders` | `Record<string, OAuthProvider \| { provider, feature }>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route), each optionally behind a feature flag. See [OAuth](#oauth) and [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
+| `oauthProviders` | `Record<string, OAuthProvider \| { provider, feature, enabled }>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route), each optionally behind a feature flag or a per-request switch. See [OAuth](#oauth), [A provider behind a feature flag](#a-provider-behind-a-feature-flag) and [Per-request switches](#per-request-switches). |
 | `oauthFailurePath` | `string \| null` | `null` | Where a refused OAuth callback redirects, with `?error=<reason>` and `?redirect=<page>`. `null` renders the callback view with `{ session: null, error, redirectTo }`. See [When a callback fails](#when-a-callback-fails). |
 | `oauthCompleteProfilePath` | `string \| null` | `null` | Where a successful OAuth sign-in sends a user who has no email (see [Providers without an email](#providers-without-an-email)), with the intended page as `?redirect=`. `null` sends them on like everyone else. |
 | `connections` | `Record<string, OAuthConnectionProvider>` | `{}` | Providers a user can connect their account to, to call their API. See [OAuth connections](#oauth-connections). |
 | `connectionStore` | `ConnectionStore \| () => ConnectionStore \| null` | `null` | Where connections are kept. `null` is the `gemi_oauth_connections` table. See [Where connections are kept](#where-connections-are-kept). |
 | `onConnected` | `({ user, provider, connection, profile, req }) => void \| Promise<void>` | no-op | Runs after the connect callback stores a connection. `profile` is what the provider said about the account, when its connection provider reports it (`InstagramConnectionProvider` does), else `null`. |
-| `password` | `boolean` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. See [Switching flows off](#switching-flows-off). |
-| `magicLink` | `boolean` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. See [Switching flows off](#switching-flows-off). |
-| `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
+| `password` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | `false` answers 404 on the email + password routes: `sign-in`, `sign-in-v2`, `sign-up`, `forgot-password`, `reset-password`, `change-password`, `verify-email`. A function decides per request. See [Switching flows off](#switching-flows-off). |
+| `magicLink` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | `false` answers 404 on `magic-link`, `sign-in-with-pin` and `sign-in-with-pin-v2`. A function decides per request. See [Switching flows off](#switching-flows-off). |
+| `verifyEmail` | `boolean \| ({ req }) => boolean \| Promise<boolean>` | `true` | When on, password sign-in, forgot/reset and change password only find users whose `emailVerifiedAt` is set; when off, sign-up stores no verification token. A function decides per request ([Per-request switches](#per-request-switches)). |
 | `sessionExpiresInHours` | `number` | `24` | Idle timeout. A session used after half of it has passed is pushed to `now + N` hours, never past the absolute cap. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `cookieDomain` | `"root" \| string \| null` | `null` | Shares the session cookie across subdomains. `"root"` means `route.domains.root`. Custom domains keep their own session. See [Domains](./domains.md#sessions-across-subdomains). |
@@ -15427,7 +15427,47 @@ connections keep working. The `/auth/sign-in/magic-link` page stays while
 `magicLink` and `emailCode.enabled` off it is not mounted (see
 [Views the auth routes render](#views-the-auth-routes-render)).
 `hashPassword` and `verifyPassword` stay available to an app that calls them itself. A value
-that isn't `true` or `false` (say `"false"`) fails the boot.
+that isn't `true`, `false` or a function (say `"false"`) fails the boot; the same holds for
+`verifyEmail` and `emailCode.enabled`.
+
+### Per-request switches
+
+An app that serves several hosts or tenants from one process can decide each flow per
+request. `password`, `magicLink`, `verifyEmail` and `emailCode.enabled` each take a function
+of the request instead of a boolean, and so does an OAuth provider entry's `enabled`:
+
+```typescript
+// app/config/auth.ts
+const isAppHost = (req: HttpRequest<any, any>) => req.headers.get("host") === "app.example.com";
+
+export default defineAuthConfig({
+  // The app's own host signs in by email code only; tenant hosts offer passwords.
+  password: ({ req }) => !isAppHost(req),
+  verifyEmail: ({ req }) => isAppHost(req),
+  magicLink: false,
+  emailCode: { enabled: async ({ req }) => isAppHost(req) || (await tenantSendsEmail(req)) },
+  oauthProviders: {
+    google: { provider: google, enabled: async ({ req }) => await tenantHasGoogle(req) },
+  },
+});
+```
+
+The function is handed `{ req }` and answers `true` or `false` (or a promise of one). Only
+`true` turns the flow on. It is asked on every request the switch guards, before the body is
+read, so keep it cheap or cache what it looks up; a throw fails the request with a 500.
+
+- Off for a request, a flow answers exactly as it does when switched off with `false`: the
+  same 404, before the body is read.
+- An OAuth provider whose `enabled` answers `false` is treated like one whose
+  [`feature`](#a-provider-behind-a-feature-flag) is off: its routes answer 404 and
+  `Auth.oauthProviders()` leaves it out. With both `feature` and `enabled` set, both must be
+  on. Outside a request, a function-gated provider is off.
+- `verifyEmail` off for a request lets password sign-in, forgot/reset and change password find
+  unverified users, and a sign-up on that request stores no verification token (`onSignUp`
+  is handed `""`).
+- A function counts as "may be on" for the [views the auth routes render](#views-the-auth-routes-render):
+  the view must exist, and `/auth/sign-in/magic-link` answers 404 on a request where both
+  `magicLink` and `emailCode.enabled` are off.
 
 ### Views the auth routes render
 
@@ -15573,7 +15613,9 @@ return { signInProviders: await Auth.oauthProviders() }; // ["google"] while it 
 ```
 
 A plain provider entry is never gated. An entry that is neither a provider nor
-`{ provider, feature }` fails the boot.
+`{ provider, feature, enabled }` fails the boot. To gate a provider on the request itself
+(the tenant the host names, say), give it `enabled` instead; see
+[Per-request switches](#per-request-switches).
 
 ### State and PKCE
 
@@ -16105,7 +16147,7 @@ current user and session.
 | `Auth.intendedUrl(fallback?)` | `string` | The page the current request's `?redirect=` names, if it is a path on this origin; otherwise `fallback`, or `redirectPath`. See [Returning to the intended page](#returning-to-the-intended-page). |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
-| `Auth.oauthProviders()` | `Promise<string[]>` | The names of the OAuth sign-in providers that are on for this request, in `oauthProviders` order. A provider whose `feature` is off is left out. See [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
+| `Auth.oauthProviders()` | `Promise<string[]>` | The names of the OAuth sign-in providers that are on for this request, in `oauthProviders` order. A provider whose `feature` is off, or whose `enabled` answers `false`, is left out. See [A provider behind a feature flag](#a-provider-behind-a-feature-flag). |
 
 ```typescript
 import { Auth } from "gemi/facades";

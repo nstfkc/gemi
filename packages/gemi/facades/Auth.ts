@@ -132,7 +132,8 @@ export class Auth extends Facade {
    * The OAuth sign-in providers that are on for this request, by name, in the
    * order `auth.oauthProviders` declares them — what a sign-in page renders
    * its "Continue with …" buttons from. A provider behind a `feature` that is
-   * off for this request is left out (#885).
+   * off for this request is left out (#885), and so is one whose `enabled`
+   * answers false for it (#1135).
    *
    * ```ts
    * return { signInProviders: await Auth.oauthProviders() }; // ["google", "instagram"]

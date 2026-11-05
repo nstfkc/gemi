@@ -1,5 +1,16 @@
 # Unreleased
 
+## auth: per-request flow switches (#1135)
+
+**New API (minor). No default behaviour change for boolean switches.** See [Authentication → Per-request switches](docs/authentication.md#per-request-switches).
+
+- `auth.password`, `auth.magicLink`, `auth.verifyEmail` and `auth.emailCode.enabled` each also take a function of the request, `({ req }) => boolean | Promise<boolean>`, asked on every request they guard. Off for a request, a flow answers the same 404 as when it is `false`.
+- An `oauthProviders` entry takes `enabled` (a boolean or such a function) beside `feature`. Off, the provider is treated like one whose feature is off: 404 on its routes, left out of `Auth.oauthProviders()`. Outside a request a function-gated provider is off.
+- A function counts as "may be on" for the views the auth routes need: an app that sets `emailCode.enabled` to a function needs `auth/MagicLinkSignIn`, and that page answers 404 on a request where both `magicLink` and `emailCode.enabled` are off.
+- Behaviour change at boot: `verifyEmail` and `emailCode.enabled` are now checked like `password` and `magicLink`. A value that is neither a boolean nor a function (say `"false"`, or `null`) fails the boot instead of being read as truthy or falsy. The boot error now reads "must be true, false or a function of the request".
+- `generateEmailVerificationToken`'s default returns `""` only for a static `verifyEmail: false`; for a function, `signUp` stores `""` when it answers false for the request.
+- New type exports from `gemi/services`: `AuthSwitch`, `AuthSwitchContext`. `enabledOAuthProvider` / `enabledOAuthProviderNames` (internal) take an optional request.
+
 ## client: `useRoute()` is the route template and `useLocation()` the URL, on every render (#1134) — behaviour change (fix)
 
 On a route with params, the first render of a page loaded directly reported the route template (`/users/:userId/ai`) from both `useLocation().pathname` and `useRoute().pathname`, and after a client navigation both reported the resolved URL (`/users/7/ai`). Now, on the server render, after hydration and after any navigation:

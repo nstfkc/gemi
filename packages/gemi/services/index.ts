@@ -622,6 +622,8 @@ export {
   type AuthConfig,
   type AuthenticatedArgs,
   type AuthHookContext,
+  type AuthSwitch,
+  type AuthSwitchContext,
   type EmailCodeConfig,
   type EmailCodeSendArgs,
   type LegacySessionMigrator,
