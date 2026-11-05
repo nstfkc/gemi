@@ -69,6 +69,10 @@ export interface PageProps {
   /**
    * The URL the view is mounted at. A template (`/app/:orgId/chat`) is resolved
    * against `params`, so the same string can be pasted from the router.
+   *
+   * As in the app, on a direct load and after a navigation alike,
+   * `useRoute().pathname` reports the template as given here and
+   * `useLocation().pathname` the resolved URL.
    */
   pathname?: string;
   /** Route params, as the router would have parsed them out of `pathname`. */
@@ -459,14 +463,15 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     return seeded;
   }, [queryData, params, user]);
 
-  // Keyed by `${view}:${pathname}` in the router's cache; the view names are
-  // ours to choose here, and only their order reaches `useBreadcrumbs`.
+  // Keyed by `${view}:${route template}` in the router's cache, which is what
+  // `useBreadcrumbs` reads through `useRoute()`; the view names are ours to
+  // choose here, and only their order reaches `useBreadcrumbs`.
   const { breadcrumbViews, breadcrumbsCache, breadcrumbsRecord } =
     useMemo(() => {
       const views = breadcrumbs.map((_, index) => `breadcrumb-${index}`);
       const cache = new Map<string, Breadcrumb>(
         breadcrumbs.map((breadcrumb, index) => [
-          `${views[index]}:${pathname}`,
+          `${views[index]}:${routePath}`,
           breadcrumb,
         ]),
       );
@@ -475,7 +480,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
         breadcrumbsCache: cache,
         breadcrumbsRecord: Object.fromEntries(cache),
       };
-    }, [breadcrumbs, pathname]);
+    }, [breadcrumbs, routePath]);
 
   const [isNavigatingSubject] = useState(() => new Subject<boolean>(false));
   const [progressManager] = useState(
@@ -558,10 +563,12 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       pageData: {},
       breadcrumbs: breadcrumbsRecord,
       prefetchedData,
+      // As the server sends it: `pathname` is the route template and
+      // `currentPath` the URL, locale segment included.
       router: {
-        pathname,
+        pathname: routePath,
         params,
-        currentPath: routePath,
+        currentPath: `${urlLocaleSegment ? `/${urlLocaleSegment}` : ""}${pathname}`,
         is404: false,
         searchParams: search,
         urlLocaleSegment,

@@ -20,6 +20,7 @@ import { useBreadcrumbs } from "../client/useBreadcrumbs";
 import { useFeature } from "../client/useFeature";
 import { useIsNavigationPending } from "../client/useIsNavigationPending";
 import { useLocation } from "../client/useLocation";
+import { useRoute } from "../client/useRoute";
 import { useNavigationProgress } from "../client/useNavigationProgress";
 import { useParams } from "../client/useParams";
 import { useQuery } from "../client/useQuery";
@@ -122,6 +123,29 @@ describe("<Page> route state", () => {
     // `params` came from the page, so the template resolved to the same href.
     expect(link.getAttribute("href")).toBe("/app/abc/chat");
     expect(link.getAttribute("data-active")).toBe("true");
+  });
+
+  // #1134: the router reports the template through `useRoute()` and the
+  // resolved URL through `useLocation()`, on a direct load and after a
+  // navigation alike, and `<Page>` reports the same pair.
+  test("useRoute reports the template and useLocation the resolved URL", () => {
+    function View() {
+      const route = useRoute();
+      const location = useLocation();
+      return (
+        <div>
+          {`${route.pathname}|${location.pathname}|${route.startsWith("/app/:orgId" as never)}`}
+        </div>
+      );
+    }
+
+    render(
+      <Page pathname="/app/:orgId/chat" params={{ orgId: "abc" }}>
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("/app/:orgId/chat|/app/abc/chat|true")).toBeDefined();
   });
 
   test("reports a navigation rather than performing one", () => {
@@ -229,6 +253,33 @@ describe("<Page> route state", () => {
     render(
       <Page
         pathname="/app/abc/chat"
+        breadcrumbs={[
+          { label: "App", href: "/app" },
+          { label: "Chat", href: "/app/abc/chat" },
+        ]}
+      >
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("App > Chat")).toBeDefined();
+  });
+
+  test("seeds the breadcrumbs on a templated pathname", () => {
+    function View() {
+      return (
+        <div>
+          {useBreadcrumbs()
+            .map((b) => b.label)
+            .join(" > ")}
+        </div>
+      );
+    }
+
+    render(
+      <Page
+        pathname="/app/:orgId/chat"
+        params={{ orgId: "abc" }}
         breadcrumbs={[
           { label: "App", href: "/app" },
           { label: "Chat", href: "/app/abc/chat" },

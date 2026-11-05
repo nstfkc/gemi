@@ -1,3 +1,17 @@
+# Unreleased
+
+## client: `useRoute()` is the route template and `useLocation()` the URL, on every render (#1134) — behaviour change (fix)
+
+On a route with params, the first render of a page loaded directly reported the route template (`/users/:userId/ai`) from both `useLocation().pathname` and `useRoute().pathname`, and after a client navigation both reported the resolved URL (`/users/7/ai`). Now, on the server render, after hydration and after any navigation:
+
+- `useRoute().pathname` (and `startsWith`) is the matched route's template, as its `ViewPaths` type says. On the `404` view, which matched no route, it is still the requested path (#952).
+- `useLocation().pathname` is the resolved URL, without its locale segment.
+- A `Link` to the current page is `data-active` on a direct load too; before, only after a navigation.
+
+What to check in apps: code that compared `useRoute().pathname` with a resolved URL (it only matched after a navigation) should compare `useLocation().pathname`; code that read the template from `useLocation().pathname` (it only had it on the first render) should use `useRoute()`. `useBreadcrumbs()` and `useNavigate`/`Link`'s shallow detection read the right value on the first render now.
+
+`gemi/testing`'s `<Page>` reports the same pair: `useRoute().pathname` is its `pathname` prop as given (the template), `useLocation().pathname` the resolved URL. It used to report the resolved URL from both. A `<Page>` test asserting `useRoute().pathname` equals the resolved URL needs the template instead.
+
 # Upgrading from 0.181.0 to 0.182.0
 
 ## client: jittered reconnect backoff for `useSubscription` (#1132) — behaviour change
