@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.184.0 to 0.185.0
 
 ## ai: `generate({ onPartial })` and `parsePartialJson` (#1149)
 
