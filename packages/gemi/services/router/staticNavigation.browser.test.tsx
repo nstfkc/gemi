@@ -410,6 +410,73 @@ describe("full loads instead of a swap", () => {
   });
 });
 
+describe("a <style> injected at runtime (#1153)", () => {
+  // What vaul, sonner or emotion do when their module is evaluated: after the
+  // page loaded, so it is in the live document but in no page the server sends.
+  const inject = (parent: HTMLElement, id: string) => {
+    const style = document.createElement("style");
+    style.id = id;
+    style.textContent = "[data-injected]{display:block}";
+    parent.appendChild(style);
+    return style;
+  };
+
+  test.each([
+    ["the head", () => document.head],
+    ["the body", () => document.body],
+  ])("in %s does not turn links into full loads, and stays in place", async (_, parent) => {
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>') },
+      {
+        pages: {
+          "/a": await page({ title: "A", body: nav('<a href="/b">b</a>') }),
+          "/b": await page({ title: "B", body: nav('<a href="/a">a</a>') + "<h1>B</h1>" }),
+        },
+      },
+    );
+    const injected = inject(parent(), "injected");
+
+    expect(await doc.navigate("/b")).toEqual({ kind: "swap", url: `${ORIGIN}/b` });
+    expect(document.title).toBe("B");
+    expect(document.getElementById("injected")).toBe(injected);
+
+    // The pages that follow, and history, keep swapping.
+    expect(await doc.navigate("/a")).toEqual({ kind: "swap", url: `${ORIGIN}/a` });
+    expect(await doc.back()).toEqual({ kind: "swap", url: `${ORIGIN}/b` });
+    expect(document.getElementById("injected")).toBe(injected);
+  });
+
+  test("a next page with another stylesheet is still a full load", async () => {
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>') },
+      { pages: { "/b": await page({ title: "B", body: "<h1>B</h1>", stylesheet: "body{margin:1px}" }) } },
+    );
+    inject(document.head, "injected");
+
+    expect(await doc.navigate("/b")).toEqual({ kind: "full-load", url: `${ORIGIN}/b` });
+    expect(document.title).toBe("A");
+  });
+
+  test("a next page that has the injected <style> itself is a full load", async () => {
+    // The server sent it to that page only, so the two pages' stylesheets differ.
+    const doc = await start(
+      { title: "A", body: nav('<a href="/b">b</a>') },
+      {
+        pages: {
+          "/b": await page({
+            title: "B",
+            body: "<h1>B</h1>",
+            head: '<style id="injected">[data-injected]{display:block}</style>',
+          }),
+        },
+      },
+    );
+    inject(document.head, "injected");
+
+    expect(await doc.navigate("/b")).toEqual({ kind: "full-load", url: `${ORIGIN}/b` });
+  });
+});
+
 describe("islands across a navigation", () => {
   test("the old ones unmount (their effects clean up) and the new ones hydrate", async () => {
     const error = vi.spyOn(console, "error");
