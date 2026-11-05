@@ -36,7 +36,7 @@ test("renders the organisation's messages", () => {
 
 | Prop | Default | What it seeds |
 | --- | --- | --- |
-| `pathname` | `"/"` | The URL the component is mounted at — `useLocation()`, `useRoute()`, and a `Link`'s `data-active`. A template (`/app/:orgId/chat`) is resolved against `params`. |
+| `pathname` | `"/"` | The URL the component is mounted at — `useLocation()`, `useRoute()`, and a `Link`'s `data-active`. A template (`/app/:orgId/chat`) is resolved against `params`: `useLocation().pathname` is the resolved URL and `useRoute().pathname` the template as given, as in the app. |
 | `params` | `{}` | `useParams()`, and the params `useQuery` / `Form` / `Link` apply when a call site omits its own. |
 | `searchParams` | `""` | `useSearchParams()`. Accepts `"?tab=recent"`, `"tab=recent"` or `{ tab: "recent" }`. |
 | `hash` | `""` | `useLocation().hash`. |

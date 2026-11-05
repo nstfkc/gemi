@@ -232,6 +232,8 @@ and pagination together with `useQuery` (see [Data Fetching](./data-fetching.md)
 ### `useLocation`
 
 Returns the current location: `{ pathname, search, hash, state, locale, key }`.
+`pathname` is the resolved URL without its locale segment (`/users/7/ai`), on a
+direct load and after a client navigation alike.
 
 ```tsx
 import { useLocation } from "gemi/client";
@@ -241,8 +243,11 @@ const { pathname, search, locale } = useLocation();
 
 ### `useRoute`
 
-Returns the matched route `pathname` and a typed `startsWith` helper — useful for
-highlighting nav sections:
+Returns the matched route's template as `pathname` (`/users/:userId/ai`, not
+`/users/7/ai`) and a typed `startsWith` helper — useful for highlighting nav
+sections and breadcrumbs. It is the template on a direct load and after a client
+navigation alike; use `useLocation().pathname` for the resolved URL. On the `404`
+view, which matched no route, it is the requested path.
 
 ```tsx
 import { useRoute } from "gemi/client";

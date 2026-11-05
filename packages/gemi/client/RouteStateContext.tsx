@@ -6,9 +6,14 @@ export interface RouteState {
   params: Record<string, string>;
   search: string;
   state: Record<string, unknown>;
+  /** The resolved URL path, without its locale segment: `/users/7/ai`. */
   pathname: string;
   hash: string;
   action: Action | null;
+  /**
+   * The matched route's template: `/users/:userId/ai`. Empty when no route
+   * matched (a `404`).
+   */
   routePath: string;
   locale: string | null;
 }

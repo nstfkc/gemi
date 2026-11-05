@@ -19,6 +19,7 @@ import { I18nContext } from "./I18nContext";
 import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { splitLocalePrefix } from "../i18n/localePrefix";
+import { applyParams } from "../utils/applyParams";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 import { otherBuild } from "./chunkLoadRecovery";
@@ -145,16 +146,23 @@ export const ClientRouterProvider = (
       params,
       search: searchParams,
       state: {},
-      // A 404 document matched no route, so it has no route pathname: the
-      // `404` view reads the path that was requested instead, without its
-      // locale segment, as after a client-side navigation (#952).
-      pathname: is404
-        ? splitLocalePrefix(currentPath || "/", urlLocaleSegment ? [urlLocaleSegment] : [])
-            .pathname
-        : pathname,
+      // The same shapes the history listener below writes on a client
+      // navigation (#1134): `pathname` is the URL that was requested, without
+      // its locale segment, and `routePath` the matched route's template. The
+      // server sends them the other way round (`router.pathname` is the
+      // template, `router.currentPath` the URL).
+      //
+      // A 404 document matched no route, so it has no template, and the `404`
+      // view reads the path that was requested (#952). A payload without
+      // `currentPath` (a hand-built one) resolves the template instead.
+      pathname:
+        currentPath || is404
+          ? splitLocalePrefix(currentPath || "/", urlLocaleSegment ? [urlLocaleSegment] : [])
+              .pathname
+          : applyParams(pathname ?? "/", params ?? {}) || "/",
       hash: "",
       action: null as Action | null,
-      routePath: currentPath,
+      routePath: is404 ? "" : pathname,
       locale,
     });
   });
