@@ -298,6 +298,19 @@ function reduce<T extends ToolShapes, O>(
         return { ...message, content };
       });
 
+    case "tool-call-discard":
+      // Partial calls of a model call the provider is asking again (#1169).
+      // Only partials go: a completed call is never discarded, and a frame
+      // replayed onto a transcript that already holds the finished message
+      // finds nothing to remove.
+      return withMessage(state, event.messageId, now, (message) => {
+        const content = message.content.filter(
+          (part) =>
+            !(part.type === "tool-call" && part.partial && event.toolCallIds.includes(part.toolCallId)),
+        );
+        return content.length === message.content.length ? message : { ...message, content };
+      });
+
     case "tool-search": {
       // Accumulated as a set. Every other additive event in this file leans on
       // `seq` to survive redelivery; this one cannot, because a `tool-search`

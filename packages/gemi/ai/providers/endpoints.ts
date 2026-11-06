@@ -34,6 +34,20 @@ export type ProviderConfig = {
    * `DEFAULT_STREAM_IDLE_TIMEOUT_MS` (120 s); `0` turns it off.
    */
   streamIdleTimeoutMs?: number;
+  /**
+   * The longest one attempt's stream may run, from its response headers to its
+   * last event, however steadily it keeps sending (#1169). No chunk resets it.
+   * When it runs out the attempt is aborted with a retryable `provider_error`.
+   * Default `DEFAULT_STREAM_MAX_DURATION_MS` (300 s); `0` turns it off.
+   */
+  streamMaxDurationMs?: number;
+  /**
+   * The most argument text one tool call may stream without finishing (#1169),
+   * in characters. Past it the attempt is aborted with a retryable
+   * `provider_error`, as a runaway generation. Default `0`, off: how large a
+   * legitimate call gets depends entirely on the app's tools.
+   */
+  maxToolArgumentChars?: number;
   maxRetries?: number;
   headers?: Record<string, string>;
 };
@@ -83,6 +97,10 @@ export type ProviderTarget = {
   timeoutMs: number;
   /** See `ProviderConfig.streamIdleTimeoutMs`. `0` is off. */
   streamIdleTimeoutMs: number;
+  /** See `ProviderConfig.streamMaxDurationMs`. `0` is off. */
+  streamMaxDurationMs: number;
+  /** See `ProviderConfig.maxToolArgumentChars`. `0` is off. */
+  maxToolArgumentChars: number;
   maxRetries: number;
 };
 
@@ -113,6 +131,28 @@ export const DEFAULT_MAX_RETRIES = 2;
  * before saying anything. An app on low effort can set it lower.
  */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * How long one attempt's stream may run in all, however steadily it sends
+ * (#1169).
+ *
+ * `streamIdleTimeoutMs` cannot see a stream that keeps trickling: seen on an
+ * Azure deployment, one function call whose argument deltas kept coming for
+ * 500 s (1,228 deltas against 20–60 normally), each one resetting the idle
+ * clock, until the run's `maxRunDurationMs` ended the whole run. Completed
+ * calls of the same agent took 4 s at p50 and 43 s at most.
+ *
+ * WHY 300 S. The same asymmetry as the idle limit, sharper. A limit that cuts a
+ * legitimate call does not just cost a retry: the retry is the same long call
+ * and is cut again, so a request that used to work now always fails. Five
+ * minutes leaves room for a reasoning model at a high effort that thinks for
+ * minutes before writing, and for a long answer or a large tool call (about
+ * 15–30k output tokens at common streaming rates). And it is half the default
+ * `maxRunDurationMs` (ten minutes), so a run that hits a runaway early still
+ * has the time to ask again and finish. An app whose calls are short (a low
+ * reasoning effort, small tools) can set it much lower.
+ */
+export const DEFAULT_STREAM_MAX_DURATION_MS = 300_000;
 
 export function env(name: string): string | undefined {
   return typeof process === "undefined" ? undefined : process.env?.[name];
@@ -212,6 +252,8 @@ export function openAITarget(
     },
     timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
+    maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 }
@@ -251,6 +293,8 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
     },
     timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
+    maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 }

@@ -141,6 +141,39 @@ describe("applyFrame over a run", () => {
     ]);
   });
 
+  test("tool-call-discard drops the partial calls it names and nothing else (#1169)", () => {
+    const partial = (toolCallId: string) => ({
+      type: "tool-call" as const,
+      toolCallId,
+      name: "grep",
+      input: { pattern: "T" },
+      partial: true as const,
+    });
+    const state = fold(at(4), [
+      { seq: 5, event: { type: "tool-call", messageId: "m1", part: partial("tc_2") } },
+      { seq: 6, event: { type: "tool-call", messageId: "m1", part: partial("tc_3") } },
+      // tc_1 is complete: a discard naming it leaves it alone.
+      { seq: 7, event: { type: "tool-call-discard", messageId: "m1", toolCallIds: ["tc_2", "tc_1"] } },
+    ]);
+
+    expect(state.messages[0]!.content).toEqual([
+      { type: "text", text: "Let me look." },
+      { type: "tool-call", toolCallId: "tc_1", name: "grep", input: { pattern: "TODO", filePath: "a.ts" } },
+      partial("tc_3"),
+    ]);
+  });
+
+  test("a tool-call-discard naming nothing the message holds changes nothing", () => {
+    const before = at(4);
+    const after = applyFrame(
+      before,
+      { seq: 5, event: { type: "tool-call-discard", messageId: "m1", toolCallIds: ["gone"] } },
+      NOW,
+    );
+
+    expect(after.messages).toEqual(before.messages);
+  });
+
   test("a tool result lands next to its call", () => {
     const content = at(5).messages[0]!.content;
 

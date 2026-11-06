@@ -4090,6 +4090,42 @@ function collectWire(run: { frames(from?: number): AsyncIterable<any> }) {
 const shapeOf = (messages: AgentMessage[]) =>
   messages.map((message) => ({ id: message.id, role: message.role, text: textOf(message) }));
 
+describe("a tool-call-discard from the provider (#1169)", () => {
+  test("drops the partial call from the step and from a watching client, and the retried call runs", async () => {
+    grepCalls.length = 0;
+    const provider = fakeProvider(
+      [
+        { type: "tool-call-delta", toolCallId: "lost", name: "grep", argsDelta: '{"pattern":"ne' },
+        { type: "tool-call-discard", toolCallIds: ["lost"] },
+        { type: "tool-call-delta", toolCallId: "c1", name: "grep", argsDelta: '{"pattern":' },
+        toolCall("c1", "grep", { pattern: "needle" }),
+        finish(),
+      ],
+      [{ type: "text-delta", delta: "found it" }, finish()],
+    );
+    const agent = Agent.create({ name: "coder", provider, tools: [grep] });
+    const run = agent.stream({ messages: [], turn: { text: "search" } });
+    const { frames, done } = collectWire(run);
+    const result = await run.result();
+    await done;
+
+    expect(grepCalls).toEqual(["needle"]);
+    const calls = partsOf(result.messages, "tool-call");
+    expect(calls.map((part: any) => part.toolCallId)).toEqual(["c1"]);
+    expect(partsOf(result.messages, "tool-result").map((part: any) => part.toolCallId)).toEqual(["c1"]);
+    expect(frames.map((frame) => frame.event)).toContainEqual({
+      type: "tool-call-discard",
+      messageId: expect.any(String),
+      toolCallIds: ["lost"],
+    });
+    const client = watched(frames, result.messages.slice(0, 1));
+    const ids = client.messages.flatMap((message: AgentMessage) =>
+      message.content.flatMap((part: any) => (part.type === "tool-call" ? [part.toolCallId] : [])),
+    );
+    expect(ids).toEqual(["c1"]);
+  });
+});
+
 describe("a nested transcript, watched live and loaded later (#470)", () => {
   async function run(params: any) {
     const sub = answeringAgent("researcher", "eleven");

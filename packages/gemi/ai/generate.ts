@@ -547,7 +547,7 @@ async function callModel<O extends Schema<any>>(
             error = event.error;
             detail = httpErrorDetail(event);
             break;
-          // `tool-call-delta`, `tool-call` and `tool-search` cannot happen:
+          // `tool-call-delta`, `tool-call`, `tool-call-discard` and `tool-search` cannot happen:
           // no tools were sent.
           // `file-rejected` needs nothing here: the provider already sent the
           // call again without that file, and `generate()` keeps no thread

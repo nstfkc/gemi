@@ -4095,6 +4095,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           });
           break;
         }
+        case "tool-call-discard": {
+          // The provider is asking again after a break that left only these
+          // partial calls (#1169). Forgotten here, or the end of the step
+          // would turn them into calls with an `invalid_tool_input` result
+          // next to the retried answer's own.
+          for (const toolCallId of event.toolCallIds) partialArgs.delete(toolCallId);
+          this.emit({ type: "tool-call-discard", messageId: message.id, toolCallIds: event.toolCallIds });
+          break;
+        }
         case "tool-call": {
           // A skill's load is stamped with the `skills` namespace even when the
           // provider listed the tools flat and reported none (no tool search):

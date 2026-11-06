@@ -789,6 +789,15 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
        */
       resent?: true;
     }
+  /**
+   * The partial calls named here are void: the model call that was streaming
+   * their arguments broke before any of them completed, and the provider is
+   * asking again (#1169). The reducer removes those `partial` tool-call parts
+   * from the message; the retried answer's calls arrive under new ids. A
+   * client that does not know the event keeps the stale partial until it
+   * reloads the thread, which the server stored without it.
+   */
+  | { type: "tool-call-discard"; messageId: string; toolCallIds: string[] }
   /** The model searched for deferred tools and loaded these. A UI can say "…
    *  looking for the right tool" instead of showing an unexplained pause. */
   | { type: "tool-search"; loaded: string[] }

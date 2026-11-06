@@ -55,6 +55,38 @@ export class ProviderStreamIdleError extends ProviderTimeoutError {
   }
 }
 
+/**
+ * A streamed answer still going after `streamMaxDurationMs` (#1169): the one
+ * bound a stream that keeps trickling cannot get around, because no chunk
+ * resets it. A `ProviderTimeoutError`, so it is a retryable `provider_error`
+ * and never an abort. The attempt was aborted, so its connection is released.
+ */
+export class ProviderStreamDurationError extends ProviderTimeoutError {
+  constructor(timeoutMs: number) {
+    super(timeoutMs);
+    this.name = "ProviderStreamDurationError";
+    this.message = `Provider stream was still going after ${timeoutMs}ms (streamMaxDurationMs)`;
+  }
+}
+
+/**
+ * One tool call streamed more argument text than `maxToolArgumentChars`
+ * without finishing (#1169), which is what a degenerate generation inside the
+ * arguments looks like. Retryable: the call never completed and never ran, so
+ * asking again costs a request, and the next sample usually ends normally.
+ */
+export class ProviderToolArgumentsTooLongError extends Error {
+  readonly limit: number;
+
+  constructor(limit: number, toolName: string) {
+    super(
+      `Provider streamed more than ${limit} characters of arguments for "${toolName}" without finishing the call (maxToolArgumentChars)`,
+    );
+    this.name = "ProviderToolArgumentsTooLongError";
+    this.limit = limit;
+  }
+}
+
 function describeBody(body: unknown): string {
   const detail = errorBody(body);
   if (detail?.message) return detail.message;
@@ -106,7 +138,7 @@ export function httpErrorDetail(error: unknown): { status?: number; requestId?: 
  * again next time.
  */
 export function normalizeProviderError(error: unknown): AgentError {
-  if (error instanceof ProviderTimeoutError) {
+  if (error instanceof ProviderTimeoutError || error instanceof ProviderToolArgumentsTooLongError) {
     return { code: "provider_error", message: error.message, retryable: true };
   }
 

@@ -1,6 +1,12 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
-import { httpErrorDetail, normalizeProviderError, ProviderStreamIdleError } from "./errors";
+import {
+  httpErrorDetail,
+  normalizeProviderError,
+  ProviderStreamDurationError,
+  ProviderStreamIdleError,
+  ProviderToolArgumentsTooLongError,
+} from "./errors";
 import {
   MAX_FILE_REJECTION_RETRIES,
   rejectedFileIds,
@@ -11,7 +17,7 @@ import { addUsage, isContentEvent } from "../runtime";
 import type { AgentError, Usage } from "../types";
 import {
   backoffDelayMs,
-  idleTimeoutBody,
+  boundedBody,
   requestWithRetry,
   waitUnlessAborted,
   type FetchLike,
@@ -38,6 +44,10 @@ export type ResponsesEndpoint = {
   timeoutMs: number;
   /** See `ProviderConfig.streamIdleTimeoutMs`. Absent or `0` is off. */
   streamIdleTimeoutMs?: number;
+  /** See `ProviderConfig.streamMaxDurationMs`. Absent or `0` is off. */
+  streamMaxDurationMs?: number;
+  /** See `ProviderConfig.maxToolArgumentChars`. Absent or `0` is off. */
+  maxToolArgumentChars?: number;
   maxRetries: number;
   fetchImpl?: FetchLike;
   /** Injected by the tests, with `random`, so a backoff can be asserted on
@@ -63,6 +73,8 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
     headers: target.headers,
     timeoutMs: target.timeoutMs,
     streamIdleTimeoutMs: target.streamIdleTimeoutMs,
+    streamMaxDurationMs: target.streamMaxDurationMs,
+    maxToolArgumentChars: target.maxToolArgumentChars,
     maxRetries: target.maxRetries,
   };
 }
@@ -96,6 +108,21 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * is a broken stream like any other: retryable, so asked again before the first
  * content event, and the call's error after it (nothing is repeated). The
  * caller's signal still wins: an abort while waiting ends the call as aborted.
+ *
+ * A STREAM THAT KEEPS TRICKLING IS CUT TOO (#1169). `streamMaxDurationMs`
+ * bounds an attempt's stream by the wall clock, which no chunk resets, and
+ * `maxToolArgumentChars` bounds the argument text of one unfinished tool call.
+ * Both abort the attempt with a retryable error, like the idle limit.
+ *
+ * AN ATTEMPT THAT STREAMED ONLY UNFINISHED TOOL-CALL ARGUMENTS IS NOT
+ * COMMITTED (#1169). `tool-call-delta` is yielded as it arrives, so a UI can
+ * show a call filling in, but until a text, reasoning, output, tool-search or
+ * completed `tool-call` event the attempt can still be asked again: the call
+ * never completed and never ran, so nothing the model said has been acted on.
+ * Before the retry a `tool-call-discard` event names the partial calls, so
+ * the consumer drops them; the next attempt's calls get new ids. Any retryable
+ * break counts, not only the limits above. Once retries are spent, the partial
+ * calls stay and the call ends with the error, as before.
  */
 export async function* streamResponses(
   endpoint: ResponsesEndpoint,
@@ -125,6 +152,8 @@ export async function* streamResponses(
   const aborted = (): ProviderEvent => closing({ type: "finish", reason: "aborted", usage: emptyUsage() });
 
   const idleMs = endpoint.streamIdleTimeoutMs ?? 0;
+  const maxMs = endpoint.streamMaxDurationMs ?? 0;
+  const maxArgs = endpoint.maxToolArgumentChars ?? 0;
 
   for (let streamAttempt = 0; ; streamAttempt++) {
     // Per attempt, so an idle timeout can abort this attempt's request (and
@@ -185,15 +214,42 @@ export async function* streamResponses(
     const held: ProviderEvent[] = [];
     let committed = false;
     let failure: AgentError | undefined;
+    // The tool calls this attempt has yielded argument deltas for, with how
+    // much text each has streamed. Before `committed`, these are the only
+    // things the consumer has seen, and a retry discards them.
+    const partial = new Map<string, number>();
     try {
-      const body = idleTimeoutBody(response.body, idleMs, () => {
-        const error = new ProviderStreamIdleError(idleMs);
-        attempt.abort(error);
-        return error;
-      });
+      const body = boundedBody(
+        response.body,
+        { idleMs, maxMs },
+        {
+          idle: () => {
+            const error = new ProviderStreamIdleError(idleMs);
+            attempt.abort(error);
+            return error;
+          },
+          max: () => {
+            const error = new ProviderStreamDurationError(maxMs);
+            attempt.abort(error);
+            return error;
+          },
+        },
+      );
       for await (const event of parseResponsesStream(decodeChunks(body), {
         structuredOutput: params.structuredOutput,
       })) {
+        if (event.type === "tool-call-delta") {
+          const chars = (partial.get(event.toolCallId) ?? 0) + event.argsDelta.length;
+          partial.set(event.toolCallId, chars);
+          if (maxArgs > 0 && chars > maxArgs) {
+            const error = new ProviderToolArgumentsTooLongError(maxArgs, event.name);
+            attempt.abort(error);
+            throw error;
+          }
+          yield event;
+          continue;
+        }
+        if (event.type === "tool-call") partial.delete(event.toolCallId);
         if (committed) {
           yield event.type === "finish" ? closing(event) : event;
           continue;
@@ -230,6 +286,7 @@ export async function* streamResponses(
       for (const event of held) {
         if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
       }
+      if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
       try {
         await waitUnlessAborted(backoffDelayMs(streamAttempt, random), params.signal, endpoint.sleep);
       } catch {
