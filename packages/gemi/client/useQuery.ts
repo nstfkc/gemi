@@ -455,10 +455,14 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // (the store logs the late-discovery hint when that cost something).
   let readPromise: Promise<void> | undefined;
   let serverError: unknown;
+  // No store on this server render, or one that does not serve this query
+  // (an island's, for a query the request did not prefetch).
+  let unserved = !serverQueries;
   if (suspense && !state?.hasData && !state?.error) {
     if (typeof window === "undefined") {
-      if (serverQueries) {
-        const entry = serverQueries.ensure(url, { params, search });
+      const entry = serverQueries?.ensure(url, { params, search }) ?? null;
+      unserved = !entry;
+      if (entry) {
         if (entry.status === "resolved") {
           state = {
             loading: false,
@@ -481,7 +485,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   if (
     suspense &&
     typeof window === "undefined" &&
-    !serverQueries &&
+    unserved &&
     !state?.hasData &&
     process.env.NODE_ENV !== "production"
   ) {

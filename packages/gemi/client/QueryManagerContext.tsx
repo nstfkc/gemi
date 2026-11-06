@@ -1,7 +1,7 @@
 import {
   createContext,
   type PropsWithChildren,
-  useCallback,
+  type ReactElement,
   useMemo,
   useRef,
 } from "react";
@@ -150,12 +150,86 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
   clearErrors: () => {},
 });
 
+/**
+ * A query cache: resources by path, created on first read and kept for the
+ * cache's lifetime. The provider below holds one per app; the islands of a
+ * static page share another (`ISLAND_QUERIES_KEY`).
+ */
+function createQueryManager(): QueryManagerContextValue {
+  const resources = new Map<string, QueryResource>();
+  return {
+    getResource(key, initialState) {
+      let resource = resources.get(key);
+      if (!resource) {
+        resource = new QueryResource(key, initialState ?? {});
+        resources.set(key, resource);
+      }
+      return resource;
+    },
+    // Resources are cached by path for the lifetime of the app, so
+    // `initialState` above only ever applies to the first load. Every
+    // navigation ships a fresh `prefetchedData` payload that has to be pushed
+    // into the existing resources, otherwise the components mounting on the
+    // new surface refetch it over `/api`.
+    hydrate(prefetchedData) {
+      if (!prefetchedData) return;
+      for (const [key, initialState] of Object.entries(prefetchedData)) {
+        if (!initialState || typeof initialState !== "object") continue;
+        const resource = resources.get(key);
+        if (resource) {
+          resource.hydrate(initialState);
+        } else {
+          resources.set(key, new QueryResource(key, initialState));
+        }
+      }
+    },
+    // Used by the route-level error boundary's reset: without this, the
+    // retried render would read the stored failure back out of the cache and
+    // re-throw.
+    clearErrors() {
+      for (const resource of resources.values()) {
+        resource.clearError();
+      }
+    },
+  };
+}
+
+/** The key the island runtime (`h`) finds the islands' query cache under. */
+export const ISLAND_QUERIES_KEY = "gemi.islandQueries";
+
+/**
+ * The query cache the islands of a static page share (#1155), on
+ * `globalThis` for the island runtime, which has no imports of gemi's: it
+ * wraps each island in `Provider`, and before hydrating one `seed`s the cache
+ * with the document's `gemi-island-queries` block, so `useQuery` hydrates
+ * with the data the server rendered and fetches nothing. Without it an
+ * island's `useQuery` had no cache at all (a new resource per render).
+ * Registered when `gemi/client` loads, so an island that never imports it
+ * (and so reads no query) is left as it was.
+ */
+export interface IslandQueries {
+  seed: (prefetchedData: PrefetchedData) => void;
+  Provider: (props: PropsWithChildren) => ReactElement;
+}
+
+if (typeof window !== "undefined") {
+  const registry = globalThis as Record<symbol, unknown>;
+  if (!registry[Symbol.for(ISLAND_QUERIES_KEY)]) {
+    const manager = createQueryManager();
+    const islandQueries: IslandQueries = {
+      seed: manager.hydrate,
+      Provider: ({ children }) => (
+        <QueryManagerContext.Provider value={manager}>{children}</QueryManagerContext.Provider>
+      ),
+    };
+    registry[Symbol.for(ISLAND_QUERIES_KEY)] = islandQueries;
+  }
+}
+
 export const QueryManagerProvider = ({
   children,
   queryConfig = null,
 }: PropsWithChildren<{ queryConfig?: QueryConfig | null }>) => {
-  const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
-
   // Sanitized once at the choke point every query reads through, so the
   // "only app-wide keys" contract holds at runtime, not just in the types.
   const appQueryConfig = useMemo(
@@ -163,42 +237,10 @@ export const QueryManagerProvider = ({
     [queryConfig],
   );
 
-  const getResource = useCallback(
-    (key: string, initialState?: Record<string, any>) => {
-      let resource = resourcesRef.current.get(key);
-      if (!resource) {
-        resource = new QueryResource(key, initialState ?? {});
-        resourcesRef.current.set(key, resource);
-      }
-      return resource;
-    },
-    [],
-  );
-
-  // Resources are cached by path for the lifetime of the app, so `initialState`
-  // above only ever applies to the first load. Every navigation ships a fresh
-  // `prefetchedData` payload that has to be pushed into the existing resources,
-  // otherwise the components mounting on the new surface refetch it over `/api`.
-  const hydrate = useCallback((prefetchedData?: PrefetchedData | null) => {
-    if (!prefetchedData) return;
-    for (const [key, initialState] of Object.entries(prefetchedData)) {
-      if (!initialState || typeof initialState !== "object") continue;
-      const resource = resourcesRef.current.get(key);
-      if (resource) {
-        resource.hydrate(initialState);
-      } else {
-        resourcesRef.current.set(key, new QueryResource(key, initialState));
-      }
-    }
-  }, []);
-
-  // Used by the route-level error boundary's reset: without this, the retried
-  // render would read the stored failure back out of the cache and re-throw.
-  const clearErrors = useCallback(() => {
-    for (const resource of resourcesRef.current.values()) {
-      resource.clearError();
-    }
-  }, []);
+  const managerRef = useRef<QueryManagerContextValue | null>(null);
+  managerRef.current ??= createQueryManager();
+  const value = managerRef.current;
+  const { hydrate } = value;
 
   // Streaming SSR delivers late-resolving queries as inline
   // `__GEMI_STREAM__.push([path, variant, data])` scripts interleaved with
@@ -230,11 +272,6 @@ export const QueryManagerProvider = ({
       adopt(payload);
     }
   }
-
-  const value = useMemo(
-    () => ({ getResource, hydrate, clearErrors }),
-    [getResource, hydrate, clearErrors],
-  );
 
   return (
     <QueryManagerContext.Provider value={value}>

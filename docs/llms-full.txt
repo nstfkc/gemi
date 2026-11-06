@@ -5301,6 +5301,10 @@ A hydrated view (not `.static()`) always sets `session_id` and `csrf_token`, so
 `s-maxage` dropped (see [`cache`](./middleware.md#cache--cachemiddleware)).
 Static views are the pages a shared cache can store.
 
+The data of the queries islands read is part of the page too (see
+[Data the handler prefetched](#data-the-handler-prefetched)). A page whose
+islands read a query that differs per visitor must not be cached publicly.
+
 Two options bring a hydrated view's cookies back, for pages that are not meant
 to be cached:
 
@@ -5412,9 +5416,9 @@ target them with a descendant selector or style them directly.
 ### Context
 
 On a static page each island is its **own React root**. Context from the page
-(a theme, gemi's router and query providers, your own) doesn't reach the
-island's component, on the server or in the browser (its `children` do, see
-above), so pass what it needs as props: data, URLs. An island that needs a
+(a theme, gemi's router provider, your own) doesn't reach the island's
+component, on the server or in the browser (its `children` do, see above), so
+pass what it needs as props: data, URLs. An island that needs a
 provider of its own renders it itself; make a small component that wraps the
 real one in its providers and declare that as the island. In a hydrated view
 the island is an ordinary component and sees the page's context as usual.
@@ -5463,6 +5467,57 @@ export default function VatLines() {
 
 An island rendered inside another island's own render is just a component of
 that root.
+
+### Data the handler prefetched
+
+An island's `useQuery` reads the queries the view handler prefetched with
+[`Query.prefetch` or `Query.instant`](./data-fetching.md). The island renders
+the data on the server, the document carries it, and the island hydrates with
+it, with **no request** for it:
+
+```tsx
+// app/http/routes/web.ts
+"/blog": this.view("site/Blog", () => {
+  Query.prefetch("/posts", { search: { limit: 5 } });
+  return {};
+}).static({ layout: "site/SiteLayout" }),
+
+// app/views/site/components/LatestPosts.tsx: an island
+import { useQuery } from "gemi/client";
+
+export default function LatestPosts() {
+  const { data } = useQuery("/posts", { search: { limit: 5 } });
+  return data.map((post) => <PostCard key={post.id} post={post} />);
+}
+```
+
+- The island joins the handler's request for the query, finished or still in
+  flight. It never starts one of its own on the server.
+- Only the prefetched queries an island read during the server render go in
+  the document, next to the island table:
+  `<script type="application/json" id="gemi-island-queries">{"/posts":{"limit=5":[…]}}</script>`.
+  It is keyed by path and search, as a hydrated view's payload is. A query
+  the handler prefetched but no island read is not in it, and a page whose
+  islands read no prefetched query (or a page without islands) gets no such
+  block.
+- In the browser the islands of a page share one query cache, seeded from that
+  block before they hydrate. After hydration the usual rules apply:
+  `staleTime`, `refetch`, `mutate` and invalidations by `useMutation` within
+  the islands.
+- A query the handler did not prefetch (another path, or the same path with
+  other `search` or `params`) is not fetched on the server: the island
+  renders it without data and fetches it after hydration, and in development
+  gemi logs a hint to prefetch it. With `suspense` (the default) that makes
+  React re-render the island in the browser; prefetch the query, or read it
+  with `suspense: false` to render a loading state on both sides.
+- A prefetch that failed is not shipped; the island fetches the query in the
+  browser and handles the error there.
+- `useParams` inside an island does not see the page's route params; pass
+  `params` to `useQuery` explicitly.
+- The data is in the page source, like the island's props. A static page is
+  one body for every visitor: when a prefetched query depends on the visitor
+  (a cart, a signed-in user), don't let a shared cache store the page (no
+  public `cacheControl`, see [Cookies and caching](#cookies-and-caching)).
 
 ### Options
 

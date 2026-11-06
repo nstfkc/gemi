@@ -54,6 +54,13 @@ export { h } from ${JSON.stringify(ISLAND_RUNTIME_ID)};
  * strings the server rendered, and fetches nothing. An island that does not
  * import `gemi/client` has no such context to read, and is left as it was.
  *
+ * The island's root reads queries through the cache the page's islands
+ * share (found on `globalThis` under `gemi.islandQueries`, where `gemi/client`
+ * puts it, #1155). When the page carries `#gemi-island-queries` (its islands
+ * read queries the request prefetched), that `{ path: { variantKey: data } }`
+ * payload seeds the cache first, so `useQuery` hydrates with the server's
+ * data and does not refetch it.
+ *
  * Written as a function body with `createElement` and `hydrateRoot` free, so a
  * test can run it against real React without a bundler.
  */
@@ -87,6 +94,12 @@ export const ISLAND_HYDRATE_SOURCE = `function h(marker, Component) {
     element = createElement(context.Provider, {
       value: { currentLocale: payload.currentLocale, defaultLocale: payload.defaultLocale, timeZone: payload.timeZone },
     }, element);
+  }
+  const cache = globalThis[Symbol.for("gemi.islandQueries")];
+  if (cache) {
+    const queries = document.getElementById("gemi-island-queries");
+    if (queries) cache.seed((queries.p = queries.p || JSON.parse(queries.textContent)));
+    element = createElement(cache.Provider, null, element);
   }
   return hydrateRoot(marker, element, {
     identifierPrefix: marker.getAttribute("data-uid") || undefined,

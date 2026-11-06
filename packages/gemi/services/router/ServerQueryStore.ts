@@ -219,6 +219,33 @@ export class ServerQueryStore {
     );
   }
 
+  /** Path, variant and map key of a query, normalised as `ensure` stores it. */
+  private locate(patternPath: string, options: ServerQueryOptions) {
+    const params = options.params ?? {};
+    const searchParams = new URLSearchParams(
+      omitNullishValues((options.search ?? {}) as Record<string, string>),
+    );
+    searchParams.delete("json");
+    searchParams.sort();
+    const path = applyParams(patternPath, params);
+    const variantKey = searchParams.toString();
+    return { params, searchParams, path, variantKey, key: this.keyFor(path, variantKey) };
+  }
+
+  /**
+   * The entry `ensure` would join for this query, without starting one when
+   * there is none. What an island on a static page reads through (#1155): it
+   * gets what the request already started, never a fetch of its own.
+   */
+  find(patternPath: string, options: ServerQueryOptions = {}): ServerQueryEntry | undefined {
+    return this.entries.get(this.locate(patternPath, options).key);
+  }
+
+  /** Every entry of one concrete path (`/posts/1`), whatever its variant. */
+  entriesFor(path: string): ServerQueryEntry[] {
+    return Array.from(this.entries.values()).filter((entry) => entry.path === path);
+  }
+
   read(path: string, variantKey: string): ServerQueryEntry | undefined {
     return this.entries.get(this.keyFor(path, variantKey));
   }
@@ -234,16 +261,7 @@ export class ServerQueryStore {
     options: ServerQueryOptions = {},
     source: ServerQuerySource = "render",
   ): ServerQueryEntry {
-    const params = options.params ?? {};
-    const searchParams = new URLSearchParams(
-      omitNullishValues((options.search ?? {}) as Record<string, string>),
-    );
-    searchParams.delete("json");
-    searchParams.sort();
-
-    const path = applyParams(patternPath, params);
-    const variantKey = searchParams.toString();
-    const key = this.keyFor(path, variantKey);
+    const { params, searchParams, path, variantKey, key } = this.locate(patternPath, options);
 
     const existing = this.entries.get(key);
     if (existing) return existing;

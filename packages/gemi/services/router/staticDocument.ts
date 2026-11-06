@@ -4,6 +4,7 @@ import {
   ISLAND_SLOT_TAG,
   ISLAND_SLOT_TEMPLATE_ATTRIBUTE,
   islandI18nPayload,
+  islandQueriesPayload,
   type StaticRenderCollector,
 } from "../../client/islands";
 import { htmlSafeJson } from "./streamQueryInjection";
@@ -33,6 +34,13 @@ export const ISLAND_DATA_ID = "gemi-islands";
  * islands read any of it. Its id is also in `ISLAND_HYDRATE_SOURCE`.
  */
 export const ISLAND_I18N_DATA_ID = "gemi-island-i18n";
+
+/**
+ * The id of the JSON block with the prefetched queries the page's islands
+ * read on the server (#1155), as `{ path: { variantKey: data } }`. Only on a
+ * page whose islands read one. Its id is also in `ISLAND_HYDRATE_SOURCE`.
+ */
+export const ISLAND_QUERIES_DATA_ID = "gemi-island-queries";
 
 /**
  * `'sha256-…'` for the production island loader, ready to put in a
@@ -115,6 +123,8 @@ export interface DocumentScript {
  * When islands read the page's i18n (`useDictionary`, `useFormatter`), the
  * locale, zone and the dictionaries they read go next to the table, so they
  * hydrate with the strings they rendered without fetching them (#1095).
+ * Likewise the prefetched queries islands read (#1155): their data goes in
+ * its own block, so their `useQuery` hydrates without refetching.
  *
  * A `script` (`.static({ script })`) is inlined at the end of the head as a
  * module script, whatever else the page has. The navigation runtime leaves
@@ -173,12 +183,16 @@ export function injectIslands(
     documentScript;
   const source = navigation ? STATIC_NAVIGATION_SOURCE : ISLAND_LOADER_SOURCE;
   const i18n = hasIslands ? islandI18nPayload(collector) : undefined;
+  const queries = hasIslands ? islandQueriesPayload(collector) : undefined;
   const body =
     (hasIslands
       ? `<script type="application/json" id="${ISLAND_DATA_ID}">${htmlSafeJson({ i: entries })}</script>`
       : "") +
     (i18n
       ? `<script type="application/json" id="${ISLAND_I18N_DATA_ID}">${htmlSafeJson(i18n)}</script>`
+      : "") +
+    (queries
+      ? `<script type="application/json" id="${ISLAND_QUERIES_DATA_ID}">${htmlSafeJson(queries)}</script>`
       : "") +
     `<script type="module">${dev ? DEV_PREAMBLE + source : source}</script>`;
 
