@@ -161,6 +161,26 @@ public data class ChatState(
         }
       }
 
+      // Partial calls of a model call the provider is asking again (gemi
+      // #1169). Only partials go: a completed call is never discarded.
+      "tool-call-discard" -> {
+        val ids = event["toolCallIds"].array().orEmpty()
+        withMessage(event.string("messageId") ?: "", now) { message ->
+          message.with(
+            "content",
+            JsonArray(
+              message.content().filterNot {
+                val part = it.obj()
+                part != null &&
+                  part.string("type") == "tool-call" &&
+                  part["partial"].bool() == true &&
+                  ids.any { id -> id == part["toolCallId"] }
+              },
+            ),
+          )
+        }
+      }
+
       // A set: union is the only accumulation that survives redelivery with
       // nothing to key it on.
       "tool-search" -> {
