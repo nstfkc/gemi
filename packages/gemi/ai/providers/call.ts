@@ -1,6 +1,6 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
-import { httpErrorDetail, normalizeProviderError } from "./errors";
+import { httpErrorDetail, normalizeProviderError, ProviderStreamIdleError } from "./errors";
 import {
   MAX_FILE_REJECTION_RETRIES,
   rejectedFileIds,
@@ -11,6 +11,7 @@ import { addUsage, isContentEvent } from "../runtime";
 import type { AgentError, Usage } from "../types";
 import {
   backoffDelayMs,
+  idleTimeoutBody,
   requestWithRetry,
   waitUnlessAborted,
   type FetchLike,
@@ -35,6 +36,8 @@ export type ResponsesEndpoint = {
    *  to be read per request rather than per provider. */
   headers: () => Promise<Record<string, string>>;
   timeoutMs: number;
+  /** See `ProviderConfig.streamIdleTimeoutMs`. Absent or `0` is off. */
+  streamIdleTimeoutMs?: number;
   maxRetries: number;
   fetchImpl?: FetchLike;
   /** Injected by the tests, with `random`, so a backoff can be asserted on
@@ -59,6 +62,7 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
     filesUrl: `${target.base}/files${target.query}`,
     headers: target.headers,
     timeoutMs: target.timeoutMs,
+    streamIdleTimeoutMs: target.streamIdleTimeoutMs,
     maxRetries: target.maxRetries,
   };
 }
@@ -85,6 +89,13 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * endpoint's `maxRetries` and the same backoff as the request retry, and an
  * abort during the wait ends the call at once. The usage a dropped attempt
  * reported is added to the call's closing `finish`, because it was billed.
+ *
+ * A STREAM THAT GOES SILENT IS CUT (#1167). With `streamIdleTimeoutMs` set, a
+ * body that sends nothing for that long errors with a `ProviderStreamIdleError`
+ * and the attempt's request is aborted, which releases the socket. From there it
+ * is a broken stream like any other: retryable, so asked again before the first
+ * content event, and the call's error after it (nothing is repeated). The
+ * caller's signal still wins: an abort while waiting ends the call as aborted.
  */
 export async function* streamResponses(
   endpoint: ResponsesEndpoint,
@@ -113,7 +124,13 @@ export async function* streamResponses(
   };
   const aborted = (): ProviderEvent => closing({ type: "finish", reason: "aborted", usage: emptyUsage() });
 
+  const idleMs = endpoint.streamIdleTimeoutMs ?? 0;
+
   for (let streamAttempt = 0; ; streamAttempt++) {
+    // Per attempt, so an idle timeout can abort this attempt's request (and
+    // release its socket) without touching the caller's signal.
+    const attempt = new AbortController();
+    const signal = params.signal ? AbortSignal.any([params.signal, attempt.signal]) : attempt.signal;
     let response: Response | undefined;
     while (response === undefined) {
       try {
@@ -127,7 +144,7 @@ export async function* streamResponses(
           {
             maxRetries: endpoint.maxRetries,
             timeoutMs: endpoint.timeoutMs,
-            signal: params.signal,
+            signal,
             fetchImpl: endpoint.fetchImpl,
             sleep: endpoint.sleep,
             random: endpoint.random,
@@ -169,7 +186,12 @@ export async function* streamResponses(
     let committed = false;
     let failure: AgentError | undefined;
     try {
-      for await (const event of parseResponsesStream(decodeChunks(response.body), {
+      const body = idleTimeoutBody(response.body, idleMs, () => {
+        const error = new ProviderStreamIdleError(idleMs);
+        attempt.abort(error);
+        return error;
+      });
+      for await (const event of parseResponsesStream(decodeChunks(body), {
         structuredOutput: params.structuredOutput,
       })) {
         if (committed) {

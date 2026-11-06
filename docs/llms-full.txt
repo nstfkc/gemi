@@ -8349,6 +8349,19 @@ A call that fails before the vendor starts answering (a network error, a timeout
 
 A stream that breaks before its first content event is retried the same way: the socket closes while the body is read, the stream ends without a terminal event, or the vendor sends a retryable `response.failed` / `error` event (a server error or a rate limit). These retries also use `maxRetries` and the same backoff. Once a content event (text, reasoning, output or a tool call) has been yielded, the call is never retried. A later failure ends it with an error, because the user has already seen part of the answer. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
 
+### Timeouts
+
+Two limits bound a call, both set on the provider config:
+
+- **`timeoutMs`** (default 120 000) covers getting the response headers. It stops once the headers arrive.
+- **`streamIdleTimeoutMs`** (default 120 000) covers the stream after that: the longest the vendor may send nothing, not even a keepalive. Every chunk resets it, so a long answer that keeps streaming is never cut. When it runs out, the attempt's request is aborted (the connection is released) and the stream fails with a retryable `provider_error` whose message names `streamIdleTimeoutMs`. From there it is handled like any other broken stream: before the first content event it is retried under `maxRetries`, and after it the call ends with that error, without repeating anything the user has seen. `0` turns it off.
+
+```typescript
+const azure = AzureOpenAIProvider.model("gpt-5.4", { streamIdleTimeoutMs: 45_000 });
+```
+
+The default is long on purpose: a reasoning model at a high effort can think for a long while between two events, and a limit that cuts it off retries (and bills) the same request again. With a low reasoning effort, where events arrive every few seconds, a lower value notices a stalled stream sooner. Aborting the call's signal still ends it at once, as `finish` reason `"aborted"`.
+
 ## Fallback chains
 
 `FallbackProvider.chain` wraps an ordered list of providers: the primary first, then the fallbacks. The chain is itself a provider, so you pass it to `Agent.create` like any other provider.
@@ -8380,7 +8393,7 @@ How a call moves through the chain:
 
 - **When it falls back.** A leg that fails before producing output is abandoned and the next leg gets the same request. By default the chain falls back when `error.retryable` is true: a 429 that isn't a spent quota, a 5xx, a 408/409, a timeout or a network failure. Errors that would repeat on any model don't fall back, such as context length or a refused tool schema. `fallbackOn(error, failure)` replaces the default rule. `failure` carries `index`, `model`, `status` and `requestId` (when the failure was an HTTP response) and `timedOut`.
 - **No fallback once output has streamed.** Once a leg sends its first text, reasoning, tool-call or structured-output delta, the consumer has it. Any error after that is final and is reported as the call's error. Starting over on another model would put two answers in one message.
-- **`timeoutMs` covers the first event only.** A leg that sends nothing within `timeoutMs` is aborted, and its failure is retryable. After the first event, the leg's own request timeout applies.
+- **`timeoutMs` covers the first event only.** A leg that sends nothing within `timeoutMs` is aborted, and its failure is retryable. After the first event, the leg's own `streamIdleTimeoutMs` applies.
 - **`reasoning` per leg.** An entry's `reasoning` overrides the agent's `reasoning` for that leg only.
 - **Usage per leg.** `onUsage` is called once for each leg that was tried. The report has its `index`, `model` (the leg's configured model), `responseModel` (the model the vendor says answered, such as the dated snapshot behind `gpt-5.4` or the model behind an Azure deployment name; absent when the leg never got a response), `attempt` (1 for the first leg tried in this call), `usage` (when the leg reported any), `outcome` (`ok`, `fallback`, `failed` or `aborted`) and `error`. Tokens billed by abandoned legs are added to the call's closing usage, so the run's usage is what the call actually cost. If `onUsage` throws, the error is ignored.
 - **Which model answered.** The call's closing `finish` event carries `model`, the answering leg's `responseModel`, so code reading the provider stream directly sees it without `onUsage`. The built-in OpenAI and Azure providers set `finish.model` on every call, chain or not.

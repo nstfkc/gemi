@@ -1,3 +1,14 @@
+# Unreleased
+
+## ai: a streamed answer that goes silent is cut at `streamIdleTimeoutMs` (#1167)
+
+**Behaviour change (minor).** See [AI Providers → Timeouts](docs/ai-providers.md#timeouts).
+
+- `OpenAIProvider` and `AzureOpenAIProvider` take `streamIdleTimeoutMs` (default 120 000): the longest a stream may send nothing, keepalives included, after its response started. Before, `timeoutMs` stopped at the response headers and nothing bounded the stream, so a stalled step waited for the run's `maxRunDurationMs`.
+- Past the limit, the attempt's request is aborted and the stream fails with a retryable `provider_error`. Before the first content event it is retried under `maxRetries`; after it, the call ends with that error and nothing is repeated. In a `FallbackProvider` chain, a leg that stalls before output falls back as a timeout does.
+- The caller's signal still wins: an abort ends the call as `aborted`, not as a timeout.
+- To keep the old behaviour, set `streamIdleTimeoutMs: 0` on the provider config. An app on a low reasoning effort can set it lower to notice a stall sooner.
+
 # Upgrading from 0.187.0 to 0.188.0
 
 ## storage: `Storage.fetch()` without a signal has default limits (#1164)

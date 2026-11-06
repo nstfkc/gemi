@@ -41,6 +41,20 @@ export class ProviderTimeoutError extends Error {
   }
 }
 
+/**
+ * A streamed answer that started and then sent nothing, not even a keepalive,
+ * for `streamIdleTimeoutMs` (#1167). A `ProviderTimeoutError`, so it reads the
+ * same everywhere: retryable `provider_error`, never an abort. The attempt was
+ * aborted, so its connection is released.
+ */
+export class ProviderStreamIdleError extends ProviderTimeoutError {
+  constructor(timeoutMs: number) {
+    super(timeoutMs);
+    this.name = "ProviderStreamIdleError";
+    this.message = `Provider stream sent nothing for ${timeoutMs}ms (streamIdleTimeoutMs)`;
+  }
+}
+
 function describeBody(body: unknown): string {
   const detail = errorBody(body);
   if (detail?.message) return detail.message;
