@@ -218,6 +218,26 @@ describe("Storage.fetch() default limits on any driver", () => {
     expect(cancel).toHaveBeenCalledWith(expect.any(StorageFetchTimeoutError));
   });
 
+  test("the body errors with the timeout even when the driver's own abort error lands first", async () => {
+    class OwnAbortError extends FileStorageDriver {
+      fetch = async (_params: unknown, options: { signal?: AbortSignal } = {}) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              options.signal?.addEventListener("abort", () => controller.error(new Error("sdk aborted")));
+            },
+          }),
+        );
+      put = async () => "";
+      list = async () => [];
+    }
+    useDriver(new OwnAbortError());
+
+    const res = await Storage.fetch("a.bin");
+
+    await expect(res.text()).rejects.toBeInstanceOf(StorageFetchTimeoutError);
+  });
+
   test("a slow consumer is not cut: the idle clock only runs while a read waits", async () => {
     class Instant extends FileStorageDriver {
       fetch = async () => new Response("abc");

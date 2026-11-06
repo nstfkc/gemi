@@ -127,8 +127,12 @@ function idleTimeoutBody(
     {
       async pull(controller) {
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let timedOut: Error | undefined;
         const idle = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(onIdle()), ms);
+          timer = setTimeout(() => {
+            timedOut = onIdle();
+            reject(timedOut);
+          }, ms);
         });
         try {
           const chunk = await Promise.race([reader.read(), idle]);
@@ -138,8 +142,11 @@ function idleTimeoutBody(
             controller.enqueue(chunk.value);
           }
         } catch (error) {
-          controller.error(error);
-          reader.cancel(error).catch(() => {});
+          // The abort in `onIdle` can error the source first, with whatever
+          // the driver or SDK throws on abort; the timeout is the real cause.
+          const reason = timedOut ?? error;
+          controller.error(reason);
+          reader.cancel(reason).catch(() => {});
         } finally {
           clearTimeout(timer);
         }
