@@ -1,3 +1,15 @@
+# Unreleased
+
+## ai: a stream that keeps trickling is cut at `streamMaxDurationMs`, and a runaway tool call is asked again (#1169)
+
+**Behaviour change (minor).** See [AI Providers → Timeouts](docs/ai-providers.md#timeouts) and [Retries](docs/ai-providers.md#retries).
+
+- `OpenAIProvider` and `AzureOpenAIProvider` take `streamMaxDurationMs` (default 300 000): a wall clock for each attempt's stream, from the response headers on, that no chunk resets. Before, a stream that never went silent (one tool call whose arguments kept streaming for minutes) was bounded only by the run's `maxRunDurationMs`. Past the limit the attempt is aborted with a retryable `provider_error`. `0` turns it off.
+- They also take `maxToolArgumentChars` (default `0`, off): the most argument text one tool call may stream without finishing. Past it the attempt is cut the same way.
+- An attempt that breaks (by these limits, `streamIdleTimeoutMs`, a dropped socket or a retryable `response.failed`) while it has sent only the arguments of unfinished tool calls is now retried under `maxRetries`, instead of ending the step with an error. Before the retry the provider stream yields a new `ProviderEvent`, `{ type: "tool-call-discard", toolCallIds }`. The agent forgets those calls (they no longer end up as calls with an `invalid_tool_input` result) and emits a new `AgentStreamEvent`, `{ type: "tool-call-discard", messageId, toolCallIds }`, which the client reducer applies by removing those partial tool-call parts. Text, reasoning, output or a completed tool call still commits the attempt, as before.
+- **Custom clients** that reduce the stream themselves should handle `tool-call-discard` by removing the named `partial` tool-call parts. One that ignores it shows the stale partial until the thread is reloaded (the stored message does not have it). **Code that wraps or reads a provider stream** may now see `tool-call-discard`; a custom `AgentProvider` need not send it.
+- To keep the old behaviour, set `streamMaxDurationMs: 0`. The retry after tool-call deltas has no switch of its own; `maxRetries: 0` turns off every stream retry.
+
 # Upgrading from 0.188.0 to 0.189.0
 
 ## ai: a streamed answer that goes silent is cut at `streamIdleTimeoutMs` (#1167)

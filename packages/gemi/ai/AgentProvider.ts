@@ -125,6 +125,17 @@ export type ProviderEvent =
    */
   | { type: "tool-call"; toolCallId: string; name: string; args: string; namespace?: string }
   /**
+   * The provider is asking the model again, and the calls named here, which
+   * only ever streamed `tool-call-delta` and never completed, are void (#1169).
+   * A stream that broke (or was cut as a runaway) before anything but argument
+   * deltas had been sent is retried like one that broke before its first
+   * content event, and this is how the deltas already passed on are taken
+   * back: `Agent` forgets the calls and tells the client to drop them, so the
+   * retried answer does not sit beside a half-written call that will never
+   * run. A provider that never retries after a delta need not send this.
+   */
+  | { type: "tool-call-discard"; toolCallIds: string[] }
+  /**
    * The model went looking for a deferred tool and pulled its schema in. Worth
    * surfacing rather than swallowing: it is a step the user paid for, and the
    * pause before it is otherwise unexplained.

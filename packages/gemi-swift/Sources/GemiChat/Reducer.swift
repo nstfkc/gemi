@@ -177,6 +177,18 @@ extension ChatState {
         message["content"] = .array(content)
       }
 
+    case "tool-call-discard":
+      // Partial calls of a model call the provider is asking again (gemi
+      // #1169). Only partials go: a completed call is never discarded.
+      let ids = event["toolCallIds"]?.arrayValue ?? []
+      withMessage(event.string("messageId") ?? "", now: now) { message in
+        message["content"] = .array(
+          message.content.filter {
+            !($0.string("type") == "tool-call" && $0["partial"]?.boolValue == true
+              && ids.contains($0["toolCallId"] ?? .null))
+          })
+      }
+
     case "tool-search":
       // A set: union is the only accumulation that survives redelivery with
       // nothing to key it on.

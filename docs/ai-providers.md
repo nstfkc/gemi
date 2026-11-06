@@ -21,20 +21,30 @@ export const support = Agent.create({ name: "support", instructions: "Be brief."
 
 A call that fails before the vendor starts answering (a network error, a timeout, a 429 that isn't a spent quota, a 408, 409 or 5xx) is sent again up to `maxRetries` times (default 2), with exponential backoff and jitter starting at 0.5 s. A `Retry-After` header is honoured, capped at 20 s.
 
-A stream that breaks before its first content event is retried the same way: the socket closes while the body is read, the stream ends without a terminal event, or the vendor sends a retryable `response.failed` / `error` event (a server error or a rate limit). These retries also use `maxRetries` and the same backoff. Once a content event (text, reasoning, output or a tool call) has been yielded, the call is never retried. A later failure ends it with an error, because the user has already seen part of the answer. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
+A stream that breaks before its first content event is retried the same way: the socket closes while the body is read, the stream ends without a terminal event, or the vendor sends a retryable `response.failed` / `error` event (a server error or a rate limit). These retries also use `maxRetries` and the same backoff. Once a content event (text, reasoning, output or a completed tool call) has been yielded, the call is never retried. A later failure ends it with an error, because the user has already seen part of the answer.
+
+A stream that breaks while it has sent only the arguments of tool calls that never completed is retried too. Those calls never ran, so nothing the model said has been acted on. Their argument deltas were passed on as they arrived (a UI can show a call filling in), so before the retry the provider sends a `tool-call-discard` event naming them. The agent forgets those calls, the stream carries a `tool-call-discard` frame, and `useChat`'s reducer removes their partial parts from the message. The retried answer's calls arrive under new ids. Once the retries are spent, the partial calls stay and the call ends with the error, as before. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
 
 ### Timeouts
 
-Two limits bound a call, both set on the provider config:
+These limits bound a call. All of them are set on the provider config:
 
 - **`timeoutMs`** (default 120 000) covers getting the response headers. It stops once the headers arrive.
 - **`streamIdleTimeoutMs`** (default 120 000) covers the stream after that: the longest the vendor may send nothing, not even a keepalive. Every chunk resets it, so a long answer that keeps streaming is never cut. When it runs out, the attempt's request is aborted (the connection is released) and the stream fails with a retryable `provider_error` whose message names `streamIdleTimeoutMs`. From there it is handled like any other broken stream: before the first content event it is retried under `maxRetries`, and after it the call ends with that error, without repeating anything the user has seen. `0` turns it off.
+- **`streamMaxDurationMs`** (default 300 000) is a wall clock for each attempt's stream, from the response headers to its last event. No chunk resets it, so it also catches a stream that never goes silent, such as a model that keeps streaming the arguments of one tool call for minutes without finishing it. When it runs out, the attempt is aborted and fails with a retryable `provider_error` whose message names `streamMaxDurationMs`, and it is handled like the idle limit. `0` turns it off.
+- **`maxToolArgumentChars`** (default `0`, off) is the most argument text one tool call may stream without finishing. Past it the attempt is cut the same way, with a message that names the tool. It is off by default because how large a legitimate call gets depends on your tools. If they normally take a few hundred characters, a call that streams tens of thousands is a runaway, and a cap well above your largest legitimate call catches it in seconds instead of minutes.
 
 ```typescript
-const azure = AzureOpenAIProvider.model("gpt-5.4", { streamIdleTimeoutMs: 45_000 });
+const azure = AzureOpenAIProvider.model("gpt-5.4", {
+  streamIdleTimeoutMs: 45_000,
+  streamMaxDurationMs: 90_000,
+  maxToolArgumentChars: 20_000,
+});
 ```
 
-The default is long on purpose: a reasoning model at a high effort can think for a long while between two events, and a limit that cuts it off retries (and bills) the same request again. With a low reasoning effort, where events arrive every few seconds, a lower value notices a stalled stream sooner. Aborting the call's signal still ends it at once, as `finish` reason `"aborted"`.
+The defaults are long on purpose. A reasoning model at a high effort can think for a long while between two events, and a long answer or a large tool call can stream for minutes. A limit that cuts a legitimate call retries (and bills) the same request, which is then cut again, so too short a limit turns a call that used to work into one that always fails. 300 s leaves room for that and is half the agent's default `maxRunDurationMs`, so a run that hits a runaway still has time to ask again. With a low reasoning effort and small tools, where a whole call takes seconds, lower values notice a stall or a runaway much sooner. Aborting the call's signal still ends it at once, as `finish` reason `"aborted"`.
+
+`streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 
 ## Fallback chains
 
@@ -67,7 +77,7 @@ How a call moves through the chain:
 
 - **When it falls back.** A leg that fails before producing output is abandoned and the next leg gets the same request. By default the chain falls back when `error.retryable` is true: a 429 that isn't a spent quota, a 5xx, a 408/409, a timeout or a network failure. Errors that would repeat on any model don't fall back, such as context length or a refused tool schema. `fallbackOn(error, failure)` replaces the default rule. `failure` carries `index`, `model`, `status` and `requestId` (when the failure was an HTTP response) and `timedOut`.
 - **No fallback once output has streamed.** Once a leg sends its first text, reasoning, tool-call or structured-output delta, the consumer has it. Any error after that is final and is reported as the call's error. Starting over on another model would put two answers in one message.
-- **`timeoutMs` covers the first event only.** A leg that sends nothing within `timeoutMs` is aborted, and its failure is retryable. After the first event, the leg's own `streamIdleTimeoutMs` applies.
+- **`timeoutMs` covers the first event only.** A leg that sends nothing within `timeoutMs` is aborted, and its failure is retryable. After the first event, the leg's own `streamIdleTimeoutMs` and `streamMaxDurationMs` apply.
 - **`reasoning` per leg.** An entry's `reasoning` overrides the agent's `reasoning` for that leg only.
 - **Usage per leg.** `onUsage` is called once for each leg that was tried. The report has its `index`, `model` (the leg's configured model), `responseModel` (the model the vendor says answered, such as the dated snapshot behind `gpt-5.4` or the model behind an Azure deployment name; absent when the leg never got a response), `attempt` (1 for the first leg tried in this call), `usage` (when the leg reported any), `outcome` (`ok`, `fallback`, `failed` or `aborted`) and `error`. Tokens billed by abandoned legs are added to the call's closing usage, so the run's usage is what the call actually cost. If `onUsage` throws, the error is ignored.
 - **Which model answered.** The call's closing `finish` event carries `model`, the answering leg's `responseModel`, so code reading the provider stream directly sees it without `onUsage`. The built-in OpenAI and Azure providers set `finish.model` on every call, chain or not.
