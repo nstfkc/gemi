@@ -165,7 +165,8 @@ export async function waitUnlessAborted(
  * legitimately takes minutes, and a timeout that kept running would cut off
  * long completions at exactly the point where they were most expensive to
  * abandon — so the timer is cleared once the headers land, and only the
- * caller's own signal can end the body.
+ * caller's own signal or the stream idle limit (`idleTimeoutBody`, #1167)
+ * can end the body.
  */
 export async function requestWithRetry(
   url: string,
@@ -270,4 +271,59 @@ async function readErrorBody(response: Response): Promise<unknown> {
   } catch {
     return text;
   }
+}
+
+/**
+ * `body`, errored with `onIdle()`'s error when a read waits longer than `ms`
+ * (#1167). `ms <= 0` or no body returns `body` as it is.
+ *
+ * `requestWithRetry`'s timer stops at the headers, so this is what bounds a
+ * stream that went quiet after it started. Every chunk resets the clock, so a
+ * slow but steady stream is never cut, and a keepalive comment counts as a
+ * sign of life. The clock runs only while the consumer is waiting on the
+ * source (the stream pulls on demand), so a consumer that is busy between two
+ * events is not mistaken for a silent provider.
+ *
+ * `onIdle` is expected to abort the request, which releases the socket; the
+ * source is cancelled here too, for a fetch that ignores its signal. The same
+ * shape as `Storage.fetch()`'s `fetchIdleTimeoutMs`.
+ */
+export function idleTimeoutBody(
+  body: ReadableStream<Uint8Array> | null,
+  ms: number,
+  onIdle: () => Error,
+): ReadableStream<Uint8Array> | null {
+  if (!body || !(ms > 0)) return body;
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let timedOut: Error | undefined;
+        const idle = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            timedOut = onIdle();
+            reject(timedOut);
+          }, ms);
+        });
+        try {
+          const chunk = await Promise.race([reader.read(), idle]);
+          if (chunk.done) controller.close();
+          else controller.enqueue(chunk.value);
+        } catch (error) {
+          // The abort in `onIdle` can error the source first, with whatever
+          // fetch throws on abort; the silence is the real cause.
+          const reason = timedOut ?? error;
+          controller.error(reason);
+          reader.cancel(reason).catch(() => {});
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
 }

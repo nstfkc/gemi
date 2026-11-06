@@ -25,6 +25,15 @@ export type ProviderConfig = {
   apiKey?: string;
   baseURL?: string;
   timeoutMs?: number;
+  /**
+   * The longest a streamed answer may go without sending anything (an event or
+   * a keepalive) once its response has started. Every chunk resets it. When it
+   * runs out the attempt is aborted with a retryable `ProviderTimeoutError`:
+   * before the first content event it is asked again like any other dropped
+   * stream, after it the call ends with an error. Default
+   * `DEFAULT_STREAM_IDLE_TIMEOUT_MS` (120 s); `0` turns it off.
+   */
+  streamIdleTimeoutMs?: number;
   maxRetries?: number;
   headers?: Record<string, string>;
 };
@@ -72,16 +81,38 @@ export type ProviderTarget = {
   /** Called per request. See the Azure branch for why that is not an accident. */
   headers: () => Promise<Record<string, string>>;
   timeoutMs: number;
+  /** See `ProviderConfig.streamIdleTimeoutMs`. `0` is off. */
+  streamIdleTimeoutMs: number;
   maxRetries: number;
 };
 
 /** Long enough for a reasoning model to think before it says anything, short
  *  enough that a hung connection is not mistaken for a slow one. For a streamed
- *  call it only covers getting a response; the stream that follows has no
- *  deadline. For a one-shot call it is the whole deadline — which is why the
+ *  call it only covers getting a response; the stream that follows is bounded
+ *  by `streamIdleTimeoutMs` instead. For a one-shot call it is the whole deadline — which is why the
  *  images path sets its own, and why `retryTimeouts` exists. */
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_RETRIES = 2;
+
+/**
+ * How long a streamed answer may stay silent once it has started (#1167).
+ *
+ * `timeoutMs` stops at the response headers, and a Responses stream sends its
+ * headers (and `response.created`) within a second or so, so before this
+ * nothing bounded a stream that went quiet: a stalled step waited for the
+ * run's `maxRunDurationMs`. Seen on an Azure deployment: completed steps took
+ * 1–12 s with the first event after 1–5 s, and the one that stalled sent
+ * nothing more for ten minutes.
+ *
+ * WHY NOT SHORTER. The cost of the two mistakes is not symmetric. Too long, and
+ * a rare stall takes two minutes to notice instead of one. Too short, and a
+ * reasoning model at a high effort, which can think for a long while between
+ * two events, is cut off mid-thought on every hard request, retried (and billed)
+ * up to `maxRetries` times, and fails anyway. So the default matches the
+ * header timeout, which already had to be long enough for a model to think
+ * before saying anything. An app on low effort can set it lower.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
 
 export function env(name: string): string | undefined {
   return typeof process === "undefined" ? undefined : process.env?.[name];
@@ -180,6 +211,7 @@ export function openAITarget(
       };
     },
     timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 }
@@ -218,6 +250,7 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
       return { ...(apiKey ? { "api-key": apiKey } : {}), ...config.headers };
     },
     timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 }
