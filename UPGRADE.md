@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.188.0 to 0.189.0
 
 ## ai: a streamed answer that goes silent is cut at `streamIdleTimeoutMs` (#1167)
 
