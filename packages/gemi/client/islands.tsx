@@ -14,6 +14,17 @@ import type { DictionarySink } from "../i18n/dictionarySink";
 import type { LocaleStrings } from "../i18n/dictionaryShape";
 import { DictionarySinkContext } from "./DictionarySinkContext";
 import { type IslandI18n, IslandI18nContext } from "./IslandI18nContext";
+import {
+  type PrefetchedData,
+  QueryManagerContext,
+  type QueryManagerContextValue,
+} from "./QueryManagerContext";
+import { QueryResource } from "./QueryResource";
+import {
+  type ServerQueriesLike,
+  type ServerQueryEntryLike,
+  ServerQueryContext,
+} from "./ServerQueryContext";
 
 /**
  * When an island's code is fetched and hydrated, per marker.
@@ -105,6 +116,44 @@ export interface StaticRenderCollector {
   i18nUsed: boolean;
   /** The dictionaries islands read, as `[id, locale, strings]`, once each. */
   dictionaries: IslandDictionary[];
+  /**
+   * What an island's `useQuery` reads through on the server (#1155): the
+   * request's prefetched queries, and nothing else. `null` without a store.
+   */
+  queries: ServerQueriesLike | null;
+  /** The prefetched queries islands read, by path and variant, once each. */
+  queriesRead: Map<string, IslandQueryEntry>;
+  /**
+   * A query cache for one island's root, seeded as the browser's will be:
+   * with the prefetched data of each path the island reads. `null` without a
+   * store.
+   */
+  createQueryManager: () => QueryManagerContextValue | null;
+}
+
+/** @internal A query the request started, as an island reads it. */
+export interface IslandQueryEntry extends ServerQueryEntryLike {
+  /** Concrete path, params applied. */
+  path: string;
+  /** Sorted search params, the key `useQuery` derives. */
+  variantKey: string;
+  source: "prefetch" | "render";
+}
+
+/**
+ * @internal The request's query store, as much of it as islands need: the
+ * entry a query already has, never a new one.
+ */
+export interface IslandQuerySource {
+  find(
+    path: string,
+    options?: {
+      params?: Record<string, any>;
+      search?: Record<string, string | number | boolean | null>;
+    },
+  ): IslandQueryEntry | undefined;
+  /** Every entry of one concrete path, whatever its search. */
+  entriesFor(path: string): IslandQueryEntry[];
 }
 
 /** @internal One dictionary an island read: what the island runtime seeds. */
@@ -123,9 +172,69 @@ export interface IslandI18nPayload extends IslandI18n {
 export function createStaticRenderCollector(
   render: StaticRenderCollector["render"],
   i18n: IslandI18n = {},
+  store?: IslandQuerySource,
 ): StaticRenderCollector {
   const seen = new Set<string>();
+  const queriesRead = new Map<string, IslandQueryEntry>();
+  // An island joins a query the request prefetched (in flight or done) and
+  // records it for the document. Anything else, a query only the page's own
+  // render started included, is not served: the island renders it as it
+  // would with no store, and fetches it in the browser. A failed prefetch is
+  // not served either, so the island handles the error where it can retry.
+  const queries: ServerQueriesLike | null = store
+    ? {
+        ensure(path, options) {
+          const entry = store.find(path, options);
+          if (!entry || entry.source !== "prefetch" || entry.status === "rejected") return null;
+          record(entry);
+          return entry;
+        },
+      }
+    : null;
+  const record = (entry: IslandQueryEntry) =>
+    queriesRead.set(`${entry.path}?${entry.variantKey}`, entry);
+  // In the browser the islands' cache starts from the document's block, so
+  // the island's server cache starts from the prefetched data too, and a
+  // query that reads the cache without suspending (`suspense: false`,
+  // `lazy`) renders what it will hydrate with. Only the variants a render
+  // looks at are recorded for the document.
+  const createQueryManager = (): QueryManagerContextValue | null => {
+    if (!store) return null;
+    const resources = new Map<string, QueryResource>();
+    return {
+      getResource(key, initialState) {
+        let resource = resources.get(key);
+        if (!resource) {
+          const prefetched = new Map(
+            store
+              .entriesFor(key)
+              .filter((entry) => entry.source === "prefetch" && entry.status === "resolved")
+              .map((entry) => [entry.variantKey, entry]),
+          );
+          resource = new QueryResource(
+            key,
+            prefetched.size > 0
+              ? Object.fromEntries(Array.from(prefetched, ([variantKey, entry]) => [variantKey, entry.data]))
+              : (initialState ?? {}),
+          );
+          const peek = resource.peek.bind(resource);
+          resource.peek = (variantKey) => {
+            const entry = prefetched.get(variantKey);
+            if (entry) record(entry);
+            return peek(variantKey);
+          };
+          resources.set(key, resource);
+        }
+        return resource;
+      },
+      hydrate() {},
+      clearErrors() {},
+    };
+  };
   const collector: StaticRenderCollector = {
+    queries,
+    queriesRead,
+    createQueryManager,
     islands: [],
     render,
     instances: new WeakMap(),
@@ -173,6 +282,22 @@ export function islandI18nPayload(collector: StaticRenderCollector): IslandI18nP
     ...(timeZone ? { timeZone } : {}),
     ...(collector.dictionaries.length > 0 ? { dictionaries: collector.dictionaries } : {}),
   };
+}
+
+/**
+ * @internal The prefetched queries the page's islands read on the server, in
+ * `prefetchedData` shape (`{ path: { variantKey: data } }`), for the
+ * document's `gemi-island-queries` block. Only those that resolved; absent
+ * when there are none, so a page whose islands read no query is unchanged.
+ */
+export function islandQueriesPayload(collector: StaticRenderCollector): PrefetchedData | undefined {
+  let payload: PrefetchedData | undefined;
+  for (const entry of collector.queriesRead.values()) {
+    if (entry.status !== "resolved") continue;
+    payload ??= {};
+    (payload[entry.path] ??= {})[entry.variantKey] = entry.data;
+  }
+  return payload;
 }
 
 /** @internal The element an island's static children land in. */
@@ -258,6 +383,9 @@ export function assertSerialisableProps(value: unknown, island: string): void {
   walk(value, "", false);
 }
 
+const withQueryManager = (manager: QueryManagerContextValue | null, element: ReactElement) =>
+  manager ? createElement(QueryManagerContext.Provider, { value: manager }, element) : element;
+
 const hasChildren = (children: unknown) =>
   children !== undefined && children !== null && typeof children !== "boolean";
 
@@ -295,7 +423,10 @@ type AnyComponent = ComponentType<any>;
  * server as static HTML and passed through untouched. On a static page the
  * island is a separate React root, so context from the page does not reach it,
  * except the page's locale and time zone: `useDictionary` and `useFormatter`
- * work inside it, and the strings it read travel with the page.
+ * work inside it, and the strings it read travel with the page. Its
+ * `useQuery` reads the queries the view handler prefetched
+ * (`Query.prefetch`, `Query.instant`): rendered on the server and shipped
+ * with the page, so it hydrates without fetching them.
  */
 export function island<M extends { default: AnyComponent }>(
   loader: () => Promise<M>,
@@ -365,7 +496,8 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
     //
     // It gets the page's locale and zone, and the island's sink records the
     // dictionaries it reads, so the browser can hydrate it with the same
-    // strings without fetching them (#1095).
+    // strings without fetching them (#1095). Likewise its `useQuery` reads
+    // the queries the request prefetched, which travel with the page (#1155).
     const html = component.then((Component) =>
       collector.render(
         createElement(
@@ -377,13 +509,20 @@ export function island(loader: IslandLoader, options: IslandOptions = {}): AnyCo
             createElement(
               DictionarySinkContext.Provider,
               { value: collector.sink },
-              hasChildren(children)
-                ? createElement(
-                    Component,
-                    rest,
-                    createElement(ISLAND_SLOT_TAG, { [ISLAND_SLOT_ATTRIBUTE]: uid, style: { display: "contents" } }),
-                  )
-                : createElement(Component, rest),
+              createElement(
+                ServerQueryContext.Provider,
+                { value: collector.queries },
+                withQueryManager(
+                  collector.createQueryManager(),
+                  hasChildren(children)
+                    ? createElement(
+                        Component,
+                        rest,
+                        createElement(ISLAND_SLOT_TAG, { [ISLAND_SLOT_ATTRIBUTE]: uid, style: { display: "contents" } }),
+                      )
+                    : createElement(Component, rest),
+                ),
+              ),
             ),
           ),
         ),

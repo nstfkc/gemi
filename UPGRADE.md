@@ -1,3 +1,15 @@
+# Unreleased
+
+## static views: islands read the queries the handler prefetched (#1155)
+
+**New behaviour (minor). Nothing to change in apps.** See [Static views and islands → Data the handler prefetched](docs/static-views-and-islands.md#data-the-handler-prefetched).
+
+- On a static page, an island's `useQuery` reads the queries the view handler started with `Query.prefetch` or `Query.instant`: it renders their data on the server, the document carries the ones islands read in `<script type="application/json" id="gemi-island-queries">`, and the island hydrates with that data without fetching it. Before, an island rendered such a query without data and fetched it after hydration.
+- Only prefetched queries an island read are shipped. A page whose islands read none, and a page without islands, is byte for byte the same as before. A query the handler did not prefetch is still not fetched on the server.
+- In the browser, the islands of a page share one query cache. Before, an island's `useQuery` had no cache of its own, so a query that suspended in an island could fetch again on every render.
+- The data is in the page source. A page whose islands read a query that differs per visitor must not be cached publicly (`cacheControl`).
+- The island runtime's source changed. It is a module of its own, not inline, so the CSP hashes (`ISLAND_LOADER_CSP_HASH`, `STATIC_NAVIGATION_CSP_HASH`) are unchanged.
+
 # Upgrading from 0.186.0 to 0.186.1
 
 ## static views: a `<style>` injected at runtime no longer turns client navigation off (#1153)

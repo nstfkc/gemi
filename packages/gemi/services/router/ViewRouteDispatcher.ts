@@ -537,7 +537,8 @@ export class ViewRouteDispatcher {
     // The page's locale and zone are the one exception (#1095): an island
     // gets them, so `useDictionary` resolves in the page's locale, including
     // one middleware or `view.detectLocale` chose, and the browser is handed
-    // the same in the document.
+    // the same in the document. So are the queries the handler prefetched
+    // (#1155): an island reads them, and the ones it read travel with the page.
     const collector = createStaticRenderCollector(
       async (element, identifierPrefix) => {
         const stream = await renderToReadableStream(element, {
@@ -554,6 +555,8 @@ export class ViewRouteDispatcher {
         defaultLocale: data?.i18n?.defaultLocale,
         timeZone: data?.i18n?.timeZone,
       },
+      // An island's `useQuery` reads what the handler prefetched (#1155).
+      serverQueries,
     );
 
     try {
