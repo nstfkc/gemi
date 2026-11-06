@@ -53,12 +53,16 @@ describe("Storage.fetch()", () => {
     expect(fetch).toHaveBeenCalledWith("a.png", { signal: controller.signal });
   });
 
-  test("still works without options", async () => {
+  test("without options, hands the driver the signal of the default limits", async () => {
     const fetch = withDriverFetch();
 
-    await Storage.fetch({ name: "a.png", bucket: "other" });
+    const res = await Storage.fetch({ name: "a.png", bucket: "other" });
 
-    expect(fetch).toHaveBeenCalledWith({ name: "a.png", bucket: "other" }, {});
+    expect(await res.text()).toBe("x");
+    expect(fetch).toHaveBeenCalledWith(
+      { name: "a.png", bucket: "other" },
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   test("rejects an already-aborted signal before reaching the driver", async () => {

@@ -19,6 +19,8 @@ import type {
   StoredObject,
 } from "../services/file-storage/drivers/types";
 import { FilesystemManager } from "../services/file-storage/FilesystemManager";
+import { fetchWithTimeouts } from "../services/file-storage/fetchTimeouts";
+import { DEFAULT_FETCH_TIMEOUT_MS } from "../services/file-storage/config";
 import {
   putFromUrl,
   type PutFromUrlOptions,
@@ -93,6 +95,12 @@ export class Storage extends Facade {
    * read, e.g. with the incoming request's signal or `AbortSignal.timeout()`:
    * an abort rejects `fetch()` itself, or errors the body if it lands after
    * `fetch()` resolved.
+   *
+   * Without a `signal`, two default limits apply (`fetchTimeoutMs` and
+   * `fetchIdleTimeoutMs` on the `filesystem` config, 30s each): no response
+   * in time rejects `fetch()`, and a body that sends nothing for that long
+   * while it is read errors. Both reject with `StorageFetchTimeoutError` and
+   * abort the request. A caller's own `signal` turns both off.
    */
   static async fetch(
     params: ReadFileParams | string,
@@ -101,7 +109,14 @@ export class Storage extends Facade {
     // Checked here too, so a custom driver that predates the option still
     // refuses an already-aborted read.
     options.signal?.throwIfAborted();
-    return this.getFacadeRoot().driver.fetch(params, options);
+    // `??` too: a manager an app rebound itself may not carry the fields.
+    const manager: Partial<FilesystemManager> &
+      Pick<FilesystemManager, "driver"> = this.getFacadeRoot();
+    return fetchWithTimeouts(manager.driver, params, options, {
+      fetchTimeoutMs: manager.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
+      fetchIdleTimeoutMs:
+        manager.fetchIdleTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
+    });
   }
 
   /**
