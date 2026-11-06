@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.187.0 to 0.188.0
 
 ## storage: `Storage.fetch()` without a signal has default limits (#1164)
 
