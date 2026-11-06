@@ -26,6 +26,10 @@ export {
   assertDeletablePrefix,
 } from "./file-storage/drivers/FileStorageDriver";
 export {
+  StorageFetchTimeoutError,
+  type StorageFetchTimeoutLimit,
+} from "./file-storage/fetchTimeouts";
+export {
   type PutFromUrlOptions,
   type PutFromUrlResult,
 } from "./file-storage/putFromUrl";

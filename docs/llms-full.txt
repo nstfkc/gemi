@@ -18939,6 +18939,32 @@ return Storage.fetch(name, { signal: req.rawRequest.signal });
 
 An abort before the object is found rejects `fetch` itself. An abort after `fetch` resolved errors the returned body instead, so a pending `arrayBuffer()`, `text()` or stream read rejects rather than hanging, and the driver cancels the underlying stream, which closes the file or releases the connection. The S3 and Azure drivers also hand the signal to their SDK, which cancels the request in flight.
 
+#### Default limits without a signal
+
+A `fetch` without a `signal` is not unbounded. Two limits apply, both set on the [`filesystem` config](#configuration-appconfigfilesystemts):
+
+- **`fetchTimeoutMs`** (default 30 000): the time until the driver hands back the response, i.e. until the backend's headers arrive. Past it, `fetch` rejects.
+- **`fetchIdleTimeoutMs`** (default 30 000): how long the body may go without sending a chunk while you are reading it. Every chunk resets it, so a large file on a slow but steady link is never cut; a body that stalls errors, and the pending `arrayBuffer()`, `text()` or stream read rejects. The clock only runs while a read is waiting on the backend, so a consumer that reads slowly (a slow client downloading a streamed response) is not cut either.
+
+Either limit rejects with a `StorageFetchTimeoutError` (exported from `gemi/services`), whose message names the driver and the limit, and aborts the request, which releases the connection:
+
+```typescript
+import { StorageFetchTimeoutError } from "gemi/services";
+
+try {
+  const res = await Storage.fetch(name);
+  return await res.arrayBuffer();
+} catch (error) {
+  if (error instanceof StorageFetchTimeoutError) {
+    // error.driver: "AzureBlobDriver", error.limit: "fetchTimeoutMs" | "fetchIdleTimeoutMs",
+    // error.timeoutMs, error.object
+  }
+  throw error;
+}
+```
+
+A `signal` of your own turns both limits off for that call, so a transfer that legitimately needs longer passes one (an `AbortController` you abort yourself, or the request's signal). `0` turns a limit off for every call. The limits apply on every driver, including custom ones, since they live in `Storage.fetch`; a driver's own `fetch()` called directly has none.
+
 ### `read(params | string, options?)`
 
 Reads a file as bytes plus metadata, rather than as a finished `Response`. Use it with [`this.stream(...)`](./routing.md#streaming-and-range-requests) to serve range requests:
@@ -19065,11 +19091,15 @@ export default class extends Kernel {
 }
 ```
 
-`FilesystemConfig` has exactly one optional field:
+`FilesystemConfig` has these optional fields:
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `driver` | `FileStorageDriver` | `new FileSystemDriver()` |
+| `fetchTimeoutMs` | `number` | `30_000`: the time `Storage.fetch()` without a `signal` waits for a response. `0` turns it off. |
+| `fetchIdleTimeoutMs` | `number` | `30_000`: the longest gap between body chunks of a `Storage.fetch()` without a `signal`. `0` turns it off. |
+
+See [Default limits without a signal](#default-limits-without-a-signal).
 
 If you omit the slice entirely, the default driver is used.
 

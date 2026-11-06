@@ -1,3 +1,15 @@
+# Unreleased
+
+## storage: `Storage.fetch()` without a signal has default limits (#1164)
+
+**Behaviour change (minor).** See [File Storage → Default limits without a signal](docs/file-storage.md#default-limits-without-a-signal).
+
+- A `Storage.fetch()` call without a `signal` used to wait forever when the backend stalled. It now has two limits, set on the `filesystem` config: `fetchTimeoutMs` (time until the response arrives, default 30 000) and `fetchIdleTimeoutMs` (longest gap between body chunks while the body is read, default 30 000; it resets on every chunk, so a large file on a slow but steady link is not cut).
+- Past either limit, the call rejects (or the body errors) with `StorageFetchTimeoutError`, exported from `gemi/services`, and the request is aborted. It applies on every driver, custom ones included.
+- A call that passes its own `signal` behaves as before: the defaults are off for it.
+- To keep the old unbounded behaviour, pass a `signal`, or set `fetchTimeoutMs: 0` and `fetchIdleTimeoutMs: 0` in `app/config/filesystem.ts`. A code path that streams objects whose backend may legitimately pause for more than 30s should raise `fetchIdleTimeoutMs` or pass a signal.
+- A `FilesystemManager` an app rebinds itself without these fields gets the 30s defaults.
+
 # Upgrading from 0.186.1 to 0.187.0
 
 ## static views: islands read the queries the handler prefetched (#1155)
