@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.186.1 to 0.187.0
 
 ## static views: islands read the queries the handler prefetched (#1155)
 
