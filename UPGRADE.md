@@ -1,4 +1,4 @@
-# Unreleased
+# Upgrading from 0.189.0 to 0.190.0
 
 ## ai: a stream that keeps trickling is cut at `streamMaxDurationMs`, and a runaway tool call is asked again (#1169)
 
