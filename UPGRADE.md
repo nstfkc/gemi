@@ -1,4 +1,4 @@
-# Unreleased
+# 0.192.0
 
 ## ai: tenant scopes for agent threads (#1177)
 
