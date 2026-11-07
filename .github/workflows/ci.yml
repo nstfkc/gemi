@@ -580,7 +580,7 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" ai/store/DatabaseAgentStore.test.ts -t "postgres|mysql"
         working-directory: packages/gemi
         env:
-          VITEST_MIN_PASSED: "41"
+          VITEST_MIN_PASSED: "43"
 
       # The run store's compare-and-set, listing, clock-based sweep and prune,
       # and a run written inside a transaction that rolls back (#908).

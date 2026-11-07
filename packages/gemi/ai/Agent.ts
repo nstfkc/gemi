@@ -98,6 +98,7 @@ import type {
   ToolSearchRecord,
   ToolResultPart,
   ToolShapes,
+  TurnEvent,
   Usage,
 } from "./types";
 import { modelOutputOf } from "./toolModelOutput";
@@ -1878,6 +1879,19 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    * turn while the run is still going.
    */
   onTurn?: (message: AgentMessage) => void | Promise<void>;
+  /**
+   * The turn is an event server code reports, not a person's words (#1181):
+   * the run's user message is the event's `text` (if any) with
+   * `message.event` set, and the model reads it wrapped in
+   * `<event name="…">`. `AgentController.startTurn({ event })` sets it.
+   */
+  event?: TurnEvent & { text?: string };
+  /**
+   * Put the turn's user message on the stream (a `message` frame), for a
+   * turn no client typed: one server code started, which no watching client
+   * holds a copy of. `AgentController` sets it for `startTurn`.
+   */
+  echoTurn?: boolean;
   /**
    * What a client is told about a failure: the run's `error` frame, and the
    * result of a tool that threw (which the model reads too). Default
@@ -5829,7 +5843,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * dropping it would be the agent losing the thing it was asked about.
    */
   private historyForProvider(current: AgentMessage | undefined): AgentMessage[] {
-    const messages = this.history.filter((message) => message !== current);
+    const messages = this.history
+      .filter((message) => message !== current)
+      .map((message) => (message.event && message.role === "user" ? eventForModel(message) : message));
 
     // Injected messages are named by the tool call that made them, and that
     // record is the test — not `attachmentId` on the part. A user's own upload
@@ -6044,19 +6060,21 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       await this.reportDeferred();
     }
 
-    if (turn && (turn.text || (turn.files && turn.files.length > 0))) {
+    const event = this.depth === 0 ? this.params.event : undefined;
+    if (event || (turn && (turn.text || (turn.files && turn.files.length > 0)))) {
+      const text = event ? event.text : turn?.text;
       const message: AgentMessage = {
         id: `msg_${crypto.randomUUID()}`,
         role: "user",
         content: [
-          ...(turn.text ? [{ type: "text" as const, text: turn.text }] : []),
+          ...(text ? [{ type: "text" as const, text }] : []),
           // Field by field rather than spread: an entry can carry whatever
           // `attach()` answered (`downgraded`, `size`), and only these four
           // mean anything on a `FilePart`. `attachmentId` is among them — it is
           // what lets the model name this file to a tool — and an absent
           // `fileId` is a storage-only upload, left out rather than written as
           // `undefined`.
-          ...(turn.files ?? []).map((file) => ({
+          ...(turn?.files ?? []).map((file) => ({
             type: "file" as const,
             ...(file.fileId ? { fileId: file.fileId } : {}),
             name: file.name,
@@ -6066,6 +6084,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         ],
         createdAt: new Date().toISOString(),
         finishReason: "stop",
+        ...(event
+          ? { event: { name: event.name, ...(event.data !== undefined ? { data: event.data } : {}) } }
+          : {}),
       };
       this.history.push(message);
       this.produced.push(message);
@@ -6077,8 +6098,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // message rides along for any other client watching the run (#778): a
       // tab that attached to it never held the copy, and the reducer appends
       // it only there.
-      if (this.depth > 0) this.emit({ type: "message", message });
-      else if (turn.localId) {
+      // A server turn (`echoTurn`) has no client copy either: a chat
+      // watching the thread is told the whole message, as for a sub-run.
+      if (this.depth > 0 || this.params.echoTurn) this.emit({ type: "message", message });
+      else if (turn?.localId) {
         this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
       }
       await this.report(message);
@@ -6783,6 +6806,29 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.finishReason = "aborted";
     await this.finalizeMessage("aborted");
   }
+}
+
+/**
+ * A server-written event message as the model reads it (#1181): its text
+ * parts become one `<event name="…">` block, with the event's data after the
+ * text, so the model can tell it from the person's words. Its file parts are
+ * kept as they are.
+ */
+function eventForModel(message: AgentMessage): AgentMessage {
+  const event = message.event!;
+  const text = message.content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
+  const data = event.data === undefined ? "" : JSON.stringify(event.data);
+  const body = [text, data].filter(Boolean).join("\n");
+  return {
+    ...message,
+    content: [
+      { type: "text", text: `<event name="${event.name}">${body ? `\n${body}\n` : ""}</event>` },
+      ...message.content.filter((part) => part.type !== "text"),
+    ],
+  };
 }
 
 function pendingKind(tool: AnyAgentTool): "approval" | "question" | "client" | null {

@@ -210,6 +210,17 @@ for (const backend of backends) {
       expect(title.endsWith("…")).toBe(true);
     });
 
+    test("an event message (#1181) is not the title", async () => {
+      const { threadId } = await store.createThread({ userId: "u" });
+      await store.appendMessages(threadId, [
+        { ...message("e1", "user", "The export finished."), event: { name: "job-settled" } },
+      ]);
+      expect((await store.getThread(threadId))!.title).toBeNull();
+      await store.appendMessages(threadId, [message("u1", "user", "rename the page")]);
+      expect((await store.getThread(threadId))!.title).toBe("rename the page");
+      expect((await store.loadThread(threadId))![0]!.event).toEqual({ name: "job-settled" });
+    });
+
     test("lists threads newest first, per user, and pages", async () => {
       const a = await store.createThread({ userId: 1 });
       const b = await store.createThread({ userId: 1 });
@@ -588,6 +599,20 @@ for (const backend of backends) {
       await expect(Chat.startTurn({ threadId, text: "no", scope: "org-b" })).rejects.toMatchObject({
         status: 404,
       });
+
+      // An event turn's message carries the scope in its row, like any other.
+      const event = await Chat.startTurn({ threadId, scope: "org-a", event: { name: "job-settled" } });
+      await event.result();
+      const quoted =
+        db.dialect === "mysql" || db.dialect === "mariadb"
+          ? `\`${store.messagesTable}\``
+          : `"${store.messagesTable}"`;
+      const rows = (await db.connect().unsafe(
+        `SELECT scope, message FROM ${quoted} WHERE thread_id = '${threadId}'`,
+      )) as { scope: string | null; message: string }[];
+      expect(rows.length).toBe(6);
+      expect(rows.some((row) => JSON.parse(String(row.message)).event?.name === "job-settled")).toBe(true);
+      expect(new Set(rows.map((row) => row.scope))).toEqual(new Set(["org-a"]));
     });
   });
 }

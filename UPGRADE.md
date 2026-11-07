@@ -5,10 +5,19 @@
 **New API, no behaviour change.** See [AI Thread Store → Scopes](docs/ai-thread-store.md#scopes-one-store-many-tenants).
 
 - `DatabaseAgentStore.forScope(scope)` and `MemoryAgentStore.forScope(scope)` return the store bound to one scope (a tenant key): every thread and message it writes carries the scope, and every read and write is filtered by it. A thread of another scope is one it does not have. `AgentStore.forScope` is a new optional method.
-- `AgentController.storeScope(req, { body })` is a new hook: when it answers a scope, `stream` and `upload` use `store.forScope(scope)`. `startTurn({ scope })` and `readThread(threadId, { scope })` take one explicitly. The default answers `null`, which is today's behaviour.
+- `AgentController.storeScope(req, { body })` is a new hook: when it answers a scope, `stream` and `upload` use `store.forScope(scope)`, and `attach` and `watch` answer 404 for a thread outside it (`body` is `{}` there). A controller instance reused for a request in another scope throws. `startTurn({ scope })` and `readThread(threadId, { scope })` take one explicitly. The default answers `null`, which is today's behaviour.
 - `DatabaseAgentStore` options: `requireScope` (the unscoped store throws) and `beginScope(tx, scope)` (called first in every transaction a scoped view opens, e.g. `set_config('app.current_id', scope, true)` for row-level security; scoped calls then always run in such a transaction).
 - **Schema, only to use scopes:** a nullable `scope` column on `gemi_agent_threads` and `gemi_agent_messages`, and an index on threads `(scope, user_id, updated_at)`. With Prisma, add `scope String?` to both models and `@@index([scope, userId, updatedAt])` to `GemiAgentThread`, then migrate. Without Prisma, `addScopeColumns()` (also run by `createTable()`) adds them. The unscoped store does not name the column, so an app that never scopes needs no migration.
 - A store that is not scoped reads every row, scoped or not, as before.
+
+## ai: `useChat({ watch })` and event turns (#1180, #1181)
+
+**New API, small behaviour change.** See [AI Server Turns → Event turns](docs/ai-server-turns.md#event-turns) and [Showing a server turn in an open chat](docs/ai-server-turns.md#showing-a-server-turn-in-an-open-chat).
+
+- `this.agent()` mounts a fifth route, `POST /<path>/watch`: an SSE stream announcing `{ type: "run-start", runId }` for each run that starts on a thread. It takes `attach`'s middleware and calls `authorizeRequest` with `route: "attach"`. `useChat({ watch: true })` opens it and attaches to each announced run.
+- `startTurn({ event: { name, text?, data? } })` starts a turn whose user message is an event: stored with `message.event` (new `AgentMessage.event`, type `TurnEvent`), read by the model as `<event name="…">`, never accepted from a client. `DatabaseAgentStore` skips event messages when it picks a thread's title.
+- **Behaviour change:** a turn started with `startTurn` now puts its user message on the run's stream as a `message` frame, so a client attached to it shows the message. Before, an attached client saw only the answer until it re-read the thread. A custom client that ignores `message` frames is unaffected.
+- New exported types: `AgentTurnEvent` from `gemi/ai`, and `TurnEvent` from `gemi/ai` and `gemi/ai/client`.
 
 ## ai: `startTurn({ ifBusy })` and `AgentJobs.onSettled` (#1178, #1179)
 

@@ -613,6 +613,25 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * per-send `body`.
    */
   metadata?: Record<string, unknown>;
+  /**
+   * Set on a user message that server code wrote, not a person (#1181): a
+   * turn started with `startTurn({ event })` because something happened (a
+   * background job finished, a record changed). Its text, if any, is the
+   * event's `text`. Stored with the message, so a re-read thread has it.
+   *
+   * The model reads such a message as `<event name="…">…</event>`, not as
+   * the person's words, and a UI can render it as a status line rather than
+   * a bubble. Only the server sets it: a client cannot send one.
+   */
+  event?: TurnEvent;
+};
+
+/** What `AgentMessage.event` carries (#1181). */
+export type TurnEvent = {
+  /** The app's name for what happened: `"job-settled"`, `"order.paid"`. */
+  name: string;
+  /** Plain data the app attached. JSON; shown to the model after the text. */
+  data?: unknown;
 };
 
 // --- what the client sends ----------------------------------------------

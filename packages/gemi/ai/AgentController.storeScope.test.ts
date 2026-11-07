@@ -10,6 +10,7 @@ import { Agent } from "./Agent";
 import { AgentController, MemoryAgentStore, MemoryLiveRuns } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
+import { decodeSSE } from "./client/sse";
 import type { AgentMessage } from "./types";
 
 /**
@@ -198,5 +199,98 @@ describe("AgentController.storeScope", () => {
     await expect(controller.stream(request({ threadId: b.threadId, text: "b" }))).rejects.toThrow(
       /another store scope/,
     );
+  });
+
+  describe("attach, watch and event turns", () => {
+    /** The scope from the signed-in user, as an app should: attach and watch carry no body. */
+    function userScoped() {
+      const store = new MemoryAgentStore();
+      const liveRuns = new MemoryLiveRuns();
+      const provider = fakeProvider(say("one"), say("two"));
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const script = provider.stream.bind(provider);
+      provider.stream = (params) =>
+        (async function* () {
+          await gate;
+          yield* script(params);
+        })();
+      class Chat extends AgentController<any> {
+        agent = Agent.create({ name: "chat", provider }) as any;
+        store = store;
+        liveRuns = liveRuns;
+        protected storeScope(req: HttpRequest<any, any>) {
+          return (req.ctx?.()?.user as { org?: string } | null)?.org ?? null;
+        }
+      }
+      const as = <T>(org: string, path: string, body: unknown, fn: (c: Chat, r: HttpRequest<any, any>) => Promise<T>) => {
+        const req = new HttpRequest(
+          new Request(`http://localhost/api/chat${path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+          {},
+          "api",
+          `/chat${path}`,
+        );
+        return RequestContext.run(req, () => fn(new Chat(), req), { user: { id: 1, org } });
+      };
+      return { store, Chat, open, as };
+    }
+
+    test("watch follows only threads in the caller's scope", async () => {
+      const { store, Chat, open, as } = userScoped();
+      const { threadId } = await store.forScope("org-a").createThread({ userId: 1 });
+
+      const refused = await as("org-b", "/watch", { threadId }, (c, r) => c.watch(r));
+      expect(refused.status).toBe(404);
+      expect(await refused.json()).toMatchObject({ error: { code: "thread_not_found" } });
+
+      const watching = await as("org-a", "/watch", { threadId }, (c, r) => c.watch(r));
+      expect(watching.status).toBe(200);
+      const reading = (async () => {
+        for await (const frame of decodeSSE(watching.body)) {
+          if (frame.event.type === "run-start") return frame.event.runId;
+        }
+      })();
+      const turn = await Chat.startTurn({ threadId, text: "hi", user: { id: 1, org: "org-a" } });
+      expect(await reading).toBe(turn.runId);
+      open();
+      await turn.result();
+    });
+
+    test("attach does not find a run on another scope's thread", async () => {
+      const { store, Chat, open, as } = userScoped();
+      const { threadId } = await store.forScope("org-a").createThread({ userId: 1 });
+      const turn = await Chat.startTurn({ threadId, text: "hi", user: { id: 1, org: "org-a" } });
+
+      const other = await as("org-b", "/attach", { threadId }, (c, r) => c.attach(r));
+      expect(other.status).toBe(404);
+      expect(await other.json()).toMatchObject({ error: { code: "no_live_run" } });
+
+      const own = await as("org-a", "/attach", { threadId }, (c, r) => c.attach(r));
+      expect(own.status).toBe(200);
+      open();
+      await own.text();
+      await turn.result();
+    });
+
+    test("an event turn through a scoped store is stored in that scope", async () => {
+      const { store, Chat, open } = userScoped();
+      const { threadId } = await store.forScope("org-a").createThread({});
+      open();
+      const turn = await Chat.startTurn({
+        threadId,
+        scope: "org-a",
+        event: { name: "job-settled", text: "The export finished." },
+      });
+      await turn.result();
+      const stored = await store.forScope("org-a").loadThread(threadId);
+      expect(stored![0]).toMatchObject({ role: "user", event: { name: "job-settled" } });
+      expect(await store.forScope("org-b").loadThread(threadId)).toBeNull();
+    });
   });
 });

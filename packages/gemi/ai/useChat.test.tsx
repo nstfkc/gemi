@@ -3492,3 +3492,151 @@ describe("a question restored from the thread", () => {
     expect(box.api.pending).toEqual([]);
   });
 });
+
+/** #1180: `watch: true` follows every run on the thread, not only this chat's. */
+describe("watch (#1180)", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const OTHER: AgentStreamFrame[] = [
+    { seq: 0, event: { type: "run-start", runId: "run_9", threadId: "th_9" } },
+    { seq: 1, event: { type: "message-start", messageId: "m9", role: "assistant" } },
+    { seq: 2, event: { type: "text-delta", messageId: "m9", delta: "The export is ready." } },
+    { seq: 3, event: { type: "message-end", messageId: "m9", finishReason: "stop" } },
+    { seq: 4, event: { type: "run-end", runId: "run_9", finishReason: "stop" } },
+  ];
+  const urls = () => calls().map((c) => c[0]);
+
+  test("attaches to a run announced while the chat is idle", async () => {
+    const watch = controlled();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat/watch") return watch.response;
+      if (url === "/api/chat/attach") return streamed(OTHER);
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, watch: true });
+    await act(settle);
+    expect(urls()).toEqual(["/api/chat/watch"]);
+    expect(JSON.parse(calls()[0]![1].body as string)).toEqual({ threadId: "th_9" });
+
+    await act(async () => {
+      watch.push({ seq: 1, event: { type: "run-start", runId: "run_9", threadId: "th_9" } });
+      await settle();
+      await settle();
+    });
+    expect(urls()).toEqual(["/api/chat/watch", "/api/chat/attach"]);
+    expect(box.api.messages.at(-1)!.content).toEqual([
+      { type: "text", text: "The export is ready." },
+    ]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a run announced mid-stream is attached once the chat's own run ends", async () => {
+    const watch = controlled();
+    const own = controlled();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat/watch") return watch.response;
+      if (url === "/api/chat") return own.response;
+      if (url === "/api/chat/attach") return streamed(OTHER);
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, watch: true });
+    await act(settle);
+    await act(async () => {
+      void box.api.sendMessage("hello");
+      await settle();
+      own.push(ANSWER[0]!, ANSWER[1]!);
+      await settle();
+      // Its own run, then someone else's, while it streams.
+      watch.push({ seq: 1, event: { type: "run-start", runId: "run_1", threadId: "th_9" } });
+      watch.push({ seq: 2, event: { type: "run-start", runId: "run_9", threadId: "th_9" } });
+      await settle();
+    });
+    expect(urls()).not.toContain("/api/chat/attach");
+
+    await act(async () => {
+      own.push(...ANSWER.slice(2));
+      own.close();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    expect(urls().filter((url) => url === "/api/chat/attach")).toHaveLength(1);
+    expect(box.api.messages.at(-1)!.content).toEqual([
+      { type: "text", text: "The export is ready." },
+    ]);
+  });
+
+  test("does not attach again to the run it started itself", async () => {
+    const watch = controlled();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat/watch") return watch.response;
+      if (url === "/api/chat") return streamed(ANSWER);
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, watch: true });
+    await act(async () => {
+      await settle();
+      await box.api.sendMessage("hello");
+    });
+    await act(async () => {
+      watch.push({ seq: 1, event: { type: "run-start", runId: "run_1", threadId: "th_9" } });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(urls()).toEqual(["/api/chat/watch", "/api/chat"]);
+  });
+
+  test("gives up on a refusal, and is off by default", async () => {
+    fetchMock.mockImplementation(async () => new Response("{}", { status: 403 }));
+    const { unmount } = mount({ threadId: "th_9", attach: false, watch: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(urls()).toEqual(["/api/chat/watch"]);
+    unmount();
+
+    fetchMock.mockClear();
+    mount({ threadId: "th_9", attach: false });
+    await act(settle);
+    expect(urls()).toEqual([]);
+  });
+
+  test("stops following on unmount", async () => {
+    let signal: AbortSignal | undefined;
+    const watch = controlled();
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      signal = init.signal ?? undefined;
+      return watch.response;
+    });
+    const { unmount } = mount({ threadId: "th_9", attach: false, watch: true });
+    await act(settle);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+});
+
+/** #1181: a server turn's event message reaches a watching chat, typed. */
+describe("event messages (#1181)", () => {
+  test("a message frame carrying `event` is kept with it, and so is one in initialMessages", async () => {
+    const eventMessage = {
+      id: "msg_ev",
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "The export finished." }],
+      createdAt: "2026-11-07T00:00:00.000Z",
+      finishReason: "stop" as const,
+      event: { name: "job-settled", data: { jobId: "ajob_1" } },
+    };
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_9", threadId: "th_9" } },
+        { seq: 1, event: { type: "message", message: eventMessage } },
+        { seq: 2, event: { type: "run-end", runId: "run_9", finishReason: "stop" } },
+      ]),
+    );
+    const { box } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      await box.api.reattach();
+    });
+    expect(box.api.messages[0]!.event).toEqual({ name: "job-settled", data: { jobId: "ajob_1" } });
+
+    cleanup();
+    const restored = mount({ threadId: "th_9", attach: false, initialMessages: [eventMessage] });
+    expect(restored.box.api.messages[0]!.event?.name).toBe("job-settled");
+  });
+});

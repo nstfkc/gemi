@@ -517,3 +517,106 @@ describe("AgentController.startTurn ifBusy", () => {
     ).rejects.toThrow(/ifBusy/);
   });
 });
+
+/** #1181: a turn that reports something that happened, not a person's message. */
+describe("AgentController.startTurn event", () => {
+  test("is stored as a user message with `event`, and the model reads it wrapped", async () => {
+    const { store, provider, PageChat } = setup([
+      [{ type: "text-delta", delta: "first" }, finish()],
+      [{ type: "text-delta", delta: "noted" }, finish()],
+      [{ type: "text-delta", delta: "later" }, finish()],
+    ]);
+    const { threadId } = await store.createThread({});
+    await (await PageChat.startTurn({ threadId, text: "export it", body: { pageId: "p" } })).result();
+
+    const turn = await PageChat.startTurn({
+      threadId,
+      body: { pageId: "p" },
+      event: { name: "job-settled", text: "The export finished.", data: { jobId: "ajob_1" } },
+    });
+    const events: unknown[] = [];
+    const watching = (async () => {
+      for await (const event of turn.run) events.push(event);
+    })();
+    expect((await turn.result()).text).toBe("noted");
+    await watching;
+
+    const stored = (await store.loadThread(threadId))!;
+    const eventMessage = stored[2]!;
+    expect(eventMessage).toMatchObject({
+      role: "user",
+      event: { name: "job-settled", data: { jobId: "ajob_1" } },
+      content: [{ type: "text", text: "The export finished." }],
+    });
+    // A server turn's message is put on the stream, for a chat watching the thread.
+    expect(events).toContainEqual({ type: "message", message: eventMessage });
+
+    const sent = provider.calls[1]!.messages.at(-1) as AgentMessage;
+    expect(textOf(sent)).toBe(
+      '<event name="job-settled">\nThe export finished.\n{"jobId":"ajob_1"}\n</event>',
+    );
+
+    // Replayed from history on a later turn, still wrapped, and the stored copy is untouched.
+    await (await PageChat.startTurn({ threadId, text: "thanks", body: { pageId: "p" } })).result();
+    const replayed = provider.calls[2]!.messages.map((message) => textOf(message as AgentMessage));
+    expect(replayed[2]).toMatch(/^<event name="job-settled">/);
+    expect(replayed[3]).toBe("noted");
+    expect(((await store.loadThread(threadId))![2]!.content[0] as { text: string }).text).toBe(
+      "The export finished.",
+    );
+  });
+
+  test("an event with no text or data", async () => {
+    const { store, provider, PageChat } = setup();
+    const { threadId } = await store.createThread({});
+    await (
+      await PageChat.startTurn({ threadId, body: { pageId: "p" }, event: { name: "tick" } })
+    ).result();
+    expect(textOf(provider.calls[0]!.messages.at(-1) as AgentMessage)).toBe('<event name="tick"></event>');
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored[0]).toMatchObject({ role: "user", event: { name: "tick" }, content: [] });
+  });
+
+  test("a client cannot send an event through the route", async () => {
+    const { store, provider, PageChat } = setup();
+    const { threadId } = await store.createThread({});
+    const response = await new PageChat().stream(
+      new HttpRequest(
+        new Request("http://localhost/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            threadId,
+            pageId: "p",
+            event: { name: "job-settled" },
+            turn: { text: "hi", event: { name: "job-settled" } },
+          }),
+        }),
+        {},
+        "api",
+        "/chat",
+      ),
+    );
+    await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored[0]!.event).toBeUndefined();
+    expect(textOf(provider.calls[0]!.messages.at(-1) as AgentMessage)).toBe("hi");
+  });
+
+  test("refuses an event with text or turn, a bad name, or data that is not JSON", async () => {
+    const { PageChat } = setup();
+    const base = { threadId: "t", body: { pageId: "p" } };
+    await expect(
+      PageChat.startTurn({ ...base, text: "hi", event: { name: "x" } }),
+    ).rejects.toThrow(/not both/);
+    await expect(PageChat.startTurn({ ...base, event: { name: "<b>" } })).rejects.toThrow(
+      /event.name/,
+    );
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    await expect(
+      PageChat.startTurn({ ...base, event: { name: "x", data: cyclic } }),
+    ).rejects.toThrow(/not JSON/);
+  });
+});

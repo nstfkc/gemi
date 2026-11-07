@@ -72,7 +72,7 @@ import { defaultAgentStore, MemoryAgentStore } from "./store/MemoryAgentStore";
 import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
 import type { ErrorRedactionInfo } from "./redact";
-import { sseResponse } from "./store/sse";
+import { encodeFrame, sseHeaders, sseKeepalive, sseResponse } from "./store/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import { AgentJobs } from "./jobs/AgentJob";
 import { markOrphans, overlayJobs } from "./jobs/overlay";
@@ -330,7 +330,28 @@ export type AgentTurnParams<Body extends object = Record<string, unknown>> = {
    * chat does.
    */
   ifBusy?: AgentTurnBusyPolicy;
+  /**
+   * Something that happened, in place of a person's message (#1181): a job
+   * finished, a record changed. Stored as a user message with
+   * `message.event` set (`{ name, data }`) and `text` as its text; the model
+   * reads it as `<event name="…">`, and a UI can render it apart from what
+   * the person wrote. Not with `text` or `turn`.
+   */
+  event?: AgentTurnEvent;
 };
+
+/** What `startTurn({ event })` takes (#1181). */
+export type AgentTurnEvent = {
+  /** Letters, digits and `.`, `_`, `:`, `-`, at most 64: `"job-settled"`. */
+  name: string;
+  /** What the model is told happened. */
+  text?: string;
+  /** Plain JSON data, stored with the message and shown to the model after `text`. */
+  data?: unknown;
+};
+
+/** What `AgentTurnEvent.name` may be. */
+const EVENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 /**
  * What `startTurn` does on a thread that is busy: a run still going, or a
@@ -603,6 +624,12 @@ const serverTurnScopes = new WeakMap<HttpRequest<any, any>, string>();
 /** `startTurn`'s busy policy, by the request it built (#1178). A route's turn has none: it supersedes. */
 const busyPolicies = new WeakMap<HttpRequest<any, any>, AgentTurnBusyPolicy>();
 
+/**
+ * `startTurn`'s event, by the request it built (#1181). Kept off the request's
+ * body on purpose: a client posting to the route cannot write one.
+ */
+const serverEvents = new WeakMap<HttpRequest<any, any>, AgentTurnEvent>();
+
 /** What `withThread` answers a `"skip"` turn on a busy thread. Never sent: `startTurn` reads it. */
 const THREAD_BUSY = "thread_busy";
 
@@ -684,6 +711,35 @@ class RunSlots {
  * two registries has two sets of runs.
  */
 const runSlots = new WeakMap<object, RunSlots>();
+/**
+ * Who is watching each thread (`POST /<path>/watch`, #1180), per `liveRuns`
+ * registry like `runSlots`: a run is announced to the watchers of the
+ * registry it was registered in. Per process, like the runs themselves.
+ */
+const threadWatchers = new WeakMap<object, Map<string, Set<(runId: string) => void>>>();
+
+function watchersFor(liveRuns: object): Map<string, Set<(runId: string) => void>> {
+  let watchers = threadWatchers.get(liveRuns);
+  if (!watchers) {
+    watchers = new Map();
+    threadWatchers.set(liveRuns, watchers);
+  }
+  return watchers;
+}
+
+/** Tells the thread's watchers a run started on it. Never throws: a watcher is a stream that may be gone. */
+function announceRun(liveRuns: object, threadId: string, runId: string): void {
+  const listeners = threadWatchers.get(liveRuns)?.get(threadId);
+  if (!listeners) return;
+  for (const listener of [...listeners]) {
+    try {
+      listener(runId);
+    } catch {
+      // A closed stream; its cancel removes it.
+    }
+  }
+}
+
 function runSlotsFor(liveRuns: object): RunSlots {
   let slots = runSlots.get(liveRuns);
   if (!slots) {
@@ -931,7 +987,9 @@ export abstract class AgentController<
    * workspace or app id) that keeps the tenant's threads apart from every
    * other's. When it answers one, `stream` and `upload` use
    * `store.forScope(scope)` instead of `store`, so a thread of another scope
-   * is a 404 like an unknown id. `null` (the default) uses `store` as it is.
+   * is a 404 like an unknown id, and `attach` and `watch` answer 404 for a
+   * thread not in the scope (they carry no `body`: it is `{}` there). `null`
+   * (the default) uses `store` as it is.
    *
    * ```ts
    * protected storeScope(req, { body }) {
@@ -965,6 +1023,18 @@ export abstract class AgentController<
    * voice bridge (which calls `startTurn`) all construct a fresh one.
    */
   private boundScope: string | null | undefined = undefined;
+
+  /**
+   * For the routes that do not read the store (`attach`, `watch`): whether
+   * the thread is in this request's scope. Always true when the request has
+   * none, so an unscoped controller still never consults the store there.
+   */
+  private async threadInScope(req: HttpRequest<any, any>, threadId: string): Promise<boolean> {
+    // Neither route carries the app's `body`.
+    await this.scopeStore(req, {} as Body);
+    if (this.boundScope === null) return true;
+    return (await this.store.loadThread(threadId)) !== null;
+  }
 
   /**
    * Swaps `store` for its scoped view, once per request. An instance reused
@@ -1626,6 +1696,7 @@ export abstract class AgentController<
         `AgentController.startTurn's \`ifBusy\` is "supersede", "queue" or "skip"; got ${JSON.stringify(params.ifBusy)}.`,
       );
     }
+    const event = params.event === undefined ? undefined : checkTurnEvent(params);
     const turn: ClientTurn = {
       ...params.turn,
       ...(params.text !== undefined ? { text: params.text } : {}),
@@ -1648,6 +1719,7 @@ export abstract class AgentController<
     serverTurns.set(req, null);
     if (params.scope !== undefined) serverTurnScopes.set(req, params.scope);
     busyPolicies.set(req, ifBusy);
+    if (event) serverEvents.set(req, event);
     // A request scope of its own, carrying the caller's user, whether or not
     // this is called from inside another request: the run is not that
     // request's, and must not end with it or read its user.
@@ -1951,6 +2023,11 @@ export abstract class AgentController<
           early.notified = written.then(() => this.safely(() => this.onMessage(message, ctx)));
         },
         instructions,
+        // A server turn's event (#1181), never the client's: see `serverEvents`.
+        ...(serverEvents.has(req) ? { event: serverEvents.get(req)! } : {}),
+        // A server turn's message is in no client's copy, so a chat watching
+        // the thread is sent it.
+        ...(serverTurns.has(req) ? { echoTurn: true } : {}),
         // Only when answered, so the agent's own applies otherwise.
         ...(reasoning ? { reasoning } : {}),
         ...(skills && skills.length > 0 ? { skills } : {}),
@@ -2039,6 +2116,8 @@ export abstract class AgentController<
 
       started = run;
       if (journal) this.follow(run, journal);
+      // After `register`, so a watcher that attaches on hearing it finds it.
+      if (threadId) announceRun(this.liveRuns, threadId, run.runId);
 
       // Kept, not just fired: the next turn on this thread has to know when
       // this one's transcript is in the store. See `withThread`. The request
@@ -2259,8 +2338,11 @@ export abstract class AgentController<
     // Before the lookup: a refused caller learns neither whether a run is live
     // on the thread nor any frame of it.
     await this.authorizeRequest(req, { route: "attach", threadId });
+    // A scoped controller (#1177) answers only for its scope's threads: a run
+    // on another tenant's thread is a miss here, as no run at all is.
+    if (!(await this.threadInScope(req, threadId))) return noLiveRun(threadId);
 
-    // The store is not consulted. This route answers whether a run is in
+    // Unscoped, the store is not consulted. This route answers whether a run is in
     // flight here, and a run it finds was started on a thread `stream` had
     // already loaded; a miss is `no_live_run` whether or not the thread exists,
     // because a client that gets one re-reads the thread anyway (see
@@ -2275,10 +2357,7 @@ export abstract class AgentController<
       // An explicit miss, not a 200 with an empty stream. See `MemoryLiveRuns`:
       // behind a round-robin load balancer this is the common case, and it has
       // to be visible as one.
-      return jsonResponse(404, {
-        code: "no_live_run",
-        message: `No run in progress for thread ${threadId} in this process.`,
-      });
+      return noLiveRun(threadId);
     }
 
     // A cursor is only a number if you know which run it counts within: `seq`
@@ -2313,6 +2392,95 @@ export abstract class AgentController<
       }
       throw err;
     }
+  }
+
+  /**
+   * `POST /<path>/watch` — follow a thread (#1180): an SSE stream that sends
+   * `{ type: "run-start", runId }` for each run that starts on the thread
+   * from now on, whoever started it (another tab, `startTurn` from a job),
+   * and once on connect for a run already going. The client attaches to the
+   * run with `/attach`; this stream carries no frames of it. `useChat`'s
+   * `watch: true` opens it.
+   *
+   * Authorized as `attach` is (`authorizeRequest` with `route: "attach"`), and
+   * a run is announced only to a caller `attach` would let read it
+   * (`runOwner`). Per process, like `LiveRuns`: a run started in another
+   * process is not announced here (#459). The stream stays open until the
+   * client closes it, with keepalive comments while it is quiet.
+   */
+  async watch(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
+    const parsed = await readJsonBody(req, SMALL_BODY_BYTES);
+    if (parsed.error) {
+      return invalidRequest(parsed);
+    }
+    const body = parsed.body;
+    const threadId =
+      typeof body.threadId === "string" ? body.threadId : searchParam(req, "threadId");
+    if (!threadId) {
+      return jsonResponse(400, {
+        code: "invalid_request",
+        message: "watch needs a threadId: it is the thread whose runs are announced.",
+      });
+    }
+    // Before anything is said about the thread's runs, as for `attach`.
+    await this.authorizeRequest(req, { route: "attach", threadId });
+    // Another scope's thread (#1177) is one this caller cannot follow.
+    if (!(await this.threadInScope(req, threadId))) {
+      return jsonResponse(404, {
+        code: "thread_not_found",
+        message: `Thread ${threadId} does not exist here, or has expired.`,
+      });
+    }
+    const owner = await this.runOwner(req);
+    const liveRuns = this.liveRuns;
+    const watchers = watchersFor(liveRuns);
+    const live = await liveRuns.find({ threadId });
+
+    let listener: ((runId: string) => void) | null = null;
+    let keepalive: ReturnType<typeof sseKeepalive> | null = null;
+    let seq = 0;
+    const close = () => {
+      keepalive?.stop();
+      if (!listener) return;
+      const set = watchers.get(threadId);
+      set?.delete(listener);
+      if (set && set.size === 0) watchers.delete(threadId);
+      listener = null;
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        keepalive = sseKeepalive(controller);
+        const send = (runId: string) => {
+          // Someone else's run (#442): `attach` would refuse it, so it is not named.
+          if (!liveRuns.mayAccess(runId, owner)) return;
+          try {
+            controller.enqueue(
+              new TextEncoder().encode(
+                encodeFrame({ seq: ++seq, event: { type: "run-start", runId, threadId } }),
+              ),
+            );
+            keepalive?.touch();
+          } catch {
+            close();
+          }
+        };
+        listener = send;
+        let set = watchers.get(threadId);
+        if (!set) {
+          set = new Set();
+          watchers.set(threadId, set);
+        }
+        set.add(send);
+        if (live && liveRuns.isRunning(live.runId)) send(live.runId);
+      },
+      cancel() {
+        close();
+      },
+    });
+    // The client going away cancels the body; the request's signal is the
+    // same news by another road, for a runtime that does not cancel it.
+    req.rawRequest?.signal?.addEventListener("abort", close, { once: true });
+    return new Response(stream, { status: 200, headers: sseHeaders() });
   }
 
   /**
@@ -4244,6 +4412,37 @@ function stoppedBeforeStart(): Response {
   });
 }
 
+/** `startTurn`'s `event`, checked and copied, or a throw saying what is wrong with it. */
+function checkTurnEvent(params: AgentTurnParams<any>): AgentTurnEvent {
+  const event = params.event as AgentTurnEvent;
+  if (params.text !== undefined || params.turn !== undefined) {
+    throw new TypeError(
+      "AgentController.startTurn takes an `event` or a `text`/`turn`, not both: an event is not a person's message.",
+    );
+  }
+  if (typeof event !== "object" || event === null || typeof event.name !== "string" || !EVENT_NAME.test(event.name)) {
+    throw new TypeError(
+      "AgentController.startTurn's `event.name` must be letters, digits and `.`, `_`, `:`, `-` (at most 64), like \"job-settled\".",
+    );
+  }
+  if (event.text !== undefined && typeof event.text !== "string") {
+    throw new TypeError("AgentController.startTurn's `event.text` must be a string.");
+  }
+  let data: unknown;
+  if (event.data !== undefined) {
+    try {
+      data = JSON.parse(JSON.stringify(event.data));
+    } catch (error) {
+      throw new TypeError(`AgentController.startTurn's \`event.data\` is not JSON: ${String(error)}`);
+    }
+  }
+  return {
+    name: event.name,
+    ...(event.text ? { text: event.text } : {}),
+    ...(data !== undefined ? { data } : {}),
+  };
+}
+
 /** A `startTurn({ ifBusy: "skip" })` on a busy thread (#1178). `startTurn` answers `{ skipped: true }` for it. */
 function threadBusy(threadId: string): Response {
   return jsonResponse(409, {
@@ -4556,4 +4755,11 @@ function scopedStore(store: AgentStore, scope: string): AgentStore {
     );
   }
   return store.forScope(scope);
+}
+
+function noLiveRun(threadId: string): Response {
+  return jsonResponse(404, {
+    code: "no_live_run",
+    message: `No run in progress for thread ${threadId} in this process.`,
+  });
 }

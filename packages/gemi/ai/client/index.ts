@@ -51,6 +51,7 @@ export type {
   AgentStreamFrame,
   ClientToolResult,
   ClientTurn,
+  TurnEvent,
   FilePart,
   FinishReason,
   // The nested transcript is something a chat UI renders, so it belongs in the

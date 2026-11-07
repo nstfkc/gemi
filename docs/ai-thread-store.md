@@ -79,7 +79,7 @@ const { threadId } = await store.createThread({ userId: user.id });
 await store.listThreads({ userId: user.id });
 ```
 
-In a controller, answer the scope from `storeScope(req, { body })`; `stream` and `upload` then run on `store.forScope(scope)`:
+In a controller, answer the scope from `storeScope(req, { body })`; `stream` and `upload` then run on `store.forScope(scope)`, and `attach` and `watch` answer 404 for a thread outside the scope (they carry no `body`, so take the scope from the user):
 
 ```ts
 export class ChatController extends AgentController<{ projectId: string }> {
