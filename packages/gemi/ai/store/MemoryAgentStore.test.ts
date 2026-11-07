@@ -141,4 +141,42 @@ describe("MemoryAgentStore", () => {
 
     expect(store.size).toBe(1);
   });
+
+  test("forScope views keep their threads apart over one store (#1177)", async () => {
+    const store = new MemoryAgentStore();
+    const a = store.forScope("a");
+    const b = store.forScope("b");
+    const { threadId } = await a.createThread({});
+    await a.appendMessages(threadId, [message("1", "user", "hi")]);
+
+    expect(await b.loadThread(threadId)).toBeNull();
+    await expect(b.appendMessages(threadId, [message("2", "user", "x")])).rejects.toThrow(/does not exist/);
+    await b.removeMessages(threadId, ["1"]);
+    await b.saveSummary(threadId, {
+      cutMessageId: "1",
+      text: "x",
+      turns: 1,
+      messages: 1,
+      fingerprint: "f",
+      createdAt: new Date(0).toISOString(),
+    });
+    b.delete(threadId);
+
+    expect(await a.loadThread(threadId)).toHaveLength(1);
+    expect(await a.loadSummaries(threadId)).toEqual([]);
+    // The store itself sees every scope.
+    expect(await store.loadThread(threadId)).toHaveLength(1);
+    expect(() => store.forScope("")).toThrow(/non-empty/);
+  });
+
+  test("with client-owned ids, a view starts unknown ids in its scope but not another's", async () => {
+    const store = new MemoryAgentStore({ clientOwnedIds: true });
+    const a = store.forScope("a");
+    const b = store.forScope("b");
+    expect(await a.loadThread("t1")).toEqual([]);
+    await a.appendMessages("t1", [message("1", "user", "hi")]);
+    expect(await b.loadThread("t1")).toBeNull();
+    await expect(b.appendMessages("t1", [message("2", "user", "x")])).rejects.toThrow(/does not exist/);
+    expect(await a.loadThread("t1")).toHaveLength(1);
+  });
 });

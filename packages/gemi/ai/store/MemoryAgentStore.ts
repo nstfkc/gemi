@@ -11,6 +11,8 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 
 type Thread = {
   messages: AgentMessage[];
+  /** The `forScope` view that created it (#1177); absent for the store itself. */
+  scope?: string;
   /** `contextWindow.compact`'s summaries of this thread, most recent first. */
   summaries?: ThreadSummary[];
   /** Bumped by every read and every write: a conversation someone is still
@@ -47,6 +49,9 @@ export class MemoryAgentStore implements AgentStore {
    *  store has never seen is a conversation starting rather than one lost. */
   readonly clientOwnedIds: boolean;
 
+  /** The scope this view is bound to (`forScope`), or `null` for the store itself. */
+  readonly scope: string | null = null;
+
   private threads = new Map<string, Thread>();
   private lastSweep = 0;
 
@@ -55,21 +60,54 @@ export class MemoryAgentStore implements AgentStore {
     this.clientOwnedIds = params.clientOwnedIds ?? false;
   }
 
+  /**
+   * This store bound to one scope (#1177), over the same threads: a thread
+   * created or first written through the view is in its scope, and the view
+   * sees no thread of another. The store itself sees every thread.
+   */
+  forScope(scope: string): MemoryAgentStore {
+    if (typeof scope !== "string" || scope === "") {
+      throw new TypeError("A MemoryAgentStore scope is a non-empty string.");
+    }
+    const view = new MemoryAgentStore({ ttlMs: this.ttlMs, clientOwnedIds: this.clientOwnedIds });
+    view.threads = this.threads;
+    (view as { scope: string | null }).scope = scope;
+    return view;
+  }
+
+  /** The thread, if this store or view may see it. */
+  private visible(threadId: string): Thread | undefined {
+    const thread = this.threads.get(threadId);
+    if (!thread || this.scope === null || thread.scope === this.scope) return thread;
+    return undefined;
+  }
+
+  /** A fresh thread, in this view's scope. */
+  private fresh(): Thread {
+    return {
+      messages: [],
+      touchedAt: Date.now(),
+      ...(this.scope !== null ? { scope: this.scope } : {}),
+    };
+  }
+
   async createThread(params: { userId?: string | number }): Promise<{ threadId: string }> {
     // The user id is not part of the id and not stored: this store cannot
     // authorize anything, and an id that looked like a key would invite an app
     // to treat it as one. Ownership belongs to the app's own table.
     void params;
     const threadId = crypto.randomUUID();
-    this.threads.set(threadId, { messages: [], touchedAt: Date.now() });
+    this.threads.set(threadId, this.fresh());
     this.sweep();
     return { threadId };
   }
 
   async loadThread(threadId: string): Promise<AgentMessage[] | null> {
     this.sweep();
-    const thread = this.threads.get(threadId);
+    const thread = this.visible(threadId);
     if (!thread) {
+      // Another scope's thread is not this view's to start.
+      if (this.threads.has(threadId)) return null;
       // With client-owned ids the first turn arrives before anything has been
       // written under it, so unknown is empty. Otherwise unknown is a thread
       // that expired or never existed, and the controller has to be able to
@@ -85,9 +123,9 @@ export class MemoryAgentStore implements AgentStore {
 
   async appendMessages(threadId: string, messages: AgentMessage[]): Promise<void> {
     this.sweep();
-    let thread = this.threads.get(threadId);
+    let thread = this.visible(threadId);
     if (!thread) {
-      if (!this.clientOwnedIds) {
+      if (!this.clientOwnedIds || this.threads.has(threadId)) {
         // Creating the thread here would persist a turn under an id the client
         // believes holds a longer conversation, and hide from the app that the
         // conversation is gone. The controller checks before the run and never
@@ -96,7 +134,7 @@ export class MemoryAgentStore implements AgentStore {
       }
       // The client owns the id, so an append to one the store has never seen is
       // the first turn, and refusing it would lose a turn that already happened.
-      thread = { messages: [], touchedAt: Date.now() };
+      thread = this.fresh();
       this.threads.set(threadId, thread);
     }
     // Upsert, not push. A turn that resolves a pending call hands back the
@@ -124,7 +162,7 @@ export class MemoryAgentStore implements AgentStore {
 
   async removeMessages(threadId: string, messageIds: string[]): Promise<void> {
     this.sweep();
-    const thread = this.threads.get(threadId);
+    const thread = this.visible(threadId);
     if (!thread) return;
     const drop = new Set(messageIds);
     thread.messages = thread.messages.filter((message) => !drop.has(message.id));
@@ -132,20 +170,20 @@ export class MemoryAgentStore implements AgentStore {
   }
 
   async loadSummaries(threadId: string): Promise<ThreadSummary[]> {
-    const thread = this.threads.get(threadId);
+    const thread = this.visible(threadId);
     return thread?.summaries?.slice() ?? [];
   }
 
   async saveSummary(threadId: string, summary: ThreadSummary): Promise<void> {
     // A thread that is gone has nothing to summarise; the summary goes with it.
-    const thread = this.threads.get(threadId);
+    const thread = this.visible(threadId);
     if (!thread) return;
     thread.summaries = keepSummary(thread.summaries ?? [], summary);
   }
 
   /** Test seam, and a way for an app to drop a conversation on request. */
   delete(threadId: string): void {
-    this.threads.delete(threadId);
+    if (this.visible(threadId)) this.threads.delete(threadId);
   }
 
   get size(): number {
