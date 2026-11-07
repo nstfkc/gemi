@@ -2,7 +2,7 @@
 
 An agent mounted with `this.agent(...)` in an `ApiRouter` is what `useChat` talks to in the browser. The same route serves native apps: **GemiChat** for iOS (Swift) and **`dev.gemijs.chat`** for Android (Kotlin) are ports of `useChat`, and `gemi ai:generate-client` writes the agent's tool and output types for either one.
 
-Nothing on the server changes. A mobile client sends the same requests as the web hook, to the same four routes: `POST /api/<path>` to stream a turn, and `/stop`, `/attach` and `/files` under it.
+Nothing on the server changes. A mobile client sends the same requests as the web hook, to the same routes: `POST /api/<path>` to stream a turn, and `/stop`, `/attach` and `/files` under it (`/watch`, which follows a thread's runs, isn't in the native clients yet).
 
 ## What you get
 

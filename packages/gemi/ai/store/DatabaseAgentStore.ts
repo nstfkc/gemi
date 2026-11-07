@@ -391,7 +391,8 @@ function list(q: SQL, values: string[]) {
 
 function titleOf(messages: AgentMessage[]): string | null {
   for (const message of messages) {
-    if (message.role !== "user") continue;
+    // An event (#1181) is the server's, not what the person asked about.
+    if (message.role !== "user" || message.event) continue;
     const text = message.content
       .map((part) => (part.type === "text" ? part.text : ""))
       .join(" ")
