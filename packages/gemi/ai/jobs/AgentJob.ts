@@ -82,6 +82,15 @@ export class JobsRequireThreadError extends ToolError {
 
 let currentStore: AgentJobStore = new MemoryAgentJobStore();
 
+/**
+ * What `AgentJobs.onSettled` calls, once per job, with the job as it settled
+ * (#1179): `state` is `"ok"` or `"error"` (a deadline is `error.code`
+ * `"timeout"`).
+ */
+export type AgentJobSettledListener = (record: AgentJobRecord) => void | Promise<void>;
+
+const settledListeners = new Set<AgentJobSettledListener>();
+
 /** Every state, for a transition that does not change the state. */
 const ANY_STATE: AgentJobState[] = ["running", "ok", "error"];
 
@@ -116,6 +125,38 @@ export const AgentJobs = {
 
   get(id: string): Promise<AgentJobRecord | null> {
     return currentStore.get(id);
+  },
+
+  /**
+   * Calls `listener` each time a job settles in this process, and answers a
+   * function that removes it (#1179). This is how an app continues a thread
+   * when its work is done, rather than waiting for the person to speak:
+   *
+   *     AgentJobs.onSettled(async (job) => {
+   *       await ChatController.startTurn({
+   *         threadId: job.threadId,
+   *         user: await userFor(job.owner),
+   *         ifBusy: "queue", // don't cut off an answer that's being read
+   *       });
+   *     });
+   *
+   * Called by whichever settle wins the compare-and-set, so once per job
+   * however many race: `settle` and `fail`, an `AgentJob`'s result or dead
+   * letter, the deadline sweep, and the expiry of an overdue job when a
+   * thread is loaded. Not for a job that could not be queued: the tool call
+   * that started it fails in its own turn.
+   *
+   * IN THE PROCESS THAT SETTLED THE JOB, which is often a queue worker or the
+   * one that took a webhook: register it at boot in every process that
+   * settles jobs, as for `AgentJobs.use`. The turn it starts runs in that
+   * process too (see `startTurn`). Settling does not wait for listeners, and a
+   * listener that throws or rejects is logged, not thrown into the settle.
+   */
+  onSettled(listener: AgentJobSettledListener): () => void {
+    settledListeners.add(listener);
+    return () => {
+      settledListeners.delete(listener);
+    };
   },
 
   /**
@@ -170,8 +211,8 @@ export async function clockOf(store: AgentJobStore): Promise<number> {
 }
 
 /** Fails a running job for its deadline. Compare-and-set: false when it had settled. */
-export function expire(store: AgentJobStore, record: AgentJobRecord): Promise<boolean> {
-  return store.transition(record.id, ["running"], {
+export async function expire(store: AgentJobStore, record: AgentJobRecord): Promise<boolean> {
+  const won = await store.transition(record.id, ["running"], {
     state: "error",
     error: {
       code: "timeout",
@@ -179,6 +220,30 @@ export function expire(store: AgentJobStore, record: AgentJobRecord): Promise<bo
       toolCallId: record.toolCallId,
       retryable: true,
     },
+  });
+  if (won) notifySettled(store, record.id);
+  return won;
+}
+
+/**
+ * Tells `onSettled`'s listeners about a job this process just settled. Not
+ * awaited by the settle: a listener may start a turn that waits for another.
+ */
+function notifySettled(store: AgentJobStore, id: string): void {
+  if (settledListeners.size === 0) return;
+  const listeners = [...settledListeners];
+  void (async () => {
+    const record = await store.get(id);
+    if (!record || record.state === "running") return;
+    for (const listener of listeners) {
+      try {
+        await listener(record);
+      } catch (error) {
+        console.error(`An AgentJobs.onSettled listener failed for background job ${id}.`, error);
+      }
+    }
+  })().catch((error) => {
+    console.error(`Could not read background job ${id} for its onSettled listeners.`, error);
   });
 }
 
@@ -190,18 +255,20 @@ async function settleOn(
   const record = await store.get(id);
   if (!record || record.state !== "running") return false;
   const usage = outcome.usage ? addUsage(record.usage ?? emptyUsage(), outcome.usage) : undefined;
-  if ("error" in outcome) {
-    return store.transition(id, ["running"], {
-      state: "error",
-      error: jobError(record, outcome.error),
-      ...(usage ? { usage } : {}),
-    });
-  }
-  return store.transition(id, ["running"], {
-    state: "ok",
-    output: plainData(outcome.output, record),
-    ...(usage ? { usage } : {}),
-  });
+  const won =
+    "error" in outcome
+      ? await store.transition(id, ["running"], {
+          state: "error",
+          error: jobError(record, outcome.error),
+          ...(usage ? { usage } : {}),
+        })
+      : await store.transition(id, ["running"], {
+          state: "ok",
+          output: plainData(outcome.output, record),
+          ...(usage ? { usage } : {}),
+        });
+  if (won) notifySettled(store, id);
+  return won;
 }
 
 /** The error the model reads. See `AgentJobs.settle`. */

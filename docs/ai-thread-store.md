@@ -92,7 +92,7 @@ export class ChatController extends AgentController<{ projectId: string }> {
 }
 ```
 
-`body` is the client's claim, as in `authorizeRequest()`: derive the scope from the authenticated user where you can, or check the body there. Server code passes the scope itself: `ChatController.startTurn({ threadId, text, scope })` (it wins over `storeScope()`, which otherwise sees the turn's `user` and `body`), and `controller.readThread(threadId, { scope })` for the route that hands a thread to `useChat`. `MemoryAgentStore` has `forScope` too, for tests and development.
+`body` is the client's claim, as in `authorizeRequest()`: derive the scope from the authenticated user where you can, or check the body there. Server code passes the scope itself: `ChatController.startTurn({ threadId, text, scope })` (it wins over `storeScope()`, which otherwise sees the turn's `user` and `body`), and `controller.readThread(threadId, { scope })` for the route that hands a thread to `useChat`. `MemoryAgentStore` has `forScope` too, for tests and development. The scoped view lives on the controller instance, which gemi builds per request (routes, `startTurn`, voice); an instance reused for a request in another scope throws rather than serve it from the first scope's view.
 
 - **The unscoped store is unchanged.** It reads every row, scoped or not (for maintenance and admin pages), and its statements do not name the `scope` column, so an app that never scopes needs no migration.
 - **`requireScope: true`** (`new DatabaseAgentStore(connection, { requireScope: true })`) makes every call on the unscoped store throw, so a call that forgot its scope is an error rather than a read across every tenant. `createTable()` still works.
