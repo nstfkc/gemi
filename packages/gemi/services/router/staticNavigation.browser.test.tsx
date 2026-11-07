@@ -365,6 +365,39 @@ describe("the swap", () => {
       { url: `${ORIGIN}/b`, title: "B", initial: false },
     ]);
   });
+
+  test("gemi:before-swap hands a listener the next document before it is in the page", async () => {
+    const a = { title: "A", body: nav('<a href="/b">b</a>') };
+    const b = { title: "B", body: nav('<a href="/a">a</a>') + '<aside data-state="expanded"></aside>' };
+    const doc = await start(a, { pages: { "/a": await page(a), "/b": await page(b) } });
+    const seen: string[] = [];
+    const prepare = (event: Event) => {
+      const { url, document: next } = (event as CustomEvent<{ url: string; document: Document }>).detail;
+      seen.push(`${url} ${document.title} ${next.title}`);
+      next.querySelector("aside")?.setAttribute("data-state", "collapsed");
+    };
+    const loaded = () => seen.push("page-load");
+    document.addEventListener("gemi:before-swap", prepare);
+    document.addEventListener("gemi:page-load", loaded);
+
+    await doc.navigate("/b");
+    expect(document.querySelector("aside")!.getAttribute("data-state")).toBe("collapsed");
+    await doc.navigate("/a");
+    // Back and forward swap the entry's page in through it too.
+    await doc.back();
+    document.removeEventListener("gemi:before-swap", prepare);
+    document.removeEventListener("gemi:page-load", loaded);
+
+    expect(seen).toEqual([
+      `${ORIGIN}/b A B`,
+      "page-load",
+      `${ORIGIN}/a B A`,
+      "page-load",
+      `${ORIGIN}/b A B`,
+      "page-load",
+    ]);
+    expect(document.querySelector("aside")!.getAttribute("data-state")).toBe("collapsed");
+  });
 });
 
 describe("full loads instead of a swap", () => {

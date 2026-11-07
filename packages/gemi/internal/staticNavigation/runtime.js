@@ -105,10 +105,10 @@ live.style.cssText =
   "position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap";
 d.body.append(live);
 
-const pageLoad = (initial) => {
-  G.p = { url: location.href, title: d.title, initial };
-  d.dispatchEvent(new CustomEvent("gemi:page-load", { detail: G.p }));
-};
+const emit = (type, detail, cancelable) =>
+  d.dispatchEvent(new CustomEvent("gemi:" + type, { detail, cancelable }));
+const pageLoad = (initial) =>
+  emit("page-load", (G.p = { url: location.href, title: d.title, initial }));
 
 // --- Fetching and the prefetch cache -------------------------------------------
 
@@ -251,6 +251,9 @@ const go = async (url, push) => {
       h.pushState({ g: key() }, "", next.href);
     }
     shown = withoutHash(location);
+    // Before the next page is in the document: a document script can prepare it
+    // (per-visitor state the cached HTML can't know) before it is first laid out (#1175).
+    emit("before-swap", { url: location.href, document: doc });
     swap(doc);
     const target = push && url.hash && d.getElementById(decodeURIComponent(url.hash.slice(1)));
     if (target) target.scrollIntoView({ behavior: "instant" });
@@ -276,12 +279,7 @@ on(d, "click", (event) => {
   )
     return;
   const url = linkOf(event);
-  if (
-    url &&
-    d.dispatchEvent(
-      new CustomEvent("gemi:before-navigate", { cancelable: true, detail: { url: url.href } }),
-    )
-  ) {
+  if (url && emit("before-navigate", { url: url.href }, true)) {
     event.preventDefault();
     stamp();
     scrolls[h.state.g] = [w.scrollX, w.scrollY];

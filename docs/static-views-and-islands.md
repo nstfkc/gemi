@@ -592,13 +592,29 @@ this.view("site/PublishedSite", [PublishedSiteController, "show"]).static({
 
 ### Events
 
-The runtime dispatches two events on `document`:
+The runtime dispatches three events on `document`:
 
 - `gemi:before-navigate`, cancelable, with `detail.url`, before it takes a
   click. Cancel it to let the browser follow that link normally (a full load).
+- `gemi:before-swap`, with `detail.url` and `detail.document`, the next page as
+  parsed, not yet in the page: once the runtime has decided to swap it in
+  (after a click or on back and forward), just before it does. A listener can
+  change that document, so the page is first laid out the way it should look:
+  per-visitor state the cached HTML can't know, such as a collapsed sidebar
+  kept in a cookie, which an inline script applies on a full load. It isn't
+  cancelable; `gemi:before-navigate` is.
 - `gemi:page-load`, with `detail.url`, `detail.title` and `detail.initial`:
   once for the page the browser loaded (`initial: true`) and after every
-  client-side navigation.
+  client-side navigation, once the scroll position and focus are set.
+
+```typescript
+// app/views/site/sidebar.script.ts, a document script
+document.addEventListener("gemi:before-swap", (event) => {
+  const next = (event as CustomEvent<{ document: Document }>).detail.document;
+  if (document.cookie.includes("sidebar=collapsed"))
+    next.querySelector("aside")?.setAttribute("data-state", "collapsed");
+});
+```
 
 From an island, `onStaticNavigate` (from `gemi/client`) is the same notice. It's
 called right away for the current page, then after every navigation, and
