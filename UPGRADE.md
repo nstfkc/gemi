@@ -1,5 +1,13 @@
 # Unreleased
 
+## ai: a sub-run uses the parent run's per-run provider (#1171)
+
+**Behaviour change (minor).** See [AI Providers → A provider per run](docs/ai-providers.md#a-provider-per-run).
+
+- A sub-run started with `ctx.runAgent` now uses the provider its parent run was given with `stream({ provider })`. Before, it always used the sub-agent's own provider from `Agent.create`, so a recorded or rerouted run still sent its sub-agents' calls to the live model.
+- Runs started without a `provider` are unchanged: each sub-agent keeps its own.
+- `RunAgentParams.provider` is new: the provider for that one sub-run, which wins over the inherited one. To keep the old behaviour for a sub-agent, pass `provider: subAgent.provider`.
+
 ## client: `<Head viewport themeColor>` (#1172)
 
 **New API, no behaviour change.** See [Views and layouts → Viewport and theme colour](docs/views-and-layouts.md#viewport-and-theme-colour).

@@ -2665,6 +2665,76 @@ describe("a sub-agent that runs to completion", () => {
   });
 });
 
+describe("the provider a sub-run calls (#1171)", () => {
+  const delegating = (params: Record<string, unknown> = {}) => {
+    const sub = answeringAgent("researcher", "own");
+    const research = nestingTool("research", async (ctx) => {
+      const run = await ctx.runAgent(sub.agent, { prompt: "how many?", ...params });
+      return { heard: textOf(run.messages[run.messages.length - 1]) };
+    });
+    const own = fakeProvider([finish()]);
+    const lead = Agent.create({ name: "lead", provider: own, tools: [research] });
+    return { sub, lead, own };
+  };
+  const leadScript = (subText: string) => [
+    [toolCall("c1", "research", {}), finish()],
+    [{ type: "text-delta", delta: subText } as ProviderEvent, finish()],
+    [{ type: "text-delta", delta: "done" } as ProviderEvent, finish()],
+  ];
+
+  test("inherits the provider the parent run was given", async () => {
+    const { sub, lead, own } = delegating();
+    const perRun = fakeProvider(...leadScript("recorded"));
+    const result = await lead.stream({ messages: [], provider: perRun }).result();
+
+    // Parent step, sub-run step, parent step: all on the per-run provider.
+    expect(perRun.calls).toHaveLength(3);
+    expect(sub.provider.calls).toHaveLength(0);
+    expect(own.calls).toHaveLength(0);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "ok",
+      output: { heard: "recorded" },
+    });
+  });
+
+  test("uses the sub-agent's own provider when the parent was given none", async () => {
+    const sub = answeringAgent("researcher", "own");
+    const research = nestingTool("research", async (ctx) => {
+      const run = await ctx.runAgent(sub.agent, { prompt: "how many?" });
+      return { heard: textOf(run.messages[run.messages.length - 1]) };
+    });
+    const parent = fakeProvider(
+      [toolCall("c1", "research", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const lead = Agent.create({ name: "lead", provider: parent, tools: [research] });
+    const result = await lead.stream({ messages: [] }).result();
+
+    expect(parent.calls).toHaveLength(2);
+    expect(sub.provider.calls).toHaveLength(1);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      output: { heard: "own" },
+    });
+  });
+
+  test("an explicit `provider` wins over the parent's", async () => {
+    const explicit = fakeProvider([{ type: "text-delta", delta: "explicit" }, finish()]);
+    const { sub, lead } = delegating({ provider: explicit });
+    const perRun = fakeProvider(
+      [toolCall("c1", "research", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const result = await lead.stream({ messages: [], provider: perRun }).result();
+
+    expect(explicit.calls).toHaveLength(1);
+    expect(perRun.calls).toHaveLength(2);
+    expect(sub.provider.calls).toHaveLength(0);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      output: { heard: "explicit" },
+    });
+  });
+});
+
 /** Turn one of the escalation conversation, shared by the tests that resume. */
 async function escalate(build: { tool: any }) {
   const provider = fakeProvider([toolCall("c1", build.tool.name, {}), finish()]);
