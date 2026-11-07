@@ -593,6 +593,18 @@ export interface RunAgentParams<Ctx = AgentContext> {
    */
   maxOutputTokens?: number;
   temperature?: number;
+  /**
+   * The provider for this sub-run's model calls (#1171). Omitted, the sub-run
+   * uses the provider the parent run was given (`stream({ provider })`) when
+   * it was given one, and its own agent's otherwise.
+   *
+   * Inherited because a per-run provider is usually about the run rather than
+   * the agent: a recorder that replays a test's model calls, or a route to a
+   * different deployment, should reach every sub-run too. Pass one to tell
+   * sub-runs apart (e.g. `recorder.child(key)` for parallel sub-runs) or to
+   * keep a sub-agent on its own: `provider: subAgent.provider`.
+   */
+  provider?: AgentProvider;
 }
 
 /**
@@ -5193,6 +5205,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       instructions: params.instructions,
       maxOutputTokens: params.maxOutputTokens,
       temperature: params.temperature,
+      // The parent's per-run provider, not its agent's: a run handed a
+      // provider (a recorder, another deployment) means it for its whole tree,
+      // while a sub-agent built with a provider of its own keeps that one when
+      // the parent was not handed any. See `RunAgentParams.provider`.
+      provider: params.provider ?? this.params.provider,
       // Kept across turns so the transcript the client already has keeps its
       // identity when the run continues.
       runId: resuming ? recorded.runId : undefined,

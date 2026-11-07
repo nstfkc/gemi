@@ -46,6 +46,17 @@ The defaults are long on purpose. A reasoning model at a high effort can think f
 
 `streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 
+## A provider per run
+
+`agent.stream({ provider })` makes that run's model calls through `provider` instead of the one from `Agent.create`, e.g. to let a user pick a model, route a run to another deployment, or record and replay model calls in a test.
+
+A sub-run started with `ctx.runAgent` inherits it: when the parent run was given a `provider`, the sub-agent's model calls go through it too. When the parent was given none, the sub-agent uses its own. Pass `provider` to `ctx.runAgent` to choose for one sub-run, for example to tell parallel sub-runs apart in a recorder, or to keep a sub-agent on its own model:
+
+```typescript
+await ctx.runAgent(researcher, { prompt, provider: recorder.child("researcher") });
+await ctx.runAgent(router, { prompt, provider: router.provider });
+```
+
 ## Fallback chains
 
 `FallbackProvider.chain` wraps an ordered list of providers: the primary first, then the fallbacks. The chain is itself a provider, so you pass it to `Agent.create` like any other provider.

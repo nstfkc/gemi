@@ -1,3 +1,13 @@
+# Unreleased
+
+## ai: a sub-run uses the parent run's per-run provider (#1171)
+
+**Behaviour change (minor).** See [AI Providers → A provider per run](docs/ai-providers.md#a-provider-per-run).
+
+- A sub-run started with `ctx.runAgent` now uses the provider its parent run was given with `stream({ provider })`. Before, it always used the sub-agent's own provider from `Agent.create`, so a recorded or rerouted run still sent its sub-agents' calls to the live model.
+- Runs started without a `provider` are unchanged: each sub-agent keeps its own.
+- `RunAgentParams.provider` is new: the provider for that one sub-run, which wins over the inherited one. To keep the old behaviour for a sub-agent, pass `provider: subAgent.provider`.
+
 # Upgrading from 0.189.0 to 0.190.0
 
 ## ai: a stream that keeps trickling is cut at `streamMaxDurationMs`, and a runaway tool call is asked again (#1169)
