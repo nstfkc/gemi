@@ -134,7 +134,7 @@ export type { ViewProps, LayoutProps, ViewPaths, ApiPaths } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";
 
 export { Image } from "./Image";
-export { Head } from "./Head";
+export { Head, type HeadThemeColor, type HeadViewport } from "./Head";
 export {
   textDirection,
   type HtmlAttributes,
