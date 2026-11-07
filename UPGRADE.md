@@ -1,3 +1,15 @@
+# Unreleased
+
+## ai: tenant scopes for agent threads (#1177)
+
+**New API, no behaviour change.** See [AI Thread Store → Scopes](docs/ai-thread-store.md#scopes-one-store-many-tenants).
+
+- `DatabaseAgentStore.forScope(scope)` and `MemoryAgentStore.forScope(scope)` return the store bound to one scope (a tenant key): every thread and message it writes carries the scope, and every read and write is filtered by it. A thread of another scope is one it does not have. `AgentStore.forScope` is a new optional method.
+- `AgentController.storeScope(req, { body })` is a new hook: when it answers a scope, `stream` and `upload` use `store.forScope(scope)`. `startTurn({ scope })` and `readThread(threadId, { scope })` take one explicitly. The default answers `null`, which is today's behaviour.
+- `DatabaseAgentStore` options: `requireScope` (the unscoped store throws) and `beginScope(tx, scope)` (called first in every transaction a scoped view opens, e.g. `set_config('app.current_id', scope, true)` for row-level security; scoped calls then always run in such a transaction).
+- **Schema, only to use scopes:** a nullable `scope` column on `gemi_agent_threads` and `gemi_agent_messages`, and an index on threads `(scope, user_id, updated_at)`. With Prisma, add `scope String?` to both models and `@@index([scope, userId, updatedAt])` to `GemiAgentThread`, then migrate. Without Prisma, `addScopeColumns()` (also run by `createTable()`) adds them. The unscoped store does not name the column, so an app that never scopes needs no migration.
+- A store that is not scoped reads every row, scoped or not, as before.
+
 # 0.191.0
 
 ## ai: a sub-run uses the parent run's per-run provider (#1171)

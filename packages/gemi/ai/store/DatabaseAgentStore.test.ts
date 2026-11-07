@@ -14,7 +14,7 @@ import { AgentController, MemoryLiveRuns } from "../AgentController";
 import type { ThreadSummary } from "../contextCompaction";
 import { fakeProvider } from "../providers/fakeProvider";
 import type { AgentMessage } from "../types";
-import { DatabaseAgentStore } from "./DatabaseAgentStore";
+import { createAgentStoreTableStatements, DatabaseAgentStore } from "./DatabaseAgentStore";
 
 /**
  * The database thread store (#1063), against SQLite always and against
@@ -360,6 +360,234 @@ for (const backend of backends) {
       expect(thread!.map((m) => m.role)).toEqual(["user", "assistant"]);
       expect(thread![1]!.content).toEqual([{ type: "text", text: "hello" }]);
       expect((await store.getThread(threadId))!.title).toBe("hi there");
+    });
+
+    // --- scopes (#1177) ----------------------------------------------------
+
+    test("two scopes do not see each other's threads, and the store sees both", async () => {
+      const a = store.forScope("tenant-a");
+      const b = store.forScope("tenant-b");
+      const one = await a.createThread({ userId: 1 });
+      const two = await b.createThread({ userId: 1 });
+      await a.appendMessages(one.threadId, [message("u1", "user", "a's")]);
+      await b.appendMessages(two.threadId, [message("u1", "user", "b's")]);
+      await a.saveSummary(one.threadId, summary("u1", "a summary"));
+
+      // Another scope's thread is a thread it does not have.
+      expect(await b.loadThread(one.threadId)).toBeNull();
+      expect(await b.getThread(one.threadId)).toBeNull();
+      expect(await b.loadSummaries(one.threadId)).toEqual([]);
+      expect(await b.lockSummary(one.threadId, "u1", 60_000)).toBeNull();
+      await expect(b.appendMessages(one.threadId, [message("x", "user", "intruder")])).rejects.toThrow(
+        /does not exist/,
+      );
+      await expect(b.appendMessages(one.threadId, [])).rejects.toThrow(/does not exist/);
+      await b.saveSummary(one.threadId, summary("x", "intruder"));
+      await b.removeMessages(one.threadId, ["u1"]);
+      await b.deleteThread(one.threadId);
+
+      // ...and nothing it tried reached it.
+      expect(await a.loadThread(one.threadId)).toEqual([message("u1", "user", "a's")]);
+      expect((await a.loadSummaries(one.threadId)).map((s) => s.text)).toEqual(["a summary"]);
+      expect((await a.getThread(one.threadId))!.title).toBe("a's");
+
+      expect((await a.listThreads({ userId: 1 })).map((t) => t.id)).toEqual([one.threadId]);
+      expect((await b.listThreads()).map((t) => t.id)).toEqual([two.threadId]);
+      expect((await store.listThreads({ userId: 1 })).map((t) => t.id).sort()).toEqual(
+        [one.threadId, two.threadId].sort(),
+      );
+      // The unscoped store's own threads are in no scope.
+      const plain = await store.createThread({});
+      expect(await a.loadThread(plain.threadId)).toBeNull();
+      expect(await store.loadThread(one.threadId)).toHaveLength(1);
+
+      // A scope deletes its own.
+      await a.deleteThread(one.threadId);
+      expect(await store.loadThread(one.threadId)).toBeNull();
+      expect(await b.loadThread(two.threadId)).toHaveLength(1);
+    });
+
+    test("a scope is a non-empty string, and requireScope refuses the unscoped store", async () => {
+      expect(() => store.forScope("")).toThrow(/non-empty/);
+      const strict = new DatabaseAgentStore(
+        { sql: db.connect(), dialect: db.dialect },
+        { threadsTable: store.threadsTable, messagesTable: store.messagesTable, requireScope: true },
+      );
+      await expect(strict.createThread({})).rejects.toThrow(/requires a scope/);
+      await expect(strict.loadThread("x")).rejects.toThrow(/requires a scope/);
+      await expect(strict.appendMessages("x", [message("u1", "user", "hi")])).rejects.toThrow(
+        /requires a scope/,
+      );
+      const scoped = strict.forScope("t");
+      const { threadId } = await scoped.createThread({});
+      await scoped.appendMessages(threadId, [message("u1", "user", "hi")]);
+      expect(await scoped.loadThread(threadId)).toHaveLength(1);
+      expect(scoped.scope).toBe("t");
+    });
+
+    test("beginScope opens every transaction a scoped view starts, reads included", async () => {
+      const calls: string[] = [];
+      const hooked = new DatabaseAgentStore(
+        { sql: db.connect(), dialect: db.dialect },
+        {
+          threadsTable: store.threadsTable,
+          messagesTable: store.messagesTable,
+          beginScope: async (tx, scope) => {
+            calls.push(scope);
+            await tx`SELECT 1`;
+          },
+        },
+      );
+      const view = hooked.forScope("tenant-a");
+      const { threadId } = await view.createThread({});
+      await view.appendMessages(threadId, [message("u1", "user", "hi")]);
+      await view.loadThread(threadId);
+      await view.listThreads();
+      const release = await view.lockSummary(threadId, "u1", 60_000);
+      await release!();
+      expect(calls.length).toBe(6);
+      expect(new Set(calls)).toEqual(new Set(["tenant-a"]));
+      // The unscoped store never calls it.
+      await hooked.listThreads();
+      expect(calls.length).toBe(6);
+    });
+
+    test("tables made before scopes keep working, and addScopeColumns brings them up to date", async () => {
+      const quote = (table: string) =>
+        db.dialect === "mysql" || db.dialect === "mariadb" ? `\`${table}\`` : `"${table}"`;
+      const sql = db.connect();
+      const threadsTable = `LegacyThreads_${suffix()}`;
+      const messagesTable = `LegacyMessages_${suffix()}`;
+      // The tables as they were: the same DDL without the scope columns and index.
+      for (const statement of createAgentStoreTableStatements(db.dialect, threadsTable, messagesTable)) {
+        if (statement.includes("scope_user_id_updated_at_idx\" ON")) continue;
+        await sql.unsafe(
+          statement
+            .split("\n")
+            .filter((line) => !/[`"]scope[`"]/.test(line))
+            .join("\n"),
+        );
+      }
+      try {
+        const legacy = new DatabaseAgentStore({ sql, dialect: db.dialect }, { threadsTable, messagesTable });
+        const old = await legacy.createThread({ userId: 1 });
+        await legacy.appendMessages(old.threadId, [message("u1", "user", "before")]);
+        expect(await legacy.loadThread(old.threadId)).toHaveLength(1);
+        await expect(legacy.forScope("t").createThread({})).rejects.toThrow();
+
+        await legacy.addScopeColumns();
+        await legacy.addScopeColumns(); // again: nothing to do
+        // A fresh client, as an app has after its migration: MySQL clients
+        // keep the statement that failed above prepared against the old table.
+        const migrated = new DatabaseAgentStore(
+          { sql: db.connect(), dialect: db.dialect },
+          { threadsTable, messagesTable },
+        );
+        const scoped = migrated.forScope("t");
+        const fresh = await scoped.createThread({});
+        await scoped.appendMessages(fresh.threadId, [message("u1", "user", "after")]);
+        expect(await scoped.loadThread(fresh.threadId)).toHaveLength(1);
+        // The old rows are in no scope: the store sees them, a scope does not.
+        expect(await scoped.loadThread(old.threadId)).toBeNull();
+        expect(await legacy.loadThread(old.threadId)).toHaveLength(1);
+      } finally {
+        await sql.unsafe(`DROP TABLE IF EXISTS ${quote(messagesTable)}`);
+        await sql.unsafe(`DROP TABLE IF EXISTS ${quote(threadsTable)}`);
+      }
+    });
+
+    if (backend.dialect === "postgres") {
+      test("beginScope's session setting is in effect for every statement of a scoped call", async () => {
+        const sql = db.connect();
+        // A stand-in for a row-level security policy (which a superuser
+        // bypasses): every row's scope must be the transaction's setting.
+        await sql.unsafe(
+          `ALTER TABLE "${store.threadsTable}" ADD CONSTRAINT "${store.threadsTable}_scope_check" CHECK (scope = coalesce(nullif(current_setting('app.current_id', true), ''), '<none>'))`,
+        );
+        await sql.unsafe(
+          `ALTER TABLE "${store.messagesTable}" ADD CONSTRAINT "${store.messagesTable}_scope_check" CHECK (scope = coalesce(nullif(current_setting('app.current_id', true), ''), '<none>'))`,
+        );
+        const options = { threadsTable: store.threadsTable, messagesTable: store.messagesTable };
+        const unhooked = new DatabaseAgentStore({ sql, dialect: "postgres" }, options).forScope("org-1");
+        await expect(unhooked.createThread({})).rejects.toThrow();
+
+        const hooked = new DatabaseAgentStore(
+          { sql, dialect: "postgres" },
+          {
+            ...options,
+            beginScope: (tx, scope) => tx`SELECT set_config('app.current_id', ${scope}, true)`,
+          },
+        ).forScope("org-1");
+        const { threadId } = await hooked.createThread({});
+        await hooked.appendMessages(threadId, [message("u1", "user", "hi")]);
+        expect(await hooked.loadThread(threadId)).toHaveLength(1);
+        // Local to each transaction: nothing leaks onto the pooled connection.
+        const [row] = (await sql`SELECT current_setting('app.current_id', true) AS v`) as {
+          v: string | null;
+        }[];
+        expect(row!.v ?? "").toBe("");
+      });
+    }
+
+    test("AgentController.storeScope keeps a turn inside its scope; startTurn and readThread take one", async () => {
+      const agent = Agent.create({
+        name: "chat",
+        provider: fakeProvider([
+          { type: "text-delta", delta: "hello" },
+          { type: "finish", reason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        ]),
+      });
+      const threadStore = store;
+      class Chat extends AgentController<{ org?: string }> {
+        agent = agent;
+        store = threadStore;
+        liveRuns = new MemoryLiveRuns();
+        protected storeScope(_req: HttpRequest<any, any>, { body }: { body: { org?: string } }) {
+          return body.org ?? null;
+        }
+      }
+      const turn = (threadId: string, org: string) =>
+        new Chat().stream(
+          new HttpRequest(
+            new Request("http://localhost/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ threadId, text: "hi there", org }),
+            }),
+            {},
+            "api",
+            "/chat",
+          ),
+        );
+      const { threadId } = await store.forScope("org-a").createThread({});
+
+      const refused = await turn(threadId, "org-b");
+      expect(refused.status).toBe(404);
+      expect(await refused.json()).toMatchObject({ error: { code: "thread_not_found" } });
+
+      const accepted = await turn(threadId, "org-a");
+      expect(accepted.status).toBe(200);
+      await accepted.text();
+      const waitFor = async (read: () => Promise<AgentMessage[] | null>, length: number) => {
+        let thread = await read();
+        for (let i = 0; i < 100 && (thread?.length !== length || thread.at(-1)?.finishReason === undefined); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          thread = await read();
+        }
+        return thread;
+      };
+      const controller = new Chat();
+      const thread = await waitFor(() => controller.readThread(threadId, { scope: "org-a" }), 2);
+      expect(thread!.map((m) => m.role)).toEqual(["user", "assistant"]);
+      expect(await controller.readThread(threadId, { scope: "org-b" })).toBeNull();
+
+      // A server-started turn, with the scope named: wins over the hook.
+      const server = await Chat.startTurn({ threadId, text: "again", scope: "org-a", body: { org: "org-b" } });
+      await server.result();
+      expect(await store.forScope("org-a").loadThread(threadId)).toHaveLength(4);
+      await expect(Chat.startTurn({ threadId, text: "no", scope: "org-b" })).rejects.toMatchObject({
+        status: 404,
+      });
     });
   });
 }

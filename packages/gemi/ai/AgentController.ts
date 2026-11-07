@@ -181,6 +181,12 @@ export interface AgentStore {
     cutMessageId: string,
     ttlMs: number,
   ): Promise<(() => Promise<void>) | null>;
+  /**
+   * Optional (#1177): the same store bound to one scope (a tenant key). Every
+   * read and write of the returned store is inside that scope, and a thread of
+   * another scope is one it does not have. What `storeScope()` needs.
+   */
+  forScope?(scope: string): AgentStore;
 }
 
 /** The default: conversations last as long as the process. */
@@ -311,6 +317,13 @@ export type AgentTurnParams<Body extends object = Record<string, unknown>> = {
   user?: unknown;
   /** What `useChat`'s `body` option would send: `instructions()`, `context()` and `ctx.body` read it. */
   body?: Body;
+  /**
+   * The store scope (tenant key) the turn's thread is in (#1177), for a
+   * controller whose store is scoped. Wins over `storeScope()`, which still
+   * answers when this is absent: it gets the request built for the turn, with
+   * `user` and `body`.
+   */
+  scope?: string;
 };
 
 /** A turn `AgentController.startTurn` started. */
@@ -556,6 +569,9 @@ const serverTurns = new WeakMap<
   HttpRequest<any, any>,
   { run: AgentRun; hooks: Promise<void> } | null
 >();
+
+/** The `scope` each `startTurn` was given, by the request it built (#1177). */
+const serverTurnScopes = new WeakMap<HttpRequest<any, any>, string>();
 
 /** The URL of the request `startTurn` builds. Nothing routes to it. */
 const SERVER_TURN_URL = "http://gemi.internal/__gemi/agent-turn";
@@ -876,6 +892,43 @@ export abstract class AgentController<
    * instance, or a store whose state is somewhere else entirely.
    */
   store: AgentStore = defaultAgentStore;
+
+  /**
+   * THE STORE SCOPE OF THIS REQUEST (#1177): a tenant key (an organisation,
+   * workspace or app id) that keeps the tenant's threads apart from every
+   * other's. When it answers one, `stream` and `upload` use
+   * `store.forScope(scope)` instead of `store`, so a thread of another scope
+   * is a 404 like an unknown id. `null` (the default) uses `store` as it is.
+   *
+   * ```ts
+   * protected storeScope(req, { body }) {
+   *   return `org:${req.ctx().user.orgId}`;
+   * }
+   * ```
+   *
+   * Called once per request, before the store is first read, with the
+   * client's `body` (the same unchecked claim `authorizeRequest()` gets): derive
+   * the scope from the authenticated user where you can. Server-started turns
+   * (`startTurn`, voice) come through here too, with the turn's `user` and
+   * `body`; `startTurn({ scope })` passes one explicitly, which wins. The store
+   * must implement `forScope` (`DatabaseAgentStore` and `MemoryAgentStore`
+   * do); one that does not is an error.
+   */
+  protected storeScope(
+    req: HttpRequest<any, any>,
+    params: { body: Body },
+  ): string | null | Promise<string | null> {
+    void req;
+    void params;
+    return null;
+  }
+
+  /** Swaps `store` for its scoped view, once per request. */
+  private async scopeStore(req: HttpRequest<any, any>, body: Body): Promise<void> {
+    const scope = serverTurnScopes.get(req) ?? (await this.storeScope(req, { body }));
+    if (scope === null || scope === undefined) return;
+    this.store = scopedStore(this.store, scope);
+  }
 
   /**
    * Defaults to the process-wide map. Overridable so a test — or an app running
@@ -1511,6 +1564,7 @@ export abstract class AgentController<
     const controller = new this();
     // Marks the request as `startTurn`'s, so only its run is kept here.
     serverTurns.set(req, null);
+    if (params.scope !== undefined) serverTurnScopes.set(req, params.scope);
     // A request scope of its own, carrying the caller's user, whether or not
     // this is called from inside another request: the run is not that
     // request's, and must not end with it or read its user.
@@ -1598,6 +1652,9 @@ export abstract class AgentController<
         message: "This agent takes a turn only on a thread: send a threadId.",
       });
     }
+
+    // Before the first read of the store: every one below is inside the scope.
+    await this.scopeStore(req, extraBody);
 
     if (regenerate && !this.store.removeMessages) {
       return jsonResponse(501, {
@@ -2810,6 +2867,7 @@ export abstract class AgentController<
       throw new LimitedUploadError(refusal.code, refusal.message);
     }
 
+    await this.scopeStore(req, extraBody);
     const threadId =
       typeof threadField === "string" &&
       threadField.length > 0 &&
@@ -3147,8 +3205,16 @@ export abstract class AgentController<
    * for the route is, so the result goes there with no cast. A controller that
    * picks its agent per request is typed by the widest one, `A`.
    */
-  async readThread(threadId: string): Promise<ThreadMessage<A>[] | null> {
-    const history = await this.store.loadThread(threadId);
+  async readThread(
+    threadId: string,
+    options: { scope?: string | null } = {},
+  ): Promise<ThreadMessage<A>[] | null> {
+    // `scope`: the thread's store scope (#1177), as `storeScope()` answers it.
+    const store =
+      options.scope === null || options.scope === undefined
+        ? this.store
+        : scopedStore(this.store, options.scope);
+    const history = await store.loadThread(threadId);
     if (!history) return null;
     const { messages } = await this.settleThread(threadId, history, { write: false });
     // The store is not typed per agent; these are this agent's messages.
@@ -4344,4 +4410,17 @@ function hasRunningResult(messages: AgentMessage[]): boolean {
   return messages.some((message) =>
     message.content.some((part) => part.type === "tool-result" && part.status === "running"),
   );
+}
+
+/** `store.forScope(scope)`, or an error naming what is missing (#1177). */
+function scopedStore(store: AgentStore, scope: string): AgentStore {
+  if (typeof scope !== "string" || scope === "") {
+    throw new TypeError("A store scope is a non-empty string.");
+  }
+  if (!store.forScope) {
+    throw new Error(
+      "This controller's store cannot be scoped: storeScope() or a turn's `scope` needs a store that implements `forScope` (DatabaseAgentStore or MemoryAgentStore).",
+    );
+  }
+  return store.forScope(scope);
 }
