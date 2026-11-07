@@ -8,6 +8,14 @@
 - Runs started without a `provider` are unchanged: each sub-agent keeps its own.
 - `RunAgentParams.provider` is new: the provider for that one sub-run, which wins over the inherited one. To keep the old behaviour for a sub-agent, pass `provider: subAgent.provider`.
 
+## client: `<Head viewport themeColor>` (#1172)
+
+**New API, no behaviour change.** See [Views and layouts → Viewport and theme colour](docs/views-and-layouts.md#viewport-and-theme-colour).
+
+- `<Head viewport={{ fit, interactiveWidget }}>` adds `viewport-fit` and `interactive-widget` to the viewport meta. Without the prop it is `width=device-width, initial-scale=1`, as before.
+- `<Head themeColor>` renders `<meta name="theme-color">`: one colour, or a list of `{ color, media? }` (e.g. one per `prefers-color-scheme`).
+- New exported types: `HeadViewport`, `HeadThemeColor` from `gemi/client`.
+
 # Upgrading from 0.189.0 to 0.190.0
 
 ## ai: a stream that keeps trickling is cut at `streamMaxDurationMs`, and a runaway tool call is asked again (#1169)

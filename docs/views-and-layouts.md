@@ -551,6 +551,35 @@ Without either, nothing changes.
 Meta.fonts([{ family: "Acme Sans", src: "/fonts/acme.woff2", weight: "100 900", preload: true }]);
 ```
 
+### Viewport and theme colour
+
+`<Head />` renders one `<meta name="viewport" content="width=device-width, initial-scale=1">`.
+Its `viewport` prop adds keys to it, and `themeColor` renders
+`<meta name="theme-color">` tags, one per entry:
+
+```tsx
+<Head
+  viewport={{ fit: "cover", interactiveWidget: "resizes-content" }}
+  themeColor={[
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+  ]}
+/>
+// <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+// <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+// <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
+```
+
+- `viewport.fit` is `viewport-fit`. Without `"cover"`, every
+  `env(safe-area-inset-*)` is `0px` on a phone with a notch, so a fixed header
+  or bottom bar can't pad itself away from it.
+- `viewport.interactiveWidget` is `interactive-widget`: what the on-screen
+  keyboard resizes.
+- `themeColor` takes one colour (`themeColor="#ffffff"`, no `media`) or a list.
+- There is no way to set `maximum-scale` or `user-scalable`, so pinch zoom
+  stays allowed. Use these props rather than a second viewport meta in
+  `children`: with two, browsers differ in which one wins.
+
 ## Breadcrumbs: `useBreadcrumbs`
 
 Every view/layout handler can return a `breadcrumb` string; gemi records it against

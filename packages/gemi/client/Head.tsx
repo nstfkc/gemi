@@ -213,10 +213,54 @@ const OpenGraph = (props: {
   );
 };
 
+/**
+ * Keys `<Head viewport>` adds to `width=device-width, initial-scale=1` (#1172).
+ * Zoom-limiting keys (`maximum-scale`, `user-scalable`) are left out on
+ * purpose: pinch zoom stays allowed.
+ */
+export interface HeadViewport {
+  /** `viewport-fit`. `"cover"` lets the page draw under the notch and the
+   *  home indicator, and is what makes `env(safe-area-inset-*)` non-zero. */
+  fit?: "auto" | "contain" | "cover";
+  /** `interactive-widget`: what the on-screen keyboard resizes. */
+  interactiveWidget?: "resizes-visual" | "resizes-content" | "overlays-content";
+}
+
+/** One `<meta name="theme-color">`, optionally for one `media` query. */
+export interface HeadThemeColor {
+  color: string;
+  /** e.g. `"(prefers-color-scheme: dark)"`. */
+  media?: string;
+}
+
+function viewportContent(viewport: HeadViewport | undefined): string {
+  const keys = ["width=device-width", "initial-scale=1"];
+  if (viewport?.fit) keys.push(`viewport-fit=${viewport.fit}`);
+  if (viewport?.interactiveWidget) keys.push(`interactive-widget=${viewport.interactiveWidget}`);
+  return keys.join(", ");
+}
+
+function themeColors(themeColor: string | readonly HeadThemeColor[] | undefined): HeadThemeColor[] {
+  if (themeColor === undefined) return [];
+  return typeof themeColor === "string" ? [{ color: themeColor }] : [...themeColor];
+}
+
 export const Head = ({
   children = null,
   charSet = "utf-8",
-}: { children?: ReactNode; charSet?: string }) => {
+  viewport,
+  themeColor,
+}: {
+  children?: ReactNode;
+  charSet?: string;
+  /** Keys added to the viewport meta, e.g. `{ fit: "cover" }`. See `HeadViewport`. */
+  viewport?: HeadViewport;
+  /**
+   * `<meta name="theme-color">`: one colour, or one entry per `media` query,
+   * e.g. one for `(prefers-color-scheme: light)` and one for `dark`.
+   */
+  themeColor?: string | readonly HeadThemeColor[];
+}) => {
   const { meta } = useContext(ServerDataContext);
   // The first page set them, so the layout rendered them: a later page that
   // sets none has to go back to its locale's (`updateMeta`). Only ever read
@@ -237,7 +281,15 @@ export const Head = ({
   return (
     <head>
       <meta charSet={charSet} />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <meta name="viewport" content={viewportContent(viewport)} />
+      {themeColors(themeColor).map((entry, index) => (
+        <meta
+          key={`theme-color:${index}`}
+          name="theme-color"
+          content={entry.color}
+          media={entry.media}
+        />
+      ))}
       {/*
         Disable browser auto-translation (Chrome/Google Translate). Gemi apps do
         their own i18n, and a translator that rewrites text nodes *before* React
