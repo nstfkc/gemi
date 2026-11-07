@@ -210,6 +210,17 @@ for (const backend of backends) {
       expect(title.endsWith("…")).toBe(true);
     });
 
+    test("an event message (#1181) is not the title", async () => {
+      const { threadId } = await store.createThread({ userId: "u" });
+      await store.appendMessages(threadId, [
+        { ...message("e1", "user", "The export finished."), event: { name: "job-settled" } },
+      ]);
+      expect((await store.getThread(threadId))!.title).toBeNull();
+      await store.appendMessages(threadId, [message("u1", "user", "rename the page")]);
+      expect((await store.getThread(threadId))!.title).toBe("rename the page");
+      expect((await store.loadThread(threadId))![0]!.event).toEqual({ name: "job-settled" });
+    });
+
     test("lists threads newest first, per user, and pages", async () => {
       const a = await store.createThread({ userId: 1 });
       const b = await store.createThread({ userId: 1 });

@@ -29,7 +29,7 @@ describe("ApiRouter.agent()", () => {
     ).toThrow("this.agent() takes an AgentController class, and got NotAnAgent.");
   });
 
-  test("mounts four POST routes under one path", () => {
+  test("mounts five POST routes under one path", () => {
     class Api extends ApiRouter {
       routes = {
         "/chat": this.agent(ChatController),
@@ -39,9 +39,9 @@ describe("ApiRouter.agent()", () => {
     const flat = createFlatApiRoutes(new Api().routes);
 
     expect(Object.keys(flat).sort()).toEqual(
-      ["/chat", "/chat/attach", "/chat/files", "/chat/stop"].sort(),
+      ["/chat", "/chat/attach", "/chat/files", "/chat/stop", "/chat/watch"].sort(),
     );
-    for (const path of ["/chat", "/chat/attach", "/chat/stop", "/chat/files"]) {
+    for (const path of ["/chat", "/chat/attach", "/chat/stop", "/chat/files", "/chat/watch"]) {
       expect(Object.keys(flat[path]!).sort()).toEqual(["OPTIONS", "POST"]);
     }
   });
@@ -128,6 +128,17 @@ describe("ApiRouter.agent()", () => {
     expect(flat["/chat/stop"]!.POST!.middleware).toEqual([]);
   });
 
+  test("watch takes attach's middleware: it reads the same thing (#1180)", () => {
+    class Api extends ApiRouter {
+      routes = {
+        "/chat": this.agent(ChatController).middleware({ attach: "auth" }),
+      };
+    }
+    const flat = createFlatApiRoutes(new Api().routes);
+    expect(flat["/chat/attach"]!.POST!.middleware).toEqual(["auth"]);
+    expect(flat["/chat/watch"]!.POST!.middleware).toEqual(["auth"]);
+  });
+
   test("takes the prefix of the router it is mounted in", () => {
     class Nested extends ApiRouter {
       routes = {
@@ -141,7 +152,7 @@ describe("ApiRouter.agent()", () => {
     const flat = createFlatApiRoutes(new Api().routes);
 
     expect(Object.keys(flat).sort()).toEqual(
-      ["/ai/chat", "/ai/chat/attach", "/ai/chat/files", "/ai/chat/stop"].sort(),
+      ["/ai/chat", "/ai/chat/attach", "/ai/chat/files", "/ai/chat/stop", "/ai/chat/watch"].sort(),
     );
     expect(flat["/ai/chat/stop"]!.POST!.middleware).toEqual(["auth"]);
   });

@@ -504,6 +504,7 @@ export class ApiRouter {
    *   POST /chat        → stream   every client turn
    *   POST /chat/attach → attach   reattach to a run in progress
    *   POST /chat/stop   → stop     explicit cancel
+   *   POST /chat/watch  → watch    follow the thread's runs (guarded as attach)
    *   POST /chat/files  → upload   attachments
    *
    * One mounted path is what gives the client one key to name — `useChat("/chat")`
@@ -645,6 +646,8 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
   const handlers = {
     stream: new RouteHandler("POST", Controller as any, "stream"),
     attach: new RouteHandler("POST", Controller as any, "attach"),
+    // A read of the same thing `attach` reads, so it takes `attach`'s middleware.
+    watch: new RouteHandler("POST", Controller as any, "watch"),
     stop: new RouteHandler("POST", Controller as any, "stop"),
     upload: new RouteHandler("POST", Controller as any, "upload"),
   };
@@ -657,13 +660,17 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
     routes: ApiRoutes = {
       "/": handlers.stream,
       "/attach": handlers.attach,
+      "/watch": handlers.watch,
       "/stop": handlers.stop,
       "/files": handlers.upload,
     };
 
     static middleware(config: AgentMiddlewareConfig) {
       if (config.stream) handlers.stream.middleware(config.stream);
-      if (config.attach) handlers.attach.middleware(config.attach);
+      if (config.attach) {
+        handlers.attach.middleware(config.attach);
+        handlers.watch.middleware(config.attach);
+      }
       if (config.stop) handlers.stop.middleware(config.stop);
       if (config.upload) handlers.upload.middleware(config.upload);
       return this;

@@ -159,6 +159,21 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    */
   reattachOnFocus?: boolean;
   /**
+   * Follow the thread (#1180): keep a small stream open to `/<path>/watch`,
+   * which announces every run that starts on the thread, whoever started it
+   * (another tab, or server code with `AgentController.startTurn`), and
+   * stream each one into this chat as `reattach()` would.
+   *
+   * A run announced while this chat is idle is attached at once; one
+   * announced while it is sending or streaming is attached when that ends.
+   * Runs this chat started itself are not attached twice. The stream
+   * reconnects on its own after a dropped connection, and gives up on a
+   * refusal (a 4xx). Needs a thread. Per server process, like `attach`: with
+   * more than one instance, route a thread's requests to one of them.
+   * Defaults to false.
+   */
+  watch?: boolean;
+  /**
    * Merged into the request body, and read back on the server in
    * `instructions(req, { body })` and on every tool's `ctx.body`. `uploadFile`
    * sends it too, as a `body` form part, so the controller's
@@ -908,6 +923,12 @@ function findToolCall(messages: AgentMessage[], toolCallId: string): ToolCallPar
   return undefined;
 }
 
+/** How often a run announced mid-stream checks whether the chat is free to attach it. */
+const WATCH_RECHECK_MS = 100;
+/** The first wait before `watch` follows the thread again after a dropped stream. */
+const WATCH_RETRY_MS = 1_000;
+const WATCH_RETRY_MAX_MS = 30_000;
+
 /**
  * The path is the agent's route, exactly as mounted:
  *
@@ -929,6 +950,7 @@ export function useChat<P extends keyof AgentRoutes>(
     cursor: initialCursor,
     attach: attachOnMount = true,
     reattachOnFocus = false,
+    watch = false,
     body: extraBody,
     headers,
     onFinish,
@@ -1815,6 +1837,72 @@ export function useChat<P extends keyof AgentRoutes>(
       document.removeEventListener("visibilitychange", onReturn);
     };
   }, [reattachOnFocus, probe]);
+
+  // The thread the watch follows: the hook's, once it has one.
+  const watchedThreadId = state.threadId;
+
+  useEffect(() => {
+    if (!watch || !watchedThreadId || typeof fetch === "undefined") return;
+    const controller = new AbortController();
+    // A run announced while this chat is busy, attached once it is not.
+    let waiting: string | null = null;
+    let waitTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const attachTo = (runId: string) => {
+      // This chat's own run, or one it has already followed to its end.
+      if (runId === stateRef.current!.cursorRunId) return;
+      if (abortRef.current) {
+        waiting = runId;
+        // Rechecked rather than hooked into every path that ends a request:
+        // a send, a probe, an answer, a regenerate all clear `abortRef`.
+        waitTimer ??= setTimeout(function recheck() {
+          waitTimer = null;
+          if (controller.signal.aborted || waiting === null) return;
+          if (abortRef.current) {
+            waitTimer = setTimeout(recheck, WATCH_RECHECK_MS);
+            return;
+          }
+          const next = waiting;
+          waiting = null;
+          attachTo(next);
+        }, WATCH_RECHECK_MS);
+        return;
+      }
+      void probe(false);
+    };
+
+    void (async () => {
+      let delay = WATCH_RETRY_MS;
+      while (!controller.signal.aborted) {
+        try {
+          const response = await post(
+            `${requestRef.current.base}/watch`,
+            { threadId: watchedThreadId },
+            controller.signal,
+          );
+          // Refused, or a server without the route: asking again changes nothing.
+          if (response.status >= 400 && response.status < 500 && response.status !== 429) return;
+          if (response.ok && response.body) {
+            for await (const frame of decodeSSE(response.body)) {
+              if (controller.signal.aborted) return;
+              delay = WATCH_RETRY_MS;
+              if (frame.event.type === "run-start") attachTo(frame.event.runId);
+            }
+          }
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+        // Dropped, or the server answered 5xx: back off and follow again.
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay = Math.min(delay * 2, WATCH_RETRY_MAX_MS);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      if (waitTimer !== null) clearTimeout(waitTimer);
+    };
+  }, [watch, watchedThreadId, post, probe]);
 
   const status: ChatStatus =
     // Ordered so the declared invariant — `pending` non-empty exactly when the

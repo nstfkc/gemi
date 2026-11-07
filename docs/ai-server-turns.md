@@ -36,6 +36,7 @@ export class ChatEditJob extends Job {
 | `turn` | The whole turn, as `useChat` sends it: `{ text, files, toolResults }`. Leave both `text` and `turn` out to let the model continue the thread. |
 | `user` | Who the turn runs as. It is `req.ctx().user` in `authorizeRequest`, `runOwner`, `context()`, the hooks and every tool, and what `Auth.user()` answers there. Absent or `null` is an anonymous turn. |
 | `body` | The controller's `Body`, as `useChat`'s `body` option would send it. Typed the same way. |
+| `event` | Something that happened, in place of a person's message: `{ name, text?, data? }`. Not with `text` or `turn`. See [Event turns](#event-turns). |
 | `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
 
 It answers once the run has started:
@@ -79,6 +80,34 @@ A thread is busy while a run on it is going, or while another turn is setting up
 With `ifBusy: "skip"`, `startTurn` answers `AgentTurn | AgentTurnSkipped`; check `"skipped" in turn` first. Like the thread's lock, the policy is per process: a run going in another process does not make the thread busy here.
 
 To continue a thread when a background job settles, call `startTurn` with `ifBusy: "queue"` from an [`AgentJobs.onSettled`](./ai-background-jobs.md#continuing-the-thread-when-a-job-settles) listener.
+
+## Event turns
+
+A turn that server code starts because something happened (a job finished, an order was paid) isn't a person's message. Storing it as `text` makes the chat show it as something the user said. Pass `event` instead:
+
+```typescript
+await ChatController.startTurn({
+  threadId,
+  user,
+  event: { name: "job-settled", text: "The export finished.", data: { jobId } },
+  ifBusy: "queue",
+});
+```
+
+- It is stored as a user message with `message.event` set to `{ name, data }` and `text` as its text, so it is in the thread's history on every later turn.
+- The model reads it as `<event name="job-settled">` around the text and the data's JSON, so it can tell it from the person's words.
+- A client gets `message.event` typed (`TurnEvent`), on the stream and from a thread read, and can render it as a status line rather than a chat bubble. `DatabaseAgentStore` doesn't use it as the thread's title.
+- `name` is letters, digits and `.`, `_`, `:`, `-`, at most 64 characters. `data` must be JSON. Only `startTurn` can write an event: a client posting to the route can't.
+
+## Showing a server turn in an open chat
+
+A chat that is open on the thread doesn't see a turn it didn't start unless it asks. `useChat({ threadId, watch: true })` follows the thread: it keeps a small SSE stream open to `POST /<path>/watch`, which announces each run that starts on the thread (from `startTurn`, another tab, voice), and the hook attaches to it as `reattach()` would. A run announced while the chat is streaming its own is attached once that ends.
+
+```tsx
+const chat = useChat("/chat", { threadId, initialMessages, watch: true });
+```
+
+A server turn's own message (its `text` or `event`) is sent on the run's stream, so the watching chat shows it before the answer. The watch route is mounted by `this.agent()` next to `/attach`. It takes `attach`'s middleware and is authorized as `attach` (`authorizeRequest` with `route: "attach"`), and it only names runs the caller could attach to. Like `attach`, it sees runs in its own process only.
 
 ## Refusals
 

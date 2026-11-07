@@ -1,5 +1,14 @@
 # Unreleased
 
+## ai: `useChat({ watch })` and event turns (#1180, #1181)
+
+**New API, small behaviour change.** See [AI Server Turns → Event turns](docs/ai-server-turns.md#event-turns) and [Showing a server turn in an open chat](docs/ai-server-turns.md#showing-a-server-turn-in-an-open-chat).
+
+- `this.agent()` mounts a fifth route, `POST /<path>/watch`: an SSE stream announcing `{ type: "run-start", runId }` for each run that starts on a thread. It takes `attach`'s middleware and calls `authorizeRequest` with `route: "attach"`. `useChat({ watch: true })` opens it and attaches to each announced run.
+- `startTurn({ event: { name, text?, data? } })` starts a turn whose user message is an event: stored with `message.event` (new `AgentMessage.event`, type `TurnEvent`), read by the model as `<event name="…">`, never accepted from a client. `DatabaseAgentStore` skips event messages when it picks a thread's title.
+- **Behaviour change:** a turn started with `startTurn` now puts its user message on the run's stream as a `message` frame, so a client attached to it shows the message. Before, an attached client saw only the answer until it re-read the thread. A custom client that ignores `message` frames is unaffected.
+- New exported types: `AgentTurnEvent` from `gemi/ai`, and `TurnEvent` from `gemi/ai` and `gemi/ai/client`.
+
 ## ai: `startTurn({ ifBusy })` and `AgentJobs.onSettled` (#1178, #1179)
 
 **New API, no behaviour change.** See [AI Server Turns → A thread that is busy](docs/ai-server-turns.md#a-thread-that-is-busy) and [AI Background Jobs → Continuing the thread when a job settles](docs/ai-background-jobs.md#continuing-the-thread-when-a-job-settles).
