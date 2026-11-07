@@ -120,6 +120,30 @@ An error given as a string, a `ToolError` or an `AgentError`-like `{ code, messa
 
 `settle` also takes `usage`, which is added to the job's. A job's usage counts toward the turn that started it, and is on the settled result's `job.usage`.
 
+## Continuing the thread when a job settles
+
+A settled job reaches the thread the next time the controller loads it, which is usually the person's next message. To have the agent react as soon as the work is done ("the video is ready"), listen with `AgentJobs.onSettled` and start a turn:
+
+```typescript
+import { AgentJobs } from "gemi/ai";
+import { ChatController } from "@/app/http/controllers/ChatController";
+
+declare function userForOwner(owner: string | null): Promise<unknown>;
+
+// At boot, in every process that settles jobs.
+AgentJobs.onSettled(async (job) => {
+  await ChatController.startTurn({
+    threadId: job.threadId,
+    user: await userForOwner(job.owner), // job.owner is the run's `runOwner`
+    ifBusy: "queue",                     // don't cut off an answer being read
+  });
+});
+```
+
+The listener gets the job's record as it settled: `state` is `"ok"` (with `output`) or `"error"` (with `error`; a missed deadline has `error.code` `"timeout"`), with `threadId`, `toolName`, `owner` and `summary`. It is called once per job, by whichever settle wins: `settle` and `fail`, an `AgentJob`'s result or its dead letter, the deadline sweep, and an overdue job failed when a thread is loaded. A job that could not be queued is not reported: its tool call fails in the turn that started it. `onSettled` answers a function that removes the listener.
+
+It runs in the process that settled the job, which is often a queue worker or the one that took a webhook, so register it at boot wherever jobs settle (as for `AgentJobs.use`). The turn it starts runs in that process too (see [Where the run lives](./ai-server-turns.md#where-the-run-lives)). Settling does not wait for listeners, and a listener that throws is logged, not thrown into the settle. Several jobs settling together start one turn each, in order; batch them in the listener if one turn should report them all.
+
 ## Where jobs are kept: `AgentJobs.use`
 
 Job records live in an `AgentJobStore`. The store is process-wide, because the code that settles a job (a queue worker, a webhook, the deadline sweep) has no controller to read one from. Set it once at boot, in every process that starts or runs jobs:

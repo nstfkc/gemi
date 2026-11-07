@@ -9286,6 +9286,30 @@ An error given as a string, a `ToolError` or an `AgentError`-like `{ code, messa
 
 `settle` also takes `usage`, which is added to the job's. A job's usage counts toward the turn that started it, and is on the settled result's `job.usage`.
 
+## Continuing the thread when a job settles
+
+A settled job reaches the thread the next time the controller loads it, which is usually the person's next message. To have the agent react as soon as the work is done ("the video is ready"), listen with `AgentJobs.onSettled` and start a turn:
+
+```typescript
+import { AgentJobs } from "gemi/ai";
+import { ChatController } from "@/app/http/controllers/ChatController";
+
+declare function userForOwner(owner: string | null): Promise<unknown>;
+
+// At boot, in every process that settles jobs.
+AgentJobs.onSettled(async (job) => {
+  await ChatController.startTurn({
+    threadId: job.threadId,
+    user: await userForOwner(job.owner), // job.owner is the run's `runOwner`
+    ifBusy: "queue",                     // don't cut off an answer being read
+  });
+});
+```
+
+The listener gets the job's record as it settled: `state` is `"ok"` (with `output`) or `"error"` (with `error`; a missed deadline has `error.code` `"timeout"`), with `threadId`, `toolName`, `owner` and `summary`. It is called once per job, by whichever settle wins: `settle` and `fail`, an `AgentJob`'s result or its dead letter, the deadline sweep, and an overdue job failed when a thread is loaded. A job that could not be queued is not reported: its tool call fails in the turn that started it. `onSettled` answers a function that removes the listener.
+
+It runs in the process that settled the job, which is often a queue worker or the one that took a webhook, so register it at boot wherever jobs settle (as for `AgentJobs.use`). The turn it starts runs in that process too (see [Where the run lives](./ai-server-turns.md#where-the-run-lives)). Settling does not wait for listeners, and a listener that throws is logged, not thrown into the settle. Several jobs settling together start one turn each, in order; batch them in the listener if one turn should report them all.
+
 ## Where jobs are kept: `AgentJobs.use`
 
 Job records live in an `AgentJobStore`. The store is process-wide, because the code that settles a job (a queue worker, a webhook, the deadline sweep) has no controller to read one from. Set it once at boot, in every process that starts or runs jobs:
@@ -10623,6 +10647,7 @@ export class ChatEditJob extends Job {
 | `turn` | The whole turn, as `useChat` sends it: `{ text, files, toolResults }`. Leave both `text` and `turn` out to let the model continue the thread. |
 | `user` | Who the turn runs as. It is `req.ctx().user` in `authorizeRequest`, `runOwner`, `context()`, the hooks and every tool, and what `Auth.user()` answers there. Absent or `null` is an anonymous turn. |
 | `body` | The controller's `Body`, as `useChat`'s `body` option would send it. Typed the same way. |
+| `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
 
 It answers once the run has started:
 
@@ -10637,9 +10662,34 @@ The turn runs through the controller's `stream`, on a request `startTurn` builds
 
 - `authorizeRequest` is called with `{ route: "stream", threadId, body }`, and `resource` is checked, against that user.
 - `runOwner` names the run's owner from that user (`user:<id>` by default). The user can attach to the run from the chat (in the same process) and stop it, and answer the approvals it raises.
-- `maxConcurrentRuns` counts the turn against `runLimitKey`, as for the chat. A turn on a thread whose run is still going supersedes it, as a resend would.
+- `maxConcurrentRuns` counts the turn against `runLimitKey`, as for the chat. A turn on a thread whose run is still going supersedes it, as a resend would, unless `ifBusy` says otherwise.
 - The route's middleware does not run. The caller is server code and names the user itself. Check what needs checking before calling `startTurn`, or in `authorizeRequest`.
 - Called inside another request (an MCP tool route, say), the turn still gets its own scope: it does not read that request's user, and that request is not held open for the run.
+
+## A thread that is busy
+
+By default a server turn on a thread whose run is still going stops that run and starts once its transcript is stored, as a resend from the chat does. That suits a turn that replaces the answer. A turn that reacts to an event (a background job finished, a webhook arrived) usually should not cut off the answer a person is reading, so `ifBusy` picks what happens instead:
+
+| `ifBusy` | On a busy thread |
+|---|---|
+| `"supersede"` | The default. Stops the running run, then starts. |
+| `"queue"` | Waits for the running run to end and its transcript to be stored, then starts, so the model sees that turn's messages. `startTurn` settles once the turn has started. |
+| `"skip"` | Starts nothing and answers `{ skipped: true, threadId }`. |
+
+```typescript
+const turn = await ChatController.startTurn({
+  threadId,
+  user,
+  text: "The export finished.",
+  ifBusy: "queue",
+});
+```
+
+A thread is busy while a run on it is going, or while another turn is setting up on it (for `"skip"`). Queued turns start in the order they were queued, each after the one before it has ended. A queued turn holds nothing while it waits: a person who sends from the chat meanwhile still supersedes the running run, and the queued turn then waits for their turn as well. A stop pressed in the chat stops the running run, and a queued turn starts after it.
+
+With `ifBusy: "skip"`, `startTurn` answers `AgentTurn | AgentTurnSkipped`; check `"skipped" in turn` first. Like the thread's lock, the policy is per process: a run going in another process does not make the thread busy here.
+
+To continue a thread when a background job settles, call `startTurn` with `ifBusy: "queue"` from an [`AgentJobs.onSettled`](./ai-background-jobs.md#continuing-the-thread-when-a-job-settles) listener.
 
 ## Refusals
 

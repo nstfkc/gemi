@@ -333,3 +333,187 @@ describe("AgentController.startTurn", () => {
     ).rejects.toThrow(/threadId/);
   });
 });
+
+/**
+ * #1178: `ifBusy` decides what a server turn does on a thread whose run is
+ * still going. The default supersedes it, as a resend from the chat does.
+ */
+describe("AgentController.startTurn ifBusy", () => {
+  /** Each model call waits for its own gate; `release(n)` opens the n-th. */
+  function gated(scripts: ProviderEvent[][]) {
+    const env = setup(scripts);
+    const gates: { promise: Promise<void>; open: () => void }[] = [];
+    const gateFor = (index: number) => {
+      while (gates.length <= index) {
+        let open!: () => void;
+        const promise = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        gates.push({ promise, open });
+      }
+      return gates[index]!;
+    };
+    const script = env.provider.stream.bind(env.provider);
+    let calls = 0;
+    env.provider.stream = (params) => {
+      const index = calls++;
+      return (async function* () {
+        await gateFor(index).promise;
+        yield* script(params);
+      })();
+    };
+    return {
+      ...env,
+      release: (index: number) => gateFor(index).open(),
+      calls: () => calls,
+    };
+  }
+
+  const say = (text: string): ProviderEvent[] => [{ type: "text-delta", delta: text }, finish()];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const settled = <T>(promise: Promise<T>) => {
+    const state = { done: false };
+    promise.then(
+      () => (state.done = true),
+      () => (state.done = true),
+    );
+    return state;
+  };
+
+  test("queue: starts after the running turn has ended and sees its messages", async () => {
+    const { store, provider, PageChat, release, calls } = gated([say("first"), say("second")]);
+    const { threadId } = await store.createThread({});
+    const first = await PageChat.startTurn({ threadId, text: "hi", body: { pageId: "p" } });
+
+    const queued = PageChat.startTurn({
+      threadId,
+      text: "job done",
+      body: { pageId: "p" },
+      ifBusy: "queue",
+    });
+    const queuedState = settled(queued);
+    await tick();
+    expect(queuedState.done).toBe(false);
+    expect(calls()).toBe(1);
+
+    release(0);
+    const firstResult = await first.result();
+    expect(firstResult.finishReason).toBe("stop");
+    expect(firstResult.text).toBe("first");
+
+    const second = await queued;
+    release(1);
+    const secondResult = await second.result();
+    expect(secondResult.text).toBe("second");
+    // The queued turn's model call carries the first turn's answer.
+    expect(provider.calls[1]!.messages.map((message) => textOf(message as AgentMessage))).toEqual([
+      "hi",
+      "first",
+      "job done",
+    ]);
+  });
+
+  test("queue: two queued turns run in the order they were queued", async () => {
+    const { store, provider, PageChat, release } = gated([say("a"), say("b"), say("c")]);
+    const { threadId } = await store.createThread({});
+    const first = await PageChat.startTurn({ threadId, text: "1", body: { pageId: "p" } });
+    const second = PageChat.startTurn({ threadId, text: "2", body: { pageId: "p" }, ifBusy: "queue" });
+    const third = PageChat.startTurn({ threadId, text: "3", body: { pageId: "p" }, ifBusy: "queue" });
+
+    release(0);
+    await first.result();
+    release(1);
+    expect((await (await second).result()).finishReason).toBe("stop");
+    release(2);
+    expect((await (await third).result()).finishReason).toBe("stop");
+
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored.map(textOf)).toEqual(["1", "a", "2", "b", "3", "c"]);
+    expect(provider.calls).toHaveLength(3);
+  });
+
+  test("queue: a turn sent meanwhile still supersedes the running run, and the queued one waits for it", async () => {
+    const { store, PageChat, release } = gated([say("first"), say("resent"), say("woken")]);
+    const { threadId } = await store.createThread({});
+    const first = await PageChat.startTurn({ threadId, text: "hi", body: { pageId: "p" } });
+    const queued = PageChat.startTurn({
+      threadId,
+      text: "job done",
+      body: { pageId: "p" },
+      ifBusy: "queue",
+    });
+    await tick();
+
+    // A person sends again: as from the chat, it stops the running run.
+    const resent = await PageChat.startTurn({ threadId, text: "again", body: { pageId: "p" } });
+    release(0);
+    expect((await first.result()).finishReason).toBe("aborted");
+
+    const queuedState = settled(queued);
+    await tick();
+    // The queued turn waits for the person's turn, not only the first.
+    expect(queuedState.done).toBe(false);
+    release(1);
+    expect((await resent.result()).finishReason).toBe("stop");
+    release(2);
+    expect((await (await queued).result()).text).toBe("woken");
+
+    const stored = (await store.loadThread(threadId))!;
+    const texts = stored.map(textOf);
+    expect(texts.indexOf("again")).toBeLessThan(texts.indexOf("job done"));
+    expect(texts.at(-1)).toBe("woken");
+  });
+
+  test("skip: answers { skipped: true } on a busy thread and changes nothing", async () => {
+    const { store, provider, PageChat, release } = gated([say("first"), say("later")]);
+    const { threadId } = await store.createThread({});
+    const first = await PageChat.startTurn({ threadId, text: "hi", body: { pageId: "p" } });
+
+    const skipped = await PageChat.startTurn({
+      threadId,
+      text: "job done",
+      body: { pageId: "p" },
+      ifBusy: "skip",
+    });
+    expect(skipped).toEqual({ skipped: true, threadId });
+    release(0);
+    expect((await first.result()).finishReason).toBe("stop");
+    expect(provider.calls).toHaveLength(1);
+    expect((await store.loadThread(threadId))!.map(textOf)).toEqual(["hi", "first"]);
+
+    // Once the thread is idle, a skip turn starts as usual.
+    release(1);
+    const later = await PageChat.startTurn({
+      threadId,
+      text: "now",
+      body: { pageId: "p" },
+      ifBusy: "skip",
+    });
+    expect("skipped" in later).toBe(false);
+    if ("skipped" in later) return;
+    expect((await later.result()).text).toBe("later");
+  });
+
+  test("supersede, the default, still stops the running turn", async () => {
+    const { store, PageChat, release } = gated([say("first"), say("second")]);
+    const { threadId } = await store.createThread({});
+    const first = await PageChat.startTurn({ threadId, text: "hi", body: { pageId: "p" } });
+    const second = await PageChat.startTurn({
+      threadId,
+      text: "again",
+      body: { pageId: "p" },
+      ifBusy: "supersede",
+    });
+    release(0);
+    release(1);
+    expect((await first.result()).finishReason).toBe("aborted");
+    expect((await second.result()).text).toBe("second");
+  });
+
+  test("refuses an ifBusy it does not know", async () => {
+    const { PageChat } = setup();
+    await expect(
+      PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: "wait" as never }),
+    ).rejects.toThrow(/ifBusy/);
+  });
+});
