@@ -311,6 +311,34 @@ export type AgentTurnParams<Body extends object = Record<string, unknown>> = {
   user?: unknown;
   /** What `useChat`'s `body` option would send: `instructions()`, `context()` and `ctx.body` read it. */
   body?: Body;
+  /**
+   * What to do when the thread already has a run going (#1178). See
+   * `AgentTurnBusyPolicy`. Defaults to `"supersede"`, what a resend from the
+   * chat does.
+   */
+  ifBusy?: AgentTurnBusyPolicy;
+};
+
+/**
+ * What `startTurn` does on a thread that is busy: a run still going, or a
+ * turn setting up on it (#1178).
+ *
+ * - `"supersede"` (the default) stops the running run and starts once its
+ *   transcript is stored, as a resend from the chat does.
+ * - `"queue"` lets the running run finish, then starts, so the turn sees that
+ *   run's messages. Queued turns start in the order they were queued, each
+ *   after the one before has ended. A queued turn holds nothing while it
+ *   waits: a person who sends meanwhile still supersedes the running run, and
+ *   the queued turn then waits for theirs too. Per process, like the thread's
+ *   lock.
+ * - `"skip"` starts nothing and answers `{ skipped: true }`.
+ */
+export type AgentTurnBusyPolicy = "supersede" | "queue" | "skip";
+
+/** What `startTurn({ ifBusy: "skip" })` answers when the thread was busy. */
+export type AgentTurnSkipped = {
+  skipped: true;
+  threadId: string;
 };
 
 /** A turn `AgentController.startTurn` started. */
@@ -556,6 +584,12 @@ const serverTurns = new WeakMap<
   HttpRequest<any, any>,
   { run: AgentRun; hooks: Promise<void> } | null
 >();
+
+/** `startTurn`'s busy policy, by the request it built (#1178). A route's turn has none: it supersedes. */
+const busyPolicies = new WeakMap<HttpRequest<any, any>, AgentTurnBusyPolicy>();
+
+/** What `withThread` answers a `"skip"` turn on a busy thread. Never sent: `startTurn` reads it. */
+const THREAD_BUSY = "thread_busy";
 
 /** The URL of the request `startTurn` builds. Nothing routes to it. */
 const SERVER_TURN_URL = "http://gemi.internal/__gemi/agent-turn";
@@ -1480,15 +1514,40 @@ export abstract class AgentController<
    *
    * The run lives in the process that called this, like every run. From a
    * queue job, await `result()` so the worker does not move on without it.
+   *
+   * On a thread that already has a run going, the turn supersedes it, as a
+   * resend from the chat does. Server code reacting to an event usually
+   * should not cut off the answer a person is reading: pass
+   * `ifBusy: "queue"` to start after it instead, or `ifBusy: "skip"` to start
+   * nothing (answered `{ skipped: true }`). See `AgentTurnBusyPolicy`. A
+   * queued turn's `startTurn` settles once the turn has started.
    */
+  static startTurn<C extends AgentController<any, any>>(
+    this: new () => C,
+    params: AgentTurnParams<ControllerBody<C>> & { ifBusy: "skip" },
+  ): Promise<AgentTurn | AgentTurnSkipped>;
+  static startTurn<C extends AgentController<any, any>>(
+    this: new () => C,
+    params: AgentTurnParams<ControllerBody<C>> & { ifBusy?: "supersede" | "queue" },
+  ): Promise<AgentTurn>;
+  static startTurn<C extends AgentController<any, any>>(
+    this: new () => C,
+    params: AgentTurnParams<ControllerBody<C>>,
+  ): Promise<AgentTurn | AgentTurnSkipped>;
   static async startTurn<C extends AgentController<any, any>>(
     this: new () => C,
     params: AgentTurnParams<ControllerBody<C>>,
-  ): Promise<AgentTurn> {
+  ): Promise<AgentTurn | AgentTurnSkipped> {
     const { threadId } = params;
     if (typeof threadId !== "string" || threadId === "") {
       throw new TypeError(
         "AgentController.startTurn needs a `threadId`: a server turn is stored on a thread. Create one with the store's `createThread`.",
+      );
+    }
+    const ifBusy = params.ifBusy ?? "supersede";
+    if (ifBusy !== "supersede" && ifBusy !== "queue" && ifBusy !== "skip") {
+      throw new TypeError(
+        `AgentController.startTurn's \`ifBusy\` is "supersede", "queue" or "skip"; got ${JSON.stringify(params.ifBusy)}.`,
       );
     }
     const turn: ClientTurn = {
@@ -1511,6 +1570,7 @@ export abstract class AgentController<
     const controller = new this();
     // Marks the request as `startTurn`'s, so only its run is kept here.
     serverTurns.set(req, null);
+    busyPolicies.set(req, ifBusy);
     // A request scope of its own, carrying the caller's user, whether or not
     // this is called from inside another request: the run is not that
     // request's, and must not end with it or read its user.
@@ -1520,7 +1580,11 @@ export abstract class AgentController<
 
     const started = serverTurns.get(req);
     if (!started) {
-      throw await AgentTurnError.from(response);
+      const error = await AgentTurnError.from(response);
+      if (ifBusy === "skip" && error.code === THREAD_BUSY) {
+        return { skipped: true, threadId };
+      }
+      throw error;
     }
     serverTurns.delete(req);
     // Nobody reads the stream; the run goes on without it (see `toResponse`).
@@ -1952,7 +2016,9 @@ export abstract class AgentController<
         );
       }
       try {
-        return threadId ? await this.withThread(threadId, owner, start) : await start();
+        return threadId
+          ? await this.withThread(threadId, owner, start, busyPolicies.get(req) ?? "supersede")
+          : await start();
       } finally {
         // A turn that never started a run (a dead thread, stopped while it
         // waited, a throw) frees its slot now; one that did, when the run ends.
@@ -2004,12 +2070,40 @@ export abstract class AgentController<
    * message later. Under the lock the later one finds the earlier one
    * registered and stops that instead. Per process, like `LiveRuns`, and for
    * the same reason: the run it guards lives here.
+   *
+   * `startTurn`'s `ifBusy` (#1178) is the one way out of superseding: a
+   * `"queue"` turn waits for the running run to end (outside the lock, so it
+   * holds no one up) and looks again; a `"skip"` turn answers `thread_busy`.
    */
   private async withThread(
     threadId: string,
     owner: string | null,
     fn: () => Promise<Response>,
+    ifBusy: AgentTurnBusyPolicy = "supersede",
   ): Promise<Response> {
+    if (ifBusy === "skip" && threadLocks.has(threadId)) {
+      // A turn is setting up on the thread, or superseding its run: busy.
+      return threadBusy(threadId);
+    }
+    for (;;) {
+      const outcome = await this.underThreadLock(threadId, owner, fn, ifBusy);
+      if (!("waitFor" in outcome)) return outcome.response;
+      // A queued turn (#1178) waits for the run outside the lock, so a person
+      // who sends meanwhile is not held up behind it: their turn takes the
+      // lock and supersedes the run as usual. Then it takes its own place in
+      // the lock's line and looks again, which is what keeps queued turns in
+      // order: the first to get the lock starts, and the next finds its run.
+      await outcome.waitFor;
+    }
+  }
+
+  /** One pass of `withThread` under the thread's lock: start, or name the run a queued turn waits for. */
+  private async underThreadLock(
+    threadId: string,
+    owner: string | null,
+    fn: () => Promise<Response>,
+    ifBusy: AgentTurnBusyPolicy,
+  ): Promise<{ response: Response } | { waitFor: Promise<unknown> }> {
     const previous = threadLocks.get(threadId) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -2020,6 +2114,14 @@ export abstract class AgentController<
     await previous;
     try {
       const live = await this.liveRuns.find({ threadId });
+      if (live && ifBusy !== "supersede" && this.liveRuns.isRunning(live.runId)) {
+        if (ifBusy === "skip") return { response: threadBusy(threadId) };
+        const run = this.liveRuns.get(live.runId);
+        // Its transcript stored, as for a supersede; a run of another
+        // process's registry has no `persisted`, and its end is enough.
+        const ended = run ? (persisted.get(run) ?? run.result()) : null;
+        if (ended) return { waitFor: ended.then(noop, noop) };
+      }
       if (
         live &&
         this.liveRuns.isRunning(live.runId) &&
@@ -2029,7 +2131,7 @@ export abstract class AgentController<
         // stop (#442). Only while it is still going: an ended run is kept for
         // `ttlMs` but a turn after it touches nothing of it. Whether this caller
         // may post on the thread at all is `authorizeRequest`'s question.
-        return notYourRun();
+        return { response: notYourRun() };
       }
       const run = live ? this.liveRuns.get(live.runId) : null;
       if (run) {
@@ -2038,7 +2140,7 @@ export abstract class AgentController<
         run.stop({ reason: "superseded by a later turn on this thread" });
         await persisted.get(run);
       }
-      return await fn();
+      return { response: await fn() };
     } finally {
       release();
       if (threadLocks.get(threadId) === tail) {
@@ -4050,6 +4152,14 @@ function stoppedBeforeStart(): Response {
   return jsonResponse(409, {
     code: "stopped",
     message: "The turn was stopped before it started.",
+  });
+}
+
+/** A `startTurn({ ifBusy: "skip" })` on a busy thread (#1178). `startTurn` answers `{ skipped: true }` for it. */
+function threadBusy(threadId: string): Response {
+  return jsonResponse(409, {
+    code: THREAD_BUSY,
+    message: `Thread ${threadId} has a run going, and this turn was not to interrupt it.`,
   });
 }
 

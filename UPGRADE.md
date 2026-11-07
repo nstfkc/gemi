@@ -1,3 +1,14 @@
+# Unreleased
+
+## ai: `startTurn({ ifBusy })` and `AgentJobs.onSettled` (#1178, #1179)
+
+**New API, no behaviour change.** See [AI Server Turns → A thread that is busy](docs/ai-server-turns.md#a-thread-that-is-busy) and [AI Background Jobs → Continuing the thread when a job settles](docs/ai-background-jobs.md#continuing-the-thread-when-a-job-settles).
+
+- `AgentController.startTurn` takes `ifBusy: "supersede" | "queue" | "skip"`. The default, `"supersede"`, stops a running run on the thread as before. `"queue"` starts once the running run has ended and its transcript is stored; `"skip"` starts nothing and answers `{ skipped: true, threadId }`.
+- With `ifBusy: "skip"` (or a policy typed `AgentTurnBusyPolicy`), `startTurn` is typed `Promise<AgentTurn | AgentTurnSkipped>`; otherwise it is `Promise<AgentTurn>`, as before.
+- `AgentJobs.onSettled(listener)` calls `listener(record)` once per job, in the process that settled it, and answers an unsubscribe. Use it with `startTurn({ ifBusy: "queue" })` to continue a thread when its background work is done.
+- New exported types: `AgentTurnBusyPolicy`, `AgentTurnSkipped`, `AgentJobSettledListener` from `gemi/ai`.
+
 # 0.191.0
 
 ## ai: a sub-run uses the parent run's per-run provider (#1171)

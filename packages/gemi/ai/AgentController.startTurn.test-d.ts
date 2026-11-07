@@ -1,7 +1,13 @@
 import { describe, expectTypeOf, test } from "vitest";
 
 import { Agent } from "./Agent";
-import { AgentController, type AgentTurn, type AgentTurnResult } from "./AgentController";
+import {
+  AgentController,
+  type AgentTurn,
+  type AgentTurnBusyPolicy,
+  type AgentTurnResult,
+  type AgentTurnSkipped,
+} from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 
 /**
@@ -37,6 +43,24 @@ describe("AgentController.startTurn", () => {
     void PageChat.startTurn({ text: "hi" });
 
     void OpenChat.startTurn({ threadId: "t", body: { anything: true } });
+  });
+
+  test("ifBusy: only skip can answer a skipped turn (#1178)", () => {
+    expectTypeOf(
+      PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: "queue" }),
+    ).toEqualTypeOf<Promise<AgentTurn>>();
+    expectTypeOf(
+      PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: "supersede" }),
+    ).toEqualTypeOf<Promise<AgentTurn>>();
+    expectTypeOf(
+      PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: "skip" }),
+    ).toEqualTypeOf<Promise<AgentTurn | AgentTurnSkipped>>();
+    const policy = "queue" as AgentTurnBusyPolicy;
+    expectTypeOf(
+      PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: policy }),
+    ).toEqualTypeOf<Promise<AgentTurn | AgentTurnSkipped>>();
+    // @ts-expect-error not a policy
+    void PageChat.startTurn({ threadId: "t", body: { pageId: "p" }, ifBusy: "wait" });
   });
 
   test("is not callable on the abstract base", () => {

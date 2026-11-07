@@ -376,6 +376,79 @@ describe("settling", () => {
     expect(outcomes.filter(Boolean)).toHaveLength(1);
   });
 
+  test("onSettled is called once per job, by the settle that won the race (#1179)", async () => {
+    const seen: { id: string; state: string; output?: unknown }[] = [];
+    const off = AgentJobs.onSettled((job) => {
+      seen.push({ id: job.id, state: job.state, output: job.output });
+    });
+    try {
+      const record = await tracked();
+      const outcomes = await Promise.all([
+        AgentJobs.settle(record.id, { output: { made: 1 } }),
+        AgentJobs.settle(record.id, { output: { made: 2 } }),
+        AgentJobs.fail(record.id, "lost the race"),
+      ]);
+      await until(() => seen.length > 0);
+      await tick();
+      expect(seen).toHaveLength(1);
+      const winner = outcomes.indexOf(true);
+      expect(seen[0]).toMatchObject(
+        winner === 2 ? { id: record.id, state: "error" } : { id: record.id, state: "ok" },
+      );
+    } finally {
+      off();
+    }
+  });
+
+  test("onSettled hears failures and timeouts too, and stops once removed", async () => {
+    const seen: { state: string; code?: string }[] = [];
+    const off = AgentJobs.onSettled((job) => {
+      seen.push({ state: job.state, code: job.error?.code });
+    });
+    const failed = await tracked();
+    await AgentJobs.fail(failed.id, "broke");
+    const late = await store.create({
+      id: "ajob_overdue",
+      threadId: "thread_1",
+      runId: "run_1",
+      toolCallId: "call_2",
+      toolName: "render",
+      owner: null,
+      job: null,
+      attachmentScope: null,
+      deadlineMs: 1,
+    });
+    await tick();
+    expect(await AgentJobs.sweep()).toBe(1);
+    await until(() => seen.length === 2);
+    expect(seen).toEqual([
+      { state: "error", code: "tool_error" },
+      { state: "error", code: "timeout" },
+    ]);
+    expect(late.id).toBe("ajob_overdue");
+
+    off();
+    const after = await tracked();
+    await AgentJobs.settle(after.id, { output: 1 });
+    await tick();
+    expect(seen).toHaveLength(2);
+  });
+
+  test("a listener that throws does not fail the settle", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const off = AgentJobs.onSettled(() => {
+      throw new Error("listener broke");
+    });
+    try {
+      const record = await tracked();
+      expect(await AgentJobs.settle(record.id, { output: { made: 1 } })).toBe(true);
+      await until(() => error.mock.calls.length > 0);
+      expect(String(error.mock.calls[0]![0])).toMatch(/onSettled listener failed/);
+    } finally {
+      off();
+    }
+  });
+
   test("an unknown id is false", async () => {
     expect(await AgentJobs.settle("ajob_nope", { output: 1 })).toBe(false);
   });
@@ -419,6 +492,54 @@ describe("ctx.jobs.track", () => {
       status: "ok",
       output: { url: "https://cdn/x.mp4" },
     });
+  });
+});
+
+describe("continuing a thread when a job settles (#1179)", () => {
+  test("an onSettled listener starts a turn that reads the job's output", async () => {
+    let id = "";
+    const watch = AgentTool.create({
+      name: "watch",
+      description: "Start a video render at a provider",
+      inputSchema,
+      async: {},
+      async execute(_input, ctx) {
+        const handle = await ctx.jobs.track<{ url: string }>({ summary: { kind: "video" } });
+        id = handle.id;
+        return handle;
+      },
+    });
+    const { controller, provider, agentStore } = setup(
+      [callTool("call_1", "watch", { count: 1 }), say("started"), say("it's ready")],
+      [watch],
+    );
+    const Chat = controller.constructor as unknown as typeof AgentController & (new () => AgentController);
+    const { threadId } = await agentStore.createThread({});
+    await turn(controller, threadId, "go");
+
+    const woken: Promise<string>[] = [];
+    const off = AgentJobs.onSettled((job) => {
+      woken.push(
+        (async () => {
+          const next = await (Chat as any).startTurn({ threadId: job.threadId, ifBusy: "queue" });
+          return (await next.result()).text as string;
+        })(),
+      );
+    });
+    try {
+      // Two settles race; only the winner wakes the thread.
+      await Promise.all([
+        AgentJobs.settle(id, { output: { url: "https://cdn/x.mp4" } }),
+        AgentJobs.settle(id, { output: { url: "https://cdn/y.mp4" } }),
+      ]);
+      await until(() => woken.length > 0);
+      expect(await woken[0]).toBe("it's ready");
+      await tick();
+      expect(woken).toHaveLength(1);
+      expect(resultsOf(provider.calls[2]!.messages)[0]).toMatchObject({ status: "ok" });
+    } finally {
+      off();
+    }
   });
 });
 

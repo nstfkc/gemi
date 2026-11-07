@@ -3,6 +3,7 @@ export {
   type AgentJobClass,
   type AgentJobContext,
   type AgentJobOutcome,
+  type AgentJobSettledListener,
   AgentJobs,
   DEFAULT_JOB_DEADLINE_MS,
   type JobAttachments,
