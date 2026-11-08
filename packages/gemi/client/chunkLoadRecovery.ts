@@ -359,11 +359,13 @@ export function chunkReloadGuard(
     origin = hash(new URL(window.location.href).origin);
     page = hash(target.origin + target.pathname);
   } catch {}
-  // `null`: `window.name` is not ours to use.
+  // `null`: `window.name` is not ours to use (or there is no page to key on).
   let named: Record<string, unknown> | null = null;
   try {
-    const name = page ? window.name : null;
-    if (name === "") {
+    const name = window.name;
+    if (!page) {
+      named = null;
+    } else if (name === "") {
       named = {};
     } else if (name.indexOf(prefix) === 0) {
       const held = parse(name.slice(prefix.length));
