@@ -106,6 +106,19 @@ describe("streamResponses: a stream that dies before its first event (#946)", ()
     const events = await h.run();
     expect(h.calls()).toBe(2);
     expect(events).toEqual([
+      {
+        type: "retry",
+        attempt: 1,
+        maxRetries: 2,
+        error: expect.objectContaining({
+          code: "provider_error",
+          retryable: true,
+        }),
+        phase: "stream",
+        timedOut: false,
+        delayMs: 250,
+        elapsedMs: expect.any(Number),
+      },
       { type: "text-delta", delta: "ok" },
       {
         type: "finish",
@@ -123,7 +136,15 @@ describe("streamResponses: a stream that dies before its first event (#946)", ()
     const events = await h.run();
     expect(h.calls()).toBe(3);
     expect(h.sleeps).toEqual([250, 500]);
-    expect(events).toEqual([
+    expect(
+      events
+        .filter((e) => e.type === "retry")
+        .map((e) => [e.attempt, e.delayMs]),
+    ).toEqual([
+      [1, 250],
+      [2, 500],
+    ]);
+    expect(events.filter((e) => e.type !== "retry")).toEqual([
       {
         type: "error",
         error: expect.objectContaining({
@@ -144,7 +165,11 @@ describe("streamResponses: a stream that dies before its first event (#946)", ()
     const h = harness([sse([CREATED]), OK]);
     const events = await h.run();
     expect(h.calls()).toBe(2);
-    expect(events.map((e) => e.type)).toEqual(["text-delta", "finish"]);
+    expect(events.map((e) => e.type)).toEqual([
+      "retry",
+      "text-delta",
+      "finish",
+    ]);
   });
 
   test("an in-stream 5xx-type `response.failed` is retried, and its usage is kept", async () => {
@@ -230,6 +255,7 @@ describe("streamResponses: a stream that dies before its first event (#946)", ()
     const events = await h.run(controller.signal);
     expect(h.calls()).toBe(1);
     expect(events).toEqual([
+      expect.objectContaining({ type: "retry", attempt: 1 }),
       {
         type: "finish",
         reason: "aborted",

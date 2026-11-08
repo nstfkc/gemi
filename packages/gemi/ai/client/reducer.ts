@@ -498,6 +498,11 @@ function reduce<T extends ToolShapes, O>(
       // is the turn's, on the state. An assignment, so a replay is harmless.
       return { ...state, usage: event.usage };
 
+    case "retry":
+      // Informational (#1192): `useChat`'s `onRetry` reads the frame, and
+      // nothing in the transcript changes.
+      return state;
+
     case "error":
       // Clearing `pending` here is what keeps "pending is non-empty exactly
       // when the UI is awaiting input" true: a run that errored is not holding

@@ -929,6 +929,21 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    */
   | { type: "usage"; usage: Usage }
   /**
+   * A model call failed and is being asked again (#1192): `attempt` failed,
+   * and the next one starts after `delayMs`. For a UI that says "still
+   * working" instead of showing an unexplained pause. Only the error's `code`
+   * is sent; the full detail goes to `onProviderRetry` on the server. Not
+   * stored in the thread, and the reducer leaves the state as it is.
+   */
+  | {
+      type: "retry";
+      messageId: string;
+      attempt: number;
+      maxRetries: number;
+      code: AgentErrorCode;
+      delayMs: number;
+    }
+  /**
    * An error after the headers are flushed cannot be an HTTP status, so it is an
    * event. Pre-flight failures — auth, validation, an unknown agent — stay
    * ordinary HTTP errors and never reach this union.

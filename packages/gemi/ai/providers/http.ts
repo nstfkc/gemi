@@ -1,4 +1,10 @@
-import { normalizeProviderError, ProviderHttpError, ProviderTimeoutError } from "./errors";
+import type { ProviderRetryInfo } from "../AgentProvider";
+import {
+  httpErrorDetail,
+  normalizeProviderError,
+  ProviderHttpError,
+  ProviderTimeoutError,
+} from "./errors";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -45,6 +51,15 @@ export type RequestOptions = {
    * run, which is the opposite of what a timeout says here.
    */
   retryTimeouts?: boolean;
+  /**
+   * Called once per failed attempt that is about to be retried, before the
+   * backoff wait (#1192). `elapsedMs` is measured from `startedAt` when given
+   * (the call's first attempt, for a caller that retries around this too), or
+   * from this function's first attempt. A hook that throws is ignored: it
+   * must not turn a retry into a failure.
+   */
+  onRetry?: (info: Omit<ProviderRetryInfo, "phase">) => void;
+  startedAt?: number;
 };
 
 /** The floor of the backoff. Doubling from here gives 0.5s, 1s, 2s, 4s — long
@@ -179,7 +194,23 @@ export async function requestWithRetry(
   const now = options.now ?? Date.now;
   const maxRetries = Math.max(0, options.maxRetries);
 
-  const wait = (ms: number) => waitUnlessAborted(ms, options.signal, sleep);
+  const startedAt = options.startedAt ?? now();
+  const wait = (ms: number, attempt: number, error: unknown, timedOut: boolean) => {
+    try {
+      options.onRetry?.({
+        attempt: attempt + 1,
+        maxRetries,
+        error: normalizeProviderError(error),
+        ...httpErrorDetail(error),
+        timedOut,
+        delayMs: ms,
+        elapsedMs: now() - startedAt,
+      });
+    } catch {
+      // See `onRetry`.
+    }
+    return waitUnlessAborted(ms, options.signal, sleep);
+  };
 
   let lastError: unknown;
 
@@ -214,7 +245,7 @@ export async function requestWithRetry(
       // `RequestOptions.retryTimeouts`.
       if (timedOut && options.retryTimeouts === false) throw lastError;
       if (attempt === maxRetries) throw lastError;
-      await wait(backoffDelayMs(attempt, random));
+      await wait(backoffDelayMs(attempt, random), attempt, lastError, timedOut);
       continue;
     }
 
@@ -250,6 +281,9 @@ export async function requestWithRetry(
       retryAfter === undefined
         ? backoffDelayMs(attempt, random)
         : Math.min(retryAfter, MAX_DELAY_MS),
+      attempt,
+      error,
+      false,
     );
     lastError = error;
   }

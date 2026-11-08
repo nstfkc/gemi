@@ -30,6 +30,7 @@ export type {
   AgentRequestBody,
   AgentStopBody,
   ChatError,
+  ChatRetry,
   ChatPendingToolCall,
   ChatStatus,
   SendMessageOptions,

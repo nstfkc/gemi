@@ -1347,6 +1347,38 @@ describe("lifecycle", () => {
     expect(onAwaitingInput.mock.calls[0]![0]).toHaveLength(2);
   });
 
+  test("onRetry gets a model call's retry, and the transcript is unchanged (#1192)", async () => {
+    const onRetry = vi.fn();
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_r", threadId: "th_r" } },
+        { seq: 1, event: { type: "message-start", messageId: "m1", role: "assistant" } },
+        {
+          seq: 2,
+          event: { type: "retry", messageId: "m1", attempt: 1, maxRetries: 2, code: "rate_limited", delayMs: 500 },
+        },
+        { seq: 3, event: { type: "text-delta", messageId: "m1", delta: "hello" } },
+        { seq: 4, event: { type: "message-end", messageId: "m1", finishReason: "stop" } },
+        { seq: 5, event: { type: "run-end", runId: "run_r", finishReason: "stop" } },
+      ] as AgentStreamFrame[]),
+    );
+    const { box } = mount({ attach: false, onRetry });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onRetry.mock.calls[0]![0]).toEqual({
+      messageId: "m1",
+      attempt: 1,
+      maxRetries: 2,
+      code: "rate_limited",
+      delayMs: 500,
+    });
+    expect(box.api.messages.at(-1)!.content).toEqual([{ type: "text", text: "hello" }]);
+  });
+
   test("unmount aborts the request in flight and sets no state after it", async () => {
     const run = controlled();
     let signal: AbortSignal | undefined;

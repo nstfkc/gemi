@@ -1,6 +1,11 @@
 import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
-import type { AgentProvider, ProviderToolNamespace, ProviderToolSpec } from "./AgentProvider";
+import type {
+  AgentProvider,
+  ProviderRetryInfo,
+  ProviderToolNamespace,
+  ProviderToolSpec,
+} from "./AgentProvider";
 import type { GeneratedImage, GenerateImageParams, ImageInput, ImageModel } from "./ImageModel";
 import {
   generateWithin,
@@ -1738,6 +1743,14 @@ export function toolCallInputOf(result: ToolResultPart): unknown {
 
 export const DEFAULT_MAX_RUN_DURATION_MS = 10 * 60 * 1000;
 
+/** What `AgentStreamParams.onProviderRetry` is called with. */
+export type AgentProviderRetry = ProviderRetryInfo & {
+  runId: string;
+  agent: string;
+  /** The run's model call this was, from 1. */
+  step: number;
+};
+
 /**
  * One call per client turn — a first message and an answer to a pending
  * approval take the same path, because they are the same thing: the next turn
@@ -1879,6 +1892,20 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    * turn while the run is still going.
    */
   onTurn?: (message: AgentMessage) => void | Promise<void>;
+  /**
+   * Fires for each failed attempt of a model call that the provider is about
+   * to ask again (#1192), before the backoff wait: `info` is the attempt, the
+   * normalized error, HTTP status and request id, the wait and the time spent
+   * so far (see `ProviderRetryInfo`), plus the run's `runId`, the agent's name
+   * and the `step`. For logging each attempt with the run's own context, or
+   * telling the user the call is being retried. The client gets a `retry`
+   * frame with the code only.
+   *
+   * Not awaited, and a hook that throws or rejects is logged and ignored: it
+   * must not slow down or fail the call it observes. Handed down unchanged to
+   * a sub-run, whose calls report their own `runId` and `agent`.
+   */
+  onProviderRetry?: (info: AgentProviderRetry) => void | Promise<void>;
   /**
    * The turn is an event server code reports, not a person's words (#1181):
    * the run's user message is the event's `text` (if any) with
@@ -4191,6 +4218,29 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           this.markFileRejected(event.fileId, event.message, httpErrorDetail(event));
           break;
         }
+        case "retry": {
+          this.emit({
+            type: "retry",
+            messageId: message.id,
+            attempt: event.attempt,
+            maxRetries: event.maxRetries,
+            code: event.error.code,
+            delayMs: event.delayMs,
+          });
+          const hook = this.params.onProviderRetry;
+          if (hook) {
+            const { type: _type, ...info } = event;
+            const report = (error: unknown) =>
+              this.writeLog(`[gemi/ai] agent "${this.config.name}" onProviderRetry threw`, { error });
+            try {
+              const done = hook({ ...info, runId: this.runId, agent: this.config.name, step });
+              if (done instanceof Promise) done.catch(report);
+            } catch (error) {
+              report(error);
+            }
+          }
+          break;
+        }
       }
     }
 
@@ -5204,6 +5254,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       threadId: this.params.threadId,
       // The same caller is reading, so the same rules for what it is told.
       redactError: this.params.redactError,
+      // The same observer: a sub-agent's model calls are the turn's too, and
+      // it reports its own run id and agent name.
+      onProviderRetry: this.params.onProviderRetry,
       // The same store, so a sub-run's answers are single-use across every
       // instance exactly as the parent's are.
       nonces: this.params.nonces,

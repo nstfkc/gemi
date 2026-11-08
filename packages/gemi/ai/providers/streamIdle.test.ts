@@ -142,6 +142,7 @@ describe("streamResponses: streamIdleTimeoutMs (#1167)", () => {
 
     expect(server.connections()).toBe(2);
     expect(events).toEqual([
+      expect.objectContaining({ type: "retry", phase: "stream", attempt: 1, timedOut: true }),
       { type: "text-delta", delta: "ok" },
       {
         type: "finish",

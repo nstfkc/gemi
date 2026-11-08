@@ -12,6 +12,7 @@ import { decodeSSE } from "./client/sse";
 import type {
   AgentError,
   AgentMessage,
+  AgentStreamEvent,
   ClientToolResult,
   ClientTurn,
   PendingToolCall,
@@ -243,6 +244,15 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    */
   onToolProgress?: (progress: ToolProgress<ToolsOf<P>>) => void;
   onError?: (error: ChatError) => void;
+  /**
+   * Fires when one of the agent's model calls failed and is being asked again
+   * (#1192): `attempt` failed, the next one starts after `delayMs`, and `code`
+   * says why. For showing "still working, retrying…" instead of an
+   * unexplained pause. The transcript is not changed. A sub-agent's retries
+   * arrive inside nested frames and do not fire it. A reattach that replays
+   * the run's frames fires it again for retries already reported.
+   */
+  onRetry?: (retry: ChatRetry) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
   /**
    * The mount probe found no run to attach to. So did a `reattachOnFocus`
@@ -535,6 +545,9 @@ export type ChatError = AgentError & {
    *  Absent when the body was empty. */
   body?: unknown;
 };
+
+/** What `onRetry` is called with: the `retry` frame without its `type`. */
+export type ChatRetry = Omit<Extract<AgentStreamEvent, { type: "retry" }>, "type">;
 
 /**
  * Why `attach()` rejected, for that file alone.
@@ -959,6 +972,7 @@ export function useChat<P extends keyof AgentRoutes>(
     onError,
     onAwaitingInput,
     onAttachMiss,
+    onRetry,
   } = params;
 
   const routeParams = useParams();
@@ -1016,6 +1030,7 @@ export function useChat<P extends keyof AgentRoutes>(
     onError,
     onAwaitingInput,
     onAttachMiss,
+    onRetry,
   });
   handlers.current = {
     onFinish,
@@ -1024,6 +1039,7 @@ export function useChat<P extends keyof AgentRoutes>(
     onError,
     onAwaitingInput,
     onAttachMiss,
+    onRetry,
   };
   const requestRef = useRef({ base, headers, extraBody });
   requestRef.current = { base, headers, extraBody };
@@ -1183,6 +1199,9 @@ export function useChat<P extends keyof AgentRoutes>(
           handlers.current.onAwaitingInput?.(event.pending as PendingToolCall<ToolsOf<P>>[]);
         } else if (event.type === "error") {
           handlers.current.onError?.(event.error);
+        } else if (event.type === "retry") {
+          const { type: _type, ...retry } = event;
+          handlers.current.onRetry?.(retry);
         }
       }
     },

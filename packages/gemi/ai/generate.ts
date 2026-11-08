@@ -1,6 +1,6 @@
 import { Log } from "../facades/Log";
 import { AgentRunError, type AgentRunFailure, type ReasoningEffort } from "./Agent";
-import type { AgentProvider } from "./AgentProvider";
+import type { AgentProvider, ProviderRetryInfo } from "./AgentProvider";
 import { type DeepPartial, PartialJsonParser } from "./partialJson";
 import { httpErrorDetail } from "./providers/errors";
 import {
@@ -547,6 +547,16 @@ async function callModel<O extends Schema<any>>(
             error = event.error;
             detail = httpErrorDetail(event);
             break;
+          case "retry": {
+            const { type: _type, ...info } = event;
+            try {
+              const done = params.onProviderRetry?.(info);
+              if (done instanceof Promise) done.catch(() => {});
+            } catch {
+              // See `onProviderRetry`.
+            }
+            break;
+          }
           // `tool-call-delta`, `tool-call`, `tool-call-discard` and `tool-search` cannot happen:
           // no tools were sent.
           // `file-rejected` needs nothing here: the provider already sent the
@@ -799,6 +809,14 @@ export interface GenerateParams<O extends Schema<any> = Schema<any>, R = Infer<O
    * `result.attemptLog`.
    */
   onAttempt?: (attempt: GenerateAttempt) => void;
+
+  /**
+   * Fires for each failed attempt of a model call that the provider is about
+   * to ask again (#1192), before its backoff wait. These are the provider's
+   * own retries inside one `generate` attempt, not the `attempts` above. Not
+   * awaited; a hook that throws is ignored. See `ProviderRetryInfo`.
+   */
+  onProviderRetry?: (info: ProviderRetryInfo) => void | Promise<void>;
 
   // --- streaming ------------------------------------------------------------
 

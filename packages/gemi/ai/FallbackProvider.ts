@@ -364,6 +364,14 @@ export class FallbackProvider extends AgentProvider {
 
           if (event.type === "finish" && event.model) responseModel = event.model;
 
+          // Passed on as it happens, committed or not: it only says this leg
+          // is waiting to ask again (#1192), and holding it back until the leg
+          // commits would deliver it after the wait it announces.
+          if (event.type === "retry") {
+            yield event;
+            continue;
+          }
+
           if (committed) {
             if (event.type === "finish") {
               usage = addUsage(usage ?? emptyUsage(), event.usage);
