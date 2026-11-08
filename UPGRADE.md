@@ -1,3 +1,12 @@
+# Unreleased
+
+## client: the chunk-reload marker leaves `window.name` once it expires (#1188)
+
+**Behaviour change (small).** See [Configuration → Reload once when a chunk will not load](docs/configuration.md).
+
+- Since 0.193.0, with `sessionStorage` blocked, the reload guard is kept in `window.name`, and it stayed there for the rest of the tab's life. gemi now sets the name back to `""` once its marker holds no live entry: on client init when nothing in it is within the cooldown (or it is from the future, another origin's, or does not parse), and otherwise when the newest entry's cooldown ends.
+- Only a name holding gemi's marker (`gemi:chunk-reload:…`) is cleared. A name the app set, before or after, is never touched. An app that uses `window.name` while it is empty can drop any workaround that treated gemi's marker as free to take over.
+
 # 0.193.0
 
 ## client: chunk-load recovery when `sessionStorage` is blocked (#1186)
