@@ -1,3 +1,15 @@
+# Unreleased
+
+## ai: provider retries are observable (#1192)
+
+**New API, small behaviour change.** See [AI Providers → Watching retries](docs/ai-providers.md#watching-retries).
+
+- `agent.stream({ onProviderRetry })`, `AgentController.onProviderRetry(info, ctx)` (also in `defineAgentHooks`) and `generate({ onProviderRetry })` are called for each failed attempt of a model call the provider is about to ask again, before the backoff wait: the attempt, `maxRetries`, the normalized `error`, HTTP `status` and `requestId`, `phase`, `timedOut`, `delayMs` and `elapsedMs`, plus `runId`, `agent` and `step` on a run. Handed down to sub-runs. Not awaited; a hook that throws is logged and ignored.
+- New `ProviderEvent` `{ type: "retry", ... }`, sent by the OpenAI and Azure providers before each request and stream retry, and passed through by `FallbackProvider` as it happens.
+- **Behaviour change:** the run's stream now carries a `retry` frame (`{ type: "retry", messageId, attempt, maxRetries, code, delayMs }`) for each retry. The `useChat` reducer and the Swift and Kotlin clients ignore it; a custom client that rejects unknown frame types needs to skip it. `useChat({ onRetry })` is called with it.
+- Code that consumes a provider stream directly (a custom `AgentProvider` wrapper, a test asserting the exact event list) now sees `retry` events before the retried answer.
+- New exported types: `ProviderRetryInfo` and `AgentProviderRetry` from `gemi/ai`, `ChatRetry` from `gemi/ai/client`.
+
 # 0.194.0
 
 ## auth: a fixed email-code sign-in code for development and tests (#1190)

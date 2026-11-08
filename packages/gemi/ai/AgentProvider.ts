@@ -184,7 +184,43 @@ export type ProviderEvent =
    * this; `Agent` treats its absence as nothing having been rejected.
    */
   | { type: "file-rejected"; fileId: string; message: string; status?: number; requestId?: string }
+  /**
+   * An attempt failed and the provider is about to ask again (#1192), sent
+   * before the backoff wait, so it arrives while the call is still waiting
+   * rather than after. Informational only: it is not content, it commits
+   * nothing, and a consumer that ignores it loses nothing. See
+   * `ProviderRetryInfo` for the fields. A provider that never retries need not
+   * send it.
+   */
+  | ({ type: "retry" } & ProviderRetryInfo)
   | { type: "error"; error: AgentError; status?: number; requestId?: string };
+
+/**
+ * One failed attempt of a provider call that is about to be asked again.
+ *
+ * - `attempt`: the attempt that failed, from 1. The next one is `attempt + 1`.
+ * - `maxRetries`: the provider's `maxRetries`, so `attempt <= maxRetries`.
+ * - `error`: the failure, normalized; `status` and `requestId` describe the
+ *   HTTP response it came from, when there was one.
+ * - `phase`: `"request"` when no response arrived (or an error status did),
+ *   `"stream"` when the response started and its body broke before the first
+ *   content event.
+ * - `timedOut`: the attempt was cut by `timeoutMs`, `streamIdleTimeoutMs` or
+ *   `streamMaxDurationMs`.
+ * - `delayMs`: how long the provider waits before the next attempt.
+ * - `elapsedMs`: since the call's first attempt started.
+ */
+export type ProviderRetryInfo = {
+  attempt: number;
+  maxRetries: number;
+  error: AgentError;
+  status?: number;
+  requestId?: string;
+  phase: "request" | "stream";
+  timedOut: boolean;
+  delayMs: number;
+  elapsedMs: number;
+};
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
 

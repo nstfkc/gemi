@@ -152,6 +152,7 @@ describe("streamResponses: streamMaxDurationMs (#1169)", () => {
     expect(runawayDeltas.length).toBeGreaterThan(3);
     expect(withoutDeltasOf(events, "call_1")).toEqual([
       { type: "tool-call-discard", toolCallIds: ["call_1"] },
+      expect.objectContaining({ type: "retry", phase: "stream", attempt: 1, timedOut: true }),
       { type: "tool-call-delta", toolCallId: "call_2", name: "write", argsDelta: '{"a":' },
       { type: "tool-call-delta", toolCallId: "call_2", name: "write", argsDelta: "1}" },
       { type: "tool-call", toolCallId: "call_2", name: "write", args: '{"a":1}' },
@@ -239,6 +240,7 @@ describe("streamResponses: a break after only tool-call arguments is retried (#1
     expect(events.map((e) => e.type)).toEqual([
       "tool-call-delta",
       "tool-call-discard",
+      "retry",
       "tool-call-delta",
       "tool-call-delta",
       "tool-call",
@@ -289,6 +291,7 @@ describe("streamResponses: maxToolArgumentChars (#1169)", () => {
     expect(runawayChars).toBeLessThanOrEqual(100);
     expect(withoutDeltasOf(events, "call_1").map((e) => e.type)).toEqual([
       "tool-call-discard",
+      "retry",
       "tool-call-delta",
       "tool-call-delta",
       "tool-call",

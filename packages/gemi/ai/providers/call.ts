@@ -5,6 +5,7 @@ import {
   normalizeProviderError,
   ProviderStreamDurationError,
   ProviderStreamIdleError,
+  ProviderTimeoutError,
   ProviderToolArgumentsTooLongError,
 } from "./errors";
 import {
@@ -54,6 +55,7 @@ export type ResponsesEndpoint = {
    *  without waiting for it. See `RequestOptions`. */
   sleep?: RequestOptions["sleep"];
   random?: () => number;
+  now?: () => number;
 };
 
 /**
@@ -154,6 +156,8 @@ export async function* streamResponses(
   const idleMs = endpoint.streamIdleTimeoutMs ?? 0;
   const maxMs = endpoint.streamMaxDurationMs ?? 0;
   const maxArgs = endpoint.maxToolArgumentChars ?? 0;
+  const now = endpoint.now ?? Date.now;
+  const startedAt = now();
 
   for (let streamAttempt = 0; ; streamAttempt++) {
     // Per attempt, so an idle timeout can abort this attempt's request (and
@@ -163,7 +167,12 @@ export async function* streamResponses(
     let response: Response | undefined;
     while (response === undefined) {
       try {
-        response = await requestWithRetry(
+        // The request retries inside `requestWithRetry`, and its `retry`
+        // events are yielded as they happen, not after it settles: they exist
+        // to say the call is waiting, while it is (#1192).
+        const retries: ProviderEvent[] = [];
+        let wake: () => void = () => {};
+        const pending = requestWithRetry(
           endpoint.responsesUrl,
           {
             method: "POST",
@@ -177,8 +186,25 @@ export async function* streamResponses(
             fetchImpl: endpoint.fetchImpl,
             sleep: endpoint.sleep,
             random: endpoint.random,
+            now: endpoint.now,
+            startedAt,
+            onRetry: (info) => {
+              retries.push({ type: "retry", ...info, phase: "request" });
+              wake();
+            },
           },
         );
+        const settled = pending.then(
+          () => true,
+          () => true,
+        );
+        for (;;) {
+          const woken = new Promise<false>((resolve) => (wake = () => resolve(false)));
+          const done = await Promise.race([settled, woken]);
+          yield* retries.splice(0);
+          if (done) break;
+        }
+        response = await pending;
       } catch (error) {
         // A stored file the provider will not read fails this request and, left
         // in, every later one in the thread (#684). Take it out and ask again,
@@ -214,6 +240,7 @@ export async function* streamResponses(
     const held: ProviderEvent[] = [];
     let committed = false;
     let failure: AgentError | undefined;
+    let streamTimedOut = false;
     // The tool calls this attempt has yielded argument deltas for, with how
     // much text each has streamed. Before `committed`, these are the only
     // things the consumer has seen, and a retry discards them.
@@ -264,6 +291,7 @@ export async function* streamResponses(
         held.push(event);
       }
     } catch (error) {
+      streamTimedOut = error instanceof ProviderTimeoutError;
       const normalized = normalizeProviderError(error);
       if (normalized.code === "aborted" || params.signal?.aborted) {
         yield aborted();
@@ -283,12 +311,26 @@ export async function* streamResponses(
     if (committed) return;
 
     if (failure?.retryable && streamAttempt < maxStreamRetries && !params.signal?.aborted) {
+      let detail: { status?: number; requestId?: string } = {};
       for (const event of held) {
         if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
+        if (event.type === "error") detail = httpErrorDetail(event);
       }
       if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
+      const delayMs = backoffDelayMs(streamAttempt, random);
+      yield {
+        type: "retry",
+        attempt: streamAttempt + 1,
+        maxRetries: maxStreamRetries,
+        error: failure,
+        ...detail,
+        phase: "stream",
+        timedOut: streamTimedOut,
+        delayMs,
+        elapsedMs: now() - startedAt,
+      };
       try {
-        await waitUnlessAborted(backoffDelayMs(streamAttempt, random), params.signal, endpoint.sleep);
+        await waitUnlessAborted(delayMs, params.signal, endpoint.sleep);
       } catch {
         yield aborted();
         return;

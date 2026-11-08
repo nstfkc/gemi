@@ -9,6 +9,7 @@ import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentResource } from "../http/ResourcePolicy";
 import type {
   AgentContext,
+  AgentProviderRetry,
   AgentRun,
   AgentRunResult,
   AgentToolShapes,
@@ -863,6 +864,7 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
   onAwaitingInput?: (pending: PendingToolCall[], ctx: AgentHookContext) => void | Promise<void>;
   redactError?: (error: AgentError, info: ErrorRedactionInfo, ctx: AgentHookContext) => AgentError;
   onError?: (error: AgentError, ctx: AgentHookContext) => void | Promise<void>;
+  onProviderRetry?: (info: AgentProviderRetry, ctx: AgentHookContext) => void | Promise<void>;
   onStreamComplete?: (
     result: AgentRunResult<any, any>,
     ctx: AgentHookContext,
@@ -2061,6 +2063,9 @@ export abstract class AgentController<
         // What the client, and for a tool's exception the model, is told about
         // a failure. See `redactError`.
         redactError: (error, info) => this.redactError(error, info, ctx),
+        // Each model-call attempt that is asked again (#1192). See
+        // `onProviderRetry`.
+        onProviderRetry: (info) => this.onProviderRetry(info, ctx),
         // Where answers' nonces are spent. See `nonces`.
         nonces: this.nonces,
         // Where approved tools' executions are recorded. See `receipts`.
@@ -3402,6 +3407,18 @@ export abstract class AgentController<
    */
   protected onError(error: AgentError, ctx: AgentHookContext): void | Promise<void> {
     return this.hooks?.onError?.(error, ctx);
+  }
+
+  /**
+   * A model call of the run (or of a sub-run) failed and is about to be asked
+   * again (#1192): the attempt, the unredacted error with its HTTP `status`
+   * and `requestId`, the wait before the next attempt and the time spent so
+   * far, with the run's `runId`, `agent` and `step`. Called before the wait,
+   * not awaited, and a hook that throws is logged and ignored. The client is
+   * sent a `retry` frame with the error code only.
+   */
+  protected onProviderRetry(info: AgentProviderRetry, ctx: AgentHookContext): void | Promise<void> {
+    return this.hooks?.onProviderRetry?.(info, ctx);
   }
 
   protected onStreamComplete(

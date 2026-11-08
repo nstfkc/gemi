@@ -25,6 +25,28 @@ A stream that breaks before its first content event is retried the same way: the
 
 A stream that breaks while it has sent only the arguments of tool calls that never completed is retried too. Those calls never ran, so nothing the model said has been acted on. Their argument deltas were passed on as they arrived (a UI can show a call filling in), so before the retry the provider sends a `tool-call-discard` event naming them. The agent forgets those calls, the stream carries a `tool-call-discard` frame, and `useChat`'s reducer removes their partial parts from the message. The retried answer's calls arrive under new ids. Once the retries are spent, the partial calls stay and the call ends with the error, as before. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
 
+### Watching retries
+
+Each retry is visible outside the provider (#1192). Before the backoff wait, the provider stream carries a `retry` event, and the run turns it into an `onProviderRetry` call on the server and a `retry` frame for the client. Use it to log every attempt with the run's context, or to tell the user the call is being asked again instead of showing an unexplained pause.
+
+```typescript
+const run = agent.stream({
+  messages,
+  turn,
+  onProviderRetry: ({ runId, agent, step, attempt, maxRetries, error, status, requestId, delayMs, elapsedMs, phase, timedOut }) => {
+    Log.warning("model call retried", { runId, agent, attempt, code: error.code, status, delayMs });
+  },
+});
+```
+
+- `attempt` is the attempt that failed, from 1, and `delayMs` the wait before the next one. `maxRetries` is the provider's. `error` is the normalized error, with the HTTP `status` and `requestId` of the response it came from when there was one. `phase` is `"request"` (no response, or an error status) or `"stream"` (the body broke before its first content event); request attempts are counted per stream attempt. `timedOut` says whether `timeoutMs`, `streamIdleTimeoutMs` or `streamMaxDurationMs` cut it. `elapsedMs` runs from the call's first attempt.
+- `runId`, `agent` and `step` (the run's model call, from 1) are added by the run. The hook is handed down to sub-runs started with `ctx.runAgent`, which report their own `runId` and `agent`.
+- The hook is not awaited, and one that throws or rejects is logged and ignored, so it cannot slow down or fail the call.
+- `AgentController` has the same hook: `onProviderRetry(info, ctx)`, as a method or in `defineAgentHooks`.
+- The client gets `{ type: "retry", messageId, attempt, maxRetries, code, delayMs }`: the error's `code` only, never its message, status or request id. A sub-run's retries arrive as `nested-event` frames. The reducer leaves the transcript as it is, and nothing is stored in the thread. `useChat({ onRetry })` is called with the frame's fields for this agent's own retries; a reattach that replays the run's frames calls it again.
+- `generate({ onProviderRetry })` takes the same hook, without the run's fields.
+- `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself.
+
 ### Timeouts
 
 These limits bound a call. All of them are set on the provider config:
