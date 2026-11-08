@@ -1,3 +1,14 @@
+# Unreleased
+
+## log: request entries carry an allow-list of fields, headers redacted (#1193)
+
+**Behaviour change.** See [Facades → Request metadata](docs/facades.md#request-metadata).
+
+- An entry logged inside a request used to carry the request's full `url`, its `headers` (the `Headers` object, `cookie` and `authorization` included) and its `body` in the entry `onLogCreated` gets. It now carries `method`, `path`, `userAgent` and, with an `x-request-id` header, `requestId`. The log file gets the same fields.
+- `requestFields: ["url", "headers"]` in `app/config/log.ts` opts back into the full URL and the headers, now a plain object with `cookie`, `set-cookie`, `authorization`, `proxy-authorization` and `x-api-key` written as `"[redacted]"`. `redactHeaders` adds header names to that list. The body is no longer logged.
+- An `onLogCreated` hook that read `entry.metadata.url` or `entry.metadata.headers` needs `requestFields`, and one that called `Headers` methods on `metadata.headers` must read it as a plain object.
+- New exported type: `LogRequestField` from `gemi/services`.
+
 # 0.194.0
 
 ## auth: a fixed email-code sign-in code for development and tests (#1190)
