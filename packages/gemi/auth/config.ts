@@ -7,6 +7,7 @@ import type { ConnectionStore } from "./connections/ConnectionStore";
 import type { ProviderConnection } from "./connections/ConnectionManager";
 import type { OAuthConnectionProvider } from "./connections/OAuthConnectionProvider";
 import { SignUpRequest } from "./requests";
+import { checkFixedSignInCode } from "./fixedCode";
 import type { AuthRateLimitKey, CodeRateLimits } from "./oneTimeCode";
 
 /** What a per-request switch (`AuthSwitch`) is handed (#1135). */
@@ -133,6 +134,16 @@ export interface EmailCodeConfig {
    * Unset, the code is logged outside production and dropped in it.
    */
   send?: (args: EmailCodeSendArgs) => Promise<void> | void;
+  /**
+   * A code `/auth/email-code/verify` accepts for any address, next to the one
+   * it issued: for development, e2e scripts and test servers (#1190). Unset
+   * (the default), `AUTH_FIXED_CODE` is used when that is set; `""` turns both
+   * off. Refused in production: with `NODE_ENV=production` the boot fails while
+   * either is set. A code is still requested and sent as before (the debug
+   * email is still written), and wrong guesses still count. `isFixedSignInCode`
+   * from `gemi/services` lets an app's own code flow honour it too.
+   */
+  fixedCode?: string | null;
 }
 
 /**
@@ -597,6 +608,7 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
   checkEmailCodeNumber("linkExpiresInMinutes", linkExpiresInMinutes, 1);
   checkEmailCodeNumber("maxAttempts", maxAttempts, 1);
   checkEmailCodeNumber("activeCodes", activeCodes, 1, 5);
+  checkFixedSignInCode(config.fixedCode);
   return {
     enabled: config.enabled ?? false,
     createUser: config.createUser ?? false,
@@ -621,6 +633,7 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
           console.info(`[gemi] email code for ${email}: ${code} (set auth.emailCode.send to deliver it)`);
         }
       }),
+    fixedCode: config.fixedCode ?? null,
   };
 }
 

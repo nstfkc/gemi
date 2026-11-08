@@ -7,6 +7,7 @@ import { ValidationError } from "../http";
 import { AuthorizationError } from "../http/errors";
 import { RequestBreakerError } from "../http/Error";
 import { enabledOAuthProvider } from "./oauth/providers";
+import { matchesFixedSignInCode } from "./fixedCode";
 import { enforceCodeRateLimits, foldEmail, normalizeEmail } from "./oneTimeCode";
 import {
   authSwitchOn,
@@ -1470,20 +1471,26 @@ export class AuthController extends Controller {
       throw new ValidationError({ code: ["invalid_code"] });
     }
 
-    const result = await auth.verifyOneTimeCode(email, code, { claim: false });
-    if (result.status === "too_many_attempts") {
-      throw new ValidationError({ code: ["too_many_attempts"] });
+    // The fixed development code (#1190) needs no issued row, spends no
+    // attempt and is never claimed, so it keeps working. Never in production.
+    let row: { id: number } | null = null;
+    if (!matchesFixedSignInCode(code, config.emailCode.fixedCode)) {
+      const result = await auth.verifyOneTimeCode(email, code, { claim: false });
+      if (result.status === "too_many_attempts") {
+        throw new ValidationError({ code: ["too_many_attempts"] });
+      }
+      if (result.status !== "ok") {
+        throw new ValidationError({ code: ["invalid_code"] });
+      }
+      row = result.row;
     }
-    if (result.status !== "ok") {
-      throw new ValidationError({ code: ["invalid_code"] });
-    }
-    const row = result.row;
+    const claim = async () => (row ? await auth.claimOneTimeCode(email, row.id) : true);
 
     let user = await userProvider.findUserByEmailAddress(email, false);
     let isNewUser = false;
 
     if (user) {
-      if (!(await auth.claimOneTimeCode(email, row.id))) {
+      if (!(await claim())) {
         throw new ValidationError({ code: ["invalid_code"] });
       }
       await userProvider.verifyUser(email);
@@ -1494,7 +1501,7 @@ export class AuthController extends Controller {
         // the code back, and of two requests with the same code only the one
         // that deletes the row creates a user.
         user = await userProvider.transaction(async () => {
-          if (!(await auth.claimOneTimeCode(email, row.id))) {
+          if (!(await claim())) {
             throw new CodeAlreadyClaimed();
           }
           const created = await userProvider.createUser({
@@ -1519,7 +1526,7 @@ export class AuthController extends Controller {
       }
     } else {
       // A row for an address with no user, left from when `createUser` was on.
-      await auth.claimOneTimeCode(email, row.id);
+      await claim();
       throw new ValidationError({ code: ["invalid_code"] });
     }
 

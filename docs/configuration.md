@@ -269,6 +269,40 @@ EMAIL_DEBUG=true
 # BUCKET_NAME=
 ```
 
+### Debug emails without browser tabs: `EMAIL_DEBUG_OPEN`
+
+With `EMAIL_DEBUG=true`, each email is written to `.debug/emails` and opened in the browser, unless `CI=true`. `EMAIL_DEBUG_OPEN=false` keeps writing the files but stops opening them, without changing anything else `CI=true` changes. Useful when automated tests or several local servers send mail.
+
+```bash
+EMAIL_DEBUG=true
+EMAIL_DEBUG_OPEN=false
+```
+
+### A fixed sign-in code: `AUTH_FIXED_CODE`
+
+For development, e2e scripts and test servers, `AUTH_FIXED_CODE` (or `auth.emailCode.fixedCode` in `app/config/auth.ts`, which wins over it) sets a code that `POST /auth/email-code/verify` accepts for **any** address, in addition to the code it issued:
+
+```bash
+AUTH_FIXED_CODE=000000
+```
+
+- The issued code keeps working, and requesting a code still calls `emailCode.send` (so the debug email is still written). The fixed code needs no request first, is never used up, and does not spend `maxAttempts`; a wrong code is still refused and counted.
+- Everything else is as with an issued code: with `createUser` off an unknown address is refused, and the rate limits apply.
+- `auth.emailCode.fixedCode: ""` turns it off even when the variable is set.
+- **Refused in production.** With `NODE_ENV=production` the boot fails while either is set (`AUTH_FIXED_CODE is set, but a fixed sign-in code is for development and tests only ...`), and a request never matches it there.
+
+An app with a code flow of its own can honour the same setting:
+
+```typescript
+import { isFixedSignInCode } from "gemi/services";
+
+if (isFixedSignInCode(code) || (await verifyMyCode(email, code))) {
+  // signed in
+}
+```
+
+`isFixedSignInCode(code)` compares in constant time and is always `false` in production or when nothing is set; `fixedSignInCode()` answers the code in effect, or `null`.
+
 ### The app's public origin
 
 `HOST_NAME` is the address the app is reached at from outside, e.g. `https://example.com` (`APP_URL` is accepted as an alias when `HOST_NAME` is unset). gemi uses it for `Url.absolute`, `Url.forDomain` outside a request, the OAuth `redirect_uri`s, the connections callback and relative `Meta` Open Graph images. Read it in your own code with `Url.origin()` from `gemi/facades` rather than `process.env`:

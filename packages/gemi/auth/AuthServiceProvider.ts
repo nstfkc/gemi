@@ -1,6 +1,7 @@
 import { ServiceProvider } from "../support/ServiceProvider";
 import { checkAuthFlowSwitches, type AuthConfig } from "./config";
 import { AuthManager } from "./AuthManager";
+import { checkFixedSignInCode } from "./fixedCode";
 import { ConnectionManager } from "./connections/ConnectionManager";
 
 export class AuthServiceProvider extends ServiceProvider {
@@ -18,8 +19,13 @@ export class AuthServiceProvider extends ServiceProvider {
     });
   }
 
-  /** A misspelt route switch fails the boot, not the first sign-in. */
+  /**
+   * A misspelt route switch fails the boot, not the first sign-in, and so does
+   * a fixed sign-in code in production (#1190).
+   */
   boot() {
-    checkAuthFlowSwitches(this.app.config.get<AuthConfig>("auth", {}));
+    const config = this.app.config.get<AuthConfig>("auth", {});
+    checkAuthFlowSwitches(config);
+    checkFixedSignInCode(config?.emailCode?.fixedCode);
   }
 }

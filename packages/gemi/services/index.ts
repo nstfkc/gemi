@@ -382,6 +382,9 @@ export {
   isSessionToken,
   mintSessionToken,
 } from "../auth/sessionToken";
+// For an app with a sign-in code flow of its own, so it honours the same
+// development code as `/auth/email-code/verify` (#1190).
+export { fixedSignInCode, isFixedSignInCode } from "../auth/isFixedSignInCode";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { GitHubOAuthProvider } from "../auth/oauth/GitHubOAuthProvider";
 export type { GitHubOAuthProviderConfig } from "../auth/oauth/GitHubOAuthProvider";

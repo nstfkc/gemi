@@ -1,3 +1,14 @@
+# Unreleased
+
+## auth: a fixed email-code sign-in code for development and tests (#1190)
+
+**New API, no behaviour change.** See [Configuration → A fixed sign-in code](docs/configuration.md#a-fixed-sign-in-code-auth_fixed_code).
+
+- `AUTH_FIXED_CODE` (or `auth.emailCode.fixedCode`, which wins over it) is a code `POST /auth/email-code/verify` accepts for any address, next to the issued one. It is never used up and spends no attempt; wrong codes are still refused and counted, the rate limits and `createUser` still apply, and requesting a code still sends it (the debug email is still written). `fixedCode: ""` turns the variable off.
+- Refused in production: with `NODE_ENV=production` the boot fails while either is set, and a request never matches it. Make sure neither is set in a production environment before upgrading.
+- `isFixedSignInCode(code)` and `fixedSignInCode()` from `gemi/services` let an app's own code flow honour the same setting.
+- `EMAIL_DEBUG_OPEN=false` writes debug emails without opening them in the browser, independently of `CI`.
+
 # 0.193.1
 
 ## client: the chunk-reload marker leaves `window.name` once it expires (#1188)
