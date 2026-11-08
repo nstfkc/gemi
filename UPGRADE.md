@@ -1,4 +1,4 @@
-# Unreleased
+# 0.196.0
 
 ## ai: provider retries are observable (#1192)
 
