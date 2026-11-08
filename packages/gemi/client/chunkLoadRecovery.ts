@@ -117,6 +117,7 @@ let pendingLoad: { url: string; at: number } | null = null;
 export function configureChunkLoadRecovery(next: ChunkLoadRecoveryOptions | false | undefined) {
   enabled = next !== false;
   options = next || {};
+  tidyWindowName();
 }
 
 /** For tests: back to the defaults, with no reload in flight. */
@@ -124,6 +125,8 @@ export function __resetChunkLoadRecovery() {
   enabled = true;
   options = {};
   pendingLoad = null;
+  clearTimeout(tidyTimer);
+  tidyTimer = undefined;
 }
 
 /**
@@ -281,7 +284,44 @@ function withinCooldown(elapsed: number, cooldownMs: number): boolean {
 }
 
 function markReload(url: string): boolean {
-  return chunkReloadGuard(CHUNK_RELOAD_MARKER, url, cooldownMs(), true) === "ok";
+  if (chunkReloadGuard(CHUNK_RELOAD_MARKER, url, cooldownMs(), true) !== "ok") return false;
+  // The load may yet be cancelled ("Stay" on a `beforeunload` prompt), and
+  // then this page has to take the `window.name` marker down itself.
+  tidyWindowName();
+  return true;
+}
+
+let tidyTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Takes gemi's marker out of `window.name` (back to `""`) once it guards
+ * nothing (#1188): the page may want the name for itself, under the same
+ * "only while it is empty" rule gemi follows. Now when nothing in it is live,
+ * otherwise once the newest entry's cooldown has passed, checked again then
+ * since a reload may have been recorded in the meantime. Only a name that
+ * holds gemi's marker is ever cleared; see `chunkReloadGuard`'s `"tidy"`.
+ */
+function tidyWindowName() {
+  clearTimeout(tidyTimer);
+  tidyTimer = undefined;
+  if (typeof window === "undefined") return;
+  let delay: number;
+  try {
+    if (chunkReloadGuard(CHUNK_RELOAD_MARKER, window.location.href, cooldownMs(), "tidy") !== "cooldown") {
+      return;
+    }
+    const held = JSON.parse(window.name.slice(CHUNK_RELOAD_MARKER.length + 1));
+    // An entry from the future (clock set back) is not live and holds nothing back.
+    const now = Date.now();
+    const latest = Math.max(
+      ...Object.values(held.m).filter((at): at is number => typeof at === "number" && at <= now),
+    );
+    delay = latest + cooldownMs() - now;
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(delay)) return;
+  tidyTimer = setTimeout(tidyWindowName, Math.max(0, delay) + 1);
 }
 
 /**
@@ -291,7 +331,10 @@ function markReload(url: string): boolean {
  * onto `url` was recorded inside `cooldownMs`, `"storage"` when no marker can
  * be read at all, otherwise `"ok"`. With `claim` true it also records the
  * reload, and answers `"ok"` only once the record was written and read back
- * unchanged; a caller navigates on nothing less.
+ * unchanged; a caller navigates on nothing less. With `"tidy"` it only looks
+ * at `window.name`: a gemi marker with no live entry for this origin (expired,
+ * from the future, another origin's, or one that does not parse) is cleared
+ * to `""` and `"ok"` answered; `"cooldown"` while an entry is still live.
  *
  * Two places can hold the marker:
  *
@@ -316,7 +359,7 @@ export function chunkReloadGuard(
   key: string,
   url: string,
   cooldownMs: number,
-  claim: boolean,
+  claim: boolean | "tidy",
 ): "ok" | "cooldown" | "storage" {
   const now = Date.now();
   const fresh = function (at: unknown) {
@@ -379,6 +422,15 @@ export function chunkReloadGuard(
     named = null;
   }
 
+  if (claim === "tidy") {
+    try {
+      const current = window.name;
+      if (named === null || current.indexOf(prefix) !== 0) return "ok";
+      for (const k in named) if (fresh(named[k])) return "cooldown";
+      window.name = "";
+    } catch {}
+    return "ok";
+  }
   if (fresh(stored[url]) || (named && fresh(named[page]))) return "cooldown";
   if (!storage && !named) return "storage";
   if (!claim) return "ok";

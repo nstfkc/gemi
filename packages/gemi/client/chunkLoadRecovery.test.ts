@@ -625,3 +625,128 @@ describe("without sessionStorage, the window.name fallback (#1186)", () => {
     expect(window.name).toBe("");
   });
 });
+
+describe("the window.name marker is taken down once it guards nothing (#1188)", () => {
+  const PREFIX = `${CHUNK_RELOAD_MARKER}:`;
+
+  /** One recovery under the fallback, then the next document's init. */
+  function recoverThenInit() {
+    blockSessionStorage("getter");
+    recoverFromChunkLoadError(chunkError());
+    expect(window.name.startsWith(PREFIX)).toBe(true);
+    nextDocument();
+    configureChunkLoadRecovery({});
+  }
+
+  test("is kept while an entry is live, and cleared after the cooldown", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    recoverThenInit();
+    expect(window.name.startsWith(PREFIX)).toBe(true);
+
+    vi.advanceTimersByTime(29_000);
+    expect(window.name.startsWith(PREFIX)).toBe(true);
+    // The guard still holds while it is there.
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+
+    vi.advanceTimersByTime(1_100);
+    expect(window.name).toBe("");
+  });
+
+  test("is cleared on init when nothing in it is live", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    blockSessionStorage("getter");
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+    vi.setSystemTime(1_000_000 + 31_000);
+
+    configureChunkLoadRecovery({});
+    expect(window.name).toBe("");
+  });
+
+  test.each([
+    ["from the future (clock set back)", () => vi.setSystemTime(1_000)],
+    ["malformed", () => (window.name = `${PREFIX}{not json`)],
+    ["another origin's", () => (window.name = `${PREFIX}{"o":"zz","m":{"a":${Date.now()}}}`)],
+  ])("a marker %s is cleared on init", (_label, spoil) => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    blockSessionStorage("getter");
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+    spoil();
+
+    configureChunkLoadRecovery({});
+    expect(window.name).toBe("");
+  });
+
+  test("an entry written in the meantime pushes the clearing back", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    recoverThenInit();
+    vi.advanceTimersByTime(20_000);
+    // Another page recovers in this document; its load is cancelled.
+    expect(recoverFromChunkLoadError(chunkError(), { url: "https://app.test/settings" })).toBe(true);
+
+    vi.advanceTimersByTime(11_000);
+    expect(window.name.startsWith(PREFIX)).toBe(true);
+    vi.advanceTimersByTime(20_000);
+    expect(window.name).toBe("");
+  });
+
+  test("a name gemi did not write is never touched, on init or by the timer", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    recoverThenInit();
+    window.name = '{"app":"state"}';
+    vi.advanceTimersByTime(60_000);
+    expect(window.name).toBe('{"app":"state"}');
+
+    nextDocument();
+    configureChunkLoadRecovery({});
+    expect(window.name).toBe('{"app":"state"}');
+    window.name = "";
+    configureChunkLoadRecovery({});
+    expect(window.name).toBe("");
+  });
+
+  test("an entry from the future does not hold the clearing back", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    blockSessionStorage("getter");
+    window.name = `${PREFIX}{"o":"x","m":{}}`;
+    recoverFromChunkLoadError(chunkError());
+    const held = JSON.parse(window.name.slice(PREFIX.length));
+    held.m.future = 1_000_000 + 3_600_000;
+    window.name = PREFIX + JSON.stringify(held);
+    nextDocument();
+    configureChunkLoadRecovery({});
+
+    vi.advanceTimersByTime(30_100);
+    expect(window.name).toBe("");
+  });
+
+  test("a name the app took over before the timer fired is left alone", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    recoverThenInit();
+    window.name = "app-window";
+    vi.advanceTimersByTime(31_000);
+    expect(window.name).toBe("app-window");
+  });
+
+  test("is cleared even with recovery turned off", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    blockSessionStorage("getter");
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+    vi.setSystemTime(1_000_000 + 31_000);
+
+    configureChunkLoadRecovery(false);
+    expect(window.name).toBe("");
+  });
+
+  test("once cleared, the next failure recovers again and the app can use the name", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    recoverThenInit();
+    vi.advanceTimersByTime(31_000);
+    expect(window.name).toBe("");
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
