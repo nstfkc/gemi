@@ -11,7 +11,7 @@ async function exists(path: string): Promise<boolean> {
 }
 import { RequestContext } from "../../http/requestContext";
 import { projectRoot } from "../../support/discover";
-import type { LogConfig } from "./config";
+import { DEFAULT_REDACTED_HEADERS, type LogConfig } from "./config";
 import { consoleThreshold, writeConsoleLine } from "./consoleSink";
 import type { LogEntry, LogLevel } from "./types";
 
@@ -42,9 +42,47 @@ export class LogManager {
   }
 
   private readonly consoleThreshold: number;
+  private readonly redactedHeaders: Set<string>;
 
   constructor(public config: Required<LogConfig>) {
     this.consoleThreshold = consoleThreshold(config.console);
+    this.redactedHeaders = new Set(
+      [...DEFAULT_REDACTED_HEADERS, ...(config.redactHeaders ?? [])].map((h) =>
+        h.toLowerCase(),
+      ),
+    );
+  }
+
+  /**
+   * What an entry logged inside a request says about it. An allow-list: the
+   * headers carry the session cookie and `Authorization`, and log files and
+   * `onLogCreated` transports are read by more people than the app's secrets
+   * should be, so anything beyond method, path, user agent and request id is
+   * opt-in, and redacted headers stay redacted even then.
+   */
+  private requestMetadata(request: Request): Record<string, unknown> {
+    const url = new URL(request.url);
+    const metadata: Record<string, unknown> = {
+      method: request.method,
+      path: url.pathname,
+      userAgent: request.headers.get("user-agent") ?? undefined,
+    };
+    const requestId = request.headers.get("x-request-id");
+    if (requestId) {
+      metadata.requestId = requestId;
+    }
+    const fields = this.config.requestFields ?? [];
+    if (fields.includes("url")) {
+      metadata.url = request.url;
+    }
+    if (fields.includes("headers")) {
+      const headers: Record<string, string> = {};
+      request.headers.forEach((value, name) => {
+        headers[name] = this.redactedHeaders.has(name) ? "[redacted]" : value;
+      });
+      metadata.headers = headers;
+    }
+    return metadata;
   }
 
   /**
@@ -147,12 +185,7 @@ export class LogManager {
         method: reqCtx.req.rawRequest.method,
         path: new URL(reqCtx.req.rawRequest.url).pathname,
       };
-      requestMetadata = {
-        url: reqCtx.req.rawRequest.url,
-        method: reqCtx.req.rawRequest.method,
-        headers: reqCtx.req.rawRequest.headers,
-        body: reqCtx.req.rawRequest.body,
-      };
+      requestMetadata = this.requestMetadata(reqCtx.req.rawRequest);
     }
 
     const logObject: LogEntry = {
