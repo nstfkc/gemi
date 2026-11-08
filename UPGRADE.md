@@ -1,4 +1,4 @@
-# Unreleased
+# 0.195.0
 
 ## log: request entries carry an allow-list of fields, headers redacted (#1193)
 
