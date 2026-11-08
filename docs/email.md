@@ -103,7 +103,7 @@ Key points:
 - Sending renders **both** an HTML body and a plain-text body from the same template automatically.
 - `to` passes through the `filterRecipients` callback from `app/config/mail.ts` before delivery, and the driver receives the list it returns; if that list is empty, the send is skipped.
 
-> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/<iso-timestamp><subject>.html` and opens it locally (not under `CI=true`) — handy for previewing templates during development. Next to it, a `.json` file with the same name records the envelope the driver would have received, so a test can assert who a mail went to:
+> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/<iso-timestamp><subject>.html` and opens it locally (not under `CI=true`, nor with `EMAIL_DEBUG_OPEN=false`) — handy for previewing templates during development. Next to it, a `.json` file with the same name records the envelope the driver would have received, so a test can assert who a mail went to:
 >
 > ```json
 > {

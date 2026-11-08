@@ -95,7 +95,9 @@ export class Email {
         params,
         { locale: args.locale },
       );
-      if (process.env.CI !== "true") {
+      // `EMAIL_DEBUG_OPEN=false` keeps the file without opening it, without
+      // the rest of what `CI=true` changes (#1190).
+      if (process.env.CI !== "true" && process.env.EMAIL_DEBUG_OPEN !== "false") {
         await open(fileName);
       }
       return { id: `debug_${crypto.randomUUID()}`, provider, status: "debug" };

@@ -26,6 +26,7 @@ vi.mock("../foundation/app", () => ({
 }));
 vi.mock("open", () => ({ default: vi.fn() }));
 
+const { default: open } = await import("open");
 const { Email } = await import("./Email");
 
 function Template({ name }: { name: string }) {
@@ -151,6 +152,32 @@ describe("Email.send with EMAIL_DEBUG", () => {
     expect(files[0]).toMatch(/Invoice 2026_10 _ paid\.html$/);
     // The record keeps the real subject.
     expect(records[0].subject).toBe("Invoice 2026/10 \\ paid");
+  });
+});
+
+describe("opening the debug email (#1190)", () => {
+  beforeEach(() => {
+    vi.mocked(open).mockClear();
+    delete process.env.CI;
+    delete process.env.EMAIL_DEBUG_OPEN;
+  });
+
+  test("opens it outside CI", async () => {
+    await WelcomeEmail.send({ to: ["ada@example.com"], data: { name: "Ada" } });
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  test("EMAIL_DEBUG_OPEN=false writes it without opening it, CI unset", async () => {
+    process.env.EMAIL_DEBUG_OPEN = "false";
+    await WelcomeEmail.send({ to: ["ada@example.com"], data: { name: "Ada" } });
+    expect(open).not.toHaveBeenCalled();
+    expect((await written()).files).toHaveLength(2);
+  });
+
+  test("CI=true does not open it either", async () => {
+    process.env.CI = "true";
+    await WelcomeEmail.send({ to: ["ada@example.com"], data: { name: "Ada" } });
+    expect(open).not.toHaveBeenCalled();
   });
 });
 
