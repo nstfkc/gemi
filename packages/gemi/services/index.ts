@@ -580,6 +580,7 @@ export {
   logConfigDefaults,
   type LogConfig,
   type LogConsoleFormat,
+  type LogRequestField,
 } from "./logging/config";
 export {
   defineQueueConfig,

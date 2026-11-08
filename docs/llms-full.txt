@@ -18591,7 +18591,29 @@ export default defineLogConfig({
 - **`"json"`** writes `{"orderId":7,"timestamp":"…","level":"error","message":"Payment failed"}`: the metadata keys at the top level, then `timestamp`, `level` and `message`, which win over metadata keys of the same name. Railway and most log platforms parse such lines into structured, filterable fields.
 - **`"text"`** writes `2026-10-11T09:00:00.000Z ERROR Payment failed {"orderId":7}`.
 - An `Error` in the metadata is written with its `name`, `message`, `stack` and `cause`, so `Log.error("Payment failed", { err })` keeps the stack.
-- Inside a request, a console line carries the request's `method` and `path`, never its headers, query string or body. The file sink and `onLogCreated` keep the full request metadata as before.
+- Inside a request, a console line carries the request's `method` and `path`, never its headers, query string or body.
+
+### Request metadata
+
+An entry logged inside a request carries an allow-list of request fields, in the log file and in the entry `onLogCreated` gets: `method`, `path`, `userAgent`, and `requestId` when the request has an `x-request-id` header. The query string, headers and body are left out.
+
+`requestFields` opts into more, and `redactHeaders` names more headers to hide:
+
+```typescript
+// app/config/log.ts
+import { defineLogConfig } from "gemi/services";
+
+export default defineLogConfig({
+  // "url": the full URL, query string included. "headers": the headers as a plain object.
+  requestFields: ["url", "headers"],
+  // Redacted on top of the defaults below. Any case.
+  redactHeaders: ["x-tenant-token"],
+});
+```
+
+- `cookie`, `set-cookie`, `authorization`, `proxy-authorization` and `x-api-key` are always written as `"[redacted]"`; `redactHeaders` adds to that list and cannot shorten it.
+- The request body is never logged.
+- `requestFields` does not change the console sink, which only ever carries `method` and `path`.
 
 ## Meta
 

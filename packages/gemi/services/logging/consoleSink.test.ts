@@ -146,8 +146,7 @@ describe("console sink", () => {
     expect(written(stdout)[0]).not.toContain("secret");
     expect(written(stdout)[0]).not.toContain("session=abc");
     expect(parsed.headers).toBeUndefined();
-    // onLogCreated still receives the full entry, unchanged.
-    expect(entries[0].metadata.headers).toBeDefined();
+    expect(entries[0].metadata.headers).toBeUndefined();
   });
 
   test("a throwing stream does not reach the caller", async () => {
@@ -157,6 +156,88 @@ describe("console sink", () => {
     await expect(
       manager({ console: true }).log("info", "x"),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("request metadata (file sink and onLogCreated)", () => {
+  const request = () =>
+    new Request("https://app.test/orders/7?token=secret", {
+      method: "POST",
+      headers: {
+        cookie: "session=abc",
+        "set-cookie": "a=b",
+        authorization: "Bearer x",
+        "proxy-authorization": "Basic y",
+        "x-api-key": "key",
+        "x-tenant-secret": "t",
+        "user-agent": "Agent/1.0",
+        "x-request-id": "req-1",
+        accept: "text/html",
+      },
+      body: "password=hunter2",
+    });
+
+  async function entryFor(config: Record<string, unknown>) {
+    store = { req: { rawRequest: request() } };
+    const entries: any[] = [];
+    await manager({
+      console: false,
+      onLogCreated: (entry: any) => entries.push(entry),
+      ...config,
+    }).log("info", "hit", { orderId: 7 });
+    return entries[0];
+  }
+
+  test("by default: method, path, user agent and request id only", async () => {
+    const entry = await entryFor({});
+    expect(entry.metadata).toEqual({
+      method: "POST",
+      path: "/orders/7",
+      userAgent: "Agent/1.0",
+      requestId: "req-1",
+      orderId: 7,
+    });
+    expect(JSON.stringify(entry)).not.toMatch(
+      /session=abc|Bearer|secret|hunter2/,
+    );
+  });
+
+  test("no request id key without an x-request-id header", async () => {
+    store = { req: { rawRequest: new Request("https://app.test/") } };
+    const entries: any[] = [];
+    await manager({ onLogCreated: (e: any) => entries.push(e) }).log(
+      "info",
+      "x",
+    );
+    expect(entries[0].metadata).not.toHaveProperty("requestId");
+  });
+
+  test("requestFields opts into the url and redacted headers", async () => {
+    const entry = await entryFor({
+      requestFields: ["url", "headers"],
+      redactHeaders: ["X-Tenant-Secret"],
+    });
+    expect(entry.metadata.url).toBe("https://app.test/orders/7?token=secret");
+    expect(entry.metadata.headers).toMatchObject({
+      cookie: "[redacted]",
+      "set-cookie": "[redacted]",
+      authorization: "[redacted]",
+      "proxy-authorization": "[redacted]",
+      "x-api-key": "[redacted]",
+      "x-tenant-secret": "[redacted]",
+      accept: "text/html",
+      "user-agent": "Agent/1.0",
+    });
+    expect(JSON.stringify(entry)).not.toMatch(/session=abc|Bearer|hunter2/);
+  });
+
+  test("the default redactions cannot be turned off", async () => {
+    const entry = await entryFor({
+      requestFields: ["headers"],
+      redactHeaders: [],
+    });
+    expect(entry.metadata.headers.cookie).toBe("[redacted]");
+    expect(entry.metadata.headers.authorization).toBe("[redacted]");
   });
 });
 
