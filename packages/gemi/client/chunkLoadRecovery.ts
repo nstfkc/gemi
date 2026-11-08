@@ -11,6 +11,8 @@
  * inside the cooldown is left to the route's error boundary. Per URL rather
  * than per tab (#1056): while two releases serve at once every navigation can
  * miss, and a tab-wide cooldown sent the second one to the error boundary.
+ * Where `sessionStorage` cannot be used, the marker lives in `window.name`
+ * instead (#1186); see `chunkReloadGuard`.
  *
  * The same guard covers a navigation whose data came from another build
  * (`recoverFromBuildMismatch`).
@@ -44,8 +46,9 @@ export type ChunkLoadErrorSource = "navigation" | "hydration" | "preload" | "app
  * Why gemi will not reload, or `null` when it will:
  * - `cooldown`: it already reloaded onto this URL within `cooldownMs`.
  * - `offline`: `navigator.onLine` is false — a reload would only fail harder.
- * - `storage`: `sessionStorage` cannot be read or written, so the guard cannot
- *   survive the reload and the loop it prevents could not be ruled out.
+ * - `storage`: neither `sessionStorage` nor the `window.name` fallback can
+ *   hold the guard, so it cannot survive the reload and the loop it prevents
+ *   could not be ruled out.
  */
 export type ChunkReloadBlock = "cooldown" | "offline" | "storage" | null;
 
@@ -267,14 +270,8 @@ function reloadBlock(url: string): ChunkReloadBlock {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     return "offline";
   }
-  let raw: string | null;
-  try {
-    raw = window.sessionStorage.getItem(CHUNK_RELOAD_MARKER);
-  } catch {
-    return "storage";
-  }
-  const at = parseMarker(raw)[url];
-  return at !== undefined && withinCooldown(Date.now() - at, cooldownMs()) ? "cooldown" : null;
+  const verdict = chunkReloadGuard(CHUNK_RELOAD_MARKER, url, cooldownMs(), false);
+  return verdict === "ok" ? null : verdict;
 }
 
 // A marker from the future (the clock was set back since it was written) is
@@ -283,51 +280,136 @@ function withinCooldown(elapsed: number, cooldownMs: number): boolean {
   return elapsed >= 0 && elapsed < cooldownMs;
 }
 
-/**
- * The marker: when each URL was last reloaded onto, `{ [url]: at }`. Anything
- * else in it (a marker written by an earlier gemi as `{ url, at }`) is ignored.
- */
-function parseMarker(raw: string | null): Record<string, number> {
-  let parsed: unknown;
-  try {
-    parsed = raw ? JSON.parse(raw) : null;
-  } catch {
-    return {};
-  }
-  const marker: Record<string, number> = {};
-  if (parsed && typeof parsed === "object") {
-    for (const [url, at] of Object.entries(parsed)) {
-      if (typeof at === "number") marker[url] = at;
-    }
-  }
-  return marker;
+function markReload(url: string): boolean {
+  return chunkReloadGuard(CHUNK_RELOAD_MARKER, url, cooldownMs(), true) === "ok";
 }
 
-// Entries past the cooldown are dropped as a new one is written, so the marker
-// holds only the reloads it still guards.
-function markReload(url: string): boolean {
-  try {
-    const now = Date.now();
-    const marker: Record<string, number> = {};
-    for (const [other, at] of Object.entries(
-      parseMarker(window.sessionStorage.getItem(CHUNK_RELOAD_MARKER)),
-    )) {
-      if (withinCooldown(now - at, cooldownMs())) marker[other] = at;
+/**
+ * The cross-document guard, shared by the client and the server's reload stub
+ * (which embeds this function's source, so it uses nothing but globals and its
+ * arguments). With `claim` false it only reads: `"cooldown"` when a reload
+ * onto `url` was recorded inside `cooldownMs`, `"storage"` when no marker can
+ * be read at all, otherwise `"ok"`. With `claim` true it also records the
+ * reload, and answers `"ok"` only once the record was written and read back
+ * unchanged; a caller navigates on nothing less.
+ *
+ * Two places can hold the marker:
+ *
+ * - `sessionStorage[key]`: `{ [url]: at }`, the format earlier releases read
+ *   and write, so a page from one and a stub from another share the guard.
+ * - `window.name`, when `sessionStorage` throws or will not take the write
+ *   (#1186). It survives a load in the same tab, but it is shared state: the
+ *   page may use it, and another origin the tab goes to can read it. So it is
+ *   used only while it is empty or already holds gemi's marker — a value of
+ *   anyone else's is left exactly as it is, and the guard then fails closed —
+ *   and it holds no URL: `key + ":" + { o: hash(origin), m: { [hash(origin +
+ *   pathname)]: at } }`. A marker written by another origin (`o` differs) or
+ *   one that does not parse holds no reloads and is replaced on the next
+ *   write. Two paths whose hashes collide share one cooldown, which only ever
+ *   refuses a reload.
+ *
+ * A reload recorded in either place counts. Entries past the cooldown — and
+ * from the future, after the clock was set back — are dropped as a new one is
+ * written, so the marker holds only the reloads it still guards.
+ */
+export function chunkReloadGuard(
+  key: string,
+  url: string,
+  cooldownMs: number,
+  claim: boolean,
+): "ok" | "cooldown" | "storage" {
+  const now = Date.now();
+  const fresh = function (at: unknown) {
+    return typeof at === "number" && now - at >= 0 && now - at < cooldownMs;
+  };
+  const parse = function (raw: string | null): Record<string, unknown> {
+    try {
+      const value = raw ? JSON.parse(raw) : null;
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      return {};
     }
-    marker[url] = now;
-    window.sessionStorage.setItem(CHUNK_RELOAD_MARKER, JSON.stringify(marker));
-    return true;
+  };
+  const live = function (marker: Record<string, unknown>) {
+    const kept: Record<string, number> = {};
+    for (const k in marker) if (fresh(marker[k])) kept[k] = marker[k] as number;
+    return kept;
+  };
+  // FNV-1a, 32 bits, base 36: a short tag, not a secret.
+  const hash = function (text: string) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+    return (h >>> 0).toString(36);
+  };
+
+  let storage: Storage | null = null;
+  let stored: Record<string, unknown> = {};
+  try {
+    storage = window.sessionStorage;
+    stored = parse(storage.getItem(key));
   } catch {
-    return false;
+    storage = null;
   }
+
+  const prefix = key + ":";
+  let origin = "";
+  let page = "";
+  try {
+    const target = new URL(url, window.location.href);
+    origin = hash(new URL(window.location.href).origin);
+    page = hash(target.origin + target.pathname);
+  } catch {}
+  // `null`: `window.name` is not ours to use.
+  let named: Record<string, unknown> | null = null;
+  try {
+    const name = page ? window.name : null;
+    if (name === "") {
+      named = {};
+    } else if (name.indexOf(prefix) === 0) {
+      const held = parse(name.slice(prefix.length));
+      const entries = held.m;
+      named =
+        held.o === origin && entries && typeof entries === "object" && !Array.isArray(entries)
+          ? (entries as Record<string, unknown>)
+          : {};
+    }
+  } catch {
+    named = null;
+  }
+
+  if (fresh(stored[url]) || (named && fresh(named[page]))) return "cooldown";
+  if (!storage && !named) return "storage";
+  if (!claim) return "ok";
+
+  if (storage) {
+    try {
+      const nextStored = live(stored);
+      nextStored[url] = now;
+      const serialised = JSON.stringify(nextStored);
+      storage.setItem(key, serialised);
+      if (storage.getItem(key) === serialised) return "ok";
+    } catch {}
+  }
+  if (named) {
+    try {
+      const nextNamed = live(named);
+      nextNamed[page] = now;
+      const value = prefix + JSON.stringify({ o: origin, m: nextNamed });
+      window.name = value;
+      if (window.name === value) return "ok";
+    } catch {}
+  }
+  return "storage";
 }
 
 /**
  * The same guard as a classic script body, for the module the server sends in
  * place of a chunk it does not have. It reloads once per URL per cooldown;
- * inside the cooldown (or with no storage) it throws an error `isChunkLoadError`
- * recognises, so the importing page's own recovery and error boundary see the
- * failure instead of a module that silently has no exports.
+ * inside the cooldown (or with no marker that would survive the reload) it
+ * throws an error `isChunkLoadError` recognises, so the importing page's own
+ * recovery and error boundary see the failure instead of a module that
+ * silently has no exports. It runs `chunkReloadGuard` itself, so it and the
+ * page's client share one marker and one reload between them.
  */
 export function chunkReloadStubScript(
   pathname: string,
@@ -336,10 +418,8 @@ export function chunkReloadStubScript(
   const key = JSON.stringify(CHUNK_RELOAD_MARKER);
   const error = JSON.stringify(`Failed to fetch dynamically imported module: ${pathname}`);
   return (
-    `var r=!1;try{var s=window.sessionStorage,u=window.location.href,m=JSON.parse(s.getItem(${key})||"{}");` +
-    `if(!m||typeof m!=="object")m={};var d=Date.now()-m[u];` +
-    `if(navigator.onLine!==!1&&!(d>=0&&d<${cooldownMs})){` +
-    `m[u]=Date.now();s.setItem(${key},JSON.stringify(m));r=!0}}catch(e){}` +
+    `var g=${chunkReloadGuard.toString()};var r=!1;` +
+    `try{r=navigator.onLine!==!1&&g(${key},window.location.href,${Number(cooldownMs)},!0)==="ok"}catch(e){}` +
     `if(r)window.location.reload();else throw new Error(${error});export {}`
   );
 }

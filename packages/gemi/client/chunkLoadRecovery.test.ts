@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
@@ -36,6 +37,7 @@ beforeEach(() => {
     value: { href: "https://app.test/dashboard", reload, assign },
   });
   window.sessionStorage.clear();
+  window.name = "";
   __resetChunkLoadRecovery();
 });
 
@@ -149,16 +151,18 @@ describe("recoverFromChunkLoadError", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test("does not reload when sessionStorage is unusable, since nothing would stop a loop", () => {
+  test("does not reload when no marker can be kept, since nothing would stop a loop", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("denied", "SecurityError");
     });
+    window.name = "a name of the app's own";
     const onChunkLoadError = vi.fn();
     configureChunkLoadRecovery({ onChunkLoadError });
 
     expect(recoverFromChunkLoadError(chunkError())).toBe(false);
     expect(reload).not.toHaveBeenCalled();
     expect(onChunkLoadError).toHaveBeenCalledWith(expect.objectContaining({ blocked: "storage" }));
+    expect(window.name).toBe("a name of the app's own");
   });
 
   test("does not reload offline", () => {
@@ -369,8 +373,255 @@ describe("the server's reload stub", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("denied", "SecurityError");
     });
+    window.name = "a name of the app's own";
 
     expect(() => run()).toThrow(/Failed to fetch dynamically imported module/);
     expect(reload).not.toHaveBeenCalled();
+    expect(window.name).toBe("a name of the app's own");
+  });
+
+  test("without sessionStorage it reloads once under the window.name marker, shared with the client", () => {
+    blockSessionStorage("getter");
+
+    run();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.name.startsWith(`${CHUNK_RELOAD_MARKER}:`)).toBe(true);
+
+    // The reloaded document: the client's recovery for the same page is refused…
+    reload.mockClear();
+    __resetChunkLoadRecovery();
+    const onChunkLoadError = vi.fn();
+    configureChunkLoadRecovery({ onChunkLoadError });
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(onChunkLoadError).toHaveBeenCalledWith(expect.objectContaining({ blocked: "cooldown" }));
+    // …and so is the stub's.
+    expect(() => run()).toThrow(/Failed to fetch dynamically imported module/);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("still works when the server is built minified, as production builds it", async () => {
+    // The stub embeds `chunkReloadGuard`'s source, so that function must stay
+    // self-contained through the build (`scripts/build.ts` minifies).
+    const build = await Bun.build({
+      entrypoints: [join(import.meta.dirname, "chunkLoadRecovery.ts")],
+      target: "bun",
+      format: "cjs",
+      minify: true,
+    });
+    expect(build.success).toBe(true);
+    const built = { exports: {} as { chunkReloadStubScript: typeof chunkReloadStubScript } };
+    // Bun's CJS output is one `(function (exports, require, module, …) {…})`.
+    const source = (await build.outputs[0]!.text()).replace(/^\/\/.*\n/, "");
+    new Function(`return ${source}`)()(built.exports, undefined, built);
+    const stub = built.exports.chunkReloadStubScript("/assets/Home-x.js");
+    const runBuilt = () => new Function(stub.replace(/export \{\}$/, ""))();
+    blockSessionStorage("getter");
+
+    runBuilt();
+    expect(reload).toHaveBeenCalledTimes(1);
+    reload.mockClear();
+    expect(runBuilt).toThrow(/Failed to fetch dynamically imported module/);
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("a client recovery without sessionStorage holds the stub back too", () => {
+    blockSessionStorage("setItem");
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    reload.mockClear();
+
+    expect(() => run()).toThrow(/Failed to fetch dynamically imported module/);
+    expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+/** Makes `sessionStorage` fail one of the ways a browser can refuse it. */
+function blockSessionStorage(how: "getter" | "getItem" | "setItem") {
+  const denied = () => {
+    throw new DOMException("denied", "SecurityError");
+  };
+  if (how === "getter") vi.spyOn(window, "sessionStorage", "get").mockImplementation(denied);
+  else vi.spyOn(Storage.prototype, how).mockImplementation(denied);
+}
+
+/** A fresh document in the same tab: memory is gone, `window.name` is not. */
+function nextDocument() {
+  reload.mockClear();
+  assign.mockClear();
+  __resetChunkLoadRecovery();
+}
+
+describe("without sessionStorage, the window.name fallback (#1186)", () => {
+  test.each(["getter", "getItem", "setItem"] as const)(
+    "a %s failure: one recovery, then the same page is refused inside the cooldown",
+    (how) => {
+      blockSessionStorage(how);
+
+      expect(recoverFromChunkLoadError(chunkError(), { source: "navigation" })).toBe(true);
+      expect(reload).toHaveBeenCalledTimes(1);
+
+      nextDocument();
+      const onChunkLoadError = vi.fn();
+      configureChunkLoadRecovery({ onChunkLoadError });
+      expect(recoverFromChunkLoadError(chunkError(), { source: "navigation" })).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+      expect(onChunkLoadError).toHaveBeenCalledWith(expect.objectContaining({ blocked: "cooldown" }));
+    },
+  );
+
+  test("is not touched while sessionStorage works", () => {
+    recoverFromChunkLoadError(chunkError());
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.name).toBe("");
+  });
+
+  test("another page recovers independently, and a build mismatch shares the guard", () => {
+    blockSessionStorage("getter");
+    vi.useFakeTimers({ now: 1_000_000 });
+
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+    expect(recoverFromChunkLoadError(chunkError(), { url: "https://app.test/settings" })).toBe(true);
+    expect(assign).toHaveBeenCalledWith("https://app.test/settings");
+
+    nextDocument();
+    expect(
+      recoverFromBuildMismatch({ url: "https://app.test/settings", clientBuild: "a", serverBuild: "b" }),
+    ).toBe(false);
+    expect(
+      recoverFromBuildMismatch({ url: "https://app.test/reports", clientBuild: "a", serverBuild: "b" }),
+    ).toBe(true);
+  });
+
+  test("after the cooldown the same page may recover again, and nothing retries on its own", () => {
+    blockSessionStorage("getter");
+    vi.useFakeTimers({ now: 1_000_000 });
+
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+    vi.advanceTimersByTime(31_000);
+    expect(reload).not.toHaveBeenCalled();
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test("holds no URL, path or query, only short hashes", () => {
+    blockSessionStorage("getter");
+
+    recoverFromChunkLoadError(chunkError(), { url: "https://app.test/invite?token=s3cr3t" });
+
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(window.name).not.toMatch(/app\.test|invite|token|s3cr3t|https/);
+    const marker = JSON.parse(window.name.slice(`${CHUNK_RELOAD_MARKER}:`.length));
+    expect(marker.o).toMatch(/^[0-9a-z]{1,7}$/);
+    expect(Object.keys(marker.m)).toEqual([expect.stringMatching(/^[0-9a-z]{1,7}$/)]);
+    expect(Object.values(marker.m)).toEqual([expect.any(Number)]);
+  });
+
+  test("the query does not make a new destination", () => {
+    blockSessionStorage("getter");
+
+    recoverFromChunkLoadError(chunkError(), { url: "https://app.test/invite?token=a" });
+    nextDocument();
+
+    expect(recoverFromChunkLoadError(chunkError(), { url: "https://app.test/invite?token=b" })).toBe(false);
+  });
+
+  test("leaves a window.name of the app's own alone and fails closed", () => {
+    blockSessionStorage("setItem");
+    window.name = '{"app":"state"}';
+    const onChunkLoadError = vi.fn();
+    configureChunkLoadRecovery({ onChunkLoadError });
+
+    // Reads worked, so the hook was told it would reload; the write found no
+    // marker that would survive, so nothing loads.
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(onChunkLoadError).toHaveBeenCalledWith(expect.objectContaining({ blocked: null }));
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.name).toBe('{"app":"state"}');
+  });
+
+  test("does not navigate when the window.name write does not stick", () => {
+    blockSessionStorage("getter");
+    vi.spyOn(window, "name", "set").mockImplementation(() => {});
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("does not navigate when window.name cannot be read either", () => {
+    blockSessionStorage("getter");
+    vi.spyOn(window, "name", "get").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+    const onChunkLoadError = vi.fn();
+    configureChunkLoadRecovery({ onChunkLoadError });
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(onChunkLoadError).toHaveBeenCalledWith(expect.objectContaining({ blocked: "storage" }));
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("a malformed marker holds no reloads and is replaced", () => {
+    blockSessionStorage("getter");
+    window.name = `${CHUNK_RELOAD_MARKER}:{not json`;
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    expect(() => JSON.parse(window.name.slice(`${CHUNK_RELOAD_MARKER}:`.length))).not.toThrow();
+
+    for (const junk of ["[1,2]", '{"o":5,"m":"x"}', '{"m":{"a":"soon"}}', "null"]) {
+      window.name = `${CHUNK_RELOAD_MARKER}:${junk}`;
+      nextDocument();
+      expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+    }
+  });
+
+  test("a marker another origin wrote holds no reloads here", () => {
+    blockSessionStorage("getter");
+    recoverFromChunkLoadError(chunkError());
+    const written = window.name;
+
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { href: "https://other.test/dashboard", reload, assign },
+    });
+    nextDocument();
+    window.name = written;
+
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+  });
+
+  test("a marker from the future (clock set back) does not block recovery", () => {
+    blockSessionStorage("getter");
+    vi.useFakeTimers({ now: 10_000_000 });
+    recoverFromChunkLoadError(chunkError());
+    nextDocument();
+
+    vi.setSystemTime(1_000_000);
+    expect(recoverFromChunkLoadError(chunkError())).toBe(true);
+  });
+
+  test("offline and a hook's veto still hold, and a veto writes nothing", () => {
+    blockSessionStorage("getter");
+    configureChunkLoadRecovery({ onChunkLoadError: () => false });
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(window.name).toBe("");
+
+    configureChunkLoadRecovery({});
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    expect(recoverFromChunkLoadError(chunkError())).toBe(false);
+    expect(window.name).toBe("");
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("errors that are not chunk failures do not use it", () => {
+    blockSessionStorage("getter");
+
+    expect(recoverFromChunkLoadError(new TypeError("x is not a function"))).toBe(false);
+    expect(window.name).toBe("");
   });
 });

@@ -1,3 +1,14 @@
+# Unreleased
+
+## client: chunk-load recovery when `sessionStorage` is blocked (#1186)
+
+**Behaviour change (small).** See [Configuration → Reload once when a chunk will not load](docs/configuration.md).
+
+- When `sessionStorage` throws or will not take the write, the reload guard is kept in `window.name` instead, so the one guarded reload for a chunk that will not load, a build mismatch, or the server's missing-chunk stub now happens in that case too. Before, recovery stopped and the page waited for a manual refresh.
+- `window.name` is used only while it is empty or already holds gemi's marker (`gemi:chunk-reload:…`); a name set by the app or by `window.open` is left alone and recovery stays off, as before. The marker holds short hashes of the origin and path, not URLs, and is bound to the origin. With `sessionStorage` working, `window.name` is never touched.
+- A reload starts only after the marker was written and read back. `blocked: "storage"` now means neither place can hold the marker.
+- In the fallback, the cooldown is per path: two URLs that differ only in their query share one.
+
 # 0.192.0
 
 ## ai: tenant scopes for agent threads (#1177)
