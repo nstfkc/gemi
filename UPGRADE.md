@@ -1,4 +1,4 @@
-# Unreleased
+# 0.193.1
 
 ## client: the chunk-reload marker leaves `window.name` once it expires (#1188)
 
