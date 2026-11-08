@@ -706,6 +706,21 @@ describe("the window.name marker is taken down once it guards nothing (#1188)", 
     expect(window.name).toBe("");
   });
 
+  test("an entry from the future does not hold the clearing back", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    blockSessionStorage("getter");
+    window.name = `${PREFIX}{"o":"x","m":{}}`;
+    recoverFromChunkLoadError(chunkError());
+    const held = JSON.parse(window.name.slice(PREFIX.length));
+    held.m.future = 1_000_000 + 3_600_000;
+    window.name = PREFIX + JSON.stringify(held);
+    nextDocument();
+    configureChunkLoadRecovery({});
+
+    vi.advanceTimersByTime(30_100);
+    expect(window.name).toBe("");
+  });
+
   test("a name the app took over before the timer fired is left alone", () => {
     vi.useFakeTimers({ now: 1_000_000 });
     recoverThenInit();

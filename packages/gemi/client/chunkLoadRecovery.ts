@@ -311,8 +311,12 @@ function tidyWindowName() {
       return;
     }
     const held = JSON.parse(window.name.slice(CHUNK_RELOAD_MARKER.length + 1));
-    const latest = Math.max(...Object.values(held.m).filter((at) => typeof at === "number"));
-    delay = latest + cooldownMs() - Date.now();
+    // An entry from the future (clock set back) is not live and holds nothing back.
+    const now = Date.now();
+    const latest = Math.max(
+      ...Object.values(held.m).filter((at): at is number => typeof at === "number" && at <= now),
+    );
+    delay = latest + cooldownMs() - now;
   } catch {
     return;
   }
