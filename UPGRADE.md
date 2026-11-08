@@ -1,4 +1,4 @@
-# Unreleased
+# 0.193.0
 
 ## client: chunk-load recovery when `sessionStorage` is blocked (#1186)
 
