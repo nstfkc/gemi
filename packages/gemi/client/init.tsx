@@ -5,6 +5,7 @@ import { ClientRouter } from "./ClientRouter";
 import type { QueryConfig } from "./QueryManagerContext";
 import { ErrorBoundary } from "react-error-boundary";
 import { initialViewModulesReady } from "./ComponentContext";
+import { documentElement } from "./documentTree";
 import {
   configureChunkLoadRecovery,
   recoverFromChunkLoadError,
@@ -125,9 +126,8 @@ export function init(
 function hydrate(RootLayout: ComponentType<any>, options: InitOptions) {
   hydrateRoot(
     document,
-    <>
-      <></>
-      <></>
+    // The server's shape, so `useId` agrees (#1200).
+    documentElement(
       <ErrorBoundary fallback={<div />}>
         <ServerDataProvider>
           <ClientRouter
@@ -135,8 +135,8 @@ function hydrate(RootLayout: ComponentType<any>, options: InitOptions) {
             queryConfig={options.queryConfig}
           />
         </ServerDataProvider>
-      </ErrorBoundary>
-    </>,
+      </ErrorBoundary>,
+    ),
     {
       onCaughtError: (error) => {
         console.error(error);
