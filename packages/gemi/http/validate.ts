@@ -127,6 +127,31 @@ function numericParam(rule: string, param: string | undefined): number {
   return n;
 }
 
+/**
+ * What a rules schema says about uploads: `null` when no field has a file rule
+ * (`file`, `fileType`, `fileSize:…`), otherwise the bytes its `fileSize`
+ * ceilings add up to (0 when none has one). Read before a multipart body is,
+ * so the request's default body limit can make room for the files. A
+ * `fileSize` it cannot read counts as nothing here; `validate` throws on it.
+ */
+export function uploadBytesOf(schema: Record<string, Record<string, unknown>>): number | null {
+  let hasFileRule = false;
+  let bytes = 0;
+  for (const rules of Object.values(schema)) {
+    if (!rules || typeof rules !== "object") continue;
+    for (const rule of Object.keys(rules)) {
+      const colon = rule.indexOf(":");
+      const name = colon === -1 ? rule : rule.slice(0, colon);
+      if (name !== "file" && name !== "fileType" && name !== "fileSize") continue;
+      hasFileRule = true;
+      if (name === "fileSize") {
+        bytes += parseFileSizeString(rule.slice(colon + 1));
+      }
+    }
+  }
+  return hasFileRule ? bytes : null;
+}
+
 export function validate(ruleName: string) {
   // Split at the first colon only, so a parameter may hold one.
   const colon = ruleName.indexOf(":");

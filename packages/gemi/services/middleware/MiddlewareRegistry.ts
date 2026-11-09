@@ -1,6 +1,11 @@
 import { HttpRequest, Middleware } from "../../http";
 import { BodyLimitMiddleware } from "../../http/BodyLimitMiddleware";
-import { hasBodyLimit, parseByteSize, setBodyLimit } from "../../http/bodyLimit";
+import {
+  hasBodyLimit,
+  parseByteSize,
+  setBodyLimit,
+  type RouteBodyLimitDefault,
+} from "../../http/bodyLimit";
 import type { MiddlewareConfig } from "../../http/middleware-config";
 import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
@@ -30,36 +35,57 @@ function transformMiddleware(input: (string | Function)[]) {
  * silent and unsafe: an unknown alias is skipped, so a `body-limit:64kb` on a
  * public route that the app forgot to register would bound nothing.
  */
-const builtinAliases: Record<string, new (req: HttpRequest) => Middleware> = {
-  "body-limit": BodyLimitMiddleware,
-};
+function builtinAliases(uploadBodyLimit: number): Record<string, new (req: HttpRequest) => Middleware> {
+  return {
+    // Configured with the upload default, for `body-limit:upload`.
+    "body-limit": BodyLimitMiddleware.configure({ uploadLimit: uploadBodyLimit }),
+  };
+}
 
 export class MiddlewareRegistry {
   static token = "middleware";
 
-  /** `config.bodyLimit` in bytes, or `null`. Parsed once, here. */
+  /**
+   * `config.bodyLimit` in bytes, or `null` when the default is off (`null` or
+   * `"none"`). Parsed once, here, so an invalid size stops the server at boot.
+   */
   readonly defaultBodyLimit: number | null;
+  /** `config.uploadBodyLimit` in bytes. */
+  readonly uploadBodyLimit: number;
+  private readonly builtinAliases: Record<string, new (req: HttpRequest) => Middleware>;
 
   constructor(public config: Required<MiddlewareConfig>) {
-    this.defaultBodyLimit =
+    const defaultBodyLimit =
       config.bodyLimit === null || config.bodyLimit === undefined
         ? null
         : parseByteSize(config.bodyLimit);
+    this.defaultBodyLimit = defaultBodyLimit === Infinity ? null : defaultBodyLimit;
+    this.uploadBodyLimit = parseByteSize(config.uploadBodyLimit ?? "50mb");
+    this.builtinAliases = builtinAliases(this.uploadBodyLimit);
   }
 
   get aliases(): Record<string, new (req: HttpRequest) => Middleware> {
-    return { ...builtinAliases, ...this.config.aliases };
+    return { ...this.builtinAliases, ...this.config.aliases };
   }
 
   /**
-   * Installs the app-wide `bodyLimit` on an api request that has no limit yet.
-   * Its `Content-Length` is checked when the body is read rather than now, so
-   * a route's own `body-limit`, which runs after this, can still raise it.
+   * Installs the app-wide `bodyLimit` on an api request that has no limit yet:
+   * `uploadBodyLimit` instead on a route that asks for the upload default (an
+   * agent's `upload`), and nothing on one that bounds its own body (an
+   * agent's `stream`). Its `Content-Length` is checked when the body is read
+   * rather than now, so a route's own `body-limit`, which runs after this, can
+   * still raise it, and so can a schema with file rules
+   * (`raiseDefaultBodyLimitForUpload`).
    */
-  applyDefaultBodyLimit(request: Request) {
-    if (this.defaultBodyLimit !== null && !hasBodyLimit(request)) {
-      setBodyLimit(request, this.defaultBodyLimit, { checkDeclared: false });
+  applyDefaultBodyLimit(request: Request, routeDefault?: RouteBodyLimitDefault) {
+    if (this.defaultBodyLimit === null || routeDefault === "none" || hasBodyLimit(request)) {
+      return;
     }
+    const limit =
+      routeDefault === "upload"
+        ? Math.max(this.defaultBodyLimit, this.uploadBodyLimit)
+        : this.defaultBodyLimit;
+    setBodyLimit(request, limit, { checkDeclared: false, uploadLimit: this.uploadBodyLimit });
   }
 
   /**

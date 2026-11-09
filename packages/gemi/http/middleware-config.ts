@@ -15,12 +15,21 @@ export interface MiddlewareConfig {
   global?: (string | MiddlewareClass)[];
   /**
    * The request body limit for every api route without a `body-limit` of its
-   * own: bytes, or a size such as `"1mb"`. A route's `body-limit:…` replaces
-   * it, raising it as well as lowering it (`body-limit:none` lifts it). Unset,
-   * only Bun's server-wide `maxRequestBodySize` applies. See
+   * own: bytes, or a size such as `"1mb"`. `"1mb"` unless set. A route's
+   * `body-limit:…` replaces it, raising it as well as lowering it
+   * (`body-limit:none` lifts it). `null` (or `"none"`) turns the default off,
+   * leaving only Bun's server-wide `maxRequestBodySize`. See
    * `docs/middleware.md`.
    */
   bodyLimit?: string | number | null;
+  /**
+   * The default for upload routes, `"50mb"` unless set: a multipart body whose
+   * schema has file rules (`file`, `fileType`, `fileSize:…`) gets this or its
+   * `fileSize` ceilings plus `bodyLimit`, whichever is larger, instead of
+   * `bodyLimit`. Also what `body-limit:upload` and an agent's `upload` route
+   * use. Does nothing while `bodyLimit` is off.
+   */
+  uploadBodyLimit?: string | number;
 }
 
 export function defineMiddlewareConfig(
@@ -33,6 +42,7 @@ export function middlewareConfigDefaults(): Required<MiddlewareConfig> {
   return {
     aliases: {},
     global: [],
-    bodyLimit: null,
+    bodyLimit: "1mb",
+    uploadBodyLimit: "50mb",
   };
 }

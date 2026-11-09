@@ -19,7 +19,12 @@ import {
   createUnsatisfiableResponse,
   type StreamOutput,
 } from "./createStreamResponse";
-import { bodyLimitExceeded, bodyLimitOf, PayloadTooLargeError } from "./bodyLimit";
+import {
+  bodyLimitExceeded,
+  bodyLimitOf,
+  PayloadTooLargeError,
+  type RouteBodyLimitDefault,
+} from "./bodyLimit";
 import { RangeNotSatisfiableError } from "./errors";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
@@ -134,6 +139,12 @@ function callWithRequest<T>(fn: (req: HttpRequest<any, any>) => T, req?: HttpReq
 export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   __internal_brand = "RouteHandler";
   middlewares: string[] = [];
+  /**
+   * The body limit this route takes in place of the app-wide `bodyLimit`
+   * when it has no `body-limit` of its own. Set by the framework's own routes;
+   * `.middleware()` does not touch it.
+   */
+  __internal_bodyLimitDefault?: RouteBodyLimitDefault;
 
   constructor(
     public method: M,
@@ -651,6 +662,11 @@ function createAgentRouteHandlers<T extends new () => AgentController<any, any>>
     stop: new RouteHandler("POST", Controller as any, "stop"),
     upload: new RouteHandler("POST", Controller as any, "upload"),
   };
+  // `stream` caps its own body by `maxBodyBytes` (4 MiB unless the controller
+  // says otherwise) while reading it, so the app-wide default must not undercut
+  // it. `upload` takes files, so it gets the upload default.
+  handlers.stream.__internal_bodyLimitDefault = "none";
+  handlers.upload.__internal_bodyLimitDefault = "upload";
 
   return class AgentRouteHandlers extends ApiRouter {
     static __internal_brand = "AgentRoute" as const;

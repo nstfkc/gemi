@@ -207,7 +207,7 @@ async upload(req: HttpRequest<{ file: File | File[] }>) {
 }
 ```
 
-Nothing bounds the body's size but Bun's server-wide `maxRequestBodySize` unless the route sets a limit. On a route anyone can post to, add [`body-limit`](./middleware.md#body-limitsize--bodylimitmiddleware) (`.middleware("body-limit:64kb")`): a body over it is a `413` refusal, whether it declares its length or not, and is never buffered past the limit.
+A body over the route's limit is a `413` refusal, whether it declares its length or not, and is never buffered past the limit. The limit is the app-wide [`bodyLimit`](./middleware.md#an-app-wide-default), 1 MiB unless configured, and a multipart body whose schema has file rules (`file`, `fileType`, `fileSize`) gets the [upload default](./middleware.md#upload-routes), 50 MiB or its `fileSize` ceilings, whichever is larger. A route sets its own with [`body-limit`](./middleware.md#body-limitsize--bodylimitmiddleware): `.middleware("body-limit:64kb")` on a route anyone can post to, `.middleware("body-limit:upload")` or `"body-limit:500mb"` on one that reads a large body itself.
 
 ## ResourceController
 

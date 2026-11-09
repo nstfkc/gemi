@@ -1,3 +1,38 @@
+# Unreleased
+
+## http: request bodies are limited to 1 MiB by default (#1196)
+
+**Behaviour change (minor version).** See [Middleware → An app-wide default](docs/middleware.md#an-app-wide-default) and [Upload routes](docs/middleware.md#upload-routes).
+
+- `middleware.bodyLimit` now defaults to `"1mb"` instead of no limit. An api route without a `body-limit` of its own answers a larger body with the usual `413` refusal (`{ error: { kind: "form_error", message: "The request body is too large.", status: 413 } }`), whether it declares a `Content-Length` or is chunked, and never buffers past the limit. Before, only Bun's server-wide `maxRequestBodySize` (10 GB under `gemi start`) applied.
+- New `middleware.uploadBodyLimit`, `"50mb"` unless set, the default for upload routes:
+  - a `multipart/form-data` body read by `req.input()` / `safeInput()` whose rules schema has a `file`, `fileType:…` or `fileSize:…` rule gets `uploadBodyLimit`, or its `fileSize` ceilings added up plus `bodyLimit`, whichever is larger. A file over its `fileSize` rule is still the validation error on its field;
+  - the new `body-limit:upload` DSL value;
+  - an agent's `upload` route (`POST <chat>/files`).
+- An agent's `stream` route takes no default; it keeps bounding its body by the controller's `maxBodyBytes` (4 MiB).
+- A route's own `body-limit` still replaces any default. View routes still take none.
+
+What to check:
+
+- **A route that reads a body over 1 MiB without a file-rules schema**: a raw upload (`req.rawRequest.blob()`, `arrayBuffer()`, a stream handed to `Storage.put`), a `this.proxy(...)` forwarding uploads, a large JSON import, a webhook that can send big payloads. Give it its own limit:
+
+  ```typescript
+  "/videos": this.post(VideoController, "store").middleware("body-limit:upload"), // uploadBodyLimit
+  "/imports": this.post(ImportController, "store").middleware("body-limit:20mb"),
+  "/backups": this.post(BackupController, "store").middleware("body-limit:none"),
+  ```
+
+- **Uploads over 50 MiB**: raise `uploadBodyLimit`, or give the route its own `body-limit`. A chat whose `attachmentLimits().maxBytes` is over 50 MiB: `this.agent(ChatController).middleware({ upload: "body-limit:200mb" })`.
+- **Raising or turning off the default for the whole app**:
+
+  ```typescript
+  // app/config/middleware.ts
+  export default defineMiddlewareConfig({
+    bodyLimit: "10mb",        // or null / "none" for the old behaviour (no default)
+    uploadBodyLimit: "500mb",
+  });
+  ```
+
 # 0.196.2
 
 ## views: `useId` matches between the server render and hydration (#1200)

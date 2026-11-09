@@ -151,6 +151,7 @@ Bounds the request body of a route, for public endpoints anyone can post to: a f
 | `body-limit:64kb` | 413 past 64 KiB |
 | `body-limit:1.5mb` | sizes are `b`, `kb`, `mb`, `gb` (binary: `1kb` is 1024 bytes), case-insensitive |
 | `body-limit:4096` | a plain byte count |
+| `body-limit:upload` | the app's [`uploadBodyLimit`](#upload-routes) (50 MiB unless configured) |
 | `body-limit:none` | no limit: lifts the app-wide [`bodyLimit`](#an-app-wide-default) for this route |
 
 ```typescript
@@ -182,23 +183,40 @@ aliases: { "beacon-limit": BodyLimitMiddleware.configure({ limit: "8kb" }) },
 
 #### An app-wide default
 
-`bodyLimit` in the `middleware` config applies to every api route that has no `body-limit` of its own:
+Every api route without a `body-limit` of its own takes the app-wide `bodyLimit`: **1 MiB** unless the `middleware` config says otherwise. A body over it, declared or chunked, is the same `413` refusal.
 
 ```typescript
 // app/config/middleware.ts
 export default defineMiddlewareConfig({
   aliases: { /* ... */ },
-  bodyLimit: "1mb",
+  bodyLimit: "4mb",        // the default for every api route; `null` or "none" turns it off
+  uploadBodyLimit: "200mb", // the default for upload routes, see below
 });
 ```
 
 Unlike a route's own limit, the default checks `Content-Length` when the body is read rather than before the route's middleware runs, so a route's `body-limit:50mb` (or `body-limit:none`) can still raise it for an upload. An invalid size stops the server at boot. View routes take no default; put `body-limit` on one that accepts a body.
 
+#### Upload routes
+
+`uploadBodyLimit` (**50 MiB** unless configured) replaces the 1 MiB default where the route is an upload:
+
+- **A multipart body whose schema has file rules.** When `req.input()` (or `safeInput()`) reads a `multipart/form-data` body and the request's [rules schema](./controllers.md#errors-and-validation) has a `file`, `fileType:…` or `fileSize:…` rule, the limit becomes `uploadBodyLimit`, or the schema's `fileSize` ceilings added up plus `bodyLimit` (room for the other fields), whichever is larger. A file over its `fileSize` but within that limit is the usual validation error on its field, not a 413. A `"photos.*"` rule counts once, so a route taking many files of one field sets its own `body-limit`.
+- **`body-limit:upload`**, for a route that reads its body some other way (`req.rawRequest.blob()`, a stream to `Storage.put`, a proxy):
+
+  ```typescript
+  "/videos": this.post(VideoController, "store").middleware("body-limit:upload"),
+  "/backups": this.post(BackupController, "store").middleware("body-limit:2gb"),
+  ```
+
+- **An agent's `upload` route** (`POST /chat/files`). Its `attachmentLimits().maxBytes` is checked after the body is read, so a chat that accepts files over `uploadBodyLimit` raises the route's limit too: `this.agent(ChatController).middleware({ upload: "body-limit:200mb" })`. An agent's `stream` route takes no default: it bounds its own body by `maxBodyBytes` (4 MiB unless the controller sets it).
+
+A route's own `body-limit` always wins, on an upload route too. With `bodyLimit` off (`null` or `"none"`), upload routes take no default either.
+
 Putting `body-limit` in the `global` list works too, but a global entry refuses a declared length before any route is matched, so no route can raise it. Prefer `bodyLimit` for a default.
 
 #### Bun's `maxRequestBodySize`
 
-Bun has a server-wide limit of its own, `maxRequestBodySize`, applied before a request reaches gemi. `gemi start` sets it to 10 GB, so uploads are not cut off; `gemi dev` leaves Bun's default, 128 MB. It is the ceiling: a body over it is answered by Bun itself, with a bare `413` and no JSON body, and the connection closed, whatever the route says. `body-limit` and `bodyLimit` are what a route actually gets, and they answer in gemi's refusal shape, so set them well below that ceiling.
+Bun has a server-wide limit of its own, `maxRequestBodySize`, applied before a request reaches gemi. `gemi start` sets it to 10 GB, so a route that raised its own limit for uploads is not cut off; `gemi dev` leaves Bun's default, 128 MB. It is the ceiling: a body over it is answered by Bun itself, with a bare `413` and no JSON body, and the connection closed, whatever the route says. `body-limit` and `bodyLimit` are what a route actually gets, and they answer in gemi's refusal shape, so set them well below that ceiling.
 
 ### `cors` → `CorsMiddleware`
 
@@ -284,7 +302,7 @@ app on the same origin. A routing directive with no alias to register.
 
 ## Registering middleware
 
-The `middleware` config slice has three fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), and `bodyLimit`, the [default request body limit](#an-app-wide-default). `aliases` is where DSL names become classes:
+The `middleware` config slice has four fields: `aliases` — `Record<string, MiddlewareClass>` — `global`, a list that runs on every request (see [Global middleware](#global-middleware)), `bodyLimit`, the [default request body limit](#an-app-wide-default), and `uploadBodyLimit`, the default for [upload routes](#upload-routes). `aliases` is where DSL names become classes:
 
 ```typescript
 // app/config/middleware.ts
