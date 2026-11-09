@@ -580,6 +580,96 @@ Its `viewport` prop adds keys to it, and `themeColor` renders
   stays allowed. Use these props rather than a second viewport meta in
   `children`: with two, browsers differ in which one wins.
 
+## Content Security Policy: nonces
+
+A hydrated page carries inline scripts: the page data (`window.__GEMI_DATA__`),
+the theme script, query results and dictionaries streamed in as they resolve,
+and React's own streaming scripts. gemi puts a per-request nonce on every one
+of them, and on the inline `<style>`s it renders, so a strict policy works
+without `'unsafe-inline'`.
+
+The quickest way is to let gemi send one. In `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    csp: true, // or { reportOnly: true, reportUri: "/csp-reports" }
+  },
+});
+```
+
+Every document of these views then gets:
+
+```
+Content-Security-Policy: script-src 'nonce-…' 'strict-dynamic'; object-src 'none'; base-uri 'self'
+```
+
+`'strict-dynamic'` hands the nonce's trust to what the trusted scripts load,
+so the client entry, route chunks and islands need no allowlist, even from a
+CDN asset base. The policy leaves styles, images, fonts and connections alone.
+`reportOnly: true` sends it as `Content-Security-Policy-Report-Only`, for
+trying it on a live app first; `reportUri` adds a `report-uri`. A
+`route.domains` group's `view` inherits `csp` or sets its own.
+
+To send a policy of your own, build it from `cspNonce()` (from `gemi/http`, or
+`req.cspNonce()`) in a middleware. A policy the app set wins over `csp`:
+
+```typescript
+import { cspNonce, Middleware } from "gemi/http";
+
+export class CspMiddleware extends Middleware {
+  run() {
+    this.req.ctx().setHeaders(
+      "Content-Security-Policy",
+      `script-src 'nonce-${cspNonce()}' 'strict-dynamic'; object-src 'none'; base-uri 'self'; connect-src 'self'`,
+    );
+  }
+}
+```
+
+The nonce is fresh for every request and the same everywhere in one request,
+`global` middleware included. `cspNonce()` throws outside a request.
+
+An inline script of your own needs the nonce too. `useCspNonce()` (from
+`gemi/client`) gives it to a component:
+
+```tsx
+import { useCspNonce } from "gemi/client";
+
+function Analytics() {
+  const nonce = useCspNonce();
+  return (
+    <script
+      nonce={nonce}
+      // The browser hides the attribute's value once the page loads.
+      suppressHydrationWarning
+      dangerouslySetInnerHTML={{ __html: "window.dataLayer = window.dataLayer || [];" }}
+    />
+  );
+}
+```
+
+**Caching.** A nonce is only worth something while nobody else has seen it, so
+a response that carries one is never handed to a shared cache: gemi lowers a
+`public` or `s-maxage` `Cache-Control` to `private`, as it does for a page that
+sets cookies. A hydrated page already sets `session_id` and `csrf_token`, so
+this changes nothing there.
+
+**Static views** (`.static()`) are one body for every visitor, meant for a CDN,
+so they carry no nonce. With `csp`, their policy allows gemi's own inline
+scripts (the island loader or navigation runtime, and the document `script`)
+by hash instead, and the page stays cacheable. Inline scripts of your own on a
+static page need a policy of your own that allows them by hash. A static
+view's request that calls `cspNonce()` (a `global` middleware that builds a
+header for every request, say) is sent `private`; development logs a warning.
+
+gemi's chunk-reload stub (the module answered for a chunk that is gone after a
+deploy) is a script file, not an inline one, so it needs nothing. The
+development error page and the production `500` page are sent without a
+policy.
+
 ## Breadcrumbs: `useBreadcrumbs`
 
 Every view/layout handler can return a `breadcrumb` string; gemi records it against

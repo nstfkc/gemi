@@ -130,6 +130,10 @@ export interface DocumentScript {
  * module script, whatever else the page has. The navigation runtime leaves
  * the head's scripts alone when it swaps a page in, so it runs once per
  * document.
+ *
+ * `inlineScripts`, when given, receives the text of each inline script added
+ * that the browser runs (not the JSON blocks), so a strict CSP can allow them
+ * by hash (#1195).
  */
 export function injectIslands(
   html: string,
@@ -138,6 +142,7 @@ export function injectIslands(
   dev: boolean,
   navigation?: StaticNavigationMarker,
   script?: DocumentScript,
+  inlineScripts?: string[],
 ): string {
   const preloads = new Set<string>();
   let entries: ({ s: string; e: string; l: string } | null)[] = [];
@@ -168,6 +173,8 @@ export function injectIslands(
     ? `<script type="module" ${DOCUMENT_SCRIPT_ATTRIBUTE}="${attr(script.name)}">${script.source}</script>`
     : "";
 
+  if (script) inlineScripts?.push(script.source);
+
   if (!hasIslands && !navigation) {
     return insertBefore(html, "</head>", documentScript, false);
   }
@@ -182,6 +189,8 @@ export function injectIslands(
     [...preloads].map((href) => `<link rel="modulepreload" href="${attr(href)}"/>`).join("") +
     documentScript;
   const source = navigation ? STATIC_NAVIGATION_SOURCE : ISLAND_LOADER_SOURCE;
+  const runtime = dev ? DEV_PREAMBLE + source : source;
+  inlineScripts?.push(runtime);
   const i18n = hasIslands ? islandI18nPayload(collector) : undefined;
   const queries = hasIslands ? islandQueriesPayload(collector) : undefined;
   const body =
@@ -194,7 +203,7 @@ export function injectIslands(
     (queries
       ? `<script type="application/json" id="${ISLAND_QUERIES_DATA_ID}">${htmlSafeJson(queries)}</script>`
       : "") +
-    `<script type="module">${dev ? DEV_PREAMBLE + source : source}</script>`;
+    `<script type="module">${runtime}</script>`;
 
   return insertBefore(insertBefore(html, "</head>", head, false), "</body>", body, true);
 }

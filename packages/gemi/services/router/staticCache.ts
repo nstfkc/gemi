@@ -75,6 +75,19 @@ export function privateWhenSettingCookies(headers: Headers, routePath: string | 
   if (!/(^|[\s,])(public|s-maxage)\b/i.test(cacheControl)) {
     return;
   }
+  const lowered = lowerSharedCaching(cacheControl);
+  if (process.env.NODE_ENV !== "production" && !warnedViewRoutes.has(routePath)) {
+    warnedViewRoutes.add(routePath);
+    const names = [...new Set(headers.getSetCookie().map((cookie) => cookie.split("=")[0]))];
+    console.warn(
+      `[gemi] The view "${routePath ?? ""}" sets cookies (${names.join(", ")}) on a response with Cache-Control "${cacheControl}", so it was sent "${lowered}" instead: a shared cache would hand those cookies to every visitor. To let a CDN cache the page, make it a static view with .static({ cacheControl }).`,
+    );
+  }
+  headers.set("Cache-Control", lowered);
+}
+
+/** `cacheControl` with `public` made `private` and the shared-cache-only directives dropped. */
+function lowerSharedCaching(cacheControl: string) {
   const kept = cacheControl
     .split(",")
     .map((directive) => directive.trim())
@@ -82,12 +95,30 @@ export function privateWhenSettingCookies(headers: Headers, routePath: string | 
       const name = directive.split("=")[0].trim().toLowerCase();
       return name !== "" && !SHARED_ONLY.has(name);
     });
-  const lowered = ["private", ...kept].join(", ");
-  if (process.env.NODE_ENV !== "production" && !warnedViewRoutes.has(routePath)) {
-    warnedViewRoutes.add(routePath);
-    const names = [...new Set(headers.getSetCookie().map((cookie) => cookie.split("=")[0]))];
+  return ["private", ...kept].join(", ");
+}
+
+/**
+ * Lowers a page that carries a CSP nonce from shared to private caching
+ * (#1195), as `privateWhenSettingCookies` does for cookies: a nonce is only
+ * worth anything while nobody else has seen it, and a CDN would hand the same
+ * one, in the header and in the page, to every visitor. A static view meant
+ * for a CDN uses hashes instead (`csp`, `ISLAND_LOADER_CSP_HASH`); one whose
+ * request asked for a nonce (`cspNonce()`) is reported once per route in
+ * development.
+ */
+const warnedNoncedRoutes = new Set<string | null>();
+
+export function privateWhenNonced(headers: Headers, routePath: string | null, staticView: boolean) {
+  const cacheControl = headers.get("Cache-Control");
+  if (!cacheControl || !/(^|[\s,])(public|s-maxage)\b/i.test(cacheControl)) {
+    return;
+  }
+  const lowered = lowerSharedCaching(cacheControl);
+  if (staticView && process.env.NODE_ENV !== "production" && !warnedNoncedRoutes.has(routePath)) {
+    warnedNoncedRoutes.add(routePath);
     console.warn(
-      `[gemi] The view "${routePath ?? ""}" sets cookies (${names.join(", ")}) on a response with Cache-Control "${cacheControl}", so it was sent "${lowered}" instead: a shared cache would hand those cookies to every visitor. To let a CDN cache the page, make it a static view with .static({ cacheControl }).`,
+      `[gemi] The static view "${routePath ?? ""}" asked for a CSP nonce (cspNonce()) on a response with Cache-Control "${cacheControl}", so it was sent "${lowered}" instead: a shared cache would hand the same nonce to every visitor. Allow a static page's scripts by hash instead (route.view.csp does).`,
     );
   }
   headers.set("Cache-Control", lowered);

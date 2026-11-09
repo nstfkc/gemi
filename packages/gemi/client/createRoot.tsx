@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import { ClientRouter } from "./ClientRouter";
+import { CspNonceContext } from "./cspNonce";
 import { DictionarySinkContext } from "./DictionarySinkContext";
 import type { RootLayoutProps } from "./htmlAttributes";
 import type { QueryConfig } from "./QueryManagerContext";
@@ -22,17 +23,21 @@ export function createRoot(
   // `serverQueries`, `viewModules` and `dictionarySink` exist only when the view
   // router renders this on the server — the browser mounts with all three absent.
   // So does `rootLayout`: a static view's own document layout
-  // (`.static({ layout })`), which replaces the app's for that render only.
+  // (`.static({ layout })`), which replaces the app's for that render only, and
+  // `cspNonce`, the request's nonce (#1195), which the browser reads off the
+  // document instead.
   return (props: any) => (
     <ServerDataProvider value={props.data}>
       <ServerQueryContext.Provider value={props.serverQueries ?? null}>
         <DictionarySinkContext.Provider value={props.dictionarySink ?? null}>
-          <ClientRouter
-            RootLayout={props.rootLayout ?? RootLayout}
-            viewImportMap={props.viewImportMap}
-            viewModules={props.viewModules}
-            queryConfig={options.queryConfig}
-          />
+          <CspNonceContext.Provider value={props.cspNonce ?? null}>
+            <ClientRouter
+              RootLayout={props.rootLayout ?? RootLayout}
+              viewImportMap={props.viewImportMap}
+              viewModules={props.viewModules}
+              queryConfig={options.queryConfig}
+            />
+          </CspNonceContext.Provider>
         </DictionarySinkContext.Provider>
       </ServerQueryContext.Provider>
     </ServerDataProvider>

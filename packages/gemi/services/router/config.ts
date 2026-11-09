@@ -8,6 +8,7 @@ import type { McpRemoteFileOptions } from "../mcp/McpRegistry";
 import type { McpRemoteHttpConfig } from "../mcp/http/McpHttpServer";
 import type { StaticViewOptions, ViewRouter } from "../../http/ViewRouter";
 import type { StreamSummary } from "./ServerQueryStore";
+import type { StrictCspOptions } from "./contentSecurityPolicy";
 
 // Config key: `route.api`. Derived from `ApiRouterServiceProvider`.
 export interface ApiRouteConfig {
@@ -197,6 +198,22 @@ export interface ViewRouteConfig {
    * own. A handler's `Meta.translate(allow)` wins over it. Default: `false`.
    */
   translate?: boolean;
+
+  /**
+   * Sends a strict Content Security Policy with these views' documents
+   * (#1195): `script-src 'nonce-…' 'strict-dynamic'; object-src 'none';
+   * base-uri 'self'`. The nonce is the request's (`cspNonce()`), which gemi
+   * puts on every inline script it renders, so a hydrated page runs with no
+   * `'unsafe-inline'`. A static view (`.static()`) gets the hashes of the
+   * scripts gemi inlined instead of a nonce, so it stays cacheable.
+   *
+   * `{ reportOnly: true }` sends it as `Content-Security-Policy-Report-Only`,
+   * `{ reportUri }` adds a `report-uri`. A policy the app set itself (a
+   * middleware's `Content-Security-Policy` header) wins. Inline scripts of
+   * the app's own need `nonce={useCspNonce()}`. A `route.domains` group's
+   * `view` inherits it or sets its own. Default: off.
+   */
+  csp?: boolean | StrictCspOptions;
 
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;
@@ -469,7 +486,7 @@ export function apiRouteConfigDefaults(): Omit<
 
 export function viewRouteConfigDefaults(): Omit<
   Required<ViewRouteConfig>,
-  "root" | "rootRouter" | "meta" | "notFound" | "translate" | "detectLocale"
+  "root" | "rootRouter" | "meta" | "notFound" | "translate" | "detectLocale" | "csp"
 > {
   return {
     partialRendering: true,
