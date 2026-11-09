@@ -5,6 +5,7 @@
 // `../gemi.d.ts`.
 
 export { useQuery } from "./useQuery";
+export { useCspNonce } from "./cspNonce";
 export type { QueryResult, GemiQueryDefaults } from "./useQuery";
 export { useInfiniteQuery } from "./useInfiniteQuery";
 export type {

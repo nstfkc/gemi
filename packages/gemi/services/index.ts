@@ -98,6 +98,7 @@ export {
 export { ViewRouteDispatcher } from "./router/ViewRouteDispatcher";
 export { ISLAND_LOADER_CSP_HASH, STATIC_NAVIGATION_CSP_HASH } from "./router/staticDocument";
 export { documentScriptCspHash } from "./router/documentScript";
+export { strictCspPolicy, type StrictCspOptions } from "./router/contentSecurityPolicy";
 // What `onStreamComplete` receives when a response body closes.
 export type {
   StreamSummary,

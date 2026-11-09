@@ -23,11 +23,16 @@ export function htmlSafeJson(value: unknown): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
-export function queryPayloadScript(entry: ServerQueryEntry): string {
+/** `<script>`, with the response's CSP nonce when it has one (#1195). */
+function openScript(nonce?: string) {
+  return nonce ? `<script nonce="${nonce}">` : "<script>";
+}
+
+export function queryPayloadScript(entry: ServerQueryEntry, nonce?: string): string {
   const payload = htmlSafeJson([entry.path, entry.variantKey, entry.data]);
   // Self-shimming: the first payload to arrive creates the buffer, so no
   // separate bootstrap is needed and execution order never matters.
-  return `<script>(self.__GEMI_STREAM__=self.__GEMI_STREAM__||[]).push(${payload})</script>`;
+  return `${openScript(nonce)}(self.__GEMI_STREAM__=self.__GEMI_STREAM__||[]).push(${payload})</script>`;
 }
 
 /**
@@ -36,9 +41,9 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
  * reveal chunk for the segment that used it and hydration never re-fetches
  * strings the document already carries.
  */
-export function dictionaryPayloadScript(use: DictionaryUse): string {
+export function dictionaryPayloadScript(use: DictionaryUse, nonce?: string): string {
   const payload = htmlSafeJson([use.id, use.locale, use.strings]);
-  return `<script>(self.__GEMI_DICT__=self.__GEMI_DICT__||[]).push(${payload})</script>`;
+  return `${openScript(nonce)}(self.__GEMI_DICT__=self.__GEMI_DICT__||[]).push(${payload})</script>`;
 }
 
 /**
@@ -97,12 +102,15 @@ export interface StreamLifecycleHooks {
  *    keeps guarantee 1: the reveal script cannot precede the payload, because
  *    the earliest safe offset is at worst the end of the one tag straddling
  *    the boundary.
+ *
+ * `nonce` is the response's CSP nonce, put on every script injected (#1195).
  */
 export function injectQueryPayloads(
   source: ReadableStream<Uint8Array>,
   store: ServerQueryStore,
   hooks: StreamLifecycleHooks = {},
   dictionaries?: DictionarySink,
+  nonce?: string,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const queue: string[] = [];
@@ -118,7 +126,7 @@ export function injectQueryPayloads(
     // Rejected entries stream nothing: React client-renders that segment and
     // the browser's own `/api` fetch surfaces the error into the boundary.
     if (entry.status !== "resolved") return;
-    queue.push(queryPayloadScript(entry));
+    queue.push(queryPayloadScript(entry, nonce));
   });
 
   // Dictionaries read during render join the same queue, and inherit its
@@ -126,7 +134,7 @@ export function injectQueryPayloads(
   // the segment that uses it, so the script is queued before React can emit
   // that segment's chunk.
   dictionaries?.onUse((use) => {
-    queue.push(dictionaryPayloadScript(use));
+    queue.push(dictionaryPayloadScript(use, nonce));
   });
 
   const reader = source.getReader();

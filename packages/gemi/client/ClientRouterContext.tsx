@@ -1,4 +1,5 @@
 import { type Action, type History, createBrowserHistory } from "history";
+import { applyDocumentNonce } from "./cspNonce";
 import {
   createContext,
   useContext,
@@ -316,6 +317,7 @@ export const ClientRouterProvider = (
     for (const { content, id } of result) {
       const style = document.createElement("style");
       style.id = id;
+      applyDocumentNonce(style);
       style.textContent = await content;
       document.head.appendChild(style);
     }
@@ -361,6 +363,7 @@ export const ClientRouterProvider = (
         const link = document.createElement("link");
         link.rel = "modulepreload";
         link.href = href;
+        applyDocumentNonce(link);
         document.head.appendChild(link);
       }
     }

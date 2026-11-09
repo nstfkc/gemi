@@ -17,7 +17,7 @@ import { DEFAULT_THEME_COOKIE, isTheme, themeScriptSource, type ThemeData } from
 import { resolvePartialRender } from "./planPartialRender";
 import { matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
-import { createElement, Fragment } from "react";
+import { cloneElement, createElement, Fragment, type ReactElement } from "react";
 import { documentChildren } from "../../client/documentTree";
 
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
@@ -62,10 +62,13 @@ import { documentScriptSource } from "./documentScript";
 import {
   applyStaticCacheControl,
   dropCookiesFromSharedCacheable,
+  privateWhenNonced,
   privateWhenSettingCookies,
   staticCookiePolicy,
 } from "./staticCache";
 import { mergeContextIntoResponse } from "./ApiRouteDispatcher";
+import { cspNonceOf, mintedCspNonce } from "../../http/cspNonce";
+import { applyStrictCsp } from "./contentSecurityPolicy";
 
 /**
  * `satori`, loaded on the first OG-image request rather than on import, for the
@@ -315,6 +318,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.translate`. */
   readonly translate: boolean | undefined;
 
+  /** See `ViewRouteConfig.csp`. */
+  readonly csp: ViewRouteConfig["csp"];
+
   /**
    * `auth` is the app's `auth` config: gemi's `/auth` view routes are mounted
    * for the features it turns on (#1040).
@@ -338,6 +344,7 @@ export class ViewRouteDispatcher {
     this.assetRoutes = config.assetRoutes ?? defaults.assetRoutes;
 
     this.translate = config.translate;
+    this.csp = config.csp;
 
     this.hooks = {
       onNotFound: config.onNotFound ?? defaults.onNotFound,
@@ -620,17 +627,24 @@ export class ViewRouteDispatcher {
       await stream.allReady.catch(() => {});
       const html = spliceIslandSlots(await new Response(stream).text());
 
-      return new Response(
-        injectIslands(
-          html,
-          collector,
-          args.resolveIsland,
-          process.env.NODE_ENV !== "production",
-          navigation,
-          script,
-        ),
-        { status: args.status, headers },
+      const inlineScripts: string[] = [];
+      const body = injectIslands(
+        html,
+        collector,
+        args.resolveIsland,
+        process.env.NODE_ENV !== "production",
+        navigation,
+        script,
+        inlineScripts,
       );
+      // One body for every visitor, so its scripts are allowed by hash, not by
+      // a nonce a CDN would replay (#1195). A nonce the app asked for itself
+      // is allowed too; that response is no longer shared-cacheable.
+      applyStrictCsp(headers, this.csp, {
+        nonce: mintedCspNonce(req.rawRequest),
+        inlineScripts,
+      });
+      return new Response(body, { status: args.status, headers });
     } finally {
       clearTimeout(deadlineTimer);
       runInRequestScope(() =>
@@ -675,6 +689,11 @@ export class ViewRouteDispatcher {
      * (403 or 404). Absent, an unmatched request answers 404.
      */
     refusedStatus?: number;
+    /**
+     * The request's CSP nonce (#1195), on every inline script and style of a
+     * hydrated document. Absent for a static one.
+     */
+    cspNonce?: string;
   }) {
     const {
       req,
@@ -699,6 +718,7 @@ export class ViewRouteDispatcher {
       appId,
       features,
       staticView,
+      cspNonce,
     } = props;
 
     // A static view has no script and one body for every visitor, so it must
@@ -982,16 +1002,20 @@ export class ViewRouteDispatcher {
       // document — the `404` view, the one route class most likely to be hit
       // cold — so it preloads that view's chain, mirroring the `["404"]` the
       // client mounts.
-      const preloadLinks = this.modulePreloadLinks({
-        clientEntry,
-        modulePreloadManifest,
-        views: currentViews ?? ["404"],
-        routeKey: currentPathName ?? "404",
-      });
+      // The links are cached per route; the nonce is per request (#1195).
+      const preloadLinks = withNonce(
+        this.modulePreloadLinks({
+          clientEntry,
+          modulePreloadManifest,
+          views: currentViews ?? ["404"],
+          routeKey: currentPathName ?? "404",
+        }),
+        cspNonce,
+      );
 
       // The `404` document has no route views; it is styled with the `404`
       // view's chain, as it is preloaded above (#951).
-      const styles = await getStyles(currentViews ?? ["404"]);
+      const styles = withNonce(await getStyles(currentViews ?? ["404"]), cspNonce);
 
       // Everything resolved by now ships in the document payload; everything
       // still in flight streams in behind it. The snapshot marks its entries
@@ -1049,6 +1073,7 @@ export class ViewRouteDispatcher {
                   ? [
                       createElement("script", {
                         key: "theme-script",
+                        nonce: cspNonce,
                         dangerouslySetInnerHTML: {
                           __html: themeScriptSource(
                             htmlSafeJson({ cookie: theme.cookie, default: theme.default }),
@@ -1064,6 +1089,7 @@ export class ViewRouteDispatcher {
                 viewModules,
                 serverQueries,
                 dictionarySink,
+                cspNonce,
                 key: "root",
               }),
             ),
@@ -1073,6 +1099,11 @@ export class ViewRouteDispatcher {
               `window.__GEMI_DATA__ = ${htmlSafeJson(result.data)}`,
             ),
             bootstrapModules: reactBootstrapModules,
+            // React's own inline scripts: the bootstrap script, the reveal
+            // scripts of streamed boundaries, its module preloads (#1195).
+            // Scripts only: a style nonce would make React drop the app's
+            // `<style precedence>` rules that carry none.
+            nonce: cspNonce,
             signal: deadline.signal,
             ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
             // A query rejecting inside a streamed segment is expected: React
@@ -1118,7 +1149,8 @@ export class ViewRouteDispatcher {
                 }
               }),
           },
-          dictionarySink),
+          dictionarySink,
+          cspNonce),
           {
             status: !currentPathName ? (props.refusedStatus ?? 404) : 200,
             headers,
@@ -1145,18 +1177,25 @@ export class ViewRouteDispatcher {
             process.env.NODE_ENV === "development"
               ? ["/render-error.js", ...reactBootstrapModules]
               : reactBootstrapModules,
+          nonce: cspNonce,
         });
         // The failed-render body still closes, and the span-ending hook is
         // pinned to the body closing, not the render succeeding — a span that
         // only ends on happy paths leaks for exactly the requests worth
         // seeing. No shell mark: this body is one settled error document.
         return new Response(
-          injectQueryPayloads(stream, serverQueries, {
-            onClose: () =>
-              runInRequestScope(() =>
-                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
-              ),
-          }),
+          injectQueryPayloads(
+            stream,
+            serverQueries,
+            {
+              onClose: () =>
+                runInRequestScope(() =>
+                  this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+                ),
+            },
+            undefined,
+            cspNonce,
+          ),
           {
             status: !currentPathName ? (props.refusedStatus ?? 404) : 200,
             headers,
@@ -1882,6 +1921,19 @@ export class ViewRouteDispatcher {
         // that set a cookie is already `private, no-store` above.
         privateWhenSettingCookies(headers, currentPathName);
 
+        // A hydrated document's inline scripts carry the request's nonce, the
+        // one the app's own CSP header reads with `cspNonce()` (#1195). A
+        // static one has none of its own: its scripts are allowed by hash
+        // (`renderStatic`), so it stays one cacheable body.
+        const cspNonce = staticDocument ? undefined : cspNonceOf(req);
+        if (!staticDocument) {
+          applyStrictCsp(headers, this.csp, { nonce: cspNonce });
+        }
+        // Whoever minted it, a nonce must not reach a shared cache.
+        if (mintedCspNonce(req)) {
+          privateWhenNonced(headers, currentPathName, staticDocument);
+        }
+
         return await this.render({
           req: httpRequest,
           runInRequestScope,
@@ -1909,6 +1961,7 @@ export class ViewRouteDispatcher {
           // unless these views have a static `notFound` (#828).
           staticView: documentStatic,
           refusedStatus: refusedStatus ?? undefined,
+          cspNonce,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
@@ -1947,6 +2000,11 @@ export class ViewRouteDispatcher {
       }
     }, carried);
   }
+}
+
+/** `elements` with the request's CSP nonce, when there is one (#1195). */
+function withNonce(elements: ReactElement[], nonce: string | undefined): ReactElement[] {
+  return nonce ? elements.map((element) => cloneElement(element, { nonce } as never)) : elements;
 }
 
 /** The visitor's stored theme, if the cookie holds one gemi recognises. */

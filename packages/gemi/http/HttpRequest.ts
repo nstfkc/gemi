@@ -9,6 +9,7 @@ import {
   type ProgressUpdate,
 } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
+import { cspNonceOf } from "./cspNonce";
 import { RequestContext } from "./requestContext";
 import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
@@ -265,6 +266,16 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
    */
   mcpGrant(): McpGrant | null {
     return dispatchedGrant(this.rawRequest) ?? null;
+  }
+
+  /**
+   * This request's Content Security Policy nonce (#1195): the one gemi puts on
+   * the inline scripts and styles of the page it renders for this request,
+   * for a CSP header and the app's own inline scripts. The same as
+   * `cspNonce()` from `gemi/http`; see there.
+   */
+  cspNonce(): string {
+    return cspNonceOf(this.rawRequest);
   }
 
   /**

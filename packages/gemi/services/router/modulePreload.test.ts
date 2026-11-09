@@ -73,7 +73,8 @@ async function fetchDocument(path: string, params: Record<string, any> = prodPar
   return await res.text();
 }
 
-const preloadTag = (href: string) => `<link rel="modulepreload" href="${href}"/>`;
+// Open-ended: the request's CSP nonce follows the href (#1195).
+const preloadTag = (href: string) => `<link rel="modulepreload" href="${href}"`;
 
 describe("route module preloads", () => {
   test("announces every chunk the current route's views will import", async () => {

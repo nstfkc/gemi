@@ -447,6 +447,11 @@ also from `gemi/services`; the runtime fetches pages from your own origin, so
 A [document script](#document-script) is allowed by its own hash,
 `await documentScriptCspHash(name)`.
 
+Or let gemi send the policy: with `csp: true` on the view config, a static
+page gets `script-src` with the hashes of exactly the scripts gemi inlined
+into it, and no nonce, so it stays cacheable. See
+[Content Security Policy](./views-and-layouts.md#content-security-policy-nonces).
+
 ### Testing
 
 Add the island transform to `vitest.config.ts`, next to the request plugin, so

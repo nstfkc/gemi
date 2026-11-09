@@ -1,3 +1,21 @@
+# Unreleased
+
+## views: CSP nonces for gemi's inline scripts (#1195)
+
+**New API (minor version).** See [Content Security Policy](docs/views-and-layouts.md#content-security-policy-nonces).
+
+- Every inline `<script>` and `<style>` gemi renders into a hydrated page now carries a per-request nonce: the page data, the theme script, streamed query and dictionary payloads, React's own streaming and bootstrap scripts, the inlined stylesheets, the `Meta.fonts` style and the `modulepreload` links. A strict `script-src` no longer needs `'unsafe-inline'`.
+- `cspNonce()` from `gemi/http` (and `req.cspNonce()`) answers that nonce, for the app's own CSP header. It is the same in `global` middleware, route middleware and handlers.
+- `useCspNonce()` from `gemi/client` gives it to a component's own inline script (`<script nonce={nonce} suppressHydrationWarning>`).
+- `route.view.csp: true` (or `{ reportOnly, reportUri }`) makes gemi send `script-src 'nonce-…' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'` with every document of those views. A static view gets the hashes of gemi's inline scripts instead of a nonce. A `Content-Security-Policy` the app set itself wins.
+- `strictCspPolicy` and the `StrictCspOptions` type are exported from `gemi/services`.
+
+What to check:
+
+- **Responses carrying a nonce are no longer shared-cacheable.** A view response whose request asked for a nonce has `public`/`s-maxage` lowered to `private`, as for cookies. Hydrated pages were already private (they set `session_id`). A **static view** is affected only when something called `cspNonce()` during its request, typically a `global` middleware that builds a CSP header for every response: skip static paths there, or allow their scripts by hash (`csp: true` does this). Development logs a warning per route.
+- **Hydration warnings.** An app script that renders `nonce={useCspNonce()}` needs `suppressHydrationWarning`: browsers hide the attribute's value after load, so React sees a mismatch otherwise.
+- Nothing else changes for an app that sets no policy: the nonce attributes are ignored without one.
+
 # 0.197.0
 
 ## http: request bodies are limited to 1 MiB by default (#1196)

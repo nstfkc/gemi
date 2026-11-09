@@ -3,6 +3,7 @@ import { type ReactNode, useContext } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
 import { resolveHtmlAttributes } from "./htmlAttributes";
 import { fontFaceRules, fontPreloads } from "./fonts";
+import { applyDocumentNonce, useCspNonce } from "./cspNonce";
 
 /**
  * Marks the `<link>`s, `<meta name="robots">` and `Meta.tags` rendered from
@@ -118,6 +119,7 @@ export function updateMeta(meta: any, locale?: string | null) {
   if (newFontRules.length > 0) {
     const style = document.createElement("style");
     style.setAttribute(GEMI_FONTS_ATTRIBUTE, "");
+    applyDocumentNonce(style);
     style.textContent = newFontRules.join("\n");
     document.head.appendChild(style);
     for (const rule of newFontRules) appliedFontRules.add(rule);
@@ -262,6 +264,7 @@ export const Head = ({
   themeColor?: string | readonly HeadThemeColor[];
 }) => {
   const { meta } = useContext(ServerDataContext);
+  const nonce = useCspNonce();
   // The first page set them, so the layout rendered them: a later page that
   // sets none has to go back to its locale's (`updateMeta`). Only ever read
   // in the browser.
@@ -343,6 +346,9 @@ export const Head = ({
       {fontRules.length > 0 && (
         <style
           {...{ [GEMI_FONTS_ATTRIBUTE]: "" }}
+          nonce={nonce}
+          // The browser hides a nonce's value once the page loads (#1195).
+          suppressHydrationWarning
           // Escaped by `fontFaceRule`: strings are CSS-escaped (`<` included),
           // descriptors are checked by `Meta.fonts`.
           dangerouslySetInnerHTML={{ __html: fontRules.join("\n") }}
