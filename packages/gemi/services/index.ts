@@ -81,6 +81,12 @@ export { MailServiceProvider } from "./email/MailServiceProvider";
 export { MailManager } from "./email/MailManager";
 export { EmailDriver } from "./email/drivers/EmailDriver";
 export { ResendDriver } from "./email/drivers/ResendDriver";
+export {
+  AcsDriver,
+  type AcsDriverConfig,
+  type AcsEmailClientLike,
+  type AcsEmailMessage,
+} from "./email/drivers/AcsDriver";
 export type {
   EmailAttachment,
   EmailDeliveryResult,

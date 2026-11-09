@@ -4,6 +4,12 @@ import { ResendDriver } from "./drivers/ResendDriver";
 // Config key: `mail`. Derived from `EmailServiceProvider`.
 export interface MailConfig {
   driver?: EmailDriver;
+  /**
+   * More drivers, by name. An email class (`driver = "acs"`) or one send
+   * (`Email.send({ driver: "acs" })`) picks one; everything else goes through
+   * `driver`.
+   */
+  drivers?: Record<string, EmailDriver>;
   headers?: Record<string, string>;
 
   // Last chance to drop or rewrite recipients before a send leaves the app.
@@ -19,6 +25,7 @@ export function defineMailConfig(config: MailConfig): MailConfig {
 export function mailConfigDefaults(): Required<MailConfig> {
   return {
     driver: new ResendDriver(),
+    drivers: {},
     headers: {},
     filterRecipients: (emails) => emails,
   };
