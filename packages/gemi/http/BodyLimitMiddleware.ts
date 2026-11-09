@@ -4,6 +4,8 @@ import { Middleware } from "./Middleware";
 export interface BodyLimitMiddlewareConfig {
   /** The limit when the DSL gives none: bytes, or a size such as `"64kb"`. */
   limit?: string | number;
+  /** What `body-limit:upload` means, in bytes: the app's `uploadBodyLimit`. */
+  uploadLimit?: number;
 }
 
 /**
@@ -12,6 +14,7 @@ export interface BodyLimitMiddlewareConfig {
  * ```
  * "body-limit:64kb"   // 413 past 64 KiB
  * "body-limit:1.5mb"
+ * "body-limit:upload" // the app's `uploadBodyLimit` (50 MiB unless configured)
  * "body-limit:none"   // lifts the app-wide `bodyLimit` default for this route
  * ```
  *
@@ -30,7 +33,9 @@ export class BodyLimitMiddleware extends Middleware<BodyLimitMiddlewareConfig> {
     if (value === undefined || value === "") {
       throw new Error('`body-limit` needs a size, as in "body-limit:64kb".');
     }
-    setBodyLimit(this.req.rawRequest, parseByteSize(value));
+    const bytes =
+      value === "upload" ? (this.config.uploadLimit ?? parseByteSize("50mb")) : parseByteSize(value);
+    setBodyLimit(this.req.rawRequest, bytes);
     return {};
   }
 }

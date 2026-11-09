@@ -1,5 +1,50 @@
 # Unreleased
 
+## http: request bodies are limited to 1 MiB by default (#1196)
+
+**Behaviour change (minor version).** See [Middleware → An app-wide default](docs/middleware.md#an-app-wide-default) and [Upload routes](docs/middleware.md#upload-routes).
+
+- `middleware.bodyLimit` now defaults to `"1mb"` instead of no limit. An api route without a `body-limit` of its own answers a larger body with the usual `413` refusal (`{ error: { kind: "form_error", message: "The request body is too large.", status: 413 } }`), whether it declares a `Content-Length` or is chunked, and never buffers past the limit. Before, only Bun's server-wide `maxRequestBodySize` (10 GB under `gemi start`) applied.
+- New `middleware.uploadBodyLimit`, `"50mb"` unless set, the default for upload routes:
+  - a `multipart/form-data` body read by `req.input()` / `safeInput()` whose rules schema has a `file`, `fileType:…` or `fileSize:…` rule gets `uploadBodyLimit`, or its `fileSize` ceilings added up plus `bodyLimit`, whichever is larger. A file over its `fileSize` rule is still the validation error on its field;
+  - the new `body-limit:upload` DSL value;
+  - an agent's `upload` route (`POST <chat>/files`).
+- An agent's `stream` route takes no default; it keeps bounding its body by the controller's `maxBodyBytes` (4 MiB).
+- A route's own `body-limit` still replaces any default. View routes still take none.
+
+What to check:
+
+- **A route that reads a body over 1 MiB without a file-rules schema**: a raw upload (`req.rawRequest.blob()`, `arrayBuffer()`, a stream handed to `Storage.put`), a `this.proxy(...)` forwarding uploads, a large JSON import, a webhook that can send big payloads. Give it its own limit:
+
+  ```typescript
+  "/videos": this.post(VideoController, "store").middleware("body-limit:upload"), // uploadBodyLimit
+  "/imports": this.post(ImportController, "store").middleware("body-limit:20mb"),
+  "/backups": this.post(BackupController, "store").middleware("body-limit:none"),
+  ```
+
+- **JSON endpoints that can pass 1 MiB.** A JSON body never counts as an upload, so these get the plain 1 MiB default. Typical ones: an editor saving a whole document or page (rich-text or block JSON, a canvas or design file, a spreadsheet), autosave endpoints that send the full state, base64-encoded images or files inside a JSON body (pasted screenshots in a chat message sent to your own route; an agent's `stream` route is bounded by `maxBodyBytes` instead, raised with `protected maxBodyBytes = 16 * 1024 * 1024`, an avatar cropped on the client, a signature pad), bulk endpoints (a CSV import parsed to JSON in the browser, batch create/update, offline sync queues), exports posted back for re-import, and inbound webhooks from services with large payloads. Raise the limit on that route only, and keep the default elsewhere:
+
+  ```typescript
+  "/documents/:id": this.put(DocumentController, "update").middleware("body-limit:10mb"),
+  "/sync": this.post(SyncController, "push").middleware(["auth", "body-limit:25mb"]),
+  // or for every route of a router
+  class EditorRouter extends ApiRouter {
+    middlewares = ["auth", "body-limit:10mb"];
+  }
+  ```
+
+  For files, prefer multipart over base64 in JSON: a multipart body with a file-rules schema gets the upload default by itself, and base64 is a third larger.
+- **Uploads over 50 MiB**: raise `uploadBodyLimit`, or give the route its own `body-limit`. A chat whose `attachmentLimits().maxBytes` is over 50 MiB: `this.agent(ChatController).middleware({ upload: "body-limit:200mb" })`.
+- **Raising or turning off the default for the whole app**:
+
+  ```typescript
+  // app/config/middleware.ts
+  export default defineMiddlewareConfig({
+    bodyLimit: "10mb",        // or null / "none" for the old behaviour (no default)
+    uploadBodyLimit: "500mb",
+  });
+  ```
+
 ## i18n: the translations route answers an empty dictionary instead of a 500 (#1199)
 
 **Fix, no API change.**

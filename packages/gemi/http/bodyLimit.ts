@@ -44,8 +44,22 @@ export function parseByteSize(input: string | number): number {
   );
 }
 
+/**
+ * What a framework route asks for in place of the app-wide `bodyLimit`:
+ * `"upload"` for `uploadBodyLimit` (an agent's `upload`), `"none"` for a
+ * route that bounds its own body as it reads it (an agent's `stream`, by
+ * `maxBodyBytes`). A route's `body-limit` still replaces either.
+ */
+export type RouteBodyLimitDefault = "upload" | "none";
+
 interface LimitState {
   limit: number;
+  /**
+   * The app-wide default's upload limit when the installed limit is that
+   * default (or a framework route's own default), so a body validated as an
+   * upload can still raise it; `null` once a route's `body-limit` set it.
+   */
+  uploadLimit: number | null;
   /** Bytes the limited stream has handed out so far. */
   read: number;
   /** The limited body, created on first access; `null` for a bodiless request. */
@@ -101,24 +115,44 @@ function refuseDeclaredLength(request: Request, limit: number) {
  * forwarded stream all read through the same counter.
  *
  * Installing again replaces the limit, so a route's `body-limit` overrides its
- * router's, and either overrides the app-wide default.
+ * router's, and either overrides the app-wide default. `uploadLimit` is passed
+ * only by the default, and lets `raiseDefaultBodyLimitForUpload` raise it.
  */
 export function setBodyLimit(
   request: Request,
   limit: number,
-  options: { checkDeclared?: boolean } = {},
+  options: { checkDeclared?: boolean; uploadLimit?: number } = {},
 ) {
+  const uploadLimit = options.uploadLimit ?? null;
   const existing = states.get(request);
   if (existing) {
     existing.limit = limit;
+    existing.uploadLimit = uploadLimit;
   } else {
-    const state: LimitState = { limit, read: 0, stream: undefined, used: false };
+    const state: LimitState = { limit, uploadLimit, read: 0, stream: undefined, used: false };
     states.set(request, state);
     shadowBodyAccessors(request, state);
   }
   if (options.checkDeclared !== false) {
     refuseDeclaredLength(request, limit);
   }
+}
+
+/**
+ * Raises a default limit for a body about to be read as an upload: a
+ * multipart body whose schema has file rules (`file`, `fileType`,
+ * `fileSize:…`). The new limit is the larger of the configured
+ * `uploadBodyLimit` and `fileBytes` (the schema's `fileSize` ceilings added
+ * up) plus the default, for the form's other fields.
+ *
+ * Only a default is raised: a limit a route set with `body-limit` is the
+ * route's answer and stays. Nothing happens once the body has been read.
+ */
+export function raiseDefaultBodyLimitForUpload(request: Request, fileBytes: number) {
+  const state = states.get(request);
+  if (!state || state.uploadLimit === null || state.used || state.read > 0) return;
+  state.limit = Math.max(state.limit, state.uploadLimit, fileBytes + state.limit);
+  state.uploadLimit = null;
 }
 
 function nativeBody(request: Request): ReadableStream<Uint8Array> | null {

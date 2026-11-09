@@ -15,7 +15,8 @@ import { Translator } from "../i18n/Translator";
 import { requestDomain } from "./requestDomain";
 import { RequestState } from "./requestState";
 import { ValidationError } from "./Router";
-import { InvalidValidationRuleError, validate } from "./validate";
+import { InvalidValidationRuleError, uploadBytesOf, validate } from "./validate";
+import { raiseDefaultBodyLimitForUpload } from "./bodyLimit";
 import type { ResolvedDomain } from "../services/router/DomainResolver";
 import { isSchema, type SchemaIssue } from "../ai/Schema";
 
@@ -339,6 +340,14 @@ export class HttpRequest<T extends Body = Record<string, never>, Params = Record
     }
 
     if (type === "application/x-www-form-urlencoded" || type === "multipart/form-data") {
+      if (type === "multipart/form-data" && !isSchema(this.schema)) {
+        // An upload route, by its schema: the app-wide default body limit
+        // (1 MiB unless configured) makes room for its files.
+        const fileBytes = uploadBytesOf(this.schema ?? {});
+        if (fileBytes !== null) {
+          raiseDefaultBodyLimitForUpload(this.rawRequest, fileBytes);
+        }
+      }
       let body: FormData;
       try {
         body = await this.rawRequest.formData();

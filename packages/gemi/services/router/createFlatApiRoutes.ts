@@ -9,6 +9,7 @@ import {
   type RouteSource,
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
+import type { RouteBodyLimitDefault } from "../../http/bodyLimit";
 
 type ApiRouteExec = any;
 export type FlatApiRoutes = Record<
@@ -21,6 +22,8 @@ export type FlatApiRoutes = Record<
       // Absent on a callback route, a proxy route and OPTIONS: none of them
       // runs a controller method.
       source?: RouteSource;
+      // The route's own default body limit, in place of the app-wide one.
+      bodyLimitDefault?: RouteBodyLimitDefault;
     }
   >
 >;
@@ -98,6 +101,7 @@ export function createFlatApiRoutes(
     exec: ApiRouteExec,
     middleware: RouterMiddleware[] | string[],
     source?: RouteSource,
+    bodyLimitDefault?: RouteBodyLimitDefault,
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
@@ -111,6 +115,7 @@ export function createFlatApiRoutes(
       exec,
       middleware: [...rootMiddleware, ...middleware],
       ...(source ? { source } : {}),
+      ...(bodyLimitDefault ? { bodyLimitDefault } : {}),
     };
     flatApiRoutes[finalPath].OPTIONS = {
       exec: () => {
@@ -136,7 +141,14 @@ export function createFlatApiRoutes(
       const method = routeHandler.method;
       const middleware = routeHandler.middlewares;
       const exec = routeHandler.run.bind(routeHandler);
-      addRoute(path, method, exec, middleware, routeHandler.source);
+      addRoute(
+        path,
+        method,
+        exec,
+        middleware,
+        routeHandler.source,
+        routeHandler.__internal_bodyLimitDefault,
+      );
       // A stream route also answers HEAD, so a client can read the size and
       // Accept-Ranges without pulling the body. It runs the same handler, so
       // it has the same source.
@@ -153,7 +165,14 @@ export function createFlatApiRoutes(
         const routeHandler = handler as RouteHandler<any, any, any, any>;
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
-        addRoute(path, method, exec, middleware, routeHandler.source);
+        addRoute(
+          path,
+          method,
+          exec,
+          middleware,
+          routeHandler.source,
+          routeHandler.__internal_bodyLimitDefault,
+        );
         // `get: this.stream(...)` answers HEAD too, as a stream route on its
         // own path does. An explicit `head` key is not part of the map.
         if (method === "get" && isStreamHandler(routeHandler)) {
