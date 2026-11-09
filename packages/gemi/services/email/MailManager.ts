@@ -7,6 +7,7 @@ export class MailManager {
   static token = "mail";
 
   readonly driver: EmailDriver;
+  readonly drivers: Record<string, EmailDriver>;
   readonly headers: Record<string, string>;
 
   private readonly recipientFilter: NonNullable<MailConfig["filterRecipients"]>;
@@ -15,8 +16,26 @@ export class MailManager {
     const defaults = mailConfigDefaults();
 
     this.driver = config.driver ?? defaults.driver;
+    this.drivers = config.drivers ?? defaults.drivers;
     this.headers = config.headers ?? defaults.headers;
     this.recipientFilter = config.filterRecipients ?? defaults.filterRecipients;
+  }
+
+  /**
+   * The driver registered as `name` in `drivers`, or the default `driver`
+   * without a name. An unknown name throws rather than falling back, so a typo
+   * can't send through the wrong provider.
+   */
+  driverFor(name?: string): EmailDriver {
+    if (name === undefined) return this.driver;
+    const driver = Object.hasOwn(this.drivers, name) ? this.drivers[name] : undefined;
+    if (!driver) {
+      const known = Object.keys(this.drivers);
+      throw new Error(
+        `No mail driver named "${name}". Register it under \`drivers\` in the mail config${known.length ? ` (registered: ${known.join(", ")})` : ""}.`,
+      );
+    }
+    return driver;
   }
 
   filterRecipients(emails: string[]): Promise<Array<string>> | Array<string> {

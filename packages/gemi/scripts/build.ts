@@ -84,8 +84,10 @@ const result = await Bun.build({
     "bun",
     "jsx-email",
     "sharp",
-    // Optional peer: only present when an app uses AzureBlobDriver.
+    // Optional peers: only present when an app uses AzureBlobDriver or AcsDriver.
     "@azure/storage-blob",
+    "@azure/communication-email",
+    "@azure/identity",
   ],
   target: "bun",
   format: "esm",

@@ -1,3 +1,20 @@
+# Unreleased
+
+## email: Azure Communication Services driver and named drivers
+
+**New API (minor version).** See [Email → Azure Communication Services](docs/email.md#azure-communication-services-acsdriver) and [Named drivers](docs/email.md#named-drivers).
+
+- `AcsDriver` (from `gemi/services`) sends through Azure Communication Services Email. It authenticates with `DefaultAzureCredential` when given an `endpoint` (or `AZURE_COMMUNICATION_ENDPOINT`), and with a `connectionString` (or `AZURE_COMMUNICATION_CONNECTION_STRING`) otherwise. `@azure/communication-email` and `@azure/identity` are new optional peer dependencies; install them only to use it.
+  - `id` is the ACS operation id; the send doesn't wait for delivery.
+  - `supportsIdempotencyKey` is `false`: keys are ignored.
+  - `scheduledAt` throws: ACS has no scheduled send.
+- `drivers` in the mail config registers more drivers by name. An email class's `driver = "acs"` or a send's `driver: "acs"` picks one; the rest keep using `driver`. An unknown name throws. `MailManager.driverFor(name)` resolves one.
+- `replyTo` (`string[]`), on the class or per send, and `contentType` on `EmailAttachment`. Both are forwarded to Resend as well.
+
+What to check:
+
+- Nothing, for an app that doesn't use them. The `EMAIL_DEBUG` `.json` sidecar has two new keys, `replyTo` and `driver`: a test that compares the whole record with `toEqual` needs them added.
+
 # 0.198.0
 
 ## views: CSP nonces for gemi's inline scripts (#1195)

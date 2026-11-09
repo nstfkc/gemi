@@ -12,6 +12,7 @@ export interface DebugEmailRecord {
   to: string[];
   cc: string[];
   bcc: string[];
+  replyTo: string[];
   from: string;
   subject: string;
   headers: Record<string, string>;
@@ -20,6 +21,8 @@ export interface DebugEmailRecord {
   scheduledAt: string | null;
   idempotencyKey: string | null;
   locale: string | null;
+  /** The named driver the send picked (`driver` on the class or the send). */
+  driver: string | null;
   text: string | null;
 }
 
@@ -44,7 +47,7 @@ export function debugEmailFileSubject(subject: string) {
 export async function writeDebugEmail(
   dir: string,
   params: SendEmailParams,
-  options: { locale?: string } = {},
+  options: { locale?: string; driver?: string } = {},
 ) {
   const base = `${dir}/${new Date().toISOString()}${debugEmailFileSubject(params.subject)}`;
 
@@ -52,6 +55,7 @@ export async function writeDebugEmail(
     to: params.to,
     cc: params.cc,
     bcc: params.bcc,
+    replyTo: params.replyTo ?? [],
     from: params.from,
     subject: params.subject,
     headers: params.headers ?? {},
@@ -62,6 +66,7 @@ export async function writeDebugEmail(
     scheduledAt: params.scheduledAt ?? null,
     idempotencyKey: params.idempotencyKey ?? null,
     locale: options.locale ?? null,
+    driver: options.driver ?? null,
     text: params.text ?? null,
   };
 

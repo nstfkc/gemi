@@ -1,6 +1,11 @@
 export type EmailAttachment = {
   filename: string;
   content: Buffer;
+  /**
+   * The MIME type, e.g. `application/pdf`. Optional: a driver that needs one
+   * (`AcsDriver`) infers it from the filename's extension when it's missing.
+   */
+  contentType?: string;
 };
 
 export interface SendEmailParams {
@@ -9,6 +14,8 @@ export interface SendEmailParams {
   subject: string;
   cc: string[];
   bcc: string[];
+  /** Where replies go, when not to `from`. */
+  replyTo?: string[];
   attachments: EmailAttachment[];
   html: string;
   text?: string;

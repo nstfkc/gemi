@@ -76,6 +76,8 @@
         "vitest": "^4.0.0",
       },
       "peerDependencies": {
+        "@azure/communication-email": "^1.1.0",
+        "@azure/identity": "^4.0.0",
         "@azure/storage-blob": "^12.28.0",
         "postgres": "^3.4.0",
         "react": ">=19",
@@ -85,6 +87,8 @@
         "vite": "^8.0.0",
       },
       "optionalPeers": [
+        "@azure/communication-email",
+        "@azure/identity",
         "@azure/storage-blob",
         "postgres",
         "typescript",

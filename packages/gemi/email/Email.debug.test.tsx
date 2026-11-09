@@ -97,6 +97,7 @@ describe("Email.send with EMAIL_DEBUG", () => {
       to: ["ada@example.com"],
       cc: ["cc@example.com"],
       bcc: ["bcc@example.com"],
+      replyTo: [],
       from: "hello@example.com",
       subject: "Welcome to Example",
       headers: {
@@ -108,6 +109,7 @@ describe("Email.send with EMAIL_DEBUG", () => {
       scheduledAt: "2026-10-02T10:00:00.000Z",
       idempotencyKey: null,
       locale: "tr-TR",
+      driver: null,
       text: expect.stringContaining("Ada"),
     });
     expect(driverSend).not.toHaveBeenCalled();
