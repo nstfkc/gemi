@@ -1,3 +1,17 @@
+# Unreleased
+
+## ai: `/attach` can answer "no run in progress" with a 204 (#1211)
+
+**Behaviour change (patch version).**
+
+- `useChat` now sends `emptyMiss: true` with its attach probe, and `AgentController.attach` answers a miss for such a request with `204 No Content` instead of `404 no_live_run`. The browser no longer logs a red error on every page load of a chat with `attach` on. The same 204 is sent for a thread outside a scoped controller's scope, so the two still can't be told apart.
+- `onAttachMiss` fires as before. `reattach()` still resolves `false` on a miss.
+- A request without `emptyMiss` (the Swift and Kotlin clients, an app's own client) still gets the 404 `no_live_run`.
+
+What to check:
+
+- Nothing, unless the app's own code or tests read the attach probe's response: a test that mocks `fetch` and matches the probe's body with `toEqual` needs `emptyMiss: true` added, and code that watches the network for the 404 should treat a 204 as the same miss.
+
 # 0.199.0
 
 ## email: Azure Communication Services driver and named drivers

@@ -963,6 +963,16 @@ describe("AgentController.attach", () => {
     expect(body.error.code).toBe("no_live_run");
   });
 
+  test("answers the miss with a 204 when the client asks for it (#1211)", async () => {
+    const { controller } = attachable("run_c2");
+    const response = await controller.attach(
+      jsonRequest({ threadId: "nothing-here", emptyMiss: true }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
+  });
+
   test("refuses a threadless attach", async () => {
     const { controller } = attachable("run_d");
     const response = await controller.attach(jsonRequest({}));
