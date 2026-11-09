@@ -138,10 +138,12 @@ export class Translator {
     return fallbackLocale;
   }
 
+  /**
+   * The legacy `prefetch` dictionaries for `locale` on `scope`, or `{}` when
+   * there are none: an app without translations, a locale it has none for, or
+   * a page no dictionary is prefetched for (#1199).
+   */
   getPageTranslations(locale: string, scope: string) {
-    if (this.translations[locale][scope]) {
-      return this.translations[locale][scope];
-    }
-    return {};
+    return this.translations[locale]?.[scope] ?? {};
   }
 }

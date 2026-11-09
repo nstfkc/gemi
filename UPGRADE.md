@@ -1,3 +1,12 @@
+# Unreleased
+
+## i18n: the translations route answers an empty dictionary instead of a 500 (#1199)
+
+**Fix, no API change.**
+
+- `GET /api/__gemi__/services/i18n/translations/:locale/:scope*` threw and answered 500 when the app had no translations, or none for the requested locale. It now answers 200 with an empty dictionary for that locale (`{ "<locale>": {} }`), as it already did for a page no dictionary is prefetched for.
+- Nothing to change in an app.
+
 # 0.196.2
 
 ## views: `useId` matches between the server render and hydration (#1200)
