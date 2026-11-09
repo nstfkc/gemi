@@ -1,3 +1,13 @@
+# Unreleased
+
+## views: `useId` matches between the server render and hydration (#1200)
+
+**Fix, no API change.**
+
+- On a hydrated page, every `useId()` returned a different id on the server and in the browser's first render whenever the document did not have exactly two elements (preload links, stylesheets, theme script) in front of the page root, which was nearly always. An id rendered as text threw a recoverable hydration error ("server rendered text didn't match the client", minified React #418) and client-rendered the page; ids in attributes (`htmlFor`, `aria-*`, Radix ids) stayed out of sync with the DOM.
+- The server now groups the preload links in one fragment and the stylesheets and theme script in another, and the browser hydrates the same three-child shape, so the root's position no longer depends on how many there are. They still land in `<head>`.
+- Nothing to change in an app. Ids rendered on the server now differ from the ones earlier versions produced, so a test snapshot that pinned a `useId` value may need updating.
+
 # 0.196.1
 
 ## ai: a retry no longer turns off a fallback leg's first-response deadline

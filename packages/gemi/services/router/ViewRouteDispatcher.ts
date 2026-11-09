@@ -18,6 +18,7 @@ import { resolvePartialRender } from "./planPartialRender";
 import { matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
 import { createElement, Fragment } from "react";
+import { documentChildren } from "../../client/documentTree";
 
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
 import { createRouteManifest } from "./createRouteManifest";
@@ -1035,24 +1036,28 @@ export class ViewRouteDispatcher {
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
-            children: [
+            // Three children whatever the number of links and styles, as the
+            // browser hydrates them, so `useId` agrees (#1200).
+            children: documentChildren(
               // React hoists these into `<head>`, ahead of the inlined
               // stylesheets, so the browser starts the fetches on the shell's
               // first bytes.
-              ...preloadLinks,
-              ...styles,
-              ...(theme
-                ? [
-                    createElement("script", {
-                      key: "theme-script",
-                      dangerouslySetInnerHTML: {
-                        __html: themeScriptSource(
-                          htmlSafeJson({ cookie: theme.cookie, default: theme.default }),
-                        ),
-                      },
-                    }),
-                  ]
-                : []),
+              preloadLinks,
+              [
+                ...styles,
+                ...(theme
+                  ? [
+                      createElement("script", {
+                        key: "theme-script",
+                        dangerouslySetInnerHTML: {
+                          __html: themeScriptSource(
+                            htmlSafeJson({ cookie: theme.cookie, default: theme.default }),
+                          ),
+                        },
+                      }),
+                    ]
+                  : []),
+              ],
               createElement(Root, {
                 data: result.data,
                 viewImportMap,
@@ -1061,7 +1066,7 @@ export class ViewRouteDispatcher {
                 dictionarySink,
                 key: "root",
               }),
-            ],
+            ),
           }),
           {
             bootstrapScriptContent: bootstrapScriptContent(
