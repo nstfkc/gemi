@@ -44,10 +44,13 @@ import type { AgentError, Usage } from "./types";
 export type FallbackEntry = {
   provider: AgentProvider;
   /**
-   * How long this leg has to produce its FIRST event, in milliseconds. Past
-   * that it is abandoned (its request aborted) and the next leg is tried. Once
-   * any event has arrived, this deadline is off and the leg's own request
-   * timeout applies — a slow answer that has started is not a dead one.
+   * How long this leg has to produce its first CONTENT event (text,
+   * reasoning, a tool call, structured output), in milliseconds, counted from
+   * the leg's start. Past that it is abandoned (its request aborted) and the
+   * next leg is tried. A `retry` event does not stop or restart it: a leg
+   * whose provider is retrying a 429 has not answered yet. Once content has
+   * arrived, this deadline is off and the leg's own request timeout applies —
+   * a slow answer that has started is not a dead one.
    *
    * Omitted: no deadline of the chain's own.
    */
@@ -338,24 +341,27 @@ export class FallbackProvider extends AgentProvider {
           })
           [Symbol.asyncIterator]();
 
-        let first = true;
+        // One deadline from the leg's start to its first content event, not one
+        // per event: a `retry` (or a held error) is not an answer, and the
+        // provider's own retry going silent after it is exactly the hung leg
+        // this deadline exists for.
+        const deadlineAt = entry.timeoutMs !== undefined ? Date.now() + entry.timeoutMs : undefined;
         for (;;) {
           const next =
-            first && entry.timeoutMs !== undefined
-              ? await withDeadline(iterator.next(), entry.timeoutMs)
+            !committed && deadlineAt !== undefined
+              ? await withDeadline(iterator.next(), Math.max(0, deadlineAt - Date.now()))
               : await iterator.next();
           if (next === TIMED_OUT) {
             timedOut = true;
             failure = {
               error: {
                 code: "provider_error",
-                message: `${model} sent nothing within ${entry.timeoutMs}ms.`,
+                message: `${model} did not start answering within ${entry.timeoutMs}ms.`,
                 retryable: true,
               },
             };
             break;
           }
-          first = false;
           if (next.done) {
             done = true;
             break;

@@ -377,7 +377,7 @@ describe("FallbackProvider", () => {
       expect(reports[0]?.error?.retryable).toBe(true);
     });
 
-    test("the deadline is for the first event only", async () => {
+    test("the deadline is for the first content event only", async () => {
       const slow = {
         model: "slow",
         capabilities: leg("x").capabilities,
@@ -400,6 +400,125 @@ describe("FallbackProvider", () => {
 
       expect(text(await collect(chain.stream({ messages: [] })))).toBe("ab");
       expect(secondary.calls).toHaveLength(0);
+    });
+
+    /**
+     * The primary answers 429 and its provider asks again, sending a `retry`
+     * event; then, optionally after `delayMs`, `then` — or, without it, the
+     * retried request goes silent until the leg is aborted.
+     */
+    function retriesThen(model: string, then?: { delayMs: number; events: ProviderEvent[] }) {
+      const seen: { aborted: boolean }[] = [];
+      const provider = {
+        model,
+        capabilities: leg("x").capabilities,
+        seen,
+        stream(params: ProviderStreamParams) {
+          const record = { aborted: false };
+          seen.push(record);
+          return (async function* (): AsyncGenerator<ProviderEvent> {
+            yield { type: "retry", ...retryInfo };
+            const aborted = new Promise<"aborted">((resolve) => {
+              params.signal?.addEventListener("abort", () => {
+                record.aborted = true;
+                resolve("aborted");
+              });
+            });
+            if (then) {
+              const woke = await Promise.race([
+                aborted,
+                new Promise<"woke">((r) => setTimeout(() => r("woke"), then.delayMs)),
+              ]);
+              if (woke === "woke") {
+                yield* then.events;
+                return;
+              }
+            } else {
+              await aborted;
+            }
+            yield { type: "finish", reason: "aborted", usage: usage(0, 0) };
+          })();
+        },
+        upload: async () => "f",
+        normalizeError: () => ({ code: "unknown" as const, message: "", retryable: false }),
+      };
+      return provider as unknown as AgentProvider & { seen: { aborted: boolean }[] };
+    }
+
+    const retryInfo = {
+      attempt: 1,
+      maxRetries: 2,
+      error: retryable,
+      status: 429,
+      phase: "request" as const,
+      timedOut: false,
+      delayMs: 0,
+      elapsedMs: 0,
+    };
+
+    test("a 429 whose retry goes silent still falls back within timeoutMs (#1197 regression)", async () => {
+      const primary = retriesThen("a");
+      const secondary = leg("b", [{ type: "text-delta", delta: "b" }, finish()]);
+      const reports: FallbackUsage[] = [];
+      const chain = FallbackProvider.chain(
+        [{ provider: primary, timeoutMs: 30 }, { provider: secondary }],
+        { onUsage: (r) => reports.push(r) },
+      );
+
+      const started = Date.now();
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(text(events)).toBe("b");
+      expect(primary.seen[0]?.aborted).toBe(true);
+      expect(reports[0]).toMatchObject({ index: 0, outcome: "fallback" });
+    });
+
+    test("a retry is passed on before the fallback, in order", async () => {
+      const primary = retriesThen("a");
+      const secondary = leg("b", [{ type: "text-delta", delta: "b" }, finish()]);
+      const chain = FallbackProvider.chain([
+        { provider: primary, timeoutMs: 20 },
+        { provider: secondary },
+      ]);
+
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(events.map((e) => e.type)).toEqual(["retry", "text-delta", "finish"]);
+      expect(events[0]).toEqual({ type: "retry", ...retryInfo });
+    });
+
+    test("a retry, then content within the deadline: no fallback", async () => {
+      const primary = retriesThen("a", {
+        delayMs: 10,
+        events: [{ type: "text-delta", delta: "a" }, finish()],
+      });
+      const secondary = leg("b", [{ type: "text-delta", delta: "b" }, finish()]);
+      const chain = FallbackProvider.chain([
+        { provider: primary, timeoutMs: 200 },
+        { provider: secondary },
+      ]);
+
+      const events = await collect(chain.stream({ messages: [] }));
+      expect(text(events)).toBe("a");
+      expect(events[0]?.type).toBe("retry");
+      expect(primary.seen[0]?.aborted).toBe(false);
+      expect(secondary.calls).toHaveLength(0);
+    });
+
+    test("the deadline counts from the leg's start, not from its last retry", async () => {
+      // Content arrives 60ms after the retry, 60ms after the leg started: past
+      // a 30ms deadline however the time is split.
+      const primary = retriesThen("a", {
+        delayMs: 60,
+        events: [{ type: "text-delta", delta: "a" }, finish()],
+      });
+      const secondary = leg("b", [{ type: "text-delta", delta: "b" }, finish()]);
+      const chain = FallbackProvider.chain([
+        { provider: primary, timeoutMs: 30 },
+        { provider: secondary },
+      ]);
+
+      expect(text(await collect(chain.stream({ messages: [] })))).toBe("b");
+      expect(primary.seen[0]?.aborted).toBe(true);
     });
 
     test("fallbackOn is told the leg timed out", async () => {

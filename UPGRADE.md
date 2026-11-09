@@ -1,3 +1,12 @@
+# Unreleased
+
+## ai: a retry no longer turns off a fallback leg's first-response deadline
+
+**Fix, no API change.** See [AI Providers](docs/ai-providers.md).
+
+- Since 0.196.0, a `FallbackProvider` leg's `timeoutMs` stopped applying once the leg sent a `retry` event. A primary that answered `429` and whose retried request then went silent never fell back; the call waited for the caller's own timeout. The deadline now runs from the leg's start until its first content event (text, reasoning, a tool call or structured output), and `retry` events neither end nor restart it. They are still passed on as they happen.
+- The timed-out leg's error message now reads "`<model>` did not start answering within `<n>`ms." instead of "sent nothing within".
+
 # 0.196.0
 
 ## ai: provider retries are observable (#1192)
