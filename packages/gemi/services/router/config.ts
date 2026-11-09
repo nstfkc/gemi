@@ -201,7 +201,7 @@ export interface ViewRouteConfig {
 
   /**
    * Sends a strict Content Security Policy with these views' documents
-   * (#1195): `script-src 'nonce-…' 'strict-dynamic'; object-src 'none';
+   * (#1195): `script-src 'nonce-…' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none';
    * base-uri 'self'`. The nonce is the request's (`cspNonce()`), which gemi
    * puts on every inline script it renders, so a hydrated page runs with no
    * `'unsafe-inline'`. A static view (`.static()`) gets the hashes of the

@@ -12,6 +12,8 @@ export interface StrictCspOptions {
   reportUri?: string;
 }
 
+const STRICT_FALLBACKS = "'strict-dynamic' 'self' https: 'unsafe-inline'";
+
 const CSP_HEADER = "Content-Security-Policy";
 const CSP_REPORT_ONLY_HEADER = "Content-Security-Policy-Report-Only";
 
@@ -33,7 +35,13 @@ export function strictCspPolicy(
   ];
   const directives = [
     // Nothing to allow (a static page without scripts): nothing runs.
-    scriptSources.length > 0 ? `script-src ${scriptSources.join(" ")} 'strict-dynamic'` : "script-src 'none'",
+    // `'self' https: 'unsafe-inline'` are for browsers without CSP level 3:
+    // one that knows `'strict-dynamic'` ignores `'self'` and `https:`, and one
+    // that knows nonces or hashes ignores `'unsafe-inline'`. An older browser
+    // degrades to a looser policy instead of blocking the page's own chunks.
+    scriptSources.length > 0
+      ? `script-src ${scriptSources.join(" ")} ${STRICT_FALLBACKS}`
+      : "script-src 'none'",
     "object-src 'none'",
     "base-uri 'self'",
   ];

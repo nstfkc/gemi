@@ -5190,8 +5190,14 @@ export default defineRouteConfig({
 Every document of these views then gets:
 
 ```
-Content-Security-Policy: script-src 'nonce-…' 'strict-dynamic'; object-src 'none'; base-uri 'self'
+Content-Security-Policy: script-src 'nonce-…' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'
 ```
+
+`'self' https: 'unsafe-inline'` are fallbacks for browsers without CSP level 3.
+A browser that supports `'strict-dynamic'` ignores `'self'` and `https:`, and
+one that supports nonces ignores `'unsafe-inline'`, so a current browser
+enforces only the nonce while an older one gets a looser policy instead of a
+broken page.
 
 `'strict-dynamic'` hands the nonce's trust to what the trusted scripts load,
 so the client entry, route chunks and islands need no allowlist, even from a

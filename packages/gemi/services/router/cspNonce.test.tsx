@@ -209,7 +209,7 @@ describe("CSP nonces on a hydrated page (#1195)", () => {
     const { res, html } = await load(strictApp, "/public");
     const nonce = res.headers.get("X-Global-Nonce")!;
     expect(res.headers.get("Content-Security-Policy")).toBe(
-      `script-src 'nonce-${nonce}' 'strict-dynamic'; object-src 'none'; base-uri 'self'`,
+      `script-src 'nonce-${nonce}' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'`,
     );
     expect(html).toContain(`nonce="${nonce}"`);
   });
@@ -218,7 +218,7 @@ describe("CSP nonces on a hydrated page (#1195)", () => {
     const { res } = await load(reportOnlyApp, "/public");
     expect(res.headers.get("Content-Security-Policy")).toBeNull();
     expect(res.headers.get("Content-Security-Policy-Report-Only")).toMatch(
-      /^script-src 'nonce-[^']+' 'strict-dynamic'; object-src 'none'; base-uri 'self'; report-uri \/csp-reports$/,
+      /^script-src 'nonce-[^']+' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'; report-uri \/csp-reports$/,
     );
   });
 
@@ -253,12 +253,24 @@ describe("static views (#1195)", () => {
     expect(inline).toHaveLength(1);
     const hash = `'sha256-${createHash("sha256").update(inline[0]).digest("base64")}'`;
     expect(res.headers.get("Content-Security-Policy")).toBe(
-      strictCspPolicy({ hashes: [hash] }),
+      `script-src ${hash} 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'`,
     );
   });
 
   test("one whose request asked for a nonce is lowered to private caching", async () => {
     const { res } = await load(strictStaticApp, "/static-nonced");
     expect(res.headers.get("Cache-Control")).toBe("private, max-age=60");
+  });
+});
+
+describe("strictCspPolicy (#1195)", () => {
+  test("is the strict policy with the CSP level 2 fallbacks, exactly", () => {
+    expect(strictCspPolicy({ nonce: "abc", hashes: ["'sha256-x'"] }, { reportUri: "/r" })).toBe(
+      "script-src 'nonce-abc' 'sha256-x' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'; report-uri /r",
+    );
+  });
+
+  test("allows no script when there is nothing to allow", () => {
+    expect(strictCspPolicy({})).toBe("script-src 'none'; object-src 'none'; base-uri 'self'");
   });
 });

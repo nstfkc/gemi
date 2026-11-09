@@ -7,7 +7,7 @@
 - Every inline `<script>` and `<style>` gemi renders into a hydrated page now carries a per-request nonce: the page data, the theme script, streamed query and dictionary payloads, React's own streaming and bootstrap scripts, the inlined stylesheets, the `Meta.fonts` style and the `modulepreload` links. A strict `script-src` no longer needs `'unsafe-inline'`.
 - `cspNonce()` from `gemi/http` (and `req.cspNonce()`) answers that nonce, for the app's own CSP header. It is the same in `global` middleware, route middleware and handlers.
 - `useCspNonce()` from `gemi/client` gives it to a component's own inline script (`<script nonce={nonce} suppressHydrationWarning>`).
-- `route.view.csp: true` (or `{ reportOnly, reportUri }`) makes gemi send `script-src 'nonce-…' 'strict-dynamic'; object-src 'none'; base-uri 'self'` with every document of those views. A static view gets the hashes of gemi's inline scripts instead of a nonce. A `Content-Security-Policy` the app set itself wins.
+- `route.view.csp: true` (or `{ reportOnly, reportUri }`) makes gemi send `script-src 'nonce-…' 'strict-dynamic' 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'` with every document of those views. A static view gets the hashes of gemi's inline scripts instead of a nonce. A `Content-Security-Policy` the app set itself wins.
 - `strictCspPolicy` and the `StrictCspOptions` type are exported from `gemi/services`.
 
 What to check:
