@@ -1,4 +1,4 @@
-# Unreleased
+# 0.198.0
 
 ## views: CSP nonces for gemi's inline scripts (#1195)
 
