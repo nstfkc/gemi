@@ -22,6 +22,18 @@ What to check:
   "/backups": this.post(BackupController, "store").middleware("body-limit:none"),
   ```
 
+- **JSON endpoints that can pass 1 MiB.** A JSON body never counts as an upload, so these get the plain 1 MiB default. Typical ones: an editor saving a whole document or page (rich-text or block JSON, a canvas or design file, a spreadsheet), autosave endpoints that send the full state, base64-encoded images or files inside a JSON body (pasted screenshots in a chat message sent to your own route; an agent's `stream` route is bounded by `maxBodyBytes` instead, raised with `protected maxBodyBytes = 16 * 1024 * 1024`, an avatar cropped on the client, a signature pad), bulk endpoints (a CSV import parsed to JSON in the browser, batch create/update, offline sync queues), exports posted back for re-import, and inbound webhooks from services with large payloads. Raise the limit on that route only, and keep the default elsewhere:
+
+  ```typescript
+  "/documents/:id": this.put(DocumentController, "update").middleware("body-limit:10mb"),
+  "/sync": this.post(SyncController, "push").middleware(["auth", "body-limit:25mb"]),
+  // or for every route of a router
+  class EditorRouter extends ApiRouter {
+    middlewares = ["auth", "body-limit:10mb"];
+  }
+  ```
+
+  For files, prefer multipart over base64 in JSON: a multipart body with a file-rules schema gets the upload default by itself, and base64 is a third larger.
 - **Uploads over 50 MiB**: raise `uploadBodyLimit`, or give the route its own `body-limit`. A chat whose `attachmentLimits().maxBytes` is over 50 MiB: `this.agent(ChatController).middleware({ upload: "body-limit:200mb" })`.
 - **Raising or turning off the default for the whole app**:
 
@@ -32,6 +44,13 @@ What to check:
     uploadBodyLimit: "500mb",
   });
   ```
+
+## i18n: the translations route answers an empty dictionary instead of a 500 (#1199)
+
+**Fix, no API change.**
+
+- `GET /api/__gemi__/services/i18n/translations/:locale/:scope*` threw and answered 500 when the app had no translations, or none for the requested locale. It now answers 200 with an empty dictionary for that locale (`{ "<locale>": {} }`), as it already did for a page no dictionary is prefetched for.
+- Nothing to change in an app.
 
 # 0.196.2
 
