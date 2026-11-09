@@ -611,8 +611,17 @@ export type AgentRequestBody = {
  * `runId` says which run the cursor counts within. Absent, or naming a run that
  * is not the live one, the cursor cannot be honoured and the run has to be
  * replayed from the start.
+ *
+ * `emptyMiss` asks for "no run in progress" as a `204 No Content` rather than
+ * a 404 `no_live_run` (#1211), which a browser logs as an error. `useChat`
+ * always sends it; a client that leaves it out keeps getting the 404.
  */
-export type AgentAttachBody = { threadId: string; cursor: number; runId?: string };
+export type AgentAttachBody = {
+  threadId: string;
+  cursor: number;
+  runId?: string;
+  emptyMiss?: boolean;
+};
 
 /**
  * What `POST /api<path>/stop` receives.
@@ -1801,14 +1810,18 @@ export function useChat<P extends keyof AgentRoutes>(
           // start — the case for a run another client started.
           cursor: seq,
           ...(cursorRunId ? { runId: cursorRunId } : {}),
+          // A miss as a 204, so the probe every page load makes is not a red
+          // 404 in the console (#1211). A server from before it ignores this
+          // and answers 404, which reads as the same miss below.
+          emptyMiss: true,
         };
         const response = await post(`${requestRef.current.base}/attach`, body, controller.signal);
         // Nothing running is the ordinary answer, not a failure: the route says
-        // so with an empty response and the screen simply stays as it was —
-        // except that on more than one instance it is also what a refresh
-        // routed away from its run gets, which is not ordinary at all. The
-        // client cannot tell; `onAttachMiss` is how an app that runs more than
-        // one process gets to react.
+        // so with a 204 (a 404 from an older server) and the screen simply
+        // stays as it was — except that on more than one instance it is also
+        // what a refresh routed away from its run gets, which is not ordinary
+        // at all. The client cannot tell; `onAttachMiss` is how an app that
+        // runs more than one process gets to react.
         if (!response.ok || response.status === 204 || !response.body) {
           if (missed) handlers.current.onAttachMiss?.({ threadId });
           return false;

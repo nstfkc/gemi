@@ -271,6 +271,13 @@ describe("AgentController.storeScope", () => {
       expect(other.status).toBe(404);
       expect(await other.json()).toMatchObject({ error: { code: "no_live_run" } });
 
+      // Asked for an empty miss, another scope's thread is the same 204 as
+      // no run at all (#1211).
+      const quiet = await as("org-b", "/attach", { threadId, emptyMiss: true }, (c, r) =>
+        c.attach(r),
+      );
+      expect(quiet.status).toBe(204);
+
       const own = await as("org-a", "/attach", { threadId }, (c, r) => c.attach(r));
       expect(own.status).toBe(200);
       open();

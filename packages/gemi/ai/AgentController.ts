@@ -2345,7 +2345,11 @@ export abstract class AgentController<
     await this.authorizeRequest(req, { route: "attach", threadId });
     // A scoped controller (#1177) answers only for its scope's threads: a run
     // on another tenant's thread is a miss here, as no run at all is.
-    if (!(await this.threadInScope(req, threadId))) return noLiveRun(threadId);
+    // `emptyMiss` is the client asking for the miss as a 204 (#1211): a 404 is
+    // logged as a red console error on every page load of a chat that probes on
+    // mount. Without it the miss stays the 404 older clients check for.
+    const emptyMiss = body.emptyMiss === true;
+    if (!(await this.threadInScope(req, threadId))) return noLiveRun(threadId, emptyMiss);
 
     // Unscoped, the store is not consulted. This route answers whether a run is in
     // flight here, and a run it finds was started on a thread `stream` had
@@ -2361,8 +2365,8 @@ export abstract class AgentController<
     if (!live) {
       // An explicit miss, not a 200 with an empty stream. See `MemoryLiveRuns`:
       // behind a round-robin load balancer this is the common case, and it has
-      // to be visible as one.
-      return noLiveRun(threadId);
+      // to be visible as one: a 404, or the 204 the client asked for.
+      return noLiveRun(threadId, emptyMiss);
     }
 
     // A cursor is only a number if you know which run it counts within: `seq`
@@ -4774,7 +4778,14 @@ function scopedStore(store: AgentStore, scope: string): AgentStore {
   return store.forScope(scope);
 }
 
-function noLiveRun(threadId: string): Response {
+/**
+ * `/attach`'s miss: a 204 when the client sent `emptyMiss` (#1211), otherwise
+ * the 404 `no_live_run` that clients written before it check for.
+ */
+function noLiveRun(threadId: string, empty = false): Response {
+  if (empty) {
+    return new Response(null, { status: 204 });
+  }
   return jsonResponse(404, {
     code: "no_live_run",
     message: `No run in progress for thread ${threadId} in this process.`,

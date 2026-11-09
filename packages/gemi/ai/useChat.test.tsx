@@ -876,7 +876,7 @@ describe("attach on mount", () => {
     });
 
     expect(calls()[0]![0]).toBe("/api/chat/attach");
-    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1 });
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1, emptyMiss: true });
     // The tail of a message this client never saw start.
     expect(box.api.messages).toHaveLength(1);
     expect(box.api.messages[0]!.content).toEqual([{ type: "text", text: "Hi there." }]);
@@ -884,8 +884,9 @@ describe("attach on mount", () => {
   });
 
   test("reports a miss, because on more than one instance it is not a miss", async () => {
-    // 404 is what the route answers for a thread with nothing running AND for
-    // a refresh routed to an instance that is not the one holding the run.
+    // A 404 (from a server older than #1211) is what the route answers for a
+    // thread with nothing running AND for a refresh routed to an instance that
+    // is not the one holding the run.
     // Neither end can tell them apart, so the client hands the ambiguity to the
     // app rather than deciding it is nothing.
     const seen: { threadId: string }[] = [];
@@ -903,6 +904,31 @@ describe("attach on mount", () => {
 
     expect(seen).toEqual([{ threadId: "th_9" }]);
     // And it still leaves the client where one without `attach` would be.
+    expect(box.api.messages).toHaveLength(0);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("asks for the miss as a 204 and reports a 204 as a miss (#1211)", async () => {
+    // A 404 on every page load is a red console error for something that is
+    // not one, so the probe asks for an empty answer instead.
+    const seen: { threadId: string }[] = [];
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const { box } = mount({
+      threadId: "th_9",
+      onAttachMiss: (p: { threadId: string }) => seen.push(p),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/chat/attach");
+    expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({
+      threadId: "th_9",
+      emptyMiss: true,
+    });
+    expect(seen).toEqual([{ threadId: "th_9" }]);
     expect(box.api.messages).toHaveLength(0);
     expect(box.api.status).toBe("idle");
   });
@@ -934,7 +960,7 @@ describe("attach on mount", () => {
     // Both halves, and the run id is not decoration: frames number from zero in
     // every run, so "I got to 3" says nothing until the server knows which run
     // reached 3. Given the pair it can resume; given a mismatch it must replay.
-    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: 3, runId: "run_1" });
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: 3, runId: "run_1", emptyMiss: true });
   });
 
   test("a full replay onto a restored transcript does not print the answer twice", async () => {
@@ -3074,7 +3100,7 @@ describe("reattach()", () => {
       attached = box.api.reattach();
     });
     expect(calls()[0]![0]).toBe("/api/chat/attach");
-    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1 });
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1, emptyMiss: true });
 
     await act(async () => {
       run.push(...ELSEWHERE.slice(0, 4));
@@ -3136,7 +3162,7 @@ describe("reattach()", () => {
     });
 
     expect(calls()[1]![0]).toBe("/api/chat/attach");
-    expect(bodyOf(1)).toEqual({ threadId: "th_9", cursor: 4, runId: "run_1" });
+    expect(bodyOf(1)).toEqual({ threadId: "th_9", cursor: 4, runId: "run_1", emptyMiss: true });
   });
 
   test("nothing running answers false, quietly", async () => {
