@@ -97,8 +97,11 @@ function loadedBy() {
  * Scrolls for a navigation that has just committed, once per navigation:
  * - a push or replace goes to the top, or to the `#hash` element when there is one;
  * - back/forward goes back to where the entry was left (the hash, or the top,
- *   for an entry without a position);
- * - a shallow navigation stays where it is: the page on screen did not change;
+ *   for an entry without a position), whether or not a shallow navigation made
+ *   it: a filtered list (`searchParams.push()`) is returned to from a detail
+ *   page with a full navigation, and the browser no longer restores it;
+ * - a shallow push or replace stays where it is: the page on screen did not
+ *   change (nor does a back/forward to a shallow entry nothing was saved for);
  * - the page a document loaded on is restored only on a reload or a
  *   back/forward to it; otherwise the browser has placed it (at its `#hash`).
  */
@@ -117,11 +120,11 @@ export function restoreScroll(navigation: {
     }
     return;
   }
-  if (navigation.shallow) return;
   if (navigation.action === Action.Pop && saved !== undefined) {
     window.scrollTo(0, saved);
     return;
   }
+  if (navigation.shallow) return;
   if (navigation.hash.length > 1) {
     let id = navigation.hash.slice(1);
     try {
