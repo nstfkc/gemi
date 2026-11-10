@@ -3,6 +3,7 @@ import { RequestContext } from "../http/requestContext";
 import type {
   AgentProvider,
   ProviderRetryInfo,
+  ProviderToolChoice,
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "./AgentProvider";
@@ -1673,6 +1674,13 @@ export type PrepareStepContext<Ctx = AgentContext> = {
   /** The output ceiling this call would send, chosen the same way. */
   maxOutputTokens: number | undefined;
   /**
+   * The tool names this call would offer, when an earlier hook narrowed them
+   * with `activeTools`. `undefined`: every tool the run offers.
+   */
+  activeTools: readonly string[] | undefined;
+  /** The `toolChoice` an earlier hook answered. `undefined`: the model chooses. */
+  toolChoice: ProviderToolChoice | undefined;
+  /**
    * The app's own fields from the turn's request body, as tools get them in
    * `ToolContext.body`. CLIENT-CONTROLLED: read the user from `context`.
    */
@@ -1721,6 +1729,28 @@ export type PrepareStepResult = {
   reasoning?: ReasoningEffort;
   /** The output ceiling for this call alone. See `CreateAgentParams.maxOutputTokens`. */
   maxOutputTokens?: number;
+  /**
+   * The tools this call alone offers (#1010): names of the run's tools, run
+   * tools or namespaces (a namespace name offers all of it), like
+   * `AgentStreamParams.activeTools` but for one model call. The rest aren't
+   * sent, and a call the model makes to one anyway is answered as a call to a
+   * tool that doesn't exist. Skills and memory tools are always kept. A name
+   * the run doesn't offer fails the run. The next step offers the run's tools
+   * again.
+   *
+   * The provider's prompt cache keys on the tool list, so a step with a
+   * different list misses it. To keep the prefix, answer `toolChoice: "none"`
+   * (no tool on this call) or have the tool refuse in `execute` instead.
+   */
+  activeTools?: readonly string[];
+  /**
+   * Whether the model must call a tool on this call alone (#1010):
+   * `"auto"` (it chooses, the default), `"required"` (some tool), `"none"`
+   * (text only; the tools are still sent, so the prompt prefix is the same),
+   * or `{ name }` (that tool, which must be offered on this call). The next
+   * step goes back to the model's choice.
+   */
+  toolChoice?: ProviderToolChoice;
 };
 
 /**
@@ -2927,6 +2957,31 @@ function withActiveTools(
   return { ...config, providerTools, offered };
 }
 
+/**
+ * Why a step's `toolChoice` (#1010) can't be sent, or `undefined` when it can.
+ * A forced tool has to be a tool (not a namespace) this call offers.
+ */
+function toolChoiceProblem(
+  choice: ProviderToolChoice,
+  tools: readonly (ProviderToolSpec | ProviderToolNamespace)[],
+  offered: ReadonlySet<string> | undefined,
+  registry: ReadonlyMap<string, unknown>,
+): string | undefined {
+  if (choice === "auto" || choice === "none") return undefined;
+  if (choice === "required") {
+    return tools.length > 0
+      ? undefined
+      : 'answered `toolChoice: "required"`, but this call offers no tools.';
+  }
+  if (typeof choice !== "object" || choice === null || typeof choice.name !== "string") {
+    return `answered \`toolChoice\` ${JSON.stringify(choice)}, which is not "auto", "required", "none" or { name }.`;
+  }
+  if (!registry.has(choice.name) || (offered && !offered.has(choice.name))) {
+    return `answered \`toolChoice\` naming "${choice.name}", which is not a tool this call offers.`;
+  }
+  return undefined;
+}
+
 /** The zero-parameter tool a skill becomes. */
 function skillTool(skill: SkillDefinition): AnyAgentTool {
   return AgentTool.create({
@@ -3295,6 +3350,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly compactMemo = new Map<string, ThreadSummary | null>();
   /** How the previous model call ended, for `prepareStep`. */
   private lastStep: { reason: FinishReason; usage?: Usage } | undefined;
+  /** The tools the current step offers, when its `prepareStep` narrowed them (#1010). */
+  private stepOffered: ReadonlySet<string> | undefined;
   private produced: AgentMessage[] = [];
   private current: AgentMessage | null = null;
   /**
@@ -4077,8 +4134,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const signal = this.controller.signal;
     const provider = this.config.provider;
 
+    this.stepOffered = undefined;
     const request = await this.prepareRequest(message, step);
     if ("error" in request) return { reason: "error", error: request.error };
+    this.stepOffered = request.offered;
 
     let outcome: StepOutcome = { reason: "stop" };
     const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
@@ -4099,7 +4158,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // is cut to the context window. See `prepareRequest`.
       messages: request.messages,
       systemPrompt: request.instructions,
-      tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
+      tools: request.tools.length > 0 ? request.tools : undefined,
+      ...(request.toolChoice !== undefined ? { toolChoice: request.toolChoice } : {}),
       output: this.config.output ? outputFormat(this.config.output) : undefined,
       reasoning: request.reasoning,
       maxOutputTokens: request.maxOutputTokens,
@@ -4392,6 +4452,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         instructions: string | undefined;
         reasoning: ReasoningEffort | undefined;
         maxOutputTokens: number | undefined;
+        tools: (ProviderToolSpec | ProviderToolNamespace)[];
+        /** The tools this call offers, when `activeTools` narrowed them. */
+        offered: ReadonlySet<string> | undefined;
+        toolChoice: ProviderToolChoice | undefined;
       }
     | { error: AgentError }
   > {
@@ -4414,6 +4478,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     let instructions = await this.systemPrompt();
     let reasoning = this.config.reasoning;
     let maxOutputTokens = this.config.maxOutputTokens;
+    let activeTools: readonly string[] | undefined;
+    let toolChoice: ProviderToolChoice | undefined;
 
     for (const hook of this.config.prepareStep) {
       let answer: PrepareStepResult | void;
@@ -4425,6 +4491,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           instructions,
           reasoning,
           maxOutputTokens,
+          activeTools,
+          toolChoice,
           body: this.params.body ?? {},
           usage: this.usage,
           ...(this.lastStep?.usage ? { lastStepUsage: this.lastStep.usage } : {}),
@@ -4459,9 +4527,47 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (answer.instructions !== undefined) instructions = answer.instructions || undefined;
       if (answer.reasoning !== undefined) reasoning = answer.reasoning;
       if (answer.maxOutputTokens !== undefined) maxOutputTokens = answer.maxOutputTokens;
+      if (answer.activeTools !== undefined) activeTools = answer.activeTools;
+      if (answer.toolChoice !== undefined) toolChoice = answer.toolChoice;
     }
 
-    return { messages, instructions, reasoning, maxOutputTokens };
+    let tools = this.config.providerTools;
+    let offered = this.config.offered;
+    if (activeTools) {
+      try {
+        ({ providerTools: tools, offered } = withActiveTools(
+          this.config,
+          activeTools,
+          `prepareStep (step ${step})`,
+        ));
+      } catch (error) {
+        return {
+          error: {
+            code: "unknown",
+            message: error instanceof Error ? error.message : String(error),
+            retryable: false,
+          },
+        };
+      }
+    }
+    if (toolChoice !== undefined) {
+      const problem = toolChoiceProblem(toolChoice, tools, offered, this.config.registry);
+      if (problem) {
+        return {
+          error: { code: "unknown", message: `prepareStep ${problem}`, retryable: false },
+        };
+      }
+    }
+
+    return {
+      messages,
+      instructions,
+      reasoning,
+      maxOutputTokens,
+      tools,
+      offered: activeTools ? offered : undefined,
+      toolChoice,
+    };
   }
 
   private async systemPrompt(): Promise<string | undefined> {
@@ -4492,9 +4598,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     for (const call of calls) {
       const name = String(call.name);
-      // A tool the run did not offer (`activeTools`, #1123) is answered as one
-      // that does not exist: the model was never shown it.
-      const offered = !this.config.offered || this.config.offered.has(name);
+      // A tool the run did not offer (`activeTools`, #1123), or this step did
+      // not (`PrepareStepResult.activeTools`, #1010), is answered as one that
+      // does not exist: the model was never shown it.
+      const shown = this.stepOffered ?? this.config.offered;
+      const offered = !shown || shown.has(name);
       const resolved = offered ? this.config.registry.get(name) : undefined;
 
       if (!resolved) {

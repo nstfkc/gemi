@@ -9223,7 +9223,7 @@ export const assistant = Agent.create({
 });
 ```
 
-It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, `reasoning` and `maxOutputTokens` (what the call would send), the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context`, `body` (the request body fields, client-controlled as in `ToolContext.body`) and `signal`. It answers `{ messages?, instructions?, reasoning?, maxOutputTokens? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
+It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, `reasoning` and `maxOutputTokens` (what the call would send), the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context`, `body` (the request body fields, client-controlled as in `ToolContext.body`) and `signal`. It also gets `activeTools` and `toolChoice` (what an earlier hook answered, else `undefined`). It answers `{ messages?, instructions?, reasoning?, maxOutputTokens?, activeTools?, toolChoice? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
 
 `Agent.stream({ prepareStep })` runs after the agent's own, on what that answered. On a controller, override the method; it gets the turn's hook context too:
 
@@ -9271,6 +9271,28 @@ class SiteChat extends AgentController {
   }
 }
 ```
+
+### Tools per step
+
+`activeTools` and `toolChoice` in the answer change which tools that model call is offered, and whether it must call one. The next step goes back to the run's tools and the model's choice.
+
+```typescript
+export const siteAgent = Agent.create({
+  name: "site",
+  provider,
+  tools: [edit, publish, askUser],
+  prepareStep: ({ step, context }) => {
+    // The app's own turns can't ask the user anything.
+    if (!context.interactive) return { activeTools: ["edit", "publish"] };
+    // Make the first step of a publish turn call `publish`.
+    if (step === 1 && context.publishing) return { toolChoice: { name: "publish" } };
+  },
+});
+```
+
+- **`activeTools`** names the run's tools, run tools or namespaces (a namespace name offers all of it), like [`activeTools` on the run](./ai-agent-context.md#tools-per-turn), for one call. Skills and memory tools are always kept. A call the model makes to a tool left out is answered as a call to a tool that doesn't exist. A name the run doesn't offer fails the run.
+- **`toolChoice`** is `"auto"` (the model chooses, the default), `"required"` (some tool), `"none"` (text only) or `{ name }` (that tool, which has to be offered on this call). Forcing a tool the call doesn't offer, or `"required"` with no tools, fails the run before the call.
+- **Prompt cache.** The provider's prompt cache keys on the tool list, so a step with a different `activeTools` misses it. `toolChoice` keeps the tool list: `"none"` stops tool calls on one step without changing the prefix. To keep a tool off for a whole turn, prefer `activeTools` on the run (`runTools()` on a controller), which keeps the list the same across the turn's steps; to hide a tool on some steps only, choose between `activeTools` here and having the tool refuse in `execute`.
 
 ## Turns
 
