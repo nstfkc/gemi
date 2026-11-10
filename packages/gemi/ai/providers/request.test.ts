@@ -847,6 +847,18 @@ describe("buildResponsesRequest()", () => {
     expect(build({ tools }, { ...FULL, parallelToolCalls: false }).parallel_tool_calls).toBe(false);
   });
 
+  test("tool_choice is sent only when set, and only with tools (#1010)", () => {
+    const tools = [tool({ name: "bash" })];
+    expect(build({ tools }).tool_choice).toBeUndefined();
+    expect(build({ tools, toolChoice: "none" }).tool_choice).toBe("none");
+    expect(build({ tools, toolChoice: "required" }).tool_choice).toBe("required");
+    expect(build({ tools, toolChoice: { name: "bash" } }).tool_choice).toEqual({
+      type: "function",
+      name: "bash",
+    });
+    expect(build({ toolChoice: "none" }).tool_choice).toBeUndefined();
+  });
+
   test("an empty tool list is omitted rather than sent as []", () => {
     expect(build({ tools: [] }).tools).toBeUndefined();
   });

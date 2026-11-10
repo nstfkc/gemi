@@ -30,6 +30,7 @@ export type ResponsesRequest = {
   instructions?: string;
   tools?: ResponsesTool[];
   parallel_tool_calls?: boolean;
+  tool_choice?: string | { type: "function"; name: string };
   text?: { format: Record<string, unknown> };
   reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
@@ -54,6 +55,12 @@ export function buildResponsesRequest(
   if (tools.length > 0) {
     body.tools = tools;
     if (!capabilities.parallelToolCalls) body.parallel_tool_calls = false;
+    if (params.toolChoice !== undefined) {
+      body.tool_choice =
+        typeof params.toolChoice === "string"
+          ? params.toolChoice
+          : { type: "function", name: params.toolChoice.name };
+    }
   }
 
   // Deliberately NOT gated on `capabilities.structuredOutput`. An agent that
