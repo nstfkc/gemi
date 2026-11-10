@@ -11,6 +11,11 @@ export interface RouteState {
   hash: string;
   action: Action | null;
   /**
+   * The history entry the route is on (`scrollRestoration.entryKey`): new on
+   * every navigation, including to the same URL. Absent on the server.
+   */
+  key?: string;
+  /**
    * The matched route's template: `/users/:userId/ai`. Empty when no route
    * matched (a `404`).
    */

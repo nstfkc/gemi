@@ -7678,6 +7678,21 @@ const { push } = useNavigate();
 <Form action="/admin/user" onSuccess={() => push("/admin/users")}>
 ```
 
+## Scroll position
+
+The router sets the window's scroll once per navigation, after the new page has
+rendered:
+
+- `push` and `replace` (a `Link`, `useNavigate`, a redirect) start at the top, or
+  at the element whose `id` the URL's `#hash` names;
+- back and forward return to where that history entry was left. Positions are
+  kept per entry, so two entries with the same URL each keep their own, and in
+  `sessionStorage`, so a reload restores the page's position too;
+- a `shallow` navigation keeps the position: the page on screen stays.
+
+The browser's own restoration is switched off (`history.scrollRestoration =
+"manual"`) because it would scroll before the restored page is on screen.
+
 ## Reading the current location
 
 ### `useParams`
