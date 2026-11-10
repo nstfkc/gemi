@@ -1,3 +1,20 @@
+# Unreleased
+
+## client: scroll is set once per navigation (#1215)
+
+**Behaviour change (patch version).**
+
+- A push or replace now starts at the top on every navigation. Before, the scroll was reset only when the view on screen changed, so two pages rendered by the same view (`/posts/:id` to another post, a catch-all route) kept the previous page's position.
+- A push to a URL with a `#hash` scrolls to the element with that `id` (the top when there is none).
+- Back/forward restores the position of the history entry, as often as it is returned to; positions were kept by URL and used once. They are kept in `sessionStorage` (`gemi:scroll`), so a reload restores too.
+- A `shallow` navigation no longer scrolls to the top.
+- `history.scrollRestoration` is set to `"manual"` once the client router mounts.
+- The undocumented `window.scrollHistory` map is gone.
+
+What to check:
+
+- Nothing, unless the app scrolls on navigation itself (a `useEffect` calling `window.scrollTo(0, 0)` on a pathname change): it can be removed.
+
 # 0.199.1
 
 ## ai: `/attach` can answer "no run in progress" with a 204 (#1211)

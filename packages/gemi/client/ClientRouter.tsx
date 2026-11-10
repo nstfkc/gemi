@@ -45,39 +45,12 @@ import {
   setAuthenticationNavigator,
 } from "./authenticationErrors";
 import { navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
+import { restoreScroll } from "./scrollRestoration";
 
 declare global {
   interface Window {
-    scrollHistory: Map<string, number>;
     loaders: Record<string, () => void>;
   }
-}
-
-function restoreScroll(action: Action | null = null, _pathname = "no path") {
-  if (action === null) {
-    return;
-  }
-
-  const { pathname, search, hash } = window.location;
-
-  const key = [pathname, search, hash].join("");
-  const sh = window.scrollHistory;
-
-  const scrollPosition = sh?.get(key);
-
-  if (action !== Action.Pop) {
-    window.scrollTo(0, 0);
-  } else {
-    // In dev mode the effect runs scroll restoration
-    // will be called twice, this if statement prevents
-    // scroll to top
-    if (!scrollPosition) {
-      return;
-    }
-    window.scrollTo(0, scrollPosition ?? 0);
-  }
-
-  sh?.delete(key);
 }
 
 function sameViews(a: string[] = [], b: string[] = []) {
@@ -102,7 +75,7 @@ const DefaultQueryErrorFallback = (props: FallbackProps) => {
 };
 
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
-  const { componentPath, pathname, action, children } = props;
+  const { componentPath, pathname } = props;
   const { viewImportMap, getViewModule } = useContext(ComponentsContext);
   const { clearErrors } = useContext(QueryManagerContext);
   const { data } = useRouteData();
@@ -121,12 +94,6 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 
   const componentData = data?.[pathname]?.[componentPath] ?? {};
   const Component = viewImportMap[componentPath];
-
-  useEffect(() => {
-    if (!children) {
-      restoreScroll(action, componentPath);
-    }
-  }, [action, children, componentPath]);
 
   if (!Component) {
     const NotFound = viewImportMap["404"];
@@ -242,6 +209,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     pathname: routerSubject?.getValue().pathname,
     views: routerSubject?.getValue().views,
     action: null,
+    key: routerSubject?.getValue().key,
     hash: routerSubject?.getValue().hash,
     state: routerSubject?.getValue().state,
     routePath: routerSubject?.getValue().routePath,
@@ -274,6 +242,15 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }),
     [routerSubject],
   );
+  // Once per navigation, after it has committed: by the history entry, so two
+  // navigations that render the same views each get their scroll (#1215).
+  const { key: navigationKey, action, hash = "" } = routeState;
+  const shallow = Boolean(routeState.state?.shallow);
+  useEffect(() => {
+    if (navigationKey === undefined) return;
+    restoreScroll({ key: navigationKey, action, hash, shallow });
+  }, [navigationKey, action, hash, shallow]);
+
   // A new page is a new incident.
   useEffect(() => {
     resetAuthenticationIncident();

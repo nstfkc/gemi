@@ -25,6 +25,7 @@ import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 import { otherBuild } from "./chunkLoadRecovery";
 import { ServerDataContext } from "./ServerDataProvider";
+import { currentEntryKey, entryKey, manageScroll, saveScroll } from "./scrollRestoration";
 
 export interface PrefetchTarget {
   /** Concrete pathname, without the locale segment. */
@@ -33,12 +34,6 @@ export interface PrefetchTarget {
   search?: string;
   /** `/tr-TR` style prefix, or empty for the default locale. */
   localeSegment?: string;
-}
-
-declare global {
-  interface Window {
-    scrollHistory: Map<string, number>;
-  }
 }
 
 interface ClientRouterContextValue {
@@ -163,6 +158,7 @@ export const ClientRouterProvider = (
           : applyParams(pathname ?? "/", params ?? {}) || "/",
       hash: "",
       action: null as Action | null,
+      key: typeof window === "undefined" ? undefined : currentEntryKey(),
       routePath: is404 ? "" : pathname,
       locale,
     });
@@ -224,14 +220,13 @@ export const ClientRouterProvider = (
     [findMatchingRouteFromParams],
   );
 
+  useEffect(() => manageScroll(), []);
+
   useEffect(() => {
-    history?.listen(({ location, action }) => {
-      if (!window.scrollHistory) {
-        window.scrollHistory = new Map();
-      }
-      const { hash, pathname, search } = routerSubject.getValue();
-      const key = [pathname, search, hash].join("");
-      window.scrollHistory.set(key, window.scrollY);
+    // Returned, so a re-run (deps changing, StrictMode) does not leave a
+    // second listener announcing every navigation twice.
+    return history?.listen(({ location, action }) => {
+      saveScroll();
       // A whole leading segment only: `/de-DE-shop` is a route, not `de-DE`.
       const { locale: _locale, pathname: _pathname } = splitLocalePrefix(
         location.pathname,
@@ -254,6 +249,7 @@ export const ClientRouterProvider = (
         routePath,
         hash: location.hash,
         locale: _locale,
+        key: entryKey(location),
       });
     });
   }, [
