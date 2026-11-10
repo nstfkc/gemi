@@ -1,4 +1,4 @@
-# Unreleased
+# 0.202.0
 
 ## ai: run a step's tool calls one at a time (#1161)
 
@@ -21,6 +21,19 @@ What to check:
 What to check:
 
 - Nothing.
+
+## server: `Service.onShutdown()` and background work in the drain (#1210)
+
+**New API (minor version).** See [Cleaning up in a service](docs/configuration.md#cleaning-up-in-a-service) and [Background work during the drain](docs/configuration.md#background-work-during-the-drain).
+
+- `Service.onShutdown({ timeoutMs })` runs on a production shutdown (and for the application a dev reload replaced), in reverse `services` order, before every provider's `shutdown()`, under the same shared deadline. Its failures and `{ abandoned: true }` are reported as a provider's are.
+- `holdShutdown(promise)` from `gemi/server` makes the drain wait for background work as it does for an in-flight request, under `GEMI_SHUTDOWN_TIMEOUT`. A worker waits for it too. Work still running at the timeout makes the shutdown exit `1`.
+- `shutdownSignal()` from `gemi/server`: an `AbortSignal` aborted when the shutdown begins.
+- A provider's shutdown log lines are unchanged; a service's say `Name.onShutdown()`.
+
+What to check:
+
+- Nothing, for an app that doesn't use them. A service with its own `shutdown()` method isn't called by gemi; the hook is named `onShutdown`. An app with a provider whose only job is `MyService.inject().shutdown()` can move that into `MyService.onShutdown()` and drop the provider.
 
 ## ai: render a prompt from another folder (#1163)
 

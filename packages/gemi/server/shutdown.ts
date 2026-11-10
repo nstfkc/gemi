@@ -8,12 +8,25 @@ import type { Instrumentation } from "./types";
 // `app/App.ts`), and `bun --hot` re-evaluates every module on a reload.
 const STATE = Symbol.for("gemi.server.shutdown");
 
-type ShutdownState = { shuttingDown: boolean; drained: boolean };
+type ShutdownState = {
+  shuttingDown: boolean;
+  drained: boolean;
+  /** `holdShutdown`'s work still running (#1210). */
+  held: Set<Promise<unknown>>;
+  /** Aborted by `markShuttingDown`. See `shutdownSignal`. */
+  controller: AbortController;
+};
 
 function state(): ShutdownState {
-  const global = globalThis as { [STATE]?: ShutdownState };
-  global[STATE] ??= { shuttingDown: false, drained: false };
-  return global[STATE];
+  const global = globalThis as { [STATE]?: Partial<ShutdownState> };
+  const current = (global[STATE] ??= {});
+  // Filled field by field: a copy of this module from before #1210 may have
+  // created the object with only the two flags.
+  current.shuttingDown ??= false;
+  current.drained ??= false;
+  current.held ??= new Set();
+  current.controller ??= new AbortController();
+  return current as ShutdownState;
 }
 
 /**
@@ -32,7 +45,65 @@ export function isShuttingDown(): boolean {
 }
 
 export function markShuttingDown() {
-  state().shuttingDown = true;
+  const current = state();
+  current.shuttingDown = true;
+  if (!current.controller.signal.aborted) current.controller.abort();
+}
+
+/**
+ * Aborted the moment this process is told to stop, when `isShuttingDown()`
+ * turns true (#1210). For background work that should wind down at once
+ * rather than notice at its next check: pass it where an `AbortSignal` is
+ * taken, or listen for `abort`.
+ */
+export function shutdownSignal(): AbortSignal {
+  return state().controller.signal;
+}
+
+/**
+ * Holds the shutdown's drain until `work` settles (#1210), as an in-flight
+ * request does: background work started by a request that outlives its
+ * response (an agent run, an upload being processed), so it shares the
+ * `GEMI_SHUTDOWN_TIMEOUT` grace period instead of getting only what is left
+ * of the providers' deadline after it.
+ *
+ * Returns `work`, so it wraps where the work is started:
+ *
+ * ```ts
+ * holdShutdown(runAgent(thread));
+ * ```
+ *
+ * The drain waits for every held promise until the timeout; whatever is still
+ * running then is abandoned like a request would be, and the shutdown exits
+ * `1`. A rejection counts as settled and is not reported here. Work should
+ * stop early on `shutdownSignal()` and checkpoint, then let a `Service` or
+ * provider `shutdown()` save what is left. Outside a server's or worker's
+ * shutdown (in dev, a CLI command) it does nothing but return `work`.
+ */
+export function holdShutdown<T>(work: Promise<T>): Promise<T> {
+  const held = state().held;
+  const entry: Promise<unknown> = work.then(
+    () => held.delete(entry),
+    () => held.delete(entry),
+  );
+  held.add(entry);
+  return work;
+}
+
+/** How many `holdShutdown` promises are still running. */
+export function heldWork(): number {
+  return state().held.size;
+}
+
+/**
+ * Resolves once no `holdShutdown` work is running, including work held while
+ * waiting. @internal
+ */
+export async function heldWorkSettled(): Promise<void> {
+  const held = state().held;
+  while (held.size > 0) {
+    await Promise.allSettled(held);
+  }
 }
 
 /**
@@ -45,8 +116,11 @@ export function markDrained() {
 
 /** Test seam: a fresh process starts false, and so should each test. */
 export function resetShuttingDown() {
-  state().shuttingDown = false;
-  state().drained = false;
+  const current = state();
+  current.shuttingDown = false;
+  current.drained = false;
+  current.held.clear();
+  current.controller = new AbortController();
 }
 
 export type ShutdownSettings = {
@@ -175,6 +249,9 @@ export async function drain(params: {
   );
 
   let drained = true;
+  // Background work held with `holdShutdown` (#1210) is waited for beside the
+  // requests, under the same deadline.
+  const heldDone = heldWorkSettled();
   if (server) {
     if (settings.delayMs > 0) {
       await sleep(Math.min(settings.delayMs, deadline - Date.now()));
@@ -197,16 +274,32 @@ export async function drain(params: {
     // closed or terminated (Bun 1.4.2 on a loaded Linux CI runner, with its
     // `pendingWebSockets` stuck above 0). So the drain also ends on its real
     // condition: no request in flight, and the hub's sockets closed or cut.
-    const done = params.closeSockets
+    const requestsDone = params.closeSockets
       ? Promise.race([stopped, Promise.all([socketsClosed, noRequestInFlight(server)])])
       : stopped;
+    const done = Promise.all([requestsDone, heldDone]);
     drained =
-      remaining > 0 ? await settlesWithin(done, remaining) : server.pendingRequests === 0;
+      remaining > 0
+        ? await settlesWithin(done, remaining)
+        : server.pendingRequests === 0 && heldWork() === 0;
     if (!drained) {
+      const parts = [
+        server.pendingRequests > 0 ? `${server.pendingRequests} request(s)` : undefined,
+        heldWork() > 0 ? `${heldWork()} held background task(s)` : undefined,
+      ].filter(Boolean);
       console.error(
-        `[gemi] Shutdown grace period elapsed with ${server.pendingRequests} request(s) still in flight; abandoning them.`,
+        `[gemi] Shutdown grace period elapsed with ${parts.join(" and ") || "work"} still in flight; abandoning them.`,
       );
       void server.stop(true).catch(() => {});
+    }
+  } else if (heldWork() > 0) {
+    // A signal during the boot: no listener, but work may already be held.
+    const remaining = deadline - Date.now();
+    drained = remaining > 0 && (await settlesWithin(heldDone, remaining));
+    if (!drained) {
+      console.error(
+        `[gemi] Shutdown grace period elapsed with ${heldWork()} held background task(s) still running; abandoning them.`,
+      );
     }
   }
 
