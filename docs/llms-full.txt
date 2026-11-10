@@ -1290,8 +1290,8 @@ In **production only** (`gemi start`), a `SIGTERM` or `SIGINT` no longer kills t
 
 1. **Marks itself as shutting down.** `isShuttingDown()` from `gemi/server` turns true, and every response from here on carries `Connection: close`, so a client that honours it opens its next request on a new connection instead of reusing this one. A queue whose driver outlives the process (such as `database`) stops claiming new jobs and leaves them to other replicas; the memory queue keeps claiming until step 4, since no other process can run its jobs. Jobs already running carry on.
 2. **Waits `GEMI_SHUTDOWN_DELAY`**, still serving new requests, so a health probe can see the instance go unhealthy and the load balancer stop routing to it.
-3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk.
-4. **Runs every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule). The scheduler is registered after the queue, so it runs first, and whatever time its ticks take comes out of what the queue has left. The database provider's closes every connection pool, and the Redis provider's closes its client if one was opened. The database is registered before both, so its pool closes after their jobs have finished with it. Closing the listener does not close a kept-alive connection that was idle at the time, so a client that ignored `Connection: close` can still send a request down it; from this step on, such a request is answered `503` with `Connection: close` and reaches neither your routes nor your instrumentation.
+3. **Stops accepting connections** and waits for every request in flight to finish — a streamed response to its last chunk — and for the background work the app [held with `holdShutdown`](#background-work-during-the-drain).
+4. **Runs every app service's `onShutdown()`** (reverse `services` order), **then every provider's `shutdown()`**, in reverse registration order. The queue's waits for its running jobs — see [Stopping the queue](./jobs-and-queues.md#stopping-the-queue). The scheduler's stops the cron schedule and waits for the ticks already running — see [Stopping the schedule](./cron.md#stopping-the-schedule). The scheduler is registered after the queue, so it runs first, and whatever time its ticks take comes out of what the queue has left. The database provider's closes every connection pool, and the Redis provider's closes its client if one was opened. The database is registered before both, so its pool closes after their jobs have finished with it. Closing the listener does not close a kept-alive connection that was idle at the time, so a client that ignored `Connection: close` can still send a request down it; from this step on, such a request is answered `503` with `Connection: close` and reaches neither your routes nor your instrumentation.
 5. **Exits** — `0` if every step finished in time, `1` if the drain was cut short, a provider threw or overran, or the queue or the scheduler left a job or tick running at the deadline. `gemi start` exits with the same code.
 
 A [`gemi queue:work`](./jobs-and-queues.md#worker-processes--gemi-queuework) worker drains the same way, with its running jobs in place of requests in step 3 and no delay in step 2.
@@ -1350,6 +1350,40 @@ export default class AppServiceProvider extends ServiceProvider {
 Providers shut down in reverse registration order, so yours — registered after the framework's — runs while the framework's services are still up. A hook that throws is logged and the next one still runs; one that is still running when `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` is up is abandoned, and any provider not reached by then is skipped.
 
 The hook also runs in development. Each `bun --hot` reload of `gemi dev` boots a new application, and once the new one is serving, the one it replaced is shut down: its requests get up to 10 seconds to finish, then its providers' `shutdown()` hooks run with 5 seconds between them. That closes the replaced application's database pool, Redis client, cron schedule and queue, so they don't pile up across saves. A reload whose boot throws shuts its own half-booted application down and leaves the old one serving. The shutdown runs in the background and doesn't delay the reload, and a failure in it is logged and doesn't reach the browser's error overlay. If a hook closes something you keep on `globalThis` so it survives reloads, it would close it for the new application too, so leave that to the new one.
+
+### Cleaning up in a service
+
+A [`Service`](./services.md) has an `onShutdown()` hook beside `boot()`. It runs in step 4, before every provider's, in reverse `services` order, so a service can still use the database and the facades:
+
+```typescript
+import { Service } from "gemi/support";
+
+export class Exports extends Service {
+  static token = "exports";
+
+  async onShutdown({ timeoutMs }: { timeoutMs: number }) {
+    await this.saveProgress({ within: timeoutMs - 500 });
+  }
+}
+```
+
+It shares the providers' deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`), and `timeoutMs` is what is left of it. A hook that throws is logged and the rest still run. Resolve `{ abandoned: true }` when it gave up on work at the deadline, as a provider would; the shutdown then exits `1`. It's called `onShutdown` and not `shutdown`, so a service that already has a `shutdown()` method of its own isn't called twice.
+
+### Background work during the drain
+
+Work a request starts but doesn't wait for, like an agent run that keeps calling the model after the response, gets none of step 3's grace period by default: the drain ends once the requests have finished. `holdShutdown(promise)` from `gemi/server` makes the drain wait for it as it waits for a request, under the same `GEMI_SHUTDOWN_TIMEOUT`. `shutdownSignal()` is an `AbortSignal` that aborts in step 1, so the work can wind down at once and save a checkpoint:
+
+```typescript
+import { holdShutdown, shutdownSignal } from "gemi/server";
+
+holdShutdown(runAgent(thread, { signal: shutdownSignal() }));
+```
+
+- It returns the promise it's given. A rejection counts as settled.
+- Work held while the drain is waiting is waited for too.
+- Work still running at the timeout is abandoned like a request, and the shutdown exits `1`. Save what's left in a service's `onShutdown()`.
+- A [`gemi queue:work`](./jobs-and-queues.md#worker-processes--gemi-queuework) worker waits for it too, after its running jobs, within the same timeout.
+- Outside a production shutdown (dev, a CLI command) it does nothing but return the promise.
 
 ### Handling the signals yourself
 
@@ -18032,6 +18066,10 @@ export class SearchIndex extends Service {
 ```
 
 A `boot()` that opens a socket turns into a per-test and per-worker-job cost, and eight of them turn into a slow `bun dev` reload — the boots run sequentially, because that is what makes the ordering above work.
+
+## Shutdown
+
+`onShutdown({ timeoutMs })` runs once when a production server or worker stops, after the requests (and work held with `holdShutdown`) have drained, in reverse `services` order and before every provider's `shutdown()`. It shares the providers' deadline. See [Cleaning up in a service](./configuration.md#cleaning-up-in-a-service).
 
 ## Registration is explicit
 

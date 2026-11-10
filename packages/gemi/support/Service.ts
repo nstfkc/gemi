@@ -1,4 +1,5 @@
 import type { ServiceToken } from "../container/Container";
+import type { ProviderShutdownResult } from "./ServiceProvider";
 import { app } from "../foundation/app";
 
 /**
@@ -44,6 +45,27 @@ export abstract class Service {
    * `boot()` needs another service must be listed after it.
    */
   async boot(): Promise<void> {}
+
+  /**
+   * Runs once when a production server (or a `gemi queue:work` worker) is
+   * told to stop, after the requests and the work held with `holdShutdown`
+   * (from `gemi/server`) have drained (#1210). Services shut down in reverse
+   * `services` order, before every provider, so a service may still use the
+   * database, the cache and the facades here. Under `gemi dev` it also runs
+   * for the application a `bun --hot` reload replaced.
+   *
+   * It shares the providers' deadline (`GEMI_SHUTDOWN_PROVIDER_TIMEOUT`):
+   * `timeoutMs` is what is left of it. Resolve `{ abandoned: true }` when it
+   * gave up on work at the deadline, as a provider would; one that throws is
+   * logged and the rest still run. See `ServiceProvider.shutdown`.
+   *
+   * Named `onShutdown` rather than `shutdown` so that a service which already
+   * has a `shutdown()` method of its own (called from a provider, with its own
+   * arguments) is not called a second time, with an argument it doesn't take.
+   */
+  onShutdown(_options: {
+    timeoutMs: number;
+  }): ProviderShutdownResult | Promise<ProviderShutdownResult> {}
 
   /**
    * The booted singleton for the current application.

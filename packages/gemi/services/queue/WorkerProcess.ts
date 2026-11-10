@@ -1,5 +1,11 @@
 import type { Application, ShutdownReport } from "../../foundation/Application";
-import { markShuttingDown, shutdownSettings, type ShutdownSettings } from "../../server/shutdown";
+import {
+  heldWork,
+  heldWorkSettled,
+  markShuttingDown,
+  shutdownSettings,
+  type ShutdownSettings,
+} from "../../server/shutdown";
 import { memoryBroadcastInWorker } from "../broadcast/workerWarning";
 import { QueueManager } from "./QueueManager";
 
@@ -119,6 +125,7 @@ export class QueueWorker {
   }
 
   private async drain(settings: ShutdownSettings): Promise<number> {
+    const deadline = Date.now() + settings.timeoutMs;
     markShuttingDown();
     const application = this.kernel.app;
     // Resolving the manager now would build a driver only to stop it, which
@@ -131,11 +138,27 @@ export class QueueWorker {
       );
       await queue.drain(settings.timeoutMs);
     }
+    // Work held with `holdShutdown` (#1210) gets what is left of the same budget.
+    let held = heldWork() === 0;
+    if (!held) {
+      const remaining = deadline - Date.now();
+      held =
+        remaining > 0 &&
+        (await Promise.race([
+          heldWorkSettled().then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), remaining)),
+        ]));
+      if (!held) {
+        console.error(
+          `[gemi] Shutdown grace period elapsed with ${heldWork()} held background task(s) still running; abandoning them.`,
+        );
+      }
+    }
 
     const report = await this.kernel.shutdown({ timeoutMs: settings.providerTimeoutMs });
     clearInterval(this.keepAlive);
     const clean =
-      (queue?.running ?? 0) === 0 && report.failed.length === 0 && report.timedOut.length === 0;
+      held && (queue?.running ?? 0) === 0 && report.failed.length === 0 && report.timedOut.length === 0;
     console.log(`[gemi] Shutdown ${clean ? "complete" : "finished with errors"}.`);
     return clean ? 0 : 1;
   }
