@@ -36,12 +36,18 @@ function stored() {
 
 /**
  * The history entry `location` is: the `history` package's key, or the URL for
- * the entry a page loaded on, which it has not keyed yet (`"default"`).
+ * an entry it has not keyed (`"default"`): the one a page loaded on, or one a
+ * same-page `#hash` link added, which is why the hash is part of it.
  */
-export function entryKey(location: { key?: string; pathname: string; search: string }) {
+export function entryKey(location: {
+  key?: string;
+  pathname: string;
+  search: string;
+  hash: string;
+}) {
   return location.key && location.key !== "default"
     ? location.key
-    : `${location.pathname}${location.search}`;
+    : `${location.pathname}${location.search}${location.hash}`;
 }
 
 /** The entry the window is on right now (before the router has a location). */
@@ -50,6 +56,7 @@ export function currentEntryKey() {
     key: window.history.state?.key,
     pathname: window.location.pathname,
     search: window.location.search,
+    hash: window.location.hash,
   });
 }
 
