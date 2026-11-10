@@ -395,6 +395,7 @@ export type {
   ProviderRetryInfo,
   ProviderStream,
   ProviderStreamParams,
+  ProviderToolChoice,
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "./AgentProvider";
