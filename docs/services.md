@@ -163,6 +163,10 @@ export class SearchIndex extends Service {
 
 A `boot()` that opens a socket turns into a per-test and per-worker-job cost, and eight of them turn into a slow `bun dev` reload — the boots run sequentially, because that is what makes the ordering above work.
 
+## Shutdown
+
+`onShutdown({ timeoutMs })` runs once when a production server or worker stops, after the requests (and work held with `holdShutdown`) have drained, in reverse `services` order and before every provider's `shutdown()`. It shares the providers' deadline. See [Cleaning up in a service](./configuration.md#cleaning-up-in-a-service).
+
 ## Registration is explicit
 
 Unlike jobs and cron jobs, services are **not** discovered from a directory. Two reasons: boot order is load-bearing here and a directory walk has no order to offer, and a service is always imported by whatever injects it, so there is no file the import graph would miss anyway.
