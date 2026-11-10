@@ -133,6 +133,26 @@ Things to know:
 - A different tool list is a different request prefix, which the provider's prompt cache keys on. Keep the list stable across a conversation where you can.
 - A sub-agent started with `ctx.runAgent` gets its own agent's tools, not the parent run's.
 
+## Order of a step's tool calls
+
+When the model makes several tool calls in one step, their `execute` functions start at once. Tools that change shared state often depend on the calls before them in the same step (`add_container { id: "a" }`, then `add_child { parent: "a" }`), so an agent can ask for them to run one at a time, in the model's order (#1161):
+
+```typescript
+export const builder = Agent.create({
+  name: "builder",
+  provider,
+  tools: [addContainer, addChild],
+  toolExecution: "sequential", // default "parallel"
+});
+```
+
+- Each call starts once the one before it has settled: ok, error or timed out. A failed call doesn't stop the ones after it; the model sees every result.
+- Their `tool-result` events and results follow the model's order.
+- The model can still make several calls in one step; only their execution is ordered.
+- Input checks, approvals and usage limits are decided for all of the step's calls first, as before. A call that waits for an approval or the client doesn't hold back the ones after it.
+- A stop while a call runs: the calls after it never start.
+- `agent.stream({ toolExecution })` overrides it for one run. A sub-agent uses its own agent's setting.
+
 ## Running the agent yourself
 
 `agent.stream({ context })` takes the agent's context. It's required when the context has a required field, and optional otherwise.

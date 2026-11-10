@@ -1513,6 +1513,19 @@ export interface CreateAgentParams<
    *  agent that loops is a bug to show, not an exception to swallow. */
   maxSteps?: number;
   /**
+   * How the tool calls of one step run (#1161). `"parallel"` (the default)
+   * starts them all at once. `"sequential"` runs them one at a time in the
+   * order the model made them: the next starts once the previous has settled
+   * (ok, error or timed out), so a call can rely on what the calls before it
+   * in the same step did. The model can still make several calls in a step.
+   *
+   * Only execution is ordered. Input checks, approvals and usage limits are
+   * decided for every call of the step first, as before, and a call that
+   * waits for an approval or the client does not hold back the ones after it.
+   * `AgentStreamParams.toolExecution` overrides it for one run.
+   */
+  toolExecution?: ToolExecution;
+  /**
    * How far `ctx.runAgent` may nest below this agent. Default 3.
    *
    * It is a limit on the *tree*, taken from the run at the root, so raising it
@@ -1631,6 +1644,9 @@ export interface CreateAgentParams<
    */
   memory?: M;
 }
+
+/** See `CreateAgentParams.toolExecution`. */
+export type ToolExecution = "parallel" | "sequential";
 
 /**
  * What `prepareStep` is told before a model call.
@@ -1861,6 +1877,9 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Per-request model choice, e.g. letting a user pick. */
   provider?: AgentProvider;
   maxSteps?: number;
+  /** Overrides the agent's `toolExecution` for this run. Not handed down to a
+   *  sub-run, which uses its own agent's. */
+  toolExecution?: ToolExecution;
   /**
    * Budgets on what this run may spend (#1124): its own (`run`), and shared
    * ones for keys the app chooses (`scopes`, kept in `store`), on tokens,
@@ -2247,6 +2266,7 @@ type RunConfig = {
   offered?: ReadonlySet<string>;
   output?: Schema<any>;
   maxSteps: number;
+  toolExecution: ToolExecution;
   maxDepth: number;
   reasoning?: ReasoningEffort;
   maxOutputTokens?: number;
@@ -2433,6 +2453,7 @@ export class Agent<
       providerTools,
       output: params.output as Schema<any> | undefined,
       maxSteps: this.maxSteps,
+      toolExecution: params.toolExecution ?? "parallel",
       maxDepth: this.maxDepth,
       reasoning: this.reasoning,
       maxOutputTokens: params.maxOutputTokens,
@@ -2509,6 +2530,7 @@ export class Agent<
       ...this.config,
       provider: params.provider ?? this.config.provider,
       maxSteps: params.maxSteps ?? this.config.maxSteps,
+      toolExecution: params.toolExecution ?? this.config.toolExecution,
       reasoning: params.reasoning ?? this.config.reasoning,
       maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
       temperature: params.temperature ?? this.config.temperature,
@@ -4566,6 +4588,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   ): Promise<PendingToolCall[]> {
     const pending: PendingToolCall[] = [];
     const running: Promise<void>[] = [];
+    // `toolExecution: "sequential"` (#1161): each call starts once the one
+    // before it has settled. Never rejects; see the `.catch` below.
+    const sequential = this.config.toolExecution === "sequential";
+    let previous: Promise<void> = Promise.resolve();
     // A usage-limit store that failed during this batch (#1124): thrown once
     // the calls already started have settled, so none lands after the run ends.
     let limitStoreError: UsageLimitStoreError | null = null;
@@ -4711,8 +4737,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
       this.toolCallCount++;
 
-      running.push(
-        this.executeTool(resolved, message.id, call, parsed.value, step)
+      const execute = () => this.executeTool(resolved, message.id, call, parsed.value, step);
+      const settled = (
+        sequential
+          ? previous.then(() => {
+              // A stop while an earlier call ran: this one never starts, and
+              // the abort path answers it with the other unresolved calls.
+              if (this.controller.signal.aborted) throw new RunAborted();
+              return execute();
+            })
+          : execute()
+      )
           .then(async (result) => {
             this.addResult(message, result);
             // The call has settled. Anything it asked to show goes into the
@@ -4738,8 +4773,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             // Only `RunAborted` reaches here, and the abort path denies every
             // unresolved call at once — swallowing it keeps a stopped run from
             // also raising an unhandled rejection.
-          }),
-      );
+          });
+      if (sequential) previous = settled;
+      running.push(settled);
     }
 
     await raceAbort(
