@@ -35,6 +35,16 @@ What to check:
 
 - Nothing, for an app that doesn't use them. A service with its own `shutdown()` method isn't called by gemi; the hook is named `onShutdown`. An app with a provider whose only job is `MyService.inject().shutdown()` can move that into `MyService.onShutdown()` and drop the provider.
 
+## ai: render a prompt from another folder (#1163)
+
+**New API (minor version).** See [A second folder](docs/ai-prompts.md#a-second-folder).
+
+- `Prompt.render(name, values, { dir, shared })` and `Prompt.placeholders(name, { dir, shared })` read that one render (and its partials) from another folder, without `Prompt.configure`. The `PromptLocation` type is exported from `gemi/ai`.
+
+What to check:
+
+- Nothing. An app that calls `Prompt.configure({ dir })` around a render and resets it afterwards can pass `{ dir }` to the render instead.
+
 # 0.201.0
 
 ## ai: `prepareStep` can answer `activeTools` and `toolChoice` (#1010)
