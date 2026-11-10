@@ -1,5 +1,16 @@
 # Unreleased
 
+## ai: run a step's tool calls one at a time (#1161)
+
+**New API (minor version).** See [Order of a step's tool calls](docs/ai-agent-context.md#order-of-a-steps-tool-calls).
+
+- `toolExecution: "sequential"` on `Agent.create` (or per run on `agent.stream`) runs a step's tool calls one at a time, in the order the model made them. The default, `"parallel"`, is unchanged.
+- The `ToolExecution` type is exported from `gemi/ai`.
+
+What to check:
+
+- Nothing, for an app that doesn't set it. An app that queues its tool bodies itself to get this order can drop the queue and set `toolExecution: "sequential"`.
+
 ## client: Back restores the saved position on an entry made by a shallow push
 
 **Fix (patch version).**
