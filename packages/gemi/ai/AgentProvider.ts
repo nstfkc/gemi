@@ -72,10 +72,21 @@ export type ProviderToolNamespace = {
   tools: ProviderToolSpec[];
 };
 
+/** See `ProviderStreamParams.toolChoice`. */
+export type ProviderToolChoice = "auto" | "required" | "none" | { name: string };
+
 export interface ProviderStreamParams {
   messages: AgentMessage[];
   systemPrompt?: string;
   tools?: (ProviderToolSpec | ProviderToolNamespace)[];
+  /**
+   * Whether the model must call a tool on this call (#1010): `"auto"` (it
+   * chooses, the provider's default), `"required"` (some tool), `"none"` (no
+   * tool, though `tools` is still sent so the prompt prefix stays the same),
+   * or `{ name }` (that tool). Unset: the provider's default. Set by
+   * `PrepareStepResult.toolChoice`.
+   */
+  toolChoice?: ProviderToolChoice;
   /** Set when the agent declares an `output` schema; the provider turns it into
    *  whatever its own strict-JSON parameter is. `strict` comes from the schema —
    *  false when it contains an `s.json()` node, which strict mode cannot

@@ -1,3 +1,18 @@
+# Unreleased
+
+## ai: `prepareStep` can answer `activeTools` and `toolChoice` (#1010)
+
+**New API (minor version).** See [Tools per step](docs/ai-context-window.md#tools-per-step).
+
+- `PrepareStepResult.activeTools` narrows the tools one model call is offered (tool, run tool or namespace names; skills and memory tools are kept). A call to a tool left out is answered as an unknown tool. A name the run doesn't offer fails the run.
+- `PrepareStepResult.toolChoice` (`"auto" | "required" | "none" | { name }`) makes the model call a tool, a given tool, or none on that call. It is sent as the Responses API's `tool_choice`.
+- `PrepareStepContext` has `activeTools` and `toolChoice` (what an earlier hook answered).
+- `ProviderStreamParams.toolChoice` and the `ProviderToolChoice` type, for an app's own provider.
+
+What to check:
+
+- Nothing, for an app that doesn't use them. An app's own `AgentProvider` that ignores `toolChoice` keeps working, but doesn't enforce it.
+
 # 0.200.0
 
 ## client: scroll is set once per navigation (#1215)

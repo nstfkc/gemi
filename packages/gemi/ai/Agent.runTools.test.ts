@@ -218,3 +218,124 @@ describe("activeTools (#1123)", () => {
     expect(sent(provider.calls[0]!.tools)).toEqual(["search"]);
   });
 });
+
+describe("prepareStep: activeTools and toolChoice for one call (#1010)", () => {
+  test("activeTools narrows one call; the next step offers the run's tools again", async () => {
+    const provider = fakeProvider(
+      [toolCall("c1", "search", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const seen: (readonly string[] | undefined)[] = [];
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [
+        echo("search"),
+        echo("askUser"),
+        ToolNamespace.create({ name: "crm", description: "CRM", tools: [echo("contacts"), echo("deals")] }),
+      ],
+      skills: [Skill.create({ name: "style", description: "Style", instructions: "be brief" })],
+      prepareStep: ({ step }) => (step === 1 ? { activeTools: ["search", "crm"] } : undefined),
+    });
+    await agent
+      .stream({
+        messages: [],
+        prepareStep: ({ activeTools }) => {
+          seen.push(activeTools);
+        },
+      })
+      .result();
+
+    expect(sent(provider.calls[0]!.tools)).toEqual(["search", "crm/contacts", "crm/deals", "skills/style"]);
+    expect(sent(provider.calls[1]!.tools)).toEqual([
+      "search",
+      "askUser",
+      "crm/contacts",
+      "crm/deals",
+      "skills/style",
+    ]);
+    // A later hook sees what an earlier one answered.
+    expect(seen).toEqual([["search", "crm"], undefined]);
+  });
+
+  test("a call to a tool the step left out is answered as an unknown tool", async () => {
+    const calls: string[] = [];
+    const provider = fakeProvider(
+      [toolCall("c1", "askUser", {}), finish()],
+      [{ type: "text-delta", delta: "ok" }, finish()],
+    );
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [echo("search", calls), echo("askUser", calls)],
+      prepareStep: () => ({ activeTools: ["search"] }),
+    });
+    const result = await agent.stream({ messages: [] }).result();
+    expect(calls).toEqual([]);
+    expect(results(result.messages)[0]).toMatchObject({
+      status: "error",
+      error: { code: "tool_error", message: 'There is no tool named "askUser".' },
+    });
+  });
+
+  test("works inside the run's activeTools, and a name outside them fails the run", async () => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [echo("search"), echo("billing")] });
+    const ok = await agent
+      .stream({ messages: [], activeTools: ["search", "billing"], prepareStep: () => ({ activeTools: ["billing"] }) })
+      .result();
+    expect(ok.finishReason).toBe("stop");
+    expect(sent(provider.calls[0]!.tools)).toEqual(["billing"]);
+
+    const failed = await agent
+      .stream({ messages: [], activeTools: ["search"], prepareStep: () => ({ activeTools: ["billing"] }) })
+      .result();
+    expect(failed.finishReason).toBe("error");
+    expect(failed.error?.message).toMatch(/prepareStep \(step 1\).*"billing"/);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  test("toolChoice is sent for that call alone", async () => {
+    const provider = fakeProvider(
+      [toolCall("c1", "search", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const agent = Agent.create({
+      name: "a",
+      provider,
+      tools: [echo("search"), echo("askUser")],
+      prepareStep: ({ step }) => (step === 1 ? { toolChoice: { name: "search" } } : { toolChoice: "none" }),
+    });
+    await agent.stream({ messages: [] }).result();
+    expect(provider.calls[0]!.toolChoice).toEqual({ name: "search" });
+    expect(provider.calls[1]!.toolChoice).toBe("none");
+    // "none" keeps the tool list, so the prompt prefix is the same.
+    expect(sent(provider.calls[1]!.tools)).toEqual(sent(provider.calls[0]!.tools));
+
+    const plain = fakeProvider([finish()]);
+    await Agent.create({ name: "b", provider: plain, tools: [echo("search")] }).stream({ messages: [] }).result();
+    expect("toolChoice" in plain.calls[0]!).toBe(false);
+  });
+
+  test("forcing a tool the call does not offer fails the run before the call", async () => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "a", provider, tools: [echo("search"), echo("askUser")] });
+
+    const hidden = await agent
+      .stream({ messages: [], prepareStep: () => ({ activeTools: ["search"], toolChoice: { name: "askUser" } }) })
+      .result();
+    expect(hidden.finishReason).toBe("error");
+    expect(hidden.error?.message).toMatch(/toolChoice.*"askUser"/);
+
+    const unknown = await agent
+      .stream({ messages: [], prepareStep: () => ({ toolChoice: { name: "nope" } }) })
+      .result();
+    expect(unknown.error?.message).toMatch(/"nope"/);
+
+    const required = await agent
+      .stream({ messages: [], prepareStep: () => ({ activeTools: [], toolChoice: "required" }) })
+      .result();
+    expect(required.error?.message).toMatch(/offers no tools/);
+    expect(provider.calls).toHaveLength(0);
+  });
+});
