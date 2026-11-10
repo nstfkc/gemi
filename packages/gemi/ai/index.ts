@@ -135,6 +135,7 @@ export type {
   ToolDefinition,
   ToolEntry,
   ToolExecute,
+  ToolExecution,
   ToolInputSchema,
   ToolSchemaContext,
   ToolApproval,
