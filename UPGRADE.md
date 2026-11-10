@@ -11,6 +11,17 @@ What to check:
 
 - Nothing, for an app that doesn't set it. An app that queues its tool bodies itself to get this order can drop the queue and set `toolExecution: "sequential"`.
 
+## client: Back restores the saved position on an entry made by a shallow push
+
+**Fix (patch version).**
+
+- Back/forward to a history entry made by a shallow navigation (a filter set with `searchParams.push()`, a `useNavigate().push(path, { shallow: true })`) now restores where that entry was left. Since 0.200.0 it was skipped, so returning to a filtered list from a detail page opened the list at the top. Back/forward between two shallow entries of the same page restores each one's position too.
+- A shallow push or replace still keeps the current position.
+
+What to check:
+
+- Nothing.
+
 ## ai: render a prompt from another folder (#1163)
 
 **New API (minor version).** See [A second folder](docs/ai-prompts.md#a-second-folder).
