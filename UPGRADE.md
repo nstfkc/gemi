@@ -1,8 +1,8 @@
-# Unreleased
+# 0.200.0
 
 ## client: scroll is set once per navigation (#1215)
 
-**Behaviour change (patch version).**
+**Behaviour change.**
 
 - A push or replace now starts at the top on every navigation. Before, the scroll was reset only when the view on screen changed, so two pages rendered by the same view (`/posts/:id` to another post, a catch-all route) kept the previous page's position.
 - A push to a URL with a `#hash` scrolls to the element with that `id` (the top when there is none).
@@ -19,7 +19,7 @@ What to check:
 
 ## ai: `/attach` can answer "no run in progress" with a 204 (#1211)
 
-**Behaviour change (patch version).**
+**Behaviour change.**
 
 - `useChat` now sends `emptyMiss: true` with its attach probe, and `AgentController.attach` answers a miss for such a request with `204 No Content` instead of `404 no_live_run`. The browser no longer logs a red error on every page load of a chat with `attach` on. The same 204 is sent for a thread outside a scoped controller's scope, so the two still can't be told apart.
 - `onAttachMiss` fires as before. `reattach()` still resolves `false` on a miss.
