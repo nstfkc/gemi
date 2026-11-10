@@ -1,4 +1,4 @@
-# 0.201.0
+# Unreleased
 
 ## ai: run a step's tool calls one at a time (#1161)
 
@@ -10,6 +10,8 @@
 What to check:
 
 - Nothing, for an app that doesn't set it. An app that queues its tool bodies itself to get this order can drop the queue and set `toolExecution: "sequential"`.
+
+# 0.201.0
 
 ## ai: `prepareStep` can answer `activeTools` and `toolChoice` (#1010)
 
