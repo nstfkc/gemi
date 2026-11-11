@@ -1,3 +1,14 @@
+# Unreleased
+
+## ai/testing: a sub-run's upload ids no longer depend on how sub-runs interleave (#1236)
+
+**Fix (patch).** `RecordingProvider` answered every upload `upload_<n>` from one counter shared by the run and its sub-runs. Sub-runs that upload in parallel could upload in another order on replay, so a request sent `upload_4` where the recording had `upload_5`, and the run failed. Now each sub-run counts its own uploads and answers `upload_<key>_<n>` (`upload_reviewer:/catalog_1`, say). The run itself still answers `upload_<n>`.
+
+What to check:
+
+- Recordings where only the run itself uploads replay as before.
+- Re-record recordings in which a sub-run (`nested(key)`) uploads a file: their requests show the old `upload_<n>` ids and no longer match. A workaround that maps `upload_\d+` through the `ids` option can go.
+
 # 0.204.2
 
 ## ai/testing: a recorded call to a tool with a free-form schema part replays stale (#1234)

@@ -218,6 +218,30 @@ describe("sub-runs, uploads and order", () => {
     expect(replay.stale.size).toBe(0);
   });
 
+  test("sub-runs count their own uploads, so they replay uploading in any order (#1236)", async () => {
+    const live = fakeProvider(say("from a"), say("from b"));
+    const recorder = RecordingProvider.record(live as unknown as AgentProvider);
+    const run = async (provider: RecordingProvider, name: string) => {
+      const fileId = await provider.upload(new File([name], `${name}.png`, { type: "image/png" }));
+      const look: AgentMessage = {
+        ...user(`look ${name}`),
+        content: [{ type: "file", fileId, name: `${name}.png`, mimeType: "image/png" }],
+      };
+      return drain(provider, { messages: [look] });
+    };
+    await run(recorder.nested("a"), "a");
+    await run(recorder.nested("b"), "b");
+    const recording = JSON.parse(JSON.stringify(recorder.recording())) as Recording;
+
+    const replay = RecordingProvider.replay(recording);
+    const b = await run(replay.nested("b"), "b");
+    const a = await run(replay.nested("a"), "a");
+    expect(a[0]).toEqual({ type: "text-delta", delta: "from a" });
+    expect(b[0]).toEqual({ type: "text-delta", delta: "from b" });
+    expect(replay.stale.size).toBe(0);
+    expect(await replay.nested("b").upload(new File(["c"], "c.png"))).toBe("upload_b_2");
+  });
+
   test("position: a replayed answer waits until the app gets where it was", async () => {
     let head = 0;
     const live = fakeProvider(say("done"));
