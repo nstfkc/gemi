@@ -1,4 +1,4 @@
-import type { AgentJobRecord } from "./AgentJobStore";
+import { type AgentJobRecord, isSettled } from "./AgentJobStore";
 
 /** How many jobs the `<jobs>` block lists by default. */
 export const DEFAULT_JOBS_CONTEXT_MAX = 20;
@@ -36,13 +36,15 @@ export function renderJobsBlock(jobs: AgentJobRecord[], max: number): string | n
   const newest = (a: AgentJobRecord, b: AgentJobRecord) =>
     b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1);
   const listed = [
-    ...jobs.filter((job) => job.state === "running").sort(newest),
-    ...jobs.filter((job) => job.state !== "running").sort(newest),
+    ...jobs.filter((job) => !isSettled(job.state)).sort(newest),
+    ...jobs.filter((job) => isSettled(job.state)).sort(newest),
   ].slice(0, max);
 
   const lines = listed.map((job) => {
     const parts = [`- ${job.id} (${job.toolName})`];
-    if (job.state === "running") {
+    if (job.state === "waiting") {
+      parts.push(`waiting for ${(job.after ?? []).join(", ")} since ${iso(job.createdAt)}`);
+    } else if (job.state === "running") {
       parts.push(`running since ${iso(job.createdAt)}`);
     } else if (job.state === "ok") {
       parts.push(`finished at ${iso(job.settledAt ?? job.updatedAt)}`);

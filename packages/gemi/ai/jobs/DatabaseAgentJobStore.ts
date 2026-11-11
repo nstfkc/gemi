@@ -3,13 +3,23 @@ import type { SQL, TransactionSQL } from "bun";
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { currentConnectionName, currentTransaction, withTransaction } from "../../orm/context";
-import type {
-  AgentJobRecord,
-  AgentJobState,
-  AgentJobStore,
-  AgentJobUpdate,
-  NewAgentJobRecord,
+import {
+  type AgentJobRecord,
+  type AgentJobState,
+  type AgentJobStore,
+  type AgentJobUpdate,
+  isSettled,
+  type NewAgentJobRecord,
 } from "./AgentJobStore";
+
+/**
+ * The columns added for `after`, batches, the inbox and checkpoints (#1222).
+ * A table made before them still works for everything else; see `columns()`.
+ */
+const LATER_COLUMNS = ["after_jobs", "batch_key", "queued", "inbox", "job_checkpoint"] as const;
+
+/** How many times an inbox write retries a compare-and-set it lost to another writer. */
+const INBOX_ATTEMPTS = 20;
 
 export type DatabaseAgentJobStoreOptions = {
   /**
@@ -48,6 +58,8 @@ export class DatabaseAgentJobStore implements AgentJobStore {
   private readonly sql: SQL;
   private readonly dialect: Dialect;
   private readonly connection: string | undefined;
+  /** Whether the table has `LATER_COLUMNS`, once asked. */
+  private later: Promise<boolean> | undefined;
 
   constructor(
     connection: Pick<DatabaseConnection, "sql" | "dialect"> &
@@ -90,17 +102,35 @@ export class DatabaseAgentJobStore implements AgentJobStore {
   }
 
   async create(job: NewAgentJobRecord): Promise<AgentJobRecord> {
+    const usesLater =
+      job.after !== undefined || job.batch !== undefined || job.queued !== undefined;
+    if (usesLater) await this.requireLaterColumns("A job with `after` or `batch`");
     const q = this.q();
     const now = this.clock(q);
-    await q`
-      INSERT INTO ${this.name(q)}
-        (id, thread_id, run_id, tool_call_id, tool_name, owner, job, summary, state,
-         orphaned, attachment_scope, created_at, updated_at, deadline_at)
-      VALUES
-        (${job.id}, ${job.threadId}, ${job.runId}, ${job.toolCallId}, ${job.toolName},
-         ${job.owner}, ${job.job}, ${json(job.summary)}, 'running', 0, ${job.attachmentScope},
-         ${now}, ${now}, ${now} + ${this.ms(q, job.deadlineMs)})
-    `;
+    const state = job.state ?? "running";
+    if (usesLater) {
+      await q`
+        INSERT INTO ${this.name(q)}
+          (id, thread_id, run_id, tool_call_id, tool_name, owner, job, summary, state,
+           orphaned, attachment_scope, created_at, updated_at, deadline_at,
+           after_jobs, batch_key, queued)
+        VALUES
+          (${job.id}, ${job.threadId}, ${job.runId}, ${job.toolCallId}, ${job.toolName},
+           ${job.owner}, ${job.job}, ${json(job.summary)}, ${state}, 0, ${job.attachmentScope},
+           ${now}, ${now}, ${now} + ${this.ms(q, job.deadlineMs)},
+           ${json(job.after)}, ${job.batch ?? null}, ${json(job.queued)})
+      `;
+    } else {
+      await q`
+        INSERT INTO ${this.name(q)}
+          (id, thread_id, run_id, tool_call_id, tool_name, owner, job, summary, state,
+           orphaned, attachment_scope, created_at, updated_at, deadline_at)
+        VALUES
+          (${job.id}, ${job.threadId}, ${job.runId}, ${job.toolCallId}, ${job.toolName},
+           ${job.owner}, ${job.job}, ${json(job.summary)}, ${state}, 0, ${job.attachmentScope},
+           ${now}, ${now}, ${now} + ${this.ms(q, job.deadlineMs)})
+      `;
+    }
     const record = await this.get(job.id);
     if (!record)
       throw new Error(`The background job ${job.id} was not found after it was written.`);
@@ -142,16 +172,21 @@ export class DatabaseAgentJobStore implements AgentJobStore {
 
   async transition(id: string, from: AgentJobState[], to: AgentJobUpdate): Promise<boolean> {
     if (from.length === 0) return false;
+    if ("checkpoint" in to) await this.requireLaterColumns("`job.checkpoint`");
     const q = this.q();
     const now = this.clock(q);
     const sets = [q`updated_at = ${now}`];
+    if (to.deadlineMs !== undefined) {
+      sets.push(q`deadline_at = ${now} + ${this.ms(q, to.deadlineMs)}`);
+    }
+    if ("checkpoint" in to) sets.push(q`job_checkpoint = ${json(to.checkpoint)}`);
     if (to.state !== undefined) sets.push(q`state = ${to.state}`);
     if ("output" in to) sets.push(q`output = ${json(to.output)}`);
     if ("error" in to) sets.push(q`error = ${json(to.error)}`);
     // `usage` is a reserved word in MySQL.
     if ("usage" in to) sets.push(q`${this.column(q, "usage")} = ${json(to.usage)}`);
     if ("orphaned" in to) sets.push(q`orphaned = ${to.orphaned ? 1 : 0}`);
-    if (to.state !== undefined && to.state !== "running") {
+    if (to.state !== undefined && isSettled(to.state)) {
       sets.push(
         to.settledAt !== undefined
           ? q`settled_at = COALESCE(settled_at, ${this.ms(q, to.settledAt)})`
@@ -177,6 +212,76 @@ export class DatabaseAgentJobStore implements AgentJobStore {
     return rows.map(recordOf);
   }
 
+  async waitingOn(id: string): Promise<AgentJobRecord[]> {
+    // Asked after every settle: a table without the columns has no waiting jobs.
+    if (!(await this.columns())) return [];
+    const q = this.q();
+    const rows: Row[] = await q`
+      SELECT * FROM ${this.name(q)}
+      WHERE state = 'waiting' AND after_jobs LIKE ${`%${JSON.stringify(id)}%`}
+      ORDER BY created_at, id
+    `;
+    return rows.map(recordOf).filter((record) => record.after?.includes(id));
+  }
+
+  async waiting(limit: number): Promise<AgentJobRecord[]> {
+    const q = this.q();
+    const rows: Row[] = await q`
+      SELECT * FROM ${this.name(q)}
+      WHERE state = 'waiting'
+      ORDER BY created_at, id
+      LIMIT ${Math.max(0, Math.floor(limit))}
+    `;
+    return rows.map(recordOf);
+  }
+
+  async listBatch(batch: string): Promise<AgentJobRecord[]> {
+    if (!(await this.columns())) return [];
+    const q = this.q();
+    const rows: Row[] = await q`
+      SELECT * FROM ${this.name(q)} WHERE batch_key = ${batch} ORDER BY created_at, id
+    `;
+    return rows.map(recordOf);
+  }
+
+  /**
+   * Compare-and-set on the inbox's text, so two senders (or a sender and the
+   * job taking its messages) never lose one another's write.
+   */
+  async appendInbox(id: string, text: string): Promise<boolean> {
+    await this.requireLaterColumns("`AgentJobs.message`");
+    for (let attempt = 0; attempt < INBOX_ATTEMPTS; attempt++) {
+      const q = this.q();
+      const [row] = (await q`
+        SELECT state, inbox FROM ${this.name(q)} WHERE id = ${id}
+      `) as Row[];
+      if (!row || isSettled(String(row.state) as AgentJobState)) return false;
+      const before = row.inbox === null || row.inbox === undefined ? null : String(row.inbox);
+      const after = JSON.stringify([...((parse(before) as string[] | undefined) ?? []), text]);
+      const result = await q`
+        UPDATE ${this.name(q)} SET inbox = ${after}, updated_at = ${this.clock(q)}
+        WHERE id = ${id} AND state IN ('waiting', 'running') AND ${this.sameInbox(q, before)}
+      `;
+      if (affected(result) > 0) return true;
+    }
+    throw new Error(`Could not add a message to background job ${id}: too many writers at once.`);
+  }
+
+  async takeInbox(id: string): Promise<string[]> {
+    if (!(await this.columns())) return [];
+    for (let attempt = 0; attempt < INBOX_ATTEMPTS; attempt++) {
+      const q = this.q();
+      const [row] = (await q`SELECT inbox FROM ${this.name(q)} WHERE id = ${id}`) as Row[];
+      if (!row || row.inbox === null || row.inbox === undefined) return [];
+      const before = String(row.inbox);
+      const result = await q`
+        UPDATE ${this.name(q)} SET inbox = NULL WHERE id = ${id} AND ${this.sameInbox(q, before)}
+      `;
+      if (affected(result) > 0) return (parse(before) as string[] | undefined) ?? [];
+    }
+    throw new Error(`Could not take the messages of background job ${id}: too many writers.`);
+  }
+
   async now(): Promise<number> {
     const q = this.q();
     const [row] = (await q`SELECT ${this.clock(q)} AS now`) as Array<{ now: unknown }>;
@@ -193,9 +298,46 @@ export class DatabaseAgentJobStore implements AgentJobStore {
     const q = this.q();
     const result = await q`
       DELETE FROM ${this.name(q)}
-      WHERE state <> 'running' AND settled_at <= ${this.clock(q)} - ${this.ms(q, olderThanMs)}
+      WHERE state IN ('ok', 'error') AND settled_at <= ${this.clock(q)} - ${this.ms(q, olderThanMs)}
     `;
     return affected(result);
+  }
+
+  /**
+   * Whether the table has the columns `after`, batches, the inbox and
+   * checkpoints need (#1222). Asked once, outside any transaction (a failed
+   * statement would abort a Postgres one), by selecting them from no rows.
+   */
+  columns(): Promise<boolean> {
+    this.later ??= (async () => {
+      try {
+        await this.sql.unsafe(
+          `SELECT ${LATER_COLUMNS.join(", ")} FROM ${this.quoted(this.table)} WHERE 1 = 0`,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    return this.later;
+  }
+
+  private async requireLaterColumns(what: string): Promise<void> {
+    if (await this.columns()) return;
+    // Asked again next time: the app may add them without a restart.
+    this.later = undefined;
+    throw new Error(
+      `${what} needs the columns ${LATER_COLUMNS.join(", ")} on the ${this.table} table, which it does not have. Add them (see docs/ai-background-jobs.md and UPGRADE.md), or call createTable() on a new table.`,
+    );
+  }
+
+  private sameInbox(q: SQL, before: string | null) {
+    return before === null ? q`inbox IS NULL` : q`inbox = ${before}`;
+  }
+
+  private quoted(name: string): string {
+    const mysql = this.dialect === "mysql" || this.dialect === "mariadb";
+    return mysql ? `\`${name}\`` : `"${name}"`;
   }
 
   /** The open ORM transaction, when it is on this store's connection. */
@@ -260,6 +402,10 @@ function recordOf(row: Row): AgentJobRecord {
   const output = parse(row.output);
   const error = parse(row.error);
   const usage = parse(row.usage);
+  const after = parse(row.after_jobs);
+  const queued = parse(row.queued);
+  const inbox = parse(row.inbox);
+  const checkpoint = parse(row.job_checkpoint);
   return {
     id: String(row.id),
     threadId: String(row.thread_id),
@@ -278,6 +424,13 @@ function recordOf(row: Row): AgentJobRecord {
       row.attachment_scope === null || row.attachment_scope === undefined
         ? null
         : String(row.attachment_scope),
+    ...(after !== undefined ? { after: after as string[] } : {}),
+    ...(row.batch_key === null || row.batch_key === undefined
+      ? {}
+      : { batch: String(row.batch_key) }),
+    ...(queued !== undefined ? { queued: queued as AgentJobRecord["queued"] } : {}),
+    ...(inbox !== undefined && (inbox as string[]).length > 0 ? { inbox: inbox as string[] } : {}),
+    ...(checkpoint !== undefined ? { checkpoint } : {}),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     deadlineAt: Number(row.deadline_at),
@@ -319,6 +472,11 @@ export function createAgentJobsTableStatements(dialect: Dialect, table: string):
     \`updated_at\` BIGINT NOT NULL,
     \`deadline_at\` BIGINT NOT NULL,
     \`settled_at\` BIGINT NULL,
+    \`after_jobs\` LONGTEXT NULL,
+    \`batch_key\` VARCHAR(191) NULL,
+    \`queued\` LONGTEXT NULL,
+    \`inbox\` LONGTEXT NULL,
+    \`job_checkpoint\` LONGTEXT NULL,
 
     INDEX \`${table}_thread_id_created_at_idx\`(\`thread_id\`, \`created_at\`),
     INDEX \`${table}_state_deadline_at_idx\`(\`state\`, \`deadline_at\`),
@@ -349,7 +507,12 @@ export function createAgentJobsTableStatements(dialect: Dialect, table: string):
     "created_at" BIGINT NOT NULL,
     "updated_at" BIGINT NOT NULL,
     "deadline_at" BIGINT NOT NULL,
-    "settled_at" BIGINT${constraint}
+    "settled_at" BIGINT,
+    "after_jobs" TEXT,
+    "batch_key" TEXT,
+    "queued" TEXT,
+    "inbox" TEXT,
+    "job_checkpoint" TEXT${constraint}
 )`,
     `CREATE INDEX IF NOT EXISTS "${table}_thread_id_created_at_idx" ON "${table}"("thread_id", "created_at")`,
     `CREATE INDEX IF NOT EXISTS "${table}_state_deadline_at_idx" ON "${table}"("state", "deadline_at")`,
