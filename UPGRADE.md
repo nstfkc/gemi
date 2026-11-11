@@ -1,3 +1,16 @@
+# Unreleased
+
+## ai: reasoning from an unfinished response is no longer replayed (#1246)
+
+**Fix (patch version).** On the OpenAI and Azure OpenAI providers, a step whose stream broke off after its reasoning started (a dropped socket, `streamMaxDurationMs`, a stop) left the reasoning part's `rs_…` id on the stored message. The Responses API never stored that response, so every later turn on the thread was refused with `400 Item with id 'rs_…' not found.` and the thread could not be answered again.
+
+- The request builder no longer sends the reasoning of a message whose `finishReason` is `error`, `aborted` or `interrupted`. That message's text and tool calls are still sent.
+- A 400 that names a reasoning item the request sent is retried once, with all reasoning items removed, instead of failing the turn.
+
+What to check:
+
+- Nothing to change. Threads that are already stuck work again on the next turn. A turn that follows a failed or stopped step loses the prompt-cache hit on that step's reasoning.
+
 # 0.205.2
 
 ## auth: opt-in fixed sign-in code in production

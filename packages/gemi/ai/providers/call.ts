@@ -25,6 +25,7 @@ import {
   type RequestOptions,
 } from "./http";
 import type { ResponsesRequest } from "./request";
+import { withoutStaleReasoning } from "./staleReasoning";
 import { decodeChunks, emptyUsage, parseResponsesStream } from "./stream";
 
 /**
@@ -151,6 +152,8 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
   let request = body;
   const rejected = new Set<string>();
   let fileAttempts = 0;
+  // Once per call: see `providers/staleReasoning.ts`.
+  let reasoningStripped = false;
   const maxStreamRetries = Math.max(0, endpoint.maxRetries);
   const random = endpoint.random ?? Math.random;
   // What the attempts that were dropped before their first content event
@@ -233,6 +236,15 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
             yield { type: "file-rejected", fileId, message: reason, ...httpErrorDetail(error) };
           }
           request = withoutFiles(responses, new Set(blamed), params.files) as unknown as Body;
+          continue;
+        }
+        // A replayed reasoning item the API no longer has fails this request
+        // and every later one in the thread. Asked again once without the
+        // reasoning items, which the answer does not depend on.
+        const stripped = reasoningStripped ? null : withoutStaleReasoning(request, error);
+        if (stripped) {
+          reasoningStripped = true;
+          request = stripped as unknown as Body;
           continue;
         }
         const normalized = normalizeProviderError(error);
