@@ -1,5 +1,14 @@
 # Unreleased
 
+## ai: Claude thinking, structured output, prompt caching and files (#1238)
+
+**Addition (minor version).** `AnthropicProvider` now sends `reasoning` as adaptive thinking with an effort and sends thinking blocks back with their signatures (through `ReasoningPart.providerMetadata`, #477), sends strict `output` schemas as `output_config.format`, marks prompt-cache breakpoints on the tools, the system prompt and the last message, and uploads files through the Files API (images, PDFs and plain text are shown to the model). See "Anthropic (Claude)" in the AI providers docs.
+
+What to check:
+
+- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps can invalidate Claude's thinking blocks (preserved thinking), which is a 400 on accounts created from 2026-08-31.
+- With `reasoning` set, a forced `toolChoice` is sent as `auto`.
+
 ## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
 
 **Addition (minor version).** `AnthropicProvider` (from `gemi/ai`) runs agents on Claude: streamed text, parallel tool calls, retries and timeouts, error mapping (529 overloaded and stream `overloaded_error` retried, 429 with `retry-after`, `prompt is too long` as `context_length_exceeded`, refusals as `content_filtered`) and usage with cache tokens. Set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`) and use `AnthropicProvider.model("claude-opus-5-5")`. See "Anthropic (Claude)" in the AI providers docs.

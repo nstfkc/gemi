@@ -4,8 +4,16 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../AgentProvider";
-import type { AgentMessage, FilePart } from "../types";
-import { attachmentIdOf, attachmentLine, toolResultOutput } from "./request";
+import type { JSONSchema } from "../Schema";
+import type { AgentMessage, FilePart, ReasoningPart } from "../types";
+import { unreadableNote } from "./fileRejection";
+import {
+  assertFilePart,
+  attachmentIdOf,
+  attachmentLine,
+  isImageFile,
+  toolResultOutput,
+} from "./request";
 
 /**
  * `ProviderStreamParams` to a Messages API body (`POST /v1/messages`), as a
@@ -23,7 +31,8 @@ import { attachmentIdOf, attachmentLine, toolResultOutput } from "./request";
  * - `temperature` is never sent. On API version `2026-10-21` (see
  *   `ANTHROPIC_VERSION`) it is a 400 on every model, whatever its value.
  * - `promptCacheKey` has no Anthropic counterpart: the cache keys on the
- *   prefix itself, so it is not sent.
+ *   prefix itself, so it is not sent. Caching is asked for with `cache_control`
+ *   breakpoints instead; see `withCacheBreakpoints`.
  */
 
 export type MessagesBlock = Record<string, unknown>;
@@ -38,6 +47,11 @@ export type MessagesRequest = {
   system?: MessagesBlock[];
   tools?: MessagesTool[];
   tool_choice?: { type: "auto" | "any" | "none" | "tool"; name?: string; disable_parallel_tool_use?: boolean };
+  thinking?: { type: "adaptive"; display: "summarized" };
+  output_config?: {
+    effort?: string;
+    format?: { type: "json_schema"; schema: JSONSchema };
+  };
 };
 
 /**
@@ -59,17 +73,119 @@ export function buildMessagesRequest(
     stream: true,
   };
 
-  if (params.systemPrompt) body.system = [{ type: "text", text: params.systemPrompt }];
+  const system = [params.systemPrompt, looseOutputInstruction(params.output)].filter(Boolean);
+  if (system.length > 0) body.system = [{ type: "text", text: system.join("\n\n") }];
+
+  // Adaptive thinking with the agent's effort. `"none"` keeps thinking off but
+  // still sends an effort, because the newest models cannot turn thinking
+  // off (`disabled` is a 400) and a low effort is the nearest thing.
+  const reasoning = ctx.capabilities.reasoning ? params.reasoning : undefined;
+  if (reasoning) {
+    if (reasoning !== "none") body.thinking = { type: "adaptive", display: "summarized" };
+    body.output_config = { effort: effortOf(reasoning) };
+  }
+
+  if (params.output?.strict) {
+    body.output_config = {
+      ...body.output_config,
+      format: { type: "json_schema", schema: toClaudeSchema(params.output.schema) },
+    };
+  }
 
   const tools = toMessagesTools(params.tools);
   if (tools.length > 0) {
     body.tools = tools;
-    const choice = toolChoice(params.toolChoice, ctx.forcedToolChoice);
+    // With thinking on, only `auto` and `none` are accepted on any model.
+    const choice = toolChoice(params.toolChoice, ctx.forcedToolChoice && !body.thinking);
     if (!ctx.capabilities.parallelToolCalls) choice.disable_parallel_tool_use = true;
     if (params.toolChoice !== undefined || choice.disable_parallel_tool_use) body.tool_choice = choice;
   }
 
+  return withCacheBreakpoints(body);
+}
+
+/**
+ * gemi's effort onto `output_config.effort` (`low` … `max`). `minimal` and
+ * `none` have no counterpart and are `low`; anything else is sent as written,
+ * so a new level works without a gemi release.
+ */
+function effortOf(reasoning: string): string {
+  return reasoning === "none" || reasoning === "minimal" ? "low" : reasoning;
+}
+
+/**
+ * Prompt caching. The cache holds a prefix in render order (`tools`, then
+ * `system`, then `messages`) up to a block marked `cache_control`, so three
+ * breakpoints cover what an agent repeats: the last tool (the tool list), the
+ * system prompt, and the last block of the last message, which the next step
+ * extends, so it reads this step's prefix back. That is three of the four
+ * allowed. A prefix under the model's minimum (512 tokens on the 5.x models)
+ * is not cached and costs nothing extra; a cache write costs 1.25x input.
+ *
+ * Thinking blocks cannot carry `cache_control`, so the last message's
+ * breakpoint goes on its last block that can.
+ */
+function withCacheBreakpoints(body: MessagesRequest): MessagesRequest {
+  const mark = (block: MessagesBlock | MessagesTool | undefined) => {
+    if (block) block.cache_control = { type: "ephemeral" };
+  };
+  mark(body.tools?.at(-1));
+  mark(body.system?.at(-1));
+  const last = body.messages.at(-1)?.content ?? [];
+  mark([...last].reverse().find((b) => b.type !== "thinking" && b.type !== "redacted_thinking"));
   return body;
+}
+
+// --- structured output ---------------------------------------------------
+
+/**
+ * Keywords structured outputs refuse, per Anthropic's JSON schema limits:
+ * numeric and string length constraints, and array constraints beyond
+ * `minItems` 0 or 1. They are removed from what is sent, as the SDKs do, and
+ * still hold: `Agent` validates the answer against the agent's own schema.
+ */
+const UNSUPPORTED_KEYWORDS = new Set([
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minLength",
+  "maxLength",
+  "maxItems",
+  "uniqueItems",
+]);
+
+const SCHEMA_MAPS = new Set(["properties", "patternProperties", "$defs", "definitions"]);
+
+export function toClaudeSchema(schema: JSONSchema): JSONSchema {
+  const strip = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(strip);
+    if (!isObject(node)) return node;
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (UNSUPPORTED_KEYWORDS.has(key)) continue;
+      if (key === "minItems" && typeof value === "number" && value > 1) continue;
+      // These map names to schemas; a property named `minimum` is kept.
+      out[key] = SCHEMA_MAPS.has(key) && isObject(value)
+        ? Object.fromEntries(Object.entries(value).map(([name, sub]) => [name, strip(sub)]))
+        : strip(value);
+    }
+    return out;
+  };
+  return strip(schema) as JSONSchema;
+}
+
+/**
+ * A schema that is not `strict` holds a free-form node (`s.json()`), which
+ * structured outputs cannot express (every object needs `additionalProperties:
+ * false`). It is not sent as `output_config.format`, which would be a 400;
+ * the model is asked for the JSON in the system prompt instead, and `Agent`
+ * validates what comes back.
+ */
+function looseOutputInstruction(output: ProviderStreamParams["output"]): string | undefined {
+  if (!output || output.strict) return undefined;
+  return `Answer with only a JSON value (no prose, no code fence) that matches this JSON schema:\n${JSON.stringify(output.schema)}`;
 }
 
 /**
@@ -149,8 +265,11 @@ export function toMessages(
           break;
         }
         case "reasoning": {
-          // Another provider's reasoning (a Responses item id) means nothing
-          // here and is left out.
+          // Claude's own thinking goes back as it came, signature and all,
+          // empty ones included. Another provider's reasoning (a Responses
+          // item id) means nothing here and is left out.
+          const block = role === "assistant" ? thinkingBlock(part) : undefined;
+          if (block) blocks.push({ role, block });
           break;
         }
         case "tool-call": {
@@ -224,17 +343,48 @@ function noResult(toolUseId: string): MessagesBlock {
   return { type: "tool_result", tool_use_id: toolUseId, content: NO_RESULT_RECORDED };
 }
 
+/** A reasoning part this provider wrote, back as its block; else nothing. */
+function thinkingBlock(part: ReasoningPart): MessagesBlock | undefined {
+  const meta = part.providerMetadata?.anthropic;
+  if (!isObject(meta)) return undefined;
+  if (meta.type === "thinking" && typeof meta.signature === "string") {
+    return { type: "thinking", thinking: part.text ?? "", signature: meta.signature };
+  }
+  if (meta.type === "redacted_thinking" && typeof meta.data === "string") {
+    return { type: "redacted_thinking", data: meta.data };
+  }
+  return undefined;
+}
+
 /**
- * A file part as the model is told about it. Without `fileInput` it is the
- * attachment line alone, when the part has an attachment id, so the model
- * knows a tool can read it.
+ * A file part as the model is told about it, with the rules of the `file` case
+ * in `toResponsesInput`: the attachment line when the part has an attachment
+ * id, and the file itself when the model can read it.
+ *
+ * Files go by Files API id (`source: {type: "file"}`): an image as an `image`
+ * block, a PDF or plain text as a `document`. Those are the types the API
+ * reads; any other file is not shown (it would be a 400), and the model is told
+ * so. Without `fileInput` it is the attachment line alone.
  */
 function fileBlocks(part: FilePart, capabilities: ProviderCapabilities): MessagesBlock[] {
   const attachmentId = attachmentIdOf(part);
-  if (!capabilities.fileInput || !part.fileId) {
-    return attachmentId ? [{ type: "text", text: attachmentLine(part, false) }] : [];
-  }
-  return [];
+  const line = (shown: boolean): MessagesBlock[] =>
+    attachmentId ? [{ type: "text", text: attachmentLine(part, shown) }] : [];
+  if (!capabilities.fileInput) return line(false);
+  assertFilePart(part, attachmentId);
+  if (!part.fileId) return line(false);
+  const kind = part.providerRejected ? undefined : fileKind(part);
+  if (!kind) return [...line(false), { type: "text", text: unreadableNote(part.name) }];
+  return [...line(true), { type: kind, source: { type: "file", file_id: part.fileId } }];
+}
+
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+function fileKind(part: FilePart): "image" | "document" | undefined {
+  const mimeType = part.mimeType?.trim().toLowerCase() ?? "";
+  if (isImageFile(part)) return !mimeType || IMAGE_TYPES.has(mimeType) ? "image" : undefined;
+  if (mimeType) return mimeType === "application/pdf" || mimeType === "text/plain" ? "document" : undefined;
+  return /\.(pdf|txt)$/i.test(part.name ?? "") ? "document" : undefined;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

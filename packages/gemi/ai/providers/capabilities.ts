@@ -138,6 +138,8 @@ function supportsToolSearch(family: Family): boolean {
  *   `output_config.effort`), which the 4.6 models and everything after take.
  *   The 4.5 generation and older only take a token budget and answer adaptive
  *   thinking with a 400, so `reasoning` is dropped for them.
+ * - `fileInput`: images (JPEG, PNG, GIF, WebP), PDFs and plain text, uploaded
+ *   through the Files API. Other types are not shown; see `fileBlocks`.
  * - `toolSearch`: false for now. Anthropic has a tool search tool, but
  *   replaying its results in a history is not built yet, so deferred tools and
  *   namespaces are sent flat and whole, which runs the agent the same.
@@ -154,7 +156,7 @@ export function capabilitiesForClaude(model: string): ProviderCapabilities {
   return {
     reasoning: !legacy,
     structuredOutput: true,
-    fileInput: false,
+    fileInput: true,
     parallelToolCalls: true,
     toolSearch: false,
   };

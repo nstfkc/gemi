@@ -9,11 +9,18 @@ import type {
   ProviderStreamParams,
   ProviderToolSpec,
 } from "../AgentProvider";
+import { Agent, AgentTool } from "../Agent";
 import { AnthropicProvider } from "../AgentProvider";
 import { FallbackProvider } from "../FallbackProvider";
+import { s } from "../Schema";
 import { RecordingProvider, type Recording } from "../testing/RecordingProvider";
 import type { AgentMessage } from "../types";
-import { buildMessagesRequest, DEFAULT_MAX_TOKENS, toMessages } from "./anthropicRequest";
+import {
+  buildMessagesRequest,
+  DEFAULT_MAX_TOKENS,
+  toClaudeSchema,
+  toMessages,
+} from "./anthropicRequest";
 import { parseMessagesStream, toAnthropicUsage } from "./anthropicStream";
 import { capabilitiesForClaude, supportsForcedToolChoice } from "./capabilities";
 import { ANTHROPIC_VERSION } from "./endpoints";
@@ -241,8 +248,11 @@ describe("buildMessagesRequest()", () => {
     expect(body.model).toBe("claude-opus-5-5");
     expect(body.max_tokens).toBe(DEFAULT_MAX_TOKENS);
     expect(body.stream).toBe(true);
-    expect(body.system).toEqual([{ type: "text", text: "Be brief." }]);
-    expect(body.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+    const cache_control = { type: "ephemeral" };
+    expect(body.system).toEqual([{ type: "text", text: "Be brief.", cache_control }]);
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi", cache_control }] },
+    ]);
     // A 400 on API version 2026-10-21; the cache key has no counterpart.
     expect(body).not.toHaveProperty("temperature");
     expect(body).not.toHaveProperty("prompt_cache_key");
@@ -271,6 +281,7 @@ describe("buildMessagesRequest()", () => {
         description: "does getOrder",
         input_schema: tool("getOrder").parameters,
         eager_input_streaming: true,
+        cache_control: { type: "ephemeral" },
       },
     ]);
     expect(body).not.toHaveProperty("tool_choice");
@@ -643,5 +654,289 @@ describe("with FallbackProvider and RecordingProvider", () => {
       live.filter((e) => e.type === "tool-call"),
     );
     expect(replay.replayedInFull()).toBe(true);
+  });
+});
+
+// --- part 2: thinking, structured output, caching, files ------------------
+
+describe("thinking", () => {
+  test("streams the text, and closes each block with its signature; redacted thinking comes whole", async () => {
+    const events = await parse(fixture("anthropic-thinking.sse"));
+    expect(events.filter((e) => e.type === "reasoning-delta")).toEqual([
+      { type: "reasoning-delta", delta: "The user wants the weather in Paris." },
+      { type: "reasoning-delta", delta: " I should call getWeather." },
+      {
+        type: "reasoning-delta",
+        delta: "",
+        providerMetadata: { anthropic: { type: "thinking", signature: "EqQBCkYIBhgCKkBFixtureSignatureOne" } },
+      },
+      {
+        type: "reasoning-delta",
+        delta: "",
+        providerMetadata: { anthropic: { type: "redacted_thinking", data: "EmwKAhgBEgyFixtureRedactedData" } },
+      },
+      // Omitted thinking: no text, still a block to send back.
+      {
+        type: "reasoning-delta",
+        delta: "",
+        providerMetadata: { anthropic: { type: "thinking", signature: "EqQBCkYIBhgCKkBFixtureSignatureTwo" } },
+      },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("the request asks for adaptive thinking at the agent's effort", () => {
+    expect(build({ reasoning: "high" })).toMatchObject({
+      thinking: { type: "adaptive", display: "summarized" },
+      output_config: { effort: "high" },
+    });
+    expect(build({ reasoning: "minimal" }).output_config).toEqual({ effort: "low" });
+    // `none` cannot turn thinking off on the newest models; a low effort can.
+    const none = build({ reasoning: "none" });
+    expect(none).not.toHaveProperty("thinking");
+    expect(none.output_config).toEqual({ effort: "low" });
+    expect(build({})).not.toHaveProperty("thinking");
+  });
+
+  test("models that only take a token budget get no thinking parameters", () => {
+    const body = build({ reasoning: "high" }, { model: "claude-haiku-4-5" });
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("output_config");
+  });
+
+  test("with thinking on, a forced tool choice is sent auto even where the model takes it", () => {
+    const opts = { model: "claude-opus-5" };
+    expect(build({ tools: [tool("a")], toolChoice: "required", reasoning: "low" }, opts).tool_choice).toEqual({
+      type: "auto",
+    });
+    expect(build({ tools: [tool("a")], toolChoice: "required", reasoning: "none" }, opts).tool_choice).toEqual({
+      type: "any",
+    });
+  });
+
+  test("Claude's reasoning parts go back as their blocks, in place, unchanged", () => {
+    const out = toMessages(
+      [
+        message({ role: "user", content: [{ type: "text", text: "weather?" }] }),
+        message({
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "thinking it over",
+              providerMetadata: { anthropic: { type: "thinking", signature: "sig1" } },
+            },
+            { type: "reasoning", providerMetadata: { anthropic: { type: "redacted_thinking", data: "enc" } } },
+            { type: "reasoning", text: "", providerMetadata: { anthropic: { type: "thinking", signature: "sig2" } } },
+            { type: "tool-call", toolCallId: "t1", name: "w", input: {} },
+            { type: "tool-result", toolCallId: "t1", name: "w", status: "ok", output: "sunny" },
+          ],
+        }),
+      ],
+      CLAUDE,
+    );
+    expect(out[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "thinking it over", signature: "sig1" },
+        { type: "redacted_thinking", data: "enc" },
+        { type: "thinking", thinking: "", signature: "sig2" },
+        { type: "tool_use", id: "t1", name: "w", input: {} },
+      ],
+    });
+  });
+
+  test("through an Agent: the next step sends the thinking back with its signature", async () => {
+    const { calls, fetchImpl } = server([
+      sse(fixture("anthropic-thinking.sse")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const agent = Agent.create({
+      name: "weather",
+      instructions: "Use the tool.",
+      provider: new TestAnthropic("claude-opus-5-5", fetchImpl),
+      reasoning: "low",
+      maxSteps: 3,
+      tools: [
+        AgentTool.create({
+          name: "getWeather",
+          description: "weather",
+          inputSchema: s.object({ city: s.string() }),
+          execute: async () => "sunny",
+        }),
+      ],
+    });
+    const result = await agent.stream({ messages: [], turn: { text: "weather in Paris?" } }).result();
+    expect(result.finishReason).toBe("stop");
+    expect(calls).toHaveLength(2);
+    const second = calls[1]!.body.messages;
+    expect(second[1].content).toEqual([
+      {
+        type: "thinking",
+        thinking: "The user wants the weather in Paris. I should call getWeather.",
+        signature: "EqQBCkYIBhgCKkBFixtureSignatureOne",
+      },
+      { type: "redacted_thinking", data: "EmwKAhgBEgyFixtureRedactedData" },
+      { type: "thinking", thinking: "", signature: "EqQBCkYIBhgCKkBFixtureSignatureTwo" },
+      { type: "tool_use", id: "toolu_01ThinkFixture000000001", name: "getWeather", input: { city: "Paris" } },
+    ]);
+    expect(second[2].content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_01ThinkFixture000000001",
+        content: "sunny",
+        cache_control: { type: "ephemeral" },
+      },
+    ]);
+  });
+});
+
+describe("structured output", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      city: { type: "string", minLength: 1, maxLength: 80 },
+      tempC: { type: "number", minimum: -90, maximum: 60 },
+      tags: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 5 },
+      minimum: { type: "integer", multipleOf: 5 },
+    },
+    required: ["city", "tempC", "tags", "minimum"],
+    additionalProperties: false,
+  };
+
+  test("a strict schema is output_config.format, without the keywords the API refuses", () => {
+    const body = build({ output: { name: "weather", schema: schema as any, strict: true } });
+    expect(body.output_config).toEqual({
+      format: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+            tempC: { type: "number" },
+            tags: { type: "array", items: { type: "string" } },
+            // A property named like a keyword is still a property.
+            minimum: { type: "integer" },
+          },
+          required: ["city", "tempC", "tags", "minimum"],
+          additionalProperties: false,
+        },
+      },
+    });
+    expect(toClaudeSchema({ type: "array", minItems: 1 } as any)).toEqual({ type: "array", minItems: 1 });
+  });
+
+  test("a schema that is not strict is asked for in the system prompt instead", () => {
+    const loose = { type: "object", properties: { data: {} }, required: ["data"] };
+    const body = build({ systemPrompt: "Be brief.", output: { name: "x", schema: loose as any, strict: false } });
+    expect(body).not.toHaveProperty("output_config");
+    expect(body.system![0]!.text).toContain("Be brief.");
+    expect(body.system![0]!.text).toContain(JSON.stringify(loose));
+  });
+
+  test("format and effort share output_config", () => {
+    const body = build({ reasoning: "medium", output: { name: "w", schema: schema as any, strict: true } });
+    expect(body.output_config).toMatchObject({ effort: "medium", format: { type: "json_schema" } });
+  });
+
+  test("the answer streams as output deltas", async () => {
+    const events = await parse(fixture("anthropic-structured.sse"), { structuredOutput: true });
+    const text = events.flatMap((e) => (e.type === "output-delta" ? [e.delta] : [])).join("");
+    expect(JSON.parse(text)).toEqual({ city: "Paris", tempC: 21 });
+  });
+});
+
+describe("prompt caching", () => {
+  test("breakpoints on the last tool, the system prompt and the last message's last block", () => {
+    const body = build({
+      systemPrompt: "sys",
+      tools: [tool("a"), tool("b")],
+      messages: [
+        message({ role: "user", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] }),
+      ],
+    });
+    const marked = JSON.stringify(body).match(/cache_control/g) ?? [];
+    expect(marked).toHaveLength(3);
+    expect(body.tools![0]).not.toHaveProperty("cache_control");
+    expect(body.tools![1]).toHaveProperty("cache_control");
+    expect(body.system![0]).toHaveProperty("cache_control");
+    expect(body.messages[0]!.content[0]).not.toHaveProperty("cache_control");
+    expect(body.messages[0]!.content[1]).toHaveProperty("cache_control");
+  });
+
+  test("never on a thinking block", () => {
+    const body = build({
+      messages: [
+        message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+        message({
+          role: "assistant",
+          content: [
+            { type: "text", text: "hello" },
+            { type: "reasoning", text: "", providerMetadata: { anthropic: { type: "thinking", signature: "s" } } },
+          ],
+        }),
+      ],
+    });
+    expect(body.messages[1]!.content).toEqual([
+      { type: "text", text: "hello", cache_control: { type: "ephemeral" } },
+      { type: "thinking", thinking: "", signature: "s" },
+    ]);
+  });
+});
+
+describe("files", () => {
+  const user = (part: Record<string, unknown>) =>
+    toMessages([message({ role: "user", content: [{ type: "file", ...part } as any] })], CLAUDE)[0]!.content;
+
+  test("an image is an image block and a PDF a document block, by Files API id", () => {
+    expect(user({ fileId: "file_img", mimeType: "image/png", name: "a.png" })).toEqual([
+      { type: "image", source: { type: "file", file_id: "file_img" } },
+    ]);
+    expect(user({ fileId: "file_pdf", mimeType: "application/pdf", name: "a.pdf" })).toEqual([
+      { type: "document", source: { type: "file", file_id: "file_pdf" } },
+    ]);
+    expect(user({ fileId: "file_txt", name: "notes.txt" })).toEqual([
+      { type: "document", source: { type: "file", file_id: "file_txt" } },
+    ]);
+  });
+
+  test("with an attachment id, the line comes first and says the file is shown", () => {
+    const blocks = user({ fileId: "file_img", attachmentId: "gemi_att_1", mimeType: "image/png", name: "a.png" });
+    expect(blocks[0]).toMatchObject({ type: "text" });
+    expect(blocks[1]).toEqual({ type: "image", source: { type: "file", file_id: "file_img" } });
+  });
+
+  test("a type the API can't read, or a file it refused, is not sent, and the model is told", () => {
+    for (const part of [
+      { fileId: "file_x", mimeType: "text/csv", name: "a.csv" },
+      { fileId: "file_x", mimeType: "image/bmp", name: "a.bmp" },
+      { fileId: "file_x", mimeType: "application/pdf", name: "a.pdf", providerRejected: true },
+    ]) {
+      const blocks = user(part);
+      expect(blocks.some((b) => b.type === "image" || b.type === "document")).toBe(false);
+      expect(String(blocks.at(-1)!.text)).toContain("could not be read");
+    }
+  });
+
+  test("a gemi attachment id in fileId is refused, as on the Responses path", () => {
+    expect(() => user({ fileId: "gemi_att_1" })).toThrow(/attachment id/);
+  });
+
+  test("upload posts to /v1/files with no purpose and answers the file id", async () => {
+    const calls: { url: string; body: FormData }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, body: init.body as FormData });
+      return new Response(JSON.stringify({ id: "file_011abc", type: "file" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const id = await new TestAnthropic("claude-opus-5-5", fetchImpl).upload(
+      new File(["%PDF-1.7"], "a.pdf", { type: "application/pdf" }),
+    );
+    expect(id).toBe("file_011abc");
+    expect(calls[0]!.url).toBe("https://api.anthropic.com/v1/files");
+    expect(calls[0]!.body.has("purpose")).toBe(false);
+    expect(calls[0]!.body.get("file")).toBeInstanceOf(File);
   });
 });

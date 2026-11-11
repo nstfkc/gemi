@@ -459,8 +459,9 @@ export class AnthropicProvider extends AgentProvider {
     });
   }
 
-  upload(_file: File): Promise<string> {
-    return Promise.reject(new Error("AnthropicProvider does not upload files yet."));
+  /** Through the Files API (`POST /v1/files`), which takes no `purpose`. */
+  upload(file: File): Promise<string> {
+    return uploadFile(this.endpoint(), file, null);
   }
 
   protected endpoint(): ResponsesEndpoint {

@@ -13,6 +13,12 @@ import { emptyUsage, sseMessages } from "./stream";
  * (the stop reason, and usage that is CUMULATIVE, not an increment) and
  * `message_stop`. `ping` frames come at any time, an `error` frame can replace
  * the rest, and unknown event types are to be ignored.
+ *
+ * Thinking is `reasoning-delta`s with no id. A `thinking` block's text streams
+ * as it comes, and at its stop one more, empty delta carries the signature as
+ * `providerMetadata.anthropic`, which closes the part. A `redacted_thinking`
+ * block is one empty delta carrying its `data`. `anthropicRequest.ts` turns
+ * those parts back into the blocks, unchanged, as the API requires.
  */
 
 type ParseOptions = {
@@ -20,7 +26,7 @@ type ParseOptions = {
   structuredOutput?: boolean;
 };
 
-type OpenBlock = { type: string; id?: string; name?: string; args: string };
+type OpenBlock = { type: string; id?: string; name?: string; args: string; signature: string };
 
 export async function* parseMessagesStream(
   chunks: AsyncIterable<string> | Iterable<string>,
@@ -65,8 +71,18 @@ export async function* parseMessagesStream(
           id: typeof block.id === "string" ? block.id : undefined,
           name: typeof block.name === "string" ? block.name : undefined,
           args: "",
+          signature: typeof block.signature === "string" ? block.signature : "",
         };
         blocks.set(index, open);
+        // Redacted thinking arrives whole: encrypted, nothing to show, and
+        // sent back as it came.
+        if (open.type === "redacted_thinking") {
+          yield {
+            type: "reasoning-delta",
+            delta: "",
+            providerMetadata: { anthropic: { type: "redacted_thinking", data: String(block.data ?? "") } },
+          };
+        }
         // A text block opens empty in every recorded shape, but the field is
         // there, so a gateway that sends it whole is read.
         if (open.type === "text" && typeof block.text === "string" && block.text) {
@@ -82,6 +98,11 @@ export async function* parseMessagesStream(
         if (delta.type === "text_delta") {
           const text = String(delta.text ?? "");
           if (text) yield textEvent(text, options);
+        } else if (delta.type === "thinking_delta") {
+          const text = String(delta.thinking ?? "");
+          if (text) yield { type: "reasoning-delta", delta: text };
+        } else if (delta.type === "signature_delta") {
+          block.signature += String(delta.signature ?? "");
         } else if (delta.type === "input_json_delta" && block.type === "tool_use") {
           const fragment = String(delta.partial_json ?? "");
           if (!fragment) break;
@@ -100,6 +121,16 @@ export async function* parseMessagesStream(
         const index = Number(payload.index);
         const block = blocks.get(index);
         blocks.delete(index);
+        // The signature closes the thinking part, and is what lets it be sent
+        // back (see `ReasoningPart.providerMetadata`). A block with no text
+        // (`display: "omitted"`) still becomes a part: it has to go back too.
+        if (block?.type === "thinking") {
+          yield {
+            type: "reasoning-delta",
+            delta: "",
+            providerMetadata: { anthropic: { type: "thinking", signature: block.signature } },
+          };
+        }
         if (block?.type === "tool_use") {
           // A call with no arguments streams no delta at all; its input is
           // the empty object.
