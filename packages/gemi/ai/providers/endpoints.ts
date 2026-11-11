@@ -311,8 +311,9 @@ export const ANTHROPIC_VERSION = "2026-10-21";
  * `ANTHROPIC_BASE_URL`) names a gateway in front of it. The base is the host,
  * as the SDKs take it; a trailing `/v1` is accepted too and not doubled.
  *
- * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), read per
- * request like the others.
+ * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), or
+ * with `ANTHROPIC_AUTH_TOKEN` as a bearer when there is no key (the SDKs'
+ * order), read per request like the others.
  */
 export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
   const host = (config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com")
@@ -325,8 +326,10 @@ export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults
     query: "",
     headers: async () => {
       const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
+      const token = apiKey ? undefined : env("ANTHROPIC_AUTH_TOKEN");
       return {
         ...(apiKey ? { "x-api-key": apiKey } : {}),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
         "anthropic-version": ANTHROPIC_VERSION,
         ...config.headers,
       };

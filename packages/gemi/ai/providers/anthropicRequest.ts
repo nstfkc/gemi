@@ -251,12 +251,20 @@ export function toMessages(
     for (const part of message.content ?? []) {
       switch (part.type) {
         case "text": {
-          if (part.text?.trim()) blocks.push({ role, block: { type: "text", text: part.text } });
+          // The assistant's text goes back exactly as the model wrote it,
+          // whitespace-only blocks included (the "\n\n" before a tool call):
+          // anything else is an edit to the turn. Only an empty string, which
+          // the API refuses, is left out. A user's blank text is noise.
+          const keep = role === "assistant" ? !!part.text : !!part.text?.trim();
+          if (keep) blocks.push({ role, block: { type: "text", text: part.text } });
           break;
         }
         case "output": {
           if (part.partial) break;
-          blocks.push({ role, block: { type: "text", text: JSON.stringify(part.value) } });
+          // The model's own text when the part kept it; re-serializing the
+          // value would change its whitespace and number formatting.
+          const text = part.text ?? JSON.stringify(part.value);
+          blocks.push({ role, block: { type: "text", text } });
           break;
         }
         case "file": {
@@ -334,8 +342,23 @@ export function toMessages(
     push(role, block);
   }
   answer();
+
+  // The API wants a user turn first, and on the 4.6-and-later models it
+  // refuses a history that ends on the assistant (that is a prefill). Both
+  // happen when an app starts a run from a trimmed or assistant-authored
+  // history. The turns added are fixed text, so the prefix stays the same
+  // from one step to the next.
+  if (out[0]?.role === "assistant") {
+    out.unshift({ role: "user", content: [{ type: "text", text: HISTORY_STARTS_HERE }] });
+  }
+  if (out.at(-1)?.role === "assistant") {
+    out.push({ role: "user", content: [{ type: "text", text: CONTINUE }] });
+  }
   return out;
 }
+
+const HISTORY_STARTS_HERE = "(The conversation continues from an earlier point.)";
+const CONTINUE = "Continue.";
 
 const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
 
