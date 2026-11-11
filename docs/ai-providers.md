@@ -68,6 +68,20 @@ The defaults are long on purpose. A reasoning model at a high effort can think f
 
 `streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 
+### Prompt cache key
+
+Every request carries a `prompt_cache_key` (#1223). The API routes requests with the same key and the same prompt prefix to the same cache, so the first step of a run can hit the prefix that another run of the same agent just warmed, parallel runs included. Without the key, first steps mostly miss.
+
+By default the key is the agent's name and a 16-digit hash of the call's instructions and tool list (`defaultPromptCacheKey`, exported from `gemi/ai`). Runs that send the same instructions and tools share a key, and agents with different prefixes don't crowd one cache. To set it yourself:
+
+```typescript
+Agent.create({ name: "specialist", provider, promptCacheKey: "site-specialists" }); // 1–64 characters
+Agent.create({ name: "private", provider, promptCacheKey: false });                 // send none
+agent.stream({ messages, promptCacheKey: `tenant-${tenantId}` });                   // per run
+```
+
+A shared key only helps when the requests really share a prefix. Keep a key's traffic below what one cache serves (OpenAI suggests about 15 requests a minute per key and prefix), and give busier groups their own keys.
+
 ## A provider per run
 
 `agent.stream({ provider })` makes that run's model calls through `provider` instead of the one from `Agent.create`, e.g. to let a user pick a model, route a run to another deployment, or record and replay model calls in a test.
