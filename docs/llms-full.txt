@@ -10753,7 +10753,7 @@ A recording that throws as soon as a prompt changes has to be made again after e
 - `"shape"`: anything but the shape of the conversation (its roles, tool calls with their inputs, tool results with their status): the instructions, settings and message text. For an app whose prompts aren't files.
 - `"exact"`: nothing.
 
-In `"wording"` and `"shape"`, the tools offered may differ too, as long as every tool call the recorded answer makes is to a tool still offered and fits its schema today. Anything else throws a `RecordingMismatchError` that shows where the two requests first differ, ids aside: a different conversation has no recorded answer.
+In `"wording"` and `"shape"`, the tools offered may differ too, as long as every tool call the recorded answer makes is to a tool still offered and fits its schema today. A schema part `s.fromJSONSchema` can't model (a free-form `props: {}`) isn't checked: the tool still validates its input when the call runs. Anything else throws a `RecordingMismatchError` that shows where the two requests first differ, ids aside: a different conversation has no recorded answer.
 
 ### Fingerprints
 

@@ -7,7 +7,7 @@ import {
   type ProviderStreamParams,
   type ProviderToolSpec,
 } from "../AgentProvider";
-import { s } from "../Schema";
+import { JSONSchemaError, s } from "../Schema";
 import { type FingerprintOptions, Fingerprints, type RecordingFingerprints } from "./Fingerprints";
 
 /**
@@ -737,10 +737,17 @@ export class RecordingProvider extends AgentProvider {
         } catch {
           input = undefined;
         }
-        const checked = s
-          .fromJSONSchema(spec.parameters as never, { unknownKeys: "error", formats })
-          .safeParse(input);
-        if (checked.ok === false) {
+        // A schema `fromJSONSchema` can't model (a free-form part, such as an
+        // object value with no type) isn't checked here (#1234): the tool still
+        // validates its input when the call runs, as for formats.
+        let schema: ReturnType<typeof s.fromJSONSchema> | undefined;
+        try {
+          schema = s.fromJSONSchema(spec.parameters as never, { unknownKeys: "error", formats });
+        } catch (error) {
+          if (!(error instanceof JSONSchemaError)) throw error;
+        }
+        const checked = schema?.safeParse(input);
+        if (checked && checked.ok === false) {
           throw new RecordingMismatchError(
             `${where}: the recorded call of ${event.name} does not fit its schema any more (${checked.errors.join("; ")}).`,
           );
