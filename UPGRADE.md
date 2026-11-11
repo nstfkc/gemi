@@ -1,5 +1,27 @@
 # Unreleased
 
+## ai: `prompt_cache_key` on every Responses request (#1223)
+
+**Behaviour change (minor version).** See [Prompt cache key](docs/ai-providers.md#prompt-cache-key).
+
+- Agent model calls now send `prompt_cache_key`. By default it's the agent's name plus a hash of the call's instructions and tools, so runs with the same prefix share the provider's prompt cache from their first step.
+- `promptCacheKey` on `Agent.create` and on `agent.stream()`: a string (1–64 characters) to set it, `false` to send none. `defaultPromptCacheKey` and `ProviderStreamParams.promptCacheKey` are exported.
+
+What to check:
+
+- Nothing for most apps: OpenAI and Azure OpenAI accept the parameter. An app whose own `AgentProvider`, proxy or recordings compare the whole request body sees the new field. Pass `promptCacheKey: false` to keep requests as they were.
+
+## orm: Postgres session settings for a block, for row-level security (#1158)
+
+**New API (minor version).** See [Session settings](docs/orm.md#session-settings-row-level-security).
+
+- `DB.withSettings(settings, fn)` (and `DB.connection(name).withSettings`) applies `set_config(name, value, true)` at the start of every transaction opened in `fn`. A single ORM call, `DB.query` or `DB.execute` outside a transaction gets a transaction of its own for it. Inside an open transaction the settings are applied at once and the ones the block added are reset when it returns. `DB.readOnly` applies them after `SET TRANSACTION READ ONLY`. Postgres only.
+- A nested block that gives a setting another value throws `SessionSettingConflictError` (exported from `gemi/orm` with the `SessionSettingValue` type).
+
+What to check:
+
+- Nothing, for an app that doesn't call it. An app that opens `Model.transaction` and runs `select set_config(...)` (or its own function that does) as the first statement can use `DB.withSettings` instead.
+
 ## ai: `RecordingProvider` in `gemi/ai/testing` (#1229)
 
 **New API (minor version).** See [AI Recordings](docs/ai-recordings.md).

@@ -62,7 +62,13 @@ describe("the ORM's seams", () => {
    * caller's transaction like everything else. `nested-writes.ts` builds that
    * SQL and never runs it.
    */
-  const DRIVER_DOOR = ["Model.ts"];
+  //
+  // `context.ts` is the second door, for one statement: the
+  // `select set_config(...)` that `withTransaction` and `runWithSettings` run
+  // on the transaction's own handle (#1158). It carries no model and no user
+  // data shape, only the session settings a block asked for, and it runs
+  // inside the transaction it configures.
+  const DRIVER_DOOR = ["Model.ts", "context.ts"];
 
   test("only Model.ts reaches the driver", () => {
     const callers = FILES.filter(([, path]) => /\.unsafe\(/.test(read(path))).map(

@@ -154,7 +154,9 @@ export {
   runAsSystem,
   runAsUser,
   transactionDepth,
+  SessionSettingConflictError,
   TransactionDependencyError,
+  type SessionSettingValue,
   withTransaction,
   type OrmScope,
 } from "./context";

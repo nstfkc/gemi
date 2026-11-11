@@ -35,6 +35,7 @@ export type ResponsesRequest = {
   reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
   max_output_tokens?: number;
+  prompt_cache_key?: string;
 };
 
 export function buildResponsesRequest(
@@ -99,6 +100,7 @@ export function buildResponsesRequest(
 
   if (typeof params.temperature === "number") body.temperature = params.temperature;
   if (typeof params.maxOutputTokens === "number") body.max_output_tokens = params.maxOutputTokens;
+  if (params.promptCacheKey) body.prompt_cache_key = params.promptCacheKey;
 
   return body;
 }

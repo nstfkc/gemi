@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type {
@@ -1627,6 +1628,15 @@ export interface CreateAgentParams<
    */
   contextWindow?: ContextWindowOptions;
   /**
+   * The provider's `prompt_cache_key` (#1223): requests with the same key and
+   * the same prompt prefix are routed to the same cache, so a run's first
+   * step can hit what another run of this agent just warmed. Default: the
+   * agent's name and a short hash of the call's instructions and tools
+   * (`defaultPromptCacheKey`), so runs that share that prefix share a key. A
+   * string is sent as is (at most 64 characters); `false` sends none.
+   */
+  promptCacheKey?: string | false;
+  /**
    * Called before every model call of a run of this agent, with the messages
    * about to be sent (after `contextWindow`), and may answer other ones, or
    * other instructions, for that call alone. See `PrepareStep`.
@@ -1919,6 +1929,9 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    * uses its own agent's.
    */
   contextWindow?: ContextWindowOptions | false;
+  /** Overrides the agent's `promptCacheKey` for this run. Not handed down to a
+   *  sub-run, which uses its own agent's. */
+  promptCacheKey?: string | false;
   /**
    * Runs after the agent's own `prepareStep`, on what that answered. Not
    * handed down to a sub-run. `AgentController` sets this from its
@@ -2292,6 +2305,7 @@ type RunConfig = {
    */
   maxRunDurationMs: number | null | undefined;
   contextWindow?: ContextWindowOptions;
+  promptCacheKey?: string | false;
   /** The agent's hook, then the stream's, in that order. */
   prepareStep: PrepareStep[];
 };
@@ -2453,6 +2467,7 @@ export class Agent<
     this.reasoning = params.reasoning;
     this.jobs = params.jobs ?? {};
     this.memory = params.memory ? (params.memory as AgentMemoryOptions) : undefined;
+    assertPromptCacheKey(params.promptCacheKey, `Agent.create for "${params.name}"`);
     const limit = normalizeDuration(params.maxRunDurationMs);
     this.maxRunDurationMs = limit === undefined ? DEFAULT_MAX_RUN_DURATION_MS : limit;
 
@@ -2474,6 +2489,7 @@ export class Agent<
       logErrors: params.logErrors ?? true,
       maxRunDurationMs: limit,
       contextWindow: params.contextWindow,
+      promptCacheKey: params.promptCacheKey,
       // The run calls it with the context it was given, which the types above
       // have already checked is this agent's.
       prepareStep: params.prepareStep ? [params.prepareStep as PrepareStep] : [],
@@ -2551,6 +2567,8 @@ export class Agent<
         params.maxRunDurationMs !== undefined
           ? normalizeDuration(params.maxRunDurationMs)
           : this.config.maxRunDurationMs,
+      promptCacheKey:
+        params.promptCacheKey !== undefined ? params.promptCacheKey : this.config.promptCacheKey,
       contextWindow:
         params.contextWindow === false
           ? undefined
@@ -2579,6 +2597,7 @@ export class Agent<
     if (params.usageLimits) {
       assertUsageLimits(params.usageLimits, `Agent.stream for "${this.name}"`);
     }
+    assertPromptCacheKey(params.promptCacheKey, `Agent.stream for "${this.name}"`);
     if (params.tools && params.tools.length > 0) {
       config = withRunTools(config, params.tools, `Agent.stream for "${this.name}"`);
     }
@@ -2989,6 +3008,57 @@ function toolChoiceProblem(
     return `answered \`toolChoice\` naming "${choice.name}", which is not a tool this call offers.`;
   }
   return undefined;
+}
+
+/**
+ * The default `prompt_cache_key` (#1223): the agent's name and the first 16
+ * hex digits of a SHA-256 over the call's instructions and tool list. Runs
+ * whose requests start with the same instructions and tools get the same key,
+ * so the provider routes them to the cache that holds that prefix.
+ */
+export function defaultPromptCacheKey(
+  agent: string,
+  instructions: string | undefined,
+  tools: readonly (ProviderToolSpec | ProviderToolNamespace)[],
+): string {
+  const hash = createHash("sha256");
+  hash.update(instructions ?? "");
+  hash.update("\0");
+  hash.update(toolsDigest(tools));
+  const name = agent.replace(/[^\w.-]/g, "_").slice(0, 40);
+  return `${name}-${hash.digest("hex").slice(0, 16)}`;
+}
+
+// The tool list's JSON can be hundreds of KB and is the same array object on
+// every step of a run, so its digest is kept per array.
+const toolDigests = new WeakMap<object, string>();
+function toolsDigest(tools: readonly (ProviderToolSpec | ProviderToolNamespace)[]): string {
+  let digest = toolDigests.get(tools);
+  if (digest === undefined) {
+    digest = createHash("sha256").update(JSON.stringify(tools)).digest("hex");
+    toolDigests.set(tools, digest);
+  }
+  return digest;
+}
+
+function promptCacheKeyParam(
+  config: RunConfig,
+  instructions: string | undefined,
+  tools: readonly (ProviderToolSpec | ProviderToolNamespace)[],
+): { promptCacheKey?: string } {
+  if (config.promptCacheKey === false) return {};
+  return {
+    promptCacheKey: config.promptCacheKey ?? defaultPromptCacheKey(config.name, instructions, tools),
+  };
+}
+
+function assertPromptCacheKey(value: unknown, owner: string): void {
+  if (value === undefined || value === false) return;
+  if (typeof value !== "string" || value.length === 0 || value.length > 64) {
+    throw new Error(
+      `${owner} sets \`promptCacheKey\` to ${JSON.stringify(value)}, but it has to be false or a string of 1 to 64 characters.`,
+    );
+  }
 }
 
 /** The zero-parameter tool a skill becomes. */
@@ -4199,6 +4269,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       messages: request.messages,
       systemPrompt: request.instructions,
       tools: request.tools.length > 0 ? request.tools : undefined,
+      ...promptCacheKeyParam(this.config, request.instructions, request.tools),
       ...(request.toolChoice !== undefined ? { toolChoice: request.toolChoice } : {}),
       output: this.config.output ? outputFormat(this.config.output) : undefined,
       reasoning: request.reasoning,

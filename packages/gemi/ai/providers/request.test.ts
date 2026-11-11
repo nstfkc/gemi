@@ -859,6 +859,11 @@ describe("buildResponsesRequest()", () => {
     expect(build({ toolChoice: "none" }).tool_choice).toBeUndefined();
   });
 
+  test("prompt_cache_key is sent when set (#1223)", () => {
+    expect(build({ promptCacheKey: "site-abc" }).prompt_cache_key).toBe("site-abc");
+    expect(build({}).prompt_cache_key).toBeUndefined();
+  });
+
   test("an empty tool list is omitted rather than sent as []", () => {
     expect(build({ tools: [] }).tools).toBeUndefined();
   });
