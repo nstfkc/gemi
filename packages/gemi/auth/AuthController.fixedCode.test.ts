@@ -58,7 +58,11 @@ let auth: AuthManager;
 
 vi.mock("../foundation/app", () => ({
   app: (token?: unknown) =>
-    token === undefined ? { bound: () => false } : token === Translator ? { detectLocale: () => "en-US" } : auth,
+    token === undefined
+      ? { bound: () => false }
+      : token === Translator
+        ? { detectLocale: () => "en-US" }
+        : auth,
 }));
 
 const { AuthController } = await import("./AuthController");
@@ -95,6 +99,7 @@ beforeEach(() => {
   resetFallbackCodeLimiter();
   provider = new MemoryProvider();
   vi.stubEnv("AUTH_FIXED_CODE", "");
+  vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "");
 });
 
 afterEach(() => {
@@ -173,7 +178,7 @@ describe("the fixed code in development", () => {
     await expect(verify({ email: EMAIL, code: "000000" })).rejects.toMatchObject({
       errors: { code: ["invalid_code"] },
     });
-    expect(matchesFixedSignInCode("", null)).toBe(false);
+    expect(matchesFixedSignInCode("", { fixedCode: null })).toBe(false);
   });
 });
 
@@ -196,7 +201,7 @@ describe("in production", () => {
   test("AUTH_FIXED_CODE fails the boot with a clear error", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("AUTH_FIXED_CODE", "000000");
-    expect(() => checkFixedSignInCode(undefined)).toThrow(
+    expect(() => checkFixedSignInCode()).toThrow(
       /AUTH_FIXED_CODE is set.*refused when NODE_ENV=production/,
     );
     expect(() => emailCodeDefaults({})).toThrow(/AUTH_FIXED_CODE/);
@@ -208,6 +213,15 @@ describe("in production", () => {
     expect(() => emailCodeDefaults({ fixedCode: "000000" })).toThrow(
       /auth\.emailCode\.fixedCode is set/,
     );
+  });
+
+  test("the code is rejected at sign-in", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    auth = manager();
+    vi.stubEnv("NODE_ENV", "production");
+    await expect(verify({ email: EMAIL, code: "000000" })).rejects.toMatchObject({
+      errors: { code: ["invalid_code"] },
+    });
   });
 
   test("the provider's boot refuses it", async () => {
@@ -222,12 +236,113 @@ describe("in production", () => {
 
   test("a request never matches it", () => {
     vi.stubEnv("NODE_ENV", "production");
-    expect(matchesFixedSignInCode("000000", "000000")).toBe(false);
+    expect(matchesFixedSignInCode("000000", { fixedCode: "000000" })).toBe(false);
   });
 
   test("unset, production boots as before", () => {
     vi.stubEnv("NODE_ENV", "production");
     expect(() => emailCodeDefaults({})).not.toThrow();
     expect(() => emailCodeDefaults({ fixedCode: "" })).not.toThrow();
+  });
+});
+
+describe("in production, opted in", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  async function bootProvider(config: Record<string, unknown> = {}) {
+    const { AuthServiceProvider } = await import("./AuthServiceProvider");
+    return new AuthServiceProvider({ config: { get: () => config } } as never).boot();
+  }
+
+  test("AUTH_FIXED_CODE_ALLOW_PRODUCTION=1 boots, warns and signs in", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "1");
+    await bootProvider();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]?.[0]);
+    expect(message).toMatch(/fixed sign-in code is enabled in production/);
+    expect(message).toMatch(/AUTH_FIXED_CODE_ALLOW_PRODUCTION=1/);
+    expect(message).toMatch(/sign in as any user/);
+    expect(message).toMatch(/local test servers only/);
+
+    auth = manager();
+    expect(await verify({ email: EMAIL, code: "000000" })).toMatchObject({ isNewUser: true });
+    await expect(verify({ email: EMAIL, code: "000001" })).rejects.toMatchObject({
+      errors: { code: ["invalid_code"] },
+    });
+    const { fixedSignInCode, isFixedSignInCode } = await import("./isFixedSignInCode");
+    expect(fixedSignInCode()).toBe("000000");
+    expect(isFixedSignInCode("000000")).toBe(true);
+  });
+
+  test("auth.emailCode.allowFixedCodeInProduction: true opts in too", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    await bootProvider({
+      emailCode: { fixedCode: "424242", allowFixedCodeInProduction: true },
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    auth = manager({ fixedCode: "424242", allowFixedCodeInProduction: true });
+    expect(await verify({ email: EMAIL, code: "424242" })).toMatchObject({ isNewUser: true });
+  });
+
+  test("allowFixedCodeInProduction: false wins over the variable", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "1");
+    expect(() => emailCodeDefaults({ allowFixedCodeInProduction: false })).toThrow(
+      /refused when NODE_ENV=production/,
+    );
+    expect(matchesFixedSignInCode("000000", { allowFixedCodeInProduction: false })).toBe(false);
+  });
+
+  test.each(["true", "yes", "0", " 1", "1 ", "01"])(
+    "AUTH_FIXED_CODE_ALLOW_PRODUCTION=%j is not an opt-in",
+    async (value) => {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("AUTH_FIXED_CODE", "000000");
+      vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", value);
+      await expect(bootProvider()).rejects.toThrow(/refused when NODE_ENV=production/);
+      expect(matchesFixedSignInCode("000000", {})).toBe(false);
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a non-boolean allowFixedCodeInProduction is refused", () => {
+    expect(() => emailCodeDefaults({ allowFixedCodeInProduction: "1" as never })).toThrow(
+      /allowFixedCodeInProduction must be a boolean/,
+    );
+  });
+
+  test("the whitespace and length checks still apply", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "1");
+    vi.stubEnv("AUTH_FIXED_CODE", " 000000");
+    expect(() => emailCodeDefaults({})).toThrow(/no surrounding whitespace/);
+    vi.stubEnv("AUTH_FIXED_CODE", "x".repeat(257));
+    expect(() => emailCodeDefaults({})).toThrow(/at most 256 characters/);
+  });
+
+  test("the opt-in alone, with no code, changes nothing", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "1");
+    await bootProvider();
+    expect(warn).not.toHaveBeenCalled();
+    expect(matchesFixedSignInCode("000000", {})).toBe(false);
+  });
+
+  test("in development the opt-in does not warn", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    vi.stubEnv("AUTH_FIXED_CODE_ALLOW_PRODUCTION", "1");
+    await bootProvider();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

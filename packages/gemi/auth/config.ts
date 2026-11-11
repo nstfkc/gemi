@@ -139,11 +139,20 @@ export interface EmailCodeConfig {
    * it issued: for development, e2e scripts and test servers (#1190). Unset
    * (the default), `AUTH_FIXED_CODE` is used when that is set; `""` turns both
    * off. Refused in production: with `NODE_ENV=production` the boot fails while
-   * either is set. A code is still requested and sent as before (the debug
+   * either is set, unless `allowFixedCodeInProduction` opts in. A code is still requested and sent as before (the debug
    * email is still written), and wrong guesses still count. `isFixedSignInCode`
    * from `gemi/services` lets an app's own code flow honour it too.
    */
   fixedCode?: string | null;
+  /**
+   * `true` accepts `fixedCode` (or `AUTH_FIXED_CODE`) under
+   * `NODE_ENV=production`, for a local production-build test server (`gemi
+   * start` always sets it). Anyone who knows the code can then sign in as any
+   * user, so the boot logs a warning. Unset (the default),
+   * `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1` opts in; any other value does not.
+   * Never set it on a real deployment.
+   */
+  allowFixedCodeInProduction?: boolean | null;
 }
 
 /**
@@ -608,7 +617,7 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
   checkEmailCodeNumber("linkExpiresInMinutes", linkExpiresInMinutes, 1);
   checkEmailCodeNumber("maxAttempts", maxAttempts, 1);
   checkEmailCodeNumber("activeCodes", activeCodes, 1, 5);
-  checkFixedSignInCode(config.fixedCode);
+  checkFixedSignInCode(config);
   return {
     enabled: config.enabled ?? false,
     createUser: config.createUser ?? false,
@@ -634,6 +643,7 @@ export function emailCodeDefaults(config: EmailCodeConfig = {}): Required<EmailC
         }
       }),
     fixedCode: config.fixedCode ?? null,
+    allowFixedCodeInProduction: config.allowFixedCodeInProduction ?? null,
   };
 }
 

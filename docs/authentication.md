@@ -767,7 +767,8 @@ request's own error (a 429, say), or `null` once it succeeds, not the old `inval
 | `verifyLimit` | `{ perEmail: [10, 900], perIp: [50, 900] }` | Also `/auth/sign-in-with-pin*`. Its `perIp` (on a counter of its own) also limits `/auth/sign-in/magic-link`. |
 | `uniformMagicLinkResponse` | `false` | See above. |
 | `send` | logs the code outside production | Awaited before the answer: enqueue the mail rather than sending it inline, so a known and an unknown address take the same time. |
-| `fixedCode` | `AUTH_FIXED_CODE`, else none | A code `/verify` accepts for any address, for development and tests. Refused in production. See [Configuration → A fixed sign-in code](./configuration.md#a-fixed-sign-in-code-auth_fixed_code). |
+| `fixedCode` | `AUTH_FIXED_CODE`, else none | A code `/verify` accepts for any address, for development and tests. Refused in production unless `allowFixedCodeInProduction` opts in. See [Configuration → A fixed sign-in code](./configuration.md#a-fixed-sign-in-code-auth_fixed_code). |
+| `allowFixedCodeInProduction` | `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1`, else `false` | `true` accepts `fixedCode` under `NODE_ENV=production`, for a local production-build test server (`gemi start`). Logs a warning at boot: anyone who knows the code can sign in as any user. Never on a real deployment. |
 
 Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
 key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your

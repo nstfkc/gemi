@@ -21,11 +21,12 @@ export class AuthServiceProvider extends ServiceProvider {
 
   /**
    * A misspelt route switch fails the boot, not the first sign-in, and so does
-   * a fixed sign-in code in production (#1190).
+   * a fixed sign-in code in production (#1190), unless it is opted in, which
+   * logs a warning.
    */
   boot() {
     const config = this.app.config.get<AuthConfig>("auth", {});
     checkAuthFlowSwitches(config);
-    checkFixedSignInCode(config?.emailCode?.fixedCode);
+    checkFixedSignInCode(config?.emailCode ?? {}, { warn: true });
   }
 }
