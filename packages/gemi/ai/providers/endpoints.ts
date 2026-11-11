@@ -311,14 +311,17 @@ export const ANTHROPIC_VERSION = "2026-10-21";
  * `ANTHROPIC_BASE_URL`) names a gateway in front of it. The base is the host,
  * as the SDKs take it; a trailing `/v1` is accepted too and not doubled.
  *
- * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), read per
- * request like the others.
+ * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), or
+ * with `ANTHROPIC_AUTH_TOKEN` as a bearer when there is no key (the SDKs'
+ * order), read per request like the others.
  */
 export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
   const host = config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com";
   return messagesTarget(host, config, defaults, async () => {
     const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
-    return apiKey ? { "x-api-key": apiKey } : {};
+    if (apiKey) return { "x-api-key": apiKey };
+    const token = env("ANTHROPIC_AUTH_TOKEN");
+    return token ? { authorization: `Bearer ${token}` } : {};
   });
 }
 
@@ -353,6 +356,13 @@ export function foundryTarget(config: FoundryConfig, defaults: TargetDefaults = 
     config.endpoint ??
     env("ANTHROPIC_FOUNDRY_BASE_URL") ??
     (resource ? `https://${resource.trim()}.services.ai.azure.com/anthropic` : "");
+  // Without one, every request would go to a relative `/v1/messages` and fail
+  // as a network error that names nothing.
+  if (!host.trim()) {
+    throw new Error(
+      "AzureAnthropicProvider has no Foundry endpoint. Set `endpoint` (the deployment's Target URI without `/v1/messages`, e.g. `https://<resource>.services.ai.azure.com/anthropic`) or `resourceName`, or the ANTHROPIC_FOUNDRY_BASE_URL or ANTHROPIC_FOUNDRY_RESOURCE environment variable.",
+    );
+  }
   return messagesTarget(host, config, defaults, async () => {
     if (config.getToken) return { authorization: `Bearer ${await config.getToken()}` };
     const apiKey = config.apiKey ?? env("ANTHROPIC_FOUNDRY_API_KEY");

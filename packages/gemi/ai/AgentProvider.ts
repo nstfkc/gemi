@@ -5,7 +5,13 @@ import {
   uploadFile,
   type ResponsesEndpoint,
 } from "./providers/call";
-import { buildMessagesRequest } from "./providers/anthropicRequest";
+import {
+  buildMessagesRequest,
+  recoverableRequestError,
+  THINKING_BINDING_BETA,
+  withoutThinkingBlocks,
+  type MessagesRequest,
+} from "./providers/anthropicRequest";
 import { parseMessagesStream } from "./providers/anthropicStream";
 import {
   capabilitiesForClaude,
@@ -26,6 +32,7 @@ import {
 import { normalizeProviderError } from "./providers/errors";
 import { sentFiles } from "./providers/fileRejection";
 import { RealtimeClient, DEFAULT_REALTIME_TIMEOUT_MS } from "./providers/realtime";
+import { isContentEvent } from "./runtime";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
@@ -410,6 +417,7 @@ const CLAUDE_MODELS = [
   "claude-opus-5-5",
   "claude-sonnet-5-5",
   "claude-haiku-5-5",
+  "claude-fable-5-2",
   "claude-fable-5-1",
   "claude-opus-5",
   "claude-sonnet-5",
@@ -451,26 +459,86 @@ export class AnthropicProvider extends AgentProvider {
   }
 
   stream(params: ProviderStreamParams): ProviderStream {
-    const body = buildMessagesRequest(params, {
+    return this.send(params);
+  }
+
+  /**
+   * One call, asked again at most once per kind of 400 that a changed request
+   * answers (`recoverableRequestError`): a thinking block bound to another
+   * conversation, with the thinking blocks stripped, and a schema too complex
+   * to compile, with the answer asked for in the prompt. Only before anything
+   * was yielded, which a 400 always is.
+   */
+  private async *send(params: ProviderStreamParams): ProviderStream {
+    let request = params;
+    let stripThinking = false;
+    const tried = new Set<string>();
+    for (;;) {
+      let body = this.request(request);
+      if (stripThinking) body = withoutThinkingBlocks(body);
+      let recover: "thinking" | "schema" | undefined;
+      let yielded = false;
+      for await (const event of streamResponses(this.endpointFor(body), body, {
+        signal: params.signal,
+        structuredOutput: Boolean(params.output),
+        parse: parseMessagesStream,
+      })) {
+        if (recover) continue;
+        if (!yielded && event.type === "error" && event.status === 400) {
+          const kind = recoverableRequestError(event.error.message);
+          if (kind && !tried.has(kind)) {
+            tried.add(kind);
+            recover = kind;
+            continue;
+          }
+        }
+        if (isContentEvent(event)) yielded = true;
+        yield event;
+      }
+      if (!recover) return;
+      if (recover === "thinking") stripThinking = true;
+      else if (request.output) request = { ...request, output: { ...request.output, strict: false } };
+    }
+  }
+
+  private request(params: ProviderStreamParams): MessagesRequest {
+    return buildMessagesRequest(params, {
       model: this.deployment(),
+      modelId: this.model,
       capabilities: this.capabilities,
       forcedToolChoice: supportsForcedToolChoice(this.model),
-    });
-    return streamResponses(this.endpoint(), body, {
-      signal: params.signal,
-      structuredOutput: Boolean(params.output),
-      parse: parseMessagesStream,
+      blockBinding: this.bindsThinking(),
     });
   }
 
-  /** Through the Files API (`POST /v1/files`), which takes no `purpose`. */
-  upload(file: File): Promise<string> {
-    return uploadFile(this.endpoint(), file, null);
+  /** The beta header goes with the body that needs it. */
+  private endpointFor(body: MessagesRequest): ResponsesEndpoint {
+    const endpoint = this.endpoint();
+    const binding = body.thinking?.type === "adaptive" && body.thinking.block_binding;
+    if (!binding) return endpoint;
+    return {
+      ...endpoint,
+      headers: async () => {
+        const headers = await endpoint.headers();
+        const beta = headers["anthropic-beta"];
+        return { ...headers, "anthropic-beta": beta ? `${beta},${THINKING_BINDING_BETA}` : THINKING_BINDING_BETA };
+      },
+    };
+  }
+
+  /** Whether `thinking.block_binding` and its beta header can be sent. */
+  protected bindsThinking(): boolean {
+    return true;
   }
 
   /** The `model` the request names. */
   protected deployment(): string {
     return this.model;
+  }
+
+  /** Through the Files API (`POST /v1/files`), which takes no `purpose`. */
+  upload(file: File): Promise<string> {
+    return uploadFile(this.endpoint(), file, null);
   }
 
   protected endpoint(): ResponsesEndpoint {
@@ -494,7 +562,8 @@ function messagesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * `fileInput` is false and `upload()` refuses: a file a user attaches is
  * stored by gemi and named to the model by its attachment id, for a tool to
  * read. Everything else the agent uses (streaming, tools, thinking, structured
- * output, prompt caching) is supported on both hostings.
+ * output, prompt caching) is supported on both hostings. Thinking is not
+ * bound (`bindsThinking`).
  */
 export class AzureAnthropicProvider extends AnthropicProvider {
   declare readonly capabilities: ProviderCapabilities;
@@ -520,6 +589,16 @@ export class AzureAnthropicProvider extends AnthropicProvider {
 
   protected override deployment(): string {
     return this.config.deployment ?? this.model;
+  }
+
+  /**
+   * Thinking block-binding controls are unconfirmed on Foundry, and sending
+   * the field where the beta is not taken is a 400 on every request. Without
+   * it, a thinking block invalidated by an edit to the history is handled by
+   * stripping the blocks and asking once more (see `AnthropicProvider.send`).
+   */
+  protected override bindsThinking(): boolean {
+    return false;
   }
 
   protected override endpoint(): ResponsesEndpoint {

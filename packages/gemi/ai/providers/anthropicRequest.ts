@@ -47,7 +47,13 @@ export type MessagesRequest = {
   system?: MessagesBlock[];
   tools?: MessagesTool[];
   tool_choice?: { type: "auto" | "any" | "none" | "tool"; name?: string; disable_parallel_tool_use?: boolean };
-  thinking?: { type: "adaptive"; display: "summarized" };
+  thinking?:
+    | {
+        type: "adaptive";
+        display?: "summarized";
+        block_binding?: { prefix_mismatch_behavior: "drop_block" };
+      }
+    | { type: "between_tools" };
   output_config?: {
     effort?: string;
     format?: { type: "json_schema"; schema: JSONSchema };
@@ -64,7 +70,17 @@ export const DEFAULT_MAX_TOKENS = 64_000;
 
 export function buildMessagesRequest(
   params: ProviderStreamParams,
-  ctx: { model: string; capabilities: ProviderCapabilities; forcedToolChoice: boolean },
+  ctx: {
+    /** What the request names: the model id, or a Foundry deployment. */
+    model: string;
+    /** The model id, which the per-model rules below read. */
+    modelId: string;
+    capabilities: ProviderCapabilities;
+    forcedToolChoice: boolean;
+    /** Whether `thinking.block_binding` can be sent (it needs a beta header
+     *  that Anthropic's API takes and Foundry is not known to). */
+    blockBinding: boolean;
+  },
 ): MessagesRequest {
   const body: MessagesRequest = {
     model: ctx.model,
@@ -73,30 +89,62 @@ export function buildMessagesRequest(
     stream: true,
   };
 
-  const system = [params.systemPrompt, looseOutputInstruction(params.output)].filter(Boolean);
+  // A strict schema goes as `output_config.format`, unless it is over the
+  // compiler's limits, in which case it is asked for like a loose one.
+  const output = params.output;
+  const strict = !!output?.strict && !overSchemaLimits(output.schema);
+
+  const loose = output && !strict ? looseOutputInstruction(output.schema) : undefined;
+  const system = [params.systemPrompt, loose].filter(Boolean);
   if (system.length > 0) body.system = [{ type: "text", text: system.join("\n\n") }];
 
-  // Adaptive thinking with the agent's effort. `"none"` keeps thinking off but
-  // still sends an effort, because the newest models cannot turn thinking
-  // off (`disabled` is a 400) and a low effort is the nearest thing.
   const reasoning = ctx.capabilities.reasoning ? params.reasoning : undefined;
-  if (reasoning) {
-    if (reasoning !== "none") body.thinking = { type: "adaptive", display: "summarized" };
-    body.output_config = { effort: effortOf(reasoning) };
+  if (reasoning === "none") {
+    // Off where the model has a switch for it: Claude Sonnet 5.5 takes
+    // `between_tools` at effort `high` or below. Claude Opus 5.5 and the
+    // other 5.x models cannot turn thinking off (`disabled` is a 400), so
+    // there `none` is the lowest effort and the model still thinks.
+    if (/^claude-sonnet-5-5(?:-\d{8})?$/.test(ctx.modelId)) body.thinking = { type: "between_tools" };
+    body.output_config = { effort: "low" };
+  } else if (reasoning) {
+    body.thinking = { type: "adaptive", display: "summarized" };
+    body.output_config = { effort: effortOf(reasoning, ctx.modelId) };
+  } else if (ctx.capabilities.reasoning && repliesWithThinking(body.messages)) {
+    // No effort was asked for, but the model thought anyway (adaptive
+    // thinking is the default on the 5.x models) and its blocks are being sent
+    // back. `thinking` is made explicit, which is what it already was, so
+    // the binding below can be set on it.
+    body.thinking = { type: "adaptive" };
   }
 
-  if (params.output?.strict) {
+  // PRESERVED THINKING. A thinking block is bound to the conversation that
+  // produced it, and `Agent` edits conversations: `contextWindow` and
+  // compaction cut the start of the history, `activeTools` narrows the tools
+  // and `prepareStep` the instructions from one step to the next. On the
+  // models that check (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable and Mythos 5.1
+  // and 5.2), a block sent back after such an edit is a 400 for accounts
+  // created from 2026-08-31 (on every account for Mythos 5.1 and the 5.2
+  // models). `drop_block` has the API drop those blocks instead: the step
+  // loses that reasoning and runs. Where the binding cannot be sent, the
+  // provider strips the blocks and asks once more on that 400
+  // (`thinkingMismatch`).
+  if (body.thinking?.type === "adaptive" && ctx.blockBinding) {
+    body.thinking.block_binding = { prefix_mismatch_behavior: "drop_block" };
+  }
+
+  if (output && strict) {
     body.output_config = {
       ...body.output_config,
-      format: { type: "json_schema", schema: toClaudeSchema(params.output.schema) },
+      format: { type: "json_schema", schema: toClaudeSchema(output.schema) },
     };
   }
 
   const tools = toMessagesTools(params.tools);
   if (tools.length > 0) {
     body.tools = tools;
-    // With thinking on, only `auto` and `none` are accepted on any model.
-    const choice = toolChoice(params.toolChoice, ctx.forcedToolChoice && !body.thinking);
+    // Forced choice works with adaptive thinking; only manual budgeted
+    // thinking, which is never sent, refuses it.
+    const choice = toolChoice(params.toolChoice, ctx.forcedToolChoice);
     if (!ctx.capabilities.parallelToolCalls) choice.disable_parallel_tool_use = true;
     if (params.toolChoice !== undefined || choice.disable_parallel_tool_use) body.tool_choice = choice;
   }
@@ -104,13 +152,58 @@ export function buildMessagesRequest(
   return withCacheBreakpoints(body);
 }
 
+function repliesWithThinking(messages: MessagesMessage[]): boolean {
+  return messages.some((message) =>
+    message.content.some((block) => block.type === "thinking" || block.type === "redacted_thinking"),
+  );
+}
+
+/** The beta header `thinking.block_binding` needs. */
+export const THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01";
+
+/**
+ * The request edits that answer a 400 once, with what to change.
+ *
+ * - `thinking`: a thinking block was bound to a different conversation (see
+ *   PRESERVED THINKING above) and the binding was not sent. The blocks are
+ *   stripped and the request asked again, which keeps the text and tool calls
+ *   and loses only the reasoning, as `drop_block` would.
+ * - `schema`: `Schema is too complex for compilation.` The answer is asked for
+ *   in the system prompt instead, as for a loose schema.
+ */
+export function recoverableRequestError(message: string): "thinking" | "schema" | undefined {
+  if (/bound to a different conversation|Invalid `signature` in `thinking` block/i.test(message)) {
+    return "thinking";
+  }
+  if (/schema is too complex/i.test(message)) return "schema";
+  return undefined;
+}
+
+/** The request without any thinking block, for the `thinking` retry. */
+export function withoutThinkingBlocks(body: MessagesRequest): MessagesRequest {
+  const messages: MessagesMessage[] = [];
+  for (const message of body.messages) {
+    const content = message.content.filter(
+      (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
+    );
+    if (content.length === 0) continue;
+    const last = messages.at(-1);
+    if (last?.role === message.role) last.content.push(...content);
+    else messages.push({ role: message.role, content });
+  }
+  return { ...body, messages };
+}
+
 /**
  * gemi's effort onto `output_config.effort` (`low` … `max`). `minimal` and
- * `none` have no counterpart and are `low`; anything else is sent as written,
- * so a new level works without a gemi release.
+ * `none` have no counterpart and are `low`. `xhigh` is `high` on the 4.6
+ * models, which predate it. Anything else is sent as written, so a new level
+ * works without a gemi release.
  */
-function effortOf(reasoning: string): string {
-  return reasoning === "none" || reasoning === "minimal" ? "low" : reasoning;
+function effortOf(reasoning: string, modelId: string): string {
+  if (reasoning === "none" || reasoning === "minimal") return "low";
+  if (reasoning === "xhigh" && /^claude-(?:opus|sonnet)-4-6(?:-|$)/.test(modelId)) return "high";
+  return reasoning;
 }
 
 /**
@@ -119,8 +212,10 @@ function effortOf(reasoning: string): string {
  * breakpoints cover what an agent repeats: the last tool (the tool list), the
  * system prompt, and the last block of the last message, which the next step
  * extends, so it reads this step's prefix back. That is three of the four
- * allowed. A prefix under the model's minimum (512 tokens on the 5.x models)
- * is not cached and costs nothing extra; a cache write costs 1.25x input.
+ * allowed. A prefix under the model's minimum is not cached and costs nothing
+ * extra: 512 tokens on Opus 5.5 and 5, Sonnet 5.5, Haiku 5.5 and Fable 5.x,
+ * 1024 on Sonnet 5, Opus 4.8 and Sonnet 4.6, up to 4096 on Opus 4.6 and Haiku
+ * 4.5. A cache write costs 1.25x input.
  *
  * Thinking blocks cannot carry `cache_control`, so the last message's
  * breakpoint goes on its last block that can.
@@ -141,8 +236,7 @@ function withCacheBreakpoints(body: MessagesRequest): MessagesRequest {
 /**
  * Keywords structured outputs refuse, per Anthropic's JSON schema limits:
  * numeric and string length constraints, and array constraints beyond
- * `minItems` 0 or 1. They are removed from what is sent, as the SDKs do, and
- * still hold: `Agent` validates the answer against the agent's own schema.
+ * `minItems` 0 or 1.
  */
 const UNSUPPORTED_KEYWORDS = new Set([
   "minimum",
@@ -156,24 +250,93 @@ const UNSUPPORTED_KEYWORDS = new Set([
   "uniqueItems",
 ]);
 
+/** The string formats structured outputs take. */
+const SUPPORTED_FORMATS = new Set([
+  "date-time",
+  "time",
+  "date",
+  "duration",
+  "email",
+  "hostname",
+  "uri",
+  "ipv4",
+  "ipv6",
+  "uuid",
+]);
+
+/** Regex features structured outputs refuse: backreferences, lookaround and
+ *  word boundaries. */
+const UNSUPPORTED_PATTERN = /\\[1-9]|\(\?<?[=!]|\\[bB]/;
+
 const SCHEMA_MAPS = new Set(["properties", "patternProperties", "$defs", "definitions"]);
 
+/**
+ * The agent's schema as structured outputs takes it, transformed the way
+ * Anthropic's SDKs transform one: a constraint the API refuses (the keywords
+ * above, a `minItems` over 1, a string `format` outside the supported list, a
+ * `pattern` with backreferences, lookaround or `\b`) is removed and written
+ * into the node's `description` instead (`{minimum: 100}`), so the model still
+ * reads it; and every object gets `additionalProperties: false`, which the API
+ * requires. Nothing is lost: `Agent` validates the answer against the agent's
+ * own schema, constraints included.
+ */
 export function toClaudeSchema(schema: JSONSchema): JSONSchema {
-  const strip = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(strip);
+  const transform = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(transform);
     if (!isObject(node)) return node;
     const out: Record<string, unknown> = {};
+    const moved: string[] = [];
     for (const [key, value] of Object.entries(node)) {
-      if (UNSUPPORTED_KEYWORDS.has(key)) continue;
-      if (key === "minItems" && typeof value === "number" && value > 1) continue;
+      const refused =
+        UNSUPPORTED_KEYWORDS.has(key) ||
+        (key === "minItems" && typeof value === "number" && value > 1) ||
+        (key === "format" && typeof value === "string" && !SUPPORTED_FORMATS.has(value)) ||
+        (key === "pattern" && typeof value === "string" && UNSUPPORTED_PATTERN.test(value));
+      if (refused) {
+        moved.push(`${key}: ${JSON.stringify(value)}`);
+        continue;
+      }
       // These map names to schemas; a property named `minimum` is kept.
-      out[key] = SCHEMA_MAPS.has(key) && isObject(value)
-        ? Object.fromEntries(Object.entries(value).map(([name, sub]) => [name, strip(sub)]))
-        : strip(value);
+      out[key] =
+        SCHEMA_MAPS.has(key) && isObject(value)
+          ? Object.fromEntries(Object.entries(value).map(([name, sub]) => [name, transform(sub)]))
+          : transform(value);
     }
+    if (moved.length > 0) {
+      const note = `{${moved.join(", ")}}`;
+      out.description = typeof out.description === "string" ? `${out.description} ${note}` : note;
+    }
+    if (out.type === "object" || isObject(out.properties)) out.additionalProperties = false;
     return out;
   };
-  return strip(schema) as JSONSchema;
+  return transform(schema) as JSONSchema;
+}
+
+/**
+ * Whether a schema is over the structured-output compiler's limits: 24
+ * optional properties and 16 union-typed ones (`anyOf` or a type array)
+ * across the request. Tools are not sent strict, so the output schema is the
+ * only one counted. Over either, the API answers `Schema is too complex for
+ * compilation.`; the answer is asked for like a loose schema's instead.
+ */
+function overSchemaLimits(schema: JSONSchema): boolean {
+  let optional = 0;
+  let unions = 0;
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(visit);
+    if (!isObject(node)) return;
+    if (Array.isArray(node.anyOf) || Array.isArray(node.type)) unions++;
+    if (isObject(node.properties)) {
+      const required = new Set(Array.isArray(node.required) ? node.required : []);
+      optional += Object.keys(node.properties).filter((name) => !required.has(name)).length;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (SCHEMA_MAPS.has(key) && isObject(value)) Object.values(value).forEach(visit);
+      else visit(value);
+    }
+  };
+  visit(schema);
+  return optional > 24 || unions > 16;
 }
 
 /**
@@ -181,11 +344,11 @@ export function toClaudeSchema(schema: JSONSchema): JSONSchema {
  * structured outputs cannot express (every object needs `additionalProperties:
  * false`). It is not sent as `output_config.format`, which would be a 400;
  * the model is asked for the JSON in the system prompt instead, and `Agent`
- * validates what comes back.
+ * validates what comes back. Schemas over the compiler's limits go the same
+ * way (`overSchemaLimits`).
  */
-function looseOutputInstruction(output: ProviderStreamParams["output"]): string | undefined {
-  if (!output || output.strict) return undefined;
-  return `Answer with only a JSON value (no prose, no code fence) that matches this JSON schema:\n${JSON.stringify(output.schema)}`;
+function looseOutputInstruction(schema: JSONSchema): string {
+  return `Answer with only a JSON value (no prose, no code fence) that matches this JSON schema:\n${JSON.stringify(schema)}`;
 }
 
 /**
@@ -251,12 +414,20 @@ export function toMessages(
     for (const part of message.content ?? []) {
       switch (part.type) {
         case "text": {
-          if (part.text?.trim()) blocks.push({ role, block: { type: "text", text: part.text } });
+          // The assistant's text goes back exactly as the model wrote it,
+          // whitespace-only blocks included (the "\n\n" before a tool call):
+          // anything else is an edit to the turn. Only an empty string, which
+          // the API refuses, is left out. A user's blank text is noise.
+          const keep = role === "assistant" ? !!part.text : !!part.text?.trim();
+          if (keep) blocks.push({ role, block: { type: "text", text: part.text } });
           break;
         }
         case "output": {
           if (part.partial) break;
-          blocks.push({ role, block: { type: "text", text: JSON.stringify(part.value) } });
+          // The model's own text when the part kept it; re-serializing the
+          // value would change its whitespace and number formatting.
+          const text = part.text ?? JSON.stringify(part.value);
+          blocks.push({ role, block: { type: "text", text } });
           break;
         }
         case "file": {
@@ -334,8 +505,23 @@ export function toMessages(
     push(role, block);
   }
   answer();
+
+  // The API wants a user turn first, and on the 4.6-and-later models it
+  // refuses a history that ends on the assistant (that is a prefill). Both
+  // happen when an app starts a run from a trimmed or assistant-authored
+  // history. The turns added are fixed text, so the prefix stays the same
+  // from one step to the next.
+  if (out[0]?.role === "assistant") {
+    out.unshift({ role: "user", content: [{ type: "text", text: HISTORY_STARTS_HERE }] });
+  }
+  if (out.at(-1)?.role === "assistant") {
+    out.push({ role: "user", content: [{ type: "text", text: CONTINUE }] });
+  }
   return out;
 }
+
+const HISTORY_STARTS_HERE = "(The conversation continues from an earlier point.)";
+const CONTINUE = "Continue.";
 
 const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
 

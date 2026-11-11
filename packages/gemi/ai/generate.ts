@@ -615,7 +615,7 @@ async function callModel<O extends Schema<any>>(
   }
 
   if (answered) {
-    reply.content.push({ type: "output", value: output });
+    reply.content.push({ type: "output", value: output, text: outputText });
   } else if (outputText) {
     // The answer that failed, as the model wrote it. A retry continues this
     // transcript, and "your output did not parse" means little to a model that

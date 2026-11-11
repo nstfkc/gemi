@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type {
   AgentProvider,
@@ -63,13 +63,15 @@ function tool(name: string): ProviderToolSpec {
 
 function build(
   params: Partial<ProviderStreamParams>,
-  ctx: { model?: string; capabilities?: ProviderCapabilities } = {},
+  ctx: { model?: string; capabilities?: ProviderCapabilities; blockBinding?: boolean } = {},
 ) {
   const model = ctx.model ?? "claude-opus-5-5";
   return buildMessagesRequest({ messages: [], ...params } as ProviderStreamParams, {
     model,
+    modelId: model,
     capabilities: ctx.capabilities ?? capabilitiesForClaude(model),
     forcedToolChoice: supportsForcedToolChoice(model),
+    blockBinding: ctx.blockBinding ?? true,
   });
 }
 
@@ -188,6 +190,20 @@ describe("parseMessagesStream()", () => {
   test("with an output schema, text is the answer's JSON", async () => {
     const events = await parse(fixture("anthropic-text.sse"), { structuredOutput: true });
     expect(events[0]).toEqual({ type: "output-delta", delta: "Hello" });
+  });
+
+  test("a tool call cut off by max_tokens is discarded, not called, and the call ends length", async () => {
+    const events = await parse(fixture("anthropic-tool-cut.sse"));
+    expect(events.filter((e) => e.type === "tool-call")).toEqual([]);
+    expect(events.at(-2)).toEqual({ type: "tool-call-discard", toolCallIds: ["toolu_01CutFixture00000000001"] });
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "length", usage: { reasoningTokens: 200 } });
+  });
+
+  test("malformed arguments on a normal stop are passed on for the agent to report", async () => {
+    const raw = fixture("anthropic-tool-cut.sse").replace('"stop_reason":"max_tokens"', '"stop_reason":"tool_use"');
+    const events = await parse(raw);
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1);
+    expect(events.some((e) => e.type === "tool-call-discard")).toBe(false);
   });
 
   test("unknown event types are ignored", async () => {
@@ -381,7 +397,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out).toEqual([
+    expect(out.slice(1, -1)).toEqual([
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "w", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "a" }] },
       { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "w", input: {} }] },
@@ -411,7 +427,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out[1]!.content).toEqual([
+    expect(out[2]!.content).toEqual([
       {
         type: "tool_result",
         tool_use_id: "t1",
@@ -443,7 +459,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out).toEqual([
+    expect(out.slice(1)).toEqual([
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "w", input: {} }] },
       {
         role: "user",
@@ -459,30 +475,60 @@ describe("toMessages()", () => {
     ]);
   });
 
-  test("another provider's reasoning is left out, and empty text is not sent", () => {
+  test("another provider's reasoning is left out; the assistant's whitespace text is kept, empty text is not", () => {
     const out = toMessages(
       [
-        message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+        message({ role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "  " }] }),
         message({
           role: "assistant",
           content: [
             { type: "reasoning", id: "rs_1", text: "openai thoughts" },
-            { type: "text", text: "  " },
+            { type: "text", text: "" },
             { type: "text", text: "hello" },
+            { type: "text", text: "\n\n" },
+            { type: "tool-call", toolCallId: "t1", name: "w", input: {} },
+            { type: "tool-result", toolCallId: "t1", name: "w", status: "ok", output: "x" },
           ],
         }),
       ],
       CLAUDE,
     );
-    expect(out[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "hello" }] });
+    expect(out[0]).toEqual({ role: "user", content: [{ type: "text", text: "hi" }] });
+    expect(out[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "hello" },
+        { type: "text", text: "\n\n" },
+        { type: "tool_use", id: "t1", name: "w", input: {} },
+      ],
+    });
   });
 
-  test("an output part is sent back as its JSON", () => {
+  test("an output part is sent back as the model wrote it, else as its JSON", () => {
     const out = toMessages(
-      [message({ role: "assistant", content: [{ type: "output", value: { ok: true } }] })],
+      [
+        message({ role: "user", content: [{ type: "text", text: "go" }] }),
+        message({ role: "assistant", content: [{ type: "output", value: { ok: true }, text: '{ "ok": true }' }] }),
+        message({ role: "user", content: [{ type: "text", text: "again" }] }),
+        message({ role: "assistant", content: [{ type: "output", value: { ok: true } }] }),
+        message({ role: "user", content: [{ type: "text", text: "thanks" }] }),
+      ],
       CLAUDE,
     );
-    expect(out).toEqual([{ role: "assistant", content: [{ type: "text", text: '{"ok":true}' }] }]);
+    expect(out[1]!.content).toEqual([{ type: "text", text: '{ "ok": true }' }]);
+    expect(out[3]!.content).toEqual([{ type: "text", text: '{"ok":true}' }]);
+  });
+
+  test("a history that starts or ends on the assistant gets a fixed user turn there", () => {
+    const out = toMessages(
+      [message({ role: "assistant", content: [{ type: "text", text: "Welcome back." }] })],
+      CLAUDE,
+    );
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(out[0]!.content).toEqual([
+      { type: "text", text: "(The conversation continues from an earlier point.)" },
+    ]);
+    expect(out[2]!.content).toEqual([{ type: "text", text: "Continue." }]);
   });
 });
 
@@ -612,9 +658,49 @@ describe("AnthropicProvider", () => {
     });
   });
 
+  test("through an Agent, a call cut off by max_tokens does not run and the run ends length", async () => {
+    const { fetchImpl } = server([sse(fixture("anthropic-tool-cut.sse"))]);
+    const ran: unknown[] = [];
+    const agent = Agent.create({
+      name: "writer",
+      instructions: "Write files.",
+      provider: new TestAnthropic("claude-opus-5-5", fetchImpl),
+      maxSteps: 3,
+      tools: [
+        AgentTool.create({
+          name: "writeFile",
+          description: "write a file",
+          inputSchema: s.object({ path: s.string(), content: s.string() }),
+          execute: async (input) => {
+            ran.push(input);
+            return "ok";
+          },
+        }),
+      ],
+    });
+    const result = await agent.stream({ messages: [], turn: { text: "make a page" } }).result();
+    expect(ran).toEqual([]);
+    expect(result.finishReason).toBe("length");
+    expect(result.messages.flatMap((m) => m.content).some((p) => p.type === "tool-call")).toBe(false);
+  });
+
+  test("ANTHROPIC_AUTH_TOKEN is a bearer when there is no key", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "oauth-token");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestAnthropic("claude-opus-5-5", fetchImpl, { apiKey: undefined }));
+      expect(calls[0]!.headers.authorization).toBe("Bearer oauth-token");
+      expect(calls[0]!.headers).not.toHaveProperty("x-api-key");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   test("models() lists the current Claude ids", () => {
     expect(AnthropicProvider.models()).toContain("claude-opus-5-5");
     expect(AnthropicProvider.models()).toContain("claude-haiku-5-5");
+    expect(AnthropicProvider.models()).toContain("claude-fable-5-2");
   });
 });
 
@@ -685,6 +771,37 @@ describe("thinking", () => {
     expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
   });
 
+  test("preserved thinking: adaptive thinking carries block_binding drop_block where it can be sent", () => {
+    expect(build({ reasoning: "low" }).thinking).toEqual({
+      type: "adaptive",
+      display: "summarized",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    });
+    expect(build({ reasoning: "low" }, { blockBinding: false }).thinking).toEqual({
+      type: "adaptive",
+      display: "summarized",
+    });
+    // `between_tools` refuses a binding.
+    expect(build({ reasoning: "none" }, { model: "claude-sonnet-5-5" }).thinking).toEqual({ type: "between_tools" });
+    // No effort asked for, but thinking blocks go back: thinking is made explicit to bind them.
+    const history = [
+      message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+      message({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "", providerMetadata: { anthropic: { type: "thinking", signature: "s" } } },
+          { type: "text", text: "hello" },
+        ],
+      }),
+      message({ role: "user", content: [{ type: "text", text: "more" }] }),
+    ];
+    expect(build({ messages: history }).thinking).toEqual({
+      type: "adaptive",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    });
+    expect(build({ messages: history.slice(0, 1) })).not.toHaveProperty("thinking");
+  });
+
   test("the request asks for adaptive thinking at the agent's effort", () => {
     expect(build({ reasoning: "high" })).toMatchObject({
       thinking: { type: "adaptive", display: "summarized" },
@@ -704,14 +821,31 @@ describe("thinking", () => {
     expect(body).not.toHaveProperty("output_config");
   });
 
-  test("with thinking on, a forced tool choice is sent auto even where the model takes it", () => {
+  test("adaptive thinking keeps a forced tool choice on the models that take one", () => {
     const opts = { model: "claude-opus-5" };
-    expect(build({ tools: [tool("a")], toolChoice: "required", reasoning: "low" }, opts).tool_choice).toEqual({
-      type: "auto",
+    for (const reasoning of ["low", "none", undefined]) {
+      expect(build({ tools: [tool("a")], toolChoice: "required", reasoning }, opts).tool_choice).toEqual({
+        type: "any",
+      });
+    }
+    expect(build({ tools: [tool("a")], toolChoice: { name: "a" }, reasoning: "high" }, opts).tool_choice).toEqual({
+      type: "tool",
+      name: "a",
     });
-    expect(build({ tools: [tool("a")], toolChoice: "required", reasoning: "none" }, opts).tool_choice).toEqual({
-      type: "any",
+  });
+
+  test("xhigh is high on the 4.6 models, which predate it", () => {
+    expect(build({ reasoning: "xhigh" }, { model: "claude-sonnet-4-6" }).output_config).toEqual({ effort: "high" });
+    expect(build({ reasoning: "xhigh" }, { model: "claude-opus-4-6" }).output_config).toEqual({ effort: "high" });
+    expect(build({ reasoning: "xhigh" }, { model: "claude-sonnet-5" }).output_config).toEqual({ effort: "xhigh" });
+  });
+
+  test("none is Sonnet 5.5's between_tools; elsewhere the lowest effort", () => {
+    expect(build({ reasoning: "none" }, { model: "claude-sonnet-5-5" })).toMatchObject({
+      thinking: { type: "between_tools" },
+      output_config: { effort: "low" },
     });
+    expect(build({ reasoning: "none" }, { model: "claude-opus-5-5" })).not.toHaveProperty("thinking");
   });
 
   test("Claude's reasoning parts go back as their blocks, in place, unchanged", () => {
@@ -780,6 +914,8 @@ describe("thinking", () => {
       { type: "thinking", thinking: "", signature: "EqQBCkYIBhgCKkBFixtureSignatureTwo" },
       { type: "tool_use", id: "toolu_01ThinkFixture000000001", name: "getWeather", input: { city: "Paris" } },
     ]);
+    // The binding's beta header goes with the request that carries it.
+    expect(calls[1]!.headers["anthropic-beta"]).toBe("thinking-binding-controls-2026-08-01");
     expect(second[2].content).toEqual([
       {
         type: "tool_result",
@@ -804,7 +940,7 @@ describe("structured output", () => {
     additionalProperties: false,
   };
 
-  test("a strict schema is output_config.format, without the keywords the API refuses", () => {
+  test("a strict schema is output_config.format, with the refused constraints moved into descriptions", () => {
     const body = build({ output: { name: "weather", schema: schema as any, strict: true } });
     expect(body.output_config).toEqual({
       format: {
@@ -812,11 +948,11 @@ describe("structured output", () => {
         schema: {
           type: "object",
           properties: {
-            city: { type: "string" },
-            tempC: { type: "number" },
-            tags: { type: "array", items: { type: "string" } },
+            city: { type: "string", description: "{minLength: 1, maxLength: 80}" },
+            tempC: { type: "number", description: "{minimum: -90, maximum: 60}" },
+            tags: { type: "array", items: { type: "string" }, description: "{minItems: 2, maxItems: 5}" },
             // A property named like a keyword is still a property.
-            minimum: { type: "integer" },
+            minimum: { type: "integer", description: "{multipleOf: 5}" },
           },
           required: ["city", "tempC", "tags", "minimum"],
           additionalProperties: false,
@@ -824,6 +960,51 @@ describe("structured output", () => {
       },
     });
     expect(toClaudeSchema({ type: "array", minItems: 1 } as any)).toEqual({ type: "array", minItems: 1 });
+  });
+
+  test("objects get additionalProperties false; unsupported formats and regex features move to the description", () => {
+    expect(
+      toClaudeSchema({
+        type: "object",
+        properties: {
+          when: { type: "string", format: "date-time" },
+          color: { type: "string", format: "color", description: "A hex color" },
+          code: { type: "string", pattern: "^[A-Z]{2}-\\d+$" },
+          word: { type: "string", pattern: "\\bfoo\\b" },
+          repeat: { type: "string", pattern: "(a)\\1" },
+          ahead: { type: "string", pattern: "^(?!x).*" },
+          nested: { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        },
+        required: ["when"],
+      } as any),
+    ).toEqual({
+      type: "object",
+      properties: {
+        when: { type: "string", format: "date-time" },
+        color: { type: "string", description: 'A hex color {format: "color"}' },
+        code: { type: "string", pattern: "^[A-Z]{2}-\\d+$" },
+        word: { type: "string", description: '{pattern: "\\\\bfoo\\\\b"}' },
+        repeat: { type: "string", description: '{pattern: "(a)\\\\1"}' },
+        ahead: { type: "string", description: '{pattern: "^(?!x).*"}' },
+        nested: { type: "object", properties: { a: { type: "string" } }, required: ["a"], additionalProperties: false },
+      },
+      required: ["when"],
+      additionalProperties: false,
+    });
+  });
+
+  test("a schema over the compiler's limits is asked for in the prompt, not sent strict", () => {
+    const properties = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`f${i}`, { type: "string" }]));
+    const wide = { type: "object", properties, required: [], additionalProperties: false };
+    const body = build({ output: { name: "w", schema: wide as any, strict: true } });
+    expect(body).not.toHaveProperty("output_config");
+    expect(body.system![0]!.text).toContain('"f24"');
+
+    const unions = Object.fromEntries(
+      Array.from({ length: 17 }, (_, i) => [`u${i}`, { type: ["string", "null"] }]),
+    );
+    const union = { type: "object", properties: unions, required: Object.keys(unions), additionalProperties: false };
+    expect(build({ output: { name: "u", schema: union as any, strict: true } })).not.toHaveProperty("output_config");
   });
 
   test("a schema that is not strict is asked for in the system prompt instead", () => {
@@ -877,9 +1058,14 @@ describe("prompt caching", () => {
         }),
       ],
     });
+    // The trailing assistant turn is followed by the fixed user turn, which
+    // carries the breakpoint; the thinking block never does.
     expect(body.messages[1]!.content).toEqual([
-      { type: "text", text: "hello", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "hello" },
       { type: "thinking", thinking: "", signature: "s" },
+    ]);
+    expect(body.messages[2]!.content).toEqual([
+      { type: "text", text: "Continue.", cache_control: { type: "ephemeral" } },
     ]);
   });
 });
@@ -1009,7 +1195,51 @@ describe("AzureAnthropicProvider", () => {
     const f = server([sse(fixture("anthropic-text.sse"))]);
     await drain(new TestAnthropic("claude-sonnet-5-5", a.fetchImpl), params);
     await drain(new TestFoundry("claude-sonnet-5-5", f.fetchImpl, { resourceName: "r", deployment: "d" }), params);
-    expect({ ...f.calls[0]!.body, model: "claude-sonnet-5-5" }).toEqual(a.calls[0]!.body);
+    // Except the thinking binding, which Foundry is not known to take.
+    const { block_binding, ...thinking } = a.calls[0]!.body.thinking;
+    expect(block_binding).toBeDefined();
+    expect({ ...f.calls[0]!.body, model: "claude-sonnet-5-5" }).toEqual({ ...a.calls[0]!.body, thinking });
+    expect(f.calls[0]!.headers).not.toHaveProperty("anthropic-beta");
+  });
+
+  test("an edit-invalidated thinking block on Foundry: stripped and asked again", async () => {
+    const { calls, fetchImpl } = server([
+      json(400, fixture("anthropic-error-thinking-mismatch.json")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const history = [
+      message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+      message({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "", providerMetadata: { anthropic: { type: "thinking", signature: "s" } } },
+          { type: "text", text: "hello" },
+        ],
+      }),
+      message({ role: "user", content: [{ type: "text", text: "more" }] }),
+    ];
+    const events = await drain(
+      new TestFoundry("claude-opus-5-5", fetchImpl, { resourceName: "r", apiKey: "k" }),
+      { messages: history },
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.thinking).toEqual({ type: "adaptive" });
+    expect(JSON.stringify(calls[1]!.body.messages)).not.toContain('"thinking"');
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("no endpoint, resource or env var: a configuration error that says what to set", async () => {
+    vi.stubEnv("ANTHROPIC_FOUNDRY_BASE_URL", "");
+    vi.stubEnv("ANTHROPIC_FOUNDRY_RESOURCE", "");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await expect(drain(new TestFoundry("claude-opus-5-5", fetchImpl, { apiKey: "k" }))).rejects.toThrow(
+        /no Foundry endpoint.*resourceName/,
+      );
+      expect(calls).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   test("capabilities are Claude's, without file input; upload refuses", async () => {
@@ -1038,5 +1268,62 @@ describe("AzureAnthropicProvider", () => {
     const events = await drain(new TestFoundry("claude-opus-5-5", fetchImpl, { resourceName: "r", apiKey: "k" }));
     expect(calls).toHaveLength(2);
     expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+});
+
+describe("one more try on a 400 that a changed request answers", () => {
+  const history = [
+    message({ role: "user", content: [{ type: "text", text: "weather?" }] }),
+    message({
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "hm", providerMetadata: { anthropic: { type: "thinking", signature: "sig" } } },
+        { type: "text", text: "Sunny." },
+      ],
+    }),
+    message({ role: "user", content: [{ type: "text", text: "and tomorrow?" }] }),
+  ];
+
+  test("a thinking block bound to another conversation: stripped, asked again once", async () => {
+    const { calls, fetchImpl } = server([
+      json(400, fixture("anthropic-error-thinking-mismatch.json")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const events = await drain(new TestAnthropic("claude-opus-5-5", fetchImpl), { messages: history });
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(calls[0]!.body.messages)).toContain('"type":"thinking"');
+    expect(calls[1]!.body.messages[1].content).toEqual([{ type: "text", text: "Sunny." }]);
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("only once: the same 400 again is the call's error", async () => {
+    const { calls, fetchImpl } = server([json(400, fixture("anthropic-error-thinking-mismatch.json"))]);
+    const events = await drain(new TestAnthropic("claude-opus-5-5", fetchImpl), { messages: history });
+    expect(calls).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: "error", status: 400 });
+  });
+
+  test("a schema too complex to compile is asked for in the prompt instead", async () => {
+    const { calls, fetchImpl } = server([
+      json(400, fixture("anthropic-error-schema-too-complex.json")),
+      sse(fixture("anthropic-structured.sse")),
+    ]);
+    const schema = { type: "object", properties: { city: { type: "string" } }, required: ["city"] };
+    const events = await drain(new TestAnthropic("claude-sonnet-5-5", fetchImpl), {
+      output: { name: "w", schema: schema as any, strict: true },
+      messages: history.slice(0, 1),
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.output_config.format).toBeDefined();
+    expect(calls[1]!.body).not.toHaveProperty("output_config");
+    expect(calls[1]!.body.system[0].text).toContain(JSON.stringify(schema));
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("any other 400 is not retried", async () => {
+    const { calls, fetchImpl } = server([json(400, fixture("anthropic-error-invalid-request.json"))]);
+    await drain(new TestAnthropic("claude-opus-5-5", fetchImpl), { messages: history });
+    expect(calls).toHaveLength(1);
   });
 });

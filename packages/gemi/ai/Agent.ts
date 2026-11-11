@@ -4493,7 +4493,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       const parsed = parseOutput(this.config.output, outputText);
       if (parsed.ok === true) {
         this.output = parsed.value;
-        message.content.push({ type: "output", value: parsed.value });
+        message.content.push({ type: "output", value: parsed.value, text: outputText });
       } else {
         this.emit({ type: "error", error: parsed.error });
       }

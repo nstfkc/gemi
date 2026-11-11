@@ -14,8 +14,8 @@ What to check:
 
 What to check:
 
-- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps can invalidate Claude's thinking blocks (preserved thinking), which is a 400 on accounts created from 2026-08-31.
-- With `reasoning` set, a forced `toolChoice` is sent as `auto`.
+- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps invalidates Claude's thinking blocks (preserved thinking). Requests send `thinking.block_binding: drop_block` with the `thinking-binding-controls-2026-08-01` beta header, so the API drops those blocks instead of answering 400; where it still answers 400, the provider strips the thinking blocks and retries once.
+- `reasoning: "none"` turns thinking off only on Claude Sonnet 5.5 (`between_tools`); on Opus 5.5 and the other 5.x models it is effort `low`.
 
 ## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
 
@@ -27,6 +27,7 @@ What to check:
 
 - Forced `toolChoice` (`"required"`, `{ name }`) is sent as `auto` on Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, which reject it.
 - `temperature` and `promptCacheKey` are not sent to Anthropic.
+- `OutputPart` has an optional `text`, the answer as the model wrote it, set by the server and sent back to Anthropic in place of a re-serialized value. Stores keep it like any other field.
 - Nothing changes for OpenAI and Azure.
 
 ## ai: `providerMetadata` on reasoning parts (#477)

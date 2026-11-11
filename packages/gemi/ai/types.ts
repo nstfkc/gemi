@@ -537,6 +537,13 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
 export type OutputPart<O = unknown> = {
   type: "output";
   value: O;
+  /**
+   * The answer exactly as the model wrote it, which `value` was parsed from.
+   * Sent back in place of a re-serialized `value`, so a provider that checks
+   * its own history (Anthropic's preserved thinking) sees what it produced.
+   * Set by the server; absent on parts a client built.
+   */
+  text?: string;
   /** True while the object is still being assembled from the token stream. */
   partial?: boolean;
 };
