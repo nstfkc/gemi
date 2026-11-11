@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   closeConnectionWhileShuttingDown,
   drain,
+  holdShutdown,
   isShuttingDown,
   markShuttingDown,
   resetShuttingDown,
   serveForShutdown,
+  shutdownSignal,
   shutdownSettings,
   type ShutdownSettings,
   type Stoppable,
@@ -307,6 +309,64 @@ describe("drain", () => {
       "providers",
     ]);
     expect(code).toBe(1);
+  });
+});
+
+describe("holdShutdown and shutdownSignal (#1210)", () => {
+  test("the signal aborts when the shutdown begins, and the drain waits for held work", async () => {
+    const { stoppable } = serve();
+    const signal = shutdownSignal();
+    expect(signal.aborted).toBe(false);
+    // Background work that winds down when told to, then takes a moment.
+    const work = holdShutdown(
+      new Promise<string>((resolve) =>
+        signal.addEventListener("abort", () =>
+          setTimeout(() => {
+            events.push("work done");
+            resolve("checkpointed");
+          }, 50),
+        ),
+      ),
+    );
+
+    const code = await drain({ server: stoppable, shutdownProviders: providers(), settings: settings() });
+
+    expect(signal.aborted).toBe(true);
+    expect(await work).toBe("checkpointed");
+    expect(events).toEqual(["stop() shuttingDown=true", "work done", "providers"]);
+    expect(code).toBe(0);
+  });
+
+  test("work held while draining is waited for too", async () => {
+    holdShutdown(
+      Bun.sleep(20).then(() => {
+        events.push("first");
+        holdShutdown(Bun.sleep(20).then(() => events.push("second")));
+      }),
+    );
+    const code = await drain({ server: undefined, shutdownProviders: providers(), settings: settings() });
+    expect(events).toEqual(["first", "second", "providers"]);
+    expect(code).toBe(0);
+  });
+
+  test("work still running at the timeout is abandoned, and the exit code says so", async () => {
+    const { stoppable } = serve();
+    holdShutdown(new Promise(() => {}));
+    const code = await drain({
+      server: stoppable,
+      shutdownProviders: providers(),
+      settings: settings({ timeoutMs: 50 }),
+    });
+    expect(code).toBe(1);
+    expect(events.at(-1)).toBe("providers");
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("1 held background task(s)"));
+  });
+
+  test("a rejected promise counts as settled", async () => {
+    const failing = holdShutdown(Promise.reject(new Error("nope")));
+    failing.catch(() => {});
+    const code = await drain({ server: undefined, shutdownProviders: providers(), settings: settings() });
+    expect(code).toBe(0);
   });
 });
 

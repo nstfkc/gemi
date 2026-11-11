@@ -1,6 +1,19 @@
 import { Container } from "../container/Container";
 import { Repository } from "../support/Repository";
-import type { ServiceProvider } from "../support/ServiceProvider";
+import type { ProviderShutdownResult, ServiceProvider } from "../support/ServiceProvider";
+
+/**
+ * Something besides a provider that `Application.shutdown()` runs: the app's
+ * `Service`s (#1210), which the Kernel hands over with `setShutdownHooks`.
+ * @internal
+ */
+export type ShutdownHook = {
+  /** How the logs name it: `Search.onShutdown`, `QueueServiceProvider.shutdown`. */
+  name: string;
+  shutdown(options: {
+    timeoutMs: number;
+  }): ProviderShutdownResult | Promise<ProviderShutdownResult>;
+};
 
 export type ServiceProviderConstructor = new (
   app: Application,
@@ -39,6 +52,7 @@ export class Application extends Container {
   readonly config: Repository;
 
   private providers: ServiceProvider[] = [];
+  private services: ShutdownHook[] = [];
   private booted = false;
 
   constructor(config: Repository = new Repository()) {
@@ -81,6 +95,14 @@ export class Application extends Container {
     }
   }
 
+  /**
+   * The app's services, in `services` order, whose `shutdown()` runs before
+   * the providers'. Set by the Kernel. @internal
+   */
+  setShutdownHooks(services: ShutdownHook[]) {
+    this.services = [...services];
+  }
+
   getProviders(): ServiceProvider[] {
     return [...this.providers];
   }
@@ -104,8 +126,10 @@ export class Application extends Container {
   }
 
   /**
-   * Runs every provider's `shutdown()`, in reverse registration order, and
-   * resolves with what did not finish cleanly. Never rejects: this runs on the
+   * Runs every app service's `onShutdown()` (reverse `services` order), then
+   * every provider's, in reverse registration order, and
+   * resolves with what did not finish cleanly. Services go first because they
+   * boot last and may use any provider. Never rejects: this runs on the
    * way out of a process, and a throw here would skip the providers after the
    * one that threw — the database pool closing is exactly the kind of thing
    * that must not depend on the mail provider behaving.
@@ -145,10 +169,17 @@ export class Application extends Container {
     // a fault: a `console.error` per provider, every provider in `timedOut`,
     // and a non-zero exit on every otherwise clean shutdown. One line saying
     // what was skipped is the whole of it.
+    const hooks: ShutdownHook[] = [
+      ...[...this.services].reverse(),
+      ...[...this.providers].reverse().map((provider) => ({
+        name: `${provider.constructor.name}.shutdown`,
+        shutdown: (options: { timeoutMs: number }) => provider.shutdown(options),
+      })),
+    ];
     if (timeoutMs <= 0) {
-      if (this.providers.length > 0) {
+      if (hooks.length > 0) {
         console.log(
-          `[gemi] Skipping ${this.providers.length} provider shutdown hook(s): no time is budgeted for them.`,
+          `[gemi] Skipping ${hooks.length} provider shutdown hook(s): no time is budgeted for them.`,
         );
       }
       return report;
@@ -156,12 +187,13 @@ export class Application extends Container {
 
     const deadline = Date.now() + timeoutMs;
 
-    for (const provider of [...this.providers].reverse()) {
-      const name = provider.constructor.name;
+    for (const provider of hooks) {
+      const label = provider.name;
+      const name = label.slice(0, label.lastIndexOf("."));
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         console.error(
-          `[gemi] ${name}.shutdown() skipped: the provider shutdown deadline had passed.`,
+          `[gemi] ${label}() skipped: the provider shutdown deadline had passed.`,
         );
         report.timedOut.push(name);
         continue;
@@ -182,7 +214,7 @@ export class Application extends Container {
                 ? ("abandoned" as const)
                 : ("done" as const),
             (error: unknown) => {
-              console.error(`[gemi] ${name}.shutdown() failed:`, error);
+              console.error(`[gemi] ${label}() failed:`, error);
               return "failed" as const;
             },
           ),
@@ -198,7 +230,7 @@ export class Application extends Container {
       if (outcome === "abandoned") report.timedOut.push(name);
       if (outcome === "timeout") {
         console.error(
-          `[gemi] ${name}.shutdown() did not finish within the provider shutdown deadline; moving on.`,
+          `[gemi] ${label}() did not finish within the provider shutdown deadline; moving on.`,
         );
         report.timedOut.push(name);
       }
@@ -211,6 +243,7 @@ export class Application extends Container {
     super.flush();
     this.instance(Repository, this.config);
     this.providers = [];
+    this.services = [];
     this.booted = false;
     this.shutdownPromise = undefined;
   }

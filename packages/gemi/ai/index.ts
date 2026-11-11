@@ -53,7 +53,7 @@ export type {
 //
 // Markdown prompts with `{{placeholders}}`, read from the app's folder.
 export { Prompt } from "./Prompt";
-export type { PromptOptions, PromptValues } from "./Prompt";
+export type { PromptLocation, PromptOptions, PromptValues } from "./Prompt";
 
 // --- the wire vocabulary --------------------------------------------------
 //

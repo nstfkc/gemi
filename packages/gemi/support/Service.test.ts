@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Kernel } from "../kernel/Kernel";
 import { Application } from "../foundation/Application";
 import { ApiRouter, ViewRouter } from "../http";
@@ -142,5 +142,62 @@ describe("Service", () => {
   it("explains an inject() with no application at all", () => {
     Application.setInstance(undefined);
     expect(() => Billing.inject()).toThrow(/never module top level/);
+  });
+});
+
+describe("Service.onShutdown (#1210)", () => {
+  it("runs in reverse services order, before the providers, with the shared deadline", async () => {
+    const calls: string[] = [];
+    class First extends Service {
+      static token = "first-shutdown";
+      onShutdown(options: { timeoutMs: number }) {
+        calls.push(`first ${options.timeoutMs > 0}`);
+      }
+    }
+    class Second extends Service {
+      static token = "second-shutdown";
+      async onShutdown() {
+        await Bun.sleep(5);
+        calls.push("second");
+      }
+    }
+    const kernel = await boot([First, Second]);
+    const report = await kernel.shutdown({ timeoutMs: 1_000 });
+    expect(calls).toEqual(["second", "first true"]);
+    expect(report).toEqual({ failed: [], timedOut: [] });
+  });
+
+  it("reports a service that throws or gives up, by class name", async () => {
+    class Throws extends Service {
+      static token = "throws-shutdown";
+      onShutdown(): void {
+        throw new Error("boom");
+      }
+    }
+    class GivesUp extends Service {
+      static token = "gives-up-shutdown";
+      onShutdown() {
+        return { abandoned: true };
+      }
+    }
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const kernel = await boot([Throws, GivesUp]);
+    const report = await kernel.shutdown({ timeoutMs: 1_000 });
+    expect(report).toEqual({ failed: ["Throws"], timedOut: ["GivesUp"] });
+    expect(error).toHaveBeenCalledWith("[gemi] Throws.onShutdown() failed:", expect.any(Error));
+    error.mockRestore();
+  });
+
+  it("leaves a service's own shutdown() method alone", async () => {
+    const calls: unknown[] = [];
+    class OwnShutdown extends Service {
+      static token = "own-shutdown";
+      shutdown(timeoutMs?: number) {
+        calls.push(timeoutMs);
+      }
+    }
+    const kernel = await boot([OwnShutdown]);
+    await kernel.shutdown({ timeoutMs: 1_000 });
+    expect(calls).toEqual([]);
   });
 });
