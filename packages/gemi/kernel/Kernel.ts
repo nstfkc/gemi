@@ -162,6 +162,12 @@ export class Kernel {
       this.serviceInstances.push(instance);
       this.serviceTokens.add(ctor.token);
     }
+    this.app.setShutdownHooks(
+      this.serviceInstances.map((service) => ({
+        name: `${service.constructor.name}.onShutdown`,
+        shutdown: (options) => service.onShutdown(options),
+      })),
+    );
   }
 
   /**

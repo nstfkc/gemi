@@ -34,16 +34,20 @@ function Page(props: { slug?: string }) {
     </>
   );
 }
+function Detail(props: { id?: string }) {
+  return <p data-view="Detail">{props.id}</p>;
+}
 function NotFound() {
   return <p data-view="404">not found</p>;
 }
 
-const viewImportMap = { Layout, Page, 404: NotFound } as any;
+const viewImportMap = { Layout, Page, Detail, 404: NotFound } as any;
 
 class AppRouter extends ViewRouter {
   routes = {
     "/": this.layout("Layout", {
       "/:slug": this.view("Page"),
+      "/detail/:id": this.view("Detail"),
     }),
   };
 }
@@ -103,14 +107,17 @@ beforeEach(() => {
     scrollWindow(1234);
   };
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
-    const slug = new URL(String(input), "http://localhost").pathname
+    const segments = new URL(String(input), "http://localhost").pathname
       .replace(/\.json$/, "")
       .split("/")
-      .filter(Boolean)
-      .at(-1);
+      .filter(Boolean);
+    const slug = segments.at(-1);
+    const detail = segments.at(-2) === "detail";
     return new Response(
       JSON.stringify({
-        data: { [`/${slug}`]: { Layout: {}, Page: { slug } } },
+        data: detail
+          ? { [`/detail/${slug}`]: { Layout: {}, Detail: { id: slug } } }
+          : { [`/${slug}`]: { Layout: {}, Page: { slug } } },
         breadcrumbs: {},
         prefetchedData: {},
         meta: {},
@@ -156,7 +163,10 @@ async function mount() {
   expect(slug()).toBe("home");
 }
 
-async function push(path: string, options?: { hash?: string; shallow?: boolean }) {
+async function push(
+  path: string,
+  options?: { hash?: string; shallow?: boolean; search?: Record<string, string> },
+) {
   await act(async () => {
     void navigate.push(path as never, options as never);
   });
@@ -251,6 +261,62 @@ describe("scroll on client-side navigation (#1215)", () => {
     await push("/home", { shallow: true });
     expect(window.location.pathname).toBe("/home");
     expect(window.scrollY).toBe(800);
+  });
+
+  test("back to a filtered list from a detail page restores where it was left", async () => {
+    await mount();
+
+    scrollWindow(100);
+    // A filter: `searchParams.push()` is a shallow push on the list's own path.
+    await push("/home", { search: { status: "open" }, shallow: true });
+    expect(window.scrollY).toBe(100);
+    scrollWindow(830);
+
+    await push("/detail/1");
+    expect(container!.querySelector(`[data-view="Detail"]`)?.textContent).toBe("1");
+    expect(window.scrollY).toBe(0);
+    scrollWindow(200);
+
+    await traverse(-1);
+    expect(window.location.search).toBe("?status=open");
+    expect(slug()).toBe("home");
+    expect(window.scrollY).toBe(830);
+
+    // And forward to the detail page returns to where it was left too.
+    await traverse(1);
+    expect(window.scrollY).toBe(200);
+  });
+
+  test("a new filter on a scrolled list keeps the position", async () => {
+    await mount();
+
+    await push("/home", { search: { status: "open" }, shallow: true });
+    scrollWindow(830);
+    await push("/home", { search: { status: "closed" }, shallow: true });
+    expect(window.location.search).toBe("?status=closed");
+    expect(window.scrollY).toBe(830);
+  });
+
+  test("back and forward between shallow entries of one page restore each", async () => {
+    await mount();
+
+    scrollWindow(100);
+    await push("/home", { search: { status: "open" }, shallow: true });
+    scrollWindow(830);
+    await push("/home", { search: { status: "closed" }, shallow: true });
+    scrollWindow(400);
+
+    await traverse(-1);
+    expect(window.location.search).toBe("?status=open");
+    expect(window.scrollY).toBe(830);
+
+    await traverse(-1);
+    expect(window.location.search).toBe("");
+    expect(window.scrollY).toBe(100);
+
+    await traverse(2);
+    expect(window.location.search).toBe("?status=closed");
+    expect(window.scrollY).toBe(400);
   });
 
   test("the browser's own restoration is off", async () => {

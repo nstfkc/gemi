@@ -19,6 +19,52 @@ What to check:
 - `DatabaseAgentJobStore`: to use these features, add the nullable columns `after_jobs`, `batch_key`, `queued`, `inbox` and `job_checkpoint` (see the Prisma model in the docs) and migrate. Without them everything else works as before.
 - Code that switches over `AgentJobState` or `AgentErrorCode` exhaustively gets the new members (`"waiting"`, `"cancelled"`, `"dependency_failed"`).
 - An app's own `AgentJobStore` keeps working; it needs the new methods only for the new features.
+# 0.202.0
+
+## ai: run a step's tool calls one at a time (#1161)
+
+**New API (minor version).** See [Order of a step's tool calls](docs/ai-agent-context.md#order-of-a-steps-tool-calls).
+
+- `toolExecution: "sequential"` on `Agent.create` (or per run on `agent.stream`) runs a step's tool calls one at a time, in the order the model made them. The default, `"parallel"`, is unchanged.
+- The `ToolExecution` type is exported from `gemi/ai`.
+
+What to check:
+
+- Nothing, for an app that doesn't set it. An app that queues its tool bodies itself to get this order can drop the queue and set `toolExecution: "sequential"`.
+
+## client: Back restores the saved position on an entry made by a shallow push
+
+**Fix (patch version).**
+
+- Back/forward to a history entry made by a shallow navigation (a filter set with `searchParams.push()`, a `useNavigate().push(path, { shallow: true })`) now restores where that entry was left. Since 0.200.0 it was skipped, so returning to a filtered list from a detail page opened the list at the top. Back/forward between two shallow entries of the same page restores each one's position too.
+- A shallow push or replace still keeps the current position.
+
+What to check:
+
+- Nothing.
+
+## server: `Service.onShutdown()` and background work in the drain (#1210)
+
+**New API (minor version).** See [Cleaning up in a service](docs/configuration.md#cleaning-up-in-a-service) and [Background work during the drain](docs/configuration.md#background-work-during-the-drain).
+
+- `Service.onShutdown({ timeoutMs })` runs on a production shutdown (and for the application a dev reload replaced), in reverse `services` order, before every provider's `shutdown()`, under the same shared deadline. Its failures and `{ abandoned: true }` are reported as a provider's are.
+- `holdShutdown(promise)` from `gemi/server` makes the drain wait for background work as it does for an in-flight request, under `GEMI_SHUTDOWN_TIMEOUT`. A worker waits for it too. Work still running at the timeout makes the shutdown exit `1`.
+- `shutdownSignal()` from `gemi/server`: an `AbortSignal` aborted when the shutdown begins.
+- A provider's shutdown log lines are unchanged; a service's say `Name.onShutdown()`.
+
+What to check:
+
+- Nothing, for an app that doesn't use them. A service with its own `shutdown()` method isn't called by gemi; the hook is named `onShutdown`. An app with a provider whose only job is `MyService.inject().shutdown()` can move that into `MyService.onShutdown()` and drop the provider.
+
+## ai: render a prompt from another folder (#1163)
+
+**New API (minor version).** See [A second folder](docs/ai-prompts.md#a-second-folder).
+
+- `Prompt.render(name, values, { dir, shared })` and `Prompt.placeholders(name, { dir, shared })` read that one render (and its partials) from another folder, without `Prompt.configure`. The `PromptLocation` type is exported from `gemi/ai`.
+
+What to check:
+
+- Nothing. An app that calls `Prompt.configure({ dir })` around a render and resets it afterwards can pass `{ dir }` to the render instead.
 
 # 0.201.0
 

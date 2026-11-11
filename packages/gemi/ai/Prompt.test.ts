@@ -210,3 +210,51 @@ describe("gemi build's prompt manifest", () => {
     );
   });
 });
+
+describe("a second folder per render (#1163)", () => {
+  let other: string;
+  beforeEach(() => {
+    other = mkdtempSync(join(tmpdir(), "gemi-prompt-other-"));
+  });
+  afterEach(() => rmSync(other, { recursive: true, force: true }));
+
+  function writeOther(file: string, text: string) {
+    const path = join(other, file);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  }
+
+  test("reads the name and its partials under `dir`, and leaves the configured one alone", () => {
+    write("site/edit.md", "Edit {{page}}.");
+    writeOther("prompts/judge.md", "Judge {{task}}. {{> rubric}}");
+    writeOther("prompts/rubric.md", "Be strict.");
+
+    expect(Prompt.render("prompts/judge", { task: "the hero" }, { dir: other })).toBe(
+      "Judge the hero. Be strict.",
+    );
+    expect(Prompt.render("site/edit", { page: "home" })).toBe("Edit home.");
+    expect(() => Prompt.render("site/edit", { page: "home" }, { dir: other })).toThrow(
+      /does not exist/,
+    );
+    expect(Prompt.placeholders("prompts/judge", { dir: other })).toEqual(["task"]);
+  });
+
+  test("a relative dir resolves from the working directory, and shared can be set too", () => {
+    vi.spyOn(process, "cwd").mockReturnValue(other);
+    writeOther("evals/common/tone.md", "Calm.");
+    expect(Prompt.render("tone", {}, { dir: "evals", shared: "common" })).toBe("Calm.");
+  });
+
+  test("the cache keeps the two folders apart", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    write("prompts/same.md", "app");
+    writeOther("prompts/same.md", "other");
+    expect(Prompt.render("same")).toBe("app");
+    expect(Prompt.render("same", {}, { dir: other })).toBe("other");
+    expect(Prompt.render("same")).toBe("app");
+  });
+
+  test("names still can't leave the folder", () => {
+    expect(() => Prompt.render("../x", {}, { dir: other })).toThrow(/not a prompt name/);
+  });
+});

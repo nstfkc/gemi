@@ -34,6 +34,12 @@ export interface PromptOptions {
   cache?: boolean;
 }
 
+/**
+ * Where one render looks (#1163): `Prompt.render(name, values, { dir })`.
+ * Unset fields fall back to `Prompt.configure`'s, then the defaults.
+ */
+export type PromptLocation = Pick<PromptOptions, "dir" | "shared">;
+
 // A partial is `{{> name}}`; a placeholder is `{{name}}`. Neither allows
 // spaces inside the name's braces, so the `{{ ... }}` of a JSX style object or
 // a template-language example in a prompt is left as it is.
@@ -82,22 +88,22 @@ function caching() {
   return options.cache ?? process.env.NODE_ENV === "production";
 }
 
-function pathOf(name: string) {
+function pathOf(name: string, at: PromptLocation) {
   if (!NAME.test(name)) {
     throw new Error(
       `"${name}" is not a prompt name. Use letters, digits, "-" and "_", with "/" between folders.`,
     );
   }
-  const dir = options.dir ?? defaults.dir;
+  const dir = at.dir ?? options.dir ?? defaults.dir;
   const root = isAbsolute(dir) ? dir : join(process.cwd(), dir);
   const file = name.includes("/")
     ? `${name}.md`
-    : join(options.shared ?? defaults.shared, `${name}.md`);
+    : join(at.shared ?? options.shared ?? defaults.shared, `${name}.md`);
   return join(root, file);
 }
 
-function read(name: string) {
-  const path = pathOf(name);
+function read(name: string, at: PromptLocation) {
+  const path = pathOf(name, at);
   const cached = caching() ? files.get(path) : undefined;
   if (cached !== undefined) return cached;
   const production = process.env.NODE_ENV === "production";
@@ -119,11 +125,13 @@ function read(name: string) {
   return text;
 }
 
-function expand(name: string, stack: string[]): string {
+function expand(name: string, stack: string[], at: PromptLocation): string {
   if (stack.includes(name)) {
     throw new Error(`The prompt "${name}" includes itself: ${[...stack, name].join(" > ")}.`);
   }
-  return read(name).replace(PARTIAL, (_, partial: string) => expand(partial, [...stack, name]));
+  return read(name, at).replace(PARTIAL, (_, partial: string) =>
+    expand(partial, [...stack, name], at),
+  );
 }
 
 /**
@@ -160,9 +168,13 @@ export class Prompt {
    * Throws when the file (or a partial) is missing, a partial includes itself,
    * or a placeholder has no value, so a prompt never reaches the model with a
    * `{{placeholder}}` left in it. A value no placeholder uses is ignored.
+   *
+   * `at` reads this render from another folder (#1163) without touching the
+   * configured one: `{ dir: "evals" }` resolves the name and its partials
+   * under `evals`, while every other render keeps using `app/agents`.
    */
-  static render(name: string, values: PromptValues = {}): string {
-    return expand(name, []).replace(PLACEHOLDER, (_, key: string) => {
+  static render(name: string, values: PromptValues = {}, at: PromptLocation = {}): string {
+    return expand(name, [], at).replace(PLACEHOLDER, (_, key: string) => {
       if (!Object.hasOwn(values, key)) {
         throw new Error(`The prompt "${name}" has no value for {{${key}}}.`);
       }
@@ -174,8 +186,8 @@ export class Prompt {
    * The placeholder names `name` uses, its partials included, in order of
    * first use. For a test that checks a caller passes every value.
    */
-  static placeholders(name: string): string[] {
-    const keys = [...expand(name, []).matchAll(PLACEHOLDER)].map((match) => match[1]);
+  static placeholders(name: string, at: PromptLocation = {}): string[] {
+    const keys = [...expand(name, [], at).matchAll(PLACEHOLDER)].map((match) => match[1]);
     return [...new Set(keys)];
   }
 }

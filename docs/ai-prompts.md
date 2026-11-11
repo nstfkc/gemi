@@ -85,3 +85,15 @@ Prompt.configure({
   cache: true,         // default: NODE_ENV === "production"
 });
 ```
+
+## A second folder
+
+A process that renders prompts from two places (an eval runner with its own prompts beside the app's agents) passes the folder to the render itself, and the configured one stays as it is for every other render:
+
+```typescript
+// evals/prompts/judge.md, with its partials under evals/ too
+Prompt.render("prompts/judge", { task }, { dir: "evals" });
+Prompt.placeholders("prompts/judge", { dir: "evals" });
+```
+
+`dir` and `shared` resolve as in `Prompt.configure` (relative to the working directory, or absolute), and partials of that prompt resolve in the same folder. Names still can't leave it. Each file is cached by its path, so the two folders never share an entry.
