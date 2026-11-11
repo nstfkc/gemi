@@ -87,6 +87,11 @@ export interface ProviderStreamParams {
    * `PrepareStepResult.toolChoice`.
    */
   toolChoice?: ProviderToolChoice;
+  /**
+   * Sent as `prompt_cache_key` (#1223): requests with the same key and prefix
+   * share a prompt cache. Set by `Agent` from `promptCacheKey`.
+   */
+  promptCacheKey?: string;
   /** Set when the agent declares an `output` schema; the provider turns it into
    *  whatever its own strict-JSON parameter is. `strict` comes from the schema —
    *  false when it contains an `s.json()` node, which strict mode cannot
