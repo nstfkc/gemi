@@ -1,4 +1,4 @@
-# Unreleased
+# 0.205.0
 
 ## ai: `AzureAnthropicProvider`, Claude on Azure AI Foundry (#1238)
 
