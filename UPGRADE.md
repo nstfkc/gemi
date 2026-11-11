@@ -1,4 +1,4 @@
-# Unreleased
+# 0.205.3
 
 ## ai: reasoning from an unfinished response is no longer replayed (#1246)
 
