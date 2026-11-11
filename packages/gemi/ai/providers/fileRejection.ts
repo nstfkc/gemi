@@ -188,7 +188,7 @@ function fileBlocks(input: ResponsesInputItem[]): { type: string; fileId: string
   return out;
 }
 
-function errorDetail(body: unknown): { message?: string; param?: string } | null {
+export function errorDetail(body: unknown): { message?: string; param?: string } | null {
   if (!body || typeof body !== "object") return null;
   const wrapper = body as { error?: unknown };
   const inner = (wrapper.error && typeof wrapper.error === "object" ? wrapper.error : body) as {

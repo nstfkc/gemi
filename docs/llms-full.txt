@@ -8639,6 +8639,8 @@ The defaults are long on purpose. A reasoning model at a high effort can think f
 
 `streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 
+A call cut after its output started leaves a message with `finishReason` `"error"` (or `"aborted"` for a stop). On the OpenAI and Azure OpenAI providers, the reasoning such a message holds is not sent back on later turns: the Responses API resolves reasoning by its `rs_…` id, and a response that never completed was never stored. The message's text and tool calls are still sent. If the API still answers `400 Item with id 'rs_…' not found.` for a reasoning item the request sent, the request is sent once more without its reasoning items.
+
 ### Prompt cache key
 
 Every request carries a `prompt_cache_key` (#1223). The API routes requests with the same key and the same prompt prefix to the same cache, so the first step of a run can hit the prefix that another run of the same agent just warmed, parallel runs included. Without the key, first steps mostly miss.

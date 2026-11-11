@@ -134,6 +134,7 @@ export function toResponsesInput(
 
   for (const message of messages) {
     const role = message.role;
+    const replayReasoning = !UNFINISHED_RESPONSE.has(message.finishReason);
     let buffer: Record<string, unknown>[] = [];
 
     const flush = () => {
@@ -202,6 +203,7 @@ export function toResponsesInput(
         }
         case "reasoning": {
           flush();
+          if (!replayReasoning) break;
           const item = reasoningItem(part);
           if (item) items.push(item);
           break;
@@ -527,6 +529,28 @@ function hasImageExtension(name: string | undefined): boolean {
  * there is a 400 that names the format, which is loud and fixes itself.
  */
 const IMAGE_EXTENSIONS = new Set(["jpeg", "jpg", "png", "gif", "webp"]);
+
+/**
+ * The finish reasons of a message whose model response may never have
+ * completed, and whose reasoning is therefore not replayed.
+ *
+ * A reasoning item goes back by id, and the API resolves that id against the
+ * response it stored. A response the stream broke off (a dropped socket,
+ * `streamMaxDurationMs`, a stop, a process that died mid-step) was never
+ * completed, so it was never stored: replaying its `rs_…` id is answered
+ * `400 Item with id 'rs_…' not found.`, and since the id is in the thread, so
+ * is every later turn. Measured in fager on Azure (gpt-6.1-sol): a main step
+ * cut by `streamMaxDurationMs` after its reasoning had started, then every
+ * following turn of that thread failed with exactly that 400.
+ *
+ * The text and tool calls of such a message still go back: they are sent by
+ * value, not by id. Only the reasoning, which is the one part the API looks
+ * up, is left out. When the step did complete and only the run failed later
+ * (a tool, a limit), this drops reasoning that was in fact retrievable, which
+ * costs one turn's prompt-cache hit on that item and nothing else. The other
+ * direction is a thread that can no longer be answered.
+ */
+const UNFINISHED_RESPONSE = new Set<string | undefined>(["error", "aborted", "interrupted"]);
 
 /**
  * Reasoning goes back exactly as it came.
