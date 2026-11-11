@@ -46,6 +46,21 @@ describe("createBrowserHistory (#1162)", () => {
     ]);
   });
 
+  test("an object target keeps only the current pathname, as the package does", () => {
+    window.history.replaceState(null, "", "/list?page=2#top");
+    const ours = createBrowserHistory();
+    ours.push({ hash: "#row-3" });
+    const oursUrl = window.location.pathname + window.location.search + window.location.hash;
+
+    window.history.replaceState(null, "", "/list?page=2#top");
+    const theirs = packageHistory();
+    theirs.push({ hash: "#row-3" });
+    const theirsUrl = window.location.pathname + window.location.search + window.location.hash;
+
+    expect(oursUrl).toBe("/list#row-3");
+    expect(oursUrl).toBe(theirsUrl);
+  });
+
   test("a popstate is a POP with the entry's location", () => {
     const history = createBrowserHistory();
     history.push("/a");

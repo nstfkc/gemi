@@ -40,6 +40,10 @@ export function createBrowserHistory(): History {
 
   const createHref = (to: To) =>
     typeof to === "string" ? to : `${to.pathname ?? ""}${to.search ?? ""}${to.hash ?? ""}`;
+  // Like the package, an object `to` is resolved against the current pathname
+  // only: a missing `search` or `hash` is empty, not kept.
+  const target = (to: To) =>
+    typeof to === "string" ? to : createHref({ pathname: location.pathname, ...to });
   const entry = (state: unknown, idx: number) => ({
     usr: state ?? null,
     key: Math.random().toString(36).slice(2, 10),
@@ -55,7 +59,7 @@ export function createBrowserHistory(): History {
     },
     createHref,
     push(to, state) {
-      const url = createHref(to);
+      const url = target(to);
       try {
         globalHistory.pushState(entry(state, (index ?? 0) + 1), "", url);
       } catch {
@@ -65,7 +69,7 @@ export function createBrowserHistory(): History {
       apply("PUSH" as Action);
     },
     replace(to, state) {
-      globalHistory.replaceState(entry(state, index ?? 0), "", createHref(to));
+      globalHistory.replaceState(entry(state, index ?? 0), "", target(to));
       apply("REPLACE" as Action);
     },
     go: (delta) => globalHistory.go(delta),
