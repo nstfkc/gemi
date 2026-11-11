@@ -1,3 +1,16 @@
+# Unreleased
+
+## orm: Postgres session settings for a block, for row-level security (#1158)
+
+**New API (minor version).** See [Session settings](docs/orm.md#session-settings-row-level-security).
+
+- `DB.withSettings(settings, fn)` (and `DB.connection(name).withSettings`) applies `set_config(name, value, true)` at the start of every transaction opened in `fn`. A single ORM call, `DB.query` or `DB.execute` outside a transaction gets a transaction of its own for it. Inside an open transaction the settings are applied at once and the ones the block added are reset when it returns. `DB.readOnly` applies them after `SET TRANSACTION READ ONLY`. Postgres only.
+- A nested block that gives a setting another value throws `SessionSettingConflictError` (exported from `gemi/orm` with the `SessionSettingValue` type).
+
+What to check:
+
+- Nothing, for an app that doesn't call it. An app that opens `Model.transaction` and runs `select set_config(...)` (or its own function that does) as the first statement can use `DB.withSettings` instead.
+
 # 0.202.0
 
 ## ai: run a step's tool calls one at a time (#1161)

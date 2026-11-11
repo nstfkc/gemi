@@ -228,6 +228,7 @@ describe("the ambient transaction scope", () => {
         depth: 0,
         afterCommit: [],
         commitDependsOn: [],
+        appliedSettings: new Map(),
       });
     });
   });
