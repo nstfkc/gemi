@@ -1,4 +1,4 @@
-import { Action } from "history";
+import type { Action } from "history";
 
 /**
  * Where the window was scrolled on each history entry, so back/forward returns
@@ -120,7 +120,7 @@ export function restoreScroll(navigation: {
     }
     return;
   }
-  if (navigation.action === Action.Pop && saved !== undefined) {
+  if (navigation.action === ("POP" as Action) && saved !== undefined) {
     window.scrollTo(0, saved);
     return;
   }

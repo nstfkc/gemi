@@ -70,6 +70,13 @@ directly.
 Routes of a [host group](./domains.md) other than the root are keyed
 `<group>:<path>`, e.g. `admin:/users`.
 
+## What gemi adds
+
+A hydrated route's client entry holds react-dom and gemi's client runtime: the router, the query cache, `Link`, `Head` and `init()`. Two things are kept out of it (#1162):
+
+- **The `URLPattern` polyfill** loads only in a browser without `URLPattern` (Safari before 26, Firefox before 142), as a separate chunk that `init()` waits for before it hydrates. Every other browser uses its own. The server render and `gemi/testing` keep a static fallback for a runtime without it.
+- **The `history` package** isn't bundled: the router uses `window.history` directly, with the same entry state, so back/forward and scroll restoration work across a deploy.
+
 ## Budgets
 
 Set budgets in `gemi.config.ts`, in KB (1024 bytes):

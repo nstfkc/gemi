@@ -29,7 +29,7 @@ import { I18nProvider } from "./I18nContext";
 import { useNavigate } from "./useNavigate";
 import { type PageData, type RouteState, RouteStateProvider } from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
-import { Action } from "history";
+import type { Action } from "history";
 import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
 import { resolveHtmlAttributes, type RootLayoutProps } from "./htmlAttributes";

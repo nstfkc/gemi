@@ -1,3 +1,6 @@
+// The client router's `URLPattern` on a runtime without one (#1162). The
+// browser loads it on demand instead; see `client/urlPattern.ts`.
+import "urlpattern-polyfill";
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { type CarriedContext, ensureSessionId, RequestContext } from "../../http/requestContext";
