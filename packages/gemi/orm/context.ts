@@ -992,24 +992,23 @@ export async function runWithSettings<T>(
 
   return ormContext.run(scope, async () => {
     const added = await applySettings(tx, merged, applied);
-    let failed = false;
+    const reset = async () => {
+      if (added.length === 0) return;
+      const calls = added.map((_, at) => `set_config($${at + 1}, '', true)`);
+      await tx.unsafe(`select ${calls.join(", ")}`, added);
+      for (const name of added) applied.delete(name);
+    };
+    let result: T;
     try {
-      return await fn();
+      result = await fn();
     } catch (error) {
-      failed = true;
+      // The transaction may already be failing (an aborted transaction
+      // refuses every statement): the rollback resets them anyway, and the
+      // caller sees the original error.
+      await reset().catch(() => {});
       throw error;
-    } finally {
-      if (added.length > 0) {
-        try {
-          const calls = added.map((_, at) => `set_config($${at + 1}, '', true)`);
-          await tx.unsafe(`select ${calls.join(", ")}`, added);
-          for (const name of added) applied.delete(name);
-        } catch (error) {
-          // The transaction is already failing (an aborted transaction refuses
-          // every statement): the rollback resets them anyway.
-          if (!failed) throw error;
-        }
-      }
     }
+    await reset();
+    return result;
   });
 }
