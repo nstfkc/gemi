@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type {
   AgentProvider,
@@ -9,8 +9,10 @@ import type {
   ProviderStreamParams,
   ProviderToolSpec,
 } from "../AgentProvider";
+import { Agent, AgentTool } from "../Agent";
 import { AnthropicProvider } from "../AgentProvider";
 import { FallbackProvider } from "../FallbackProvider";
+import { s } from "../Schema";
 import { RecordingProvider, type Recording } from "../testing/RecordingProvider";
 import type { AgentMessage } from "../types";
 import { buildMessagesRequest, DEFAULT_MAX_TOKENS, toMessages } from "./anthropicRequest";
@@ -181,6 +183,20 @@ describe("parseMessagesStream()", () => {
   test("with an output schema, text is the answer's JSON", async () => {
     const events = await parse(fixture("anthropic-text.sse"), { structuredOutput: true });
     expect(events[0]).toEqual({ type: "output-delta", delta: "Hello" });
+  });
+
+  test("a tool call cut off by max_tokens is discarded, not called, and the call ends length", async () => {
+    const events = await parse(fixture("anthropic-tool-cut.sse"));
+    expect(events.filter((e) => e.type === "tool-call")).toEqual([]);
+    expect(events.at(-2)).toEqual({ type: "tool-call-discard", toolCallIds: ["toolu_01CutFixture00000000001"] });
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "length", usage: { reasoningTokens: 200 } });
+  });
+
+  test("malformed arguments on a normal stop are passed on for the agent to report", async () => {
+    const raw = fixture("anthropic-tool-cut.sse").replace('"stop_reason":"max_tokens"', '"stop_reason":"tool_use"');
+    const events = await parse(raw);
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1);
+    expect(events.some((e) => e.type === "tool-call-discard")).toBe(false);
   });
 
   test("unknown event types are ignored", async () => {
@@ -370,7 +386,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out).toEqual([
+    expect(out.slice(1, -1)).toEqual([
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "w", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "a" }] },
       { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "w", input: {} }] },
@@ -400,7 +416,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out[1]!.content).toEqual([
+    expect(out[2]!.content).toEqual([
       {
         type: "tool_result",
         tool_use_id: "t1",
@@ -432,7 +448,7 @@ describe("toMessages()", () => {
       ],
       CLAUDE,
     );
-    expect(out).toEqual([
+    expect(out.slice(1)).toEqual([
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "w", input: {} }] },
       {
         role: "user",
@@ -448,30 +464,60 @@ describe("toMessages()", () => {
     ]);
   });
 
-  test("another provider's reasoning is left out, and empty text is not sent", () => {
+  test("another provider's reasoning is left out; the assistant's whitespace text is kept, empty text is not", () => {
     const out = toMessages(
       [
-        message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+        message({ role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "  " }] }),
         message({
           role: "assistant",
           content: [
             { type: "reasoning", id: "rs_1", text: "openai thoughts" },
-            { type: "text", text: "  " },
+            { type: "text", text: "" },
             { type: "text", text: "hello" },
+            { type: "text", text: "\n\n" },
+            { type: "tool-call", toolCallId: "t1", name: "w", input: {} },
+            { type: "tool-result", toolCallId: "t1", name: "w", status: "ok", output: "x" },
           ],
         }),
       ],
       CLAUDE,
     );
-    expect(out[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "hello" }] });
+    expect(out[0]).toEqual({ role: "user", content: [{ type: "text", text: "hi" }] });
+    expect(out[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "hello" },
+        { type: "text", text: "\n\n" },
+        { type: "tool_use", id: "t1", name: "w", input: {} },
+      ],
+    });
   });
 
-  test("an output part is sent back as its JSON", () => {
+  test("an output part is sent back as the model wrote it, else as its JSON", () => {
     const out = toMessages(
-      [message({ role: "assistant", content: [{ type: "output", value: { ok: true } }] })],
+      [
+        message({ role: "user", content: [{ type: "text", text: "go" }] }),
+        message({ role: "assistant", content: [{ type: "output", value: { ok: true }, text: '{ "ok": true }' }] }),
+        message({ role: "user", content: [{ type: "text", text: "again" }] }),
+        message({ role: "assistant", content: [{ type: "output", value: { ok: true } }] }),
+        message({ role: "user", content: [{ type: "text", text: "thanks" }] }),
+      ],
       CLAUDE,
     );
-    expect(out).toEqual([{ role: "assistant", content: [{ type: "text", text: '{"ok":true}' }] }]);
+    expect(out[1]!.content).toEqual([{ type: "text", text: '{ "ok": true }' }]);
+    expect(out[3]!.content).toEqual([{ type: "text", text: '{"ok":true}' }]);
+  });
+
+  test("a history that starts or ends on the assistant gets a fixed user turn there", () => {
+    const out = toMessages(
+      [message({ role: "assistant", content: [{ type: "text", text: "Welcome back." }] })],
+      CLAUDE,
+    );
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(out[0]!.content).toEqual([
+      { type: "text", text: "(The conversation continues from an earlier point.)" },
+    ]);
+    expect(out[2]!.content).toEqual([{ type: "text", text: "Continue." }]);
   });
 });
 
@@ -601,9 +647,49 @@ describe("AnthropicProvider", () => {
     });
   });
 
+  test("through an Agent, a call cut off by max_tokens does not run and the run ends length", async () => {
+    const { fetchImpl } = server([sse(fixture("anthropic-tool-cut.sse"))]);
+    const ran: unknown[] = [];
+    const agent = Agent.create({
+      name: "writer",
+      instructions: "Write files.",
+      provider: new TestAnthropic("claude-opus-5-5", fetchImpl),
+      maxSteps: 3,
+      tools: [
+        AgentTool.create({
+          name: "writeFile",
+          description: "write a file",
+          inputSchema: s.object({ path: s.string(), content: s.string() }),
+          execute: async (input) => {
+            ran.push(input);
+            return "ok";
+          },
+        }),
+      ],
+    });
+    const result = await agent.stream({ messages: [], turn: { text: "make a page" } }).result();
+    expect(ran).toEqual([]);
+    expect(result.finishReason).toBe("length");
+    expect(result.messages.flatMap((m) => m.content).some((p) => p.type === "tool-call")).toBe(false);
+  });
+
+  test("ANTHROPIC_AUTH_TOKEN is a bearer when there is no key", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "oauth-token");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestAnthropic("claude-opus-5-5", fetchImpl, { apiKey: undefined }));
+      expect(calls[0]!.headers.authorization).toBe("Bearer oauth-token");
+      expect(calls[0]!.headers).not.toHaveProperty("x-api-key");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   test("models() lists the current Claude ids", () => {
     expect(AnthropicProvider.models()).toContain("claude-opus-5-5");
     expect(AnthropicProvider.models()).toContain("claude-haiku-5-5");
+    expect(AnthropicProvider.models()).toContain("claude-fable-5-2");
   });
 });
 

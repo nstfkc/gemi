@@ -27,6 +27,9 @@ export async function* parseMessagesStream(
   options: ParseOptions = {},
 ): AsyncGenerator<ProviderEvent> {
   const blocks = new Map<number, OpenBlock>();
+  // Calls whose arguments are not whole JSON, held until the stop reason says
+  // whether they were cut off.
+  const held: OpenBlock[] = [];
   let model: string | undefined;
   let usage: RawUsage = {};
   let stopReason: string | undefined;
@@ -103,12 +106,12 @@ export async function* parseMessagesStream(
         if (block?.type === "tool_use") {
           // A call with no arguments streams no delta at all; its input is
           // the empty object.
-          yield {
-            type: "tool-call",
-            toolCallId: block.id ?? "",
-            name: block.name ?? "",
-            args: block.args || "{}",
-          };
+          block.args ||= "{}";
+          // A block is stopped even when `max_tokens` cut it off, and then its
+          // arguments are a prefix of the JSON. Such a call must not be
+          // emitted whole, or it would run; it is held for `message_stop`.
+          if (isJson(block.args)) yield toolCall(block);
+          else held.push(block);
         }
         break;
       }
@@ -130,7 +133,17 @@ export async function* parseMessagesStream(
           yield ended("error");
           break;
         }
-        yield ended(finishReasonOf(stopReason));
+        const reason = finishReasonOf(stopReason);
+        // Cut off: the held calls never finished, so they are discarded (the
+        // agent forgets them and the client removes their partial parts) and
+        // the call ends `length`. Otherwise a held call is the model's own
+        // malformed JSON, passed on for `Agent` to report against the tool.
+        if (held.length > 0 && reason === "length") {
+          yield { type: "tool-call-discard", toolCallIds: held.map((b) => b.id ?? "") };
+        } else {
+          for (const block of held) yield toolCall(block);
+        }
+        yield ended(reason);
         break;
       }
 
@@ -156,6 +169,19 @@ export async function* parseMessagesStream(
     },
   };
   yield ended("error");
+}
+
+function toolCall(block: OpenBlock): ProviderEvent {
+  return { type: "tool-call", toolCallId: block.id ?? "", name: block.name ?? "", args: block.args };
+}
+
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function textEvent(delta: string, options: ParseOptions): ProviderEvent {
@@ -218,6 +244,8 @@ type RawUsage = {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  /** From `output_tokens_details.thinking_tokens`, part of `output_tokens`. */
+  thinking_tokens?: number;
 };
 
 /** The latest value of each field: `message_delta` usage is cumulative. */
@@ -232,6 +260,8 @@ function mergeUsage(total: RawUsage, raw: any): RawUsage {
   ] as const) {
     if (typeof raw[key] === "number") next[key] = raw[key];
   }
+  const thinking = raw.output_tokens_details?.thinking_tokens;
+  if (typeof thinking === "number") next.thinking_tokens = thinking;
   return next;
 }
 
@@ -242,7 +272,8 @@ function mergeUsage(total: RawUsage, raw: any): RawUsage {
  * last cache breakpoint), `cache_read_input_tokens` and
  * `cache_creation_input_tokens`. gemi's `inputTokens` is the whole prompt, as
  * OpenAI reports it, so it is their sum, and the two cache parts are its
- * breakdown (`cachedInputTokens`, `cacheWriteInputTokens`). A field the
+ * breakdown (`cachedInputTokens`, `cacheWriteInputTokens`). Thinking tokens are part
+ * of `output_tokens` and are its `reasoningTokens` breakdown. A field the
  * response did not carry stays absent rather than zero.
  */
 export function toAnthropicUsage(raw: RawUsage | undefined): Usage {
@@ -254,5 +285,6 @@ export function toAnthropicUsage(raw: RawUsage | undefined): Usage {
   const usage: Usage = { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
   if (typeof read === "number") usage.cachedInputTokens = read;
   if (typeof write === "number") usage.cacheWriteInputTokens = write;
+  if (typeof raw.thinking_tokens === "number") usage.reasoningTokens = raw.thinking_tokens;
   return usage;
 }

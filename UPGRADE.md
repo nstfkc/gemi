@@ -10,6 +10,7 @@ What to check:
 
 - Forced `toolChoice` (`"required"`, `{ name }`) is sent as `auto` on Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, which reject it.
 - `temperature` and `promptCacheKey` are not sent to Anthropic.
+- `OutputPart` has an optional `text`, the answer as the model wrote it, set by the server and sent back to Anthropic in place of a re-serialized value. Stores keep it like any other field.
 - Nothing changes for OpenAI and Azure.
 
 ## ai: `providerMetadata` on reasoning parts (#477)

@@ -8648,7 +8648,7 @@ A shared key only helps when the requests really share a prefix. Keep a key's tr
 
 ## Anthropic (Claude)
 
-`AnthropicProvider` talks to Anthropic's Messages API (`POST /v1/messages`, API version `2026-10-21`). It takes the model id and the same config as the other providers. The key comes from `apiKey` or `ANTHROPIC_API_KEY`, and the host from `baseURL` or `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`; a trailing `/v1` is accepted).
+`AnthropicProvider` talks to Anthropic's Messages API (`POST /v1/messages`, API version `2026-10-21`). It takes the model id and the same config as the other providers. The key comes from `apiKey` or `ANTHROPIC_API_KEY` (with no key, `ANTHROPIC_AUTH_TOKEN` is sent as a bearer token), and the host from `baseURL` or `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`; a trailing `/v1` is accepted).
 
 ```typescript
 import { Agent, AnthropicProvider } from "gemi/ai";
@@ -8669,7 +8669,8 @@ How the agent's settings map onto the request:
 - **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto`. The step still runs, so say in the instructions which tool you expect.
 - **Tools** are sent flat with `eager_input_streaming`, so their arguments stream as they're written. Tool search is not supported yet (`capabilities.toolSearch` is `false`), so namespaces are flattened and deferred tools are sent whole. `strict` is not sent; the agent validates every call against the tool's schema.
 - **`promptCacheKey`** is not sent. Anthropic's cache keys on the prompt prefix itself.
-- **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. Another provider's reasoning parts are left out.
+- **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. The assistant's text goes back exactly as written, whitespace-only blocks included, and an `output` part goes back as the text the model wrote (`OutputPart.text`), not a re-serialized value. A history that starts or ends on the assistant gets a fixed user turn there ("(The conversation continues from an earlier point.)", "Continue."), because the API wants a user turn first and refuses a prefill. Another provider's reasoning parts are left out.
+- **Cut-off tool calls**: a tool call whose arguments `max_tokens` cut off is discarded (`tool-call-discard`), never run, and the call ends with reason `"length"`.
 
 Usage counts the whole prompt in `inputTokens`, as OpenAI reports it, with `cachedInputTokens` (cache reads) and `cacheWriteInputTokens` (cache writes) as its breakdown. A `ModelPrice` can price cache writes with `cacheWriteInput` (Anthropic charges 1.25x input for the 5-minute cache).
 
