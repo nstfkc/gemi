@@ -91,6 +91,7 @@ export type { Jsonify } from "../utils/jsonify";
 export {
   Agent,
   AgentTool,
+  defaultPromptCacheKey,
   // A class, and exported as a value on purpose: a tool that wants to let a
   // sub-agent's question through untouched needs `instanceof` to tell an
   // escalation from a failure, and rethrowing everything is not the same thing.
