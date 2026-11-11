@@ -1,5 +1,16 @@
 # Unreleased
 
+## ai: `prompt_cache_key` on every Responses request (#1223)
+
+**Behaviour change (minor version).** See [Prompt cache key](docs/ai-providers.md#prompt-cache-key).
+
+- Agent model calls now send `prompt_cache_key`. By default it's the agent's name plus a hash of the call's instructions and tools, so runs with the same prefix share the provider's prompt cache from their first step.
+- `promptCacheKey` on `Agent.create` and on `agent.stream()`: a string (1–64 characters) to set it, `false` to send none. `defaultPromptCacheKey` and `ProviderStreamParams.promptCacheKey` are exported.
+
+What to check:
+
+- Nothing for most apps: OpenAI and Azure OpenAI accept the parameter. An app whose own `AgentProvider`, proxy or recordings compare the whole request body sees the new field. Pass `promptCacheKey: false` to keep requests as they were.
+
 ## orm: Postgres session settings for a block, for row-level security (#1158)
 
 **New API (minor version).** See [Session settings](docs/orm.md#session-settings-row-level-security).
