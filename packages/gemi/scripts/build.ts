@@ -60,6 +60,9 @@ const result = await Bun.build({
     // React entry and is built by `vite.client.config.mts` instead — see the
     // note at the top of `ai/index.ts` for why the two are separate at all.
     "./ai/index.ts",
+    // `gemi/ai/testing`: `RecordingProvider` for tests and evals. Its own
+    // entry so an app's server bundle never carries it.
+    "./ai/testing/index.ts",
     // The entry `gemi run` spawns. It belongs in *this* build rather than one of
     // its own: `splitting: true` is what puts the `Command` base class in a
     // chunk shared with `dist/services/index.js`, so the published runner and

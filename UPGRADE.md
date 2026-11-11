@@ -22,6 +22,22 @@ What to check:
 
 - Nothing, for an app that doesn't call it. An app that opens `Model.transaction` and runs `select set_config(...)` (or its own function that does) as the first statement can use `DB.withSettings` instead.
 
+## ai: `RecordingProvider` in `gemi/ai/testing` (#1229)
+
+**New API (minor version).** See [AI Recordings](docs/ai-recordings.md).
+
+- New entrypoint `gemi/ai/testing`: `RecordingProvider.record(live, options)` and `RecordingProvider.replay(recording, { match, fingerprints, ids, ordered, position, waitMs })` record model calls and replay them in tests and evals.
+  - Matching is by call index, and ids minted per run are matched by place.
+  - A reworded prompt file replays as stale (`stale`, `staleCalls`) rather than failing (`match: "wording"`, by its git fingerprints). `"shape"` and `"exact"` are the other modes.
+  - Recorded tool calls are re-checked against today's tool schemas.
+  - Also: `nested(key)` sub-runs, `pin()`/`position` for runs side by side, `upload_<n>` upload ids, `replayedInFull()` and `RecordingProvider.changedSince(recording)`.
+- `Fingerprints`: what a recording was made with (prompt blob ids, tool hashes, app `inputs`), and how a request is cut across a reworded prompt.
+- `pinClock(at)` runs `Date` from a recording's `recordedAt`.
+
+What to check:
+
+- Nothing; it is new.
+
 # 0.203.0
 
 ## ai: background jobs that coordinate (#1222)
