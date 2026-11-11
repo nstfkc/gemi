@@ -21,10 +21,13 @@ import {
 import {
   anthropicTarget,
   azureRealtimeTarget,
+  foundryTarget,
+  type FoundryConfig,
   azureTarget,
   openAITarget,
   type AzureConfig,
   type ProviderConfig,
+  type ProviderTarget,
 } from "./providers/endpoints";
 import { normalizeProviderError } from "./providers/errors";
 import { sentFiles } from "./providers/fileRejection";
@@ -270,7 +273,7 @@ export type ProviderStream = AsyncIterable<ProviderEvent>;
  * and api-version from the same fields — see `providers/endpoints.ts` for why
  * that resolution lives in one place and what happens when it does not.
  */
-export type { AzureConfig, ProviderConfig } from "./providers/endpoints";
+export type { AzureConfig, FoundryConfig, ProviderConfig } from "./providers/endpoints";
 
 export abstract class AgentProvider {
   abstract readonly model: string;
@@ -431,7 +434,8 @@ const CLAUDE_MODELS = [
  * `streamResponses` does the retries, the stream limits and the holding back
  * until the first content event, and `parseMessagesStream` reads the stream.
  * `baseURL` (or `ANTHROPIC_BASE_URL`) points it at a gateway; see
- * `anthropicTarget`. Bedrock, Vertex and Foundry are not covered.
+ * `anthropicTarget`. `AzureAnthropicProvider` is the Azure AI Foundry
+ * variant; Bedrock and Vertex are not covered.
  */
 export class AnthropicProvider extends AgentProvider {
   readonly model: string;
@@ -538,8 +542,67 @@ export class AnthropicProvider extends AgentProvider {
   }
 
   protected endpoint(): ResponsesEndpoint {
-    const target = anthropicTarget(this.config);
-    return { ...responsesEndpoint(target), responsesUrl: `${target.base}/messages` };
+    return messagesEndpoint(anthropicTarget(this.config));
+  }
+}
+
+function messagesEndpoint(target: ProviderTarget): ResponsesEndpoint {
+  return { ...responsesEndpoint(target), responsesUrl: `${target.base}/messages` };
+}
+
+/**
+ * Claude on Azure AI Foundry, which serves the same Messages API under the
+ * resource's `/anthropic` path, so this is `AnthropicProvider` with another
+ * endpoint and auth (see `foundryTarget`) and, as with `AzureOpenAIProvider`,
+ * a deployment name that can differ from the model id. Capabilities are read
+ * off the model, as there.
+ *
+ * NO FILES. The Files API is a 400 on deployments hosted on Azure (the
+ * default hosting) and a beta on the ones hosted on Anthropic, so
+ * `fileInput` is false and `upload()` refuses: a file a user attaches is
+ * stored by gemi and named to the model by its attachment id, for a tool to
+ * read. Everything else the agent uses (streaming, tools, thinking, structured
+ * output, prompt caching) is supported on both hostings. Thinking is not
+ * bound (`bindsThinking`).
+ */
+export class AzureAnthropicProvider extends AnthropicProvider {
+  declare readonly capabilities: ProviderCapabilities;
+  protected declare readonly config: FoundryConfig;
+
+  constructor(model: string, config: FoundryConfig = {}) {
+    super(model, config);
+    this.capabilities = { ...capabilitiesForClaude(model), fileInput: false };
+  }
+
+  /** `ANTHROPIC_FOUNDRY_*` from the environment for what `config` leaves out. */
+  static override model(model: string, config?: FoundryConfig): AzureAnthropicProvider {
+    return new AzureAnthropicProvider(model, config);
+  }
+
+  override upload(_file: File): Promise<string> {
+    return Promise.reject(
+      new Error(
+        "AzureAnthropicProvider does not upload files: the Files API is not available on Azure-hosted Foundry deployments. The file is still stored by gemi and named to the model by its attachment id.",
+      ),
+    );
+  }
+
+  protected override deployment(): string {
+    return this.config.deployment ?? this.model;
+  }
+
+  /**
+   * Thinking block-binding controls are unconfirmed on Foundry, and sending
+   * the field where the beta is not taken is a 400 on every request. Without
+   * it, a thinking block invalidated by an edit to the history is handled by
+   * stripping the blocks and asking once more (see `AnthropicProvider.send`).
+   */
+  protected override bindsThinking(): boolean {
+    return false;
+  }
+
+  protected override endpoint(): ResponsesEndpoint {
+    return messagesEndpoint(foundryTarget(this.config));
   }
 }
 

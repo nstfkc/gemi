@@ -1,5 +1,13 @@
 # Unreleased
 
+## ai: `AzureAnthropicProvider`, Claude on Azure AI Foundry (#1238)
+
+**Addition (minor version).** `AzureAnthropicProvider` (from `gemi/ai`) is `AnthropicProvider` against an Azure AI Foundry resource: `https://<resource>.services.ai.azure.com/anthropic`, with the key in `api-key` or an Entra ID token from `getToken`, and an optional `deployment` name. It reads `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_RESOURCE` and `ANTHROPIC_FOUNDRY_BASE_URL` for what the config leaves out. See "Claude on Azure AI Foundry" in the AI providers docs.
+
+What to check:
+
+- No file input: the Files API is not available on Azure-hosted deployments, so `upload()` throws. Route uploads to storage with `attachmentDestination`.
+
 ## ai: Claude thinking, structured output, prompt caching and files (#1238)
 
 **Addition (minor version).** `AnthropicProvider` now sends `reasoning` as adaptive thinking with an effort and sends thinking blocks back with their signatures (through `ReasoningPart.providerMetadata`, #477), sends strict `output` schemas as `output_config.format`, marks prompt-cache breakpoints on the tools, the system prompt and the last message, and uploads files through the Files API (images, PDFs and plain text are shown to the model). See "Anthropic (Claude)" in the AI providers docs.

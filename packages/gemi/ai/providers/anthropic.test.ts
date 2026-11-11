@@ -10,7 +10,7 @@ import type {
   ProviderToolSpec,
 } from "../AgentProvider";
 import { Agent, AgentTool } from "../Agent";
-import { AnthropicProvider } from "../AgentProvider";
+import { AnthropicProvider, AzureAnthropicProvider } from "../AgentProvider";
 import { FallbackProvider } from "../FallbackProvider";
 import { s } from "../Schema";
 import { RecordingProvider, type Recording } from "../testing/RecordingProvider";
@@ -1124,6 +1124,150 @@ describe("files", () => {
     expect(calls[0]!.url).toBe("https://api.anthropic.com/v1/files");
     expect(calls[0]!.body.has("purpose")).toBe(false);
     expect(calls[0]!.body.get("file")).toBeInstanceOf(File);
+  });
+});
+
+// --- Claude on Azure AI Foundry ---------------------------------------------
+
+class TestFoundry extends AzureAnthropicProvider {
+  constructor(
+    model: string,
+    private readonly fetchImpl: FetchLike,
+    config: ConstructorParameters<typeof AzureAnthropicProvider>[1] = {},
+  ) {
+    super(model, config);
+  }
+
+  protected override endpoint() {
+    return { ...super.endpoint(), fetchImpl: this.fetchImpl, sleep: async () => {}, random: () => 0 };
+  }
+}
+
+describe("AzureAnthropicProvider", () => {
+  test("the resource's /anthropic path, the key in api-key, the deployment as the model", async () => {
+    const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+    const provider = new TestFoundry("claude-opus-5-5", fetchImpl, {
+      resourceName: "acme-ai",
+      apiKey: "azure-key",
+      deployment: "prod-claude",
+    });
+    const events = await drain(provider);
+    expect(calls[0]!.url).toBe("https://acme-ai.services.ai.azure.com/anthropic/v1/messages");
+    expect(calls[0]!.headers).toMatchObject({ "api-key": "azure-key", "anthropic-version": ANTHROPIC_VERSION });
+    expect(calls[0]!.headers).not.toHaveProperty("x-api-key");
+    expect(calls[0]!.body.model).toBe("prod-claude");
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("an endpoint (the Target URI's base) is used as given, with or without /v1", async () => {
+    for (const endpoint of [
+      "https://acme-ai.services.ai.azure.com/anthropic",
+      "https://acme-ai.services.ai.azure.com/anthropic/v1/",
+    ]) {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestFoundry("claude-opus-5-5", fetchImpl, { endpoint, apiKey: "k" }));
+      expect(calls[0]!.url).toBe("https://acme-ai.services.ai.azure.com/anthropic/v1/messages");
+    }
+  });
+
+  test("Entra ID: a bearer token, asked for on every request", async () => {
+    const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+    let minted = 0;
+    const provider = new TestFoundry("claude-opus-5-5", fetchImpl, {
+      resourceName: "acme-ai",
+      getToken: async () => `token-${++minted}`,
+    });
+    await drain(provider);
+    await drain(provider);
+    expect(calls.map((c) => c.headers.authorization)).toEqual(["Bearer token-1", "Bearer token-2"]);
+    expect(calls[0]!.headers).not.toHaveProperty("api-key");
+  });
+
+  test("the same request body as Anthropic's, except the model", async () => {
+    const params = {
+      systemPrompt: "Be brief.",
+      reasoning: "low",
+      tools: [tool("getWeather")],
+      toolChoice: "required" as const,
+      messages: [message({ role: "user", content: [{ type: "text", text: "weather?" }] })],
+    };
+    const a = server([sse(fixture("anthropic-text.sse"))]);
+    const f = server([sse(fixture("anthropic-text.sse"))]);
+    await drain(new TestAnthropic("claude-sonnet-5-5", a.fetchImpl), params);
+    await drain(new TestFoundry("claude-sonnet-5-5", f.fetchImpl, { resourceName: "r", deployment: "d" }), params);
+    // Except the thinking binding, which Foundry is not known to take.
+    const { block_binding, ...thinking } = a.calls[0]!.body.thinking;
+    expect(block_binding).toBeDefined();
+    expect({ ...f.calls[0]!.body, model: "claude-sonnet-5-5" }).toEqual({ ...a.calls[0]!.body, thinking });
+    expect(f.calls[0]!.headers).not.toHaveProperty("anthropic-beta");
+  });
+
+  test("an edit-invalidated thinking block on Foundry: stripped and asked again", async () => {
+    const { calls, fetchImpl } = server([
+      json(400, fixture("anthropic-error-thinking-mismatch.json")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const history = [
+      message({ role: "user", content: [{ type: "text", text: "hi" }] }),
+      message({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "", providerMetadata: { anthropic: { type: "thinking", signature: "s" } } },
+          { type: "text", text: "hello" },
+        ],
+      }),
+      message({ role: "user", content: [{ type: "text", text: "more" }] }),
+    ];
+    const events = await drain(
+      new TestFoundry("claude-opus-5-5", fetchImpl, { resourceName: "r", apiKey: "k" }),
+      { messages: history },
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.thinking).toEqual({ type: "adaptive" });
+    expect(JSON.stringify(calls[1]!.body.messages)).not.toContain('"thinking"');
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("no endpoint, resource or env var: a configuration error that says what to set", async () => {
+    vi.stubEnv("ANTHROPIC_FOUNDRY_BASE_URL", "");
+    vi.stubEnv("ANTHROPIC_FOUNDRY_RESOURCE", "");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await expect(drain(new TestFoundry("claude-opus-5-5", fetchImpl, { apiKey: "k" }))).rejects.toThrow(
+        /no Foundry endpoint.*resourceName/,
+      );
+      expect(calls).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("capabilities are Claude's, without file input; upload refuses", async () => {
+    const provider = AzureAnthropicProvider.model("claude-opus-5-5", { resourceName: "r" });
+    expect(provider.capabilities).toEqual({ ...capabilitiesForClaude("claude-opus-5-5"), fileInput: false });
+    await expect(provider.upload(new File(["x"], "a.pdf"))).rejects.toThrow(/Files API/);
+    // A file in the history is named by its attachment id, not sent.
+    const blocks = toMessages(
+      [
+        message({
+          role: "user",
+          content: [{ type: "file", fileId: "file_1", attachmentId: "gemi_att_1", name: "a.pdf" } as any],
+        }),
+      ],
+      provider.capabilities,
+    )[0]!.content;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "text" });
+  });
+
+  test("a 529 from Foundry is retried like Anthropic's", async () => {
+    const { calls, fetchImpl } = server([
+      json(529, fixture("anthropic-error-overloaded.json")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const events = await drain(new TestFoundry("claude-opus-5-5", fetchImpl, { resourceName: "r", apiKey: "k" }));
+    expect(calls).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
   });
 });
 

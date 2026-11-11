@@ -8680,6 +8680,27 @@ How the agent's settings map onto the request:
 
 Usage counts the whole prompt in `inputTokens`, as OpenAI reports it, with `cachedInputTokens` (cache reads) and `cacheWriteInputTokens` (cache writes) as its breakdown. A `ModelPrice` can price cache writes with `cacheWriteInput` (Anthropic charges 1.25x input for the 5-minute cache).
 
+### Claude on Azure AI Foundry
+
+`AzureAnthropicProvider` runs Claude deployed in an Azure AI Foundry resource. Foundry serves the same Messages API under the resource's `/anthropic` path, so everything above applies, with these differences:
+
+- **Endpoint**: `endpoint` (or `baseURL`, or `ANTHROPIC_FOUNDRY_BASE_URL`) is the deployment's Target URI without `/v1/messages`, e.g. `https://acme-ai.services.ai.azure.com/anthropic`. Or give `resourceName` (or `ANTHROPIC_FOUNDRY_RESOURCE`) and the URL is built from it.
+- **Auth**: the key goes in the `api-key` header (`apiKey`, or `ANTHROPIC_FOUNDRY_API_KEY`). For Entra ID, pass `getToken`, which is called on every request so an expiring token is refreshed; the token's scope is `https://ai.azure.com/.default`.
+- **Deployment**: `deployment` is sent as `model` when the deployment isn't named after the model. Capabilities are still read off the model id.
+- **Preserved thinking**: thinking-binding controls are unconfirmed on Foundry, so `block_binding` isn't sent. A thinking block that an edit to the history invalidated is handled by stripping the thinking blocks and asking once more.
+- **Missing endpoint**: with no `endpoint`, `baseURL`, `resourceName` or `ANTHROPIC_FOUNDRY_*` variable, the call throws a configuration error naming them.
+- **No files**: the Files API returns a 400 on Azure-hosted deployments, so `capabilities.fileInput` is `false` and `upload()` throws. Route uploads to storage (`attachmentDestination` returning `"storage"` on the agent controller) so attachments are kept by gemi and named to the model by attachment id for a tool to read.
+
+```typescript
+import { AzureAnthropicProvider } from "gemi/ai";
+import { DefaultAzureCredential, getBearerTokenProvider } from "@azure/identity";
+
+const claude = AzureAnthropicProvider.model("claude-opus-5-5", {
+  resourceName: "acme-ai",
+  getToken: getBearerTokenProvider(new DefaultAzureCredential(), "https://ai.azure.com/.default"),
+});
+```
+
 ## A provider per run
 
 `agent.stream({ provider })` makes that run's model calls through `provider` instead of the one from `Agent.create`, e.g. to let a user pick a model, route a run to another deployment, or record and replay model calls in a test.
