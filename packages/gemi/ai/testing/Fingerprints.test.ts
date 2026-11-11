@@ -223,4 +223,65 @@ describe("Fingerprints", () => {
     expect(JSON.stringify(recorder.recording())).not.toContain(key(rewordedPrompt));
     expect(live.calls[0]!.promptCacheKey).toBe(key(rewordedPrompt));
   });
+
+  test("a recorded call to a tool with a free-form schema part replays stale (#1234)", async () => {
+    const { root, write } = repo({
+      "app/agents/welcome/intro.md": intro,
+      "app/agents/prompts/tone.md": tone,
+    });
+    // `props: {}` has no type: `s.fromJSONSchema` can't model it.
+    const setProps = (description: string) => ({
+      name: "set_props",
+      description,
+      parameters: {
+        type: "object",
+        properties: { node: { type: "string" }, props: {} },
+        required: ["node", "props"],
+        additionalProperties: false,
+      } as never,
+      strict: false,
+    });
+    const call: ProviderEvent[] = [
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        name: "set_props",
+        args: JSON.stringify({ node: "hero", props: { title: "Hi", columns: 3 } }),
+      },
+      finish(),
+    ];
+    const live = fakeProvider(call);
+    const recorder = RecordingProvider.record(live as unknown as AgentProvider, {
+      fingerprints: { root },
+    });
+    await drain(recorder, {
+      systemPrompt: render(intro, tone, "a bakery"),
+      messages: [user("Write it.")],
+      tools: [setProps("Set a node's props.")],
+    });
+    const recording = JSON.parse(JSON.stringify(recorder.recording())) as Recording;
+
+    const reworded = tone.replace("warmly and plainly", "warmly, plainly and briefly");
+    write({ "app/agents/prompts/tone.md": reworded });
+    const replay = RecordingProvider.replay(recording, { fingerprints: { root } });
+    await drain(replay, {
+      systemPrompt: render(intro, reworded, "a bakery"),
+      messages: [user("Write it.")],
+      tools: [setProps("Set the props of a node.")],
+    });
+    expect([...replay.stale].sort()).toEqual([
+      "app/agents/prompts/tone.md changed",
+      "tools changed: set_props",
+    ]);
+
+    // The tool must still be offered.
+    const gone = RecordingProvider.replay(recording, { fingerprints: { root } });
+    await expect(
+      drain(gone, {
+        systemPrompt: render(intro, reworded, "a bakery"),
+        messages: [user("Write it.")],
+        tools: [{ ...setProps("x"), name: "set_layout" }],
+      }),
+    ).rejects.toThrow(/not offered any more/);
+  });
 });

@@ -1,3 +1,13 @@
+# Unreleased
+
+## ai/testing: a recorded call to a tool with a free-form schema part replays stale (#1234)
+
+**Fix (patch).** When the tools offered differ from the recording's, `RecordingProvider` re-checks the recorded tool calls against today's schemas. A schema that `s.fromJSONSchema` can't model, such as a free-form `props: {}` part, used to throw and fail the call. Now that call's input check is skipped, because the tool still validates its input when it runs, and the tool must still be offered. The replay goes on, counted as stale.
+
+What to check:
+
+- Nothing.
+
 # 0.204.1
 
 ## ai/testing: replays ignore the prompt cache key (#1231)
