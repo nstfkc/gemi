@@ -240,7 +240,12 @@ function isContextLength(haystack: string): boolean {
     haystack.includes("context_length_exceeded") ||
     haystack.includes("maximum context length") ||
     haystack.includes("context window") ||
-    haystack.includes("reduce the length")
+    haystack.includes("reduce the length") ||
+    // Anthropic: 400 "prompt is too long: 1050000 tokens > 1000000 maximum",
+    // and 413 `request_too_large` for a body over the byte limit. Neither
+    // works on a retry; both want a shorter history.
+    haystack.includes("prompt is too long") ||
+    haystack.includes("request_too_large")
   );
 }
 

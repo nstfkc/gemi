@@ -69,7 +69,17 @@ export type Usage = {
   outputTokens: number;
   /** Billed separately by OpenAI and worth surfacing on its own. */
   reasoningTokens?: number;
+  /** The part of `inputTokens` read from the provider's prompt cache. */
   cachedInputTokens?: number;
+  /**
+   * The part of `inputTokens` written to the prompt cache on this call, which
+   * Anthropic bills above the normal input price (1.25x for the 5-minute
+   * cache). A breakdown like `cachedInputTokens`, not a separate bucket: the
+   * provider reports the three apart, and `inputTokens` is their sum. Absent on
+   * a provider that does not report writes (OpenAI caches without charging
+   * for it).
+   */
+  cacheWriteInputTokens?: number;
   /**
    * How much of `inputTokens` / `outputTokens` was image rather than text, on a
    * generation or an edit.

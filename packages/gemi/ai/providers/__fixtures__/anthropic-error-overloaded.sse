@@ -1,0 +1,9 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_01OverloadFixture0000001","type":"message","role":"assistant","content":[],"model":"claude-opus-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+
+event: ping
+data: {"type":"ping"}
+
+event: error
+data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+

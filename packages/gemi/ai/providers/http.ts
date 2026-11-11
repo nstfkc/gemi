@@ -262,7 +262,8 @@ export async function requestWithRetry(
     const error = new ProviderHttpError(
       response.status,
       body,
-      response.headers.get("x-request-id") ?? undefined,
+      // `request-id` is Anthropic's spelling.
+      response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined,
       parseRetryAfter(response.headers.get("retry-after"), now()),
     );
 

@@ -1,5 +1,17 @@
 # Unreleased
 
+## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
+
+**Addition (minor version).** `AnthropicProvider` (from `gemi/ai`) runs agents on Claude: streamed text, parallel tool calls, retries and timeouts, error mapping (529 overloaded and stream `overloaded_error` retried, 429 with `retry-after`, `prompt is too long` as `context_length_exceeded`, refusals as `content_filtered`) and usage with cache tokens. Set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`) and use `AnthropicProvider.model("claude-opus-5-5")`. See "Anthropic (Claude)" in the AI providers docs.
+
+`Usage` has a new optional breakdown, `cacheWriteInputTokens` (tokens written to the prompt cache, part of `inputTokens`), and `ModelPrice` a matching `cacheWriteInput` price.
+
+What to check:
+
+- Forced `toolChoice` (`"required"`, `{ name }`) is sent as `auto` on Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, which reject it.
+- `temperature` and `promptCacheKey` are not sent to Anthropic.
+- Nothing changes for OpenAI and Azure.
+
 ## ai: `providerMetadata` on reasoning parts (#477)
 
 **Addition (minor version).** `ReasoningPart` has an optional `providerMetadata` field, and the `reasoning-delta` provider event and stream frame carry it. A provider writes there what it needs to send the part back on the next request (Anthropic: a thinking block's `signature`), under its own key, and other providers ignore it. It comes on the part's last delta and closes the part, so the next reasoning delta starts a new part.

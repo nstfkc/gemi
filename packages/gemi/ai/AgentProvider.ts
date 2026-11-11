@@ -5,8 +5,15 @@ import {
   uploadFile,
   type ResponsesEndpoint,
 } from "./providers/call";
-import { capabilitiesForModel } from "./providers/capabilities";
+import { buildMessagesRequest } from "./providers/anthropicRequest";
+import { parseMessagesStream } from "./providers/anthropicStream";
 import {
+  capabilitiesForClaude,
+  capabilitiesForModel,
+  supportsForcedToolChoice,
+} from "./providers/capabilities";
+import {
+  anthropicTarget,
   azureRealtimeTarget,
   azureTarget,
   openAITarget,
@@ -388,6 +395,77 @@ export class OpenAIProvider extends AgentProvider {
       openAITarget(this.config, { timeoutMs: DEFAULT_REALTIME_TIMEOUT_MS }),
       { model: this.model },
     );
+  }
+}
+
+/**
+ * The current Claude models, newest family first. Autocomplete, not a gate,
+ * like `OPENAI_MODELS`: any id is accepted, and `capabilitiesForClaude` says
+ * what an unknown one is assumed to do.
+ */
+const CLAUDE_MODELS = [
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+  "claude-fable-5-1",
+  "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-fable-5",
+  "claude-opus-4-8",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
+] as const;
+
+/**
+ * Claude on Anthropic's Messages API (`POST /v1/messages`), with an API key.
+ *
+ * The same request path as the OpenAI providers below the request body:
+ * `streamResponses` does the retries, the stream limits and the holding back
+ * until the first content event, and `parseMessagesStream` reads the stream.
+ * `baseURL` (or `ANTHROPIC_BASE_URL`) points it at a gateway; see
+ * `anthropicTarget`. Bedrock, Vertex and Foundry are not covered.
+ */
+export class AnthropicProvider extends AgentProvider {
+  readonly model: string;
+  readonly capabilities: ProviderCapabilities;
+  protected readonly config: ProviderConfig;
+
+  constructor(model: string, config: ProviderConfig = {}) {
+    super();
+    this.model = model;
+    this.capabilities = capabilitiesForClaude(model);
+    this.config = config;
+  }
+
+  /** `ANTHROPIC_API_KEY` from the environment unless `config.apiKey` is set. */
+  static model(model: string, config?: ProviderConfig): AnthropicProvider {
+    return new AnthropicProvider(model, config);
+  }
+
+  static models(): readonly string[] {
+    return CLAUDE_MODELS;
+  }
+
+  stream(params: ProviderStreamParams): ProviderStream {
+    const body = buildMessagesRequest(params, {
+      model: this.model,
+      capabilities: this.capabilities,
+      forcedToolChoice: supportsForcedToolChoice(this.model),
+    });
+    return streamResponses(this.endpoint(), body, {
+      signal: params.signal,
+      structuredOutput: Boolean(params.output),
+      parse: parseMessagesStream,
+    });
+  }
+
+  upload(_file: File): Promise<string> {
+    return Promise.reject(new Error("AnthropicProvider does not upload files yet."));
+  }
+
+  protected endpoint(): ResponsesEndpoint {
+    const target = anthropicTarget(this.config);
+    return { ...responsesEndpoint(target), responsesUrl: `${target.base}/messages` };
   }
 }
 
