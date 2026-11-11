@@ -1,3 +1,25 @@
+# Unreleased
+
+## ai: background jobs that coordinate (#1222)
+
+**New API (minor version), and a behaviour change for `job.signal`.** See [Jobs that coordinate](docs/ai-background-jobs.md#jobs-that-coordinate).
+
+- `AgentJobs.start(Job, args, options)` and `AgentJobs.track(options)` start a job from server code, with no tool call (`toolCallId` and `runId` are `""` on its record).
+- `after: [ids]` on `ctx.jobs.start` and `AgentJobs.start`: the job is `waiting` (a new `AgentJobState`) until those jobs settle `ok`, and is cancelled when one fails or is cancelled. New `AgentErrorCode`s `"cancelled"` and `"dependency_failed"`.
+- `AgentJobs.cancel(id, { reason, silent })` cancels a waiting or running job and the jobs waiting for it.
+- `AgentJobs.message(id, text)` and `job.inbox`; `agent.stream({ inbox })` adds the inbox's messages as user messages before each model call.
+- `job.checkpoint(value)` / `job.checkpointed` for the next attempt.
+- `AgentJobs.onSettledBatch(listener, { delayMs, maxDelayMs, key, hold })` reports settled jobs in batches; `batch` on the start options groups jobs reported together.
+- `AgentJobStore` has new optional methods (`waitingOn`, `waiting`, `listBatch`, `appendInbox`, `takeInbox`), and `AgentJobRecord` new optional fields (`after`, `batch`, `queued`, `inbox`, `checkpoint`).
+
+Behaviour change: `job.signal` used to never abort. It now aborts when the job is cancelled, or when it is settled while it runs (the deadline sweep failing it, say). An `AgentJob` that passes it on stops then; what it returns afterwards was already dropped. `AgentJob.cancelCheckMs` (5 s) is how often a running job reads its record to notice a cancel from another process; `0` turns that off.
+
+What to check:
+
+- `DatabaseAgentJobStore`: to use these features, add the nullable columns `after_jobs`, `batch_key`, `queued`, `inbox` and `job_checkpoint` (see the Prisma model in the docs) and migrate. Without them everything else works as before.
+- Code that switches over `AgentJobState` or `AgentErrorCode` exhaustively gets the new members (`"waiting"`, `"cancelled"`, `"dependency_failed"`).
+- An app's own `AgentJobStore` keeps working; it needs the new methods only for the new features.
+
 # 0.201.0
 
 ## ai: `prepareStep` can answer `activeTools` and `toolChoice` (#1010)

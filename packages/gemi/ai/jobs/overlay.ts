@@ -1,12 +1,17 @@
 import type { Schema } from "../Schema";
 import type { AgentJobRef, AgentMessage, ToolResultPart } from "../types";
 import { clockOf, expire } from "./AgentJob";
-import type { AgentJobRecord, AgentJobState, AgentJobStore } from "./AgentJobStore";
+import {
+  type AgentJobRecord,
+  type AgentJobState,
+  type AgentJobStore,
+  isSettled,
+} from "./AgentJobStore";
 
 /** How many of a thread's newest jobs are checked for orphans on each load. */
 const ORPHAN_SCAN = 50;
 
-const ANY_STATE: AgentJobState[] = ["running", "ok", "error"];
+const ANY_STATE: AgentJobState[] = ["waiting", "running", "ok", "error"];
 
 /**
  * The thread with each background job's current state rendered over the tool
@@ -94,7 +99,8 @@ export async function overlayJobs(
         record = found ? await current(found) : undefined;
         if (record) known.set(id, record);
       }
-      if (record?.state === "running") continue;
+      // Still waiting or running: the result stays `running`, byte for byte.
+      if (record && !isSettled(record.state)) continue;
 
       content ??= message.content.slice();
       content[index] = settledResult(part, record, params.outputSchemaFor, params.modelOutputFor);
@@ -108,7 +114,8 @@ export async function overlayJobs(
 
   const orphans: AgentJobRecord[] = [];
   for (const record of recent) {
-    if (record.orphaned || calls.has(record.toolCallId)) continue;
+    // A job started from server code (`AgentJobs.start`) settles no tool call.
+    if (record.orphaned || record.toolCallId === "" || calls.has(record.toolCallId)) continue;
     if (await params.isRunLive(record.runId)) continue;
     orphans.push(record);
   }

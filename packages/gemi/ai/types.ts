@@ -165,6 +165,11 @@ export type AgentErrorCode =
    *  (`usageLimits`). On the run's `error`, and on the result of a tool call
    *  refused by one. Not retryable until the budget is raised or renewed. */
   | "usage_limit"
+  /** A background job was cancelled (`AgentJobs.cancel`), or it waited for
+   *  one that was (#1222). */
+  | "cancelled"
+  /** A background job waited for another (`after`) that failed (#1222). */
+  | "dependency_failed"
   | "aborted"
   | "unknown";
 

@@ -21,6 +21,7 @@ import {
   type AgentJobRecord,
   type AgentJobState,
   type AgentJobStore,
+  isSettled,
   MemoryAgentJobStore,
 } from "./AgentJobStore";
 
@@ -92,7 +93,80 @@ export type AgentJobSettledListener = (record: AgentJobRecord) => void | Promise
 const settledListeners = new Set<AgentJobSettledListener>();
 
 /** Every state, for a transition that does not change the state. */
-const ANY_STATE: AgentJobState[] = ["running", "ok", "error"];
+const ANY_STATE: AgentJobState[] = ["waiting", "running", "ok", "error"];
+
+/** Jobs cancelled with `silent`: settled without telling `onSettled`'s listeners. */
+const quiet = new Set<string>();
+
+/** The jobs this process is running, so a cancel here aborts their `signal` at once. */
+const runningHere = new Map<string, AbortController>();
+
+/** What `AgentJobs.onSettledBatch` calls: the settled jobs of one key, oldest first. */
+export type AgentJobBatchListener = (jobs: AgentJobRecord[], key: string) => void | Promise<void>;
+
+/** Options for `AgentJobs.onSettledBatch`. */
+export type AgentJobBatchOptions = {
+  /**
+   * How long a report waits for more jobs to settle, in milliseconds, so
+   * jobs settling close together are reported in one call. Each settle under
+   * the same key starts the wait again. Default 1000.
+   */
+  delayMs?: number;
+  /**
+   * The longest a settled job waits for the quiet `delayMs` asks for, in
+   * milliseconds, when jobs keep settling. Default 10 × `delayMs`.
+   */
+  maxDelayMs?: number;
+  /** Which jobs are reported together. Default the job's `threadId`. */
+  key?: (job: AgentJobRecord) => string;
+  /**
+   * Holds the key's ready reports back: `true` until the next settle under
+   * the key or a `flush(key)`, a number to look again after that many
+   * milliseconds, `false` (or nothing) to report them now. For a person's
+   * open question, say, which a turn on the thread would close.
+   */
+  hold?: (
+    jobs: AgentJobRecord[],
+    key: string,
+  ) => boolean | number | void | Promise<boolean | number | void>;
+};
+
+/** What `AgentJobs.onSettledBatch` answers: removes the listener, and `flush`es on demand. */
+export type AgentJobBatchSubscription = (() => void) & {
+  /**
+   * Looks at a key's held reports again (all keys without one), as a settle
+   * would, after its `delayMs`; `{ now: true }` skips the wait.
+   */
+  flush(key?: string, options?: { now?: boolean }): void;
+};
+
+/** Options for `AgentJobs.cancel`. */
+export type CancelJobOptions = {
+  /** What the job's error says, which the model reads. */
+  reason?: string;
+  /**
+   * Settle it, and the jobs that waited for it, without calling `onSettled`
+   * listeners: the caller tells whoever needs to know itself.
+   */
+  silent?: boolean;
+};
+
+/** Options for `AgentJobs.start` and `AgentJobs.track`: a job started from server code. */
+export type ServerJobOptions = Omit<StartJobOptions, "after"> & {
+  /**
+   * The thread the job belongs to: it is listed in that thread's `<jobs>`
+   * block, and `onSettledBatch` groups by it by default. Default none (`""`).
+   */
+  threadId?: string;
+  /** Who it is for, as a run's `runOwner`. Default `null`. */
+  owner?: string | null;
+  /** What it is called in the `<jobs>` block and on the record (`toolName`). Default the class's name. */
+  name?: string;
+  /** The attachment scope key its `job.attachments` use. Default none. */
+  attachmentScope?: string | null;
+  /** The jobs it starts after. See `StartJobOptions.after`. Not for `track`. */
+  after?: string[];
+};
 
 /** What a job settles with. */
 export type AgentJobOutcome =
@@ -201,9 +275,268 @@ export const AgentJobs = {
     for (const record of await store.overdue(now, limit)) {
       if (await expire(store, record)) failed++;
     }
+    // A waiting job whose dependencies settled in a process that died before
+    // it could start them: started (or cancelled) here instead.
+    if (store.waiting) {
+      for (const record of await store.waiting(limit)) {
+        try {
+          await advance(store, record);
+        } catch (error) {
+          console.error(`Could not advance waiting background job ${record.id}.`, error);
+        }
+      }
+    }
     return failed;
   },
+
+  /**
+   * Starts a background job from server code rather than from a tool (#1222):
+   * an orchestrator handing out several tasks at once, a webhook, a cron.
+   * Nothing in a thread's history points at it (its `toolCallId` is `""`), so
+   * its result is read from the record, `onSettled` or `onSettledBatch`.
+   *
+   *     const plan = await AgentJobs.start(BuildJob, { task: "the data" }, { threadId, batch });
+   *     await AgentJobs.start(BuildJob, { task: "the pages" }, { threadId, batch, after: [plan.id] });
+   *
+   * With `after`, the job is `waiting` until those jobs settle `ok`. At least
+   * once, like every queued job: make `run` idempotent.
+   */
+  async start<A, O>(
+    job: AgentJobClass<A, O>,
+    args: A,
+    options: ServerJobOptions = {},
+  ): Promise<JobHandle<O>> {
+    const record = await createJob(serverFields(options, job.name), {
+      job: job as new () => AgentJob<any, any>,
+      args,
+      options,
+    });
+    return handleOf(record);
+  },
+
+  /**
+   * Records a background job from server code that something else settles
+   * (`AgentJobs.settle`): `ctx.jobs.track` without a tool call.
+   */
+  async track<O = unknown>(options: Omit<ServerJobOptions, "after"> = {}): Promise<JobHandle<O>> {
+    const record = await createJob(serverFields(options, "job"), {
+      job: null,
+      args: undefined,
+      options,
+    });
+    return handleOf(record);
+  },
+
+  /**
+   * Cancels a waiting or running job (#1222), and answers whether this call
+   * did: it settles `error` with code `"cancelled"`, and every job waiting
+   * for it (`after`), and for those, is cancelled too. False once it has
+   * settled.
+   *
+   * A running `AgentJob` sees `job.signal` abort: at once in this process,
+   * and within its `cancelCheckMs` in another. What it changed already
+   * stays, and what it returns afterwards is dropped. A tracked job is only
+   * marked: tell whatever does the work yourself.
+   */
+  async cancel(id: string, options: CancelJobOptions = {}): Promise<boolean> {
+    const store = currentStore;
+    const record = await store.get(id);
+    if (!record || isSettled(record.state)) return false;
+    if (options.silent) quiet.add(id);
+    const won = await store.transition(id, ["waiting", "running"], {
+      state: "error",
+      error: {
+        code: "cancelled",
+        message: options.reason ?? `The background job for "${record.toolName}" was cancelled.`,
+        ...(record.toolCallId ? { toolCallId: record.toolCallId } : {}),
+        retryable: false,
+      },
+    });
+    if (!won) {
+      quiet.delete(id);
+      return false;
+    }
+    await afterSettle(store, id);
+    return true;
+  },
+
+  /**
+   * Leaves a message for a waiting or running job (#1222), and answers
+   * whether it did: false once the job has settled. The job takes its
+   * messages with `job.inbox.take()`; handed to `agent.stream({ inbox })`,
+   * the run adds each as a user message before its next model call. A
+   * waiting job gets them when it starts. Messages it never took stay on
+   * the settled record (`inbox`).
+   */
+  async message(id: string, text: string): Promise<boolean> {
+    const store = currentStore;
+    if (!store.appendInbox) {
+      throw new Error(
+        "AgentJobs.message needs a job store with an inbox (appendInbox and takeInbox).",
+      );
+    }
+    return store.appendInbox(id, text);
+  },
+
+  /**
+   * Calls `listener` with settled jobs in batches (#1222), and answers a
+   * function that removes it (with `flush`). Use it in place of
+   * `onSettled` to wake an agent once for work that ends close together:
+   *
+   *     AgentJobs.onSettledBatch(async (jobs, threadId) => {
+   *       await ChatController.startTurn({ threadId, user, ifBusy: "queue", event: { name: "work-settled", data: { jobs } } });
+   *     });
+   *
+   * - Jobs are grouped by `key` (the thread, by default), and a group is
+   *   reported `delayMs` after its last settle (at most `maxDelayMs` after its
+   *   first).
+   * - A job started with a `batch` waits until every other unsettled job of
+   *   that batch builds on it (lists it in `after`, directly or through
+   *   another), so a batch is reported together and a report never arrives
+   *   before the work it would mention.
+   * - `hold` keeps ready reports back (a question the person has open).
+   * - One call per key at a time, in this process: settles meanwhile are
+   *   reported in the next call. Cancelled with `silent` are not reported.
+   *
+   * Like `onSettled`, it hears the settles of this process only.
+   */
+  onSettledBatch(
+    listener: AgentJobBatchListener,
+    options: AgentJobBatchOptions = {},
+  ): AgentJobBatchSubscription {
+    const batcher = new SettledBatcher(listener, options);
+    const off = AgentJobs.onSettled((record) => batcher.add(record));
+    const subscription = (() => {
+      off();
+      batcher.stop();
+    }) as AgentJobBatchSubscription;
+    subscription.flush = (key, flushOptions) => batcher.flush(key, flushOptions?.now === true);
+    return subscription;
+  },
 };
+
+/** The record fields of a job started from server code. */
+function serverFields(options: Omit<ServerJobOptions, "after">, fallbackName: string): JobFields {
+  return {
+    threadId: options.threadId ?? "",
+    runId: "",
+    toolCallId: "",
+    toolName: options.name ?? fallbackName,
+    owner: options.owner ?? null,
+    attachmentScope: options.attachmentScope ?? null,
+    deadlineMs: options.deadlineMs ?? DEFAULT_JOB_DEADLINE_MS,
+  };
+}
+
+/** What a new job's record is made of, apart from what the start options say. */
+type JobFields = {
+  threadId: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  owner: string | null;
+  attachmentScope: string | null;
+  deadlineMs: number;
+};
+
+/**
+ * Writes a job's record and queues it: now, or once its `after` jobs settle
+ * `ok`. Refuses a dependency that does not exist or has already failed.
+ */
+async function createJob(
+  fields: JobFields,
+  start: {
+    job: (new () => AgentJob<any, any>) | null;
+    args: unknown;
+    options: StartJobOptions;
+  },
+): Promise<AgentJobRecord> {
+  const store = AgentJobs.store;
+  const { job, args, options } = start;
+  const deadlineMs = fields.deadlineMs;
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new ToolError(`A job's deadlineMs must be a positive number; got ${deadlineMs}.`);
+  }
+  const after = options.after ? [...new Set(options.after)] : [];
+  let waiting = false;
+  if (after.length > 0) {
+    if (!job) {
+      throw new ToolError("A tracked job cannot wait for others: `after` is only for `start`.", {
+        retryable: false,
+      });
+    }
+    if (!store.waitingOn) {
+      throw new Error("`after` needs a job store that can list waiting jobs (waitingOn).");
+    }
+    for (const id of after) {
+      const need = await store.get(id);
+      if (!need) {
+        throw new ToolError(`The job waits for ${id}, which does not exist.`, {
+          retryable: false,
+        });
+      }
+      if (need.state === "error") {
+        throw new ToolError(
+          `The job waits for ${id}, which did not finish (${need.error?.code ?? "error"}). Leave it out, or start that work again.`,
+          { retryable: false },
+        );
+      }
+      if (need.state !== "ok") waiting = true;
+    }
+  }
+  if (job && (job.name === "unset" || !job.name)) {
+    throw new Error("Cannot start an AgentJob with no `static name`.");
+  }
+
+  const write = async () => {
+    const record = await store.create({
+      id: `ajob_${crypto.randomUUID()}`,
+      threadId: fields.threadId,
+      runId: fields.runId,
+      toolCallId: fields.toolCallId,
+      toolName: fields.toolName,
+      owner: fields.owner,
+      job: job ? job.name : null,
+      ...(options.summary !== undefined ? { summary: plainData(options.summary, fields) } : {}),
+      attachmentScope: fields.attachmentScope,
+      deadlineMs,
+      ...(after.length > 0 ? { after } : {}),
+      ...(options.batch !== undefined ? { batch: options.batch } : {}),
+      ...(waiting
+        ? { state: "waiting" as const, queued: { args: plainData(args, fields), deadlineMs } }
+        : {}),
+    });
+    if (job && !waiting) {
+      try {
+        await dispatchJob(job, { jobId: record.id, args });
+      } catch (error) {
+        // In a store transaction the record goes with the rollback.
+        if (store.transaction) throw error;
+        // Nothing will ever run it, so it is failed now rather than left to
+        // reach its deadline, and the caller hears of the failure.
+        await store
+          .transition(record.id, ["running"], {
+            state: "error",
+            error: {
+              code: "tool_error",
+              message: `The background job for "${fields.toolName}" could not be queued.`,
+              ...(fields.toolCallId ? { toolCallId: fields.toolCallId } : {}),
+              retryable: true,
+            },
+          })
+          .catch(() => {});
+        throw error;
+      }
+    }
+    return record;
+  };
+  // Both or neither when the store can: see `AgentJobStore.transaction`.
+  const record = store.transaction ? await store.transaction(write) : await write();
+  // A dependency may have settled between the check above and the write,
+  // with no one to start this job then: look again.
+  if (waiting) await advance(store, record);
+  return (await store.get(record.id)) ?? record;
+}
 
 /** The store's clock, or this process's for a store without one. */
 export async function clockOf(store: AgentJobStore): Promise<number> {
@@ -221,8 +554,101 @@ export async function expire(store: AgentJobStore, record: AgentJobRecord): Prom
       retryable: true,
     },
   });
-  if (won) notifySettled(store, record.id);
+  if (won) await afterSettle(store, record.id);
   return won;
+}
+
+/**
+ * What follows a settle this process won: the jobs that waited for it start
+ * or are cancelled, then `onSettled`'s listeners hear about it. Never throws.
+ */
+async function afterSettle(store: AgentJobStore, id: string): Promise<void> {
+  runningHere.get(id)?.abort(new ToolError("The background job was settled while it ran."));
+  try {
+    await releaseDependents(store, id);
+  } catch (error) {
+    console.error(`Could not start or cancel the jobs waiting for background job ${id}.`, error);
+  }
+  notifySettled(store, id);
+}
+
+/** Starts or cancels each waiting job whose `after` names `id`, now that `id` settled. */
+async function releaseDependents(store: AgentJobStore, id: string): Promise<void> {
+  if (!store.waitingOn) return;
+  for (const waiting of await store.waitingOn(id)) await advance(store, waiting);
+}
+
+/**
+ * A waiting job, once its `after` jobs settle: starts it when every one is
+ * `ok`, cancels it when one failed or was cancelled (and so on down its own
+ * dependents), and leaves it waiting otherwise. Compare-and-set from
+ * `waiting`, so two processes advancing it at once start it once.
+ */
+async function advance(store: AgentJobStore, record: AgentJobRecord): Promise<void> {
+  const after = record.after ?? [];
+  const needs = await Promise.all(after.map((id) => store.get(id)));
+  const missing = after.find((_, index) => needs[index] === null);
+  const broken = needs.find((need) => need?.state === "error");
+  if (missing !== undefined || broken) {
+    const cancelled = broken?.error?.code === "cancelled";
+    const brokenId = broken?.id ?? missing!;
+    const won = await store.transition(record.id, ["waiting"], {
+      state: "error",
+      error: {
+        code: cancelled ? "cancelled" : "dependency_failed",
+        message: broken
+          ? `It waited for ${brokenId}, which ${cancelled ? "was cancelled" : "failed"}, so it did not start.`
+          : `It waited for ${brokenId}, which can no longer be found, so it did not start.`,
+        ...(record.toolCallId ? { toolCallId: record.toolCallId } : {}),
+        retryable: false,
+      },
+    });
+    if (won) {
+      // A silent cancel stays silent down the line.
+      if (quiet.has(brokenId)) quiet.add(record.id);
+      await afterSettle(store, record.id);
+    }
+    return;
+  }
+  if (needs.some((need) => need!.state !== "ok")) return;
+  const started = await store.transition(record.id, ["waiting"], {
+    state: "running",
+    ...(record.queued ? { deadlineMs: record.queued.deadlineMs } : {}),
+  });
+  if (!started) return;
+  const job = record.job ? lookupJob(record.job) : undefined;
+  if (!job) {
+    // Nothing would ever run it: a tracked job waits for its settle as usual.
+    if (record.job === null) return;
+    await settleOn(store, record.id, {
+      error: {
+        code: "tool_error",
+        message: `The background job ${record.job} is not registered with the queue, so it could not start.`,
+        retryable: false,
+      },
+    });
+    return;
+  }
+  try {
+    await dispatchJob(job, { jobId: record.id, args: record.queued?.args });
+  } catch (error) {
+    console.error(`Could not queue background job ${record.id} after its dependencies.`, error);
+    await settleOn(store, record.id, {
+      error: {
+        code: "tool_error",
+        message: `The background job for "${record.toolName}" could not be queued.`,
+        retryable: true,
+      },
+    });
+  }
+}
+
+function lookupJob(name: string): (new () => AgentJob<any, any>) | undefined {
+  try {
+    return app(QueueManager).jobs[name] as (new () => AgentJob<any, any>) | undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -230,11 +656,12 @@ export async function expire(store: AgentJobStore, record: AgentJobRecord): Prom
  * awaited by the settle: a listener may start a turn that waits for another.
  */
 function notifySettled(store: AgentJobStore, id: string): void {
+  if (quiet.delete(id)) return;
   if (settledListeners.size === 0) return;
   const listeners = [...settledListeners];
   void (async () => {
     const record = await store.get(id);
-    if (!record || record.state === "running") return;
+    if (!record || !isSettled(record.state)) return;
     for (const listener of listeners) {
       try {
         await listener(record);
@@ -267,7 +694,7 @@ async function settleOn(
           output: plainData(outcome.output, record),
           ...(usage ? { usage } : {}),
         });
-  if (won) notifySettled(store, id);
+  if (won) await afterSettle(store, id);
   return won;
 }
 
@@ -330,6 +757,20 @@ export type StartJobOptions = {
    * code `"timeout"` by the deadline sweep, and a later result is refused.
    */
   deadlineMs?: number;
+  /**
+   * The jobs this one starts after (#1222), by id: it is `waiting`, and not
+   * queued, until each has settled `ok`, then starts with a fresh deadline.
+   * When one fails or is cancelled it is cancelled too (`error.code`
+   * `"dependency_failed"` or `"cancelled"`), and so are the jobs waiting for
+   * it. A dependency that does not exist or has already failed is refused.
+   * Only for `start`: a tracked job cannot wait.
+   */
+  after?: string[];
+  /**
+   * A label shared by the jobs started together (#1222): `onSettledBatch`
+   * reports a batch's jobs together. See `AgentJobRecord.batch`.
+   */
+  batch?: string;
 };
 
 /** A tool's `ctx.jobs`. See `ToolContext.jobs`. */
@@ -409,53 +850,24 @@ export function toolJobs(params: {
     const jobs = params.jobs;
     const threadId = params.threadId;
     started = (async () => {
-      const store = AgentJobs.store;
       // A tool re-entered after an escalation runs from the top again. The job
       // it started the first time is the one it gets.
-      const existing = (await store.listForThread(threadId, { limit: 50 })).find(
+      const existing = (await AgentJobs.store.listForThread(threadId, { limit: 50 })).find(
         (record) => record.toolCallId === params.toolCallId,
       );
       if (existing) return handleOf(existing);
-
-      const write = async () => {
-        const record = await store.create({
-          id: `ajob_${crypto.randomUUID()}`,
+      const record = await createJob(
+        {
           threadId,
           runId: params.runId,
           toolCallId: params.toolCallId,
           toolName: params.toolName,
           owner: jobs.owner,
-          job: job ? job.name : null,
-          ...(options.summary !== undefined ? { summary: plainData(options.summary, params) } : {}),
           attachmentScope: params.attachments?.scopeKey ?? null,
           deadlineMs,
-        });
-        if (job) {
-          try {
-            await dispatchJob(job, { jobId: record.id, args });
-          } catch (error) {
-            // In a store transaction the record goes with the rollback.
-            if (store.transaction) throw error;
-            // Nothing will ever run it, so it is failed now rather than left to
-            // reach its deadline, and the tool call reports the failure.
-            await store
-              .transition(record.id, ["running"], {
-                state: "error",
-                error: {
-                  code: "tool_error",
-                  message: `The background job for "${params.toolName}" could not be queued.`,
-                  toolCallId: params.toolCallId,
-                  retryable: true,
-                },
-              })
-              .catch(() => {});
-            throw error;
-          }
-        }
-        return record;
-      };
-      // Both or neither when the store can: see `AgentJobStore.transaction`.
-      const record = store.transaction ? await store.transaction(write) : await write();
+        },
+        { job, args, options },
+      );
       return handleOf(record);
     })();
     return started;
@@ -475,9 +887,6 @@ function handleOf(record: AgentJobRecord): JobHandle<any> {
 type JobEnvelope = { jobId: string; args: unknown };
 
 function dispatchJob(job: new () => AgentJob<any, any>, envelope: JobEnvelope): Promise<string> {
-  if (job.name === "unset" || !job.name) {
-    throw new Error("Cannot start an AgentJob with no `static name`.");
-  }
   return app(QueueManager).push(job, JSON.stringify([envelope]));
 }
 
@@ -511,8 +920,36 @@ export interface AgentJobContext {
   /** The `runOwner` of the run that started it. */
   readonly owner: string | null;
   readonly summary: unknown;
-  /** Not aborted yet: cancellation comes with a later release (#461, phase 4). */
+  /** The jobs it started after (`after`), all settled `ok`. Read their outputs with `AgentJobs.get`. */
+  readonly after: readonly string[];
+  /** Its batch, if it was started with one. */
+  readonly batch: string | undefined;
+  /**
+   * Aborted when the job is cancelled (`AgentJobs.cancel`), fails its
+   * deadline or is otherwise settled while it runs (#1222): at once in this
+   * process, within `cancelCheckMs` in another. Pass it to whatever the job
+   * waits on, an agent run (`agent.stream({ signal })`) above all.
+   */
   readonly signal: AbortSignal;
+  /**
+   * The messages `AgentJobs.message` left for the job (#1222). `take()`
+   * empties the inbox and answers them, oldest first. Hand it to
+   * `agent.stream({ inbox: job.inbox })` and the run adds each message as a
+   * user message before its next model call.
+   */
+  readonly inbox: AgentInbox;
+  /**
+   * What an earlier attempt saved with `checkpoint`, or `undefined` on a
+   * first attempt. A job retried after a crash or a restart (the queue runs
+   * it again) starts from here instead of from scratch.
+   */
+  readonly checkpointed: unknown;
+  /**
+   * Saves plain data for the next attempt to read as `checkpointed`, such as
+   * the messages an agent run has finished so far (`onMessage`). Answers
+   * false once the job is no longer running.
+   */
+  checkpoint(value: unknown): Promise<boolean>;
   /**
    * The attachments of the run that started the job: what the tool's
    * `ctx.attachments` was. Throws when that run had no attachment scope.
@@ -526,6 +963,15 @@ export interface AgentJobContext {
   editImage(model: ImageModel, params: JobEditImageParams): Promise<GeneratedAttachment>;
   /** What this attempt has spent so far. */
   readonly usage: Usage;
+}
+
+/**
+ * Messages for a running agent, taken between its steps (#1222). See
+ * `AgentStreamParams.inbox` and `AgentJobContext.inbox`.
+ */
+export interface AgentInbox {
+  /** Empties the inbox and answers what was in it, oldest first. */
+  take(): Promise<readonly string[]> | readonly string[];
 }
 
 /**
@@ -563,6 +1009,12 @@ export abstract class AgentJob<Args = unknown, Output = unknown> extends Job {
   attachments: AttachmentStore = defaultAttachmentStore;
   /** Where the attachments' bytes live. Defaults to the app's `Storage`. */
   attachmentStorage: AttachmentStorage = Storage;
+  /**
+   * How often a running job reads its record to notice it was cancelled in
+   * another process, in milliseconds (#1222). `0` turns it off; a cancel in
+   * this process aborts `job.signal` at once either way.
+   */
+  cancelCheckMs = 5_000;
 
   abstract run(args: Args, job: AgentJobContext): Promise<Output> | Output;
 
@@ -596,17 +1048,42 @@ export abstract class AgentJob<Args = unknown, Output = unknown> extends Job {
   ): Promise<Output | undefined> {
     const store = AgentJobs.store;
     const record = await store.get(envelope.jobId);
-    // Settled already (the deadline passed, or another attempt finished it):
-    // nothing it produced would be kept, so the work is not done again.
+    // Settled already (the deadline passed, it was cancelled, or another
+    // attempt finished it): nothing it produced would be kept, so the work is
+    // not done again. A waiting job is queued only once it starts.
     if (!record || record.state !== "running") return undefined;
 
-    const context = new JobContext(record, this);
+    const abort = new AbortController();
+    runningHere.set(record.id, abort);
+    const watch =
+      this.cancelCheckMs > 0
+        ? setInterval(() => {
+            void store
+              .get(record.id)
+              .then((now) => {
+                if (now && now.state !== "running" && !abort.signal.aborted) {
+                  abort.abort(new ToolError("The background job was cancelled."));
+                }
+              })
+              .catch(() => {});
+          }, this.cancelCheckMs)
+        : undefined;
+    (watch as { unref?: () => void } | undefined)?.unref?.();
+
+    const context = new JobContext(record, this, abort.signal);
     let output: Output;
     try {
       output = await body.call(this, envelope.args as Args, context);
     } catch (error) {
       await keepUsage(store, record.id, context.usage);
+      // Cancelled or settled under it: the error is the abort, and retrying
+      // would only meet a settled record.
+      const now = await store.get(record.id).catch(() => null);
+      if (abort.signal.aborted || (now && now.state !== "running")) return undefined;
       throw error;
+    } finally {
+      clearInterval(watch);
+      if (runningHere.get(record.id) === abort) runningHere.delete(record.id);
     }
     if (this.$outcome) {
       // `this.release()` or `this.fail()`: the queue decides what happens next.
@@ -635,12 +1112,26 @@ class JobContext implements AgentJobContext {
   readonly toolName: string;
   readonly owner: string | null;
   readonly summary: unknown;
-  readonly signal = new AbortController().signal;
+  readonly after: readonly string[];
+  readonly batch: string | undefined;
+  readonly checkpointed: unknown;
+  readonly inbox: AgentInbox;
   usage: Usage = emptyUsage();
   readonly attachments: JobAttachments;
 
-  constructor(record: AgentJobRecord, job: AgentJob<any, any>) {
+  constructor(
+    record: AgentJobRecord,
+    job: AgentJob<any, any>,
+    readonly signal: AbortSignal,
+  ) {
     this.id = record.id;
+    this.after = record.after ?? [];
+    this.batch = record.batch;
+    this.checkpointed = record.checkpoint;
+    const store = AgentJobs.store;
+    this.inbox = {
+      take: async () => (store.takeInbox ? await store.takeInbox(record.id) : []),
+    };
     this.threadId = record.threadId;
     this.toolCallId = record.toolCallId;
     this.toolName = record.toolName;
@@ -665,6 +1156,12 @@ class JobContext implements AgentJobContext {
       read: (id) => scope().read(id),
       file: (id) => scope().file(id),
     };
+  }
+
+  async checkpoint(value: unknown): Promise<boolean> {
+    return AgentJobs.store.transition(this.id, ["running"], {
+      checkpoint: plainData(value, this),
+    });
   }
 
   generate(params: GenerateParams<any>): Promise<any> {
@@ -711,5 +1208,152 @@ class JobContext implements AgentJobContext {
       mimeType: image.mimeType,
     });
     return { attachment, size: image.size, mimeType: image.mimeType, usage: image.usage };
+  }
+}
+
+// --- batched settles ---------------------------------------------------------
+
+type BatchGroup = {
+  jobs: Map<string, AgentJobRecord>;
+  /** When the oldest unreported settle arrived, for `maxDelayMs`. */
+  first: number | undefined;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  /** A listener call is under way; `again` asks for another look after it. */
+  busy: boolean;
+  again: boolean;
+};
+
+/** `AgentJobs.onSettledBatch`'s state: settled jobs per key, waiting to be reported. */
+class SettledBatcher {
+  private groups = new Map<string, BatchGroup>();
+  private stopped = false;
+  private readonly delayMs: number;
+  private readonly maxDelayMs: number;
+  private readonly keyOf: (job: AgentJobRecord) => string;
+
+  constructor(
+    private readonly listener: AgentJobBatchListener,
+    private readonly options: AgentJobBatchOptions,
+  ) {
+    this.delayMs = Math.max(0, options.delayMs ?? 1000);
+    this.maxDelayMs = Math.max(this.delayMs, options.maxDelayMs ?? this.delayMs * 10);
+    this.keyOf = options.key ?? ((job) => job.threadId);
+  }
+
+  add(record: AgentJobRecord): void {
+    if (this.stopped) return;
+    const key = this.keyOf(record);
+    let group = this.groups.get(key);
+    if (!group) {
+      group = { jobs: new Map(), first: undefined, timer: undefined, busy: false, again: false };
+      this.groups.set(key, group);
+    }
+    group.jobs.set(record.id, record);
+    group.first ??= Date.now();
+    this.schedule(key, false);
+  }
+
+  flush(key: string | undefined, now: boolean): void {
+    for (const each of key === undefined ? [...this.groups.keys()] : [key]) {
+      if (this.groups.has(each)) this.schedule(each, now);
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    for (const group of this.groups.values()) clearTimeout(group.timer);
+    this.groups.clear();
+  }
+
+  private schedule(key: string, now: boolean): void {
+    const group = this.groups.get(key);
+    if (!group) return;
+    if (group.busy) {
+      group.again = true;
+      return;
+    }
+    clearTimeout(group.timer);
+    const cap =
+      group.first === undefined ? this.delayMs : group.first + this.maxDelayMs - Date.now();
+    const wait = now ? 0 : Math.max(0, Math.min(this.delayMs, cap));
+    group.timer = setTimeout(() => void this.run(key), wait);
+    (group.timer as { unref?: () => void }).unref?.();
+  }
+
+  private async run(key: string): Promise<void> {
+    const group = this.groups.get(key);
+    if (!group || this.stopped) return;
+    group.timer = undefined;
+    group.busy = true;
+    try {
+      for (;;) {
+        group.again = false;
+        const ready = await this.ready([...group.jobs.values()]);
+        if (ready.length === 0) break;
+        const held = this.options.hold ? await this.options.hold(ready, key) : false;
+        if (held === true) break;
+        if (typeof held === "number" && held > 0) {
+          const later = setTimeout(() => this.flush(key, true), held);
+          (later as { unref?: () => void }).unref?.();
+          break;
+        }
+        for (const job of ready) group.jobs.delete(job.id);
+        try {
+          await this.listener(ready, key);
+        } catch (error) {
+          console.error(`An AgentJobs.onSettledBatch listener failed for ${key}.`, error);
+        }
+        if (this.stopped) return;
+      }
+    } catch (error) {
+      console.error(`Could not report the settled background jobs of ${key}.`, error);
+    } finally {
+      group.busy = false;
+      if (group.jobs.size === 0) {
+        if (this.groups.get(key) === group) this.groups.delete(key);
+      } else {
+        group.first = undefined;
+        if (group.again) this.schedule(key, false);
+      }
+    }
+  }
+
+  /**
+   * The settled jobs that may be reported now: each without a batch, and each
+   * whose batch has no other unsettled job that does not build on it.
+   */
+  private async ready(jobs: AgentJobRecord[]): Promise<AgentJobRecord[]> {
+    const store = AgentJobs.store;
+    const batches = new Map<string, Map<string, AgentJobRecord>>();
+    const out: AgentJobRecord[] = [];
+    for (const job of jobs.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))) {
+      if (job.batch === undefined || !store.listBatch) {
+        out.push(job);
+        continue;
+      }
+      let batch = batches.get(job.batch);
+      if (!batch) {
+        batch = new Map((await store.listBatch(job.batch)).map((record) => [record.id, record]));
+        batches.set(job.batch, batch);
+      }
+      const members = batch;
+      const needs = (record: AgentJobRecord, id: string, seen = new Set<string>()): boolean => {
+        if (seen.has(record.id)) return false;
+        seen.add(record.id);
+        const after = record.after ?? [];
+        return (
+          after.includes(id) ||
+          after.some((other) => {
+            const next = members.get(other);
+            return next !== undefined && needs(next, id, seen);
+          })
+        );
+      };
+      const blocked = [...members.values()].some(
+        (other) => other.id !== job.id && !isSettled(other.state) && !needs(other, job.id),
+      );
+      if (!blocked) out.push(job);
+    }
+    return out;
   }
 }
