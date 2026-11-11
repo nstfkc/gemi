@@ -242,7 +242,7 @@ function reduce<T extends ToolShapes, O>(
       if (isFinished(state, event.messageId)) return state;
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
-        content: appendReasoning(message.content, event.delta, event.id),
+        content: appendReasoning(message.content, event.delta, event.id, event.providerMetadata),
       }));
 
     case "output-delta":
@@ -863,19 +863,35 @@ function appendText<T extends ToolShapes, O>(
  * produced two items stays two parts instead of flattening into one under the
  * wrong id. The two implementations have to agree, because a stateless client
  * posts this content straight back and the provider matches on that id.
+ *
+ * Also its `providerMetadata` rule (#477): the metadata comes on a part's last
+ * delta and closes the part, so the next delta starts a new one.
  */
 function appendReasoning<T extends ToolShapes, O>(
   content: AgentContentPart<T, O>[],
   delta: string,
   id?: string,
+  providerMetadata?: Record<string, unknown>,
 ): AgentContentPart<T, O>[] {
   const last = content[content.length - 1];
-  if (last && last.type === "reasoning" && last.id === id) {
-    return [...content.slice(0, -1), { ...last, text: (last.text ?? "") + delta }];
+  if (last && last.type === "reasoning" && last.id === id && !last.providerMetadata) {
+    return [
+      ...content.slice(0, -1),
+      {
+        ...last,
+        text: (last.text ?? "") + delta,
+        ...(providerMetadata ? { providerMetadata } : {}),
+      },
+    ];
   }
   return [
     ...content,
-    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
+    {
+      type: "reasoning",
+      ...(id ? { id } : {}),
+      text: delta,
+      ...(providerMetadata ? { providerMetadata } : {}),
+    },
   ];
 }
 

@@ -128,7 +128,10 @@ public data class ChatState(
         if (isFinished(id)) this
         else
           withMessage(id, now) {
-            it.with("content", JsonArray(appendReasoning(it.content(), event.string("delta") ?: "", event["id"])))
+            it.with(
+              "content",
+              JsonArray(appendReasoning(it.content(), event.string("delta") ?: "", event["id"], event["providerMetadata"])),
+            )
           }
       }
 
@@ -465,15 +468,25 @@ private fun appendText(content: List<JsonElement>, delta: String): List<JsonElem
 }
 
 /** Joins the last part only when the reasoning-item id matches, as
- *  `appendReasoning` in `Agent.ts` does. */
-private fun appendReasoning(content: List<JsonElement>, delta: String, id: JsonElement?): List<JsonElement> {
+ *  `appendReasoning` in `Agent.ts` does. A part that has `providerMetadata` is
+ *  closed (#477): it comes on the part's last delta, and the next delta starts
+ *  a new part. */
+private fun appendReasoning(
+  content: List<JsonElement>,
+  delta: String,
+  id: JsonElement?,
+  providerMetadata: JsonElement?,
+): List<JsonElement> {
   val last = content.lastOrNull().obj()
-  if (last != null && last.string("type") == "reasoning" && last["id"] == id) {
-    return content.dropLast(1) + last.with("text", JsonPrimitive((last.string("text") ?: "") + delta))
+  if (last != null && last.string("type") == "reasoning" && last["id"] == id && last["providerMetadata"] == null) {
+    val joined = last.with("text", JsonPrimitive((last.string("text") ?: "") + delta))
+    return content.dropLast(1) + (if (providerMetadata != null) joined.with("providerMetadata", providerMetadata) else joined)
   }
-  return content +
-    if (id != null && id.truthy()) jsonObjectOf("type" to JsonPrimitive("reasoning"), "id" to id, "text" to JsonPrimitive(delta))
-    else jsonObjectOf("type" to JsonPrimitive("reasoning"), "text" to JsonPrimitive(delta))
+  val fields = mutableListOf<Pair<String, JsonElement>>("type" to JsonPrimitive("reasoning"))
+  if (id != null && id.truthy()) fields += "id" to id
+  fields += "text" to JsonPrimitive(delta)
+  if (providerMetadata != null) fields += "providerMetadata" to providerMetadata
+  return content + jsonObjectOf(*fields.toTypedArray())
 }
 
 private fun upsert(content: List<JsonElement>, part: JsonObject, match: (JsonObject) -> Boolean): List<JsonElement> {

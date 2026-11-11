@@ -4291,12 +4291,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "reasoning-delta": {
-          appendReasoning(message, event.id, event.delta);
+          appendReasoning(message, event.id, event.delta, event.providerMetadata);
           this.emit({
             type: "reasoning-delta",
             messageId: message.id,
             delta: event.delta,
             id: event.id,
+            ...(event.providerMetadata ? { providerMetadata: event.providerMetadata } : {}),
           });
           break;
         }
