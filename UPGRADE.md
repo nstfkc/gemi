@@ -6,8 +6,8 @@
 
 What to check:
 
-- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps can invalidate Claude's thinking blocks (preserved thinking), which is a 400 on accounts created from 2026-08-31.
-- With `reasoning` set, a forced `toolChoice` is sent as `auto`.
+- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps invalidates Claude's thinking blocks (preserved thinking). Requests send `thinking.block_binding: drop_block` with the `thinking-binding-controls-2026-08-01` beta header, so the API drops those blocks instead of answering 400; where it still answers 400, the provider strips the thinking blocks and retries once.
+- `reasoning: "none"` turns thinking off only on Claude Sonnet 5.5 (`between_tools`); on Opus 5.5 and the other 5.x models it is effort `low`.
 
 ## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
 

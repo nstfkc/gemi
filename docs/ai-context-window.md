@@ -197,6 +197,8 @@ class SiteChat extends AgentController {
 
 `activeTools` and `toolChoice` in the answer change which tools that model call is offered, and whether it must call one. The next step goes back to the run's tools and the model's choice.
 
+On Claude, changing the instructions or tools between steps, like windowing or compacting the history, changes the conversation the model's earlier thinking was bound to. `AnthropicProvider` has the API drop the thinking blocks that edit invalidated instead of failing the call (see "Preserved thinking" in the [AI providers](./ai-providers.md) docs), so the step runs, without that reasoning. Steps that keep the instructions and tools the same keep it, and the prompt cache.
+
 ```typescript
 export const siteAgent = Agent.create({
   name: "site",
