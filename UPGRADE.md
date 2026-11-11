@@ -1,5 +1,13 @@
 # Unreleased
 
+## ai: Claude thinking, structured output, prompt caching and files (#1238)
+
+**Addition (minor version).** `AnthropicProvider` now sends `reasoning` as adaptive thinking with an effort and sends thinking blocks back with their signatures (through `ReasoningPart.providerMetadata`, #477), sends strict `output` schemas as `output_config.format`, marks prompt-cache breakpoints on the tools, the system prompt and the last message, and uploads files through the Files API (images, PDFs and plain text are shown to the model). See "Anthropic (Claude)" in the AI providers docs.
+
+What to check:
+
+- Keep reasoning parts as they are in stored threads. Editing the system prompt, the tools or earlier messages between steps invalidates Claude's thinking blocks (preserved thinking). Requests send `thinking.block_binding: drop_block` with the `thinking-binding-controls-2026-08-01` beta header, so the API drops those blocks instead of answering 400; where it still answers 400, the provider strips the thinking blocks and retries once.
+- `reasoning: "none"` turns thinking off only on Claude Sonnet 5.5 (`between_tools`); on Opus 5.5 and the other 5.x models it is effort `low`.
 
 ## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
 
