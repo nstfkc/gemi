@@ -306,6 +306,17 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
  */
 export const ANTHROPIC_VERSION = "2026-10-21";
 
+/** `AnthropicProvider`'s config. */
+export type AnthropicConfig = ProviderConfig & {
+  /**
+   * The workspace to bill and scope requests to, sent as
+   * `anthropic-workspace-id` on every request (Messages and Files). Needed for
+   * an API key that is not scoped to a workspace, which the API otherwise
+   * answers with a 400. Else `ANTHROPIC_WORKSPACE_ID`; unset sends no header.
+   */
+  workspaceId?: string;
+};
+
 /**
  * Anthropic's API, `https://api.anthropic.com` unless `baseURL` (or
  * `ANTHROPIC_BASE_URL`) names a gateway in front of it. The base is the host,
@@ -313,15 +324,18 @@ export const ANTHROPIC_VERSION = "2026-10-21";
  *
  * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), or
  * with `ANTHROPIC_AUTH_TOKEN` as a bearer when there is no key (the SDKs'
- * order), read per request like the others.
+ * order), read per request like the others. `workspaceId` (else
+ * `ANTHROPIC_WORKSPACE_ID`) adds `anthropic-workspace-id`.
  */
-export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
+export function anthropicTarget(config: AnthropicConfig, defaults: TargetDefaults = {}): ProviderTarget {
   const host = config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com";
   return messagesTarget(host, config, defaults, async () => {
+    const workspaceId = config.workspaceId ?? env("ANTHROPIC_WORKSPACE_ID");
+    const workspace = workspaceId ? { "anthropic-workspace-id": workspaceId } : {};
     const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
-    if (apiKey) return { "x-api-key": apiKey };
+    if (apiKey) return { "x-api-key": apiKey, ...workspace };
     const token = env("ANTHROPIC_AUTH_TOKEN");
-    return token ? { authorization: `Bearer ${token}` } : {};
+    return token ? { authorization: `Bearer ${token}`, ...workspace } : workspace;
   });
 }
 

@@ -697,6 +697,43 @@ describe("AnthropicProvider", () => {
     }
   });
 
+  test("workspaceId is sent as anthropic-workspace-id", async () => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", "wrkspc_env");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestAnthropic("claude-opus-5-5", fetchImpl, { workspaceId: "wrkspc_01" }));
+      expect(calls[0]!.headers).toMatchObject({ "x-api-key": "test-key", "anthropic-workspace-id": "wrkspc_01" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("ANTHROPIC_WORKSPACE_ID is the workspace when the config has none, with a key or a bearer", async () => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", "wrkspc_env");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "oauth-token");
+    try {
+      for (const apiKey of ["test-key", undefined]) {
+        const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+        vi.stubEnv("ANTHROPIC_API_KEY", "");
+        await drain(new TestAnthropic("claude-opus-5-5", fetchImpl, { apiKey }));
+        expect(calls[0]!.headers["anthropic-workspace-id"]).toBe("wrkspc_env");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("no workspace configured: no anthropic-workspace-id header", async () => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", "");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestAnthropic("claude-opus-5-5", fetchImpl));
+      expect(calls[0]!.headers).not.toHaveProperty("anthropic-workspace-id");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   test("models() lists the current Claude ids", () => {
     expect(AnthropicProvider.models()).toContain("claude-opus-5-5");
     expect(AnthropicProvider.models()).toContain("claude-haiku-5-5");
@@ -1125,6 +1162,21 @@ describe("files", () => {
     expect(calls[0]!.body.has("purpose")).toBe(false);
     expect(calls[0]!.body.get("file")).toBeInstanceOf(File);
   });
+
+  test("upload sends the workspace too", async () => {
+    const calls: { headers: Record<string, string> }[] = [];
+    const fetchImpl: FetchLike = async (_url, init) => {
+      calls.push({ headers: init.headers as Record<string, string> });
+      return new Response(JSON.stringify({ id: "file_011abc", type: "file" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    await new TestAnthropic("claude-opus-5-5", fetchImpl, { workspaceId: "wrkspc_01" }).upload(
+      new File(["%PDF-1.7"], "a.pdf", { type: "application/pdf" }),
+    );
+    expect(calls[0]!.headers["anthropic-workspace-id"]).toBe("wrkspc_01");
+  });
 });
 
 // --- Claude on Azure AI Foundry ---------------------------------------------
@@ -1157,6 +1209,17 @@ describe("AzureAnthropicProvider", () => {
     expect(calls[0]!.headers).not.toHaveProperty("x-api-key");
     expect(calls[0]!.body.model).toBe("prod-claude");
     expect(events.at(-1)).toMatchObject({ type: "finish", reason: "stop" });
+  });
+
+  test("ANTHROPIC_WORKSPACE_ID is not sent to Foundry", async () => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", "wrkspc_env");
+    try {
+      const { calls, fetchImpl } = server([sse(fixture("anthropic-text.sse"))]);
+      await drain(new TestFoundry("claude-opus-5-5", fetchImpl, { resourceName: "r", apiKey: "k" }));
+      expect(calls[0]!.headers).not.toHaveProperty("anthropic-workspace-id");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   test("an endpoint (the Target URI's base) is used as given, with or without /v1", async () => {

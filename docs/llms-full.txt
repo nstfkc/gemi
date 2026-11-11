@@ -8650,10 +8650,14 @@ A shared key only helps when the requests really share a prefix. Keep a key's tr
 
 `AnthropicProvider` talks to Anthropic's Messages API (`POST /v1/messages`, API version `2026-10-21`). It takes the model id and the same config as the other providers. The key comes from `apiKey` or `ANTHROPIC_API_KEY` (with no key, `ANTHROPIC_AUTH_TOKEN` is sent as a bearer token), and the host from `baseURL` or `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`; a trailing `/v1` is accepted).
 
+An API key that isn't scoped to a workspace needs the workspace named on every request, or the API answers 400 ("This API key is not scoped to a workspace..."). Set `workspaceId` (or `ANTHROPIC_WORKSPACE_ID`, e.g. `wrkspc_01...`) and it is sent as the `anthropic-workspace-id` header on every call, Messages and Files API alike. Unset, no header is sent. `AzureAnthropicProvider` doesn't send it.
+
 ```typescript
 import { Agent, AnthropicProvider } from "gemi/ai";
 
 const claude = AnthropicProvider.model("claude-opus-5-5", { streamIdleTimeoutMs: 60_000 });
+// With a key that isn't scoped to a workspace:
+// AnthropicProvider.model("claude-opus-5-5", { workspaceId: "wrkspc_01..." });
 
 export const support = Agent.create({ name: "support", instructions: "Be brief.", provider: claude });
 ```

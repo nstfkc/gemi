@@ -1,3 +1,9 @@
+# Unreleased
+
+## ai: `AnthropicProvider` sends `anthropic-workspace-id`
+
+**Fix (patch version).** An Anthropic API key that isn't scoped to a workspace was answered with a 400 on every request ("This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header"). `AnthropicProvider` takes a `workspaceId` option, read from `ANTHROPIC_WORKSPACE_ID` when the config leaves it out, and sends it as `anthropic-workspace-id` on Messages and Files API requests. Unset, nothing changes. `AzureAnthropicProvider` doesn't send it.
+
 # 0.205.0
 
 ## ai: `AzureAnthropicProvider`, Claude on Azure AI Foundry (#1238)
