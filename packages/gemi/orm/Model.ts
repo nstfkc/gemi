@@ -5,6 +5,7 @@ import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
 import {
   currentConnectionName,
+  currentSettings,
   currentTransaction,
   isSystemScope,
   runAsSystem,
@@ -809,9 +810,15 @@ export abstract class Model {
     args: any = {},
     options?: ExecOptions,
   ): Promise<unknown> {
-    return runOnConnection(this.$connection ?? currentConnectionName(), () =>
-      this.$execute(op, args, options),
-    );
+    const name = this.$connection ?? currentConnectionName();
+    // Outside a transaction, inside `DB.withSettings` (#1158): the call gets a
+    // transaction of its own, which starts by applying the settings.
+    if (currentTransaction() === undefined && currentSettings()) {
+      return transact(app(DatabaseManager).connection(name), () =>
+        runOnConnection(name, () => this.$execute(op, args, options)),
+      );
+    }
+    return runOnConnection(name, () => this.$execute(op, args, options));
   }
 
   private static async $execute(

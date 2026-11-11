@@ -115,6 +115,21 @@ export interface OrmScope {
    * block cannot leak its entry back into the enclosing one.
    */
   trashed?: ReadonlyMap<string, TrashedMode>;
+  /**
+   * Postgres session settings for this subtree (#1158), set by
+   * `DB.withSettings`: applied with `set_config(name, value, true)` at the
+   * start of every transaction opened here, and of the implicit transaction a
+   * single ORM call or `DB.query` gets when none is open. A fresh object per
+   * scope, never mutated.
+   */
+  settings?: Readonly<Record<string, string>>;
+  /**
+   * What has been applied on `tx` so far, by name. Created by the outermost
+   * `withTransaction` and shared by reference with its savepoints, so a
+   * `withSettings` block entered inside the transaction applies only what is
+   * new and resets it on the way out.
+   */
+  appliedSettings?: Map<string, string>;
 }
 
 /**
@@ -695,7 +710,16 @@ async function drainAfterCommit(
 export function withTransaction<T>(
   pool: SQL,
   fn: (tx: TransactionSQL) => Promise<T>,
-  options?: { slowTransactionThreshold?: number | false; connection?: string },
+  options?: {
+    slowTransactionThreshold?: number | false;
+    connection?: string;
+    /**
+     * Leave the scope's `settings` (#1158) to `fn`, which applies them with
+     * `applyTransactionSettings()` after statements that have to come first
+     * (`SET TRANSACTION READ ONLY`).
+     */
+    deferSettings?: boolean;
+  },
 ): Promise<T> {
   const current = ormContext.getStore();
 
@@ -787,6 +811,7 @@ export function withTransaction<T>(
   // the store then is exactly what is no longer possible.
   const deferred: AfterCommitCallback[] = [];
   const dependencies: Promise<unknown>[] = [];
+  const applied = new Map<string, string>();
 
   // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
   // `.finally` alone would not: it is only attached once `begin` has returned a
@@ -822,8 +847,12 @@ export function withTransaction<T>(
               // rather than appending to the array it is being run out of.
               afterCommit: deferred,
               commitDependsOn: dependencies,
+              appliedSettings: applied,
             },
             async () => {
+              if (!options?.deferSettings) {
+                await applySettings(tx, current?.settings, applied);
+              }
               const result = await fn(tx);
               await awaitDependencies(dependencies, 0);
               return result;
@@ -858,4 +887,128 @@ export function withTransaction<T>(
     stopWatching();
     throw error;
   }
+}
+
+// --- session settings (#1158) ---------------------------------------------
+
+/** A custom Postgres setting's name: at least two dot-separated parts. */
+const SETTING_NAME = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)+$/;
+
+/** The value a setting can be given. `null` sets it to the empty string. */
+export type SessionSettingValue = string | number | boolean | bigint | null;
+
+/**
+ * A `withSettings` block tried to give a setting another value than the
+ * block around it gave it (#1158). Refused rather than applied, because a
+ * nested change would outlive the inner block: `SET LOCAL` survives
+ * `RELEASE SAVEPOINT`, so the rest of the outer block would run as the inner
+ * tenant.
+ */
+export class SessionSettingConflictError extends Error {
+  constructor(
+    readonly setting: string,
+    readonly outer: string,
+    readonly inner: string,
+  ) {
+    super(
+      `DB.withSettings: "${setting}" is already "${outer}" in an enclosing withSettings block, and a nested block can't change it to "${inner}". Open a separate block outside the first one.`,
+    );
+    this.name = "SessionSettingConflictError";
+  }
+}
+
+/** The settings of the ambient scope, or `undefined` when there are none. */
+export function currentSettings(): Readonly<Record<string, string>> | undefined {
+  const settings = ormContext.getStore()?.settings;
+  return settings && Object.keys(settings).length > 0 ? settings : undefined;
+}
+
+/**
+ * `set_config(name, value, true)` on `tx` for every setting not applied yet,
+ * in one statement.
+ */
+async function applySettings(
+  tx: TransactionSQL,
+  settings: Readonly<Record<string, string>> | undefined,
+  applied: Map<string, string>,
+): Promise<string[]> {
+  if (!settings) return [];
+  const pending = Object.entries(settings).filter(([name, value]) => applied.get(name) !== value);
+  if (pending.length === 0) return [];
+  const calls = pending.map((_, at) => `set_config($${at * 2 + 1}, $${at * 2 + 2}, true)`);
+  await tx.unsafe(
+    `select ${calls.join(", ")}`,
+    pending.flatMap(([name, value]) => [name, value]),
+  );
+  for (const [name, value] of pending) applied.set(name, value);
+  return pending.map(([name]) => name);
+}
+
+/**
+ * Apply the ambient scope's settings on the open transaction, for a caller
+ * that opened it with `deferSettings` (`DB.readOnly`). @internal
+ */
+export async function applyTransactionSettings(): Promise<void> {
+  const store = ormContext.getStore();
+  if (store?.tx && store.appliedSettings) {
+    await applySettings(store.tx, store.settings, store.appliedSettings);
+  }
+}
+
+/**
+ * Runs `fn` with Postgres session settings (#1158): every transaction opened
+ * inside starts with `set_config(name, value, true)` for each, and so does the
+ * implicit transaction a single ORM call or `DB.query` outside a transaction
+ * is given. Inside an open transaction they are applied at once, and the ones
+ * this block added are reset to `''` when it returns.
+ *
+ * Blocks nest: an inner block adds settings, and giving one the outer block
+ * set another value throws `SessionSettingConflictError`.
+ */
+export async function runWithSettings<T>(
+  settings: Record<string, SessionSettingValue>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = ormContext.getStore();
+  const outer = current?.settings ?? {};
+  const merged: Record<string, string> = { ...outer };
+  for (const [name, raw] of Object.entries(settings)) {
+    if (!SETTING_NAME.test(name)) {
+      throw new Error(
+        `DB.withSettings: "${name}" is not a custom setting name. Use a prefix and a dot, like "app.tenant_id".`,
+      );
+    }
+    const value = raw === null ? "" : String(raw);
+    if (Object.hasOwn(outer, name) && outer[name] !== value) {
+      throw new SessionSettingConflictError(name, outer[name]!, value);
+    }
+    merged[name] = value;
+  }
+  const scope: OrmScope = { ...current, depth: current?.depth ?? 0, settings: merged };
+
+  const tx = current?.tx;
+  const applied = current?.appliedSettings;
+  if (!tx || !applied) return ormContext.run(scope, fn);
+
+  return ormContext.run(scope, async () => {
+    const added = await applySettings(tx, merged, applied);
+    const reset = async () => {
+      if (added.length === 0) return;
+      const calls = added.map((_, at) => `set_config($${at + 1}, '', true)`);
+      await tx.unsafe(`select ${calls.join(", ")}`, added);
+      for (const name of added) applied.delete(name);
+    };
+    let result: T;
+    try {
+      result = await fn();
+    } catch (error) {
+      // The transaction may already be failing (an aborted transaction
+      // refuses every statement): the rollback resets them anyway, and the
+      // caller sees the original error.
+      await reset().catch(() => {});
+      throw error;
+    }
+    await reset();
+    return result;
+  });
 }
