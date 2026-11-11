@@ -538,8 +538,16 @@ export class RecordingProvider extends AgentProvider {
         `${where}: call ${this.sentCalls} was not recorded (the recording has no more calls).`,
       );
     }
-    if (!root.matches(JSON.stringify(call.request), request)) {
-      root.tolerate(where, call, request, params.tools ?? []);
+    // A recording made with 0.204.0 kept the request's `promptCacheKey`: it is
+    // not compared (see `requestOf`).
+    const { promptCacheKey: _cacheKey, ...recorded } = call.request;
+    if (!root.matches(JSON.stringify(recorded), request)) {
+      root.tolerate(
+        where,
+        { ...call, request: recorded as RecordedRequest },
+        request,
+        params.tools ?? [],
+      );
     }
     if (call.ended !== undefined) await root.reach(call.ended, where);
     const ids = root.shared.ids;
@@ -563,7 +571,11 @@ export class RecordingProvider extends AgentProvider {
    */
   private requestOf(params: ProviderStreamParams): RecordedRequest {
     this.sentCalls++;
-    const { signal: _signal, messages, tools, ...rest } = params;
+    // `promptCacheKey` is derived from the prompt and the tools (#1228): it
+    // changes whenever they are reworded, and recordings made before it have
+    // none. It says nothing the request doesn't already say, so it is neither
+    // matched nor fingerprinted (#1231).
+    const { signal: _signal, promptCacheKey: _cacheKey, messages, tools, ...rest } = params;
     const sent = messages.map(({ role, content }) => ({
       role,
       content: withoutTranscripts(content),
