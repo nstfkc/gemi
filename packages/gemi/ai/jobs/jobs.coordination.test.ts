@@ -399,12 +399,12 @@ describe("onSettledBatch", () => {
 
     release("b");
     await until(() => calls.length === 1);
-    // c builds on a and is still running, so a and b are told together.
-    expect(calls[0]).toEqual([a.id, b.id]);
+    // c builds on a, so a is told now; c doesn't build on b, so b waits for c.
+    expect(calls[0]).toEqual([a.id]);
 
     release("c");
     await until(() => calls.length === 2);
-    expect(calls[1]).toEqual([c.id]);
+    expect(calls[1]).toEqual([b.id, c.id]);
   });
 
   test("hold keeps ready reports back until a flush", async () => {

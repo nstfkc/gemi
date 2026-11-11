@@ -101,7 +101,7 @@ const quiet = new Set<string>();
 /** The jobs this process is running, so a cancel here aborts their `signal` at once. */
 const runningHere = new Map<string, AbortController>();
 
-/** What `AgentJobs.onSettledBatch` calls: the settled jobs of one key, oldest first. */
+/** What `AgentJobs.onSettledBatch` calls: the settled jobs of one key, in the order they settled. */
 export type AgentJobBatchListener = (jobs: AgentJobRecord[], key: string) => void | Promise<void>;
 
 /** Options for `AgentJobs.onSettledBatch`. */
@@ -1326,7 +1326,8 @@ class SettledBatcher {
     const store = AgentJobs.store;
     const batches = new Map<string, Map<string, AgentJobRecord>>();
     const out: AgentJobRecord[] = [];
-    for (const job of jobs.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))) {
+    // In the order they settled.
+    for (const job of jobs) {
       if (job.batch === undefined || !store.listBatch) {
         out.push(job);
         continue;

@@ -327,7 +327,8 @@ for (const backend of backends) {
       for (const column of ["after_jobs", "batch_key", "queued", "inbox", "job_checkpoint"]) {
         await sql.unsafe(`ALTER TABLE ${quote(legacy)} DROP COLUMN ${quote(column)}`);
       }
-      disposers.push(async () => {
+      // Before the database's own disposer, which closes the clients.
+      disposers.unshift(async () => {
         await sql.unsafe(`DROP TABLE IF EXISTS ${quote(legacy)}`);
       });
       const fresh = new DatabaseAgentJobStore(
