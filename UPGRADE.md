@@ -1,4 +1,4 @@
-# Unreleased
+# 0.205.2
 
 ## auth: opt-in fixed sign-in code in production
 
