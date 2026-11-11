@@ -1,3 +1,13 @@
+# Unreleased
+
+## ai/testing: replays ignore the prompt cache key (#1231)
+
+**Fix (patch).** `RecordingProvider` no longer records, matches or fingerprints a request's `promptCacheKey` (#1228). Before this, recordings made before 0.204 mismatched on every call because they had no key. A reworded prompt also mismatched, because its key changed, when it should have replayed as stale. Recordings made with 0.204.0 that still have the key replay as before.
+
+What to check:
+
+- Nothing.
+
 # 0.204.0
 
 ## ai: `prompt_cache_key` on every Responses request (#1223)

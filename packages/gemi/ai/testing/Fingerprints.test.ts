@@ -169,4 +169,58 @@ describe("Fingerprints", () => {
     schema = "v2";
     expect(RecordingProvider.changedSince(recording, { root, inputs })).toEqual(["input Card"]);
   });
+
+  test("the prompt cache key is neither matched nor fingerprinted (#1231)", async () => {
+    const { root, write } = repo({
+      "app/agents/welcome/intro.md": intro,
+      "app/agents/prompts/tone.md": tone,
+    });
+    const key = (text: string) => `ck_${Fingerprints.blob(text).slice(0, 12)}`;
+    const systemPrompt = render(intro, tone, "a bakery");
+
+    // An old recording: made before requests carried a key.
+    const old = await recordCase(root, "a bakery");
+    expect(JSON.stringify(old)).not.toContain("promptCacheKey");
+    const replayOld = RecordingProvider.replay(old, { fingerprints: { root } });
+    await drain(replayOld, {
+      systemPrompt,
+      promptCacheKey: key(systemPrompt),
+      messages: [user("Write it.")],
+    });
+    expect(replayOld.stale.size).toBe(0);
+
+    // One made by 0.204.0, which kept the key in the request.
+    const withKey = structuredClone(old);
+    withKey.calls[0]!.request.promptCacheKey = key(systemPrompt);
+    const replayKeyed = RecordingProvider.replay(withKey, { fingerprints: { root } });
+    await drain(replayKeyed, { systemPrompt, messages: [user("Write it.")] });
+    expect(replayKeyed.stale.size).toBe(0);
+
+    // A reworded prompt changes the key with it: still stale, not a mismatch.
+    const reworded = tone.replace("warmly and plainly", "warmly, plainly and briefly");
+    write({ "app/agents/prompts/tone.md": reworded });
+    const rewordedPrompt = render(intro, reworded, "a bakery");
+    for (const recording of [old, withKey]) {
+      const replay = RecordingProvider.replay(recording, { fingerprints: { root } });
+      await drain(replay, {
+        systemPrompt: rewordedPrompt,
+        promptCacheKey: key(rewordedPrompt),
+        messages: [user("Write it.")],
+      });
+      expect([...replay.stale]).toEqual(["app/agents/prompts/tone.md changed"]);
+    }
+
+    // Recording now leaves the key out of the request and the fingerprints.
+    const live = fakeProvider(say("Welcome!"));
+    const recorder = RecordingProvider.record(live as unknown as AgentProvider, {
+      fingerprints: { root },
+    });
+    await drain(recorder, {
+      systemPrompt: rewordedPrompt,
+      promptCacheKey: key(rewordedPrompt),
+      messages: [user("Write it.")],
+    });
+    expect(JSON.stringify(recorder.recording())).not.toContain(key(rewordedPrompt));
+    expect(live.calls[0]!.promptCacheKey).toBe(key(rewordedPrompt));
+  });
 });
