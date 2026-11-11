@@ -220,8 +220,10 @@ type Shared = {
  * the two differ.
  *
  * UPLOADS are answered `upload_<n>`, by order, so a file need not be the same
- * bytes on another machine for its call to replay. Recording, the file goes to
- * the live provider, and the calls show the model the provider's id.
+ * bytes on another machine for its call to replay. A sub-run counts its own,
+ * `upload_<key>_<n>`, so the ids stay the same however sub-runs interleave.
+ * Recording, the file goes to the live provider, and the calls show the model
+ * the provider's id.
  *
  * TIME. `recordedAt` is when the recording started. `pinClock(recordedAt)`
  * runs a replay at that time, so dates relative to today come out as recorded.
@@ -241,6 +243,7 @@ export class RecordingProvider extends AgentProvider {
   private sent: unknown[] = [];
   /** Recording: the live provider's file id of each upload, by the id answered here. */
   private readonly uploads: Map<string, string>;
+  /** Uploads answered so far, counted per run and per sub-run. */
   private uploadCount = 0;
   /** Recording: the position the next call's prompt was pinned to. */
   private read?: number;
@@ -444,8 +447,8 @@ export class RecordingProvider extends AgentProvider {
   }
 
   async upload(file: File): Promise<string> {
-    const root = this.parent ?? this;
-    const id = `upload_${++root.uploadCount}`;
+    const n = ++this.uploadCount;
+    const id = this.key === undefined ? `upload_${n}` : `upload_${this.key}_${n}`;
     if (this.live) this.uploads.set(id, await this.live.upload(file));
     return id;
   }
