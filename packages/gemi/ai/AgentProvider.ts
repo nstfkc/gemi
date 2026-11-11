@@ -22,6 +22,7 @@ import {
   anthropicTarget,
   azureRealtimeTarget,
   foundryTarget,
+  type AnthropicConfig,
   type FoundryConfig,
   azureTarget,
   openAITarget,
@@ -273,7 +274,7 @@ export type ProviderStream = AsyncIterable<ProviderEvent>;
  * and api-version from the same fields — see `providers/endpoints.ts` for why
  * that resolution lives in one place and what happens when it does not.
  */
-export type { AzureConfig, FoundryConfig, ProviderConfig } from "./providers/endpoints";
+export type { AnthropicConfig, AzureConfig, FoundryConfig, ProviderConfig } from "./providers/endpoints";
 
 export abstract class AgentProvider {
   abstract readonly model: string;
@@ -440,17 +441,20 @@ const CLAUDE_MODELS = [
 export class AnthropicProvider extends AgentProvider {
   readonly model: string;
   readonly capabilities: ProviderCapabilities;
-  protected readonly config: ProviderConfig;
+  protected readonly config: AnthropicConfig;
 
-  constructor(model: string, config: ProviderConfig = {}) {
+  constructor(model: string, config: AnthropicConfig = {}) {
     super();
     this.model = model;
     this.capabilities = capabilitiesForClaude(model);
     this.config = config;
   }
 
-  /** `ANTHROPIC_API_KEY` from the environment unless `config.apiKey` is set. */
-  static model(model: string, config?: ProviderConfig): AnthropicProvider {
+  /**
+   * `ANTHROPIC_API_KEY` (and `ANTHROPIC_WORKSPACE_ID`) from the environment
+   * unless `config.apiKey` (`config.workspaceId`) is set.
+   */
+  static model(model: string, config?: AnthropicConfig): AnthropicProvider {
     return new AnthropicProvider(model, config);
   }
 

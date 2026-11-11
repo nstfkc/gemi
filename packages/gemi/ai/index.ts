@@ -403,6 +403,7 @@ export type {
 export { MemoryCircuitStore } from "./CircuitStore";
 export type { CircuitOutcome, CircuitPolicy, CircuitState, CircuitStore } from "./CircuitStore";
 export type {
+  AnthropicConfig,
   AzureConfig,
   FoundryConfig,
   ProviderCapabilities,
