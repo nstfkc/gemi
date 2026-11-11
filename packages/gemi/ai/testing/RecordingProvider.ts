@@ -8,6 +8,7 @@ import {
   type ProviderToolSpec,
 } from "../AgentProvider";
 import { s } from "../Schema";
+import { type FingerprintOptions, Fingerprints, type RecordingFingerprints } from "./Fingerprints";
 
 /**
  * One model call, as a recording keeps it: what was sent (normalised, see
@@ -48,21 +49,40 @@ export type Recording = {
   calls: RecordedCall[];
   /** Sub-runs' calls (`nested(key)`), each in its own order. */
   nested?: Record<string, RecordedCall[]>;
+  /** What it was made with, when recorded with `fingerprints`. See `Fingerprints`. */
+  fingerprints?: RecordingFingerprints;
 };
 
-/** How `replay` matches a request against the recorded one. */
-export type RecordingMatch = "exact" | "tolerant";
+/** How `replay` matches a request against the recorded one. See `RecordingProviderOptions.match`. */
+export type RecordingMatch = "exact" | "wording" | "shape";
 
 export type RecordingProviderOptions = {
   /**
-   * `"tolerant"` (the default): a request that differs from the recorded one
-   * only in its instructions, its settings, the tools offered or the text of
-   * its messages still replays, provided the conversation has the same shape
-   * (the same roles, tool calls with the same inputs, tool results with the
-   * same status) and every tool call the recorded answer makes fits today's
-   * schema. The call is `stale` and says why. `"exact"` throws on any difference.
+   * What a replayed request may differ in from the recorded one and still
+   * replay, counted as `stale` with the reason:
+   *
+   * - `"wording"` (the default): the wording of the prompt files changed since
+   *   the recording, and nothing else. The static text of those files is cut
+   *   out of both requests (see `Fingerprints.cutters`), so the messages, the
+   *   tool calls and results and every value filled into the prompts must
+   *   still be the same. Needs a recording made with `fingerprints`, and
+   *   `fingerprints` on the replay to find the files.
+   * - `"shape"`: anything but the shape of the conversation (its roles, tool
+   *   calls with their inputs, tool results with their status): instructions,
+   *   settings and message text. For an app whose prompts are not files.
+   * - `"exact"`: nothing.
+   *
+   * In `"wording"` and `"shape"`, the tools offered may differ too, as long as
+   * every tool call the recorded answer makes is to a tool still offered and
+   * fits its schema today.
    */
   match?: RecordingMatch;
+  /**
+   * Fingerprint what the recording is made with (the prompt files its
+   * requests carried, its tools' definitions, `inputs`), and, replaying, tell
+   * a reworded prompt by them. See `Fingerprints`.
+   */
+  fingerprints?: FingerprintOptions;
   /**
    * Ids minted per run (a record's id, say), which a replay mints anew. Each
    * recorded id matches the id at its place in the request, the same one
@@ -138,7 +158,7 @@ const flatTools = (tools: NonNullable<ProviderStreamParams["tools"]>): ProviderT
   tools.flatMap((tool) => ("tools" in tool ? tool.tools : [tool]));
 
 /**
- * The shape of a conversation, which a tolerant match keeps: each message's
+ * The shape of a conversation, which `match: "shape"` keeps: each message's
  * role, its tool calls with their inputs and its tool results with their
  * status, but not its text.
  */
@@ -189,12 +209,15 @@ type Shared = {
  *   recorded answer is given the replay's ids.
  * - The tool list is compared by its hash.
  *
- * With `match: "tolerant"` (the default), a request that differs in its
- * instructions, settings, tools or message text, but not in the shape of the
- * conversation, still replays, and is counted in `stale` with the reason. A
- * recorded tool call that no longer fits its tool's schema, or calls a tool no
- * longer offered, throws: replaying it would test nothing. Anything else
- * throws a `RecordingMismatchError` that shows where the two differ.
+ * A request that differs is stale rather than a mismatch only as far as
+ * `match` allows. With `"wording"` (the default) that is the rewording of
+ * prompt files changed since the recording: their static text is cut out of
+ * both requests and the rest must be the same (see `Fingerprints`). The tools
+ * offered may differ too, as long as each tool call the recorded answer makes
+ * still exists and fits its schema today: replaying a call that doesn't
+ * would test nothing. A stale call replays and is counted in `stale` with the
+ * reason. Anything else throws a `RecordingMismatchError` that shows where
+ * the two differ.
  *
  * UPLOADS are answered `upload_<n>`, by order, so a file need not be the same
  * bytes on another machine for its call to replay. Recording, the file goes to
@@ -224,6 +247,13 @@ export class RecordingProvider extends AgentProvider {
   private readonly shared: Shared;
   private readonly options: Required<Pick<RecordingProviderOptions, "match" | "ids" | "waitMs">> &
     RecordingProviderOptions;
+  /** What the calls sent, for the fingerprints: every string, and each tool's definition hashes. */
+  private readonly texts = new Set<string>();
+  private readonly toolHashes = new Map<string, Set<string>>();
+  private readonly toolLists = new Set<string>();
+  /** Replaying: the recording's fingerprints, and how a differing request is cut by them. */
+  private recorded?: Fingerprints;
+  private cuts?: ReturnType<Fingerprints["cutters"]>;
 
   private constructor(
     private readonly live: AgentProvider | undefined,
@@ -234,7 +264,7 @@ export class RecordingProvider extends AgentProvider {
     super();
     this.options = {
       ...options,
-      match: options.match ?? "tolerant",
+      match: options.match ?? "wording",
       ids: new RegExp(options.ids ?? UUIDS, "g"),
       waitMs: options.waitMs ?? 60_000,
     };
@@ -275,6 +305,9 @@ export class RecordingProvider extends AgentProvider {
     this.recordedAt = new Date(recording.recordedAt);
     this.calls = structuredClone(recording.calls);
     this.recordedNested = structuredClone(recording.nested ?? {});
+    if (recording.fingerprints) {
+      this.recorded = new Fingerprints(recording.fingerprints, options.fingerprints);
+    }
   }
 
   /** Records every call made through it to `live`, which answers it. */
@@ -294,7 +327,7 @@ export class RecordingProvider extends AgentProvider {
 
   /**
    * Why the replay should be recorded again: the parts of the requests that
-   * differed and were tolerated (`match: "tolerant"`). Empty for a replay
+   * differed and were tolerated (`match`). Empty for a replay
    * that matched exactly, and for a recording.
    */
   get stale(): ReadonlySet<string> {
@@ -345,6 +378,7 @@ export class RecordingProvider extends AgentProvider {
       capabilities: this.capabilities,
       recordedAt: this.recordedAt.toISOString(),
       calls: structuredClone(this.calls),
+      ...(this.options.fingerprints ? { fingerprints: this.fingerprints().data } : {}),
       ...(this.children.size > 0
         ? {
             nested: Object.fromEntries(
@@ -353,6 +387,28 @@ export class RecordingProvider extends AgentProvider {
           }
         : {}),
     };
+  }
+
+  /**
+   * The fingerprints of what the calls sent so far, the sub-runs' included:
+   * of this recording, or of this replay (compare it with the recording's to
+   * tell whether a new recording would differ). Uses the `fingerprints`
+   * options for where prompts live.
+   */
+  fingerprints(): Fingerprints {
+    const root = this.parent ?? this;
+    return Fingerprints.of(root.texts, root.toolHashes, this.options.fingerprints);
+  }
+
+  /**
+   * What changed since `recording` was made, without replaying it: the prompt
+   * files and inputs its fingerprints name that differ today. Empty for a
+   * recording without fingerprints. For listing the recordings to make again.
+   */
+  static changedSince(recording: Recording, options: FingerprintOptions = {}): string[] {
+    return recording.fingerprints
+      ? new Fingerprints(recording.fingerprints, options).changed()
+      : [];
   }
 
   /**
@@ -520,6 +576,21 @@ export class RecordingProvider extends AgentProvider {
         : 0;
     this.sent = sent;
     const listed = tools && tools.length > 0 ? JSON.stringify(tools) : undefined;
+    const root = this.parent ?? this;
+    const keep = (text: string) => {
+      root.texts.add(text);
+      return text;
+    };
+    mapStrings([rest, sent.slice(after)], keep);
+    if (listed && !root.toolLists.has(listed)) {
+      root.toolLists.add(listed);
+      for (const tool of flatTools(tools!)) {
+        mapStrings(tool, keep);
+        const hashes = root.toolHashes.get(tool.name) ?? new Set<string>();
+        hashes.add(Fingerprints.tool(tool));
+        root.toolHashes.set(tool.name, hashes);
+      }
+    }
     return {
       ...(withoutTranscripts(rest) as Record<string, unknown>),
       ...(listed
@@ -558,9 +629,10 @@ export class RecordingProvider extends AgentProvider {
   }
 
   /**
-   * A request that is not the recorded one. Tolerated, and counted stale, when
-   * matching is tolerant, the conversation has the same shape, and every tool
-   * call of the recorded answer fits today's tools. Throws otherwise.
+   * A request that is not the recorded one. It replays, stale, when what
+   * differs is what `match` allows (see `RecordingProviderOptions.match`), and
+   * every tool call of the recorded answer fits today's tools if those differ.
+   * Throws otherwise, showing where the two first differ.
    */
   private tolerate(
     where: string,
@@ -568,47 +640,68 @@ export class RecordingProvider extends AgentProvider {
     request: RecordedRequest,
     tools: NonNullable<ProviderStreamParams["tools"]>,
   ): void {
+    const pattern = this.options.ids;
+    const match = this.options.match;
     const recorded = call.request;
-    const differs = (): never => {
-      const theirs = JSON.stringify(recorded);
-      const ours = JSON.stringify(request);
+    const differs = (theirs: unknown, ours: unknown, why: string): never => {
+      // Where they first differ, ids aside (they are matched by place).
+      const a = JSON.stringify(theirs).replace(pattern, "<id>");
+      const b = JSON.stringify(ours).replace(pattern, "<id>");
       let at = 0;
-      while (at < theirs.length && theirs[at] === ours[at]) at++;
+      while (at < a.length && a[at] === b[at]) at++;
       throw new RecordingMismatchError(
-        `${where}: the request differs from the recorded one${this.options.match === "tolerant" ? " in the conversation itself" : ""}. Recorded: …${theirs.slice(Math.max(0, at - 80), at + 120)}… Sent: …${ours.slice(Math.max(0, at - 80), at + 120)}…`,
+        `${where}: the request differs from the recorded one${why}. Recorded: …${a.slice(Math.max(0, at - 80), at + 120)}… Sent: …${b.slice(Math.max(0, at - 80), at + 120)}…`,
       );
     };
-    if (this.options.match === "exact") differs();
-    // The conversation's shape, ids matched by place as for an exact match.
-    if (!this.matches(JSON.stringify(shapeOf(recorded.messages)), shapeOf(request.messages))) {
-      differs();
-    }
-    if ((recorded.after ?? 0) !== (request.after ?? 0)) differs();
+    if (match === "exact") differs(recorded, request, "");
 
+    const { tools: recordedTools, toolNames: recordedNames, ...recordedRest } = recorded;
+    const { tools: sentTools, toolNames: sentNames, ...sentRest } = request;
     const reasons: string[] = [];
-    const {
-      messages: recordedMessages,
-      tools: recordedTools,
-      toolNames: recordedNames,
-      after: _a,
-      ...recordedRest
-    } = recorded;
-    const {
-      messages: sentMessages,
-      tools: sentTools,
-      toolNames: sentNames,
-      after: _b,
-      ...sentRest
-    } = request;
-    if (!this.matches(JSON.stringify(recordedMessages), sentMessages)) {
-      reasons.push("message text changed");
-    }
-    const fields = new Set([...Object.keys(recordedRest), ...Object.keys(sentRest)]);
-    for (const field of [...fields].sort()) {
-      if (!this.matches(JSON.stringify(recordedRest[field] ?? null), sentRest[field] ?? null)) {
-        reasons.push(`${field} changed`);
+
+    if (!this.matches(JSON.stringify(recordedRest), sentRest)) {
+      if (match === "wording") {
+        if (!this.recorded) {
+          differs(
+            recordedRest,
+            sentRest,
+            ", and the recording has no fingerprints to tell a reworded prompt by",
+          );
+        }
+        try {
+          this.cuts ??= this.recorded!.cutters();
+        } catch (error) {
+          throw new RecordingMismatchError(`${where}: ${(error as Error).message}.`);
+        }
+        const theirs = mapStrings(recordedRest, this.cuts.recorded);
+        const ours = mapStrings(sentRest, this.cuts.sent);
+        if (this.cuts.changed.length === 0 || !this.matches(JSON.stringify(theirs), ours)) {
+          differs(
+            theirs,
+            ours,
+            this.cuts.changed.length > 0 ? ", beyond the wording of the prompts changed since" : "",
+          );
+        }
+        reasons.push(...this.cuts.changed.map((path) => `${path} changed`));
+      } else {
+        // The conversation's shape, ids matched by place as for an exact match.
+        const sameShape =
+          (recorded.after ?? 0) === (request.after ?? 0) &&
+          this.matches(JSON.stringify(shapeOf(recorded.messages)), shapeOf(request.messages));
+        if (!sameShape) differs(recordedRest, sentRest, " in the conversation itself");
+        const { messages: recordedMessages, ...recordedSettings } = recordedRest;
+        const { messages: sentMessages, ...sentSettings } = sentRest;
+        if (!this.matches(JSON.stringify(recordedMessages), sentMessages)) {
+          reasons.push("message text changed");
+        }
+        const fields = new Set([...Object.keys(recordedSettings), ...Object.keys(sentSettings)]);
+        for (const field of [...fields].sort()) {
+          const theirs = JSON.stringify(recordedSettings[field] ?? null);
+          if (!this.matches(theirs, sentSettings[field] ?? null)) reasons.push(`${field} changed`);
+        }
       }
     }
+
     if (recordedTools !== sentTools) {
       const specs = flatTools(tools);
       for (const event of call.events) {
@@ -641,18 +734,30 @@ export class RecordingProvider extends AgentProvider {
           );
         }
       }
-      const before = new Set(recordedNames ?? []);
-      const now = new Set(sentNames ?? []);
-      const added = [...now].filter((name) => !before.has(name));
-      const removed = [...before].filter((name) => !now.has(name));
-      reasons.push(
-        added.length > 0 || removed.length > 0
-          ? `tools offered changed (${[
-              ...added.map((name) => `+${name}`),
-              ...removed.map((name) => `-${name}`),
-            ].join(", ")})`
-          : "tool definitions changed",
-      );
+      if (this.recorded) {
+        const changed = specs
+          .filter(
+            (tool) => !this.recorded!.data.tools[tool.name]?.includes(Fingerprints.tool(tool)),
+          )
+          .map((tool) => tool.name)
+          .sort();
+        reasons.push(
+          changed.length > 0 ? `tools changed: ${changed.join(", ")}` : "the tools offered changed",
+        );
+      } else {
+        const before = new Set(recordedNames ?? []);
+        const now = new Set(sentNames ?? []);
+        const added = [...now].filter((name) => !before.has(name));
+        const removed = [...before].filter((name) => !now.has(name));
+        reasons.push(
+          added.length > 0 || removed.length > 0
+            ? `tools offered changed (${[
+                ...added.map((name) => `+${name}`),
+                ...removed.map((name) => `-${name}`),
+              ].join(", ")})`
+            : "the tools offered changed",
+        );
+      }
     }
     this.shared.staleCalls++;
     for (const reason of reasons) this.shared.stale.add(reason);

@@ -12,4 +12,5 @@ export {
   RecordingProvider,
   type RecordingProviderOptions,
 } from "./RecordingProvider";
+export { type FingerprintOptions, Fingerprints, type RecordingFingerprints } from "./Fingerprints";
 export { pinClock } from "./pinClock";

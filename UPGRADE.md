@@ -4,7 +4,12 @@
 
 **New API (minor version).** See [AI Recordings](docs/ai-recordings.md).
 
-- New entrypoint `gemi/ai/testing`, with `RecordingProvider.record(live)` and `RecordingProvider.replay(recording, { match, ids, ordered, position, waitMs })`. It records model calls and replays them in tests and evals. Matching is by call index, ids minted per run are mapped by place, and tolerant matching reports a stale call (`stale`, `staleCalls`) instead of throwing. It also has `nested(key)` for sub-runs, `pin()`/`position` for runs side by side, `upload_<n>` upload ids and `replayedInFull()`.
+- New entrypoint `gemi/ai/testing`: `RecordingProvider.record(live, options)` and `RecordingProvider.replay(recording, { match, fingerprints, ids, ordered, position, waitMs })` record model calls and replay them in tests and evals.
+  - Matching is by call index, and ids minted per run are matched by place.
+  - A reworded prompt file replays as stale (`stale`, `staleCalls`) rather than failing (`match: "wording"`, by its git fingerprints). `"shape"` and `"exact"` are the other modes.
+  - Recorded tool calls are re-checked against today's tool schemas.
+  - Also: `nested(key)` sub-runs, `pin()`/`position` for runs side by side, `upload_<n>` upload ids, `replayedInFull()` and `RecordingProvider.changedSince(recording)`.
+- `Fingerprints`: what a recording was made with (prompt blob ids, tool hashes, app `inputs`), and how a request is cut across a reworded prompt.
 - `pinClock(at)` runs `Date` from a recording's `recordedAt`.
 
 What to check:

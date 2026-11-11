@@ -43,19 +43,59 @@ The n-th call of a replay is answered with the n-th recorded call, and it has to
 - **Ids minted per run** (a record's id, a job's) differ between the recording and the replay. Each recorded id matches the id at its place in the request, the same one wherever it shows, across every call. The recorded answer is given the replay's ids, so a tool call the model makes names the record the replay made. Ids are UUIDs by default; set `ids` to another pattern.
 - **Tools** are compared by a hash of the tool list.
 
-## Tolerant matching
+## When a prompt changes: stale, not failed
 
-A recording that throws as soon as a prompt changes has to be made again after every prompt edit, and all of them at once. With `match: "tolerant"` (the default), a request that differs from the recorded one only in
+A recording that throws as soon as a prompt changes has to be made again after every prompt edit, all of them at once. So a replayed request that differs from the recorded one can still replay, counted as **stale**: `provider.stale` lists why (`"app/agents/prompts/tone.md changed"`, `"tools changed: addCard"`), and `provider.staleCalls` how many calls were. Report those cases as stale, apart from passing and failing, and record them again when convenient. What may differ is set by `match`:
 
-- its instructions or settings (`systemPrompt`, `reasoning`, `maxOutputTokens`, …),
-- the text of its messages, or
-- the tools offered,
+- `"wording"` (the default): the wording of the prompt files changed since the recording, and nothing else. The static text of each changed file (and of the partials it includes) is cut out of both requests, the recorded version's out of the recorded request and today's out of the replay's, so the messages, the tool calls and results and every value filled into the prompts must still be the same. It needs fingerprints, below.
+- `"shape"`: anything but the shape of the conversation (its roles, tool calls with their inputs, tool results with their status): the instructions, settings and message text. For an app whose prompts aren't files.
+- `"exact"`: nothing.
 
-still replays, provided the conversation has the same shape (the same roles, tool calls with the same inputs, tool results with the same status) and every tool call the recorded answer makes is to a tool that is still offered and fits its schema today. The call counts as stale: `provider.stale` lists why (`"systemPrompt changed"`, `"tools offered changed (+deleteRecord)"`), and `provider.staleCalls` how many calls were. Report those cases as stale rather than passing or failing, and record them again when convenient.
+In `"wording"` and `"shape"`, the tools offered may differ too, as long as every tool call the recorded answer makes is to a tool still offered and fits its schema today. Anything else throws a `RecordingMismatchError` that shows where the two requests first differ, ids aside: a different conversation has no recorded answer.
 
-Anything else throws a `RecordingMismatchError` that shows where the two requests first differ: a different conversation has no recorded answer. `match: "exact"` throws on any difference.
+### Fingerprints
 
-`replayedInFull()` says whether the replay made every recorded call, the sub-runs' too: a run that took a shorter path made fewer.
+Record with `fingerprints` and the recording keeps what it was made with (`recording.fingerprints`):
+
+- each prompt file whose text its requests carried, by path, as its git blob id, so the recorded version can be read back from git;
+- each tool it offered, as the hashes of its definitions;
+- `inputs`, any other hashes the app says it depends on, such as the schemas behind generated tools.
+
+```typescript
+import { createHash } from "node:crypto";
+import type { AgentProvider } from "gemi/ai";
+import { type Recording, RecordingProvider } from "gemi/ai/testing";
+
+declare const live: AgentProvider;
+declare const recording: Recording;
+declare const componentSchemas: Record<string, unknown>;
+
+const fingerprints = {
+  root: process.cwd(),
+  dirs: ["app/agents", "evals"],
+  // The component schema behind each `add_<component>` tool offered.
+  inputs: (tools: ReadonlySet<string>) =>
+    Object.fromEntries(
+      Object.entries(componentSchemas)
+        .filter(([name]) => tools.has(`add_${name.toLowerCase()}`))
+        .map(([name, schema]) => [
+          name,
+          createHash("sha256").update(JSON.stringify(schema)).digest("hex"),
+        ]),
+    ),
+};
+
+export const recorder = () => RecordingProvider.record(live, { fingerprints });
+export const replay = () => RecordingProvider.replay(recording, { fingerprints });
+
+// Which recordings to make again, without running anything:
+export const changed = () => RecordingProvider.changedSince(recording, fingerprints);
+```
+
+- `root` is the repository (git runs there), `dirs` the prompt folders under it (`["app/agents"]` by default, as `Prompt.render`), and `shared` the folder a bare partial name resolves in (`prompts`). `readBlob` replaces git for reading a recorded version back.
+- A prompt file counts as sent when one of its three longest pieces of static text is in a request.
+- `RecordingProvider.changedSince(recording, options)` names each prompt file and input changed since; a replay's `provider.fingerprints()` says what it sent, to compare with the recording's (`Fingerprints.same`).
+- A recorded version that git no longer has can't be cut, so its calls throw: record them again.
 
 ## Sub-runs
 

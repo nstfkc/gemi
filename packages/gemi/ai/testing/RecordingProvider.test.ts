@@ -101,31 +101,35 @@ describe("record and replay", () => {
 });
 
 describe("tolerant matching", () => {
-  test("a changed prompt replays stale, and exact matching refuses it", async () => {
+  test("shape: a changed prompt or message text replays stale; exact refuses", async () => {
+    const { recording } = await recordCalls(
+      [say("ok")],
+      [{ systemPrompt: "v1", messages: [user("hi there")] }],
+    );
+    const replay = RecordingProvider.replay(recording, { match: "shape" });
+    await drain(replay, { systemPrompt: "v2", messages: [user("hello there")] });
+    expect([...replay.stale].sort()).toEqual(["message text changed", "systemPrompt changed"]);
+    expect(replay.staleCalls).toBe(1);
+
+    const longer = RecordingProvider.replay(recording, { match: "shape" });
+    await expect(
+      drain(longer, { systemPrompt: "v1", messages: [user("hi there"), user("and more")] }),
+    ).rejects.toThrow(RecordingMismatchError);
+
+    const exact = RecordingProvider.replay(recording, { match: "exact" });
+    await expect(
+      drain(exact, { systemPrompt: "v2", messages: [user("hi there")] }),
+    ).rejects.toThrow(/differs from the recorded one/);
+  });
+
+  test("wording, without fingerprints, refuses a changed prompt", async () => {
     const { recording } = await recordCalls(
       [say("ok")],
       [{ systemPrompt: "v1", messages: [user("hi")] }],
     );
     const replay = RecordingProvider.replay(recording);
-    await drain(replay, { systemPrompt: "v2", messages: [user("hi")] });
-    expect([...replay.stale]).toEqual(["systemPrompt changed"]);
-    expect(replay.staleCalls).toBe(1);
-
-    const exact = RecordingProvider.replay(recording, { match: "exact" });
-    await expect(drain(exact, { systemPrompt: "v2", messages: [user("hi")] })).rejects.toThrow(
-      /differs from the recorded one/,
-    );
-  });
-
-  test("changed message text is stale; a changed conversation is a mismatch", async () => {
-    const { recording } = await recordCalls([say("ok")], [{ messages: [user("hi there")] }]);
-    const reworded = RecordingProvider.replay(recording);
-    await drain(reworded, { messages: [user("hello there")] });
-    expect([...reworded.stale]).toEqual(["message text changed"]);
-
-    const longer = RecordingProvider.replay(recording);
-    await expect(drain(longer, { messages: [user("hi there"), user("and more")] })).rejects.toThrow(
-      RecordingMismatchError,
+    await expect(drain(replay, { systemPrompt: "v2", messages: [user("hi")] })).rejects.toThrow(
+      /no fingerprints/,
     );
   });
 
