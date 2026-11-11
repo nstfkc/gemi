@@ -69,7 +69,17 @@ export type Usage = {
   outputTokens: number;
   /** Billed separately by OpenAI and worth surfacing on its own. */
   reasoningTokens?: number;
+  /** The part of `inputTokens` read from the provider's prompt cache. */
   cachedInputTokens?: number;
+  /**
+   * The part of `inputTokens` written to the prompt cache on this call, which
+   * Anthropic bills above the normal input price (1.25x for the 5-minute
+   * cache). A breakdown like `cachedInputTokens`, not a separate bucket: the
+   * provider reports the three apart, and `inputTokens` is their sum. Absent on
+   * a provider that does not report writes (OpenAI caches without charging
+   * for it).
+   */
+  cacheWriteInputTokens?: number;
   /**
    * How much of `inputTokens` / `outputTokens` was image rather than text, on a
    * generation or an edit.
@@ -527,6 +537,13 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
 export type OutputPart<O = unknown> = {
   type: "output";
   value: O;
+  /**
+   * The answer exactly as the model wrote it, which `value` was parsed from.
+   * Sent back in place of a re-serialized `value`, so a provider that checks
+   * its own history (Anthropic's preserved thinking) sees what it produced.
+   * Set by the server; absent on parts a client built.
+   */
+  text?: string;
   /** True while the object is still being assembled from the token stream. */
   partial?: boolean;
 };

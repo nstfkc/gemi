@@ -186,22 +186,7 @@ export function toResponsesInput(
           // not depend on the answer — it is worth having on the shapes alone —
           // so this comment names the failure rather than a status code nobody
           // checked.)
-          if (part.fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
-            throw new Error(
-              `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` goes in \`FilePart.attachmentId\`, is shown to the model as text, and is resolved by a tool through \`ctx.attachments\`.`,
-            );
-          }
-          // A storage-only upload has no provider id, and that is a legal part
-          // now: the model is told the file exists and is not shown it. What
-          // is still refused is a part with NEITHER id — nothing to show and
-          // nothing to name. The emptiness check is `!part.fileId` rather than
-          // a prefix test because `undefined?.startsWith` is `undefined`, and
-          // `file_id: undefined` reaches the vendor as surely as a wrong string.
-          if (!part.fileId && !attachmentId) {
-            throw new Error(
-              "FilePart.fileId is empty and there is no `attachmentId` either. `fileId` is the *provider's* file id and `attachmentId` is gemi's (`gemi_att_…`), both from the upload response; an upload always answers at least one, so a part with neither was built from something other than that answer.",
-            );
-          }
+          assertFilePart(part, attachmentId);
           // Refused once already (#684): the id would be refused again, and the
           // request with it. The model is told the file is there and was not
           // read, and is given the attachment id when there is one, since the
@@ -348,7 +333,7 @@ function textContent(role: AgentMessage["role"], text: string): Record<string, u
  * refusing it would fail every later turn of a conversation over a field the
  * model could not have used.
  */
-function attachmentIdOf(part: FilePart): string | undefined {
+export function attachmentIdOf(part: FilePart): string | undefined {
   const id = part.attachmentId;
   return typeof id === "string" && id.startsWith(ATTACHMENT_ID_PREFIX) ? id : undefined;
 }
@@ -376,7 +361,7 @@ function attachmentIdOf(part: FilePart): string | undefined {
  * unsaid, a line that names `photo.png` invites the model to describe a
  * picture it never saw.
  */
-function attachmentLine(part: FilePart, shown: boolean): string {
+export function attachmentLine(part: FilePart, shown: boolean): string {
   const fields = [`id=${JSON.stringify(part.attachmentId)}`];
   if (part.name) fields.push(`name=${JSON.stringify(part.name)}`);
   if (part.mimeType) fields.push(`mimeType=${JSON.stringify(part.mimeType)}`);
@@ -446,15 +431,42 @@ function attachmentLine(part: FilePart, shown: boolean): string {
  * where they agree.
  */
 function fileContent(part: FilePart): Record<string, unknown> {
+  return { type: isImageFile(part) ? "input_image" : "input_file", file_id: part.fileId };
+}
+
+/** Whether a file part goes to the image block. See `fileContent`. */
+export function isImageFile(part: FilePart): boolean {
   const mimeType = part.mimeType?.trim().toLowerCase() ?? "";
   // `""` rather than `undefined` is the shape to expect from a browser that
   // could not type the file: `useChat.uploadFile` writes `data.mimeType ??
   // file.type`, and `File.type` is the empty string, not absent. Both land on
   // the name.
-  const isImage = mimeType
+  return mimeType
     ? mimeType.startsWith("image/") && mimeType !== "image/svg+xml"
     : hasImageExtension(part.name);
-  return { type: isImage ? "input_image" : "input_file", file_id: part.fileId };
+}
+
+/**
+ * The two file parts no request can carry: a gemi attachment id in `fileId`,
+ * and a part with neither id. See the `file` case in `toResponsesInput`.
+ */
+export function assertFilePart(part: FilePart, attachmentId: string | undefined): void {
+  if (part.fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
+    throw new Error(
+      `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` goes in \`FilePart.attachmentId\`, is shown to the model as text, and is resolved by a tool through \`ctx.attachments\`.`,
+    );
+  }
+  // A storage-only upload has no provider id, and that is a legal part now:
+  // the model is told the file exists and is not shown it. What is still
+  // refused is a part with NEITHER id — nothing to show and nothing to name.
+  // The emptiness check is `!part.fileId` rather than a prefix test because
+  // `undefined?.startsWith` is `undefined`, and `file_id: undefined` reaches
+  // the vendor as surely as a wrong string.
+  if (!part.fileId && !attachmentId) {
+    throw new Error(
+      "FilePart.fileId is empty and there is no `attachmentId` either. `fileId` is the *provider's* file id and `attachmentId` is gemi's (`gemi_att_…`), both from the upload response; an upload always answers at least one, so a part with neither was built from something other than that answer.",
+    );
+  }
 }
 
 function hasImageExtension(name: string | undefined): boolean {

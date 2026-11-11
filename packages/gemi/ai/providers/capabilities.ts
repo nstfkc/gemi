@@ -130,6 +130,58 @@ function supportsToolSearch(family: Family): boolean {
 }
 
 /**
+ * What a Claude model can do, read off its id, with the same bias as
+ * `capabilitiesForModel`: an id this does not know gets every capability that
+ * is safe to guess.
+ *
+ * - `reasoning`: adaptive thinking (`thinking: {type: "adaptive"}` with
+ *   `output_config.effort`), which the 4.6 models and everything after take.
+ *   The 4.5 generation and older only take a token budget and answer adaptive
+ *   thinking with a 400, so `reasoning` is dropped for them.
+ * - `toolSearch`: false for now. Anthropic has a tool search tool, but
+ *   replaying its results in a history is not built yet, so deferred tools and
+ *   namespaces are sent flat and whole, which runs the agent the same.
+ *
+ * Forced tool choice is not a capability an agent can branch on; it decides
+ * how the request is built. See `supportsForcedToolChoice`.
+ */
+export function capabilitiesForClaude(model: string): ProviderCapabilities {
+  const id = normalizeModelId(model);
+  // `claude-opus-4-1`, `claude-haiku-4-5`, `claude-sonnet-4-20250514` (minor
+  // 0): the 4.x releases before 4.6.
+  const four = /^claude-(?:opus|sonnet|haiku)-4(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
+  const legacy = /^claude-(?:3|2|instant)/.test(id) || (!!four && Number(four[1] ?? 0) <= 5);
+  return {
+    reasoning: !legacy,
+    structuredOutput: true,
+    fileInput: false,
+    parallelToolCalls: true,
+    toolSearch: false,
+  };
+}
+
+/**
+ * Whether a Claude model takes `tool_choice` `any` and `tool`.
+ *
+ * Claude Opus 5.5, Claude Sonnet 5.5, Claude Fable 5.1 (and the Mythos and
+ * 5.2 releases beside them) answer both with a 400, and every release since
+ * Claude Opus 5 that did not keep them has dropped them. So this is a list of
+ * the families known to take them, not of those known to refuse, and an id it
+ * does not know is sent `auto`: a step that should have called a tool and
+ * wrote text instead is a worse step, while a 400 is a failed one on every
+ * forced step.
+ */
+export function supportsForcedToolChoice(model: string): boolean {
+  const id = normalizeModelId(model);
+  return (
+    /^claude-(?:3|2|instant)/.test(id) ||
+    /^claude-(?:opus|sonnet|haiku)-4(?:-|$)/.test(id) ||
+    /^claude-(?:opus|sonnet|fable|mythos)-5(?:-\d{8})?$/.test(id) ||
+    /^claude-haiku-5-5(?:-\d{8})?$/.test(id)
+  );
+}
+
+/**
  * Azure deployment names are chosen by whoever ran the ARM template, so half of
  * them look nothing like a model id. That is not a special case here: an
  * unrecognizable deployment name lands on the same all-true default as an

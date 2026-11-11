@@ -300,6 +300,49 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
 }
 
 /**
+ * The Messages API version sent as `anthropic-version`. `2026-10-21` is the
+ * version the current SDKs send: on it `temperature`, `top_p` and `top_k` are a
+ * 400 on every model, which is why `buildMessagesRequest` never sends them.
+ */
+export const ANTHROPIC_VERSION = "2026-10-21";
+
+/**
+ * Anthropic's API, `https://api.anthropic.com` unless `baseURL` (or
+ * `ANTHROPIC_BASE_URL`) names a gateway in front of it. The base is the host,
+ * as the SDKs take it; a trailing `/v1` is accepted too and not doubled.
+ *
+ * Authenticates with `x-api-key` (`apiKey`, else `ANTHROPIC_API_KEY`), or
+ * with `ANTHROPIC_AUTH_TOKEN` as a bearer when there is no key (the SDKs'
+ * order), read per request like the others.
+ */
+export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
+  const host = (config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/v1$/, "");
+
+  return {
+    base: `${host}/v1`,
+    query: "",
+    headers: async () => {
+      const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
+      const token = apiKey ? undefined : env("ANTHROPIC_AUTH_TOKEN");
+      return {
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        "anthropic-version": ANTHROPIC_VERSION,
+        ...config.headers,
+      };
+    },
+    timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
+    maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
+    maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+  };
+}
+
+/**
  * Azure's realtime surface, which is the GA `/openai/v1` one regardless of the
  * configured api-version.
  *

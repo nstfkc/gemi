@@ -193,6 +193,24 @@ describe("Usage.meter", () => {
     expect(metered.byModel.transcribe!.cost).toBe(1);
   });
 
+  test("cache reads and cache writes are priced apart from the rest of the input", async () => {
+    const metered = await Usage.meter(
+      async () => {
+        Usage.record("claude-x", {
+          inputTokens: 3_000_000,
+          cachedInputTokens: 1_000_000,
+          cacheWriteInputTokens: 1_000_000,
+          outputTokens: 0,
+          totalTokens: 3_000_000,
+        });
+      },
+      { pricing: { "claude-x": { input: 4, output: 20, cachedInput: 0.2, cacheWriteInput: 5 } } },
+    );
+    // 1M uncached at 4, 1M read at 0.2, 1M written at 5.
+    expect(metered.cost).toBeCloseTo(9.2);
+    expect(metered.usage).toMatchObject({ cachedInputTokens: 1_000_000, cacheWriteInputTokens: 1_000_000 });
+  });
+
   test("outside a meter, add, record and current do nothing; a settled meter stops counting", async () => {
     expect(Usage.current()).toBeUndefined();
     Usage.add("browser", 1);

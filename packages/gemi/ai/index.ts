@@ -383,7 +383,12 @@ export type { ImageProviderEditParams, ImageProviderParams } from "./ImageProvid
 export { ImageRequestError } from "./providers/images";
 
 // --- providers ------------------------------------------------------------
-export { AgentProvider, AzureOpenAIProvider, OpenAIProvider } from "./AgentProvider";
+export {
+  AgentProvider,
+  AnthropicProvider,
+  AzureOpenAIProvider,
+  OpenAIProvider,
+} from "./AgentProvider";
 export { evalChain, FallbackProvider } from "./FallbackProvider";
 export type {
   EvalChainResult,

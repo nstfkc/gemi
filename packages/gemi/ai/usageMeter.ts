@@ -20,11 +20,14 @@ import type { Usage as UsageType } from "./types";
  * call is priced here, when it is recorded, at its own model's prices.
  */
 
-/** USD per million tokens. `cachedInput` defaults to `input`. */
+/** USD per million tokens. `cachedInput` and `cacheWriteInput` default to `input`. */
 export type ModelPrice = {
   input: number;
   output: number;
   cachedInput?: number;
+  /** For `Usage.cacheWriteInputTokens` (Anthropic: 1.25x `input` for the
+   *  5-minute cache). */
+  cacheWriteInput?: number;
   /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`);
    *  they're priced as text when these are absent. */
   imageInput?: number;
@@ -254,11 +257,13 @@ export function priceUsage(
   const price = priceFor(pricing, model);
   if (!price) return undefined;
   const cached = usage.cachedInputTokens ?? 0;
+  const cacheWrite = usage.cacheWriteInputTokens ?? 0;
   const imageIn = usage.imageInputTokens ?? 0;
   const imageOut = usage.imageOutputTokens ?? 0;
   return (
-    ((usage.inputTokens - cached - imageIn) * price.input +
+    ((usage.inputTokens - cached - cacheWrite - imageIn) * price.input +
       cached * (price.cachedInput ?? price.input) +
+      cacheWrite * (price.cacheWriteInput ?? price.input) +
       imageIn * (price.imageInput ?? price.input) +
       (usage.outputTokens - imageOut) * price.output +
       imageOut * (price.imageOutput ?? price.output)) /

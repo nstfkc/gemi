@@ -126,17 +126,28 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * break counts, not only the limits above. Once retries are spent, the partial
  * calls stay and the call ends with the error, as before.
  */
-export async function* streamResponses(
+export async function* streamResponses<Body extends object = ResponsesRequest>(
   endpoint: ResponsesEndpoint,
-  body: ResponsesRequest,
+  body: Body,
   params: {
     signal?: AbortSignal;
     structuredOutput: boolean;
     /** The file ids `body` sends, with their names — for the note that
-     *  replaces a file the provider refuses. See `providers/fileRejection.ts`. */
+     *  replaces a file the provider refuses. See `providers/fileRejection.ts`.
+     *  Responses bodies only: without it a refused file fails the call. */
     files?: Map<string, SentFile>;
+    /**
+     * The SSE parser. Defaults to the Responses one; the Anthropic provider
+     * passes `parseMessagesStream`, and everything else here (retries, the
+     * stream limits, holding back until the first content event) is shared.
+     */
+    parse?: (
+      chunks: AsyncIterable<string>,
+      options: { structuredOutput: boolean },
+    ) => AsyncIterable<ProviderEvent>;
   },
 ): AsyncGenerator<ProviderEvent> {
+  const parse = params.parse ?? parseResponsesStream;
   let request = body;
   const rejected = new Set<string>();
   let fileAttempts = 0;
@@ -209,9 +220,10 @@ export async function* streamResponses(
         // A stored file the provider will not read fails this request and, left
         // in, every later one in the thread (#684). Take it out and ask again,
         // as long as the error blames a file this attempt still sent.
+        const responses = request as unknown as ResponsesRequest;
         const blamed =
-          fileAttempts < MAX_FILE_REJECTION_RETRIES
-            ? rejectedFileIds(request, error, params.files).filter((id) => !rejected.has(id))
+          params.files && fileAttempts < MAX_FILE_REJECTION_RETRIES
+            ? rejectedFileIds(responses, error, params.files).filter((id) => !rejected.has(id))
             : [];
         if (blamed.length > 0) {
           fileAttempts++;
@@ -220,7 +232,7 @@ export async function* streamResponses(
             rejected.add(fileId);
             yield { type: "file-rejected", fileId, message: reason, ...httpErrorDetail(error) };
           }
-          request = withoutFiles(request, new Set(blamed), params.files);
+          request = withoutFiles(responses, new Set(blamed), params.files) as unknown as Body;
           continue;
         }
         const normalized = normalizeProviderError(error);
@@ -262,7 +274,7 @@ export async function* streamResponses(
           },
         },
       );
-      for await (const event of parseResponsesStream(decodeChunks(body), {
+      for await (const event of parse(decodeChunks(body), {
         structuredOutput: params.structuredOutput,
       })) {
         if (event.type === "tool-call-delta") {
@@ -372,10 +384,11 @@ export type UploadPurpose = "user_data" | "assistants";
 export async function uploadFile(
   endpoint: ResponsesEndpoint,
   file: File,
-  purpose: UploadPurpose = "user_data",
+  /** `null` for Anthropic's Files API, which takes no purpose. */
+  purpose: UploadPurpose | null = "user_data",
 ): Promise<string> {
   const form = new FormData();
-  form.set("purpose", purpose);
+  if (purpose) form.set("purpose", purpose);
   form.set("file", file);
 
   const response = await requestWithRetry(

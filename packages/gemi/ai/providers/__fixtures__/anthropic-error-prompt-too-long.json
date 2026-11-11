@@ -1,0 +1,1 @@
+{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1043211 tokens > 1000000 maximum"},"request_id":"req_011TooLongFixture000001"}

@@ -8646,6 +8646,34 @@ agent.stream({ messages, promptCacheKey: `tenant-${tenantId}` });               
 
 A shared key only helps when the requests really share a prefix. Keep a key's traffic below what one cache serves (OpenAI suggests about 15 requests a minute per key and prefix), and give busier groups their own keys.
 
+## Anthropic (Claude)
+
+`AnthropicProvider` talks to Anthropic's Messages API (`POST /v1/messages`, API version `2026-10-21`). It takes the model id and the same config as the other providers. The key comes from `apiKey` or `ANTHROPIC_API_KEY` (with no key, `ANTHROPIC_AUTH_TOKEN` is sent as a bearer token), and the host from `baseURL` or `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`; a trailing `/v1` is accepted).
+
+```typescript
+import { Agent, AnthropicProvider } from "gemi/ai";
+
+const claude = AnthropicProvider.model("claude-opus-5-5", { streamIdleTimeoutMs: 60_000 });
+
+export const support = Agent.create({ name: "support", instructions: "Be brief.", provider: claude });
+```
+
+`AnthropicProvider.models()` lists the current ids (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`, and older ones). Any other id is sent as written.
+
+Retries, timeouts, `onProviderRetry` and fallback chains work as described above. An `overloaded_error` (HTTP 529, or an `error` event in the stream) and server errors are retried. A 429 is `rate_limited` and honours `retry-after`. A prompt over the context window (`prompt is too long`) is `context_length_exceeded` and is not retried. A refusal (`stop_reason: "refusal"`) ends the call with `content_filtered`. `max_tokens` ends it with reason `"length"`.
+
+How the agent's settings map onto the request:
+
+- **`maxOutputTokens`** is `max_tokens`, which the API requires. Without it, 64 000 is sent.
+- **`temperature`** is not sent. On API version `2026-10-21` it is rejected on every model.
+- **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto`. The step still runs, so say in the instructions which tool you expect.
+- **Tools** are sent flat with `eager_input_streaming`, so their arguments stream as they're written. Tool search is not supported yet (`capabilities.toolSearch` is `false`), so namespaces are flattened and deferred tools are sent whole. `strict` is not sent; the agent validates every call against the tool's schema.
+- **`promptCacheKey`** is not sent. Anthropic's cache keys on the prompt prefix itself.
+- **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. The assistant's text goes back exactly as written, whitespace-only blocks included, and an `output` part goes back as the text the model wrote (`OutputPart.text`), not a re-serialized value. A history that starts or ends on the assistant gets a fixed user turn there ("(The conversation continues from an earlier point.)", "Continue."), because the API wants a user turn first and refuses a prefill. Another provider's reasoning parts are left out.
+- **Cut-off tool calls**: a tool call whose arguments `max_tokens` cut off is discarded (`tool-call-discard`), never run, and the call ends with reason `"length"`.
+
+Usage counts the whole prompt in `inputTokens`, as OpenAI reports it, with `cachedInputTokens` (cache reads) and `cacheWriteInputTokens` (cache writes) as its breakdown. A `ModelPrice` can price cache writes with `cacheWriteInput` (Anthropic charges 1.25x input for the 5-minute cache).
+
 ## A provider per run
 
 `agent.stream({ provider })` makes that run's model calls through `provider` instead of the one from `Agent.create`, e.g. to let a user pick a model, route a run to another deployment, or record and replay model calls in a test.

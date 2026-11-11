@@ -82,6 +82,7 @@ export function addUsage(total: Usage, next: Usage | undefined): Usage {
 const USAGE_BREAKDOWNS = [
   "reasoningTokens",
   "cachedInputTokens",
+  "cacheWriteInputTokens",
   "imageInputTokens",
   "imageOutputTokens",
   "audioInputTokens",
