@@ -1,5 +1,6 @@
 # Unreleased
 
+
 ## ai: `AnthropicProvider`, Claude through the Messages API (#1238)
 
 **Addition (minor version).** `AnthropicProvider` (from `gemi/ai`) runs agents on Claude: streamed text, parallel tool calls, retries and timeouts, error mapping (529 overloaded and stream `overloaded_error` retried, 429 with `retry-after`, `prompt is too long` as `context_length_exceeded`, refusals as `content_filtered`) and usage with cache tokens. Set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`) and use `AnthropicProvider.model("claude-opus-5-5")`. See "Anthropic (Claude)" in the AI providers docs.
