@@ -337,7 +337,8 @@ export class RecordingProvider extends AgentProvider {
    */
   recording(): Recording {
     if (this.parent) return this.parent.recording();
-    if (!this.live) throw new Error("Only a recording provider (`record`) has a recording to save.");
+    if (!this.live)
+      throw new Error("Only a recording provider (`record`) has a recording to save.");
     return {
       version: 1,
       model: this.model,
@@ -592,8 +593,13 @@ export class RecordingProvider extends AgentProvider {
       after: _a,
       ...recordedRest
     } = recorded;
-    const { messages: sentMessages, tools: sentTools, toolNames: sentNames, after: _b, ...sentRest } =
-      request;
+    const {
+      messages: sentMessages,
+      tools: sentTools,
+      toolNames: sentNames,
+      after: _b,
+      ...sentRest
+    } = request;
     if (!this.matches(JSON.stringify(recordedMessages), sentMessages)) {
       reasons.push("message text changed");
     }

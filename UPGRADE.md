@@ -1,4 +1,4 @@
-# 0.202.0
+# Unreleased
 
 ## ai: `RecordingProvider` in `gemi/ai/testing` (#1229)
 
@@ -10,6 +10,8 @@
 What to check:
 
 - Nothing; it is new.
+
+# 0.202.0
 
 ## ai: run a step's tool calls one at a time (#1161)
 

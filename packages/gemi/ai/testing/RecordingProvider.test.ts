@@ -79,7 +79,10 @@ describe("record and replay", () => {
   test("records only the messages new since the call before", async () => {
     const one = [user("a")];
     const two = [...one, user("b")];
-    const { recording } = await recordCalls([say("x"), say("y")], [{ messages: one }, { messages: two }]);
+    const { recording } = await recordCalls(
+      [say("x"), say("y")],
+      [{ messages: one }, { messages: two }],
+    );
     expect(recording.calls[1]!.request.after).toBe(1);
     expect(recording.calls[1]!.request.messages).toHaveLength(1);
   });
@@ -99,7 +102,10 @@ describe("record and replay", () => {
 
 describe("tolerant matching", () => {
   test("a changed prompt replays stale, and exact matching refuses it", async () => {
-    const { recording } = await recordCalls([say("ok")], [{ systemPrompt: "v1", messages: [user("hi")] }]);
+    const { recording } = await recordCalls(
+      [say("ok")],
+      [{ systemPrompt: "v1", messages: [user("hi")] }],
+    );
     const replay = RecordingProvider.replay(recording);
     await drain(replay, { systemPrompt: "v2", messages: [user("hi")] });
     expect([...replay.stale]).toEqual(["systemPrompt changed"]);
@@ -118,9 +124,9 @@ describe("tolerant matching", () => {
     expect([...reworded.stale]).toEqual(["message text changed"]);
 
     const longer = RecordingProvider.replay(recording);
-    await expect(
-      drain(longer, { messages: [user("hi there"), user("and more")] }),
-    ).rejects.toThrow(RecordingMismatchError);
+    await expect(drain(longer, { messages: [user("hi there"), user("and more")] })).rejects.toThrow(
+      RecordingMismatchError,
+    );
   });
 
   test("changed tools replay when the recorded calls still fit, and not when they don't", async () => {
