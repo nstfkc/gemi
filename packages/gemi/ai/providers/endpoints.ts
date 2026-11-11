@@ -315,22 +315,67 @@ export const ANTHROPIC_VERSION = "2026-10-21";
  * request like the others.
  */
 export function anthropicTarget(config: ProviderConfig, defaults: TargetDefaults = {}): ProviderTarget {
-  const host = (config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com")
-    .trim()
-    .replace(/\/+$/, "")
-    .replace(/\/v1$/, "");
+  const host = config.baseURL ?? env("ANTHROPIC_BASE_URL") ?? "https://api.anthropic.com";
+  return messagesTarget(host, config, defaults, async () => {
+    const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
+    return apiKey ? { "x-api-key": apiKey } : {};
+  });
+}
 
+/** `AzureAnthropicProvider`'s config: the Azure OpenAI fields that apply. */
+export type FoundryConfig = ProviderConfig & {
+  /**
+   * The resource's Anthropic base, `https://<resource>.services.ai.azure.com/anthropic`
+   * (the deployment's Target URI without `/v1/messages`). `baseURL` works too.
+   */
+  endpoint?: string;
+  /** Just the resource name; expanded to the base above. */
+  resourceName?: string;
+  /** The deployment to call, when it is not named after the model. */
+  deployment?: string;
+  /** For Entra ID instead of a key, called per request (tokens expire). */
+  getToken?: () => Promise<string>;
+};
+
+/**
+ * Claude on Azure AI Foundry: the same Messages API under the resource's
+ * `/anthropic` path. The settings and their environment variables are the
+ * ones Anthropic's Foundry SDK clients read: `endpoint`/`baseURL` or
+ * `ANTHROPIC_FOUNDRY_BASE_URL`, else `resourceName` or
+ * `ANTHROPIC_FOUNDRY_RESOURCE`; the key in `api-key` (`apiKey`, else
+ * `ANTHROPIC_FOUNDRY_API_KEY`), or an Entra token from `getToken` as a bearer
+ * (scope `https://ai.azure.com/.default`).
+ */
+export function foundryTarget(config: FoundryConfig, defaults: TargetDefaults = {}): ProviderTarget {
+  const resource = config.resourceName ?? env("ANTHROPIC_FOUNDRY_RESOURCE");
+  const host =
+    config.baseURL ??
+    config.endpoint ??
+    env("ANTHROPIC_FOUNDRY_BASE_URL") ??
+    (resource ? `https://${resource.trim()}.services.ai.azure.com/anthropic` : "");
+  return messagesTarget(host, config, defaults, async () => {
+    if (config.getToken) return { authorization: `Bearer ${await config.getToken()}` };
+    const apiKey = config.apiKey ?? env("ANTHROPIC_FOUNDRY_API_KEY");
+    return apiKey ? { "api-key": apiKey } : {};
+  });
+}
+
+/** What Anthropic and Foundry share: `/v1` under the host, and the version. */
+function messagesTarget(
+  host: string,
+  config: ProviderConfig,
+  defaults: TargetDefaults,
+  auth: () => Promise<Record<string, string>>,
+): ProviderTarget {
+  const base = host.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
   return {
-    base: `${host}/v1`,
+    base: `${base}/v1`,
     query: "",
-    headers: async () => {
-      const apiKey = config.apiKey ?? env("ANTHROPIC_API_KEY");
-      return {
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
-        "anthropic-version": ANTHROPIC_VERSION,
-        ...config.headers,
-      };
-    },
+    headers: async () => ({
+      ...(await auth()),
+      "anthropic-version": ANTHROPIC_VERSION,
+      ...config.headers,
+    }),
     timeoutMs: config.timeoutMs ?? defaults.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,

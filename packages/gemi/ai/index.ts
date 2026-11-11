@@ -386,6 +386,7 @@ export { ImageRequestError } from "./providers/images";
 export {
   AgentProvider,
   AnthropicProvider,
+  AzureAnthropicProvider,
   AzureOpenAIProvider,
   OpenAIProvider,
 } from "./AgentProvider";
@@ -403,6 +404,7 @@ export { MemoryCircuitStore } from "./CircuitStore";
 export type { CircuitOutcome, CircuitPolicy, CircuitState, CircuitStore } from "./CircuitStore";
 export type {
   AzureConfig,
+  FoundryConfig,
   ProviderCapabilities,
   ProviderConfig,
   ProviderEvent,
