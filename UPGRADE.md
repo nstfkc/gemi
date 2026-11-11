@@ -1,3 +1,14 @@
+# Unreleased
+
+## auth: opt-in fixed sign-in code in production
+
+**Fix (patch version).** `AUTH_FIXED_CODE` / `auth.emailCode.fixedCode` is still refused when `NODE_ENV=production`, but a local production-build test server (`gemi start` always sets `NODE_ENV=production`) can now opt in with `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1` or `auth.emailCode.allowFixedCodeInProduction: true` (the config wins over the variable). Only the exact value `1` (or `true`) opts in. With it, the fixed code is accepted in production and the boot logs a warning that anyone who knows the code can sign in as any user. Without it nothing changes: the boot still fails and the code is ignored at sign-in. See "A fixed sign-in code" in the configuration docs.
+
+What to check:
+
+- Never set `AUTH_FIXED_CODE_ALLOW_PRODUCTION` on a real deployment.
+- `checkFixedSignInCode` and `matchesFixedSignInCode` (internal) now take the `auth.emailCode` options object instead of the bare code. `isFixedSignInCode` and `fixedSignInCode` from `gemi/services` are unchanged.
+
 # 0.205.1
 
 ## ai: `AnthropicProvider` sends `anthropic-workspace-id`

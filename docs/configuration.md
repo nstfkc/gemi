@@ -290,6 +290,13 @@ AUTH_FIXED_CODE=000000
 - Everything else is as with an issued code: with `createUser` off an unknown address is refused, and the rate limits apply.
 - `auth.emailCode.fixedCode: ""` turns it off even when the variable is set.
 - **Refused in production.** With `NODE_ENV=production` the boot fails while either is set (`AUTH_FIXED_CODE is set, but a fixed sign-in code is for development and tests only ...`), and a request never matches it there.
+- **Opting in for a local production-build test server.** `gemi start` always sets `NODE_ENV=production`, so a test server running the production build needs an explicit opt-in: `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1` (or `auth.emailCode.allowFixedCodeInProduction: true`, which wins over it). Only the exact value `1` opts in. With it the code is accepted in production and the boot logs a warning: anyone who knows the code can sign in as any user. The whitespace and length checks still apply. Never set it on a real deployment.
+
+```bash
+NODE_ENV=production
+AUTH_FIXED_CODE=000000
+AUTH_FIXED_CODE_ALLOW_PRODUCTION=1 # local test server only
+```
 
 An app with a code flow of its own can honour the same setting:
 
@@ -301,7 +308,7 @@ if (isFixedSignInCode(code) || (await verifyMyCode(email, code))) {
 }
 ```
 
-`isFixedSignInCode(code)` compares in constant time and is always `false` in production or when nothing is set; `fixedSignInCode()` answers the code in effect, or `null`.
+`isFixedSignInCode(code)` compares in constant time and is `false` when nothing is set, and in production without the opt-in; `fixedSignInCode()` answers the code in effect, or `null`.
 
 ### The app's public origin
 

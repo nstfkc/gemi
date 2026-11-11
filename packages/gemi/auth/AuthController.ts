@@ -1472,9 +1472,10 @@ export class AuthController extends Controller {
     }
 
     // The fixed development code (#1190) needs no issued row, spends no
-    // attempt and is never claimed, so it keeps working. Never in production.
+    // attempt and is never claimed, so it keeps working. Never in production,
+    // unless explicitly opted in.
     let row: { id: number } | null = null;
-    if (!matchesFixedSignInCode(code, config.emailCode.fixedCode)) {
+    if (!matchesFixedSignInCode(code, config.emailCode)) {
       const result = await auth.verifyOneTimeCode(email, code, { claim: false });
       if (result.status === "too_many_attempts") {
         throw new ValidationError({ code: ["too_many_attempts"] });
