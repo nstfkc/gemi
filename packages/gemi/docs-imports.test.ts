@@ -153,6 +153,7 @@ describe("documented gemi imports resolve", () => {
     expect(modules).toEqual([
       "gemi/ai",
       "gemi/ai/client",
+      "gemi/ai/testing",
       "gemi/ai/voice",
       "gemi/app",
       "gemi/client",

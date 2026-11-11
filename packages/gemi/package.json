@@ -25,6 +25,7 @@
     "./ai": "./ai/index.ts",
     "./ai/client": "./ai/client/index.ts",
     "./ai/voice": "./ai/voice/index.ts",
+    "./ai/testing": "./ai/testing/index.ts",
     "./testing": "./testing/index.ts",
     "./app": "./app/index.ts",
     "./facades": "./facades/index.ts",

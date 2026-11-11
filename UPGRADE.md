@@ -1,5 +1,16 @@
 # Unreleased
 
+## ai: `RecordingProvider` in `gemi/ai/testing` (#1229)
+
+**New API (minor version).** See [AI Recordings](docs/ai-recordings.md).
+
+- New entrypoint `gemi/ai/testing`, with `RecordingProvider.record(live)` and `RecordingProvider.replay(recording, { match, ids, ordered, position, waitMs })`. It records model calls and replays them in tests and evals. Matching is by call index, ids minted per run are mapped by place, and tolerant matching reports a stale call (`stale`, `staleCalls`) instead of throwing. It also has `nested(key)` for sub-runs, `pin()`/`position` for runs side by side, `upload_<n>` upload ids and `replayedInFull()`.
+- `pinClock(at)` runs `Date` from a recording's `recordedAt`.
+
+What to check:
+
+- Nothing; it is new.
+
 ## ai: run a step's tool calls one at a time (#1161)
 
 **New API (minor version).** See [Order of a step's tool calls](docs/ai-agent-context.md#order-of-a-steps-tool-calls).
