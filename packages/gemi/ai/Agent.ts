@@ -31,7 +31,14 @@ import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
 import type { Infer, JSONSchema, Schema } from "./Schema";
-import { isJobHandle, type JobHandle, type RunJobs, type ToolJobs, toolJobs } from "./jobs/AgentJob";
+import {
+  type AgentInbox,
+  isJobHandle,
+  type JobHandle,
+  type RunJobs,
+  type ToolJobs,
+  toolJobs,
+} from "./jobs/AgentJob";
 import type { AgentJobsOptions } from "./jobs/contextBlock";
 import { DEFAULT_MEMORY_MAX_TOKENS } from "./memory/contextBlock";
 import {
@@ -75,11 +82,7 @@ import { httpErrorDetail } from "./providers/errors";
 import { defaultNonceStore, type NonceStore } from "./store/Nonces";
 import type { ReceiptClaim, ReceiptStore } from "./store/Receipts";
 import { sseKeepalive } from "./store/sse";
-import {
-  injectedMessageIds,
-  windowMessages,
-  type ContextWindowOptions,
-} from "./contextWindow";
+import { injectedMessageIds, windowMessages, type ContextWindowOptions } from "./contextWindow";
 import {
   compactWindow,
   defaultSummaryStore,
@@ -770,8 +773,10 @@ export type ToolToModel<Output> = (output: Output) => unknown;
  * What an `endsRun` function is given beside the call's output: the call's
  * input, and the same run facts `requiresApproval`'s function gets.
  */
-export interface ToolEndsRunContext<Input = unknown, Ctx = AgentContext>
-  extends ToolApprovalContext<Ctx> {
+export interface ToolEndsRunContext<
+  Input = unknown,
+  Ctx = AgentContext,
+> extends ToolApprovalContext<Ctx> {
   /** The call's input, as the tool's `execute` received it. */
   input: Input;
 }
@@ -1802,8 +1807,7 @@ export type AgentProviderRetry = ProviderRetryInfo & {
  * approval take the same path, because they are the same thing: the next turn
  * of a conversation.
  */
-export type AgentStreamParams<Ctx = AgentContext> = AgentStreamParamsBase<Ctx> &
-  ContextParam<Ctx>;
+export type AgentStreamParams<Ctx = AgentContext> = AgentStreamParamsBase<Ctx> & ContextParam<Ctx>;
 
 interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Prior turns. The controller loads these from its store, or takes what the
@@ -1813,6 +1817,15 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
   turn?: ClientTurn;
   /** Aborted by an explicit `stop`, not by a disconnect. */
   signal?: AbortSignal;
+  /**
+   * Messages for the run while it works (#1222): before each model call the
+   * run takes what is in it and adds each as a user message to the history
+   * (reported to `onMessage`, and put on the stream as a `message` frame),
+   * so the model reads it on that call. A background job hands its
+   * `job.inbox` (`AgentJobs.message`). What arrives after the last model
+   * call is left in the inbox. Not handed down to a sub-run.
+   */
+  inbox?: AgentInbox;
   runId?: string;
   threadId?: string;
   /** Appended to the agent's own `instructions` for this request only. */
@@ -2920,11 +2933,7 @@ function withRunTools(config: RunConfig, entries: readonly ToolEntry[], owner: s
  * out, and `offered` lets `runTools` refuse a call to it. The registry keeps
  * every tool, so a pending call answered on this turn still resolves.
  */
-function withActiveTools(
-  config: RunConfig,
-  names: readonly string[],
-  owner: string,
-): RunConfig {
+function withActiveTools(config: RunConfig, names: readonly string[], owner: string): RunConfig {
   const wanted = new Set(names);
   const known = new Set<string>();
   for (const tool of config.providerTools) {
@@ -3719,7 +3728,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       try {
         await this.limiter.report(this.spent(), true);
       } catch (error) {
-        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record its usage`, { error });
+        this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record its usage`, {
+          error,
+        });
       }
     }
 
@@ -3851,7 +3862,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     });
     this.config = { ...this.config, registry, providerTools };
 
-    const maxTokens = this.params.memory?.maxTokens ?? options.maxTokens ?? DEFAULT_MEMORY_MAX_TOKENS;
+    const maxTokens =
+      this.params.memory?.maxTokens ?? options.maxTokens ?? DEFAULT_MEMORY_MAX_TOKENS;
     try {
       this.memoryBlock = await memory.block({
         maxTokens,
@@ -3980,6 +3992,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           return;
         }
       }
+      await this.takeInbox();
       const message = this.startMessage();
       const outcome = await this.runStep(message, step);
       this.modelSteps++;
@@ -4058,6 +4071,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       await this.finalizeMessage(outcome.reason);
+    }
+  }
+
+  /** Adds what the run's `inbox` holds to the history, as user messages. */
+  private async takeInbox(): Promise<void> {
+    const inbox = this.depth === 0 ? this.params.inbox : undefined;
+    if (!inbox) return;
+    let texts: readonly string[];
+    try {
+      texts = await inbox.take();
+    } catch (error) {
+      this.writeLog(`[gemi/ai] agent "${this.config.name}" could not read its inbox`, { error });
+      return;
+    }
+    for (const text of texts) {
+      if (typeof text !== "string" || text.length === 0) continue;
+      const message: AgentMessage = {
+        id: `msg_${crypto.randomUUID()}`,
+        role: "user",
+        content: [{ type: "text", text }],
+        createdAt: new Date().toISOString(),
+        finishReason: "stop",
+      };
+      this.history.push(message);
+      this.produced.push(message);
+      this.emit({ type: "message", message });
+      await this.report(message);
     }
   }
 
@@ -4236,7 +4276,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           // would turn them into calls with an `invalid_tool_input` result
           // next to the retried answer's own.
           for (const toolCallId of event.toolCallIds) partialArgs.delete(toolCallId);
-          this.emit({ type: "tool-call-discard", messageId: message.id, toolCallIds: event.toolCallIds });
+          this.emit({
+            type: "tool-call-discard",
+            messageId: message.id,
+            toolCallIds: event.toolCallIds,
+          });
           break;
         }
         case "tool-call": {
@@ -4313,7 +4357,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           if (hook) {
             const { type: _type, ...info } = event;
             const report = (error: unknown) =>
-              this.writeLog(`[gemi/ai] agent "${this.config.name}" onProviderRetry threw`, { error });
+              this.writeLog(`[gemi/ai] agent "${this.config.name}" onProviderRetry threw`, {
+                error,
+              });
             try {
               const done = hook({ ...info, runId: this.runId, agent: this.config.name, step });
               if (done instanceof Promise) done.catch(report);
@@ -6042,7 +6088,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private historyForProvider(current: AgentMessage | undefined): AgentMessage[] {
     const messages = this.history
       .filter((message) => message !== current)
-      .map((message) => (message.event && message.role === "user" ? eventForModel(message) : message));
+      .map((message) =>
+        message.event && message.role === "user" ? eventForModel(message) : message,
+      );
 
     // Injected messages are named by the tool call that made them, and that
     // record is the test — not `attachmentId` on the part. A user's own upload
@@ -6282,7 +6330,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         createdAt: new Date().toISOString(),
         finishReason: "stop",
         ...(event
-          ? { event: { name: event.name, ...(event.data !== undefined ? { data: event.data } : {}) } }
+          ? {
+              event: {
+                name: event.name,
+                ...(event.data !== undefined ? { data: event.data } : {}),
+              },
+            }
           : {}),
       };
       this.history.push(message);

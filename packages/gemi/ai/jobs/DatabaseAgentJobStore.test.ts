@@ -255,6 +255,98 @@ for (const backend of backends) {
       expect(await jobs.get("ajob_nope")).toBeNull();
     });
 
+    test("keeps after, batch, the queued start, the inbox and checkpoints (#1222)", async () => {
+      const { store } = await database();
+      const jobs = store();
+      await jobs.create(newJob({ id: "ajob_dep", batch: "b1" }));
+      const waiting = await jobs.create(
+        newJob({
+          id: "ajob_wait",
+          state: "waiting",
+          after: ["ajob_dep"],
+          batch: "b1",
+          queued: { args: { task: "pages" }, deadlineMs: 1_000 },
+        }),
+      );
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        after: ["ajob_dep"],
+        batch: "b1",
+        queued: { args: { task: "pages" }, deadlineMs: 1_000 },
+      });
+      expect((await jobs.waitingOn("ajob_dep")).map((job) => job.id)).toEqual(["ajob_wait"]);
+      expect(await jobs.waitingOn("ajob_de")).toEqual([]);
+      expect((await jobs.waiting(10)).map((job) => job.id)).toEqual(["ajob_wait"]);
+      expect((await jobs.listBatch("b1")).map((job) => job.id)).toEqual(["ajob_dep", "ajob_wait"]);
+      // Not overdue while it waits, and its deadline restarts when it starts.
+      expect(await jobs.overdue(Date.now() + 120_000, 10)).toHaveLength(1);
+      expect(
+        await jobs.transition("ajob_wait", ["waiting"], { state: "running", deadlineMs: 500 }),
+      ).toBe(true);
+      const started = (await jobs.get("ajob_wait"))!;
+      expect(started.deadlineAt - started.updatedAt).toBe(500);
+      expect(started.settledAt).toBeUndefined();
+
+      expect(await jobs.appendInbox("ajob_wait", "one")).toBe(true);
+      await Promise.all([
+        jobs.appendInbox("ajob_wait", "two"),
+        jobs.appendInbox("ajob_wait", "three"),
+      ]);
+      expect((await jobs.get("ajob_wait"))!.inbox).toHaveLength(3);
+      expect((await jobs.takeInbox("ajob_wait")).slice(0, 1)).toEqual(["one"]);
+      expect(await jobs.takeInbox("ajob_wait")).toEqual([]);
+      expect((await jobs.get("ajob_wait"))!.inbox).toBeUndefined();
+
+      expect(await jobs.transition("ajob_wait", ["running"], { checkpoint: { step: 2 } })).toBe(
+        true,
+      );
+      expect((await jobs.get("ajob_wait"))!.checkpoint).toEqual({ step: 2 });
+
+      await jobs.appendInbox("ajob_wait", "late");
+      await jobs.transition("ajob_wait", ["running"], { state: "ok", output: null });
+      expect(await jobs.appendInbox("ajob_wait", "too late")).toBe(false);
+      expect((await jobs.get("ajob_wait"))!.inbox).toEqual(["late"]);
+      // A waiting job is not pruned.
+      await jobs.create(newJob({ id: "ajob_w2", state: "waiting", after: ["ajob_dep"] }));
+      await sleep(5);
+      await jobs.prune(0);
+      expect(await jobs.get("ajob_w2")).not.toBeNull();
+    });
+
+    test("a table made before the coordination columns still works, and says what it lacks", async () => {
+      const { db } = await database();
+      const sql = db.connect();
+      const legacy = `${db.jobsTable}_old`.slice(0, 60);
+      const quote = (name: string) =>
+        backend.dialect === "mysql" || backend.dialect === "mariadb" ? `\`${name}\`` : `"${name}"`;
+      const old = new DatabaseAgentJobStore(
+        { name: DEFAULT_CONNECTION, sql, dialect: backend.dialect },
+        { table: legacy },
+      );
+      await old.createTable();
+      for (const column of ["after_jobs", "batch_key", "queued", "inbox", "job_checkpoint"]) {
+        await sql.unsafe(`ALTER TABLE ${quote(legacy)} DROP COLUMN ${quote(column)}`);
+      }
+      // Before the database's own disposer, which closes the clients.
+      disposers.unshift(async () => {
+        await sql.unsafe(`DROP TABLE IF EXISTS ${quote(legacy)}`);
+      });
+      const fresh = new DatabaseAgentJobStore(
+        { name: DEFAULT_CONNECTION, sql, dialect: backend.dialect },
+        { table: legacy },
+      );
+      await fresh.create(newJob({ id: "ajob_old" }));
+      expect(await fresh.transition("ajob_old", ["running"], { state: "ok", output: 1 })).toBe(
+        true,
+      );
+      expect(await fresh.waitingOn("ajob_old")).toEqual([]);
+      expect(await fresh.takeInbox("ajob_old")).toEqual([]);
+      await expect(fresh.appendInbox("ajob_old", "hi")).rejects.toThrow(/after_jobs/);
+      await expect(
+        fresh.create(newJob({ id: "ajob_new", state: "waiting", after: ["ajob_old"] })),
+      ).rejects.toThrow(/needs the columns/);
+    });
+
     test("transition is compare-and-set, and keeps the first settle", async () => {
       const { store } = await database();
       const jobs = store();
