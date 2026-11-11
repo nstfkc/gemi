@@ -1,4 +1,4 @@
-# Unreleased
+# 0.204.2
 
 ## ai/testing: a recorded call to a tool with a free-form schema part replays stale (#1234)
 
