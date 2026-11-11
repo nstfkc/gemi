@@ -13775,6 +13775,29 @@ const rows = await DB.connection("analytics").readOnly(
 - **Refused inside an open transaction**, because `SET TRANSACTION READ ONLY` has to be the first statement of its own transaction. Also refused on SQLite and MySQL.
 - `DB.readOnly(fn)` takes no options and uses the ambient connection.
 
+### Session settings (row-level security)
+
+Postgres row-level security policies usually read a per-transaction setting, such as `current_setting('app.tenant_id', true)`. `DB.withSettings` sets them for a block (#1158):
+
+```ts
+import { DB } from "gemi/facades"
+
+await DB.withSettings({ "app.tenant_id": tenantId }, async () => {
+  await Note.findMany()                 // its own transaction, with the setting
+  await Note.transaction(async () => {  // starts with the setting
+    await Note.create({ data: { body } })
+  })
+})
+```
+
+- **What it runs.** Every transaction opened in the block starts with `select set_config('app.tenant_id', $1, true)`, one call per setting in one statement. A single ORM call, `DB.query` or `DB.execute` outside a transaction gets a transaction of its own for it (`BEGIN`, the settings, the statement, `COMMIT`), so no statement in the block runs without them. `DB.readOnly` applies them after `SET TRANSACTION READ ONLY`.
+- **Safe behind a pooler.** `set_config(..., true)` is `SET LOCAL`: it ends with the transaction and never stays on a pooled connection.
+- **Inside an open transaction**, the block applies its settings at once and resets the ones it added to `''` when it returns.
+- **Blocks nest.** An inner block adds settings. Giving a setting a value other than the one an outer block gave it throws `SessionSettingConflictError`, because a change made in an inner scope would outlive it (`SET LOCAL` survives `RELEASE SAVEPOINT`). The same value again is fine.
+- **Names** need a prefix and a dot (`app.tenant_id`), as Postgres requires for custom settings. Values are strings; numbers and booleans are turned into strings, and `null` becomes `''`.
+- **Statements gemi issues on the pool itself** (the database queue, the lock store, the agent stores) run in their own transactions as before, and the ones that open one through the ORM's transaction get the settings too.
+- **Postgres only**: refused on SQLite and MySQL. `DB.connection(name).withSettings(...)` checks that connection.
+
 ### Unit-testing code that opens one
 
 `Model.transaction` resolves its connection ambiently, out of the `AsyncLocalStorage` scope — which
@@ -14277,6 +14300,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
 | `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
 | `LockOutsideTransactionError` | A read was given `lock` outside a transaction, where the lock would be released before anything it guards could run. Wrap the read and its writes in `Model.transaction`. See [Locking rows](#locking-rows). |
+| `SessionSettingConflictError` | A nested `DB.withSettings` block gave a setting another value than an enclosing block gave it. See [Session settings](#session-settings-row-level-security). |
 | `TransactionDependencyError` | A statement issued on the transaction for you, without your awaiting it, failed — today, a job the database queue driver wrote on it ([Jobs & Queues](./jobs-and-queues.md#dispatching-inside-a-transaction)) — so the transaction rolled back instead of committing. The statement's own error is its `cause`. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |

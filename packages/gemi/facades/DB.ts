@@ -5,10 +5,14 @@ import type { Dialect } from "../database/dialect";
 import type { DatabaseSchema } from "../database/introspect/types";
 import { app } from "../foundation/app";
 import {
+  applyTransactionSettings,
   assertConnectionUsable,
   currentConnectionName,
+  currentSettings,
   currentTransaction,
   runOnConnection,
+  runWithSettings,
+  type SessionSettingValue,
   withTransaction,
 } from "../orm/context";
 import { dialectFor } from "../orm/dialect";
@@ -284,12 +288,15 @@ export class ConnectionQueries {
         connection.sql,
         async (tx) => {
           for (const statement of statements) await tx.unsafe(statement);
+          // After them: SET TRANSACTION has to be the first statement.
+          await applyTransactionSettings();
           const value = await runOnConnection(name, () => fn(tx));
           throw new ReadOnlyRollback(value);
         },
         {
           slowTransactionThreshold: connection.config.slowTransactionThreshold,
           connection: name,
+          deferSettings: true,
         },
       );
     } catch (error) {
@@ -326,6 +333,26 @@ export class ConnectionQueries {
     return introspect(this.handle() ?? db.sql, db.dialect);
   }
 
+  /**
+   * Runs `fn` with Postgres session settings (#1158), for row-level security
+   * policies that read `current_setting('app.tenant_id', true)`. Every
+   * transaction opened inside starts with `set_config(name, value, true)` for
+   * each, and so does a single ORM call or `DB.query` outside a transaction,
+   * which gets a transaction of its own for it. Postgres only.
+   */
+  async withSettings<T>(
+    settings: Record<string, SessionSettingValue>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const connection = this.connection();
+    if (connection.dialect !== "postgres") {
+      throw new Error(
+        `DB.withSettings is supported on Postgres only, and the "${connection.name}" connection is ${connection.dialect}.`,
+      );
+    }
+    return runWithSettings(settings, fn);
+  }
+
   private run(fragment: SqlFragment, operation: string) {
     const db = this.connection();
     // Per call, never captured: the same rule `Model.$exec` follows, and what
@@ -335,7 +362,18 @@ export class ConnectionQueries {
       dialectFor(db.dialect),
       operation,
     );
-    return (this.handle() ?? db.sql).unsafe(text, values);
+    const handle = this.handle();
+    // Outside a transaction, inside `withSettings` (#1158): a transaction of
+    // its own, so the statement runs with the settings applied.
+    if (handle === undefined && currentSettings()) {
+      const name = this.name;
+      return withTransaction(
+        db.sql,
+        (tx) => runOnConnection(name, () => tx.unsafe(text, values)),
+        { slowTransactionThreshold: db.config.slowTransactionThreshold, connection: name },
+      );
+    }
+    return (handle ?? db.sql).unsafe(text, values);
   }
 
   /**
@@ -434,6 +472,16 @@ export class DB extends Facade {
   // `User.create` inside this joins it. See `ConnectionQueries.transaction`.
   static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
     return ambient.transaction(fn);
+  }
+
+  // Runs the callback with Postgres session settings (`set_config`) applied to
+  // every transaction inside it, and to single statements outside one: row-level
+  // security. See `ConnectionQueries.withSettings`.
+  static withSettings<T>(
+    settings: Record<string, SessionSettingValue>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return ambient.withSettings(settings, fn);
   }
 
   // Runs the callback in a read-only transaction on the ambient connection
