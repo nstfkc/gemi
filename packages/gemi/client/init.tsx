@@ -12,6 +12,7 @@ import {
   type ChunkLoadRecoveryOptions,
 } from "./chunkLoadRecovery";
 import { configureRealtime } from "./realtime/loader";
+import { loadURLPattern } from "./urlPattern";
 import type { RealtimeOptions } from "./realtime/RealtimeClient";
 import {
   configureAuthenticationErrors,
@@ -113,7 +114,9 @@ export function init(
     // reached that handler. Deferring it past a `.then` puts the throw in a
     // rejection no `window.onerror` reporter sees, and the page sits
     // permanently unhydrated with nothing raised.
-    void initialViewModulesReady
+    // And until `URLPattern` exists: native almost everywhere, else the
+    // polyfill, loaded only for the browsers that need it (#1162).
+    void Promise.all([initialViewModulesReady, loadURLPattern()])
       .then(() => hydrate(RootLayout, options))
       .catch((e) => {
         setTimeout(() => {
@@ -179,9 +182,14 @@ export function create(
     prefetchedData,
     pageData: {},
   };
-  createRoot(document.getElementById("root")).render(
-    <ServerDataProvider>
-      <ClientRouter viewImportMap={viewImportMap} RootLayout={RootLayout} />
-    </ServerDataProvider>,
-  );
+  const render = () =>
+    createRoot(document.getElementById("root")).render(
+      <ServerDataProvider>
+        <ClientRouter viewImportMap={viewImportMap} RootLayout={RootLayout} />
+      </ServerDataProvider>,
+    );
+  // Synchronous where `URLPattern` is native, as before (#1162).
+  const loading = loadURLPattern();
+  if (loading) void loading.then(render);
+  else render();
 }

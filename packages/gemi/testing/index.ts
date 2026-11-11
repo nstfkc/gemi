@@ -1,3 +1,6 @@
+// The client router's `URLPattern` on a runtime without one (#1162). The
+// browser loads it on demand instead; see `client/urlPattern.ts`.
+import "urlpattern-polyfill";
 export { Page } from "./Page";
 export type { PageProps, PageDictionary } from "./Page";
 export { fakeSocket, FakeSocket } from "../client/realtime/FakeSocket";

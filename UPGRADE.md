@@ -1,3 +1,16 @@
+# Unreleased
+
+## client: a smaller client runtime (#1162)
+
+**Behaviour change.**
+
+- The client entry no longer bundles `urlpattern-polyfill` (about 6 KB gzip) or the `history` package (about 1 KB gzip). In a browser without `URLPattern`, `init()` loads the polyfill as a separate chunk before it hydrates. Every route's initial JavaScript is about 6 KB gzip smaller.
+- `gemi/client` no longer installs `globalThis.URLPattern` when the module loads. It's installed before hydration, and only where the browser lacks it.
+
+What to check:
+
+- Nothing, unless the app's own client code uses `URLPattern` in a browser without it before `init()` hydrates. Import `urlpattern-polyfill` there yourself.
+
 # 0.202.0
 
 ## ai: run a step's tool calls one at a time (#1161)

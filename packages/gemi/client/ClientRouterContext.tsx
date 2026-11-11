@@ -1,4 +1,5 @@
-import { type Action, type History, createBrowserHistory } from "history";
+import type { Action, History } from "history";
+import { createBrowserHistory } from "./browserHistory";
 import { applyDocumentNonce } from "./cspNonce";
 import {
   createContext,
@@ -10,8 +11,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { Subject } from "../utils/Subject";
-// @ts-ignore
-import { URLPattern } from "urlpattern-polyfill";
+import { urlPattern as createURLPattern } from "./urlPattern";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import type { Breadcrumb } from "./useBreadcrumbs";
@@ -179,7 +179,7 @@ export const ClientRouterProvider = (
       routePath = routePath === "" ? "/" : routePath;
       const candidates: string[] = [];
       for (const route of Object.keys(routeManifest)) {
-        const urlPattern = new URLPattern({ pathname: route });
+        const urlPattern = createURLPattern(route);
         if (urlPattern.test({ pathname: routePath })) {
           candidates.push(route);
         }
@@ -214,7 +214,7 @@ export const ClientRouterProvider = (
   const getParams = useMemo(
     () => (pathname: string) => {
       const route = findMatchingRouteFromParams(pathname);
-      const urlPattern = new URLPattern({ pathname: route });
+      const urlPattern = createURLPattern(route);
       return urlPattern.exec({ pathname })?.pathname.groups ?? {};
     },
     [findMatchingRouteFromParams],
