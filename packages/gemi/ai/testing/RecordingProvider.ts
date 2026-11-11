@@ -220,9 +220,10 @@ type Shared = {
  * the two differ.
  *
  * UPLOADS are answered `upload_<n>`, by order, so a file need not be the same
- * bytes on another machine for its call to replay. A sub-run counts its own:
- * `upload_<key>_<n>`, so the ids stay the same however sub-runs interleave. Recording, the file goes to
- * the live provider, and the calls show the model the provider's id.
+ * bytes on another machine for its call to replay. A sub-run counts its own,
+ * `upload_<key>_<n>`, so the ids stay the same however sub-runs interleave.
+ * Recording, the file goes to the live provider, and the calls show the model
+ * the provider's id.
  *
  * TIME. `recordedAt` is when the recording started. `pinClock(recordedAt)`
  * runs a replay at that time, so dates relative to today come out as recorded.
