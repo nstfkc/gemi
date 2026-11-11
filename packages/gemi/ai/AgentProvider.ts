@@ -113,7 +113,17 @@ export interface ProviderStreamParams {
  */
 export type ProviderEvent =
   | { type: "text-delta"; delta: string }
-  | { type: "reasoning-delta"; delta: string; id?: string }
+  /**
+   * `providerMetadata` is what the provider needs to send the part back, kept
+   * on `ReasoningPart.providerMetadata` (#477). Sent once, on the part's last
+   * delta, which closes the part: the next reasoning delta starts a new one.
+   */
+  | {
+      type: "reasoning-delta";
+      delta: string;
+      id?: string;
+      providerMetadata?: Record<string, unknown>;
+    }
   /** Arguments arrive as JSON fragments; the provider passes them through and
    *  `Agent` assembles and validates against the tool's schema. */
   | {

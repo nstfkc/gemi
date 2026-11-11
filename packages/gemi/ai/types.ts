@@ -192,8 +192,24 @@ export type TextPart = { type: "text"; text: string };
  * Reasoning is kept as its own part rather than folded into text: it must be
  * renderable separately (or not at all), and on the next turn it has to be sent
  * back to the provider in its original form for cache hits to survive.
+ *
+ * `id` is the Responses API's handle on a reasoning item. `providerMetadata`
+ * is everything else a provider needs to send the part back (#477): written by
+ * the provider that produced the part, under its own key (`{ anthropic: {
+ * signature } }`), and passed back untouched. Opaque to everything else, and
+ * ignored by a provider that finds no key of its own in it, so a part from one
+ * provider's turn is never sent to another as if it were its own.
+ *
+ * A part that has `providerMetadata` is complete: the provider sends it once a
+ * block has ended (a thinking block's signature arrives after its text), so a
+ * later reasoning delta starts a new part rather than joining this one.
  */
-export type ReasoningPart = { type: "reasoning"; id?: string; text?: string };
+export type ReasoningPart = {
+  type: "reasoning";
+  id?: string;
+  text?: string;
+  providerMetadata?: Record<string, unknown>;
+};
 
 /**
  * An uploaded file: the provider's copy, gemi's copy, or both.
@@ -793,8 +809,18 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    * cache, which keys on the literal item. Optional because a provider need
    * not supply one (Azure does not always); such a part still renders, it just
    * cannot be echoed back.
+   *
+   * `providerMetadata` is the part's `ReasoningPart.providerMetadata` (#477),
+   * for the same reason: a stateless client has to post it back. It arrives on
+   * the part's last delta (often with an empty `delta`), and closes the part.
    */
-  | { type: "reasoning-delta"; messageId: string; delta: string; id?: string }
+  | {
+      type: "reasoning-delta";
+      messageId: string;
+      delta: string;
+      id?: string;
+      providerMetadata?: Record<string, unknown>;
+    }
   /** Emitted only for an agent with an `output` schema: `delta` is raw JSON
    *  text, `snapshot` the best-effort parse so far, so a UI can bind fields
    *  before the object closes. */

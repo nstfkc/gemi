@@ -450,6 +450,29 @@ describe("the rest of the event union", () => {
     ]);
   });
 
+  test("a reasoning part keeps its providerMetadata, and the metadata closes it (#477)", () => {
+    const anthropic = (signature: string) => ({ anthropic: { signature } });
+    const state = fold(initialChatState(), [
+      { seq: 0, event: { type: "reasoning-delta", messageId: "m1", delta: "one" } },
+      {
+        seq: 1,
+        event: { type: "reasoning-delta", messageId: "m1", delta: "", providerMetadata: anthropic("s1") },
+      },
+      // A second block with no id: without the close it would join the first
+      // and post back one block holding two blocks' text under one signature.
+      { seq: 2, event: { type: "reasoning-delta", messageId: "m1", delta: "two" } },
+      {
+        seq: 3,
+        event: { type: "reasoning-delta", messageId: "m1", delta: "", providerMetadata: anthropic("s2") },
+      },
+    ]);
+
+    expect(state.messages[0]!.content).toEqual([
+      { type: "reasoning", text: "one", providerMetadata: anthropic("s1") },
+      { type: "reasoning", text: "two", providerMetadata: anthropic("s2") },
+    ]);
+  });
+
   test("output snapshots replace rather than accumulate, so a late client is right", () => {
     const late = fold(initialChatState(), [
       {

@@ -531,7 +531,7 @@ async function callModel<O extends Schema<any>>(
             appendText(reply, "text", event.delta);
             break;
           case "reasoning-delta":
-            appendReasoning(reply, event.id, event.delta);
+            appendReasoning(reply, event.id, event.delta, event.providerMetadata);
             break;
           case "finish":
             // Usage is taken whatever happened before it; the reason only if

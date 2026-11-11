@@ -245,6 +245,31 @@ describe("reasoning parts", () => {
     const result = await greetAgent(provider).stream({ messages: [] }).result();
     expect(partsOf(result.messages, "reasoning")).toEqual([{ type: "reasoning", text: "quiet" }]);
   });
+
+  test("keeps the provider's metadata on the part and the frame, and it closes the part (#477)", async () => {
+    // Anthropic's thinking blocks have no id: what goes back is the block's
+    // signature, which arrives after its text. Two blocks must stay two parts.
+    const meta = (signature: string) => ({ anthropic: { signature } });
+    const provider = fakeProvider([
+      { type: "reasoning-delta", delta: "one" },
+      { type: "reasoning-delta", delta: "", providerMetadata: meta("s1") },
+      { type: "reasoning-delta", delta: "", providerMetadata: { anthropic: { redacted: "r" } } },
+      { type: "text-delta", delta: "done" },
+      finish(),
+    ]);
+    const run = greetAgent(provider).stream({ messages: [] });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+    expect(partsOf(result.messages, "reasoning")).toEqual([
+      { type: "reasoning", text: "one", providerMetadata: meta("s1") },
+      { type: "reasoning", text: "", providerMetadata: { anthropic: { redacted: "r" } } },
+    ]);
+    // On the frame too, or a stateless client posts the part back without it.
+    expect(
+      events.filter((e) => e.type === "reasoning-delta").map((e) => (e as any).providerMetadata),
+    ).toEqual([undefined, meta("s1"), { anthropic: { redacted: "r" } }]);
+  });
 });
 
 describe("a plain run", () => {

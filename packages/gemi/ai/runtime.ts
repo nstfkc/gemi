@@ -247,14 +247,27 @@ export function appendText(message: AgentMessage, type: "text" | "reasoning", de
  * UI renders, and a provider that reports no item id (Azure does not always)
  * should still show its thinking. It just cannot be echoed back, which is the
  * bargain `reasoningItem` already documents.
+ *
+ * `providerMetadata` (#477) arrives on a part's last delta and closes it: a
+ * part that has it is not joined again, so two thinking blocks with no id
+ * (Anthropic's have none) stay two parts, each with its own signature.
  */
-export function appendReasoning(message: AgentMessage, id: string | undefined, delta: string) {
+export function appendReasoning(
+  message: AgentMessage,
+  id: string | undefined,
+  delta: string,
+  providerMetadata?: Record<string, unknown>,
+) {
   const last = message.content[message.content.length - 1];
-  if (last && last.type === "reasoning" && last.id === id) {
+  if (last && last.type === "reasoning" && last.id === id && !last.providerMetadata) {
     last.text = (last.text ?? "") + delta;
+    if (providerMetadata) last.providerMetadata = providerMetadata;
     return;
   }
-  message.content.push(
-    id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta },
-  );
+  message.content.push({
+    type: "reasoning",
+    ...(id ? { id } : {}),
+    text: delta,
+    ...(providerMetadata ? { providerMetadata } : {}),
+  });
 }

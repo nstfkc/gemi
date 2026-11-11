@@ -1,5 +1,15 @@
 # Unreleased
 
+## ai: `providerMetadata` on reasoning parts (#477)
+
+**Addition (minor version).** `ReasoningPart` has an optional `providerMetadata` field, and the `reasoning-delta` provider event and stream frame carry it. A provider writes there what it needs to send the part back on the next request (Anthropic: a thinking block's `signature`), under its own key, and other providers ignore it. It comes on the part's last delta and closes the part, so the next reasoning delta starts a new part.
+
+What to check:
+
+- Stores and stateless clients keep the field like any other part field. A stateless client must post it back unchanged.
+- Swift and Kotlin clients: `ai/client/__fixtures__/reducer.json` has new cases for the merge rule.
+- Nothing changes for OpenAI and Azure, which don't send it.
+
 ## ai/testing: a sub-run's upload ids no longer depend on how sub-runs interleave (#1236)
 
 **Fix (patch).** `RecordingProvider` answered every upload `upload_<n>` from one counter shared by the run and its sub-runs. Sub-runs that upload in parallel could upload in another order on replay, so a request sent `upload_4` where the recording had `upload_5`, and the run failed. Now each sub-run counts its own uploads and answers `upload_<key>_<n>` (`upload_reviewer:/catalog_1`, say). The run itself still answers `upload_<n>`.

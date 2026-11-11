@@ -136,7 +136,9 @@ extension ChatState {
       if isFinished(id) { return }
       withMessage(id, now: now) { message in
         message["content"] = .array(
-          appendReasoning(message.content, event.string("delta") ?? "", id: event["id"]))
+          appendReasoning(
+            message.content, event.string("delta") ?? "", id: event["id"],
+            providerMetadata: event["providerMetadata"]))
       }
 
     case "output-delta":
@@ -522,18 +524,23 @@ private func appendText(_ content: [JSONValue], _ delta: String) -> [JSONValue] 
 
 /// Joins the last part only when the reasoning-item id matches, as
 /// `appendReasoning` in `Agent.ts` does — a stateless client posts this back
-/// and the provider matches on the id.
-private func appendReasoning(_ content: [JSONValue], _ delta: String, id: JSONValue?)
-  -> [JSONValue]
-{
-  if var last = content.last?.objectValue, last.string("type") == "reasoning", last["id"] == id {
+/// and the provider matches on the id. A part that has `providerMetadata` is
+/// closed (#477): it comes on the part's last delta, and the next delta starts
+/// a new part.
+private func appendReasoning(
+  _ content: [JSONValue], _ delta: String, id: JSONValue?, providerMetadata: JSONValue?
+) -> [JSONValue] {
+  if var last = content.last?.objectValue, last.string("type") == "reasoning", last["id"] == id,
+    last["providerMetadata"] == nil
+  {
     last["text"] = .string((last.string("text") ?? "") + delta)
+    if let providerMetadata { last["providerMetadata"] = providerMetadata }
     return content.dropLast() + [.object(last)]
   }
-  if let id, truthy(id) {
-    return content + [["type": "reasoning", "id": id, "text": .string(delta)]]
-  }
-  return content + [["type": "reasoning", "text": .string(delta)]]
+  var part: [String: JSONValue] = ["type": "reasoning", "text": .string(delta)]
+  if let id, truthy(id) { part["id"] = id }
+  if let providerMetadata { part["providerMetadata"] = providerMetadata }
+  return content + [.object(part)]
 }
 
 private func truthy(_ value: JSONValue) -> Bool {
