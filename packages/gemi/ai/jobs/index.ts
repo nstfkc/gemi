@@ -1,5 +1,11 @@
 export {
+  type AgentInbox,
   AgentJob,
+  type AgentJobBatchListener,
+  type AgentJobBatchOptions,
+  type AgentJobBatchSubscription,
+  type CancelJobOptions,
+  type ServerJobOptions,
   type AgentJobClass,
   type AgentJobContext,
   type AgentJobOutcome,
@@ -22,6 +28,7 @@ export {
   type AgentJobUpdate,
   MemoryAgentJobStore,
   type NewAgentJobRecord,
+  type QueuedJobStart,
 } from "./AgentJobStore";
 export { AgentJobDeadlineSweep } from "./AgentJobDeadlineSweep";
 export { type AgentJobsOptions, DEFAULT_JOBS_CONTEXT_MAX } from "./contextBlock";
