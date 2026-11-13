@@ -293,7 +293,12 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
           const chars = (partial.get(event.toolCallId) ?? 0) + event.argsDelta.length;
           partial.set(event.toolCallId, chars);
           if (maxArgs > 0 && chars > maxArgs) {
-            const error = new ProviderToolArgumentsTooLongError(maxArgs, event.name);
+            const error = new ProviderToolArgumentsTooLongError(
+              maxArgs,
+              event.name,
+              event.toolCallId,
+              chars,
+            );
             attempt.abort(error);
             throw error;
           }
@@ -328,7 +333,13 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
       }
       failure = normalized;
       held.push(
-        { type: "error", error: normalized },
+        {
+          type: "error",
+          error: normalized,
+          ...(error instanceof ProviderToolArgumentsTooLongError
+            ? { toolArgumentsTooLong: error.detail }
+            : {}),
+        },
         { type: "finish", reason: "error", usage: emptyUsage() },
       );
     }
