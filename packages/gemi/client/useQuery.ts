@@ -434,14 +434,16 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     }
   }, [snapshot]);
 
-  // A variant with no state yet counts as loading unless the query is lazy:
-  // its request is on the wire (started silently in the render) or goes out
-  // in the commit's effect.
+  // A variant with no state yet counts as loading for a `suspense: false`
+  // reader that isn't lazy: its request is on the wire (started silently in
+  // the render) or goes out in the commit's effect. A suspending reader
+  // suspends on it instead (#1255): showing the previous variant's data here
+  // would let a transition at the call site commit the new state with it.
   let state = snapshot;
   if (
     config.keepPreviousData &&
     !snapshot?.hasData &&
-    (snapshot ? snapshot.loading : !lazy) &&
+    (snapshot ? snapshot.loading : !lazy && !suspense) &&
     lastDataRef.current
   ) {
     state = { ...lastDataRef.current, loading: true };

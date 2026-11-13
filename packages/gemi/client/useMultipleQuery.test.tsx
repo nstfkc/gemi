@@ -1,6 +1,14 @@
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { Component, Suspense, act, useState } from "react";
+import {
+  Component,
+  Suspense,
+  act,
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useState,
+} from "react";
 import type { PropsWithChildren, ReactNode } from "react";
 import { cleanup, render } from "@testing-library/react";
 
@@ -588,5 +596,103 @@ describe("loadingByKey", () => {
     expect(seen.at(-1)).toBe("1|undefined|true|false|true");
     await net.resolve("/api/invoices", { v: 2 });
     expect(seen.at(-1)).toBe("1|2|false|false|false");
+  });
+});
+
+// #1255: a suspending key whose new variant has no state yet suspends the
+// render that reads it, so a transition at the call site keeps the old tree
+// committed instead of showing the previous variant's data as the new one.
+describe("suspending keys on a new variant", () => {
+  test("a search change in startTransition keeps the old tree committed until the new variant lands", async () => {
+    const net = createFetch();
+    let go: (page: number) => void = () => {};
+    const seen: string[] = [];
+    function View() {
+      const [page, setPage] = useState(1);
+      go = (next) => startTransition(() => setPage(next));
+      const { data, loading } = useMultipleQuery({
+        list: ["/list" as any, { search: { page } }],
+        other: ["/other" as any],
+      });
+      const text = `page:${page}|${(data.list as any).page}|${loading}`;
+      useEffect(() => {
+        seen.push(text);
+      });
+      return <div>{text}</div>;
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    await net.drain((url) => ({ page: url.endsWith("=2") ? 2 : 1 }));
+    expect(screen.queryByText("page:1|1|false")).not.toBeNull();
+
+    await act(async () => go(2));
+    expect(screen.queryByText("fallback")).toBeNull();
+    expect(screen.queryByText("page:1|1|false")).not.toBeNull();
+    expect(net.urls()).toEqual(["/api/list?page=2"]);
+
+    await net.resolve("/api/list?page=2", { page: 2 });
+    expect(screen.queryByText("page:2|2|false")).not.toBeNull();
+    expect(seen.filter((s) => s.startsWith("page:2"))).toEqual([
+      "page:2|2|false",
+    ]);
+  });
+
+  test("a search change through useDeferredValue keeps the deferred value on the committed page", async () => {
+    const net = createFetch();
+    let go: (page: number) => void = () => {};
+    const seen: string[] = [];
+    function View() {
+      const [page, setPage] = useState(1);
+      go = setPage;
+      const deferredPage = useDeferredValue(page);
+      const { data } = useMultipleQuery({
+        list: ["/list" as any, { search: { page: deferredPage } }],
+      });
+      const text = `page:${deferredPage}|${(data.list as any).page}`;
+      useEffect(() => {
+        seen.push(text);
+      });
+      return <div>{text}</div>;
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    await net.resolve("/api/list?page=1", { page: 1 });
+    expect(screen.queryByText("page:1|1")).not.toBeNull();
+
+    await act(async () => go(2));
+    expect(screen.queryByText("fallback")).toBeNull();
+    expect(screen.queryByText("page:1|1")).not.toBeNull();
+
+    await net.resolve("/api/list?page=2", { page: 2 });
+    expect(screen.queryByText("page:2|2")).not.toBeNull();
+    expect(seen).not.toContain("page:2|1");
+  });
+
+  test("a suspense: false key next to it still shows its previous data while its new variant loads", async () => {
+    const net = createFetch();
+    let go: (page: number) => void = () => {};
+    const seen: string[] = [];
+    function View() {
+      const [page, setPage] = useState(1);
+      go = setPage;
+      const { data, loadingByKey } = useMultipleQuery({
+        list: ["/list" as any, { search: { page } }, { suspense: false }],
+        other: ["/other" as any],
+      });
+      seen.push(
+        `${(data.list as any)?.page}|${loadingByKey.list}|${(data.other as any).v}`,
+      );
+      return null;
+    }
+    render(<View />, { wrapper: Providers });
+    await net.resolve("/api/other", { v: "o" });
+    await net.resolve("/api/list?page=1", { page: 1 });
+    expect(seen.at(-1)).toBe("1|false|o");
+    seen.length = 0;
+
+    await act(async () => go(2));
+    expect(net.urls()).toEqual(["/api/list?page=2"]);
+    expect(seen).not.toContain("undefined|true|o");
+    expect(seen.at(-1)).toBe("1|true|o");
+    await net.resolve("/api/list?page=2", { page: 2 });
+    expect(seen.at(-1)).toBe("2|false|o");
   });
 });
