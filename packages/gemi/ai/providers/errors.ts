@@ -1,4 +1,4 @@
-import type { AgentError } from "../types";
+import type { AgentError, ToolArgumentsTooLong } from "../types";
 
 /**
  * A non-2xx response, carried as an exception so the retry loop and
@@ -77,13 +77,16 @@ export class ProviderStreamDurationError extends ProviderTimeoutError {
  */
 export class ProviderToolArgumentsTooLongError extends Error {
   readonly limit: number;
+  /** The cut call (#1259), carried onto the provider's `error` event. */
+  readonly detail: ToolArgumentsTooLong;
 
-  constructor(limit: number, toolName: string) {
+  constructor(limit: number, toolName: string, toolCallId = "", chars = limit + 1) {
     super(
       `Provider streamed more than ${limit} characters of arguments for "${toolName}" without finishing the call (maxToolArgumentChars)`,
     );
     this.name = "ProviderToolArgumentsTooLongError";
     this.limit = limit;
+    this.detail = { tool: toolName, toolCallId, limit, chars };
   }
 }
 

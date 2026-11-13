@@ -183,6 +183,19 @@ export type AgentErrorCode =
   | "aborted"
   | "unknown";
 
+/**
+ * A tool call the provider cut because its arguments went past
+ * `maxToolArgumentChars` (#1259): which call, the limit, and how many
+ * characters it had streamed when it was cut. Server-side detail, on
+ * `AgentRunFailure.toolArgumentsTooLong` and `ToolArgumentsTooLongError`.
+ */
+export type ToolArgumentsTooLong = {
+  tool: string;
+  toolCallId: string;
+  limit: number;
+  chars: number;
+};
+
 export type AgentError = {
   code: AgentErrorCode;
   message: string;
