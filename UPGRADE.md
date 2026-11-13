@@ -1,4 +1,4 @@
-# Unreleased
+# 0.207.0
 
 ## client: `suspense: false` queries start in the render; `loadingByKey` (#1253)
 
