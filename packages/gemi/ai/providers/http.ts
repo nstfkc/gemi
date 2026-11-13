@@ -60,7 +60,74 @@ export type RequestOptions = {
    */
   onRetry?: (info: Omit<ProviderRetryInfo, "phase">) => void;
   startedAt?: number;
+  /** See `ProviderRetryPolicy`. Absent: `maxRetries` quick retries only. */
+  retry?: ProviderRetryPolicy;
 };
+
+/**
+ * A retry patience budget (#1258), on a provider's config as `retry`.
+ *
+ * The quick retries (`maxRetries`, backoff, `Retry-After` up to 20 s) are over
+ * within seconds, and a rate limit counted over a one-minute window (Azure
+ * OpenAI's tokens per minute) outlasts them. With a policy, a retryable
+ * failure (a 429, a 5xx, a timeout, a dropped connection) that is still
+ * failing once the quick retries are spent is asked again after a longer
+ * wait: the provider's `Retry-After` when it sent one, otherwise
+ * `initialWaitMs`, doubling, with jitter. Each wait is at most `maxWaitMs`,
+ * and they stop once `patienceMs` has passed since the call started (the
+ * last wait is cut to what is left of it). Only before the first content
+ * event: nothing the model said is ever asked for twice.
+ */
+export type ProviderRetryPolicy = {
+  /** The total time, from the call's start, retryable failures are waited out for. */
+  patienceMs: number;
+  /** The first wait when the provider gives no `Retry-After`. Default 4 000. */
+  initialWaitMs?: number;
+  /** The longest single wait, `Retry-After` included. Default 60 000. */
+  maxWaitMs?: number;
+};
+
+export const DEFAULT_PATIENT_INITIAL_WAIT_MS = 4_000;
+export const DEFAULT_PATIENT_MAX_WAIT_MS = 60_000;
+
+/** Throws on a policy that cannot be followed. */
+export function assertRetryPolicy(policy: ProviderRetryPolicy | undefined): void {
+  if (policy === undefined) return;
+  const ok = (value: unknown, min: number) =>
+    typeof value === "number" && Number.isFinite(value) && value >= min;
+  if (
+    !policy ||
+    !ok(policy.patienceMs, 0) ||
+    (policy.initialWaitMs !== undefined && !ok(policy.initialWaitMs, 1)) ||
+    (policy.maxWaitMs !== undefined && !ok(policy.maxWaitMs, 1))
+  ) {
+    throw new Error(
+      `The provider's retry policy ${JSON.stringify(policy)} is not usable: patienceMs has to be a number of milliseconds (0 or more), and initialWaitMs and maxWaitMs above 0.`,
+    );
+  }
+}
+
+/**
+ * The next patient wait (#1258), or `undefined` when the budget is spent.
+ * `patient` counts the patient waits already made for this failure, from 0.
+ */
+export function patientDelayMs(
+  policy: ProviderRetryPolicy,
+  patient: number,
+  retryAfter: number | undefined,
+  elapsedMs: number,
+  random: () => number,
+): number | undefined {
+  const remaining = policy.patienceMs - elapsedMs;
+  if (remaining <= 0) return undefined;
+  const max = policy.maxWaitMs ?? DEFAULT_PATIENT_MAX_WAIT_MS;
+  const initial = policy.initialWaitMs ?? DEFAULT_PATIENT_INITIAL_WAIT_MS;
+  const wait =
+    retryAfter !== undefined
+      ? Math.min(retryAfter, max)
+      : Math.round(Math.min(max, initial * 2 ** patient) * (0.5 + random() * 0.5));
+  return Math.min(wait, remaining);
+}
 
 /** The floor of the backoff. Doubling from here gives 0.5s, 1s, 2s, 4s — long
  *  enough to outlast a rate-limit window, short enough that a user watching a
@@ -195,7 +262,9 @@ export async function requestWithRetry(
   const maxRetries = Math.max(0, options.maxRetries);
 
   const startedAt = options.startedAt ?? now();
+  const policy = options.retry;
   const wait = (ms: number, attempt: number, error: unknown, timedOut: boolean) => {
+    const elapsedMs = now() - startedAt;
     try {
       options.onRetry?.({
         attempt: attempt + 1,
@@ -204,7 +273,8 @@ export async function requestWithRetry(
         ...httpErrorDetail(error),
         timedOut,
         delayMs: ms,
-        elapsedMs: now() - startedAt,
+        elapsedMs,
+        ...(policy ? { remainingMs: Math.max(0, policy.patienceMs - elapsedMs - ms) } : {}),
       });
     } catch {
       // See `onRetry`.
@@ -212,9 +282,14 @@ export async function requestWithRetry(
     return waitUnlessAborted(ms, options.signal, sleep);
   };
 
-  let lastError: unknown;
+  // Past `maxRetries`, only a patience budget asks again (#1258): the delay
+  // for the attempt after `attempt`, or `undefined` to give up.
+  const patient = (attempt: number, retryAfter: number | undefined) =>
+    policy
+      ? patientDelayMs(policy, attempt - maxRetries, retryAfter, now() - startedAt, random)
+      : undefined;
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     options.signal?.throwIfAborted();
 
     const controller = new AbortController();
@@ -239,13 +314,14 @@ export async function requestWithRetry(
       // The caller's abort wins outright — `stop()` means stop, not "stop and
       // try three more times".
       if (options.signal?.aborted) throw error;
-      lastError = timedOut ? new ProviderTimeoutError(options.timeoutMs) : error;
+      const lastError = timedOut ? new ProviderTimeoutError(options.timeoutMs) : error;
       // Checked before the attempt count, because this is not "no attempts
       // left" — it is "another attempt is the wrong thing to do". See
       // `RequestOptions.retryTimeouts`.
       if (timedOut && options.retryTimeouts === false) throw lastError;
-      if (attempt === maxRetries) throw lastError;
-      await wait(backoffDelayMs(attempt, random), attempt, lastError, timedOut);
+      const delay = attempt < maxRetries ? backoffDelayMs(attempt, random) : patient(attempt, undefined);
+      if (delay === undefined) throw lastError;
+      await wait(delay, attempt, lastError, timedOut);
       continue;
     }
 
@@ -267,7 +343,7 @@ export async function requestWithRetry(
       parseRetryAfter(response.headers.get("retry-after"), now()),
     );
 
-    if (attempt === maxRetries || !shouldRetry(response.status, error)) throw error;
+    if (!shouldRetry(response.status, error)) throw error;
 
     // Bounded, because `Retry-After` is a number the server chooses and a daily
     // quota answers it in hours. Sleeping through that holds the run open for
@@ -278,20 +354,15 @@ export async function requestWithRetry(
     const retryAfter =
       error.retryAfter ??
       (response.status === 429 ? normalizeProviderError(error).retryAfter : undefined);
-    await wait(
-      retryAfter === undefined
-        ? backoffDelayMs(attempt, random)
-        : Math.min(retryAfter, MAX_DELAY_MS),
-      attempt,
-      error,
-      false,
-    );
-    lastError = error;
+    const delay =
+      attempt >= maxRetries
+        ? patient(attempt, retryAfter)
+        : retryAfter === undefined
+          ? backoffDelayMs(attempt, random)
+          : Math.min(retryAfter, MAX_DELAY_MS);
+    if (delay === undefined) throw error;
+    await wait(delay, attempt, error, false);
   }
-
-  // Unreachable: the loop either returns or throws. Kept honest rather than
-  // asserted away.
-  throw lastError ?? new Error("Provider request failed with no response.");
 }
 
 async function readErrorBody(response: Response): Promise<unknown> {

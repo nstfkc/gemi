@@ -23,6 +23,8 @@ import {
   waitUnlessAborted,
   type FetchLike,
   type RequestOptions,
+  patientDelayMs,
+  type ProviderRetryPolicy,
 } from "./http";
 import type { ResponsesRequest } from "./request";
 import { withoutStaleReasoning } from "./staleReasoning";
@@ -51,6 +53,8 @@ export type ResponsesEndpoint = {
   /** See `ProviderConfig.maxToolArgumentChars`. Absent or `0` is off. */
   maxToolArgumentChars?: number;
   maxRetries: number;
+  /** See `ProviderConfig.retry`. */
+  retry?: ProviderRetryPolicy;
   fetchImpl?: FetchLike;
   /** Injected by the tests, with `random`, so a backoff can be asserted on
    *  without waiting for it. See `RequestOptions`. */
@@ -79,6 +83,7 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
     streamMaxDurationMs: target.streamMaxDurationMs,
     maxToolArgumentChars: target.maxToolArgumentChars,
     maxRetries: target.maxRetries,
+    ...(target.retry ? { retry: target.retry } : {}),
   };
 }
 
@@ -202,6 +207,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
             random: endpoint.random,
             now: endpoint.now,
             startedAt,
+            ...(endpoint.retry ? { retry: endpoint.retry } : {}),
             onRetry: (info) => {
               retries.push({ type: "retry", ...info, phase: "request" });
               wake();
@@ -334,14 +340,28 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     }
     if (committed) return;
 
-    if (failure?.retryable && streamAttempt < maxStreamRetries && !params.signal?.aborted) {
+    // Past `maxRetries`, a patience budget asks again too (#1258).
+    const delayMs = !failure?.retryable || params.signal?.aborted
+      ? undefined
+      : streamAttempt < maxStreamRetries
+        ? backoffDelayMs(streamAttempt, random)
+        : endpoint.retry
+          ? patientDelayMs(
+              endpoint.retry,
+              streamAttempt - maxStreamRetries,
+              failure.retryAfter,
+              now() - startedAt,
+              random,
+            )
+          : undefined;
+    if (delayMs !== undefined) {
       let detail: { status?: number; requestId?: string } = {};
       for (const event of held) {
         if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
         if (event.type === "error") detail = httpErrorDetail(event);
       }
       if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
-      const delayMs = backoffDelayMs(streamAttempt, random);
+      const elapsedMs = now() - startedAt;
       yield {
         type: "retry",
         attempt: streamAttempt + 1,
@@ -351,7 +371,10 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         phase: "stream",
         timedOut: streamTimedOut,
         delayMs,
-        elapsedMs: now() - startedAt,
+        elapsedMs,
+        ...(endpoint.retry
+          ? { remainingMs: Math.max(0, endpoint.retry.patienceMs - elapsedMs - delayMs) }
+          : {}),
       };
       try {
         await waitUnlessAborted(delayMs, params.signal, endpoint.sleep);

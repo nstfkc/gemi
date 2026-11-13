@@ -243,7 +243,9 @@ export type ProviderEvent =
  * One failed attempt of a provider call that is about to be asked again.
  *
  * - `attempt`: the attempt that failed, from 1. The next one is `attempt + 1`.
- * - `maxRetries`: the provider's `maxRetries`, so `attempt <= maxRetries`.
+ * - `maxRetries`: the provider's `maxRetries`, so `attempt <= maxRetries`,
+ *   except for the patient retries of a provider `retry` policy (#1258),
+ *   which come after them and carry `remainingMs`.
  * - `error`: the failure, normalized; `status` and `requestId` describe the
  *   HTTP response it came from, when there was one.
  * - `phase`: `"request"` when no response arrived (or an error status did),
@@ -264,6 +266,11 @@ export type ProviderRetryInfo = {
   timedOut: boolean;
   delayMs: number;
   elapsedMs: number;
+  /**
+   * With a provider `retry` policy (#1258): what is left of its `patienceMs`
+   * after this wait. Absent without one.
+   */
+  remainingMs?: number;
 };
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
@@ -275,6 +282,7 @@ export type ProviderStream = AsyncIterable<ProviderEvent>;
  * that resolution lives in one place and what happens when it does not.
  */
 export type { AnthropicConfig, AzureConfig, FoundryConfig, ProviderConfig } from "./providers/endpoints";
+export type { ProviderRetryPolicy } from "./providers/http";
 
 export abstract class AgentProvider {
   abstract readonly model: string;

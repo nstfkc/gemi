@@ -21,6 +21,8 @@
  * here knows about Responses, files or images.
  */
 
+import { assertRetryPolicy, type ProviderRetryPolicy } from "./http";
+
 export type ProviderConfig = {
   apiKey?: string;
   baseURL?: string;
@@ -49,6 +51,12 @@ export type ProviderConfig = {
    */
   maxToolArgumentChars?: number;
   maxRetries?: number;
+  /**
+   * A patience budget for retryable failures, beyond the quick `maxRetries`
+   * (#1258): `{ patienceMs, initialWaitMs?, maxWaitMs? }`. See
+   * `ProviderRetryPolicy`. Absent: the quick retries only, as before.
+   */
+  retry?: ProviderRetryPolicy;
   headers?: Record<string, string>;
 };
 
@@ -102,6 +110,8 @@ export type ProviderTarget = {
   /** See `ProviderConfig.maxToolArgumentChars`. `0` is off. */
   maxToolArgumentChars: number;
   maxRetries: number;
+  /** See `ProviderConfig.retry`. */
+  retry?: ProviderRetryPolicy;
 };
 
 /** Long enough for a reasoning model to think before it says anything, short
@@ -255,6 +265,7 @@ export function openAITarget(
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+    ...retryPolicy(config),
   };
 }
 
@@ -296,6 +307,7 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+    ...retryPolicy(config),
   };
 }
 
@@ -405,6 +417,7 @@ function messagesTarget(
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+    ...retryPolicy(config),
   };
 }
 
@@ -432,4 +445,10 @@ export function azureRealtimeTarget(
 ): ProviderTarget {
   const target = azureTarget(config, defaults);
   return { ...target, base: `${azureResourceBase(config)}/v1`, query: "" };
+}
+
+/** `ProviderConfig.retry`, checked, for a target. */
+function retryPolicy(config: ProviderConfig): { retry?: ProviderRetryPolicy } {
+  assertRetryPolicy(config.retry);
+  return config.retry ? { retry: config.retry } : {};
 }

@@ -990,6 +990,8 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
       maxRetries: number;
       code: AgentErrorCode;
       delayMs: number;
+      /** With a provider `retry` policy (#1258): what is left of its budget after this wait. */
+      remainingMs?: number;
     }
   /**
    * An error after the headers are flushed cannot be an HTTP status, so it is an
