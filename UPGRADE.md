@@ -1,4 +1,4 @@
-# Unreleased
+# 0.207.2
 
 ## client: navigating to `/` with a search or a hash keeps the root path (#1257)
 
