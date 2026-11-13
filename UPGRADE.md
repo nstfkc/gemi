@@ -1,4 +1,4 @@
-# Unreleased
+# 0.206.0
 
 ## client: `useMultipleQuery`, several queries in one render cycle (#1251)
 
