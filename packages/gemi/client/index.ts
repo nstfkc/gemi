@@ -7,6 +7,12 @@
 export { useQuery } from "./useQuery";
 export { useCspNonce } from "./cspNonce";
 export type { QueryResult, GemiQueryDefaults } from "./useQuery";
+export { useMultipleQuery } from "./useMultipleQuery";
+export type {
+  MultipleQueryConfig,
+  MultipleQueryEntry,
+  MultipleQueryReturn,
+} from "./useMultipleQuery";
 export { useInfiniteQuery } from "./useInfiniteQuery";
 export type {
   InfiniteQueryConfig,
