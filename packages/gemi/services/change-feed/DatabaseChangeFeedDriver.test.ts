@@ -10,6 +10,7 @@ import type { ChangeFeedEvent } from "./ChangeFeedDriver";
 import { changeFeedDriverContract } from "./changeFeedDriverContract";
 import { ChangeFeedManager } from "./ChangeFeedManager";
 import { DatabaseChangeFeedDriver } from "./DatabaseChangeFeedDriver";
+import { encodeCursor } from "./cursor";
 import {
   bunCanListen,
   bunListener,
@@ -250,6 +251,51 @@ describe.skipIf(!POSTGRES_URL)("change feed across instances on postgres", () =>
       ),
     );
     expect(order).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)("change feed heads inside transactions on postgres", () => {
+  // #1249: `cursor` read the heads on the pool while the caller's transaction
+  // held a connection. With as many such transactions as the pool has
+  // connections, each waited for a second one forever.
+  test("postgres: cursor in as many concurrent transactions as the pool has connections does not deadlock", async () => {
+    const db = await openPostgres(POSTGRES_URL!);
+    const size = 4;
+    const sql = new SQL(POSTGRES_URL!, { max: size });
+    // Closed before the tables are dropped: a deadlocked run leaves its
+    // transactions open, and they would hold the DROP up.
+    cleanups.unshift(() => sql.close({ timeout: 0 }));
+    const manager = new ChangeFeedManager({ driver: db.driver({ sql }) });
+    await manager.publish("site:1", null);
+
+    // Every transaction holds its connection before any of them reads.
+    let begun = 0;
+    let allBegun!: () => void;
+    const barrier = new Promise<void>((resolve) => (allBegun = resolve));
+    const cursors = Promise.all(
+      Array.from({ length: size }, () =>
+        withTransaction(sql, async (tx) => {
+          await tx`SELECT 1`;
+          if (++begun === size) allBegun();
+          await barrier;
+          return manager.cursor("site:1");
+        }),
+      ),
+    );
+    const timedOut = sleep(3_000).then(() => "deadlocked");
+    expect(await Promise.race([cursors, timedOut])).toEqual(
+      Array.from({ length: size }, () => encodeCursor(new Map([["site:1", 1]]))),
+    );
+  });
+
+  test("postgres: head inside a transaction sees the transaction's own publish", async () => {
+    const db = await openPostgres(POSTGRES_URL!);
+    const manager = new ChangeFeedManager({ driver: db.driver() });
+    await withTransaction(db.sql, async () => {
+      expect(await manager.publish("site:1", "in")).toBe(1);
+      expect(await manager.head("site:1")).toBe(1);
+    });
+    expect(await manager.head("site:1")).toBe(1);
   });
 });
 
