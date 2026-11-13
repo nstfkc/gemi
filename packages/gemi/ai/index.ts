@@ -79,6 +79,7 @@ export type {
   ToolCallPart,
   ToolApprovalRecord,
   ToolDenial,
+  ToolArgumentsTooLong,
   ToolResultPart,
   ToolSearchRecord,
   JsonToolShapes,
@@ -100,6 +101,8 @@ export {
   // A class for the same reason: `result({ throwOnError: true })` rejects with
   // it, and a caller tells a failed run from its own bug with `instanceof`.
   AgentRunError,
+  // Its subclass for a tool call cut at `maxToolArgumentChars` (#1259).
+  ToolArgumentsTooLongError,
   // What `maxRunDurationMs` is when an agent does not set it, so an app can
   // derive its own limits from it rather than restate ten minutes.
   DEFAULT_MAX_RUN_DURATION_MS,
