@@ -155,6 +155,25 @@ hooks = defineAgentHooks({
 });
 ```
 
+## Not asking again after a refusal
+
+A model that is refused often asks for the same call again a step later. With `rememberDenials`, the run remembers what the user refused and answers a repeat itself:
+
+```ts
+const agent = Agent.create({
+  name: "editor",
+  provider,
+  tools: [publishPage],
+  rememberDenials: true,
+});
+```
+
+- **`true`** matches a later call of the same tool with the same input (as the tool's schema parsed it, whatever the key order). **`"name"`** matches any later call of the same tool. **`false`** (the default) asks every time.
+- A matching call is not asked: it gets a `denied` result with `cause: "denied-earlier"` and the earlier refusal's `reason`, and the model is told the user already declined it. It has no `approval` record, since nobody answered it.
+- A tool's own `rememberDenials` wins over the agent's, so `rememberDenials: false` on one tool keeps it asking.
+- The memory lasts for the run, which is one turn: the refusal arrives on the turn that answers the approval, and a repeat in that turn is refused. The user's next message starts a new run that asks again.
+- The run lists its refusals as `run.denials`, and the controller's hooks read them as `ctx.denials` (`{ toolCallId, name, input, approval }` each), whatever the setting.
+
 ## Through the MCP registry
 
 A native tool registered with `fromTool` keeps its function:

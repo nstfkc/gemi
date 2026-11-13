@@ -1,5 +1,22 @@
 # Unreleased
 
+## ai: remember a refused approval for the rest of the run (#1260)
+
+**New API (minor version).** `Agent.create({ rememberDenials })` (and the same option on a tool) stops the user from being asked the same approval twice in one run:
+
+```ts
+Agent.create({ name: "editor", provider, tools: [publishPage], rememberDenials: true });
+```
+
+- `true` refuses a later call of a refused tool with the same input; `"name"` refuses any later call of that tool. The call gets a `denied` result with the new `cause: "denied-earlier"` and the earlier `reason`, and no approval is asked. A tool's own setting wins over the agent's.
+- The default is `false`: nothing changes until you turn it on.
+- `run.denials` and the controller hooks' `ctx.denials` list the run's refusals (`{ toolCallId, name, input, approval }`), whatever the setting. An app that kept its own `Map<runId, …>` filled from `onToolResult` can drop it.
+
+What to check:
+
+- Code that switches over a `denied` result's `cause` (`"refused" | "stopped" | "interrupted"`) has one more case, `"denied-earlier"`.
+- A class of your own that `implements AgentRun` needs a `denials` array, and code that builds an `AgentHookContext` by hand (in a test) needs `denials: []`.
+
 ## ai: a forced `toolChoice` is emulated on providers that can't force one (#1261)
 
 **Behaviour change and new API (minor version).** `ProviderCapabilities` has `supportsForcedToolChoice`. It is `false` on the Claude models that refuse a forced tool choice (Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and ids gemi doesn't know), whose provider sends `"required"` and `{ name }` as `auto`. On those, a step that `prepareStep` forces is now emulated:

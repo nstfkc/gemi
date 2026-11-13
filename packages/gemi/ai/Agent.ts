@@ -61,6 +61,7 @@ import {
   type ToolMemory,
 } from "./memory/runMemory";
 import {
+  canonicalize,
   executionReceiptId,
   spendNestedRun,
   spendPendingCall,
@@ -106,6 +107,7 @@ import type {
   ToolApprovalRecord,
   ToolArgumentsTooLong,
   ToolCallPart,
+  ToolDenial,
   ToolSearchRecord,
   ToolResultPart,
   ToolShapes,
@@ -897,6 +899,11 @@ export type ToolDefinition<
       /** Ask the user first: always, never, or per call. See `ToolApproval`. */
       requiresApproval?: ToolApproval<Input, Ctx>;
       /**
+       * Whether a refused approval of this tool is remembered for the rest of
+       * the run (#1260). Overrides the agent's `rememberDenials`; see there.
+       */
+      rememberDenials?: RememberDenials;
+      /**
        * Computes what the user is shown before they approve a call (#1060): a
        * dry run, such as the SQL a write would run and how many rows it
        * changes. Needs `requiresApproval`.
@@ -970,6 +977,7 @@ export type ToolDefinition<
       execute?: never;
       /** Meaningless here: the client answering *is* the approval. */
       requiresApproval?: never;
+      rememberDenials?: never;
       approvalPreview?: never;
       /** Server tools only: a client's answer is what the model reads. */
       toModel?: never;
@@ -1037,6 +1045,8 @@ export class AgentTool<
   ) => boolean | Promise<boolean>;
   /** See `ToolDefinition.approvalPreview`. */
   readonly approvalPreview?: ToolApprovalPreview<Input, Ctx, Preview>;
+  /** See `ToolDefinition.rememberDenials`. `undefined` defers to the agent. */
+  readonly rememberDenials?: RememberDenials;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
   /** See `ToolDefinition.endsRun`. `undefined` for a tool that never ends the run. */
@@ -1085,6 +1095,7 @@ export class AgentTool<
     this.async = params.async;
     if (params.endsRun) this.endsRun = params.endsRun;
     if (params.toModel) this.toModel = params.toModel;
+    if (params.rememberDenials !== undefined) this.rememberDenials = params.rememberDenials;
   }
 
   /**
@@ -1162,6 +1173,7 @@ export class AgentTool<
         `The tool "${params.name}" is answered by the client and cannot set \`endsRun\`: its answer arrives on a later turn.`,
       );
     }
+    assertRememberDenials(params.rememberDenials, `The tool "${params.name}"`);
     if (params.async && params.answeredBy === "client") {
       throw new Error(
         `The tool "${params.name}" is answered by the client and cannot be \`async\`: background jobs are for tools the server runs.`,
@@ -1533,6 +1545,24 @@ export interface CreateAgentParams<
    */
   toolExecution?: ToolExecution;
   /**
+   * Remembers an approval the user refused for the rest of the run (#1260).
+   * A later call in the same run that matches it is refused at once, with a
+   * `denied` result with `cause: "denied-earlier"` and the earlier refusal's
+   * `reason`, and the user is not asked again.
+   *
+   * `true` matches a call of the same tool with the same input (compared as
+   * the tool's schema parsed it, whatever the key order); `"name"` matches
+   * any call of the same tool. `false`, the default, asks every time, as
+   * before. A tool's own `rememberDenials` wins over this.
+   *
+   * A run is one turn: the refusal arrives on the turn that answers the
+   * approval and is remembered until that turn's run ends. The next message
+   * from the user starts a new run that asks again. Whatever the setting,
+   * the run lists its refusals on `AgentRun.denials` and
+   * `AgentHookContext.denials`.
+   */
+  rememberDenials?: RememberDenials;
+  /**
    * What happens when the provider cuts a tool call whose arguments went past
    * its `maxToolArgumentChars` (#1259), once its own retries are spent.
    *
@@ -1674,6 +1704,17 @@ export interface CreateAgentParams<
    * `AgentMemoryOptions` and docs/ai-memory.md.
    */
   memory?: M;
+}
+
+/** See `CreateAgentParams.rememberDenials`. */
+export type RememberDenials = boolean | "name";
+
+function assertRememberDenials(value: unknown, owner: string): void {
+  if (value !== undefined && typeof value !== "boolean" && value !== "name") {
+    throw new Error(
+      `${owner} has a rememberDenials of ${JSON.stringify(value)}: it has to be true, false or "name".`,
+    );
+  }
 }
 
 function assertOnToolArgumentsTooLong(value: unknown, owner: string): void {
@@ -2307,6 +2348,11 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
   AgentStreamEvent<T, O>
 > {
   readonly runId: string;
+  /**
+   * The approvals the user refused in this run so far, in the order they
+   * came (#1260). See `CreateAgentParams.rememberDenials`.
+   */
+  readonly denials: readonly ToolDenial[];
   /** Numbered events, replayable from a cursor. `toResponse` is this, encoded. */
   frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
   toResponse(params?: { from?: number }): Response;
@@ -2361,6 +2407,7 @@ type RunConfig = {
   output?: Schema<any>;
   maxSteps: number;
   toolExecution: ToolExecution;
+  rememberDenials: RememberDenials;
   /** How many cut tool calls a run sends back to the model; `0` fails at the first. */
   cutCallsToModel: number;
   maxDepth: number;
@@ -2552,6 +2599,7 @@ export class Agent<
       output: params.output as Schema<any> | undefined,
       maxSteps: this.maxSteps,
       toolExecution: params.toolExecution ?? "parallel",
+      rememberDenials: params.rememberDenials ?? false,
       cutCallsToModel:
         typeof params.onToolArgumentsTooLong === "object" ? params.onToolArgumentsTooLong.toolError : 0,
       maxDepth: this.maxDepth,
@@ -2616,6 +2664,7 @@ export class Agent<
     if (params.maxRunDurationMs != null) {
       assertDuration(params.maxRunDurationMs, `The agent "${params.name}"`, "maxRunDurationMs");
     }
+    assertRememberDenials(params.rememberDenials, `The agent "${params.name}"`);
     assertOnToolArgumentsTooLong(params.onToolArgumentsTooLong, `The agent "${params.name}"`);
     const block = params.jobs?.contextBlock;
     if (block && block.max !== undefined && !(Number.isInteger(block.max) && block.max > 0)) {
@@ -3569,6 +3618,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * executes, so only that execution sees it.
    */
   private readonly approvals = new Map<string, ToolApprovalRecord>();
+  /** See `AgentRun.denials`. */
+  readonly denials: ToolDenial[] = [];
   private finishReason: FinishReason = "stop";
   /** Calls cut at `maxToolArgumentChars` sent back to the model so far (#1259). */
   private cutCalls = 0;
@@ -4965,6 +5016,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         kind = null;
       }
       if (kind) {
+        const earlier = kind === "approval" ? this.deniedEarlier(resolved.tool, call) : undefined;
+        if (earlier) {
+          this.addResult(message, {
+            type: "tool-result",
+            toolCallId: call.toolCallId,
+            name: call.name,
+            status: "denied",
+            cause: "denied-earlier",
+            ...(earlier.approval.reason !== undefined ? { reason: earlier.approval.reason } : {}),
+          });
+          continue;
+        }
         if (this.onPending === "deny") {
           this.addResult(message, this.deniedByPolicy(call));
           continue;
@@ -5163,6 +5226,22 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       );
       return true;
     }
+  }
+
+  /**
+   * The refusal in this run a new call of `tool` matches, when the tool (or
+   * the agent) remembers refusals (#1260). `call.input` is already the parsed
+   * value, as the refused call's is, so the two compare like for like.
+   */
+  private deniedEarlier(tool: AnyAgentTool, call: ToolCallPart): ToolDenial | undefined {
+    const remember = tool.rememberDenials ?? this.config.rememberDenials;
+    if (!remember || this.denials.length === 0) return undefined;
+    const name = String(call.name);
+    const input = remember === "name" ? undefined : canonicalize(call.input);
+    return this.denials.find(
+      (denial) =>
+        denial.name === name && (input === undefined || canonicalize(denial.input) === input),
+    );
   }
 
   /** What `requiresApproval`'s function and `approvalPreview` are given. */
@@ -7067,6 +7146,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           throw error;
         }
       }
+      const approval = this.approvalRecord(false, answer.reason);
+      this.denials.push({ toolCallId: call.toolCallId, name, input: call.input, approval });
       return {
         type: "tool-result",
         toolCallId: call.toolCallId,
@@ -7074,7 +7155,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         status: "denied",
         cause: "refused",
         reason: answer.reason,
-        approval: this.approvalRecord(false, answer.reason),
+        approval,
       };
     }
 

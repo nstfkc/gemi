@@ -197,8 +197,10 @@ public struct ToolResultPart: JSONObjectView, Identifiable {
     case ok(JSONValue)
     case error(AgentError)
     /// The call did not complete: `"refused"` by the client, `"stopped"` by a
-    /// cancel that landed while it was in flight, or `"interrupted"` when the
-    /// server stopped mid-call (it may have run in part or in full).
+    /// cancel that landed while it was in flight, `"interrupted"` when the
+    /// server stopped mid-call (it may have run in part or in full), or
+    /// `"denied-earlier"` for a repeat of a call already refused in the run,
+    /// refused without asking.
     case denied(cause: String, reason: String?)
   }
 
