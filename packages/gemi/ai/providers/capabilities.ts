@@ -59,6 +59,7 @@ export function capabilitiesForModel(model: string): ProviderCapabilities {
       fileInput: false,
       parallelToolCalls: true,
       toolSearch: false,
+      supportsForcedToolChoice: true,
     };
   }
 
@@ -73,6 +74,7 @@ export function capabilitiesForModel(model: string): ProviderCapabilities {
       fileInput: true,
       parallelToolCalls: family.major > 1,
       toolSearch: supportsToolSearch(family),
+      supportsForcedToolChoice: true,
     };
   }
 
@@ -85,6 +87,7 @@ export function capabilitiesForModel(model: string): ProviderCapabilities {
       fileInput: family.major > 4 || id.startsWith("gpt-4o") || id.startsWith("gpt-4.1"),
       parallelToolCalls: true,
       toolSearch: supportsToolSearch(family),
+      supportsForcedToolChoice: true,
     };
   }
 
@@ -94,6 +97,7 @@ export function capabilitiesForModel(model: string): ProviderCapabilities {
     fileInput: true,
     parallelToolCalls: true,
     toolSearch: true,
+    supportsForcedToolChoice: true,
   };
 }
 
@@ -159,6 +163,7 @@ export function capabilitiesForClaude(model: string): ProviderCapabilities {
     fileInput: true,
     parallelToolCalls: true,
     toolSearch: false,
+    supportsForcedToolChoice: supportsForcedToolChoice(model),
   };
 }
 

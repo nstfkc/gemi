@@ -1831,6 +1831,14 @@ export type PrepareStepResult = {
    * (text only; the tools are still sent, so the prompt prefix is the same),
    * or `{ name }` (that tool, which must be offered on this call). The next
    * step goes back to the model's choice.
+   *
+   * On a provider that cannot force a tool (`capabilities.
+   * supportsForcedToolChoice` is `false`), a forced choice is emulated
+   * (#1261): the call's system prompt ends with a line naming the tool (or
+   * "one of your tools"), and a step that answers without any tool call is
+   * asked once more with the same choice and line, as the next step (a hook
+   * that answers a `toolChoice` of its own for that step wins). If that
+   * answer has no tool call either, the run ends as it would have.
    */
   toolChoice?: ProviderToolChoice;
 };
@@ -3100,6 +3108,16 @@ function withActiveTools(config: RunConfig, names: readonly string[], owner: str
 }
 
 /**
+ * The system line that stands in for a forced `toolChoice` on a provider that
+ * cannot force one (#1261).
+ */
+function forcedToolLine(choice: ProviderToolChoice): string {
+  return typeof choice === "object"
+    ? `In this step, call the tool "${choice.name}". The turn is not done until you have called it.`
+    : "In this step, call one of your tools. The turn is not done until you have called one.";
+}
+
+/**
  * Why a step's `toolChoice` (#1010) can't be sent, or `undefined` when it can.
  * A forced tool has to be a tool (not a namespace) this call offers.
  */
@@ -3224,6 +3242,11 @@ function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown, unkn
 
 type StepOutcome = {
   reason: FinishReason;
+  /**
+   * The forced `toolChoice` this step emulated (#1261), when the provider
+   * cannot force it and the step was not already the second ask.
+   */
+  emulated?: ProviderToolChoice;
   error?: AgentError;
   /** The HTTP response behind `error`, when the provider reported one, and
    *  the cut call when it was `maxToolArgumentChars` (#1259). */
@@ -3544,6 +3567,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly compactMemo = new Map<string, ThreadSummary | null>();
   /** How the previous model call ended, for `prepareStep`. */
   private lastStep: { reason: FinishReason; usage?: Usage } | undefined;
+  /**
+   * A forced `toolChoice` the last step emulated and did not get (#1261):
+   * the next step asks again with it, once.
+   */
+  private forceAgain: ProviderToolChoice | undefined;
   /** The tools the current step offers, when its `prepareStep` narrowed them (#1010). */
   private stepOffered: ReadonlySet<string> | undefined;
   private produced: AgentMessage[] = [];
@@ -4214,6 +4242,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         (part): part is ToolCallPart => part.type === "tool-call" && part !== cut,
       );
 
+      // A forced step the provider could not force, answered without a tool
+      // call (#1261): asked once more, with the same line, before it ends the
+      // run as it would have.
+      if (calls.length === 0 && !cut && outcome.emulated && step < maxSteps) {
+        this.forceAgain = outcome.emulated;
+        await this.finalizeMessage(outcome.reason);
+        continue;
+      }
+
       if (calls.length === 0 && !cut) {
         this.finishReason = outcome.reason;
         await this.finalizeMessage(outcome.reason);
@@ -4419,6 +4456,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     if ("error" in request) return { reason: "error", error: request.error };
     this.stepOffered = request.offered;
 
+    // A forced choice the provider sends as `auto` (#1261): the step is told
+    // in words instead. Not on a second ask, which is the last one.
+    const forced =
+      request.toolChoice === "required" || typeof request.toolChoice === "object";
+    const emulating = forced && provider.capabilities.supportsForcedToolChoice === false;
+    const secondAsk = this.forceAgain !== undefined;
+    this.forceAgain = undefined;
+    const systemPrompt = emulating
+      ? [request.instructions, forcedToolLine(request.toolChoice!)].filter(Boolean).join("\n\n")
+      : request.instructions;
+
     let outcome: StepOutcome = { reason: "stop" };
     const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
     // Searches the model ran in this step, waiting for the call that follows
@@ -4437,7 +4485,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // forever and must not be in every *request* forever, and a long thread
       // is cut to the context window. See `prepareRequest`.
       messages: request.messages,
-      systemPrompt: request.instructions,
+      systemPrompt,
       tools: request.tools.length > 0 ? request.tools : undefined,
       ...promptCacheKeyParam(this.config, request.instructions, request.tools),
       ...(request.toolChoice !== undefined ? { toolChoice: request.toolChoice } : {}),
@@ -4674,6 +4722,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
     }
 
+    if (emulating && !secondAsk && !outcome.error) outcome.emulated = request.toolChoice;
     return outcome;
   }
 
@@ -4823,6 +4872,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (answer.activeTools !== undefined) activeTools = answer.activeTools;
       if (answer.toolChoice !== undefined) toolChoice = answer.toolChoice;
     }
+    // The second ask of a forced step a provider could not force (#1261).
+    // A hook that answered a choice of its own for this step still wins.
+    if (this.forceAgain && toolChoice === undefined) toolChoice = this.forceAgain;
 
     let tools = this.config.providerTools;
     let offered = this.config.offered;
