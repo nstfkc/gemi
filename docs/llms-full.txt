@@ -6643,6 +6643,7 @@ What it returns:
 |---|---|
 | `data` | `{ [key]: data }`, each typed from its route. Non-nullable for a key that suspends, `T \| undefined` for one that doesn't. |
 | `loading` | `true` while at least one key is loading (including a key whose `params`/`search` changed and is loading behind its previous data). |
+| `loadingByKey` | `{ [key]: boolean }`, each key's own loading flag: show one key's spinner apart from the others without a second hook. |
 | `error` | `{ [key]: error \| null }`. Under suspense a key's error throws to the error boundary instead, as with `useQuery`. |
 | `mutate` | `{ [key]: mutate }`, `useQuery`'s `mutate` for that key. |
 | `refetch` | `{ [key]: () => void }`. |
@@ -6658,6 +6659,13 @@ How it behaves:
 - **With `suspense: false`** the answers of keys loading for the first time are
   held back until every such key answered, then all of them commit together. After
   that, each key's updates (a `mutate`, a revalidation, a poll) render as they land.
+  Their requests start in the render too, never waiting for the commit: next to
+  suspending keys they go out in the same round.
+- **Mixing suspending and non-suspending reads** (one key on a spinner, the rest
+  behind the segment's `Loading`): either one call with per-key `suspense`, or two
+  hooks with the **`suspense: false` hook first**. A suspending hook throws before
+  the next hook runs, so a non-suspending hook after it only starts once the
+  suspending reads answered: two request rounds on a cold load.
 - **Config:** a key's third element is its `useQuery` config; a second argument
   applies config to every key (`useMultipleQuery(queries, { suspense: false })`).
   Resolution is key config → second argument → app `queryConfig` → defaults.
@@ -6668,7 +6676,11 @@ How it behaves:
   data meanwhile, with `loading: true`. Keys can be added or removed between
   renders.
 - **SSR:** prefetched data (`Query.prefetch`) is read per key exactly like
-  `useQuery`; a suspense key without it logs the same missing-prefetch warning.
+  `useQuery`; a suspense key without it logs the same missing-prefetch warning. On a
+  streaming render a `suspense: false` key without prefetched data starts its
+  request in the request's store (as does a `suspense: false` `useQuery`) and
+  renders loading; its answer streams into the client cache, so the browser
+  doesn't fetch it again.
 - **A query that depends on another's answer** can't be a key of the same call:
   every key is read in the same render. Read it in a child component that gets the
   first answer as a prop, or in its own `useQuery`.

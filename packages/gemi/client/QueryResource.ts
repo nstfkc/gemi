@@ -82,6 +82,13 @@ export class QueryResource {
    * disconnect through `req.signal`.
    */
   private controllers = new Map<string, Set<AbortController>>();
+  /**
+   * Variants whose data came from a streamed server payload (#1253). A reader
+   * that does not suspend rendered them on the server before their answer
+   * existed, so hydration must render them the same way; see
+   * `peekForHydration`.
+   */
+  private streamed = new Set<string>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -97,7 +104,10 @@ export class QueryResource {
    * otherwise the resource cache (which is keyed by path for the lifetime of
    * the app) would keep serving the first payload and revalidate it over `/api`.
    */
-  hydrate(initialState: Record<string, any> | null | undefined) {
+  hydrate(
+    initialState: Record<string, any> | null | undefined,
+    streamed = false,
+  ) {
     const store = this.store.getValue();
     const now = Date.now();
     let changed = false;
@@ -116,6 +126,7 @@ export class QueryResource {
       if (current?.hasData && current.data === data) continue;
 
       this.fill(store, variantKey, data, now);
+      if (streamed) this.streamed.add(variantKey);
       changed = true;
     }
 
@@ -166,6 +177,37 @@ export class QueryResource {
    */
   peek(variantKey: string) {
     return this.store.getValue().get(variantKey);
+  }
+
+  /**
+   * The server snapshot of a reader that does not suspend. On the server it
+   * rendered only what the document's `__GEMI_DATA__` carried, never a
+   * streamed answer (its request may still have been on the wire), so while
+   * hydrating it leaves out data that arrived through the stream. React
+   * re-renders with `peek` right after hydrating.
+   */
+  peekForHydration(variantKey: string) {
+    return this.streamed.has(variantKey) ? undefined : this.peek(variantKey);
+  }
+
+  /** Whether a request for this variant is on the wire. */
+  isFetching(variantKey: string) {
+    return this.inflight.has(variantKey);
+  }
+
+  /**
+   * The render-phase start for a reader that does not suspend (#1253): a
+   * variant with nothing cached and no request on the wire starts its request
+   * now, so it runs alongside the suspending reads of the same render instead
+   * of waiting for the commit's effect. Silent, like `read`: it never writes
+   * the store synchronously, and the in-flight mark makes every later read
+   * and the mount effect's `getVariant` join it.
+   */
+  start(variantKey: string) {
+    if (typeof window === "undefined") return;
+    if (this.store.getValue().has(variantKey)) return;
+    if (this.inflight.has(variantKey)) return;
+    this.resolveVariant(variantKey, true);
   }
 
   /**

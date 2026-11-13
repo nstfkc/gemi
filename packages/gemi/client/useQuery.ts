@@ -264,7 +264,7 @@ export function useQuery<T extends keyof GetRPC>(
   // `user` is `useUser`'s own section, not a query default.
   const { user: _user, ...queryConfig } = useContext(QueryConfigContext) ?? {};
   const merged = mergeDefinedConfig<Config<Data<T>>>(queryConfig, config);
-  return useFrameworkQuery(url, options, merged);
+  return useFrameworkQuery(url, options, merged, { startOnServer: true });
 }
 
 /**
@@ -273,13 +273,22 @@ export function useQuery<T extends keyof GetRPC>(
  * (`useUser`'s `suspense: false`, `useSignIn`'s `lazy`) build on this so an
  * app-wide `queryConfig` can never change their semantics. Deliberately not
  * exported from the package root.
+ *
+ * `startOnServer`: a `suspense: false` query starts its request on a
+ * streaming server render too (#1253). Only `useQuery` asks for it: `useUser`
+ * of an anonymous visitor would put a 401 for `/auth/me` on every render, and
+ * report it through `onRequestFail`.
  */
 export function useFrameworkQuery<T extends keyof GetRPC>(
   url: T,
-  ...args: [options?: Options<T>, config?: Config<Data<T>>]
+  ...args: [
+    options?: Options<T>,
+    config?: Config<Data<T>>,
+    internal?: { startOnServer?: boolean },
+  ]
 ): QueryReturn<T, NestedPrettify<Data<T>> | undefined> {
   const _params = useParams();
-  const [_options = defaultOptions, _config = defaultConfig] = args;
+  const [_options = defaultOptions, _config = defaultConfig, internal] = args;
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
   const suspense = config.suspense !== false && !config.lazy;
@@ -402,7 +411,17 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     () => resource.peek(variantKey),
     [resource, variantKey],
   );
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  // A reader that doesn't suspend hydrates without streamed answers: the
+  // server rendered it before they existed (see `peekForHydration`).
+  const getServerSnapshot = useCallback(
+    () => resource.peekForHydration(variantKey),
+    [resource, variantKey],
+  );
+  const snapshot = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    suspense ? getSnapshot : getServerSnapshot,
+  );
 
   // `keepPreviousData`: remember the last snapshot that had data, and show it
   // whenever the current one is loading without data (e.g. a variant change
@@ -415,11 +434,14 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     }
   }, [snapshot]);
 
+  // A variant with no state yet counts as loading unless the query is lazy:
+  // its request is on the wire (started silently in the render) or goes out
+  // in the commit's effect.
   let state = snapshot;
   if (
     config.keepPreviousData &&
     !snapshot?.hasData &&
-    snapshot?.loading &&
+    (snapshot ? snapshot.loading : !lazy) &&
     lastDataRef.current
   ) {
     state = { ...lastDataRef.current, loading: true };
@@ -460,6 +482,21 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
       }
     } else {
       readPromise = resource.read(variantKey, config.staleTime).promise;
+    }
+  }
+
+  // A query that doesn't suspend starts in the render too (#1253), so its
+  // request runs alongside the suspending ones instead of after them: in the
+  // browser when nothing is cached or on the wire for it, and on a streaming
+  // server render in the request's store, which streams the answer into the
+  // client cache. It never waits for it: the promise is not thrown.
+  if (!suspense && !lazy && !snapshot?.hasData && !snapshot?.error) {
+    if (typeof window === "undefined") {
+      if (internal?.startOnServer) {
+        serverQueries?.ensure(url, { params, search });
+      }
+    } else {
+      resource.start(variantKey);
     }
   }
 
@@ -593,6 +630,9 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     focusRef.current.eligible = true;
     const store = resource.store.getValue();
     const variant = store.get(variantKey);
+    // A request another reader started in its render is silent: on the wire
+    // without `loading` in the store.
+    if (resource.isFetching(variantKey)) return;
     if (!variant || (!variant.loading && !variant.hasData)) {
       resource.refetch(variantKey);
     }

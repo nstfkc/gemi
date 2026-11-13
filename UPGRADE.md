@@ -1,3 +1,28 @@
+# Unreleased
+
+## client: `suspense: false` queries start in the render; `loadingByKey` (#1253)
+
+**Behaviour change and new API (minor version).** A `suspense: false` key of `useMultipleQuery`, and a `suspense: false` `useQuery`, used to start its request only in the mount effect. Next to a suspending read the effect waits until every suspending read of the component answered, and on a server render it never runs, so a cold load took two request rounds. Now:
+
+- **In the browser** such a query starts its request during the render when nothing is cached or on the wire for it. The request is marked in flight right away, so the mount effect and every other reader of the same variant join it. Its answer is never waited for: the component doesn't suspend on it.
+- **On a streaming server render** it starts its request in the request's store (like `Query.prefetch`, without waiting for it) and still renders as loading. Its answer streams into the client cache, so the browser doesn't fetch it again. While hydrating, a non-suspending reader leaves out streamed answers so it matches the server's markup, then re-renders with them right after.
+- **`loadingByKey`**: `useMultipleQuery` returns `{ [key]: boolean }` next to `loading`, so a view can show one key's spinner apart from the others without a second hook:
+
+```tsx
+const { data, loading, loadingByKey } = useMultipleQuery({
+  account: ["/settings/account"],
+  invoices: ["/settings/invoices", {}, { suspense: false }],
+});
+loadingByKey.invoices; // true until /settings/invoices answered
+```
+
+What to check:
+
+- Hook order matters when a component has two query hooks: put the `suspense: false` hook **before** the suspending one. A suspending hook throws before the next hook runs, so a `suspense: false` hook after it still starts only once the suspending reads answered. One `useMultipleQuery` with per-key `suspense` avoids the question. The best-practices rule `query-multiple-query-per-component` says this.
+- A `suspense: false` query mounted in a render that React then discards (a transition that never commits) may have started its request already, as suspending reads always did. Nothing else changes for code that only renders committed trees.
+- Tests that counted requests for a `suspense: false` query next to a suspending one now see them all in the first render.
+- On a streaming server render, a `suspense: false` query that fails (a 401 for an anonymous visitor, say) is now reported through `onRequestFail`, as a suspending query's failure already was. `useUser` doesn't start `/auth/me` on the server.
+
 # 0.206.0
 
 ## client: `useMultipleQuery`, several queries in one render cycle (#1251)
