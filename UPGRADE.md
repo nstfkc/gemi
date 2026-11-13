@@ -1,4 +1,4 @@
-# Unreleased
+# 0.207.1
 
 ## client: a suspending query suspends again on a new variant (#1255)
 
