@@ -1,3 +1,26 @@
+# Unreleased
+
+## client: `useMultipleQuery`, several queries in one render cycle (#1251)
+
+**New API (minor version).** `useMultipleQuery` reads several queries in one hook:
+
+```tsx
+const { data, loading, error, mutate, refetch } = useMultipleQuery({
+  products: ["/products"],
+  category: ["/categories/:categoryId", { params: { categoryId } }],
+});
+```
+
+Each key is `[path, options?, config?]`, the arguments `useQuery` takes, and `data`, `error`, `mutate` and `refetch` are objects with one entry per key, typed from each route. `loading` is true while any key is loading. It reads the same cache as `useQuery`.
+
+n `useQuery` calls in one component fetch one after the other under suspense and render about 2n + 1 times (n + 1 with `suspense: false`). `useMultipleQuery` sends all requests in the same render and renders 3 times under suspense, 2 with `suspense: false`, whatever n is.
+
+What to check:
+
+- Nothing changes for existing code. `useQuery`'s behaviour is unchanged (its per-query effects moved into shared helpers that both hooks use).
+- Components with several `useQuery` calls can switch: put the independent reads in one `useMultipleQuery`; a query that needs another's answer stays a separate hook. The gemi best-practices skill has a new rule for this (`query-multiple-query-per-component`).
+- `lazy` is not a per-key option.
+
 # 0.205.4
 
 ## change-feed: `ChangeFeed.cursor` and `head` read on the open transaction (#1249)

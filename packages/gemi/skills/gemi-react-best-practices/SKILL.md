@@ -6,7 +6,7 @@ description: Best practices for the gemi framework (Bun + Vite + React 19 SSR fu
 # gemi Best Practices
 
 Rules for building on **gemi**, the full-stack TypeScript framework this app runs on
-(Bun + Vite, React 19 SSR). 47 rules across 11 categories, ordered by impact.
+(Bun + Vite, React 19 SSR). 48 rules across 11 categories, ordered by impact.
 
 Every rule is derived from the gemi documentation and from patterns that recur across
 gemi codebases. This skill ships with the `gemi` package, so it describes the
@@ -140,6 +140,7 @@ carried for free.
 - `query-suspense-default` - `suspense: true` is the DEFAULT and throws to the nearest boundary
 - `query-lazy-vs-mount-gate` - A lazy query does not refetch when its variant changes
 - `query-share-cache-key` - Identical path + params + search dedupes across components for free
+- `query-multiple-query-per-component` - Never call `useQuery` twice in one component; several reads go through `useMultipleQuery`
 - `query-keep-previous-data` - Keep the previous page rendered while the next variant loads
 - `query-mutate-over-refetch` - Write the cache with `mutate` / `useMutate` / `updates` instead of refetching
 - `query-debounce-search-variant` - Debounce a value before it becomes a query variant
@@ -216,6 +217,7 @@ Counter-intuitive behaviours that produce silent failures rather than errors:
 | `paginate()` silently caps `perPage` at 100 | `orm-paginate-helper` |
 | Command discovery **imports** every file under `app/commands` | `service-lazy-not-module-scope` |
 | A suspending query blanks everything up to the nearest boundary | `query-suspense-default` |
+| Two `useQuery` calls in one component fetch one after the other and render ~2n times | `query-multiple-query-per-component` |
 | Returning `{ error }` from a controller is a **200** the client reads as success | `controller-throw-framework-errors` |
 
 ## How to Use

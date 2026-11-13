@@ -15,38 +15,33 @@ import type { UnwrapPromise } from "../utils/type";
 import { QueryConfigContext, QueryManagerContext } from "./QueryManagerContext";
 import { ServerQueryContext } from "./ServerQueryContext";
 import { DEFAULT_STALE_TIME } from "./QueryResource";
-import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
-import { toVariantKey } from "../utils/variantKey";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
-import { isPlainObject } from "./isPlainObject";
 import {
   DEFAULT_RETRY,
-  retryDelayFor,
-  shouldRetryQuery,
-  type QueryFailure,
   type RetryDelayOption,
   type RetryOption,
 } from "./retryPolicy";
+import {
+  createPollState,
+  mergeDefinedConfig,
+  mutateQuery,
+  onHttpReload,
+  reloadQuery,
+  resolveQueryTarget,
+  retryFailedQuery,
+  retryWhenOnline,
+  revalidateOnFocus,
+  stepPoll,
+  stopPoll,
+  warnUnprefetched,
+  type FocusState,
+  type PollState,
+} from "./queryEffects";
 import type { LiveChannel } from "./realtime/live";
 import { followLive } from "./realtime/loader";
 import { RealtimeContext } from "./realtime/RealtimeContext";
-
-/**
- * A DOM event or React's synthetic one. Never a plain object, so a cached
- * value that happens to have a `nativeEvent` key is not mistaken for one.
- */
-function isEventLike(value: unknown): boolean {
-  if (typeof value !== "object" || value === null || isPlainObject(value)) {
-    return false;
-  }
-  if (typeof Event !== "undefined" && value instanceof Event) return true;
-  return (
-    "nativeEvent" in value &&
-    typeof (value as { preventDefault?: unknown }).preventDefault === "function"
-  );
-}
 
 export interface Config<T> {
   fallbackData?: T;
@@ -136,7 +131,7 @@ type WithOptionalValues<T> = {
   [K in keyof T]: T[K] | null;
 };
 
-const defaultConfig: Config<any> = {
+export const defaultConfig: Config<any> = {
   fallbackData: null,
   keepPreviousData: true,
   retry: DEFAULT_RETRY,
@@ -167,7 +162,9 @@ type QueryOptions<T extends keyof GetRPC> = {
 
 type Error = Record<string, unknown>;
 
-const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
+export const defaultOptions: QueryOptions<any> & {
+  params?: Record<string, any>;
+} = {
   params: {} as Record<string, string>,
   search: {} as Record<string, string>,
 };
@@ -266,14 +263,7 @@ export function useQuery<T extends keyof GetRPC>(
   // is already sanitized at the provider (see `QueryManagerProvider`).
   // `user` is `useUser`'s own section, not a query default.
   const { user: _user, ...queryConfig } = useContext(QueryConfigContext) ?? {};
-  const merged: Config<Data<T>> = { ...queryConfig };
-  if (config) {
-    for (const key of Object.keys(config) as Array<keyof Config<Data<T>>>) {
-      if (config[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = config[key];
-      }
-    }
-  }
+  const merged = mergeDefinedConfig<Config<Data<T>>>(queryConfig, config);
   return useFrameworkQuery(url, options, merged);
 }
 
@@ -293,13 +283,14 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
   const suspense = config.suspense !== false && !config.lazy;
-  const params =
-    "params" in options ? { ..._params, ...options.params } : _params;
-  const search = "search" in options ? (options.search ?? {}) : {};
+  const {
+    params,
+    search,
+    path: currentPath,
+    variantKey: currentVariantKey,
+  } = resolveQueryTarget(url, options, _params);
   const { getResource } = useContext(QueryManagerContext);
   const serverQueries = useContext(ServerQueryContext);
-  const currentPath = applyParams(url, params);
-  const currentVariantKey = toVariantKey(search);
   // `keepPreviousData` under suspense: read through deferred keys so a
   // variant change never suspends the committed tree. The urgent render keeps
   // showing the previous variant's data; React re-renders in the background
@@ -364,21 +355,8 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // `refetchUntil`'s poll: the pending timer, the last delay it returned
   // (handed back as `duration`), the snapshot/variant it was last evaluated
   // against, and whether a poll's refetch is on the wire.
-  const pollRef = useRef<{
-    timer: ReturnType<typeof setTimeout> | null;
-    duration: number;
-    snapshot: unknown;
-    resource: unknown;
-    variantKey: string | null;
-    awaiting: boolean;
-  }>({
-    timer: null,
-    duration: 0,
-    snapshot: undefined,
-    resource: null,
-    variantKey: null,
-    awaiting: false,
-  });
+  const pollRef = useRef<PollState>(null as unknown as PollState);
+  pollRef.current ??= createPollState();
   const prefetchedRef = useRef(false);
   // Focus revalidation eligibility, deliberately *not* `fetchedRef`: that one
   // is flipped by `prefetch()` too, and a hover prefetch is documented as
@@ -386,12 +364,15 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // revalidation would keep re-requesting it for the life of the component.
   // Only the reads that put data on screen (`trigger`, `refetch`, `mutate`,
   // or simply not being lazy) count.
-  const focusEligibleRef = useRef(!lazy);
-  // The away latch: `focus` fires for things that never left the page —
-  // dismissing an `alert`, returning from devtools — so a revalidation is only
-  // owed when the window actually lost focus or the tab was hidden first.
-  const wasAwayRef = useRef(false);
-  const lastFocusRevalidationRef = useRef(0);
+  // The away latch (`wasAway`): `focus` fires for things that never left the
+  // page — dismissing an `alert`, returning from devtools — so a revalidation
+  // is only owed when the window actually lost focus or the tab was hidden
+  // first.
+  const focusRef = useRef<FocusState>({
+    eligible: !lazy,
+    wasAway: false,
+    last: 0,
+  });
 
   // Subscribing also retains the variant, so an `invalidate` across search
   // variants knows this one is on screen and refetches it now.
@@ -489,17 +470,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     !state?.hasData &&
     process.env.NODE_ENV !== "production"
   ) {
-    const searchHint = variantKey
-      ? `, { search: ${JSON.stringify(
-          Object.fromEntries(new URLSearchParams(variantKey)),
-        )} }`
-      : "";
-    console.warn(
-      `[gemi] useQuery("${url}") rendered on the server without data. ` +
-        `The server never fetches, so this page ships without it and the ` +
-        `client suspends after hydration. Add ` +
-        `\`Query.prefetch("${url}"${searchHint})\` to the route's view handler.`,
-    );
+    warnUnprefetched(url, variantKey);
   }
 
   // While a `keepPreviousData` variant change is pending, the variant loading
@@ -533,36 +504,18 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // instead. The resource owns the timer — one per variant however many
   // readers render it — and drops it once none of them is mounted.
   useEffect(() => {
-    if (suspense || !snapshot?.error || snapshot.loading) return;
-    const cfg = configRef.current;
-    const error = snapshot.error as QueryFailure;
-    const failureCount = Math.max(1, resource.failureCount(variantKey));
-    if (!shouldRetryQuery(failureCount, error, cfg.retry)) return;
-    const delay = retryDelayFor(
-      failureCount,
-      error,
-      cfg.retryDelay,
-      cfg.retryIntervalOnError,
-    );
-    if (cfg.debug) console.log("retrying", variantKey, "in", delay);
-    resource.scheduleRetry(variantKey, delay);
+    if (suspense) return;
+    retryFailedQuery(resource, variantKey, snapshot, configRef.current);
   }, [snapshot, suspense, resource, variantKey]);
 
   // Coming back online retries a query that failed in a way another attempt
   // might fix — e.g. one that ran out of retries while offline — as long as
   // its retry policy would retry that error at all. Silent, and it starts a
   // fresh run of failures.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onOnline = () => {
-      const state = resource.peek(variantKey);
-      if (!state?.error) return;
-      if (!shouldRetryQuery(1, state.error, configRef.current.retry)) return;
-      resource.retryNow(variantKey);
-    };
-    window.addEventListener("online", onOnline);
-    return () => window.removeEventListener("online", onOnline);
-  }, [resource, variantKey]);
+  useEffect(
+    () => retryWhenOnline(resource, variantKey, () => configRef.current),
+    [resource, variantKey],
+  );
 
   // `refetchUntil` runs after every commit, not only when the data changes,
   // so the predicate always sees the current render's closure: one that also
@@ -572,73 +525,22 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // re-render a pending timer is kept, so frequent renders never push the
   // next refetch back.
   useEffect(() => {
-    const poll = pollRef.current;
-    const clear = () => {
-      if (poll.timer) clearTimeout(poll.timer);
-      poll.timer = null;
-    };
-    if (
-      poll.snapshot !== snapshot ||
-      poll.resource !== resource ||
-      poll.variantKey !== variantKey
-    ) {
-      clear();
-      poll.awaiting = false;
-      poll.snapshot = snapshot;
-      poll.resource = resource;
-      poll.variantKey = variantKey;
-    }
-    const refetchUntil = configRef.current.refetchUntil;
-    if (
-      !refetchUntil ||
-      liveOpen ||
-      !snapshot ||
-      snapshot.loading ||
-      !snapshot.hasData ||
-      snapshot.error
-    ) {
-      clear();
-      return;
-    }
-    // The poll's own refetch is on the wire; its answer re-runs this.
-    if (poll.awaiting) return;
-    const nextDuration = refetchUntil(snapshot.data, poll.duration);
-    if (!(nextDuration > 0)) {
-      clear();
-      poll.duration = 0;
-      return;
-    }
-    if (poll.timer) return;
-    poll.duration = nextDuration;
-    poll.timer = setTimeout(() => {
-      poll.timer = null;
-      poll.awaiting = true;
-      resource.refetch(variantKey);
-    }, nextDuration);
+    stepPoll(
+      pollRef.current,
+      resource,
+      variantKey,
+      snapshot,
+      configRef.current.refetchUntil,
+      liveOpen,
+    );
   });
 
-  useEffect(
-    () => () => {
-      const poll = pollRef.current;
-      if (poll.timer) clearTimeout(poll.timer);
-      poll.timer = null;
-      // A StrictMode remount re-runs the effect above with the same snapshot.
-      poll.snapshot = undefined;
-      poll.awaiting = false;
-    },
-    [],
-  );
+  useEffect(() => () => stopPoll(pollRef.current), []);
 
-  const handleReload = useCallback(() => {
-    if (configRef.current.debug) {
-      console.log("Reloading query for", variantKey);
-    }
-    const data = resource.getVariant(
-      variantKey,
-      configRef.current.staleTime,
-    ).data;
-    resource.mutate(variantKey, () => data);
-  }, [variantKey, resource]);
+  const handleReload = useCallback(
+    () => reloadQuery(resource, variantKey, configRef.current),
+    [variantKey, resource],
+  );
 
   useEffect(() => {
     if (!fetchedRef.current || liveOpen) return;
@@ -676,63 +578,19 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // costs nothing — the latch is already spent by the time the second fires.
   useEffect(() => {
     if (!config.revalidateOnFocus) return;
-    const markAway = () => {
-      wasAwayRef.current = true;
-    };
-    const revalidate = () => {
-      if (!focusEligibleRef.current) return;
-      if (document.visibilityState === "hidden") return;
-      if (!wasAwayRef.current) return;
-      const now = Date.now();
-      // Throttled: leave the latch armed so the next return, once the
-      // interval has passed, still revalidates.
-      if (
-        now - lastFocusRevalidationRef.current <
-        configRef.current.focusThrottleInterval
-      ) {
-        return;
-      }
-      wasAwayRef.current = false;
-      lastFocusRevalidationRef.current = now;
-      resource.revalidate(variantKey, configRef.current.staleTime);
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        markAway();
-      } else {
-        revalidate();
-      }
-    };
-    window.addEventListener("blur", markAway);
-    window.addEventListener("focus", revalidate);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      window.removeEventListener("blur", markAway);
-      window.removeEventListener("focus", revalidate);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
+    return revalidateOnFocus(
+      resource,
+      variantKey,
+      focusRef.current,
+      () => configRef.current,
+    );
   }, [config.revalidateOnFocus, resource, variantKey]);
 
-  useEffect(() => {
-    // Feature-checked per method: vitest's `import.meta.hot` shim has `on`
-    // but not `off`.
-    // @ts-ignore
-    if (typeof import.meta.hot?.on === "function") {
-      // @ts-ignore
-      import.meta.hot.on("http-reload", handleReload);
-    }
-    return () => {
-      // @ts-ignore
-      if (typeof import.meta.hot?.off === "function") {
-        // @ts-ignore
-        import.meta.hot.off("http-reload", handleReload);
-      }
-    };
-  }, [handleReload]);
+  useEffect(() => onHttpReload(handleReload), [handleReload]);
 
   const trigger = useCallback(() => {
     fetchedRef.current = true;
-    focusEligibleRef.current = true;
+    focusRef.current.eligible = true;
     const store = resource.store.getValue();
     const variant = store.get(variantKey);
     if (!variant || (!variant.loading && !variant.hasData)) {
@@ -751,7 +609,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
 
   const refetch = useCallback(() => {
     fetchedRef.current = true;
-    focusEligibleRef.current = true;
+    focusRef.current.eligible = true;
     resource.refetch(variantKey);
   }, [resource, variantKey]);
 
@@ -760,60 +618,12 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>,
   ): void;
   function mutate(fn?: any) {
-    // `onClick={mutate}` hands React's event to `mutate` as if it were the
-    // new data. It is not a plain object, so the shape check below threw —
-    // and where the data is untyped nothing caught it at compile time. An
-    // event carries no data to write, so it means what a bare `mutate()`
-    // means: refetch.
-    if (isEventLike(fn)) fn = undefined;
     // Either form ends in a fetch whose result the component renders, so a
     // lazy query mutated by hand is as focus-eligible as a triggered one.
-    focusEligibleRef.current = true;
-    if (!fn) {
+    focusRef.current.eligible = true;
+    if (mutateQuery(resource, variantKey, fn) === "refetch") {
       fetchedRef.current = true;
-      resource.refetch(variantKey);
-      return;
     }
-    return resource.mutate(variantKey, (data: any) => {
-      // `null` is a legitimate cached body; only `undefined` means the query
-      // hasn't produced anything (and `mutate` refetches instead of calling
-      // this in that case).
-      if (data === undefined) {
-        console.warn("Mutate function called before the query.");
-        return data;
-      }
-
-      // The callback's return value *replaces* the cached data. The type checks
-      // below only ensure the shape matches so a stray value can't corrupt the
-      // cache; they do not merge or append.
-      const updatedData = typeof fn === "function" ? fn(data) : fn;
-
-      if (isPlainObject(data)) {
-        if (isPlainObject(updatedData)) {
-          return updatedData;
-        }
-        throw new Error(
-          "Mutate function must return an object when the current data is an object.",
-        );
-      }
-
-      if (Array.isArray(data)) {
-        if (Array.isArray(updatedData)) {
-          return updatedData;
-        }
-        throw new Error(
-          "Mutate function must return an array when the current data is an array.",
-        );
-      }
-
-      if (typeof data !== typeof updatedData) {
-        throw new Error(
-          "Mutate function must return the same type as the current data.",
-        );
-      }
-
-      return updatedData;
-    });
   }
 
   // Suspend last, after every hook has run: the attempt React discards ran

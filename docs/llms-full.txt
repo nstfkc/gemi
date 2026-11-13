@@ -6603,6 +6603,76 @@ nothing.
 
 To update a query from **outside** the component that owns it, use `useMutate`.
 
+## Several queries at once: `useMultipleQuery`
+
+A component that reads more than one query uses `useMultipleQuery` instead of
+several `useQuery` calls. Each key takes the arguments `useQuery` takes, as a
+tuple `[path, options?, config?]`:
+
+```tsx
+import { useMultipleQuery } from "gemi/client";
+
+function ProductPage({ categoryId }: { categoryId: number }) {
+  const { data, loading, error, mutate, refetch } = useMultipleQuery({
+    products: ["/products", { search: { sort: "price" } }],
+    category: ["/categories/:categoryId", { params: { categoryId } }],
+    stock: ["/stock", {}, { refetchUntil: (s) => (s.syncing ? 2000 : 0) }],
+  });
+
+  data.products; // typed from GET /products
+  data.category; // typed from GET /categories/:categoryId
+}
+```
+
+Why not n `useQuery` calls: a suspending `useQuery` throws before the next one
+runs, so n of them fetch **one after the other** and render about 2n + 1 times. With
+`suspense: false` they fetch in parallel but render once per answer. `useMultipleQuery`
+sends every request in the same render and commits all keys together:
+
+| n queries | `useQuery` × n | `useMultipleQuery` |
+|---|---|---|
+| suspense (default) | 2n + 1 renders, requests in sequence | 3 renders, requests in parallel |
+| `suspense: false` | n + 1 renders | 2 renders |
+
+(3 under suspense is what a single `useQuery` takes too: the suspended attempt,
+React's prerender of the suspended tree, and the commit.)
+
+What it returns:
+
+| Field | Value |
+|---|---|
+| `data` | `{ [key]: data }`, each typed from its route. Non-nullable for a key that suspends, `T \| undefined` for one that doesn't. |
+| `loading` | `true` while at least one key is loading (including a key whose `params`/`search` changed and is loading behind its previous data). |
+| `error` | `{ [key]: error \| null }`. Under suspense a key's error throws to the error boundary instead, as with `useQuery`. |
+| `mutate` | `{ [key]: mutate }`, `useQuery`'s `mutate` for that key. |
+| `refetch` | `{ [key]: () => void }`. |
+
+How it behaves:
+
+- **Same cache as `useQuery`.** A key and a `useQuery` of the same path, params and
+  search share one request and one cached value, and `mutate`, `useMutate`,
+  `updates` and `useSetQueryData` reach both.
+- **Under suspense** every key without data starts its request in the render, and
+  the component suspends once until all of them answered (or one failed: its error
+  goes to the boundary).
+- **With `suspense: false`** the answers of keys loading for the first time are
+  held back until every such key answered, then all of them commit together. After
+  that, each key's updates (a `mutate`, a revalidation, a poll) render as they land.
+- **Config:** a key's third element is its `useQuery` config; a second argument
+  applies config to every key (`useMultipleQuery(queries, { suspense: false })`).
+  Resolution is key config → second argument → app `queryConfig` → defaults.
+  `lazy` is not accepted: a query fetched on `trigger()` doesn't load with the
+  others, so give it its own `useQuery`.
+- **Changing args:** when a key's `params` or `search` change, only that key
+  refetches. With `keepPreviousData` (the default) it keeps showing its previous
+  data meanwhile, with `loading: true`. Keys can be added or removed between
+  renders.
+- **SSR:** prefetched data (`Query.prefetch`) is read per key exactly like
+  `useQuery`; a suspense key without it logs the same missing-prefetch warning.
+- **A query that depends on another's answer** can't be a key of the same call:
+  every key is read in the same render. Read it in a child component that gets the
+  first answer as a prop, or in its own `useQuery`.
+
 ## Paged lists: `useInfiniteQuery`
 
 A "load more" list — pages appended as the user scrolls — is `useInfiniteQuery`.
