@@ -104,6 +104,7 @@ import type {
   NestedRun,
   PendingToolCall,
   ToolApprovalRecord,
+  ToolArgumentsTooLong,
   ToolCallPart,
   ToolSearchRecord,
   ToolResultPart,
@@ -1532,6 +1533,21 @@ export interface CreateAgentParams<
    */
   toolExecution?: ToolExecution;
   /**
+   * What happens when the provider cuts a tool call whose arguments went past
+   * its `maxToolArgumentChars` (#1259), once its own retries are spent.
+   *
+   * `"fail"` (the default) fails the run, as before: `result().error` has
+   * `toolArgumentsTooLong` and `result({ throwOnError: true })` rejects with
+   * a `ToolArgumentsTooLongError`.
+   *
+   * `{ toolError: n }` sends the cut call back to the model, up to `n` times
+   * in a run: the call gets an `invalid_tool_input` error result that tells
+   * the model to split the work over smaller calls, its cut arguments are
+   * replaced by `{}`, the step's other finished calls run, and the run goes
+   * on. The cut after the `n`th fails the run as `"fail"` does.
+   */
+  onToolArgumentsTooLong?: "fail" | { toolError: number };
+  /**
    * How far `ctx.runAgent` may nest below this agent. Default 3.
    *
    * It is a limit on the *tree*, taken from the run at the root, so raising it
@@ -1658,6 +1674,16 @@ export interface CreateAgentParams<
    * `AgentMemoryOptions` and docs/ai-memory.md.
    */
   memory?: M;
+}
+
+function assertOnToolArgumentsTooLong(value: unknown, owner: string): void {
+  if (value === undefined || value === "fail") return;
+  const toolError = (value as { toolError?: unknown } | null)?.toolError;
+  if (typeof toolError !== "number" || !Number.isInteger(toolError) || toolError < 1) {
+    throw new Error(
+      `${owner} has an onToolArgumentsTooLong of ${JSON.stringify(value)}: it has to be "fail" or { toolError: n } with n a whole number above 0.`,
+    );
+  }
 }
 
 /** See `CreateAgentParams.toolExecution`. */
@@ -2146,6 +2172,12 @@ export type AgentRunFailure = AgentError & {
   usageLimit?: UsageLimitHit;
   /** The provider's request id (`x-request-id`), when it sent one. */
   requestId?: string;
+  /**
+   * The tool call the provider cut at `maxToolArgumentChars` (#1259), when
+   * that is why the run failed. Server-side only, like `status`. See
+   * `ToolArgumentsTooLongError` and `CreateAgentParams.onToolArgumentsTooLong`.
+   */
+  toolArgumentsTooLong?: ToolArgumentsTooLong;
 };
 
 export type AgentRunResult<T extends ToolShapes, O> = {
@@ -2226,6 +2258,34 @@ export class AgentRunError extends Error {
 }
 
 /**
+ * What `result({ throwOnError: true })` rejects with when the run failed
+ * because the provider cut a tool call at `maxToolArgumentChars` (#1259). An
+ * `AgentRunError` (code `provider_error`), with the cut call's `tool` and
+ * `toolCallId`, the `limit` and the `chars` it had streamed, so an app tells
+ * it apart with `instanceof` rather than by reading the message.
+ */
+export class ToolArgumentsTooLongError extends AgentRunError {
+  readonly tool: string;
+  declare readonly toolCallId: string;
+  readonly limit: number;
+  readonly chars: number;
+
+  constructor(
+    result: AgentRunResult<ToolShapes, unknown> & {
+      error: AgentRunFailure & { toolArgumentsTooLong: ToolArgumentsTooLong };
+    },
+  ) {
+    super(result);
+    this.name = "ToolArgumentsTooLongError";
+    const cut = result.error.toolArgumentsTooLong;
+    this.tool = cut.tool;
+    this.toolCallId = cut.toolCallId;
+    this.limit = cut.limit;
+    this.chars = cut.chars;
+  }
+}
+
+/**
  * A run is an async iterable of events, and the SSE encoding is a method on it
  * rather than a separate helper — so the same object serves a controller
  * returning a `Response` and a server-side caller that just wants to await the
@@ -2293,6 +2353,8 @@ type RunConfig = {
   output?: Schema<any>;
   maxSteps: number;
   toolExecution: ToolExecution;
+  /** How many cut tool calls a run sends back to the model; `0` fails at the first. */
+  cutCallsToModel: number;
   maxDepth: number;
   reasoning?: ReasoningEffort;
   maxOutputTokens?: number;
@@ -2482,6 +2544,8 @@ export class Agent<
       output: params.output as Schema<any> | undefined,
       maxSteps: this.maxSteps,
       toolExecution: params.toolExecution ?? "parallel",
+      cutCallsToModel:
+        typeof params.onToolArgumentsTooLong === "object" ? params.onToolArgumentsTooLong.toolError : 0,
       maxDepth: this.maxDepth,
       reasoning: this.reasoning,
       maxOutputTokens: params.maxOutputTokens,
@@ -2544,6 +2608,7 @@ export class Agent<
     if (params.maxRunDurationMs != null) {
       assertDuration(params.maxRunDurationMs, `The agent "${params.name}"`, "maxRunDurationMs");
     }
+    assertOnToolArgumentsTooLong(params.onToolArgumentsTooLong, `The agent "${params.name}"`);
     const block = params.jobs?.contextBlock;
     if (block && block.max !== undefined && !(Number.isInteger(block.max) && block.max > 0)) {
       throw new Error(
@@ -3111,8 +3176,9 @@ function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown, unkn
 type StepOutcome = {
   reason: FinishReason;
   error?: AgentError;
-  /** The HTTP response behind `error`, when the provider reported one. */
-  detail?: { status?: number; requestId?: string };
+  /** The HTTP response behind `error`, when the provider reported one, and
+   *  the cut call when it was `maxToolArgumentChars` (#1259). */
+  detail?: { status?: number; requestId?: string; toolArgumentsTooLong?: ToolArgumentsTooLong };
 };
 
 /**
@@ -3476,6 +3542,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    */
   private readonly approvals = new Map<string, ToolApprovalRecord>();
   private finishReason: FinishReason = "stop";
+  /** Calls cut at `maxToolArgumentChars` sent back to the model so far (#1259). */
+  private cutCalls = 0;
   /** Set by `fail`, and only there: the cause of a run that ends `"error"`. */
   private failure: AgentRunFailure | undefined;
   private output: unknown;
@@ -3714,7 +3782,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   result(options?: AgentResultOptions): Promise<AgentRunResult<ToolShapes, unknown>> {
     if (!options?.throwOnError) return this.settled;
     return this.settled.then((result) => {
-      if (result.error) throw new AgentRunError({ ...result, error: result.error });
+      const error = result.error;
+      if (error?.toolArgumentsTooLong) {
+        throw new ToolArgumentsTooLongError({
+          ...result,
+          error: { ...error, toolArgumentsTooLong: error.toolArgumentsTooLong },
+        });
+      }
+      if (error) throw new AgentRunError({ ...result, error });
       return result;
     });
   }
@@ -3980,7 +4055,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private fail(
     error: AgentError,
-    detail: { status?: number; requestId?: string; usageLimit?: UsageLimitHit } = {},
+    detail: {
+      status?: number;
+      requestId?: string;
+      usageLimit?: UsageLimitHit;
+      toolArgumentsTooLong?: ToolArgumentsTooLong;
+    } = {},
   ): void {
     const failure: AgentRunFailure = { ...error, ...detail };
     this.failure = failure;
@@ -4069,7 +4149,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.lastStep = { reason: outcome.reason, usage: message.usage };
       await this.limiter?.report(this.spent());
 
-      if (outcome.error) {
+      // A call cut at `maxToolArgumentChars` that goes back to the model
+      // (#1259) instead of failing the run. It has its result already.
+      const cut = outcome.error ? this.cutCallToModel(message, outcome.detail) : undefined;
+      if (outcome.error && !cut) {
         this.fail(outcome.error, outcome.detail);
         await this.finalizeMessage("error");
         this.finishReason = "error";
@@ -4077,16 +4160,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       const calls = message.content.filter(
-        (part): part is ToolCallPart => part.type === "tool-call",
+        (part): part is ToolCallPart => part.type === "tool-call" && part !== cut,
       );
 
-      if (calls.length === 0) {
+      if (calls.length === 0 && !cut) {
         this.finishReason = outcome.reason;
         await this.finalizeMessage(outcome.reason);
         return;
       }
 
-      const pending = await this.runTools(message, calls, step);
+      const pending = calls.length > 0 ? await this.runTools(message, calls, step) : [];
       await this.limiter?.report(this.spent());
       // A tool call refused by a limit ends the run once its step is closed:
       // another model call would only meet the same refusal. A step that left
@@ -4114,7 +4197,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
       // Before the `maxSteps` check: a run whose tools finished the job is
       // done, not out of steps.
-      const closing = await this.closingText(message, calls, step);
+      // A cut call did not succeed, so the step cannot end the run.
+      const closing = cut ? null : await this.closingText(message, calls, step);
       if (closing !== null) {
         this.finishReason = "stop";
         await this.finalizeMessage(outcome.reason);
@@ -4140,8 +4224,43 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         return;
       }
 
-      await this.finalizeMessage(outcome.reason);
+      await this.finalizeMessage(cut ? "stop" : outcome.reason);
     }
+  }
+
+  /**
+   * Gives the call the provider cut at `maxToolArgumentChars` an error result
+   * the model reads (#1259), while the run's `onToolArgumentsTooLong` budget
+   * lasts. Answers the call, or `undefined` to fail the run as before.
+   */
+  private cutCallToModel(
+    message: AgentMessage,
+    detail: StepOutcome["detail"],
+  ): ToolCallPart | undefined {
+    const cut = detail?.toolArgumentsTooLong;
+    if (!cut || this.cutCalls >= this.config.cutCallsToModel) return undefined;
+    const part = message.content.find(
+      (p): p is ToolCallPart => p.type === "tool-call" && p.toolCallId === cut.toolCallId,
+    );
+    if (!part) return undefined;
+    this.cutCalls++;
+    // The cut text is not JSON, and sending it back on every later step would
+    // fill the context with the runaway the limit was there to stop.
+    part.input = {};
+    this.emit({ type: "tool-call", messageId: message.id, part });
+    this.addResult(message, {
+      type: "tool-result",
+      toolCallId: part.toolCallId,
+      name: part.name,
+      status: "error",
+      error: {
+        code: "invalid_tool_input",
+        message: `The arguments for "${cut.tool}" were cut off after more than ${cut.limit} characters, so the call did not run. Split the work over smaller calls.`,
+        toolCallId: part.toolCallId,
+        retryable: true,
+      },
+    });
+    return part;
   }
 
   /** Adds what the run's `inbox` holds to the history, as user messages. */
@@ -4408,7 +4527,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           outcome = {
             reason: "error",
             error: event.error,
-            detail: httpErrorDetail(event),
+            detail: {
+              ...httpErrorDetail(event),
+              ...(event.toolArgumentsTooLong
+                ? { toolArgumentsTooLong: event.toolArgumentsTooLong }
+                : {}),
+            },
           };
           break;
         }

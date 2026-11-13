@@ -306,9 +306,24 @@ describe("streamResponses: maxToolArgumentChars (#1169)", () => {
     const { events } = await run(server.url, { streamMaxDurationMs: 0, maxToolArgumentChars: 100 });
 
     expect(withoutDeltasOf(events, "call_1")).toEqual([
-      limitError('"write"'),
+      { ...limitError('"write"'), toolArgumentsTooLong: expect.any(Object) },
       { type: "finish", reason: "error", usage: EMPTY },
     ]);
+    await server.allClosed();
+  });
+
+  test("the error carries the cut call, the limit and how far it got (#1259)", async () => {
+    const server = await tcpServer([runaway()]);
+    const { events } = await run(server.url, { streamMaxDurationMs: 0, maxToolArgumentChars: 100 });
+
+    const error = events.find((e) => e.type === "error") as Extract<ProviderEvent, { type: "error" }>;
+    expect(error.toolArgumentsTooLong).toEqual({
+      tool: "write",
+      toolCallId: "call_1",
+      limit: 100,
+      chars: expect.any(Number),
+    });
+    expect(error.toolArgumentsTooLong!.chars).toBeGreaterThan(100);
     await server.allClosed();
   });
 
