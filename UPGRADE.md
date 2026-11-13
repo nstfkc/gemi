@@ -1,3 +1,11 @@
+# 0.205.4
+
+## change-feed: `ChangeFeed.cursor` and `head` read on the open transaction (#1249)
+
+**Fix (patch version).** On Postgres, calling `ChangeFeed.cursor()` or `head()` inside a transaction read the channel head on a second pool connection. With as many such transactions as pool connections, every connection waited for another and the app stopped answering. They now read on the open transaction's connection, like `publish` already did. Outside a transaction, on SQLite, or in a transaction on another connection nothing changes.
+
+Behaviour note: inside a transaction, `head` and `cursor` now include that transaction's own uncommitted publishes. Apps that read `gemi_change_heads` directly to work around this can switch back to `ChangeFeed.cursor`.
+
 # 0.205.3
 
 ## ai: reasoning from an unfinished response is no longer replayed (#1246)
