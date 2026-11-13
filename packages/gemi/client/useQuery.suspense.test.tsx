@@ -4,7 +4,9 @@ import {
   Component,
   Suspense,
   act,
+  startTransition,
   useContext,
+  useDeferredValue,
   useEffect,
   useState,
 } from "react";
@@ -452,6 +454,108 @@ describe("keepPreviousData under suspense", () => {
 
     await net.resolve([{ id: 2 }]);
     expect(screen.queryByText("ids:2 loading:false")).not.toBeNull();
+  });
+
+  // #1255: a new variant with no state yet must suspend the render that
+  // reads it, or a transition at the call site commits at once and shows
+  // the previous variant's rows next to the new state.
+  test("a variant change in startTransition keeps the old tree committed until the new variant lands", async () => {
+    let go: (page: number) => void = () => {};
+    const seen: string[] = [];
+    function View() {
+      const [page, setPage] = useState(1);
+      go = (next) => startTransition(() => setPage(next));
+      const { data, loading } = useQuery("/todos" as any, { search: { page } });
+      const text = `page:${page} ids:${(data as any[]).map((t: any) => t.id).join(",")} loading:${loading}`;
+      useEffect(() => {
+        seen.push(text);
+      });
+      return <div>{text}</div>;
+    }
+    const screen = render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("page:1 ids:1 loading:false")).not.toBeNull();
+
+    await act(async () => go(2));
+    // The transition suspended: the old page stays as it was.
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(screen.queryByText("page:1 ids:1 loading:false")).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenLastCalledWith(
+      "/api/todos?page=2",
+      expect.anything(),
+    );
+
+    await net.resolve([{ id: 2 }]);
+    expect(screen.queryByText("page:2 ids:2 loading:false")).not.toBeNull();
+    // Page 2 was never committed with page 1's rows.
+    expect(seen.filter((s) => s.startsWith("page:2"))).toEqual([
+      "page:2 ids:2 loading:false",
+    ]);
+  });
+
+  test("a variant change through useDeferredValue keeps the deferred value on the committed page", async () => {
+    let go: (page: number) => void = () => {};
+    const seen: string[] = [];
+    function View() {
+      const [page, setPage] = useState(1);
+      go = setPage;
+      const deferredPage = useDeferredValue(page);
+      const { data } = useQuery("/todos" as any, {
+        search: { page: deferredPage },
+      });
+      const text = `page:${deferredPage} ids:${(data as any[]).map((t: any) => t.id).join(",")}`;
+      useEffect(() => {
+        seen.push(text);
+      });
+      return <div>{text}</div>;
+    }
+    const screen = render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("page:1 ids:1")).not.toBeNull();
+
+    await act(async () => go(2));
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(screen.queryByText("page:1 ids:1")).not.toBeNull();
+
+    await net.resolve([{ id: 2 }]);
+    expect(screen.queryByText("page:2 ids:2")).not.toBeNull();
+    expect(seen).not.toContain("page:2 ids:1");
+  });
+
+  test("a params change in startTransition keeps the old tree committed too", async () => {
+    let go: (id: number) => void = () => {};
+    function View() {
+      const [listId, setListId] = useState(1);
+      go = (next) => startTransition(() => setListId(next));
+      const { data } = useQuery("/lists/:listId/todos" as any, {
+        params: { listId } as any,
+      });
+      return (
+        <div>{`list:${listId} ids:${(data as any[]).map((t: any) => t.id).join(",")}`}</div>
+      );
+    }
+    const screen = render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("list:1 ids:1")).not.toBeNull();
+
+    await act(async () => go(2));
+    expect(screen.queryByText("list:1 ids:1")).not.toBeNull();
+    expect(screen.queryByText("list:2 ids:1")).toBeNull();
+
+    await net.resolve([{ id: 2 }]);
+    expect(screen.queryByText("list:2 ids:2")).not.toBeNull();
   });
 });
 

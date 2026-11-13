@@ -358,8 +358,10 @@ export function useMultipleQuery(
   );
 
   // `keepPreviousData`: a key loading without data shows its last data. A
-  // variant with no state yet counts as loading: its request is on the wire
-  // (started silently in the render) or goes out in the commit's effect.
+  // variant with no state yet counts as loading for a `suspense: false` key:
+  // its request is on the wire (started silently in the render) or goes out
+  // in the commit's effect. A suspending key suspends on it instead (#1255),
+  // so a transition at the call site keeps the old tree committed.
   const lastDataRef = useRef(new Map<string, State>());
   useEffect(() => {
     snapshot.forEach((state, i) => {
@@ -373,7 +375,7 @@ export function useMultipleQuery(
     if (
       e.config.keepPreviousData &&
       !state?.hasData &&
-      (state ? state.loading : true) &&
+      (state ? state.loading : !e.suspense) &&
       last
     ) {
       return { ...last, loading: true };

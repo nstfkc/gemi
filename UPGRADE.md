@@ -1,3 +1,9 @@
+# Unreleased
+
+## client: a suspending query suspends again on a new variant (#1255)
+
+**Fix (patch version).** Since 0.207.0 a suspending `useQuery` with `keepPreviousData` (the default) didn't suspend when its `search` or `params` changed to a variant with no state yet: it rendered the previous variant's data with `loading: true`. A variant change in `startTransition` or through `useDeferredValue` then committed at once, with the new state next to the old rows, instead of keeping the old tree until the new variant answered. It suspends again, as in 0.206.0. `useMultipleQuery`'s suspending keys had the same bug since 0.206.0 and are fixed too. `suspense: false` readers keep 0.207.0's behaviour: they start in the render and show their previous data while the new variant loads.
+
 # 0.207.0
 
 ## client: `suspense: false` queries start in the render; `loadingByKey` (#1253)
