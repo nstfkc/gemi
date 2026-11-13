@@ -11,6 +11,7 @@ describe("capabilitiesForModel()", () => {
       fileInput: true,
       parallelToolCalls: true,
       toolSearch: true,
+      supportsForcedToolChoice: true,
     });
   });
 
@@ -39,6 +40,7 @@ describe("capabilitiesForModel()", () => {
       fileInput: false,
       parallelToolCalls: true,
       toolSearch: false,
+      supportsForcedToolChoice: true,
     });
   });
 
@@ -56,6 +58,7 @@ describe("capabilitiesForModel()", () => {
         fileInput: true,
         parallelToolCalls: true,
         toolSearch: true,
+        supportsForcedToolChoice: true,
       });
     }
   });
