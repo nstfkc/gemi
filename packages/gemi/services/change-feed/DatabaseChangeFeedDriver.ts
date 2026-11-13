@@ -227,8 +227,8 @@ export class DatabaseChangeFeedDriver implements ChangeFeedDriver {
 
   /**
    * The ORM transaction a publish should be written on, and `heads` read on:
-   * one open on this driver's own connection, matched by name as the queue's database driver
-   * matches it. Never on SQLite, where Bun has one connection and a read on
+   * one open on this driver's own connection, matched by name as the queue's
+   * database driver matches it. Never on SQLite, where Bun has one connection and a read on
    * the pool runs inside the open transaction: a subscriber would deliver an
    * entry that may still roll back, and whose seq would then be reused. There
    * the manager publishes after the commit instead.
