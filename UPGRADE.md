@@ -1,3 +1,9 @@
+# Unreleased
+
+## client: navigating to `/` with a search or a hash keeps the root path (#1257)
+
+**Fix (patch version).** `useNavigate().push("/", { search: { a: "1" } })` (and `replace`) navigated to `/a=1` instead of `/?a=1`: the root route resolves to an empty path, and joining it with the search dropped the `?` with it, so the browser resolved `a=1` against the current URL. A hash alone (`push("/", { hash: "#x" })`) pushed `#x` and stayed on the current page. `<Link href="/">` rendered the same broken `href` (`a=1`, `#x`), and a root link with a search was never `data-active`. The path, search and hash are now joined in one place for both, so the root comes out as `/?a=1`, `/#x` and `/?a=1#x`. Nothing to change in apps; other paths build the same URLs as before.
+
 # 0.207.1
 
 ## client: a suspending query suspends again on a new variant (#1255)

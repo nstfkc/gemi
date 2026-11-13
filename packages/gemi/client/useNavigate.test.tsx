@@ -124,3 +124,73 @@ describe("useNavigate to another host", () => {
     expect(assigned).toEqual([]);
   });
 });
+
+describe("useNavigate to the root route (#1257)", () => {
+  test("push to / with a search keeps the ?", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.push("/", { search: { a: "1" } });
+    });
+
+    expect(pushed).toEqual([["/?a=1", undefined]]);
+  });
+
+  test("replace to / with a search keeps the ?", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.replace("/", { search: { a: "1" } });
+    });
+
+    expect(replaced).toEqual([["/?a=1", undefined]]);
+  });
+
+  test("a hash keeps the root path, with and without a search", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.push("/", { search: { a: "1" }, hash: "#x" });
+      await navigate.push("/", { hash: "#x" });
+    });
+
+    expect(pushed.map(([path]) => path)).toEqual(["/?a=1#x", "/#x"]);
+  });
+
+  test("an optional param left out resolves to the root", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.push("/:section?" as string, {
+        params: {},
+        search: { a: "1" },
+      });
+    });
+
+    expect(pushed).toEqual([["/?a=1", undefined]]);
+  });
+
+  test("a shallow push to / with a search keeps the ?", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.push("/", { search: { a: "1" }, shallow: true });
+    });
+
+    expect(pushed).toEqual([["/?a=1", { shallow: true }]]);
+  });
+
+  test("other paths with params and a search are unchanged", async () => {
+    const navigate = renderNavigate();
+
+    await act(async () => {
+      await navigate.push("/users/:id" as string, {
+        params: { id: 7 },
+        search: { tab: "posts" },
+        hash: "#bio",
+      });
+    });
+
+    expect(pushed).toEqual([["/users/7?tab=posts#bio", undefined]]);
+  });
+});

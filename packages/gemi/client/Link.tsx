@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { applyParams } from "../utils/applyParams";
+import { routeHref } from "../utils/routeHref";
 import { isAbsoluteUrl, type AbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
 import type { UrlParser, ViewResult } from "./types";
@@ -175,12 +176,11 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
 
   const localeSegment = urlLocaleSegment ? `/${urlLocaleSegment}` : "";
 
-  const targetHref = [
-    [`${localeSegment}${path}`, searchParams.toString()]
-      .filter((s) => s.length > 0)
-      .join("?"),
+  const targetHref = routeHref(
+    `${localeSegment}${path}`,
+    searchParams.toString(),
     hash,
-  ].join("");
+  );
 
   const currentHref = [location.pathname, location.search, location.hash]
     .filter((item) => !!item)
@@ -311,7 +311,7 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
       // The resolved path, not the template: one template can back a whole list
       // of rows, and only the row that was clicked is heading anywhere.
       data-pending={isTransitioning && resolvedPath === targetPath}
-      href={targetHref === '' ? '/' : targetHref}
+      href={targetHref}
       onClick={(e) => {
         // The caller's handler always runs, and runs first: it may want to
         // log, close a menu, or cancel the navigation with `preventDefault()`.
@@ -328,7 +328,7 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
         // add a duplicate history entry and restart the request (#1048).
         if (isTransitioning && resolvedPath === targetPath) {
           const { pathname, search, hash: urlHash } = window.location;
-          if (`${pathname}${search}${urlHash}` === (targetHref || "/")) {
+          if (`${pathname}${search}${urlHash}` === targetHref) {
             e.preventDefault();
             return;
           }

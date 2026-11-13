@@ -129,3 +129,69 @@ describe("Link to another host", () => {
     );
   });
 });
+
+describe("Link href to the root route (#1257)", () => {
+  function hrefOf(html: string) {
+    return html.match(/href="([^"]*)"/)?.[1];
+  }
+
+  test("keeps the root path in front of a search", () => {
+    const html = renderLink(
+      <Link href={"/" as never} search={{ a: "1" } as never}>
+        Home
+      </Link>,
+      "/elsewhere",
+      { pathname: "/elsewhere" },
+    );
+
+    expect(hrefOf(html)).toBe("/?a=1");
+  });
+
+  test("keeps the root path in front of a hash, with and without a search", () => {
+    const withSearch = renderLink(
+      <Link href={"/" as never} search={{ a: "1" } as never} hash="#x">
+        Home
+      </Link>,
+      "/elsewhere",
+      { pathname: "/elsewhere" },
+    );
+    const hashOnly = renderLink(
+      <Link href={"/" as never} hash="#x">
+        Home
+      </Link>,
+      "/elsewhere",
+      { pathname: "/elsewhere" },
+    );
+
+    expect(hrefOf(withSearch)).toBe("/?a=1#x");
+    expect(hrefOf(hashOnly)).toBe("/#x");
+  });
+
+  test("an optional param left out resolves to the root", () => {
+    const html = renderLink(
+      <Link
+        href={"/:section?" as never}
+        params={{} as never}
+        search={{ a: "1" } as never}
+      >
+        Home
+      </Link>,
+      "/elsewhere",
+      { pathname: "/elsewhere" },
+    );
+
+    expect(hrefOf(html)).toBe("/?a=1");
+  });
+
+  test("is active on / with the same search", () => {
+    const html = renderLink(
+      <Link href={"/" as never} search={{ a: "1" } as never}>
+        Home
+      </Link>,
+      "/",
+      { pathname: "/", search: "?a=1" },
+    );
+
+    expect(html).toContain('data-active="true"');
+  });
+});

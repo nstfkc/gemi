@@ -2,6 +2,7 @@ import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { IsViewPath, UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
+import { routeHref } from "../utils/routeHref";
 import { isAbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
 import { I18nContext } from "./I18nContext";
@@ -106,22 +107,18 @@ export function useNavigate() {
         localeSegment = "";
       }
 
-      const routePath = applyParams(path, params);
-      const navigationPath = [
-        `${localeSegment ? `/${localeSegment}` : ""}${routePath === "/" ? "" : routePath}`,
+      const finalPath = routeHref(
+        `${localeSegment ? `/${localeSegment}` : ""}${applyParams(path, params)}`,
         urlSearchParams.toString(),
-      ]
-        .filter((s) => s.length > 0)
-        .join("?");
-
-      const finalPath = [navigationPath, hash].filter(Boolean).join("");
+        hash ?? "",
+      );
 
       if (shallow) {
         history?.[pushOrReplace](finalPath, { shallow });
         return;
       }
 
-      history?.[pushOrReplace](finalPath === '' ? '/' : finalPath);
+      history?.[pushOrReplace](finalPath);
     };
   }
 
