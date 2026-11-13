@@ -157,7 +157,11 @@ export class DatabaseChangeFeedDriver implements ChangeFeedDriver {
   async heads(channels: readonly string[]): Promise<Map<string, number>> {
     const heads = new Map(channels.map((channel) => [channel, 0]));
     if (channels.length === 0) return heads;
-    const q = this.sql;
+    // Inside an ORM transaction on this connection, read on it: the caller
+    // already holds one pooled connection, and waiting for a second one while
+    // holding it can exhaust the pool (#1249). It also sees the transaction's
+    // own publishes.
+    const q = this.transaction() ?? this.sql;
     const rows: { channel: string; seq: number | string }[] = await q`
       SELECT channel, seq FROM ${q.unsafe(`"${this.headsTable}"`)}
       WHERE channel IN ${q([...channels])}
@@ -222,8 +226,8 @@ export class DatabaseChangeFeedDriver implements ChangeFeedDriver {
   }
 
   /**
-   * The ORM transaction a publish should be written on: one open on this
-   * driver's own connection, matched by name as the queue's database driver
+   * The ORM transaction a publish should be written on, and `heads` read on:
+   * one open on this driver's own connection, matched by name as the queue's database driver
    * matches it. Never on SQLite, where Bun has one connection and a read on
    * the pool runs inside the open transaction: a subscriber would deliver an
    * entry that may still roll back, and whose seq would then be reused. There

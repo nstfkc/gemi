@@ -59,6 +59,8 @@ Seqs are commit-ordered: a subscriber never sees seq 6 while seq 5 could still a
 return { site, changesCursor: await ChangeFeed.cursor(`site:${site.id}`) };
 ```
 
+With the database driver on Postgres, `head` and `cursor` called inside an ORM transaction read on that transaction, so they see its own publishes and don't take a second connection from the pool.
+
 ## Streaming to the browser
 
 `ChangeFeed.stream(req, channels)` answers with an SSE response. Use it in a route handler **after** deciding that the caller may read those channels.
