@@ -19,6 +19,36 @@ What to check:
 - Nothing changes without `retry`. Apps that wrapped a provider in their own retry loop to wait out a rate-limit window can drop it and set `retry` instead.
 - A run that waits needs a `maxRunDurationMs` long enough for the budget (the default is ten minutes).
 
+## ai: remember a refused approval for the rest of the run (#1260)
+
+**New API (minor version).** `Agent.create({ rememberDenials })` (and the same option on a tool) stops the user from being asked the same approval twice in one run:
+
+```ts
+Agent.create({ name: "editor", provider, tools: [publishPage], rememberDenials: true });
+```
+
+- `true` refuses a later call of a refused tool with the same input; `"name"` refuses any later call of that tool. The call gets a `denied` result with the new `cause: "denied-earlier"` and the earlier `reason`, and no approval is asked. A tool's own setting wins over the agent's.
+- The default is `false`: nothing changes until you turn it on.
+- `run.denials` and the controller hooks' `ctx.denials` list the run's refusals (`{ toolCallId, name, input, approval }`), whatever the setting. An app that kept its own `Map<runId, …>` filled from `onToolResult` can drop it.
+
+What to check:
+
+- Code that switches over a `denied` result's `cause` (`"refused" | "stopped" | "interrupted"`) has one more case, `"denied-earlier"`.
+- A class of your own that `implements AgentRun` needs a `denials` array, and code that builds an `AgentHookContext` by hand (in a test) needs `denials: []`.
+
+## ai: a forced `toolChoice` is emulated on providers that can't force one (#1261)
+
+**Behaviour change and new API (minor version).** `ProviderCapabilities` has `supportsForcedToolChoice`. It is `false` on the Claude models that refuse a forced tool choice (Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and ids gemi doesn't know), whose provider sends `"required"` and `{ name }` as `auto`. On those, a step that `prepareStep` forces is now emulated:
+
+- The call's system prompt ends with a line naming the tool (`In this step, call the tool "publish". …`), or asking for one of the tools for `"required"`.
+- A step that answers with text and no tool call is asked once more, as the next step, with the same choice and line. A hook that answers its own `toolChoice` for that step wins. If that answer has no tool call either, the run ends as before.
+
+What to check:
+
+- Apps that added their own "the turn isn't done without the call" line for these models, and branched on the model name to do it, can drop both.
+- On these models a forced step that answers in text now makes one more model call (it counts toward `maxSteps`, and isn't made on the last step), and the transcript has both answers.
+- `capabilitiesForModel` and `capabilitiesForClaude` now include the field; tests that compare them with `toEqual` see it. A custom provider that doesn't set it is treated as forcing (`true`), as before. `FallbackProvider` forces only when every leg does.
+
 ## ai: a typed error for a tool call cut at `maxToolArgumentChars` (#1259)
 
 **New API (minor version).** A run that fails because the provider cut a tool call at `maxToolArgumentChars` now says which call it was:

@@ -8805,7 +8805,7 @@ How the agent's settings map onto the request:
 
 - **`maxOutputTokens`** is `max_tokens`, which the API requires. Without it, 64 000 is sent.
 - **`temperature`** is not sent. On API version `2026-10-21` it is rejected on every model.
-- **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto`. The step still runs, so say in the instructions which tool you expect.
+- **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto` and `capabilities.supportsForcedToolChoice` is `false`. The agent then emulates the forced choice with a system line and one more ask (see [`toolChoice` in AI Context Window](./ai-context-window.md)).
 - **Tools** are sent flat with `eager_input_streaming`, so their arguments stream as they're written. Tool search is not supported yet (`capabilities.toolSearch` is `false`), so namespaces are flattened and deferred tools are sent whole. `strict` is not sent; the agent validates every call against the tool's schema.
 - **`promptCacheKey`** is not sent. Anthropic's cache keys on the prompt prefix itself.
 - **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. The assistant's text goes back exactly as written, whitespace-only blocks included, and an `output` part goes back as the text the model wrote (`OutputPart.text`), not a re-serialized value. A history that starts or ends on the assistant gets a fixed user turn there ("(The conversation continues from an earlier point.)", "Continue."), because the API wants a user turn first and refuses a prefill. Another provider's reasoning parts are left out.
@@ -9543,6 +9543,7 @@ export const siteAgent = Agent.create({
 
 - **`activeTools`** names the run's tools, run tools or namespaces (a namespace name offers all of it), like [`activeTools` on the run](./ai-agent-context.md#tools-per-turn), for one call. Skills and memory tools are always kept. A call the model makes to a tool left out is answered as a call to a tool that doesn't exist. A name the run doesn't offer fails the run.
 - **`toolChoice`** is `"auto"` (the model chooses, the default), `"required"` (some tool), `"none"` (text only) or `{ name }` (that tool, which has to be offered on this call). Forcing a tool the call doesn't offer, or `"required"` with no tools, fails the run before the call.
+- **Providers that can't force a tool.** Some models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) don't take a forced tool choice, and their provider sends it as `auto`; `provider.capabilities.supportsForcedToolChoice` is `false` there. gemi then emulates it: the call's system prompt ends with a line naming the tool (or asking for "one of your tools" for `"required"`), and a step that answers with text and no tool call is asked once more, as the next step, with the same choice and line. A hook that answers its own `toolChoice` for that step wins. If the second answer has no tool call either, the run ends as before. The second ask counts toward `maxSteps`, and isn't made on the last step. There is no need to check the model name or add the line yourself.
 - **Prompt cache.** The provider's prompt cache keys on the tool list, so a step with a different `activeTools` misses it. `toolChoice` keeps the tool list: `"none"` stops tool calls on one step without changing the prefix. To keep a tool off for a whole turn, prefer `activeTools` on the run (`runTools()` on a controller), which keeps the list the same across the turn's steps; to hide a tool on some steps only, choose between `activeTools` here and having the tool refuse in `execute`.
 
 ## Turns
@@ -10561,6 +10562,25 @@ hooks = defineAgentHooks({
   },
 });
 ```
+
+## Not asking again after a refusal
+
+A model that is refused often asks for the same call again a step later. With `rememberDenials`, the run remembers what the user refused and answers a repeat itself:
+
+```ts
+const agent = Agent.create({
+  name: "editor",
+  provider,
+  tools: [publishPage],
+  rememberDenials: true,
+});
+```
+
+- **`true`** matches a later call of the same tool with the same input (as the tool's schema parsed it, whatever the key order). **`"name"`** matches any later call of the same tool. **`false`** (the default) asks every time.
+- A matching call is not asked: it gets a `denied` result with `cause: "denied-earlier"` and the earlier refusal's `reason`, and the model is told the user already declined it. It has no `approval` record, since nobody answered it.
+- A tool's own `rememberDenials` wins over the agent's, so `rememberDenials: false` on one tool keeps it asking.
+- The memory lasts for the run, which is one turn: the refusal arrives on the turn that answers the approval, and a repeat in that turn is refused. The user's next message starts a new run that asks again.
+- The run lists its refusals as `run.denials`, and the controller's hooks read them as `ctx.denials` (`{ toolCallId, name, input, approval }` each), whatever the setting.
 
 ## Through the MCP registry
 
@@ -11696,7 +11716,7 @@ export class PageChatController extends AgentController<typeof siteAgent, SiteBo
 
 ## State that passes between hooks
 
-Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval.
+Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval. `ctx` also has the turn's `runId`, its `threadId`, and `denials`: the approvals the user refused in the run so far (see [Not asking again after a refusal](./ai-tool-approvals.md#not-asking-again-after-a-refusal)).
 
 ## Variants
 

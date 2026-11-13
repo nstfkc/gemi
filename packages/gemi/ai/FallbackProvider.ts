@@ -616,6 +616,7 @@ function intersect(all: ProviderCapabilities[]): ProviderCapabilities {
     fileInput: all.every((c) => c.fileInput),
     parallelToolCalls: all.every((c) => c.parallelToolCalls),
     toolSearch: all.every((c) => c.toolSearch),
+    supportsForcedToolChoice: all.every((c) => c.supportsForcedToolChoice !== false),
   };
 }
 

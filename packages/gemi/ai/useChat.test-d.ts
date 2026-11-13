@@ -118,7 +118,9 @@ describe("onToolResult", () => {
         expectTypeOf(part.error.message).toEqualTypeOf<string>();
       }
       if (part.status === "denied") {
-        expectTypeOf(part.cause).toEqualTypeOf<"refused" | "stopped" | "interrupted">();
+        expectTypeOf(part.cause).toEqualTypeOf<
+          "refused" | "stopped" | "interrupted" | "denied-earlier"
+        >();
       }
     };
     void handler;

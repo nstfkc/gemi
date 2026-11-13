@@ -13,11 +13,7 @@ import {
   type MessagesRequest,
 } from "./providers/anthropicRequest";
 import { parseMessagesStream } from "./providers/anthropicStream";
-import {
-  capabilitiesForClaude,
-  capabilitiesForModel,
-  supportsForcedToolChoice,
-} from "./providers/capabilities";
+import { capabilitiesForClaude, capabilitiesForModel } from "./providers/capabilities";
 import {
   anthropicTarget,
   azureRealtimeTarget,
@@ -68,6 +64,14 @@ export type ProviderCapabilities = {
    * that changed behaviour when unavailable would not be one.
    */
   toolSearch: boolean;
+  /**
+   * Whether the model takes a forced `toolChoice` (`"required"` or
+   * `{ name }`) (#1261). A provider that answers `false` sends one as `auto`,
+   * and `Agent` emulates it: a system line naming the call the step must
+   * make, and one more ask when the step ends without it. Absent means
+   * `true`, so a custom provider written before this flag is unchanged.
+   */
+  supportsForcedToolChoice?: boolean;
 };
 
 /** A tool as the model is shown it: schema only, no implementation. */
@@ -525,7 +529,7 @@ export class AnthropicProvider extends AgentProvider {
       model: this.deployment(),
       modelId: this.model,
       capabilities: this.capabilities,
-      forcedToolChoice: supportsForcedToolChoice(this.model),
+      forcedToolChoice: this.capabilities.supportsForcedToolChoice !== false,
       blockBinding: this.bindsThinking(),
     });
   }

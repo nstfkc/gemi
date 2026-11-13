@@ -632,6 +632,9 @@ export function toolResultOutput(part: ToolResultPart): string {
       // does it again.
       return `The run was interrupted (the server stopped) while this tool call was in progress, so its result was lost. It may have run in part or in full: check its effects before repeating it.${reason}`;
     }
+    if (part.cause === "denied-earlier") {
+      return `The user already declined this tool call earlier in this conversation, so it did not run and they were not asked again. Do not ask for it again; carry on without it.${reason}`;
+    }
     return `The user declined this tool call, so it did not run.${reason}`;
   }
 

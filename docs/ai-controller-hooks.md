@@ -106,7 +106,7 @@ export class PageChatController extends AgentController<typeof siteAgent, SiteBo
 
 ## State that passes between hooks
 
-Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval.
+Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval. `ctx` also has the turn's `runId`, its `threadId`, and `denials`: the approvals the user refused in the run so far (see [Not asking again after a refusal](./ai-tool-approvals.md#not-asking-again-after-a-refusal)).
 
 ## Variants
 
