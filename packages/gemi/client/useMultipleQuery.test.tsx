@@ -261,6 +261,31 @@ describe("useMultipleQuery", () => {
     expect(net.urls()).toEqual(["/api/b"]);
   });
 
+  test("a mutate is not held back while another key loads its new variant", async () => {
+    const net = createFetch();
+    let api: any;
+    let setPage: (page: number) => void = () => {};
+    function View() {
+      const [page, set] = useState(1);
+      setPage = set;
+      api = useMultipleQuery(
+        {
+          a: ["/a" as any],
+          list: ["/list" as any, { search: { page } }, { keepPreviousData: false }],
+        },
+        { suspense: false },
+      );
+      return <div>{`a:${api.data.a?.v}`}</div>;
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    await net.drain(() => ({ v: 1 }));
+    await act(async () => setPage(2));
+    expect(net.urls()).toEqual(["/api/list?page=2"]);
+    await act(async () => api.mutate.a({ v: 2 }));
+    // `list` is still waiting for page 2; `a` updates anyway.
+    expect(screen.queryByText("a:2")).not.toBeNull();
+  });
+
   test("suspense: false returns each key's error; the others still render", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const net = createFetch();

@@ -261,19 +261,26 @@ export function useMultipleQuery(
   );
 
   // One subscription for every key. It retains each variant (so an
-  // `invalidate` refetches it now), and batches: answers that land while
-  // another key still waits for its first one are held back, then all of
-  // them commit together. Store writes in the same task coalesce into one
-  // notification, checked after the writing request has finished.
+  // `invalidate` refetches it now), and batches: first answers that land
+  // while another key still waits for its own are held back, then all of
+  // them commit together. A change to data already on screen (a `mutate`, a
+  // revalidation) is never held. Store writes in the same task coalesce into
+  // one notification, checked after the writing request has finished.
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
       const releases = targets.map((t) => t.resource.retain(t.variantKey));
+      let notified = targets.map((t) => t.resource.peek(t.variantKey));
       let active = true;
       let scheduled = false;
       const flush = () => {
         scheduled = false;
         if (!active) return;
-        if (targets.some(awaitingFirstAnswer)) return;
+        const states = targets.map((t) => t.resource.peek(t.variantKey));
+        const shownDataChanged = states.some(
+          (state, i) => state !== notified[i] && notified[i]?.hasData,
+        );
+        if (!shownDataChanged && targets.some(awaitingFirstAnswer)) return;
+        notified = states;
         onStoreChange();
       };
       const onChange = () => {
@@ -379,17 +386,21 @@ export function useMultipleQuery(
   );
   useEffect(() => {
     const channels: Array<[string, any]> = JSON.parse(liveKey);
-    const stops = channels.map(([key, live]) =>
-      followLive(
+    const stops = channels.map(([key, live]) => {
+      // The key's resource now; the one it had when this ran, if it was
+      // removed and this effect has not been cleaned up yet.
+      const initial = entriesRef.current.find((e) => e.key === key)!.resource;
+      return followLive(
         realtime,
         live,
-        () => entriesRef.current.find((e) => e.key === key)!.resource,
+        () =>
+          entriesRef.current.find((e) => e.key === key)?.resource ?? initial,
         (open) =>
           setLiveOpen((prev) =>
             prev[key] === open ? prev : { ...prev, [key]: open },
           ),
-      ),
-    );
+      );
+    });
     return () => {
       for (const stop of stops) stop();
     };
