@@ -1,5 +1,18 @@
 # Unreleased
 
+## ai: a forced `toolChoice` is emulated on providers that can't force one (#1261)
+
+**Behaviour change and new API (minor version).** `ProviderCapabilities` has `supportsForcedToolChoice`. It is `false` on the Claude models that refuse a forced tool choice (Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and ids gemi doesn't know), whose provider sends `"required"` and `{ name }` as `auto`. On those, a step that `prepareStep` forces is now emulated:
+
+- The call's system prompt ends with a line naming the tool (`In this step, call the tool "publish". …`), or asking for one of the tools for `"required"`.
+- A step that answers with text and no tool call is asked once more, as the next step, with the same choice and line. A hook that answers its own `toolChoice` for that step wins. If that answer has no tool call either, the run ends as before.
+
+What to check:
+
+- Apps that added their own "the turn isn't done without the call" line for these models, and branched on the model name to do it, can drop both.
+- On these models a forced step that answers in text now makes one more model call (it counts toward `maxSteps`, and isn't made on the last step), and the transcript has both answers.
+- `capabilitiesForModel` and `capabilitiesForClaude` now include the field; tests that compare them with `toEqual` see it. A custom provider that doesn't set it is treated as forcing (`true`), as before. `FallbackProvider` forces only when every leg does.
+
 ## ai: a typed error for a tool call cut at `maxToolArgumentChars` (#1259)
 
 **New API (minor version).** A run that fails because the provider cut a tool call at `maxToolArgumentChars` now says which call it was:
