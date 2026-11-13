@@ -50,6 +50,25 @@ function Dashboard({ orgId }: { orgId: string }) {
 A key's third element is its `useQuery` config (`staleTime`, `refetchUntil`,
 `live`, `suspense`, …); a second argument applies config to every key.
 
+**One key outside the segment's `Loading`:** give that key `suspense: false` in
+the same call and read its own flag from `loadingByKey`. Every key, suspending or
+not, starts its request in the same render, so the view still costs one request
+round:
+
+```tsx
+const { data, loadingByKey } = useMultipleQuery({
+  account: ["/settings/account"],
+  invoices: ["/settings/invoices", {}, { suspense: false }],
+});
+// data.account is ready; data.invoices may be undefined while loadingByKey.invoices
+```
+
+**Two hooks, one of them `suspense: false`** (e.g. a shared hook that wraps its
+own `suspense: false` read): call the non-suspending hook **first**. Its requests
+start in the render and run alongside the suspending ones. After a suspending
+hook they can't: it throws before the next hook runs, and the non-suspending
+requests only go out once the suspending ones answered (two rounds).
+
 **Exceptions — a second `useQuery` is fine when:**
 
 - **One query needs another's answer** (its `params` or `search` come from the
@@ -59,6 +78,9 @@ A key's third element is its `useQuery` config (`staleTime`, `refetchUntil`,
   or, better, in a child component that receives the first answer as a prop.
 - **A query is `lazy`** (fetched on `trigger()`): it does not load with the
   others, and `useMultipleQuery` does not take `lazy`.
+- **A `suspense: false` read before the suspending one** (see above): both start
+  in the same render. Prefer one call with per-key `suspense` when you write both
+  reads yourself.
 - **A paged list** uses `useInfiniteQuery`, which has its own hook.
 
 Reading the same query in separate components is not this case: that is one

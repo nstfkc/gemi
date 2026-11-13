@@ -99,6 +99,11 @@ export interface MultipleQueryReturn<Q, G> {
   data: { [K in keyof Q]: EntryData<Q[K], G> };
   /** True while at least one key is loading. */
   loading: boolean;
+  /**
+   * Each key's own loading flag, for a view that shows one key's spinner
+   * apart from the others.
+   */
+  loadingByKey: { [K in keyof Q]: boolean };
   /** Each key's error, `null` when it has none. */
   error: { [K in keyof Q]: Record<string, unknown> | null };
   /** Each key's `mutate`, as `useQuery` returns it. */
@@ -113,15 +118,20 @@ interface Target {
   key: string;
   path: string;
   variantKey: string;
+  suspense: boolean;
   resource: QueryResource;
 }
 
 type State = ReturnType<QueryResource["peek"]>;
 
-/** A key whose first answer is still on the wire: nothing to show for it yet. */
+/**
+ * A key whose first answer is still on the wire: nothing to show for it yet.
+ * A variant with no state at all counts: its request was started silently in
+ * the render, or goes out in the mount effect.
+ */
 function awaitingFirstAnswer(target: Target) {
   const state = target.resource.peek(target.variantKey);
-  return !!state && state.loading && !state.hasData;
+  return !state || (state.loading && !state.hasData);
 }
 
 /**
@@ -145,7 +155,10 @@ function awaitingFirstAnswer(target: Target) {
  *   waterfall and about two renders per query.
  * - With `suspense: false`, keys that are loading for the first time hold
  *   back the others' answers, so the component renders once with all of them.
- *   `loading` is true while at least one key is loading.
+ *   `loading` is true while at least one key is loading; `loadingByKey` has
+ *   each key's own flag. Their requests start in the render too, so next to
+ *   suspending keys (in this hook or another one) they go out in the same
+ *   round instead of after the suspending ones answered.
  *
  * The optional second argument is config for every key; a key's own config
  * (the tuple's third element) wins over it.
@@ -245,14 +258,15 @@ export function useMultipleQuery(
   // What the subscription and the effects run on: stable while no key, path
   // or variant changes, whatever the call site re-creates each render.
   const targetsKey = entries
-    .map((e) => `${e.key}\u0000${e.path}\u0000${e.variantKey}`)
+    .map((e) => `${e.key}\u0000${e.path}\u0000${e.variantKey}\u0000${e.suspense}`)
     .join("\n");
   const targets = useMemo<Target[]>(
     () =>
-      entriesRef.current.map(({ key, path, variantKey, resource }) => ({
+      entriesRef.current.map(({ key, path, variantKey, suspense, resource }) => ({
         key,
         path,
         variantKey,
+        suspense,
         resource,
       })),
     // `getResource` is stable per provider; `targetsKey` captures the rest.
@@ -315,11 +329,37 @@ export function useMultipleQuery(
     cacheRef.current = { targets, states };
     return states;
   }, [targets]);
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  // Keys that don't suspend hydrate without streamed answers, as the server
+  // rendered them (see `QueryResource.peekForHydration`).
+  const serverCacheRef = useRef<{ targets: Target[]; states: State[] } | null>(
+    null,
+  );
+  const getServerSnapshot = useCallback(() => {
+    const states = targets.map((t) =>
+      t.suspense
+        ? t.resource.peek(t.variantKey)
+        : t.resource.peekForHydration(t.variantKey),
+    );
+    const cached = serverCacheRef.current;
+    if (
+      cached &&
+      cached.targets === targets &&
+      states.every((state, i) => state === cached.states[i])
+    ) {
+      return cached.states;
+    }
+    serverCacheRef.current = { targets, states };
+    return states;
+  }, [targets]);
+  const snapshot = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getServerSnapshot,
+  );
 
   // `keepPreviousData`: a key loading without data shows its last data. A
-  // variant nobody has read yet counts as loading: its request only goes out
-  // in the commit's effect, and the render before it must not flash empty.
+  // variant with no state yet counts as loading: its request is on the wire
+  // (started silently in the render) or goes out in the commit's effect.
   const lastDataRef = useRef(new Map<string, State>());
   useEffect(() => {
     snapshot.forEach((state, i) => {
@@ -341,15 +381,29 @@ export function useMultipleQuery(
     return state;
   });
 
-  // The render-phase reads for the suspense keys: every key without data
-  // starts (or joins) its request now, before anything suspends, so the
-  // requests run in parallel and the component suspends once for all of
-  // them. A streaming server render reads from the request's store instead.
+  // The render-phase reads: every key without data starts (or joins) its
+  // request now, before anything suspends, so the requests run in parallel
+  // and the component suspends once for all of its suspense keys. A key with
+  // `suspense: false` starts too (#1253), but is never waited for: on a cold
+  // mount its request would otherwise wait for the commit's effect, after
+  // every suspending read of the component had answered. A streaming server
+  // render reads from the request's store instead, which streams a key's
+  // answer into the client cache.
   const promises: Promise<void>[] = [];
   let thrown: { error: unknown } | null = null;
   entries.forEach((e, i) => {
+    if (!e.suspense) {
+      // The key's own state: `keepPreviousData` may show another variant's.
+      if (snapshot[i]?.hasData || snapshot[i]?.error) return;
+      if (typeof window === "undefined") {
+        serverQueries?.ensure(e.url, { params: e.params, search: e.search });
+      } else {
+        e.resource.start(e.variantKey);
+      }
+      return;
+    }
     const state = states[i];
-    if (!e.suspense || state?.hasData || state?.error) return;
+    if (state?.hasData || state?.error) return;
     if (typeof window === "undefined") {
       const entry =
         serverQueries?.ensure(e.url, { params: e.params, search: e.search }) ??
@@ -564,12 +618,14 @@ export function useMultipleQuery(
   const error: Record<string, unknown> = {};
   const mutate: Record<string, (fn?: unknown) => void> = {};
   const refetch: Record<string, () => void> = {};
+  const loadingByKey: Record<string, boolean> = {};
   let loading = false;
   entries.forEach((e, i) => {
     const state = states[i];
     data[e.key] = state?.data;
     error[e.key] = state?.error ?? null;
-    if (e.isDeferred || (state?.loading ?? true)) loading = true;
+    loadingByKey[e.key] = e.isDeferred || (state?.loading ?? true);
+    if (loadingByKey[e.key]) loading = true;
     // Bound to the visible variant, like `useQuery`'s callbacks.
     mutate[e.key] = (fn) => {
       mutateQuery(e.resource, e.variantKey, fn);
@@ -577,5 +633,5 @@ export function useMultipleQuery(
     refetch[e.key] = () => e.resource.refetch(e.variantKey);
   });
 
-  return { data, loading, error, mutate, refetch };
+  return { data, loading, loadingByKey, error, mutate, refetch };
 }

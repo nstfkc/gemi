@@ -138,7 +138,11 @@ export interface QueryManagerContextValue {
     key: string,
     initialState?: Record<string, any>,
   ) => QueryResource;
-  hydrate: (prefetchedData?: PrefetchedData | null) => void;
+  /**
+   * `streamed`: the data came from a streamed server payload, which readers
+   * that don't suspend leave out while hydrating (`peekForHydration`).
+   */
+  hydrate: (prefetchedData?: PrefetchedData | null, streamed?: boolean) => void;
   clearErrors: () => void;
 }
 
@@ -171,16 +175,16 @@ function createQueryManager(): QueryManagerContextValue {
     // navigation ships a fresh `prefetchedData` payload that has to be pushed
     // into the existing resources, otherwise the components mounting on the
     // new surface refetch it over `/api`.
-    hydrate(prefetchedData) {
+    hydrate(prefetchedData, streamed = false) {
       if (!prefetchedData) return;
       for (const [key, initialState] of Object.entries(prefetchedData)) {
         if (!initialState || typeof initialState !== "object") continue;
-        const resource = resources.get(key);
-        if (resource) {
-          resource.hydrate(initialState);
-        } else {
-          resources.set(key, new QueryResource(key, initialState));
+        let resource = resources.get(key);
+        if (!resource) {
+          resource = new QueryResource(key, {});
+          resources.set(key, resource);
         }
+        resource.hydrate(initialState, streamed);
       }
     },
     // Used by the route-level error boundary's reset: without this, the
@@ -264,7 +268,7 @@ export const QueryManagerProvider = ({
         | { push: (p: StreamedQueryPayload) => void };
     };
     const adopt = ([path, variantKey, data]: StreamedQueryPayload) => {
-      hydrate({ [path]: { [variantKey]: data } });
+      hydrate({ [path]: { [variantKey]: data } }, true);
     };
     const buffered = Array.isArray(w.__GEMI_STREAM__) ? w.__GEMI_STREAM__ : [];
     w.__GEMI_STREAM__ = { push: adopt };

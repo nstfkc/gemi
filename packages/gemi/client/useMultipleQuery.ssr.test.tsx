@@ -126,4 +126,89 @@ describe("useMultipleQuery during SSR", () => {
       search: { q: "x" },
     });
   });
+
+  test("a streaming render starts the suspense: false keys too, without waiting for them (#1253)", () => {
+    const ensure = vi.fn(
+      (): ServerQueryEntryLike => ({
+        status: "pending",
+        promise: new Promise(() => {}),
+      }),
+    );
+    function View() {
+      const { loading, loadingByKey } = useMultipleQuery(
+        {
+          a: ["/a" as any],
+          b: ["/b/:id" as any, { params: { id: 7 } }],
+        },
+        { suspense: false },
+      );
+      return <div>{`${loading}:${loadingByKey.a}:${loadingByKey.b}`}</div>;
+    }
+    const html = renderOnServer(<View />, {}, { ensure });
+    expect(html).toContain("true:true:true");
+    expect(ensure).toHaveBeenCalledWith("/a", { params: {}, search: {} });
+    expect(ensure).toHaveBeenCalledWith("/b/:id", {
+      params: { id: 7 },
+      search: {},
+    });
+  });
+
+  test("a non-suspending hook next to a suspending one starts every request in the same render (#1253)", () => {
+    const ensure = vi.fn(
+      (): ServerQueryEntryLike => ({
+        status: "pending",
+        promise: new Promise(() => {}),
+      }),
+    );
+    function View() {
+      useMultipleQuery({ c: ["/c" as any] }, { suspense: false });
+      useMultipleQuery({ a: ["/a" as any], b: ["/b" as any] });
+      return <div>rendered</div>;
+    }
+    const html = renderOnServer(<View />, {}, { ensure });
+    expect(html).toContain("fallback");
+    expect(ensure.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      "/c",
+      "/a",
+      "/b",
+    ]);
+  });
+
+  test("a suspense: false key renders loading, not the store's answer, and never warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ensure = vi.fn(
+      (): ServerQueryEntryLike => ({
+        status: "resolved",
+        data: { v: "A" },
+        promise: Promise.resolve(),
+      }),
+    );
+    function View() {
+      const { data, loading } = useMultipleQuery(
+        { a: ["/a" as any] },
+        { suspense: false },
+      );
+      return <div>{`${(data.a as any)?.v}:${loading}`}</div>;
+    }
+    // The client hydrates it from `__GEMI_DATA__` only (see
+    // `QueryResource.peekForHydration`), so the server must not render a
+    // streamed answer for it.
+    expect(renderOnServer(<View />, {}, { ensure })).toContain("undefined:true");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("a suspense: false key with prefetched data starts nothing", () => {
+    const ensure = vi.fn();
+    function View() {
+      const { data } = useMultipleQuery({ a: ["/a" as any] }, { suspense: false });
+      return <div>{`${data.a}`}</div>;
+    }
+    const html = renderOnServer(
+      <View />,
+      { prefetchedData: { "/a": { "": 1 } } },
+      { ensure },
+    );
+    expect(html).toContain("1");
+    expect(ensure).not.toHaveBeenCalled();
+  });
 });

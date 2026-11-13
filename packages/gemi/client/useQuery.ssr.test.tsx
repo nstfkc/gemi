@@ -4,7 +4,11 @@ import { renderToString } from "react-dom/server";
 
 import { QueryManagerProvider } from "./QueryManagerContext";
 import { RouteStateProvider, type PageData, type RouteState } from "./RouteStateContext";
-import { useQuery } from "./useQuery";
+import {
+  ServerQueryContext,
+  type ServerQueryEntryLike,
+} from "./ServerQueryContext";
+import { useFrameworkQuery, useQuery } from "./useQuery";
 
 /**
  * These render on the server, where `window` is undefined — the same conditions
@@ -142,3 +146,60 @@ describe("useQuery during SSR", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe("useQuery with suspense: false on a streaming server render (#1253)", () => {
+  function renderStreaming(ui: React.ReactNode, ensure: (...args: any[]) => any) {
+    return renderToString(
+      <ServerQueryContext.Provider value={{ ensure }}>
+        <QueryManagerProvider>
+          <RouteStateProvider state={{} as RouteState & PageData}>
+            {ui}
+          </RouteStateProvider>
+        </QueryManagerProvider>
+      </ServerQueryContext.Provider>,
+    );
+  }
+
+  test("starts its request in the request's store and renders loading", () => {
+    const ensure = vi.fn(
+      (): ServerQueryEntryLike => ({
+        status: "pending",
+        promise: new Promise(() => {}),
+      }),
+    );
+    function View() {
+      const { loading } = useQuery(
+        "/items/:id" as any,
+        { params: { id: 3 }, search: { q: "x" } },
+        { suspense: false },
+      );
+      return <div>{`loading:${loading}`}</div>;
+    }
+    expect(renderStreaming(<View />, ensure)).toContain("loading:true");
+    expect(ensure).toHaveBeenCalledWith("/items/:id", {
+      params: { id: 3 },
+      search: { q: "x" },
+    });
+  });
+
+  test("a framework-internal query (useUser's /auth/me) starts nothing", () => {
+    const ensure = vi.fn();
+    function View() {
+      useFrameworkQuery("/auth/me" as any, {}, { suspense: false });
+      return null;
+    }
+    renderStreaming(<View />, ensure);
+    expect(ensure).not.toHaveBeenCalled();
+  });
+
+  test("a lazy query starts nothing", () => {
+    const ensure = vi.fn();
+    function View() {
+      useQuery("/items" as any, undefined, { lazy: true });
+      return null;
+    }
+    renderStreaming(<View />, ensure);
+    expect(ensure).not.toHaveBeenCalled();
+  });
+});
+

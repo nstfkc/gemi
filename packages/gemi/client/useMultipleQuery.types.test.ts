@@ -30,13 +30,15 @@ function expectType<T extends true>(_: T) {}
 const snippets = {
   inferred: `
     export function f() {
-      const { data, loading, error, mutate, refetch } = useMultipleQuery({
+      const { data, loading, loadingByKey, error, mutate, refetch } = useMultipleQuery({
         products: ["/products"],
         category: ["/categories/:categoryId", { params: { categoryId: 1 } }],
       });
       expectType<Equal<typeof data.products, { id: string; price: number }[]>>(true);
       expectType<Equal<typeof data.category, { id: number; name: string }>>(true);
       expectType<Equal<typeof loading, boolean>>(true);
+      expectType<Equal<typeof loadingByKey.products, boolean>>(true);
+      expectType<Equal<keyof typeof loadingByKey, "products" | "category">>(true);
       expectType<Equal<typeof error.products, Record<string, unknown> | null>>(true);
       mutate.products((items) => items.filter((p) => p.price > 0));
       mutate.category({ id: 2, name: "x" });

@@ -440,12 +440,153 @@ describe("useMultipleQuery", () => {
       return null;
     }
     render(<View />, { wrapper: Providers });
-    // `eager` suspends; `background` is not loaded until the commit.
+    // `eager` suspends; `background` starts in the same render (#1253).
     expect(seen).toEqual([]);
-    expect(net.urls()).toEqual(["/api/eager"]);
+    expect(net.urls()).toEqual(["/api/eager", "/api/background"]);
     await net.resolve("/api/eager", { v: 1 });
     expect(seen.at(-1)).toBe("1|undefined|true");
     await net.resolve("/api/background", { v: 2 });
     expect(seen.at(-1)).toBe("1|2|false");
+  });
+});
+
+/**
+ * #1253: a key with `suspense: false` starts in the render, so next to a
+ * suspending read (in the same hook or another one) all requests of a cold
+ * mount go out in one round.
+ */
+describe("suspense: false keys start in the render", () => {
+  test("a non-suspending hook before a suspending one starts all requests before any answer arrives", async () => {
+    const net = createFetch();
+    const seen: string[] = [];
+    function View() {
+      const side = useMultipleQuery(
+        { c: ["/c" as any], d: ["/d" as any] },
+        { suspense: false },
+      );
+      const main = useMultipleQuery({ a: ["/a" as any], b: ["/b" as any] });
+      const data = { ...main.data, ...side.data } as any;
+      seen.push(`${data.a.v}${data.b.v}|${data.c?.v}${data.d?.v}`);
+      return null;
+    }
+    render(<View />, { wrapper: Providers });
+    // Nothing answered yet, and every request is already on the wire.
+    expect(seen).toEqual([]);
+    expect(net.urls()).toEqual(["/api/c", "/api/d", "/api/a", "/api/b"]);
+    await net.resolve("/api/c", { v: 3 });
+    await net.resolve("/api/d", { v: 4 });
+    await net.resolve("/api/a", { v: 1 });
+    await net.resolve("/api/b", { v: 2 });
+    expect(seen.at(-1)).toBe("12|34");
+    // One request per key: the mount effects joined the render's.
+    expect(net.fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  test("a non-suspending hook after a suspending one waits for it: hook order matters", async () => {
+    const net = createFetch();
+    function View() {
+      useMultipleQuery({ a: ["/a" as any] });
+      useMultipleQuery({ c: ["/c" as any] }, { suspense: false });
+      return null;
+    }
+    render(<View />, { wrapper: Providers });
+    // The suspending hook throws before the next hook runs.
+    expect(net.urls()).toEqual(["/api/a"]);
+    await net.resolve("/api/a", { v: 1 });
+    expect(net.urls()).toEqual(["/api/c"]);
+  });
+
+  test("a suspense: false useQuery before a suspending useMultipleQuery starts in the same render", async () => {
+    const net = createFetch();
+    function View() {
+      const side = useQuery("/side" as any, undefined, { suspense: false });
+      const { data } = useMultipleQuery({ a: ["/a" as any] });
+      return (
+        <div>{`${(data.a as any).v}|${(side.data as any)?.v}|${side.loading}`}</div>
+      );
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    expect(net.urls()).toEqual(["/api/side", "/api/a"]);
+    await net.resolve("/api/a", { v: 1 });
+    expect(screen.queryByText("1|undefined|true")).not.toBeNull();
+    await net.resolve("/api/side", { v: 2 });
+    expect(screen.queryByText("1|2|false")).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a non-suspending key joins the request another reader has on the wire", async () => {
+    const net = createFetch();
+    function View() {
+      const { data } = useMultipleQuery({
+        a: ["/shared" as any],
+        b: ["/shared" as any, undefined, { suspense: false }],
+      });
+      return <div>{`${(data.a as any).v}|${(data.b as any)?.v}`}</div>;
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    expect(net.urls()).toEqual(["/api/shared"]);
+    await net.resolve("/api/shared", { v: 1 });
+    expect(screen.queryByText("1|1")).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("a lazy reader's trigger joins a request started in another reader's render", async () => {
+    const net = createFetch();
+    let trigger: () => void = () => {};
+    function View() {
+      const lazyRead = useQuery("/a" as any, undefined, { lazy: true });
+      trigger = lazyRead.trigger;
+      const { data } = useMultipleQuery({ a: ["/a" as any] }, { suspense: false });
+      return <div>{`${(data.a as any)?.v}|${(lazyRead.data as any)?.v}`}</div>;
+    }
+    const screen = render(<View />, { wrapper: Providers });
+    expect(net.urls()).toEqual(["/api/a"]);
+    act(() => trigger());
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+    await net.resolve("/api/a", { v: 1 });
+    expect(screen.queryByText("1|1")).not.toBeNull();
+  });
+
+  test("first answers of non-suspending keys still commit together", async () => {
+    const net = createFetch();
+    const seen: string[] = [];
+    function View() {
+      const { data, loading } = useMultipleQuery(
+        { a: ["/a" as any], b: ["/b" as any] },
+        { suspense: false },
+      );
+      seen.push(`${(data.a as any)?.v}|${(data.b as any)?.v}|${loading}`);
+      return null;
+    }
+    render(<View />, { wrapper: Providers });
+    expect(net.urls()).toEqual(["/api/a", "/api/b"]);
+    await net.resolve("/api/a", { v: 1 });
+    expect(seen).not.toContain("1|undefined|true");
+    await net.resolve("/api/b", { v: 2 });
+    expect(seen).toEqual(["undefined|undefined|true", "1|2|false"]);
+  });
+});
+
+describe("loadingByKey", () => {
+  test("each key reports its own loading flag", async () => {
+    const net = createFetch();
+    const seen: string[] = [];
+    function View() {
+      const { data, loading, loadingByKey } = useMultipleQuery(
+        {
+          fast: ["/fast" as any],
+          invoices: ["/invoices" as any, undefined, { suspense: false }],
+        },
+      );
+      seen.push(
+        `${(data.fast as any).v}|${(data.invoices as any)?.v}|${loading}|${loadingByKey.fast}|${loadingByKey.invoices}`,
+      );
+      return null;
+    }
+    render(<View />, { wrapper: Providers });
+    await net.resolve("/api/fast", { v: 1 });
+    expect(seen.at(-1)).toBe("1|undefined|true|false|true");
+    await net.resolve("/api/invoices", { v: 2 });
+    expect(seen.at(-1)).toBe("1|2|false|false|false");
   });
 });
