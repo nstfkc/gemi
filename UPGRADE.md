@@ -13,6 +13,20 @@ What to check:
 - On these models a forced step that answers in text now makes one more model call (it counts toward `maxSteps`, and isn't made on the last step), and the transcript has both answers.
 - `capabilitiesForModel` and `capabilitiesForClaude` now include the field; tests that compare them with `toEqual` see it. A custom provider that doesn't set it is treated as forcing (`true`), as before. `FallbackProvider` forces only when every leg does.
 
+## ai: a typed error for a tool call cut at `maxToolArgumentChars` (#1259)
+
+**New API (minor version).** A run that fails because the provider cut a tool call at `maxToolArgumentChars` now says which call it was:
+
+- `result().error.toolArgumentsTooLong` is `{ tool, toolCallId, limit, chars }` (server-side, like `status`), and the controller's `onError` sees it too.
+- `result({ throwOnError: true })` rejects with a `ToolArgumentsTooLongError`, a subclass of `AgentRunError` with `tool`, `toolCallId`, `limit` and `chars`. Apps that matched the error message with a regex can use `instanceof` instead.
+- A provider's `error` event carries the same object as `toolArgumentsTooLong`.
+- `Agent.create({ onToolArgumentsTooLong: { toolError: n } })` sends the cut call back to the model as an `invalid_tool_input` error ("split the work over smaller calls") up to `n` times in a run, instead of failing it. The cut arguments are replaced by `{}` in the history. The default, `"fail"`, keeps today's behaviour.
+
+What to check:
+
+- Nothing changes for existing code: the error's `code`, `message` and `retryable` are as before.
+- Tests that compared a provider's `error` event for this case with `toEqual` see the new `toolArgumentsTooLong` field.
+
 # 0.207.2
 
 ## client: navigating to `/` with a search or a hash keeps the root path (#1257)

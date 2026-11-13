@@ -32,7 +32,7 @@ import { RealtimeClient, DEFAULT_REALTIME_TIMEOUT_MS } from "./providers/realtim
 import { isContentEvent } from "./runtime";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
-import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
+import type { AgentError, AgentMessage, FinishReason, ToolArgumentsTooLong, Usage } from "./types";
 
 /**
  * A provider makes one model call. It does not run the tool loop.
@@ -241,7 +241,14 @@ export type ProviderEvent =
    * send it.
    */
   | ({ type: "retry" } & ProviderRetryInfo)
-  | { type: "error"; error: AgentError; status?: number; requestId?: string };
+  | {
+      type: "error";
+      error: AgentError;
+      status?: number;
+      requestId?: string;
+      /** Set when the call was cut at `maxToolArgumentChars` (#1259). */
+      toolArgumentsTooLong?: ToolArgumentsTooLong;
+    };
 
 /**
  * One failed attempt of a provider call that is about to be asked again.

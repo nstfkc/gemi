@@ -66,6 +66,30 @@ const azure = AzureOpenAIProvider.model("gpt-5.4", {
 
 The defaults are long on purpose. A reasoning model at a high effort can think for a long while between two events, and a long answer or a large tool call can stream for minutes. A limit that cuts a legitimate call retries (and bills) the same request, which is then cut again, so too short a limit turns a call that used to work into one that always fails. 300 s leaves room for that and is half the agent's default `maxRunDurationMs`, so a run that hits a runaway still has time to ask again. With a low reasoning effort and small tools, where a whole call takes seconds, lower values notice a stall or a runaway much sooner. Aborting the call's signal still ends it at once, as `finish` reason `"aborted"`.
 
+#### When a tool call is cut
+
+A call cut at `maxToolArgumentChars` is asked again under `maxRetries`, like the other limits. When those run out, the run fails with a `provider_error` that says which call was cut: `result().error.toolArgumentsTooLong` is `{ tool, toolCallId, limit, chars }`, and `result({ throwOnError: true })` rejects with a `ToolArgumentsTooLongError` (an `AgentRunError` with the same four fields):
+
+```typescript
+import { ToolArgumentsTooLongError } from "gemi/ai";
+
+try {
+  await agent.stream({ messages, turn }).result({ throwOnError: true });
+} catch (error) {
+  if (error instanceof ToolArgumentsTooLongError) {
+    console.log(`${error.tool} went past ${error.limit} characters`);
+  }
+}
+```
+
+To let the model recover instead, set `onToolArgumentsTooLong` on the agent:
+
+```typescript
+Agent.create({ name: "writer", provider, tools, onToolArgumentsTooLong: { toolError: 2 } });
+```
+
+With `{ toolError: n }`, the cut call gets an `invalid_tool_input` error result telling the model to split the work over smaller calls, its cut arguments are replaced by `{}`, the step's other finished calls run, and the run goes on. That happens up to `n` times in a run; the next cut fails the run as above. The default, `"fail"`, fails at the first.
+
 `streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 
 A call cut after its output started leaves a message with `finishReason` `"error"` (or `"aborted"` for a stop). On the OpenAI and Azure OpenAI providers, the reasoning such a message holds is not sent back on later turns: the Responses API resolves reasoning by its `rs_…` id, and a response that never completed was never stored. The message's text and tool calls are still sent. If the API still answers `400 Item with id 'rs_…' not found.` for a reasoning item the request sent, the request is sent once more without its reasoning items.
