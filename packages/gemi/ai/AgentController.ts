@@ -96,6 +96,7 @@ import type {
   ClientTurn,
   JsonToolShapes,
   PendingToolCall,
+  ToolDenial,
   ToolResultPart,
   ToolShapes,
 } from "./types";
@@ -283,6 +284,12 @@ export type AgentHookContext = {
   req: HttpRequest<any, any>;
   runId: string;
   threadId?: string;
+  /**
+   * The approvals the user refused in this turn's run so far (#1260): read
+   * live from the run, so `onToolResult` for a refusal already sees it. See
+   * `CreateAgentParams.rememberDenials`.
+   */
+  readonly denials: readonly ToolDenial[];
 };
 
 /**
@@ -1996,7 +2003,15 @@ export abstract class AgentController<
       // the run does: `redactError` below is handed it, and the run may call
       // it for its first frame.
       const runId = `run_${crypto.randomUUID()}`;
-      const ctx: AgentHookContext = { req, runId, threadId };
+      let denials: readonly ToolDenial[] = [];
+      const ctx: AgentHookContext = {
+        req,
+        runId,
+        threadId,
+        get denials() {
+          return denials;
+        },
+      };
 
       // The app's `onMessage` for the turn's user message, called while the
       // run goes rather than after it (#806). See `EarlyTurn`.
@@ -2100,6 +2115,7 @@ export abstract class AgentController<
             }
           : {}),
       }) as AgentRun;
+      denials = run.denials;
 
       // Registered before the response is built: the run is now owned by the
       // process rather than by this request, which is the property `/attach`

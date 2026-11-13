@@ -474,6 +474,18 @@ export type ToolApprovalRecord = {
   reason?: string;
 };
 
+/**
+ * An approval a person refused in this run (#1260): the call, with the input
+ * the server signed, and the refusal. On `AgentRun.denials` and
+ * `AgentHookContext.denials`.
+ */
+export type ToolDenial = {
+  toolCallId: string;
+  name: string;
+  input: unknown;
+  approval: ToolApprovalRecord;
+};
+
 export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
   [K in keyof T]: {
     type: "tool-result";
@@ -517,7 +529,11 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
     /**
      * The call did not run. `refused` is the client declining an approval or
      * answering something else instead; `stopped` is a cancel that landed while
-     * the call was in flight.
+     * the call was in flight. `denied-earlier` is a call the user already
+     * refused in this run, asked again with the same input (or, for a tool
+     * remembering by name, any input), and refused without asking (#1260, see
+     * `rememberDenials`): it carries the earlier refusal's `reason` and no
+     * `approval`, since nobody answered it.
      *
      * `interrupted` is a call whose run died while it was in flight (see
      * `FinishReason`). Unlike `stopped` it may have run, in part or in full:
@@ -529,7 +545,11 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
      * also happens to be true — the model asked for something and did not get
      * it, and the next turn goes better for knowing which.
      */
-    | { status: "denied"; cause: "refused" | "stopped" | "interrupted"; reason?: string }
+    | {
+        status: "denied";
+        cause: "refused" | "stopped" | "interrupted" | "denied-earlier";
+        reason?: string;
+      }
   );
 }[keyof T];
 

@@ -1,6 +1,6 @@
 import { AgentRunError } from "../Agent";
 import type { AgentResultOptions, AgentRun, AgentRunResult } from "../Agent";
-import type { AgentStreamEvent, AgentStreamFrame, ToolShapes } from "../types";
+import type { AgentStreamEvent, AgentStreamFrame, ToolDenial, ToolShapes } from "../types";
 
 /**
  * A hand-driven `AgentRun`, for tests of everything that consumes one.
@@ -15,6 +15,7 @@ import type { AgentStreamEvent, AgentStreamFrame, ToolShapes } from "../types";
  */
 export class StubAgentRun implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
+  readonly denials: readonly ToolDenial[] = [];
 
   stopped = false;
   stopReason: string | undefined;
