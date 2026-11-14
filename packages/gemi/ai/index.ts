@@ -415,6 +415,7 @@ export type {
   ProviderConfig,
   ProviderEvent,
   ProviderRetryInfo,
+  ProviderRetryPolicy,
   ProviderStream,
   ProviderStreamParams,
   ProviderToolChoice,

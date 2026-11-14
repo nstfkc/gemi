@@ -8678,6 +8678,26 @@ A stream that breaks before its first content event is retried the same way: the
 
 A stream that breaks while it has sent only the arguments of tool calls that never completed is retried too. Those calls never ran, so nothing the model said has been acted on. Their argument deltas were passed on as they arrived (a UI can show a call filling in), so before the retry the provider sends a `tool-call-discard` event naming them. The agent forgets those calls, the stream carries a `tool-call-discard` frame, and `useChat`'s reducer removes their partial parts from the message. The retried answer's calls arrive under new ids. Once the retries are spent, the partial calls stay and the call ends with the error, as before. Aborting the call's signal during a backoff ends it at once with `finish` reason `"aborted"`. Usage reported by a dropped attempt is added to the call's closing `finish` event. `maxRetries: 0` turns both kinds of retry off.
 
+### Waiting out a rate limit
+
+The retries above are over within seconds. A rate limit counted over a longer window, such as Azure OpenAI's tokens per minute, outlasts them, and a long agent run that hits it fails although the same call would go through a minute later. Give the provider a patience budget with `retry`:
+
+```typescript
+const azure = AzureOpenAIProvider.model("gpt-5.4", {
+  retry: {
+    patienceMs: 3 * 60_000, // the total time, from the call's start, to keep trying
+    initialWaitMs: 4_000, // the first wait without a Retry-After (default 4 000); doubles, with jitter
+    maxWaitMs: 60_000, // the longest single wait, Retry-After included (default 60 000)
+  },
+});
+```
+
+- The quick retries (`maxRetries`) come first, as before. A retryable failure that is still failing after them (a 429 that isn't a spent quota, a 408, 409 or 5xx, a timeout, a dropped connection) is asked again after a longer wait: the vendor's `Retry-After` when it sent one (or the wait its 429 message names), otherwise `initialWaitMs`, doubling. Each wait is at most `maxWaitMs`, and the attempts stop once `patienceMs` has passed since the call started; the last wait is cut to what is left of it. The call then fails with the last error.
+- Only before the first content event, like every retry here: nothing the model said is asked for twice.
+- Every attempt still sends a `retry` event (`onProviderRetry`, and the client's `retry` frame), now with `remainingMs`, the budget left after its wait, so an app can say "still trying". `attempt` goes past `maxRetries` for these.
+- The run's `maxRunDurationMs` and `stop()` still end it, during a wait too.
+- Without `retry`, nothing changes. The same option is on `AnthropicProvider` and the Foundry providers.
+
 ### Watching retries
 
 Each retry is visible outside the provider (#1192). Before the backoff wait, the provider stream carries a `retry` event, and the run turns it into an `onProviderRetry` call on the server and a `retry` frame for the client. Use it to log every attempt with the run's context, or to tell the user the call is being asked again instead of showing an unexplained pause.
@@ -8696,7 +8716,7 @@ const run = agent.stream({
 - `runId`, `agent` and `step` (the run's model call, from 1) are added by the run. The hook is handed down to sub-runs started with `ctx.runAgent`, which report their own `runId` and `agent`.
 - The hook is not awaited, and one that throws or rejects is logged and ignored, so it cannot slow down or fail the call.
 - `AgentController` has the same hook: `onProviderRetry(info, ctx)`, as a method or in `defineAgentHooks`.
-- The client gets `{ type: "retry", messageId, attempt, maxRetries, code, delayMs }`: the error's `code` only, never its message, status or request id. A sub-run's retries arrive as `nested-event` frames. The reducer leaves the transcript as it is, and nothing is stored in the thread. `useChat({ onRetry })` is called with the frame's fields for this agent's own retries; a reattach that replays the run's frames calls it again.
+- The client gets `{ type: "retry", messageId, attempt, maxRetries, code, delayMs, remainingMs? }`: the error's `code` only, never its message, status or request id. A sub-run's retries arrive as `nested-event` frames. The reducer leaves the transcript as it is, and nothing is stored in the thread. `useChat({ onRetry })` is called with the frame's fields for this agent's own retries; a reattach that replays the run's frames calls it again.
 - `generate({ onProviderRetry })` takes the same hook, without the run's fields.
 - `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself.
 

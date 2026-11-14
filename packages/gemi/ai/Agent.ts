@@ -4647,6 +4647,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             maxRetries: event.maxRetries,
             code: event.error.code,
             delayMs: event.delayMs,
+            ...(event.remainingMs !== undefined ? { remainingMs: event.remainingMs } : {}),
           });
           const hook = this.params.onProviderRetry;
           if (hook) {

@@ -1,5 +1,24 @@
 # Unreleased
 
+## ai: a retry patience budget for providers (#1258)
+
+**New API (minor version).** A provider config takes `retry: { patienceMs, initialWaitMs?, maxWaitMs? }`, next to `maxRetries`:
+
+```ts
+AzureOpenAIProvider.model("gpt-5.4", {
+  retry: { patienceMs: 3 * 60_000, initialWaitMs: 4_000, maxWaitMs: 60_000 },
+});
+```
+
+- After the quick retries, a retryable failure (429, 408, 409, 5xx, timeout, dropped connection) is asked again after longer waits: `Retry-After` when the vendor sent one, otherwise `initialWaitMs` (default 4 s) doubling with jitter, each wait at most `maxWaitMs` (default 60 s), until `patienceMs` has passed since the call started. Only before the first content event, as with the quick retries.
+- Every attempt still sends a `retry` event; `ProviderRetryInfo` and the client's `retry` frame have a new `remainingMs` (the budget left after the wait) when a policy is set, and `attempt` goes past `maxRetries` for the patient retries.
+- `maxRunDurationMs` and `stop()` still end the call, during a wait too.
+
+What to check:
+
+- Nothing changes without `retry`. Apps that wrapped a provider in their own retry loop to wait out a rate-limit window can drop it and set `retry` instead.
+- A run that waits needs a `maxRunDurationMs` long enough for the budget (the default is ten minutes).
+
 ## ai: remember a refused approval for the rest of the run (#1260)
 
 **New API (minor version).** `Agent.create({ rememberDenials })` (and the same option on a tool) stops the user from being asked the same approval twice in one run:
