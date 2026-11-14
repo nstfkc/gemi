@@ -16,6 +16,7 @@ import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { isBuildChunkPath, isReservedAssetPath, staticAssetMiss } from "./staticAssetMiss";
+import { assetFallbackBase, createAssetFallback } from "./assetFallback";
 import { BUILD_HEADER } from "../client/chunkLoadRecovery";
 import { assetUrl, readBuiltAssetBase } from "../config/assetBase";
 import { isApiPath } from "../services/router/apiPath";
@@ -218,6 +219,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
   }
 
+  // Where a build asset this release does not have is looked for next: a
+  // store every release uploads its assets to, so a document of another
+  // release still gets its files while two serve at once.
+  const fallbackBase = assetFallbackBase(process.env.GEMI_ASSET_FALLBACK_URL);
+  const assetFallback = fallbackBase ? createAssetFallback({ base: fallbackBase }) : undefined;
+
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
@@ -247,6 +254,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       // with the response already committed as 200. So existence is checked
       // here, per request, even for a path `publicFiles` lists.
       if (!distPath || !(await isFile(distPath))) {
+        // Another release's file, from the store every release uploads to.
+        if (isAssetPath && assetFallback) {
+          const fallback = await assetFallback(req, pathname);
+          if (fallback) return fallback;
+        }
         // A host whose views own `/assets` (#1015) gets its routes for what
         // the build has no file for; a missing chunk keeps its reload stub.
         if (isAssetPath && !isBuildChunkPath(pathname) && (await staticFilesPolicy(req)).assetRoutes) {
