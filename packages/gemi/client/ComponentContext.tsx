@@ -6,7 +6,11 @@ import {
 } from "../i18n/dictionaryRegistry";
 import { flattenComponentTree } from "./helpers/flattenComponentTree";
 import type { ServerDataContextValue } from "./ServerDataProvider";
-import { recoverFromChunkLoadError } from "./chunkLoadRecovery";
+import {
+  RELOAD_STUB_EXPORT,
+  recoverFromChunkLoadError,
+  waitForReload,
+} from "./chunkLoadRecovery";
 
 declare const window: {
   __GEMI_DATA__: ServerDataContextValue;
@@ -52,15 +56,24 @@ export function loadViewModule(
     .catch((error) => {
       // A chunk that will not load is usually a document from an earlier
       // release (#548): one guarded full load of the page being navigated to
-      // gets the current one. Rethrown either way, so `lazy()` and the route's
-      // error boundary see the failure while the reload is under way — or for
-      // good, when the guard refuses it.
-      if (purpose !== "prefetch") {
-        recoverFromChunkLoadError(error, { source: purpose });
+      // gets the current one. While that load is under way the view waits on
+      // it instead of failing, so the route's error boundary does not flash
+      // "Something went wrong" before the page goes; refused by the guard, the
+      // failure goes to the boundary as before.
+      if (purpose !== "prefetch" && recoverFromChunkLoadError(error, { source: purpose })) {
+        return waitForReload(error);
       }
       throw error;
     })
     .then(async (mod) => {
+      // The server answered this chunk with its reload stub, and the stub is
+      // reloading the page: a module with no `default` that is not this view.
+      // Not registered, so nothing renders it; the view waits on the reload.
+      if (mod?.[RELOAD_STUB_EXPORT] === true) {
+        const error = new Error(`Failed to fetch dynamically imported module: ${name}`);
+        if (purpose === "prefetch") throw error;
+        return waitForReload(error);
+      }
       const isNew = !viewModules.has(name);
       viewModules.set(name, mod);
 

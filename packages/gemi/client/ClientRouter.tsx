@@ -44,7 +44,7 @@ import {
   resetAuthenticationIncident,
   setAuthenticationNavigator,
 } from "./authenticationErrors";
-import { navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
+import { isChunkLoadError, navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
 import { restoreScroll } from "./scrollRestoration";
 
 declare global {
@@ -63,16 +63,48 @@ interface RouteProps {
   action: Action | null;
 }
 
+/**
+ * The error UI of a view that exports no `Error` of its own. Plain markup with
+ * a few inline styles, so it stays readable when the page's stylesheet is the
+ * thing that failed to load. A chunk that would not load (a deploy between page
+ * load and navigation, two releases serving at once) cannot be fixed by
+ * rendering the view again, since the browser keeps the failed import, so then
+ * it offers a full reload of the page instead of a reset.
+ */
 const DefaultQueryErrorFallback = (props: FallbackProps) => {
+  const stale = isChunkLoadError(props.error);
   return (
-    <div role="alert">
-      <p>Something went wrong.</p>
-      <button type="button" onClick={() => props.resetErrorBoundary()}>
-        Try again
+    <div role="alert" style={fallbackStyle}>
+      <p style={{ margin: "0 0 12px" }}>
+        {stale ? "This page didn't finish loading." : "Something went wrong."}
+      </p>
+      <button
+        type="button"
+        style={fallbackButtonStyle}
+        onClick={() => (stale ? window.location.reload() : props.resetErrorBoundary())}
+      >
+        {stale ? "Reload page" : "Try again"}
       </button>
     </div>
   );
 };
+
+const fallbackStyle = {
+  padding: "24px 16px",
+  fontFamily: "system-ui, -apple-system, sans-serif",
+  fontSize: "15px",
+  lineHeight: 1.5,
+} as const;
+
+const fallbackButtonStyle = {
+  font: "inherit",
+  padding: "6px 14px",
+  border: "1px solid currentColor",
+  borderRadius: "6px",
+  background: "transparent",
+  color: "inherit",
+  cursor: "pointer",
+} as const;
 
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { componentPath, pathname } = props;

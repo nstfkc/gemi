@@ -12,6 +12,8 @@ import {
   otherBuild,
   recoverFromBuildMismatch,
   recoverFromChunkLoadError,
+  RELOAD_STUB_EXPORT,
+  RELOAD_WAIT_MS,
 } from "./chunkLoadRecovery";
 import { loadViewModule } from "./ComponentContext";
 
@@ -55,6 +57,12 @@ describe("isChunkLoadError", () => {
     ["Safari", "Importing a module script failed."],
     ["iOS 16 Safari", "Importing module './imageUrl-DtezMpO4.js' is not found."],
     ["Vite's preload helper", "Unable to preload CSS for /assets/x.css"],
+    // A chunk whose dependency came from another build (the stub, or another
+    // release's file) fails to link: the stub's reload never runs.
+    ["Chromium (link)", "The requested module './index-B1x2.js' does not provide an export named 'j'"],
+    ["Firefox (link)", "The requested module './index-B1x2.js' doesn't provide an export named: 'j'"],
+    ["older Firefox (link)", "import not found: j"],
+    ["Safari (link)", "Importing binding name 'j' is not found."],
   ])("recognises %s's wording", (_engine, message) => {
     expect(isChunkLoadError(new Error(message))).toBe(true);
   });
@@ -301,12 +309,65 @@ describe("recoverFromBuildMismatch (#1056)", () => {
 });
 
 describe("loadViewModule", () => {
-  test("a navigation whose view chunk fails reloads, and still rejects", async () => {
+  test("a navigation whose view chunk fails reloads, and waits on the reload instead of failing", async () => {
+    // Rejecting at once put the route's error boundary on screen for the
+    // moment before the page went away. It rejects only if the page is still
+    // here after RELOAD_WAIT_MS: the load was cancelled.
+    vi.useFakeTimers();
+    try {
+      const error = chunkError();
+      (window as any).loaders = { Home: () => Promise.reject(error) };
+
+      let outcome: unknown = "pending";
+      loadViewModule("Home").catch((e) => (outcome = e));
+      await vi.advanceTimersByTimeAsync(RELOAD_WAIT_MS - 1);
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(outcome).toBe("pending");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome).toBe(error);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a failure the guard refuses to reload for rejects at once", async () => {
+    // Reloaded onto this page inside the cooldown, and the reload did not
+    // happen (cancelled); a later navigation fails the same way.
+    recoverFromChunkLoadError(chunkError());
+    navigationStarted();
+    reload.mockClear();
     const error = chunkError();
     (window as any).loaders = { Home: () => Promise.reject(error) };
 
     await expect(loadViewModule("Home")).rejects.toBe(error);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test("a view answered by the reloading stub is not rendered: it waits on the reload", async () => {
+    vi.useFakeTimers();
+    try {
+      (window as any).loaders = { Home: () => Promise.resolve({ [RELOAD_STUB_EXPORT]: true }) };
+
+      let outcome: unknown = "pending";
+      loadViewModule("Home").then(
+        (mod) => (outcome = mod),
+        (e) => (outcome = e),
+      );
+      await vi.advanceTimersByTimeAsync(RELOAD_WAIT_MS - 1);
+      expect(outcome).toBe("pending");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(isChunkLoadError(outcome)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a prefetch answered by the reloading stub fails rather than registering the stub", async () => {
+    (window as any).loaders = { Home: () => Promise.resolve({ [RELOAD_STUB_EXPORT]: true }) };
+
+    await expect(loadViewModule("Home", "prefetch")).rejects.toSatisfy(isChunkLoadError);
   });
 
   test("a prefetch that fails does not reload", async () => {
@@ -330,7 +391,13 @@ describe("the server's reload stub", () => {
   // The stub is a module body; evaluate it as a function body without the
   // trailing `export {}`, which is all that makes it a module.
   const run = (pathname = "/assets/Home-x.js") =>
-    new Function(chunkReloadStubScript(pathname).replace(/export \{\}$/, ""))();
+    new Function(chunkReloadStubScript(pathname).replace(/export \{[^}]*\}$/, ""))();
+
+  test("exports whether it reloaded, so the client can tell it from a view", () => {
+    expect(chunkReloadStubScript("/assets/Home-x.js")).toMatch(
+      new RegExp(`export \\{r as ${RELOAD_STUB_EXPORT}\\}$`),
+    );
+  });
 
   test("reloads and leaves the marker the client guard reads", () => {
     run();
@@ -414,7 +481,7 @@ describe("the server's reload stub", () => {
     const source = (await build.outputs[0]!.text()).replace(/^\/\/.*\n/, "");
     new Function(`return ${source}`)()(built.exports, undefined, built);
     const stub = built.exports.chunkReloadStubScript("/assets/Home-x.js");
-    const runBuilt = () => new Function(stub.replace(/export \{\}$/, ""))();
+    const runBuilt = () => new Function(stub.replace(/export \{[^}]*\}$/, ""))();
     blockSessionStorage("getter");
 
     runBuilt();

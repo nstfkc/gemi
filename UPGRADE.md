@@ -1,3 +1,19 @@
+# Unreleased
+
+## Mixed releases during a rollout no longer leave pages on the error boundary (#1269)
+
+**New option (minor version).** While two releases serve one app (a weighted rollout across revisions), a hard load could show "Something went wrong" until the user reloaded by hand.
+
+- **`GEMI_ASSET_FALLBACK_URL`** (server, read at boot): a store every release uploads its `dist/client/assets` to before it takes traffic. A miss under `/assets/` is fetched from there (3 s to start answering, `GET`/`HEAD` only) and streamed back as an immutable asset; a miss there too is answered as before, and not asked again for 30 s. Unset, nothing changes. See the configuration docs' "Missing chunks after a deploy".
+- A chunk whose dependency came from another release fails to link (`does not provide an export named`, Safari's `Importing binding name ... is not found`). That now counts as a chunk-load error, so it gets the guarded reload instead of going straight to the boundary.
+- While gemi's recovery reload is under way, the view waits on it (up to 15 s) instead of rejecting, and a view chunk answered by the server's reload stub is no longer rendered: no flash of the error boundary before the page goes. The stub now ends in `export {r as __gemiReload}` instead of `export {}`.
+- The default error fallback (a view without an `Error` export) has minimal inline styles and, for a chunk-load error, a "Reload page" button that reloads the page in full ("This page didn't finish loading."). Other errors keep "Something went wrong." / "Try again".
+
+What to check:
+
+- A test that asserted `loadViewModule` rejects right after starting a recovery reload now sees it pending (rejecting after 15 s, `RELOAD_WAIT_MS`).
+- A test that matched the default fallback's text for a chunk-load error now sees "This page didn't finish loading." / "Reload page".
+
 # 0.208.0
 
 ## ai: a retry patience budget for providers (#1258)

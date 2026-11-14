@@ -181,7 +181,47 @@ const CHUNK_LOAD_MESSAGES = [
   /importing module .* is not found/i,
   /unable to preload css/i,
   /failed to load module script/i,
+  // A chunk that loaded but whose dependency came from another build: the
+  // dependency's URL answered with the server's reload stub (or another
+  // release's file), which lacks the named export the chunk imports, so the
+  // module graph fails to link before any of it runs — the stub's own reload
+  // never gets the chance. A production build's chunks only import names their
+  // own build exports, so outside a mixed deploy this does not happen.
+  // - Chromium: `The requested module './index-x.js' does not provide an export named 'a'`
+  // - Firefox: `The requested module './index-x.js' doesn't provide an export named: 'a'`,
+  //   older releases `import not found: a`
+  // - Safari: `Importing binding name 'a' is not found.`
+  /requested module .* (does not|doesn't) provide an export named/i,
+  /^import not found: /i,
+  /importing binding name .* is not found/i,
 ];
+
+/**
+ * The export the server's reload stub carries, true when the stub started a
+ * reload. A view chunk answered by the stub then evaluates to a module with no
+ * `default`, and rendering it would put the route's error boundary on screen
+ * for the moment before the page goes away.
+ */
+export const RELOAD_STUB_EXPORT = "__gemiReload";
+
+/**
+ * How long a view waits on a full load gemi started before it gives up and
+ * fails after all. The load can be cancelled ("Stay" on a `beforeunload`
+ * prompt), and the page must not sit on its loading state for good then.
+ */
+export const RELOAD_WAIT_MS = 15_000;
+
+/**
+ * A promise for a view whose page is being loaded in full: it stays pending,
+ * so the route keeps its `Loading` fallback (or the server's HTML) instead of
+ * flashing its error boundary while the reload is under way, and rejects with
+ * `error` only if the page is still here after `RELOAD_WAIT_MS`.
+ */
+export function waitForReload(error: unknown, ms: number = RELOAD_WAIT_MS): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(error), ms);
+  });
+}
 
 /**
  * Reloads the page onto `url` once for a chunk that failed to load, unless the
@@ -463,7 +503,10 @@ export function chunkReloadGuard(
  * throws an error `isChunkLoadError` recognises, so the importing page's own
  * recovery and error boundary see the failure instead of a module that
  * silently has no exports. It runs `chunkReloadGuard` itself, so it and the
- * page's client share one marker and one reload between them.
+ * page's client share one marker and one reload between them. It exports
+ * `RELOAD_STUB_EXPORT`, true when it reloaded, so the client can tell a view
+ * answered by the stub from a view and wait for the reload instead of
+ * rendering a module with no `default`.
  */
 export function chunkReloadStubScript(
   pathname: string,
@@ -474,6 +517,6 @@ export function chunkReloadStubScript(
   return (
     `var g=${chunkReloadGuard.toString()};var r=!1;` +
     `try{r=navigator.onLine!==!1&&g(${key},window.location.href,${Number(cooldownMs)},!0)==="ok"}catch(e){}` +
-    `if(r)window.location.reload();else throw new Error(${error});export {}`
+    `if(r)window.location.reload();else throw new Error(${error});export {r as ${RELOAD_STUB_EXPORT}}`
   );
 }
