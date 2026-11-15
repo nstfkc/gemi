@@ -126,6 +126,13 @@ interface FormProps<
   onSettled?: (form: HTMLFormElement) => void;
   params?: Partial<UrlParser<`${K & string}`>>;
   search?: Record<string, string>;
+  /**
+   * How long the submit may wait for its answer, in ms. Past it the request
+   * is aborted and `onError` gets a `RequestTimeoutError`. Defaults to
+   * `queryConfig.mutationTimeout`; unset, it waits as long as the browser
+   * does.
+   */
+  timeout?: number;
   dynamicInputs?: (formData: FormData) => Record<string, any>;
 }
 
@@ -146,6 +153,7 @@ export function Form<
     ref,
     params,
     search = {},
+    timeout,
     className,
     dynamicInputs = () => ({}),
     ...formProps
@@ -228,6 +236,7 @@ export function Form<
       search,
     } as Any,
     {
+      timeout,
       onSuccess: (data) => {
         onSuccess(data as Any, formRef.current);
         onSettled?.(formRef.current);

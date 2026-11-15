@@ -20,6 +20,7 @@ export type {
 } from "./useInfiniteQuery";
 export { QueryError } from "./QueryError";
 export { isRetryableQueryError } from "./retryPolicy";
+export { RequestTimeoutError } from "./requestTimeout";
 export type {
   QueryFailure,
   RetryOption,

@@ -94,6 +94,15 @@ export interface Config<T> {
   focusThrottleInterval?: number;
   /** How long cached data stays fresh before a read revalidates it, in ms. */
   staleTime?: number;
+  /**
+   * How long a request may wait for its answer, in ms. Past it the request is
+   * aborted and fails with a `RequestTimeoutError`, a network failure: `retry`
+   * retries it, and `isReconnecting` is `true` meanwhile. Unset (the
+   * default), a request waits as long as the browser does. When several
+   * mounted readers of the same query and `search` set one, the smallest
+   * applies; a reader without one never removes another's.
+   */
+  timeout?: number;
   debug?: boolean;
   lazy?: boolean;
   /**
@@ -180,6 +189,12 @@ interface QueryReturn<T extends keyof GetRPC, D> {
   data: D;
   loading: boolean;
   error: Error;
+  /**
+   * `true` while the query sits on an error its `retry` policy retries — a
+   * dropped connection, a timeout, a 5xx — until a retry succeeds or the
+   * retries run out. Always `false` under suspense.
+   */
+  isReconnecting: boolean;
   mutate: {
     (fn?: NestedPrettify<Data<T>>): void;
     (fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>): void;
@@ -262,7 +277,11 @@ export function useQuery<T extends keyof GetRPC>(
   // — a plain spread would copy the `undefined` over it. The provider value
   // is already sanitized at the provider (see `QueryManagerProvider`).
   // `user` is `useUser`'s own section, not a query default.
-  const { user: _user, ...queryConfig } = useContext(QueryConfigContext) ?? {};
+  const {
+    user: _user,
+    mutationTimeout: _mutationTimeout,
+    ...queryConfig
+  } = useContext(QueryConfigContext) ?? {};
   const merged = mergeDefinedConfig<Config<Data<T>>>(queryConfig, config);
   return useFrameworkQuery(url, options, merged, { startOnServer: true });
 }
@@ -338,6 +357,15 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // render pass instead of flashing through an effect.
   const resource = getResource(normalPath, seed ?? undefined);
   const lazy = config.lazy;
+  // Before any read below can put a request on the wire; once mounted, the
+  // hold keeps it for every later request (the smallest timeout among the
+  // variant's mounted readers applies).
+  resource.setRequestTimeout(variantKey, config.timeout);
+  const timeout = config.timeout;
+  useEffect(
+    () => resource.holdRequestTimeout(variantKey, timeout),
+    [resource, variantKey, timeout],
+  );
 
   const configRef = useRef(config);
   configRef.current = config;
@@ -542,8 +570,22 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // allows, retried in the background; under suspense it throws below
   // instead. The resource owns the timer — one per variant however many
   // readers render it — and drops it once none of them is mounted.
+  // Once per failure: the decision's own `reconnecting` write is a new
+  // snapshot carrying the same error. Only while this hook holds the
+  // variant, though: letting go of it (a variant change, StrictMode's double
+  // mount) may cancel its retry, so retaining it again decides afresh.
+  const retriedErrorRef = useRef<unknown>(null);
+  useEffect(
+    () => () => {
+      retriedErrorRef.current = null;
+    },
+    [resource, variantKey],
+  );
   useEffect(() => {
     if (suspense) return;
+    if (!snapshot?.error || snapshot.loading) return;
+    if (retriedErrorRef.current === snapshot.error) return;
+    retriedErrorRef.current = snapshot.error;
     retryFailedQuery(resource, variantKey, snapshot, configRef.current);
   }, [snapshot, suspense, resource, variantKey]);
 
@@ -690,10 +732,17 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     }
   }
 
+  // The decision `retryFailedQuery` made, recorded on the state: `true` from
+  // the moment a retry is scheduled through the retry's own request, `false`
+  // once one succeeds or the retry policy gives up.
+  const isReconnecting =
+    !suspense && !!snapshot?.error && !!snapshot.reconnecting;
+
   return {
     data: state?.data as NestedPrettify<Data<T>>,
     loading: isDeferred || (state?.loading ?? !lazy),
     error: state?.error as Error,
+    isReconnecting,
     mutate,
     trigger,
     prefetch,

@@ -175,7 +175,11 @@ export function useMultipleQuery(
   queries: Record<string, MultipleQueryEntry>,
   sharedConfig?: MultipleQueryConfig<any>,
 ) {
-  const { user: _user, ...appConfig } = useContext(QueryConfigContext) ?? {};
+  const {
+    user: _user,
+    mutationTimeout: _mutationTimeout,
+    ...appConfig
+  } = useContext(QueryConfigContext) ?? {};
   const routeParams = useParams();
   const { getResource } = useContext(QueryManagerContext);
   const serverQueries = useContext(ServerQueryContext);
@@ -252,8 +256,29 @@ export function useMultipleQuery(
     };
   });
 
+  // Before any read below can put a request on the wire.
+  for (const e of entries) {
+    e.resource.setRequestTimeout(e.variantKey, e.config.timeout);
+  }
+
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+
+  // Mounted keys hold their timeout for every later request; the render-phase
+  // `setRequestTimeout` above only covers the requests this render starts.
+  const timeoutsKey = entries
+    .map((e) => `${e.path}\u0000${e.variantKey}\u0000${e.config.timeout ?? ""}`)
+    .join("\n");
+  useEffect(() => {
+    const releases = entriesRef.current.map((e) =>
+      e.resource.holdRequestTimeout(e.variantKey, e.config.timeout),
+    );
+    return () => {
+      for (const release of releases) release();
+    };
+    // `timeoutsKey` captures every path, variant and timeout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeoutsKey, getResource]);
 
   // What the subscription and the effects run on: stable while no key, path
   // or variant changes, whatever the call site re-creates each render.
@@ -496,13 +521,22 @@ export function useMultipleQuery(
   const configOf = (key: string): ResolvedConfig =>
     entriesRef.current.find((e) => e.key === key)?.config ?? defaultConfig;
 
-  // Background retries for failed `suspense: false` keys, once per new state.
-  const retriedRef = useRef(new Map<string, State>());
+  // Background retries for failed `suspense: false` keys, once per failure:
+  // the decision's own `reconnecting` write is a new state carrying the same
+  // error. Only while the subscription holds the variants: letting go of them
+  // (a key's variant changing, StrictMode's double mount) may cancel their
+  // retries, so retaining them again decides afresh.
+  const retriedRef = useRef(new Map<string, unknown>());
+  useEffect(() => {
+    const retried = retriedRef.current;
+    return () => retried.clear();
+  }, [targets]);
   useEffect(() => {
     targets.forEach((t, i) => {
       const state = snapshot[i];
-      if (retriedRef.current.get(t.key) === state) return;
-      retriedRef.current.set(t.key, state);
+      if (!state?.error || state.loading) return;
+      if (retriedRef.current.get(t.key) === state.error) return;
+      retriedRef.current.set(t.key, state.error);
       const config = configOf(t.key);
       if (config.suspense !== false) return;
       retryFailedQuery(t.resource, t.variantKey, state, config);

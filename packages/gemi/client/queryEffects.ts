@@ -73,7 +73,11 @@ export function mergeDefinedConfig<C extends object>(
 /**
  * A failed `suspense: false` query: schedule the background retry its retry
  * policy allows. The resource owns the timer, one per variant however many
- * readers render it.
+ * readers render it, and records the decision as the state's `reconnecting`.
+ *
+ * Call it once per failure (per stored error): a function `retry` is the
+ * app's own code, documented to run once after every failure, and the
+ * `reconnecting` write this makes changes the snapshot without a new failure.
  */
 export function retryFailedQuery(
   resource: QueryResource,
@@ -84,7 +88,10 @@ export function retryFailedQuery(
   if (!snapshot?.error || snapshot.loading) return;
   const error = snapshot.error as QueryFailure;
   const failureCount = Math.max(1, resource.failureCount(variantKey));
-  if (!shouldRetryQuery(failureCount, error, cfg.retry)) return;
+  if (!shouldRetryQuery(failureCount, error, cfg.retry)) {
+    resource.giveUpRetry(variantKey);
+    return;
+  }
   const delay = retryDelayFor(
     failureCount,
     error,

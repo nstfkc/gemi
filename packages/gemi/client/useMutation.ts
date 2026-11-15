@@ -14,7 +14,8 @@ import {
 import { realtime } from "./realtime/loader";
 import { reportAuthenticationRefusal } from "./authenticationErrors";
 import { SOCKET_ID_HEADER } from "../services/broadcast/socketHeader";
-import { QueryManagerContext } from "./QueryManagerContext";
+import { QueryConfigContext, QueryManagerContext } from "./QueryManagerContext";
+import { RequestTimeoutError, startRequestTimeout } from "./requestTimeout";
 import type { QueryUpdate } from "./useSetQueryData";
 import { loadLazy } from "./lazyModule";
 import { mutationExtras, preloadMutationExtras } from "./mutationModules";
@@ -73,6 +74,13 @@ type Config<T, E = never> = {
   onError(error: WithMutationErrorHelpers<MutationError | E>): void;
   onCanceled?: () => void;
   concurrency?: MutationConcurrency;
+  /**
+   * How long the request may wait for its answer, in ms. Past it the request
+   * is aborted and `onError` gets a `RequestTimeoutError`; it is not sent
+   * again. Defaults to `queryConfig.mutationTimeout`; unset, it waits as long
+   * as the browser does.
+   */
+  timeout?: number;
   /**
    * Queries the answer is written into on success, before `onSuccess`, with
    * no refetch: `{ path, params?, search?, data? }`. Without `data` the
@@ -149,6 +157,7 @@ export function useMutation<
   // and a prefetched payload is committed wholesale — into the query cache too.
   const { clearPrefetchCache } = useContext(ClientRouterContext);
   const { getResource } = useContext(QueryManagerContext);
+  const appTimeout = useContext(QueryConfigContext)?.mutationTimeout;
   const [state, setState] = useState<State<T, E>>({
     data: null,
     error: null,
@@ -273,6 +282,8 @@ export function useMutation<
     }
 
     const socketId = realtime.client?.socketId;
+    const timeoutMs = options.timeout ?? appTimeout;
+    const timeout = startRequestTimeout(controller, timeoutMs);
     try {
       const response = await fetch(`/api${finalUrl}`, {
         method,
@@ -287,6 +298,7 @@ export function useMutation<
       });
 
       const data = await readResponseBody(response);
+      timeout.clear();
       // `data.error` rather than the envelope around it: `onError` is typed
       // `(error: MutationError) => void`, and the envelope has no `kind` to
       // branch on. A body without one — an app's own `HttpResponse.json` —
@@ -337,7 +349,12 @@ export function useMutation<
 
       return data as T;
     } catch (thrown) {
-      const error = await withErrorHelpers(thrown as MutationError);
+      timeout.clear();
+      // Aborted by `timeout`, not by `cancel()`: a failure of its own.
+      const failure = timeout.timedOut()
+        ? new RequestTimeoutError(`/api${finalUrl}`, timeoutMs!)
+        : thrown;
+      const error = await withErrorHelpers(failure as MutationError);
       if (isSuperseded()) {
         settle((prev) => prev, true);
         return;
@@ -458,7 +475,7 @@ export function useUpload<
   url: K,
   ...args: [
     options?: { params?: Partial<ParseParams<K>> },
-    config?: Partial<Omit<Config<T, E>, "concurrency">>,
+    config?: Partial<Omit<Config<T, E>, "concurrency" | "timeout">>,
   ]
 ) {
   const [state, setState] = useState<"idle" | "uploading" | "done" | "error">(
