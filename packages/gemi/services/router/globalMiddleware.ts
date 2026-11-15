@@ -6,6 +6,8 @@ import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { breakResponse, mergeContextIntoResponse } from "./ApiRouteDispatcher";
 import { isApiPath } from "./apiPath";
+import { DomainRouter } from "./DomainRouter";
+import { isViewDataPath } from "./matchViewRoute";
 import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { privateWhenSettingCookies, sharedCacheable } from "./staticCache";
@@ -98,7 +100,13 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
       await registry.runGlobalMiddleware();
       return { refusal: null, apply, carried: { user: ctx.user, state: httpRequest.state } };
     } catch (err) {
-      const isViewData = !isApi && pathname.endsWith(".json");
+      // The host is not resolved yet: a file route at the literal `.json`
+      // path in any domain group is that file, not view data (#1275).
+      const isViewData =
+        !isApi &&
+        app(DomainRouter)
+          .viewDispatchers()
+          .every((view) => isViewDataPath(view.flatViewRoutes, pathname));
       if (err?.kind === GEMI_REQUEST_BREAKER_ERROR) {
         const refusal = isApi
           ? breakResponse(err.payload.api)

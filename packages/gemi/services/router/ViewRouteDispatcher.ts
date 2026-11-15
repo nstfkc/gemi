@@ -18,7 +18,7 @@ import {
 } from "./config";
 import { DEFAULT_THEME_COOKIE, isTheme, themeScriptSource, type ThemeData } from "../../client/theme";
 import { resolvePartialRender } from "./planPartialRender";
-import { matchViewRoute } from "./matchViewRoute";
+import { isViewDataPath, isViewOgPath, matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
 import { cloneElement, createElement, Fragment, type ReactElement } from "react";
 import { documentChildren } from "../../client/documentTree";
@@ -1250,9 +1250,15 @@ export class ViewRouteDispatcher {
 
   async handleViewRequest(req: Request, carried?: CarriedContext | null) {
     const url = new URL(req.url);
-    const isViewDataRequest = url.pathname.endsWith(".json");
-    const isOgRequest = url.pathname.endsWith(".og");
-    const urlPathnameWithLocale = url.pathname.replace(".json", "").replace(".og", "");
+    // A file route declared at the literal path (`/.well-known/x.json`) is
+    // that file, not a view's data URL (#1275). Only the suffix is cut.
+    const isViewDataRequest = isViewDataPath(this.flatViewRoutes, url.pathname);
+    const isOgRequest = isViewOgPath(this.flatViewRoutes, url.pathname);
+    const urlPathnameWithLocale = isViewDataRequest
+      ? url.pathname.slice(0, -".json".length)
+      : isOgRequest
+        ? url.pathname.slice(0, -".og".length)
+        : url.pathname;
 
     const [, maybeLocale, ...rest] = urlPathnameWithLocale.split("/");
     let urlPathname = urlPathnameWithLocale;
