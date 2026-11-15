@@ -20,6 +20,8 @@ import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 import {
   DEFAULT_RETRY,
+  shouldRetryQuery,
+  type QueryFailure,
   type RetryDelayOption,
   type RetryOption,
 } from "./retryPolicy";
@@ -94,6 +96,14 @@ export interface Config<T> {
   focusThrottleInterval?: number;
   /** How long cached data stays fresh before a read revalidates it, in ms. */
   staleTime?: number;
+  /**
+   * How long a request may wait for its answer, in ms. Past it the request is
+   * aborted and fails with a `RequestTimeoutError`, a network failure: `retry`
+   * retries it, and `isReconnecting` is `true` meanwhile. Unset (the
+   * default), a request waits as long as the browser does. Readers of the same
+   * query and `search` share one timeout.
+   */
+  timeout?: number;
   debug?: boolean;
   lazy?: boolean;
   /**
@@ -180,6 +190,12 @@ interface QueryReturn<T extends keyof GetRPC, D> {
   data: D;
   loading: boolean;
   error: Error;
+  /**
+   * `true` while the query sits on an error its `retry` policy retries — a
+   * dropped connection, a timeout, a 5xx — until a retry succeeds or the
+   * retries run out. Always `false` under suspense.
+   */
+  isReconnecting: boolean;
   mutate: {
     (fn?: NestedPrettify<Data<T>>): void;
     (fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>): void;
@@ -262,7 +278,11 @@ export function useQuery<T extends keyof GetRPC>(
   // — a plain spread would copy the `undefined` over it. The provider value
   // is already sanitized at the provider (see `QueryManagerProvider`).
   // `user` is `useUser`'s own section, not a query default.
-  const { user: _user, ...queryConfig } = useContext(QueryConfigContext) ?? {};
+  const {
+    user: _user,
+    mutationTimeout: _mutationTimeout,
+    ...queryConfig
+  } = useContext(QueryConfigContext) ?? {};
   const merged = mergeDefinedConfig<Config<Data<T>>>(queryConfig, config);
   return useFrameworkQuery(url, options, merged, { startOnServer: true });
 }
@@ -338,6 +358,8 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // render pass instead of flashing through an effect.
   const resource = getResource(normalPath, seed ?? undefined);
   const lazy = config.lazy;
+  // Before any read below can put a request on the wire.
+  resource.setRequestTimeout(variantKey, config.timeout);
 
   const configRef = useRef(config);
   configRef.current = config;
@@ -690,10 +712,23 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     }
   }
 
+  // The same check `retryFailedQuery` makes before it schedules a retry, so
+  // this stays `true` through the retry's own request and turns `false` once
+  // the retries run out.
+  const isReconnecting =
+    !suspense &&
+    !!snapshot?.error &&
+    shouldRetryQuery(
+      Math.max(1, resource.failureCount(variantKey)),
+      snapshot.error as QueryFailure,
+      config.retry,
+    );
+
   return {
     data: state?.data as NestedPrettify<Data<T>>,
     loading: isDeferred || (state?.loading ?? !lazy),
     error: state?.error as Error,
+    isReconnecting,
     mutate,
     trigger,
     prefetch,

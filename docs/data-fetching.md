@@ -158,6 +158,7 @@ so a typo in a param or a wrong field type is a compile error.
 | `data` | The response body, typed from the endpoint. Non-nullable under suspense (the default); `undefined` until first load with `suspense: false` / `lazy: true`. |
 | `loading` | `true` while a request is in flight. Under suspense (the default) a query never renders without data, so this is `false` in steady state — it flips to `true` during a variant change's pending window: with `keepPreviousData` on, changing `search`/`params` keeps the previous variant's rows rendered and reports the new variant's in-flight fetch here. This is the flag pager UI consumes. With `suspense: false` it is the plain in-flight flag, `true` from the first render until the first load settles. |
 | `error` | Error record if the request failed, otherwise `null`. Under suspense a failure only *throws* (a `QueryError`, into the segment's error boundary) when there is no data to show for the requested variant — a background revalidation that fails while that variant's data is on screen keeps rendering the data and returns the `error` here instead. A variant change whose fetch fails still throws, even though the *previous* variant's rows are on screen during the pending window. With `suspense: false` it is always returned, never thrown. |
+| `isReconnecting` | `true` while the query sits on an error its `retry` policy retries (no answer, a `timeout`, a `5xx`, …), through the retry's own request, until a retry succeeds or the retries run out. Always `false` under suspense. Use it for a "Reconnecting…" hint. |
 | `refetch()` | Force a fresh fetch of the current variant. |
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |
@@ -177,6 +178,7 @@ const { data } = useQuery("/feed", {}, {
   refreshInterval: 5000,   // poll every 5s
   retry: 3,                // background retries of a failed query — suspense: false only
   retryDelay: (n) => 1000 * 2 ** (n - 1), // wait before retry n (default: 1s, 2s, 4s, capped at 30s, jittered)
+  timeout: 10_000,         // abort a request with no answer after 10s; a retryable failure (default: none)
   revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
   focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
@@ -307,6 +309,24 @@ useQuery("/jobs/:id", { params: { id } }, {
 });
 ```
 
+**`timeout`** (unset by default) is how long a request may wait for its
+answer, headers and body, in ms. On a weak network a request can hang with no
+answer at all, and without a timeout it never fails, so `retry` never runs.
+Past the timeout the request is aborted and fails with a `RequestTimeoutError`
+(`name: "TimeoutError"`, `url`, `timeout`), which counts as a network failure:
+`isRetryableQueryError` is `true` for it and `retry` retries it. Readers of the
+same query and `search` share one timeout. `isReconnecting` reports the
+retries:
+
+```tsx
+const { data, isReconnecting } = useQuery("/inbox", {}, {
+  suspense: false,
+  timeout: 8_000,
+  retry: true,
+});
+// {isReconnecting && <p>Reconnecting…</p>}
+```
+
 A run of retries ends at the first success. Unmounting every reader of the
 query cancels a pending retry. When the browser comes back `online`, a query
 whose last failure its policy would retry is fetched again, silently, with a
@@ -351,7 +371,8 @@ init(RootLayout, { queryConfig });
 Pass the same value to both, so the server render and hydration agree.
 
 Accepted keys: `suspense`, `staleTime`, `keepPreviousData`, `retry`,
-`retryDelay`, `refreshInterval`, `revalidateOnFocus`, `focusThrottleInterval`
+`retryDelay`, `timeout`, `mutationTimeout` (the default `timeout` of
+mutations), `refreshInterval`, `revalidateOnFocus`, `focusThrottleInterval`
 (and the deprecated `retryIntervalOnError`). `lazy`, `fallbackData` and
 `refetchUntil` are call-site only. `useUser()` ignores these and reads
 `queryConfig.user` instead — see Authentication.
@@ -679,7 +700,11 @@ These hooks return:
 
 Options mirror the query hooks — `{ params, search }` in the second argument (e.g.
 `usePatch("/todos/:id", { params: { id } })`), and a config object (`onSuccess`,
-`onError`, `onCanceled`, `autoInvalidate`, `concurrency`, `updates`) in the third.
+`onError`, `onCanceled`, `autoInvalidate`, `concurrency`, `updates`, `timeout`) in the third.
+`timeout` (ms, default `queryConfig.mutationTimeout`, otherwise none) aborts a
+request with no answer in time; `onError` and `error` get a
+`RequestTimeoutError`. A mutation is never sent again on its own. `<Form>`
+takes the same `timeout` prop.
 `updates` writes the answer into other queries without a refetch; see
 [Writing a mutation's answer into a query](#writing-a-mutations-answer-into-a-query-updates).
 

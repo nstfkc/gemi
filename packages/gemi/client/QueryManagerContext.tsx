@@ -38,6 +38,18 @@ export interface QueryConfig {
   retry?: RetryOption;
   /** The wait before each retry, in ms, or `(failureCount, error) => ms`. */
   retryDelay?: RetryDelayOption;
+  /**
+   * How long a query's request may wait for its answer, in ms, before it is
+   * aborted and fails as a retryable network error. Unset by default. See
+   * `useQuery`'s `timeout`.
+   */
+  timeout?: number;
+  /**
+   * The same for mutations (`useMutation`, `usePost`, …, `<Form>`): past it
+   * the request is aborted and `onError` gets a `RequestTimeoutError`.
+   * Mutations are never retried. Unset by default.
+   */
+  mutationTimeout?: number;
   /** @deprecated Use `retryDelay`. The base of the default backoff. */
   retryIntervalOnError?: number;
   refreshInterval?: number;
@@ -89,6 +101,8 @@ const APP_WIDE_QUERY_CONFIG_KEYS = [
   "keepPreviousData",
   "retry",
   "retryDelay",
+  "timeout",
+  "mutationTimeout",
   "retryIntervalOnError",
   "refreshInterval",
   "revalidateOnFocus",

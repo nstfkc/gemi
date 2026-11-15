@@ -175,7 +175,11 @@ export function useMultipleQuery(
   queries: Record<string, MultipleQueryEntry>,
   sharedConfig?: MultipleQueryConfig<any>,
 ) {
-  const { user: _user, ...appConfig } = useContext(QueryConfigContext) ?? {};
+  const {
+    user: _user,
+    mutationTimeout: _mutationTimeout,
+    ...appConfig
+  } = useContext(QueryConfigContext) ?? {};
   const routeParams = useParams();
   const { getResource } = useContext(QueryManagerContext);
   const serverQueries = useContext(ServerQueryContext);
@@ -251,6 +255,11 @@ export function useMultipleQuery(
       resource: getResource(visible.path, seed ?? undefined),
     };
   });
+
+  // Before any read below can put a request on the wire.
+  for (const e of entries) {
+    e.resource.setRequestTimeout(e.variantKey, e.config.timeout);
+  }
 
   const entriesRef = useRef(entries);
   entriesRef.current = entries;

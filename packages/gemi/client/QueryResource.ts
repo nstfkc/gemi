@@ -3,6 +3,7 @@ import { QueryError } from "./QueryError";
 import { parseRetryAfter } from "./retryPolicy";
 import { readResponseBody } from "./helpers/readResponseBody";
 import { reportAuthenticationRefusal } from "./authenticationErrors";
+import { RequestTimeoutError, startRequestTimeout } from "./requestTimeout";
 
 type State = {
   loading: boolean;
@@ -89,6 +90,12 @@ export class QueryResource {
    * `peekForHydration`.
    */
   private streamed = new Set<string>();
+  /**
+   * The `timeout` of each variant's requests, in ms, as its readers set it
+   * (`setRequestTimeout`). A variant with none waits for the answer as long
+   * as the browser does.
+   */
+  private timeouts = new Map<string, number>();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -188,6 +195,20 @@ export class QueryResource {
    */
   peekForHydration(variantKey: string) {
     return this.streamed.has(variantKey) ? undefined : this.peek(variantKey);
+  }
+
+  /**
+   * The timeout every later request of this variant gets: one past it is
+   * aborted and fails with a `RequestTimeoutError`, which the retry policy
+   * treats as a network failure. `undefined` (or `0`) removes it. Readers of
+   * one variant share it, so the last one to render with a timeout sets it.
+   */
+  setRequestTimeout(variantKey: string, timeout: number | undefined) {
+    if (typeof timeout === "number" && timeout > 0) {
+      this.timeouts.set(variantKey, timeout);
+    } else {
+      this.timeouts.delete(variantKey);
+    }
   }
 
   /** Whether a request for this variant is on the wire. */
@@ -556,6 +577,8 @@ export class QueryResource {
       }
       set.add(controller);
     }
+    const timeoutMs = this.timeouts.get(variantKey);
+    const timeout = startRequestTimeout(controller, timeoutMs);
     // No newer request for this variant has been sent since this one.
     const isLatest = () => this.issued.get(variantKey) === seq;
     // A newer response, or an optimistic update made after this request was
@@ -619,10 +642,16 @@ export class QueryResource {
           // a non-JSON body (a proxy's HTML 502, a CDN's 404) is still that
           // status — the retry policy needs it — so it becomes a
           // `QueryError` with a `null` body.
-          if (response.ok) throw parseError;
+          if (response.ok || timeout.timedOut()) throw parseError;
           data = null;
         }
       } catch (error) {
+        if (timeout.timedOut()) {
+          // No answer in time: a network failure, so the retry policy may
+          // send it again.
+          writeError(new RequestTimeoutError(`/api${fullUrl}`, timeoutMs!));
+          return;
+        }
         if (controller?.signal.aborted) {
           // Aborted because nobody renders the variant any more — not a
           // failure: no error is stored, the retry policy never sees it, and
@@ -694,6 +723,7 @@ export class QueryResource {
         }
       }
     } finally {
+      timeout.clear();
       if (controller) {
         const set = this.controllers.get(variantKey);
         set?.delete(controller);
