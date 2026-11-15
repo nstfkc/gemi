@@ -100,13 +100,7 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
       await registry.runGlobalMiddleware();
       return { refusal: null, apply, carried: { user: ctx.user, state: httpRequest.state } };
     } catch (err) {
-      // The host is not resolved yet: a file route at the literal `.json`
-      // path in any domain group is that file, not view data (#1275).
-      const isViewData =
-        !isApi &&
-        app(DomainRouter)
-          .viewDispatchers()
-          .every((view) => isViewDataPath(view.flatViewRoutes, pathname));
+      const isViewData = !isApi && isViewDataRequest(pathname);
       if (err?.kind === GEMI_REQUEST_BREAKER_ERROR) {
         const refusal = isApi
           ? breakResponse(err.payload.api)
@@ -134,6 +128,27 @@ export async function runGlobalMiddleware(req: Request): Promise<GlobalMiddlewar
       ctx.destroy();
     }
   });
+}
+
+/**
+ * Whether a refused view request asks for a view's data. Only a `.json` path
+ * can, and only then is the router consulted (#1277): the host is not
+ * resolved yet, so a file route at the literal `.json` path in any domain
+ * group is that file, not view data (#1275). A kernel with no route config
+ * (one that only configures middleware) has no routes to consult and reads
+ * every `.json` path as view data.
+ */
+function isViewDataRequest(pathname: string): boolean {
+  if (!pathname.endsWith(".json")) {
+    return false;
+  }
+  const config = app().config;
+  if (!config.get("route.api") || !config.get("route.view")) {
+    return true;
+  }
+  return app(DomainRouter)
+    .viewDispatchers()
+    .every((view) => isViewDataPath(view.flatViewRoutes, pathname));
 }
 
 /** `privateWhenSettingCookies` on a response, whose headers may be immutable. */
