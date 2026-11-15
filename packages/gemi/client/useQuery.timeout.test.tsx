@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Suspense, act } from "react";
+import { StrictMode, Suspense, act } from "react";
 import type { PropsWithChildren } from "react";
 import { cleanup, render, renderHook } from "@testing-library/react";
 
@@ -285,6 +285,26 @@ describe("query timeout with several readers of one variant", () => {
     });
   }
 
+  test("a reader that mounts late gives a long-waiting request its timeout from now, not at once", async () => {
+    net.script("hang");
+    const { handles, rerender } = renderReaders([{}, { timeout: 1000 }]);
+    rerender([true, false]);
+    await advance(0);
+    act(() => handles[0].refetch());
+    await advance(5000);
+    const signal = net.signals()[net.calls() - 1];
+    expect(signal.aborted).toBe(false);
+
+    rerender([true, true]);
+    await advance(0);
+    expect(signal.aborted).toBe(false);
+    await advance(999);
+    expect(signal.aborted).toBe(false);
+    await advance(1);
+    expect(signal.aborted).toBe(true);
+    expect((handles[0].error as RequestTimeoutError).timeout).toBe(1000);
+  });
+
   test("the smallest timeout among mounted readers applies, and an unmounted reader's goes with it", async () => {
     net.script("hang");
     const { handles, rerender } = renderReaders([{ timeout: 3000 }, { timeout: 1000 }, {}]);
@@ -408,6 +428,137 @@ describe("isReconnecting", () => {
     expect(seen[0].data).toEqual(["a"]);
     expect(seen[0].isReconnecting).toBe(false);
     expect(seen[1].isReconnecting).toBe(false);
+  });
+
+  // X has data, a refetch fails and a retry is scheduled; letting go of X
+  // cancels it. Coming back to X inside `staleTime` must decide again.
+  const RETRY = { suspense: false, retry: true, retryDelay: 1000, staleTime: LATER };
+
+  test("a variant left and come back to (X -> Y -> X) is retried again", async () => {
+    net.script(
+      { status: 200, body: ["x"] },
+      "network",
+      { status: 200, body: ["y"] },
+      { status: 200, body: ["x2"] },
+    );
+    let query: any;
+    function Todos(props: { q: string }) {
+      query = useQuery("/todos" as any, { search: { q: props.q } } as any, RETRY as any);
+      return null;
+    }
+    const view = render(
+      <Providers>
+        <Todos q="x" />
+      </Providers>,
+    );
+    const show = (q: string) =>
+      view.rerender(
+        <Providers>
+          <Todos q={q} />
+        </Providers>,
+      );
+    await advance(0);
+    expect(query.data).toEqual(["x"]);
+    act(() => query.refetch());
+    await advance(0);
+    expect(query.error).toBeInstanceOf(TypeError);
+    expect(query.isReconnecting).toBe(true);
+
+    show("y");
+    await advance(0);
+    expect(query.data).toEqual(["y"]);
+    expect(net.calls()).toBe(3);
+
+    show("x");
+    await advance(0);
+    expect(query.error).toBeInstanceOf(TypeError);
+    expect(query.isReconnecting).toBe(true);
+    await advance(1000);
+    expect(net.calls()).toBe(4);
+    expect(query.data).toEqual(["x2"]);
+    expect(query.error).toBeFalsy();
+    expect(query.isReconnecting).toBe(false);
+  });
+
+  test("under StrictMode, a reader mounting on a failed variant schedules its retry", async () => {
+    net.script({ status: 200, body: ["a"] }, "network", { status: 200, body: ["b"] });
+    let query: any;
+    function Todos() {
+      query = useQuery("/todos" as any, {}, RETRY as any);
+      return null;
+    }
+    const view = render(
+      <Providers>
+        <Todos key="first" />
+      </Providers>,
+    );
+    await advance(0);
+    act(() => query.refetch());
+    await advance(0);
+    expect(query.error).toBeInstanceOf(TypeError);
+
+    // The first reader goes, which cancels its retry; a new one mounts under
+    // StrictMode, whose double mount lets go of the variant once more.
+    view.rerender(<Providers>{null}</Providers>);
+    await advance(0);
+    view.rerender(
+      <Providers>
+        <StrictMode>
+          <Todos key="second" />
+        </StrictMode>
+      </Providers>,
+    );
+    await advance(0);
+    expect(query.isReconnecting).toBe(true);
+    await advance(1000);
+    expect(net.calls()).toBe(3);
+    expect(query.data).toEqual(["b"]);
+    expect(query.isReconnecting).toBe(false);
+  });
+
+  test("useMultipleQuery: a key whose variant goes X -> Y -> X is retried again", async () => {
+    net.script(
+      { status: 200, body: ["x"] },
+      "network",
+      { status: 200, body: ["y"] },
+      { status: 200, body: ["x2"] },
+    );
+    let seen: any;
+    function View(props: { q: string }) {
+      seen = useMultipleQuery(
+        { todos: ["/todos" as any, { search: { q: props.q } } as any] },
+        RETRY as any,
+      );
+      return null;
+    }
+    const view = render(
+      <Providers>
+        <View q="x" />
+      </Providers>,
+    );
+    const show = (q: string) =>
+      view.rerender(
+        <Providers>
+          <View q={q} />
+        </Providers>,
+      );
+    await advance(0);
+    expect(seen.data.todos).toEqual(["x"]);
+    act(() => seen.refetch.todos());
+    await advance(0);
+    expect(seen.error.todos).toBeInstanceOf(TypeError);
+
+    show("y");
+    await advance(0);
+    expect(seen.data.todos).toEqual(["y"]);
+
+    show("x");
+    await advance(0);
+    expect(seen.error.todos).toBeInstanceOf(TypeError);
+    await advance(1000);
+    expect(net.calls()).toBe(4);
+    expect(seen.data.todos).toEqual(["x2"]);
+    expect(seen.error.todos).toBeFalsy();
   });
 
   test("false for an error that is never retried", async () => {

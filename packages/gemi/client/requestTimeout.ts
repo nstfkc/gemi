@@ -20,32 +20,32 @@ export class RequestTimeoutError extends Error {
  * `catch` that the abort was this timer, not a cancel; `clear()` runs once
  * the request settles.
  *
- * `tighten(timeout)` applies a smaller timeout to the request already on the
- * wire, counted from when it was sent (a larger one changes nothing);
- * `timeout()` is the one in force.
+ * `tighten(timeout)` gives the request already on the wire a timeout from
+ * now, when that ends sooner than the one it has (otherwise it changes
+ * nothing): a request is never aborted at once, however long it has already
+ * waited. `timeout()` is the one in force.
  */
 export function startRequestTimeout(
   controller: AbortController | null,
   timeout: number | undefined,
 ) {
-  const startedAt = Date.now();
   let timedOut = false;
   let settled = false;
   let current: number | undefined;
+  let deadline = Infinity;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const tighten = (next: number | undefined) => {
     if (!controller || settled) return;
     if (typeof next !== "number" || !(next > 0) || !Number.isFinite(next)) return;
-    if (current !== undefined && next >= current) return;
+    const now = Date.now();
+    if (now + next >= deadline) return;
     current = next;
+    deadline = now + next;
     if (timer !== null) clearTimeout(timer);
-    timer = setTimeout(
-      () => {
-        timedOut = true;
-        controller.abort();
-      },
-      Math.max(0, startedAt + next - Date.now()),
-    );
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, next);
   };
   tighten(timeout);
   return {

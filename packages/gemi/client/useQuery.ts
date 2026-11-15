@@ -571,8 +571,16 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // instead. The resource owns the timer — one per variant however many
   // readers render it — and drops it once none of them is mounted.
   // Once per failure: the decision's own `reconnecting` write is a new
-  // snapshot carrying the same error.
+  // snapshot carrying the same error. Only while this hook holds the
+  // variant, though: letting go of it (a variant change, StrictMode's double
+  // mount) may cancel its retry, so retaining it again decides afresh.
   const retriedErrorRef = useRef<unknown>(null);
+  useEffect(
+    () => () => {
+      retriedErrorRef.current = null;
+    },
+    [resource, variantKey],
+  );
   useEffect(() => {
     if (suspense) return;
     if (!snapshot?.error || snapshot.loading) return;

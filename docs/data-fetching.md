@@ -316,9 +316,9 @@ Past the timeout the request is aborted and fails with a `RequestTimeoutError`
 (`name: "TimeoutError"`, `url`, `timeout`), which counts as a network failure:
 `isRetryableQueryError` is `true` for it and `retry` retries it. When several
 mounted readers of the same query and `search` set a timeout, the smallest
-applies, also to a request already on the wire; a reader without one never
-removes another's. `isReconnecting` reports the
-retries:
+applies, also to a request already on the wire (counted from when that reader
+renders); a reader without one never removes another's. `isReconnecting`
+reports the retries:
 
 ```tsx
 const { data, isReconnecting } = useQuery("/inbox", {}, {

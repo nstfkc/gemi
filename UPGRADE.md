@@ -4,7 +4,7 @@
 
 **New API (minor version).** On a weak network a request could hang with no answer, so `retry` never ran and polls stalled.
 
-- **`timeout`** (ms) on `useQuery` and `useMultipleQuery`, with an app-wide default in `queryConfig.timeout`. Past it the request is aborted and fails with the new `RequestTimeoutError` (`name: "TimeoutError"`, `url`, `timeout`, exported from `gemi/client`). It counts as a network failure: `isRetryableQueryError` is `true`, so `retry` retries it. When several mounted readers of one query and `search` set different timeouts, the smallest applies (also to a request already on the wire); a reader without a timeout never removes another's.
+- **`timeout`** (ms) on `useQuery` and `useMultipleQuery`, with an app-wide default in `queryConfig.timeout`. Past it the request is aborted and fails with the new `RequestTimeoutError` (`name: "TimeoutError"`, `url`, `timeout`, exported from `gemi/client`). It counts as a network failure: `isRetryableQueryError` is `true`, so `retry` retries it. When several mounted readers of one query and `search` set different timeouts, the smallest applies (also to a request already on the wire, counted from when that reader renders); a reader without a timeout never removes another's.
 - **`timeout`** on `useMutation` / `usePost` / `usePut` / `usePatch` / `useDelete` and `<Form timeout>`, with an app-wide default in `queryConfig.mutationTimeout`. Past it the request is aborted and `onError` / `error` get a `RequestTimeoutError`. Mutations are not retried. (`useUpload` is unchanged.)
 - **`isReconnecting`** on `useQuery`: `true` while the query sits on an error its `retry` policy retries, through the retry's own request, until a retry succeeds or the retries run out. Always `false` under suspense.
 

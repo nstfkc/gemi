@@ -523,8 +523,14 @@ export function useMultipleQuery(
 
   // Background retries for failed `suspense: false` keys, once per failure:
   // the decision's own `reconnecting` write is a new state carrying the same
-  // error.
+  // error. Only while the subscription holds the variants: letting go of them
+  // (a key's variant changing, StrictMode's double mount) may cancel their
+  // retries, so retaining them again decides afresh.
   const retriedRef = useRef(new Map<string, unknown>());
+  useEffect(() => {
+    const retried = retriedRef.current;
+    return () => retried.clear();
+  }, [targets]);
   useEffect(() => {
     targets.forEach((t, i) => {
       const state = snapshot[i];

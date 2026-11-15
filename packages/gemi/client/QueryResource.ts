@@ -269,7 +269,8 @@ export class QueryResource {
   /**
    * A reader with a smaller timeout than the requests already on the wire —
    * e.g. it rendered after the reader whose render sent the request — has
-   * them time out by its timeout too, so render order never decides it.
+   * them time out by its timeout too, counted from now, so render order
+   * never decides it.
    */
   private tightenInflight(variantKey: string, timeout: number) {
     for (const timer of this.requestTimers.get(variantKey) ?? []) {
