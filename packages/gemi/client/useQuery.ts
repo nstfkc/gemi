@@ -20,8 +20,6 @@ import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 import {
   DEFAULT_RETRY,
-  shouldRetryQuery,
-  type QueryFailure,
   type RetryDelayOption,
   type RetryOption,
 } from "./retryPolicy";
@@ -100,8 +98,9 @@ export interface Config<T> {
    * How long a request may wait for its answer, in ms. Past it the request is
    * aborted and fails with a `RequestTimeoutError`, a network failure: `retry`
    * retries it, and `isReconnecting` is `true` meanwhile. Unset (the
-   * default), a request waits as long as the browser does. Readers of the same
-   * query and `search` share one timeout.
+   * default), a request waits as long as the browser does. When several
+   * mounted readers of the same query and `search` set one, the smallest
+   * applies; a reader without one never removes another's.
    */
   timeout?: number;
   debug?: boolean;
@@ -358,8 +357,15 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // render pass instead of flashing through an effect.
   const resource = getResource(normalPath, seed ?? undefined);
   const lazy = config.lazy;
-  // Before any read below can put a request on the wire.
+  // Before any read below can put a request on the wire; once mounted, the
+  // hold keeps it for every later request (the smallest timeout among the
+  // variant's mounted readers applies).
   resource.setRequestTimeout(variantKey, config.timeout);
+  const timeout = config.timeout;
+  useEffect(
+    () => resource.holdRequestTimeout(variantKey, timeout),
+    [resource, variantKey, timeout],
+  );
 
   const configRef = useRef(config);
   configRef.current = config;
@@ -564,8 +570,14 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   // allows, retried in the background; under suspense it throws below
   // instead. The resource owns the timer — one per variant however many
   // readers render it — and drops it once none of them is mounted.
+  // Once per failure: the decision's own `reconnecting` write is a new
+  // snapshot carrying the same error.
+  const retriedErrorRef = useRef<unknown>(null);
   useEffect(() => {
     if (suspense) return;
+    if (!snapshot?.error || snapshot.loading) return;
+    if (retriedErrorRef.current === snapshot.error) return;
+    retriedErrorRef.current = snapshot.error;
     retryFailedQuery(resource, variantKey, snapshot, configRef.current);
   }, [snapshot, suspense, resource, variantKey]);
 
@@ -712,17 +724,11 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     }
   }
 
-  // The same check `retryFailedQuery` makes before it schedules a retry, so
-  // this stays `true` through the retry's own request and turns `false` once
-  // the retries run out.
+  // The decision `retryFailedQuery` made, recorded on the state: `true` from
+  // the moment a retry is scheduled through the retry's own request, `false`
+  // once one succeeds or the retry policy gives up.
   const isReconnecting =
-    !suspense &&
-    !!snapshot?.error &&
-    shouldRetryQuery(
-      Math.max(1, resource.failureCount(variantKey)),
-      snapshot.error as QueryFailure,
-      config.retry,
-    );
+    !suspense && !!snapshot?.error && !!snapshot.reconnecting;
 
   return {
     data: state?.data as NestedPrettify<Data<T>>,

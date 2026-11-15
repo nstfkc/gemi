@@ -264,6 +264,22 @@ export function useMultipleQuery(
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
 
+  // Mounted keys hold their timeout for every later request; the render-phase
+  // `setRequestTimeout` above only covers the requests this render starts.
+  const timeoutsKey = entries
+    .map((e) => `${e.path}\u0000${e.variantKey}\u0000${e.config.timeout ?? ""}`)
+    .join("\n");
+  useEffect(() => {
+    const releases = entriesRef.current.map((e) =>
+      e.resource.holdRequestTimeout(e.variantKey, e.config.timeout),
+    );
+    return () => {
+      for (const release of releases) release();
+    };
+    // `timeoutsKey` captures every path, variant and timeout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeoutsKey, getResource]);
+
   // What the subscription and the effects run on: stable while no key, path
   // or variant changes, whatever the call site re-creates each render.
   const targetsKey = entries
@@ -505,13 +521,16 @@ export function useMultipleQuery(
   const configOf = (key: string): ResolvedConfig =>
     entriesRef.current.find((e) => e.key === key)?.config ?? defaultConfig;
 
-  // Background retries for failed `suspense: false` keys, once per new state.
-  const retriedRef = useRef(new Map<string, State>());
+  // Background retries for failed `suspense: false` keys, once per failure:
+  // the decision's own `reconnecting` write is a new state carrying the same
+  // error.
+  const retriedRef = useRef(new Map<string, unknown>());
   useEffect(() => {
     targets.forEach((t, i) => {
       const state = snapshot[i];
-      if (retriedRef.current.get(t.key) === state) return;
-      retriedRef.current.set(t.key, state);
+      if (!state?.error || state.loading) return;
+      if (retriedRef.current.get(t.key) === state.error) return;
+      retriedRef.current.set(t.key, state.error);
       const config = configOf(t.key);
       if (config.suspense !== false) return;
       retryFailedQuery(t.resource, t.variantKey, state, config);

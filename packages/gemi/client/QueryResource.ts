@@ -18,6 +18,13 @@ type State = {
   hasData: boolean;
   error: any;
   version: number;
+  /**
+   * A retry of the stored error is scheduled or on the wire — what
+   * `useQuery`'s `isReconnecting` shows. Set when `retryFailedQuery` schedules
+   * one, kept through the retry's own request, and gone once a request
+   * succeeds or the retry policy gives up.
+   */
+  reconnecting?: boolean;
 };
 
 type Deferred = { promise: Promise<void>; resolve: () => void };
@@ -91,11 +98,24 @@ export class QueryResource {
    */
   private streamed = new Set<string>();
   /**
-   * The `timeout` of each variant's requests, in ms, as its readers set it
-   * (`setRequestTimeout`). A variant with none waits for the answer as long
-   * as the browser does.
+   * The `timeout` of each mounted reader of a variant, in ms, one entry per
+   * `holdRequestTimeout`. A request gets the smallest one; a variant whose
+   * readers set none waits for the answer as long as the browser does.
    */
-  private timeouts = new Map<string, number>();
+  private timeouts = new Map<string, Map<object, number>>();
+  /**
+   * Timeouts set by readers rendering right now (`setRequestTimeout`), so a
+   * request a render starts gets its reader's timeout before that reader has
+   * mounted. Dropped at the end of the task: by then a reader that committed
+   * holds its timeout, and one whose render was thrown away has no say.
+   */
+  private renderTimeouts = new Map<string, number>();
+  private renderTimeoutsClearing = false;
+  /** The timeout timer of every request on the wire, per variant. */
+  private requestTimers = new Map<
+    string,
+    Set<ReturnType<typeof startRequestTimeout>>
+  >();
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
@@ -198,17 +218,72 @@ export class QueryResource {
   }
 
   /**
-   * The timeout every later request of this variant gets: one past it is
-   * aborted and fails with a `RequestTimeoutError`, which the retry policy
-   * treats as a network failure. `undefined` (or `0`) removes it. Readers of
-   * one variant share it, so the last one to render with a timeout sets it.
+   * A rendering reader's `timeout`, for the requests its own render starts.
+   * A request past its timeout is aborted and fails with a
+   * `RequestTimeoutError`, which the retry policy treats as a network
+   * failure. `undefined` (or `0`) means the reader has no timeout, which
+   * never removes another reader's. Lasts until the end of the task; a
+   * mounted reader keeps it with `holdRequestTimeout`.
    */
   setRequestTimeout(variantKey: string, timeout: number | undefined) {
-    if (typeof timeout === "number" && timeout > 0) {
-      this.timeouts.set(variantKey, timeout);
-    } else {
-      this.timeouts.delete(variantKey);
+    if (!isTimeout(timeout)) return;
+    this.tightenInflight(variantKey, timeout);
+    const current = this.renderTimeouts.get(variantKey);
+    if (current === undefined || timeout < current) {
+      this.renderTimeouts.set(variantKey, timeout);
     }
+    if (this.renderTimeoutsClearing) return;
+    this.renderTimeoutsClearing = true;
+    Promise.resolve().then(() => {
+      this.renderTimeoutsClearing = false;
+      this.renderTimeouts.clear();
+    });
+  }
+
+  /**
+   * A mounted reader's `timeout` for this variant, until the returned release
+   * runs. Every request of the variant gets the smallest timeout its mounted
+   * readers hold; a reader without one (`undefined` or `0`) holds nothing.
+   */
+  holdRequestTimeout(
+    variantKey: string,
+    timeout: number | undefined,
+  ): () => void {
+    if (!isTimeout(timeout)) return () => {};
+    this.tightenInflight(variantKey, timeout);
+    const reader = {};
+    let held = this.timeouts.get(variantKey);
+    if (!held) {
+      held = new Map();
+      this.timeouts.set(variantKey, held);
+    }
+    held.set(reader, timeout);
+    return () => {
+      const current = this.timeouts.get(variantKey);
+      if (!current) return;
+      current.delete(reader);
+      if (current.size === 0) this.timeouts.delete(variantKey);
+    };
+  }
+
+  /**
+   * A reader with a smaller timeout than the requests already on the wire —
+   * e.g. it rendered after the reader whose render sent the request — has
+   * them time out by its timeout too, so render order never decides it.
+   */
+  private tightenInflight(variantKey: string, timeout: number) {
+    for (const timer of this.requestTimers.get(variantKey) ?? []) {
+      timer.tighten(timeout);
+    }
+  }
+
+  /** The timeout the next request of this variant gets, if any. */
+  private requestTimeout(variantKey: string): number | undefined {
+    let smallest = this.renderTimeouts.get(variantKey);
+    for (const timeout of this.timeouts.get(variantKey)?.values() ?? []) {
+      if (smallest === undefined || timeout < smallest) smallest = timeout;
+    }
+    return smallest;
   }
 
   /** Whether a request for this variant is on the wire. */
@@ -337,7 +412,7 @@ export class QueryResource {
     for (const [key, state] of store) {
       if (variantKey !== undefined && key !== variantKey) continue;
       if (state.error) {
-        store.set(key, { ...state, error: null });
+        store.set(key, { ...state, error: null, reconnecting: false });
         changed = true;
       }
     }
@@ -364,6 +439,7 @@ export class QueryResource {
         this.watchers.delete(variantKey);
         // Nobody renders it any more: a retry would fetch for no one.
         this.cancelRetry(variantKey);
+        this.setReconnecting(variantKey, false);
         this.scheduleAbort(variantKey);
       }
     };
@@ -410,6 +486,9 @@ export class QueryResource {
    */
   scheduleRetry(variantKey: string, delay: number) {
     if (typeof window === "undefined") return;
+    // The retry policy said "go again": the variant is reconnecting, whether
+    // this call or an earlier one puts the retry on the wire.
+    this.setReconnecting(variantKey, true);
     if (this.retryTimers.has(variantKey) || this.inflight.has(variantKey)) {
       return;
     }
@@ -427,6 +506,25 @@ export class QueryResource {
       this.resolveVariant(variantKey, state.hasData, true, true);
     }, wait);
     this.retryTimers.set(variantKey, timer);
+  }
+
+  /**
+   * The retry policy will not retry the stored error: the variant stops
+   * reconnecting — unless a retry another reader asked for is still
+   * scheduled or on the wire, which then decides.
+   */
+  giveUpRetry(variantKey: string) {
+    if (this.retryTimers.has(variantKey) || this.inflight.has(variantKey)) {
+      return;
+    }
+    this.setReconnecting(variantKey, false);
+  }
+
+  private setReconnecting(variantKey: string, reconnecting: boolean) {
+    const store = this.store.getValue();
+    const state = store.get(variantKey);
+    if (!state || !!state.reconnecting === reconnecting) return;
+    this.store.next(store.set(variantKey, { ...state, reconnecting }));
   }
 
   cancelRetry(variantKey: string) {
@@ -467,7 +565,12 @@ export class QueryResource {
     if (fn && state?.hasData) {
       this.markApplied(variantKey);
       this.store.next(
-        store.set(variantKey, { ...state, data: fn(state.data), error: null }),
+        store.set(variantKey, {
+          ...state,
+          data: fn(state.data),
+          error: null,
+          reconnecting: false,
+        }),
       );
     }
     this.staleVariants.add(variantKey);
@@ -577,8 +680,16 @@ export class QueryResource {
       }
       set.add(controller);
     }
-    const timeoutMs = this.timeouts.get(variantKey);
-    const timeout = startRequestTimeout(controller, timeoutMs);
+    const timeout = startRequestTimeout(
+      controller,
+      this.requestTimeout(variantKey),
+    );
+    let timers = this.requestTimers.get(variantKey);
+    if (!timers) {
+      timers = new Set();
+      this.requestTimers.set(variantKey, timers);
+    }
+    timers.add(timeout);
     // No newer request for this variant has been sent since this one.
     const isLatest = () => this.issued.get(variantKey) === seq;
     // A newer response, or an optimistic update made after this request was
@@ -608,6 +719,9 @@ export class QueryResource {
           hasData: current?.hasData ?? false,
           error,
           version: current?.version,
+          // Whether to go on retrying is the retry policy's call for this
+          // new failure (`retryFailedQuery`); until then nothing changes.
+          reconnecting: current?.reconnecting,
         }),
       );
     };
@@ -621,6 +735,7 @@ export class QueryResource {
           hasData: previousState?.hasData ?? false,
           error: previousState?.error,
           version: previousState?.version,
+          reconnecting: previousState?.reconnecting,
         });
       }
 
@@ -649,7 +764,9 @@ export class QueryResource {
         if (timeout.timedOut()) {
           // No answer in time: a network failure, so the retry policy may
           // send it again.
-          writeError(new RequestTimeoutError(`/api${fullUrl}`, timeoutMs!));
+          writeError(
+            new RequestTimeoutError(`/api${fullUrl}`, timeout.timeout()!),
+          );
           return;
         }
         if (controller?.signal.aborted) {
@@ -724,6 +841,9 @@ export class QueryResource {
       }
     } finally {
       timeout.clear();
+      const timers = this.requestTimers.get(variantKey);
+      timers?.delete(timeout);
+      if (timers?.size === 0) this.requestTimers.delete(variantKey);
       if (controller) {
         const set = this.controllers.get(variantKey);
         set?.delete(controller);
@@ -739,4 +859,8 @@ export class QueryResource {
       this.settle(variantKey);
     }
   }
+}
+
+function isTimeout(timeout: number | undefined): timeout is number {
+  return typeof timeout === "number" && timeout > 0;
 }

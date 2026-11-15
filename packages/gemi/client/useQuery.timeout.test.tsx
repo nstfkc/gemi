@@ -223,6 +223,93 @@ describe("query timeout", () => {
   });
 });
 
+describe("query timeout with several readers of one variant", () => {
+  type Reader = { timeout?: number };
+  type Handle = { refetch: () => void; error: unknown };
+
+  function renderReaders(readers: Reader[]) {
+    const handles: Handle[] = readers.map(() => ({ refetch: () => {}, error: null }));
+    function TodosReader(props: { index: number; timeout?: number }) {
+      const query = useQuery(
+        "/todos" as any,
+        {},
+        { suspense: false, retry: false, timeout: props.timeout } as any,
+      );
+      handles[props.index].refetch = query.refetch;
+      handles[props.index].error = query.error;
+      return null;
+    }
+    const tree = (shown: boolean[]) => (
+      <Providers>
+        {readers.map((r, i) =>
+          shown[i] ? <TodosReader key={i} index={i} timeout={r.timeout} /> : null,
+        )}
+      </Providers>
+    );
+    const all = readers.map(() => true);
+    const view = render(tree(all));
+    return {
+      handles,
+      rerender: (shown = all) => view.rerender(tree(shown)),
+    };
+  }
+
+  for (const order of ["with-timeout first", "without-timeout first"] as const) {
+    test(`a reader without a timeout never clears another's (${order})`, async () => {
+      net.script("hang");
+      const readers: Reader[] =
+        order === "with-timeout first" ? [{ timeout: 1000 }, {}] : [{}, { timeout: 1000 }];
+      const { handles, rerender } = renderReaders(readers);
+
+      await advance(1000);
+      expect(net.calls()).toBe(1);
+      expect(net.signals()[0].aborted).toBe(true);
+      expect(handles[0].error).toBeInstanceOf(RequestTimeoutError);
+      expect(handles[1].error).toBeInstanceOf(RequestTimeoutError);
+
+      // Re-render both, in this order, then send a request from each reader:
+      // the timeout still applies, whoever rendered last.
+      rerender();
+      await advance(0);
+      act(() => handles[0].refetch());
+      await advance(1000);
+      expect(net.calls()).toBe(2);
+      expect(net.signals()[1].aborted).toBe(true);
+
+      rerender();
+      await advance(0);
+      act(() => handles[1].refetch());
+      await advance(1000);
+      expect(net.calls()).toBe(3);
+      expect(net.signals()[2].aborted).toBe(true);
+    });
+  }
+
+  test("the smallest timeout among mounted readers applies, and an unmounted reader's goes with it", async () => {
+    net.script("hang");
+    const { handles, rerender } = renderReaders([{ timeout: 3000 }, { timeout: 1000 }, {}]);
+    await advance(1000);
+    expect((handles[0].error as RequestTimeoutError).timeout).toBe(1000);
+
+    // The 1s reader unmounts: the 3s reader's timeout is what is left.
+    rerender([true, false, true]);
+    await advance(0);
+    act(() => handles[2].refetch());
+    await advance(1000);
+    expect(net.signals()[1].aborted).toBe(false);
+    await advance(2000);
+    expect(net.signals()[1].aborted).toBe(true);
+    expect((handles[2].error as RequestTimeoutError).timeout).toBe(3000);
+
+    // Only the reader without a timeout is left: requests wait.
+    rerender([false, false, true]);
+    await advance(0);
+    act(() => handles[2].refetch());
+    await advance(LATER);
+    expect(net.signals()[2].aborted).toBe(false);
+  });
+});
+
 describe("isReconnecting", () => {
   test("true while a network failure is being retried, false once the retries run out", async () => {
     net.script("network");
@@ -237,6 +324,90 @@ describe("isReconnecting", () => {
     expect(seen.current.isReconnecting).toBe(false);
     await advance(LATER);
     expect(net.calls()).toBe(3);
+  });
+
+  test("a retry function runs once per failure, however often the reader re-renders", async () => {
+    net.script("network");
+    const retry = vi.fn((failureCount: number) => failureCount < 3);
+    const seen: { current: Seen } = { current: null as unknown as Seen };
+    function Todos(_props: { tick: number }) {
+      const { data, error, loading, isReconnecting } = useQuery(
+        "/todos" as any,
+        {},
+        { suspense: false, retry } as any,
+      );
+      seen.current = { data, error, loading, isReconnecting };
+      return null;
+    }
+    const view = render(
+      <Providers>
+        <Todos tick={0} />
+      </Providers>,
+    );
+    const rerenders = (from: number) => {
+      for (let tick = from; tick < from + 5; tick++) {
+        view.rerender(
+          <Providers>
+            <Todos tick={tick} />
+          </Providers>,
+        );
+      }
+    };
+
+    await advance(0);
+    expect(net.calls()).toBe(1);
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(seen.current.isReconnecting).toBe(true);
+    rerenders(1);
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    await advance(1000);
+    expect(net.calls()).toBe(2);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(retry).toHaveBeenLastCalledWith(2, expect.any(TypeError));
+    rerenders(10);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(seen.current.isReconnecting).toBe(true);
+
+    // The third failure: the function gives up.
+    await advance(2000);
+    expect(net.calls()).toBe(3);
+    expect(retry).toHaveBeenCalledTimes(3);
+    expect(seen.current.isReconnecting).toBe(false);
+    rerenders(20);
+    await advance(LATER);
+    expect(retry).toHaveBeenCalledTimes(3);
+    expect(net.calls()).toBe(3);
+    expect(seen.current.isReconnecting).toBe(false);
+  });
+
+  test("two readers with different retry policies settle: a retry one schedules keeps it reconnecting", async () => {
+    net.script("network", { status: 200, body: ["a"] });
+    const seen: Seen[] = [];
+    function Todos(props: { index: number; retry: unknown }) {
+      const { data, error, loading, isReconnecting } = useQuery(
+        "/todos" as any,
+        {},
+        { suspense: false, retry: props.retry } as any,
+      );
+      seen[props.index] = { data, error, loading, isReconnecting };
+      return null;
+    }
+    render(
+      <Providers>
+        <Todos index={0} retry={false} />
+        <Todos index={1} retry={true} />
+      </Providers>,
+    );
+    await advance(0);
+    expect(net.calls()).toBe(1);
+    expect(seen[0].isReconnecting).toBe(true);
+    expect(seen[1].isReconnecting).toBe(true);
+    await advance(1000);
+    expect(net.calls()).toBe(2);
+    expect(seen[0].data).toEqual(["a"]);
+    expect(seen[0].isReconnecting).toBe(false);
+    expect(seen[1].isReconnecting).toBe(false);
   });
 
   test("false for an error that is never retried", async () => {
