@@ -1,4 +1,4 @@
-# Unreleased
+# 0.210.0
 
 ## Request timeouts for queries and mutations, and `isReconnecting` (#1273)
 
