@@ -541,10 +541,17 @@ describe("consent", () => {
       const { request, csrf } = await page();
       expect((await decide({ request, csrf, decision: "allow" }, { origin: "https://evil.example" })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: "null" })).status).toBe(403);
+      expect((await decide({ request, csrf, decision: "allow" }, { origin: "null", fetchSite: "cross-site" })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: null })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: null, fetchSite: "cross-site" })).status).toBe(403);
       // Same-origin without an Origin header is how some browsers post.
       const ok = await decide({ request, csrf, decision: "allow" }, { origin: null, fetchSite: "same-origin" });
+      expect(ok.status).toBe(303);
+    });
+
+    test("Chrome's post from the no-referrer page (Origin: null, same-origin) is accepted", async () => {
+      const { request, csrf } = await page();
+      const ok = await decide({ request, csrf, decision: "allow" }, { origin: "null", fetchSite: "same-origin" });
       expect(ok.status).toBe(303);
     });
 
