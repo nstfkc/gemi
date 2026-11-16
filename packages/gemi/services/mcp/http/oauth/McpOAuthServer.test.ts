@@ -102,7 +102,7 @@ const oauth = (options: Partial<ConstructorParameters<typeof McpOAuthServer>[0]>
     ...options,
   });
 
-function appWith(server: McpOAuthServer) {
+function appWith(server: McpOAuthServer, remote: Record<string, unknown> = {}) {
   class AppKernel extends Kernel {
     protected providers = [StubAuthProvider];
     config = {
@@ -122,6 +122,7 @@ function appWith(server: McpOAuthServer) {
               }),
               server,
             ],
+            ...remote,
           },
         },
       },
@@ -540,10 +541,17 @@ describe("consent", () => {
       const { request, csrf } = await page();
       expect((await decide({ request, csrf, decision: "allow" }, { origin: "https://evil.example" })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: "null" })).status).toBe(403);
+      expect((await decide({ request, csrf, decision: "allow" }, { origin: "null", fetchSite: "cross-site" })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: null })).status).toBe(403);
       expect((await decide({ request, csrf, decision: "allow" }, { origin: null, fetchSite: "cross-site" })).status).toBe(403);
       // Same-origin without an Origin header is how some browsers post.
       const ok = await decide({ request, csrf, decision: "allow" }, { origin: null, fetchSite: "same-origin" });
+      expect(ok.status).toBe(303);
+    });
+
+    test("Chrome's post from the no-referrer page (Origin: null, same-origin) is accepted", async () => {
+      const { request, csrf } = await page();
+      const ok = await decide({ request, csrf, decision: "allow" }, { origin: "null", fetchSite: "same-origin" });
       expect(ok.status).toBe(303);
     });
 
@@ -841,5 +849,130 @@ describe("the resource server", () => {
     // A client with no credential yet is only told where to get one.
     ip += 1;
     for (let i = 0; i < 40; i++) expect((await mcp(null)).status).toBe(401);
+  });
+});
+
+describe("behind a proxy that rewrites Host", () => {
+  // A tunnel run as `ngrok http 5192 --host-header=localhost:5192`: clients
+  // address public.test, the app sees localhost:5192.
+  const PUBLIC = "https://public.test";
+  const proxied = appWith(oauth(), { url: `${PUBLIC}/mcp`, hosts: ["localhost:5192"] });
+  const send = (path: string, init: RequestInit & { headers?: Record<string, string> } = {}) =>
+    proxied.fetch(
+      new Request(`http://localhost:5192${path.replace(PUBLIC, "")}`, {
+        ...init,
+        headers: { "x-forwarded-for": `10.0.1.${ip}`, ...init.headers },
+      }),
+    );
+
+  test("the metadata advertises the public URL", async () => {
+    const challenge = (await send("/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).headers.get(
+      "www-authenticate",
+    );
+    expect(challenge).toContain(`resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/mcp"`);
+    expect(await (await send("/.well-known/oauth-protected-resource/mcp")).json()).toMatchObject({
+      resource: `${PUBLIC}/mcp`,
+      authorization_servers: [PUBLIC],
+    });
+    expect(await (await send("/.well-known/oauth-authorization-server")).json()).toMatchObject({
+      issuer: PUBLIC,
+      authorization_endpoint: `${PUBLIC}/mcp/oauth/authorize`,
+      token_endpoint: `${PUBLIC}/mcp/oauth/token`,
+      registration_endpoint: `${PUBLIC}/mcp/oauth/register`,
+    });
+  });
+
+  test("register, authorize, consent, token and tools/list work through it", async () => {
+    const client = (await (
+      await send("/mcp/oauth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [CLAUDE], token_endpoint_auth_method: "none", client_name: "Claude" }),
+      })
+    ).json()) as any;
+    const { verifier, challenge } = pkce();
+    const authorized = await send(
+      authorizeUrl({
+        response_type: "code",
+        client_id: client.client_id,
+        redirect_uri: CLAUDE,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        state: "st-1",
+        resource: `${PUBLIC}/mcp`,
+      }),
+    );
+    const consentUrl = authorized.headers.get("location")!;
+    expect(consentUrl.startsWith(`${PUBLIC}/mcp/oauth/consent?request=`)).toBe(true);
+
+    // Signed out: sent to sign in on the host the browser is on, not to another.
+    const signedOut = await send(consentUrl);
+    expect(signedOut.headers.get("location")).toMatch(/^\/[^/]/);
+
+    const html = await (await send(consentUrl, { headers: { Cookie: "access_token=v2.tok-alice" } })).text();
+    expect(html).toContain(`action="${PUBLIC}/mcp/oauth/consent"`);
+    const field = (name: string) => new RegExp(`name="${name}" value="([^"]*)"`).exec(html)![1]!;
+    const decided = await send("/mcp/oauth/consent", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: "access_token=v2.tok-alice",
+        Origin: PUBLIC,
+      },
+      body: new URLSearchParams({ request: field("request"), csrf: field("csrf"), decision: "allow" }).toString(),
+    });
+    const back = new URL(decided.headers.get("location")!);
+    expect(back.searchParams.get("iss")).toBe(PUBLIC);
+
+    const tokens = (await (
+      await send("/mcp/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: back.searchParams.get("code")!,
+          code_verifier: verifier,
+          client_id: client.client_id,
+          redirect_uri: CLAUDE,
+          resource: `${PUBLIC}/mcp`,
+        }).toString(),
+      })
+    ).json()) as any;
+    expect(tokens.access_token).toBeTruthy();
+
+    const listed = await send("/mcp", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list",
+        Authorization: `Bearer ${tokens.access_token}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(await listed.json())).toContain("whoami");
+  });
+
+  test("a host it was not given still gets none of it", async () => {
+    const res: unknown = await proxied.fetch(new Request("http://127.0.0.1:5192/.well-known/oauth-authorization-server"));
+    expect(res).not.toBeInstanceOf(Response);
+  });
+
+  test("the boot refuses a host that is not one", async () => {
+    for (const host of ["https://localhost:5192", "localhost/mcp", ""]) {
+      await expect(appWith(oauth(), { hosts: [host] }).waitForBoot()).rejects.toThrow(/route.mcp.remote.hosts/);
+    }
   });
 });

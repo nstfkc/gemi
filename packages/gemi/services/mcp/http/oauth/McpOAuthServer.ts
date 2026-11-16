@@ -471,8 +471,11 @@ export class McpOAuthServer implements McpCallerResolver {
    * to the request), and only once.
    */
   private async decide(req: Request): Promise<Response> {
+    // The page is served with `Referrer-Policy: no-referrer`, so Chrome posts it
+    // with `Origin: null`: then `Sec-Fetch-Site`, which only the browser writes, decides.
     const origin = req.headers.get("origin");
-    const sameOrigin = origin !== null ? origin === this.issuer : req.headers.get("sec-fetch-site") === "same-origin";
+    const sameOrigin =
+      origin !== null && origin !== "null" ? origin === this.issuer : req.headers.get("sec-fetch-site") === "same-origin";
     if (!sameOrigin) return htmlError("This decision did not come from this site's consent page.", 403);
     if (!/^application\/x-www-form-urlencoded\s*(;|$)/i.test(req.headers.get("content-type") ?? "")) {
       return htmlError("The decision must be a form post.");

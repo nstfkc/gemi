@@ -77,6 +77,16 @@ export type McpRemoteHttpConfig = {
    */
   url?: string;
   /**
+   * Other hosts (`host[:port]`) the endpoint answers on, besides `url`'s.
+   * For a proxy in front that rewrites `Host` — a tunnel run as
+   * `ngrok http 5192 --host-header=localhost:5192`, say — so the app sees
+   * `localhost:5192` while clients address the public name. `url` stays the
+   * public URL: it is what the OAuth metadata, the `resource` and every
+   * endpoint URL advertise. Name only hosts that reach this app; any other
+   * still falls through to the app's own routes (DNS rebinding).
+   */
+  hosts?: readonly string[];
+  /**
    * Who may call: tried in order, and at least one is required — the boot is
    * refused without one, since an endpoint that resolves nobody would be
    * either useless or, worse, open. See `McpCallerResolver`,
@@ -277,6 +287,8 @@ export class McpHttpServer {
   private readonly resolvers: McpCallerResolver[];
   private readonly context: McpResolveContext;
   private readonly allowedOrigins: Set<string>;
+  /** The hosts the endpoint answers on: `url`'s and `hosts`. */
+  private readonly hosts: Set<string>;
   private readonly rateLimit: { limit: number; window: number } | false;
   private readonly maxBodyBytes: number;
   private readonly serverInfo: { name: string; version: string };
@@ -332,6 +344,15 @@ export class McpHttpServer {
       }),
     );
     this.allowedOrigins.add(this.endpoint.origin);
+    this.hosts = new Set([this.endpoint.host]);
+    for (const host of config.hosts ?? []) {
+      let parsed: URL | null = null;
+      try {
+        parsed = typeof host === "string" && host !== "" && !/[/?#@\\\s]/.test(host) ? new URL(`http://${host}`) : null;
+      } catch {}
+      if (!parsed) throw new Error(`route.mcp.remote.hosts: "${String(host)}" is not a host (host[:port]).`);
+      this.hosts.add(parsed.host);
+    }
     this.rateLimit = config.rateLimit === false ? false : (config.rateLimit ?? DEFAULT_RATE_LIMIT);
     this.maxBodyBytes =
       config.maxBodyBytes ?? Math.ceil(registry.maxFileBytes * 1.4) + 1024 * 1024;
@@ -365,13 +386,13 @@ export class McpHttpServer {
    * Answers a request that is the endpoint's, or one of its resolvers' (OAuth
    * metadata and endpoints), and `null` for anything else.
    *
-   * Only on the configured host. The name a client used is compared, not
+   * Only on the configured hosts. The name a client used is compared, not
    * trusted: a DNS-rebinding page reaches this server under its own host name,
    * and is answered by the app's ordinary routes, never by this.
    */
   async handle(req: Request): Promise<Response | null> {
     const url = new URL(req.url);
-    if (url.host !== this.endpoint.host) return null;
+    if (!this.hosts.has(url.host)) return null;
     if (this.feature !== undefined) {
       // Only for a path the endpoint or its resolvers can own, so the app's
       // own pages never pay for the evaluation (#885).
