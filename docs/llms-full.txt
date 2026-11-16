@@ -4376,6 +4376,7 @@ export default {
 - **`enabled`** must be `true` (a boolean) for anything to be mounted.
 - **`url`** is the endpoint's canonical URL: its path is where it is served, its host is the only host it answers on, and it is the OAuth `resource` tokens are issued for. `https`, or `http` on `localhost`. No query, fragment or trailing slash, and not `/`.
 - **`resolvers`** turn the request's credential into a user. The boot is refused without one, and without `SECRET` (the transport signs what it hands clients).
+- **`hosts`**: other hosts (`host[:port]`) the endpoint answers on, besides `url`'s. For a proxy that rewrites `Host`, like a tunnel run as `ngrok http 5192 --host-header=localhost:5192`: set `url` to the public URL (`https://<tunnel>/mcp`), which the OAuth metadata, the `resource` and every endpoint URL advertise, and list the host the app sees (`hosts: ["localhost:5192"]`). Any other host still gets the app's own routes.
 - **`allowedOrigins`**: browser origins allowed besides the endpoint's own (a web-based inspector, say). Requests with any other `Origin` get 403. Non-browser clients send none and are not affected.
 - **`rateLimit`**: each credential's budget at the endpoint, default `{ limit: 600, window: 60 }` requests; `false` turns it off.
 - **`maxBodyBytes`**, **`server`** (`name`, `version`, `instructions`), **`nonces`**, **`approvalTimeoutMs`**, **`onCall`** (an audit hook): see below.
