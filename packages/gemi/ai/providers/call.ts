@@ -15,7 +15,7 @@ import {
   type SentFile,
 } from "./fileRejection";
 import { addUsage, isContentEvent } from "../runtime";
-import type { AgentError, Usage } from "../types";
+import type { AgentError, ToolArgumentsTooLong, Usage } from "../types";
 import {
   backoffDelayMs,
   boundedBody,
@@ -23,6 +23,7 @@ import {
   waitUnlessAborted,
   type FetchLike,
   type RequestOptions,
+  patienceApplies,
   patientDelayMs,
   type ProviderRetryPolicy,
 } from "./http";
@@ -138,6 +139,8 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
   params: {
     signal?: AbortSignal;
     structuredOutput: boolean;
+    /** See `ProviderStreamParams.retryToolArgumentsTooLong`. */
+    retryToolArgumentsTooLong?: boolean;
     /** The file ids `body` sends, with their names — for the note that
      *  replaces a file the provider refuses. See `providers/fileRejection.ts`.
      *  Responses bodies only: without it a refused file fails the call. */
@@ -271,6 +274,8 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     let committed = false;
     let failure: AgentError | undefined;
     let streamTimedOut = false;
+    // The call this attempt was cut at, when `maxToolArgumentChars` ended it.
+    let cut: ToolArgumentsTooLong | undefined;
     // The tool calls this attempt has yielded argument deltas for, with how
     // much text each has streamed. Before `committed`, these are the only
     // things the consumer has seen, and a retry discards them.
@@ -338,38 +343,42 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         return;
       }
       failure = normalized;
+      if (error instanceof ProviderToolArgumentsTooLongError) cut = error.detail;
       held.push(
-        {
-          type: "error",
-          error: normalized,
-          ...(error instanceof ProviderToolArgumentsTooLongError
-            ? { toolArgumentsTooLong: error.detail }
-            : {}),
-        },
+        { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) },
         { type: "finish", reason: "error", usage: emptyUsage() },
       );
     }
     if (committed) return;
 
-    // Past `maxRetries`, a patience budget asks again too (#1258).
-    const delayMs = !failure?.retryable || params.signal?.aborted
-      ? undefined
-      : streamAttempt < maxStreamRetries
-        ? backoffDelayMs(streamAttempt, random)
-        : endpoint.retry
-          ? patientDelayMs(
-              endpoint.retry,
-              streamAttempt - maxStreamRetries,
-              failure.retryAfter,
-              now() - startedAt,
-              random,
-            )
-          : undefined;
+    let detail: { status?: number; requestId?: string } = {};
+    for (const event of held) if (event.type === "error") detail = httpErrorDetail(event);
+    // Past `maxRetries`, a patience budget asks again too (#1258), for the
+    // failures its `on` names (#1291). A cut call the caller sends back to the
+    // model itself is not asked again at all: the same request comes out as
+    // long again, which is what the limit is there to stop.
+    const delayMs =
+      !failure?.retryable || params.signal?.aborted || (cut && params.retryToolArgumentsTooLong === false)
+        ? undefined
+        : streamAttempt < maxStreamRetries
+          ? backoffDelayMs(streamAttempt, random)
+          : endpoint.retry &&
+              patienceApplies(endpoint.retry, failure, {
+                ...(detail.status !== undefined ? { status: detail.status } : {}),
+                timedOut: streamTimedOut,
+                ...(cut ? { toolArgumentsTooLong: cut } : {}),
+              })
+            ? patientDelayMs(
+                endpoint.retry,
+                streamAttempt - maxStreamRetries,
+                failure.retryAfter,
+                now() - startedAt,
+                random,
+              )
+            : undefined;
     if (delayMs !== undefined) {
-      let detail: { status?: number; requestId?: string } = {};
       for (const event of held) {
         if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
-        if (event.type === "error") detail = httpErrorDetail(event);
       }
       if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
       const elapsedMs = now() - startedAt;
@@ -381,6 +390,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         ...detail,
         phase: "stream",
         timedOut: streamTimedOut,
+        ...(cut ? { toolArgumentsTooLong: cut } : {}),
         delayMs,
         elapsedMs,
         ...(endpoint.retry
