@@ -230,8 +230,8 @@ function isFrameworkJsonValue(type: TS.Type): boolean {
  * a warning naming where it was, so a generated client never silently claims
  * to know a type it does not.
  */
-export class TypeMapper {
-  types: NamedType[] = [];
+export class TypeMapper<ExtraTag extends boolean = never> {
+  types: NamedType<ExtraTag>[] = [];
   warnings: string[] = [];
   private names = new Set<string>([
     // What the renderers declare beside the named types.
@@ -293,11 +293,11 @@ export class TypeMapper {
       nullable && inner.kind !== "json" ? { kind: "nullable", inner } : inner;
 
     if (members.length === 0) return { kind: "json" };
+    if (members.length === 1) return wrap(this.map(members[0]!, name, where));
     // `boolean` is `true | false` to the checker.
     if (members.every((member) => member.flags & ts.TypeFlags.BooleanLike)) {
       return wrap({ kind: "boolean" });
     }
-    if (members.length === 1) return wrap(this.map(members[0]!, name, where));
     if (members.every((member) => member.isStringLiteral())) {
       const values = [...new Set(members.map((member) => (member as TS.StringLiteralType).value))];
       return wrap(this.named(name, (unique) => ({ kind: "enum", name: unique, values })));
@@ -317,7 +317,11 @@ export class TypeMapper {
           discriminant,
           variants: members.map((member) => {
             const value = this.literalAt(member, discriminant)!;
-            const type = this.map(member, `${unique}${pascalCase(value)}`, `${where} (${value})`);
+            const type = this.map(
+              member,
+              `${unique}${pascalCase(String(value))}`,
+              `${where} (${value})`,
+            );
             return { value, type };
           }),
         })),
@@ -326,7 +330,7 @@ export class TypeMapper {
     return this.unsupported(type, where, "a union that is not told apart by one string member");
   }
 
-  /** The key every member has as a distinct string literal, if one does. */
+  /** The key every member has as a distinct literal, if one does. */
   private discriminantOf(members: TS.Type[]): string | undefined {
     if (!members.every((member) => this.isPlainObject(member))) return undefined;
     const keys = this.checker
@@ -338,11 +342,14 @@ export class TypeMapper {
     });
   }
 
-  private literalAt(type: TS.Type, key: string): string | undefined {
+  private literalAt(type: TS.Type, key: string): string | ExtraTag | undefined {
     const property = type.getProperty(key);
     if (!property) return undefined;
-    const propertyType = this.checker.getTypeOfSymbol(property);
-    return propertyType.isStringLiteral() ? propertyType.value : undefined;
+    return this.discriminantValue(this.checker.getTypeOfSymbol(property));
+  }
+
+  protected discriminantValue(type: TS.Type): string | ExtraTag | undefined {
+    return type.isStringLiteral() ? type.value : undefined;
   }
 
   private isPlainObject(type: TS.Type) {
@@ -412,12 +419,12 @@ export class TypeMapper {
    * before `build` runs so members named inside it cannot claim it first, and
    * the type is listed before its members so a reader meets it first.
    */
-  protected named(name: string, build: (unique: string) => NamedType): TypeRef {
+  protected named(name: string, build: (unique: string) => NamedType<ExtraTag>): TypeRef {
     let unique = name;
     for (let n = 2; this.names.has(unique); n++) unique = `${name}${n}`;
     this.names.add(unique);
     const slot = this.types.length;
-    this.types.push(undefined as unknown as NamedType);
+    this.types.push(undefined as unknown as NamedType<ExtraTag>);
     this.types[slot] = build(unique);
     return { kind: "named", name: unique };
   }

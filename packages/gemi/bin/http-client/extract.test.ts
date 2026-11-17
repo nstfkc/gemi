@@ -58,6 +58,7 @@ describe("type-only HTTP extraction", () => {
       "GET:/raw-response",
       "GET:/resources",
       "GET:/resources/:id",
+      "GET:/result",
       "GET:/search/:org/:cursor?",
       "GET:/unsupported",
       "GET:/verbs",
@@ -189,6 +190,61 @@ describe("type-only HTTP extraction", () => {
     expect(properties(route("GET:/controller").input.type)[0]?.key).toBe("page");
     expect(api.warnings.some((w) => w.includes("POST:/upload input.file"))).toBe(true);
   });
+  test("preserves boolean tags, nullable literals and unrestricted booleans", () => {
+    const result = route("GET:/result");
+    expect(properties(result.input.type).map((p) => p.type)).toEqual([
+      { kind: "nullable", inner: { kind: "boolean", literal: false } },
+      { kind: "boolean" },
+    ]);
+    const ref = result.response;
+    if (ref.kind !== "named") throw new Error("Expected named response");
+    const union = api.types.find((t) => t.name === ref.name);
+    if (union?.kind !== "union") throw new Error("Expected tagged result");
+    expect(union.discriminant).toBe("ok");
+    expect(union.variants.map((v) => v.value).sort()).toEqual([false, true]);
+    for (const { value, type } of union.variants) {
+      expect(properties(type).find((p) => p.key === "ok")?.type).toEqual({
+        kind: "boolean",
+        literal: value,
+      });
+    }
+    expect(route("GET:/errors").response).toEqual({ kind: "never" });
+    expect(api.warnings.some((w) => w.includes("no raw output"))).toBe(false);
+  });
+  test("warns for a missing raw output and preserves a handler that always throws", () => {
+    const partial = extractHttpApi(
+      ts,
+      {
+        file: "bin/http-client/__fixtures__/partial/http/ApiRouter.ts",
+        exportName: "default",
+      },
+      { cwd },
+    );
+    expect(partial.routes.map(({ key, response }) => [key, response])).toEqual([
+      ["GET:/missing", { kind: "json" }],
+      ["GET:/throws", { kind: "never" }],
+    ]);
+    expect(partial.warnings).toEqual([
+      "GET:/missing response: CreateRPC has a route but no raw output was found; kept as raw JSON.",
+    ]);
+  }, 60_000);
+  test("reads older app routers that only export the web RPC types", () => {
+    const legacy = extractHttpApi(
+      ts,
+      {
+        file: "bin/http-client/__fixtures__/legacy/http/ApiRouter.ts",
+        exportName: "default",
+      },
+      { cwd },
+    );
+    expect(legacy.routes.map(({ key, response }) => [key, response])).toEqual([
+      ["GET:/items/:id", { kind: "string" }],
+      ["POST:/empty", { kind: "json" }],
+    ]);
+    expect(legacy.warnings).toEqual([
+      "POST:/empty response: this version of gemi cannot distinguish a 204 from JSON null.",
+    ]);
+  }, 60_000);
   test("repeated extraction is byte-identical", () => {
     expect(JSON.stringify(read())).toBe(JSON.stringify(api));
   }, 60_000);
