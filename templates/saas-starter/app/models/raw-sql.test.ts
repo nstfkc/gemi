@@ -26,8 +26,10 @@ import { User } from "./User";
  * database anywhere near it. What it cannot cover is the half that only a
  * driver can answer, and that half is where the surprises live:
  *
- * - **The rowcount.** Bun reports it on `count` and leaves `affectedRows` null,
- *   on both dialects. That is measured behaviour rather than documented
+ * - **The rowcount.** Bun reports it on `count` on both dialects. Before Bun
+ *   1.4.4 `affectedRows` was null on both; from 1.4.4 it carries the same
+ *   number for a write and 0 for a `SELECT`. `count` is the one that holds on
+ *   every version, which is measured behaviour rather than documented
  *   behaviour, so it belongs in a test that would notice it changing.
  * - **The ambient transaction.** A raw statement that quietly runs on a pooled
  *   connection while `Model.transaction` holds a reserved one commits while its
@@ -36,6 +38,29 @@ import { User } from "./User";
  *
  * Both dialects, because the two agree about neither for free.
  */
+
+/**
+ * How many rows a query bound with a forged fragment returned — or 0 when the
+ * driver refused to bind the object at all.
+ *
+ * Both outcomes mean the fragment was *bound* rather than spliced, which is the
+ * guarantee under test. Which one happens is the driver's call and moved with
+ * Bun 1.4: Bun's SQLite driver used to bind a plain object as something
+ * meaningless that matched nothing, and from 1.4.0 it throws `Binding expected
+ * string, TypedArray, …`. Postgres binds it on both (from 1.4.4 as JSON text).
+ * Any other error is still a failure, so a broken statement cannot pass as a
+ * refused binding.
+ */
+async function matched(rows: Promise<unknown[]>): Promise<number> {
+  try {
+    return (await rows).length;
+  } catch (error) {
+    if (error instanceof TypeError && /^Binding expected/.test(error.message)) {
+      return 0;
+    }
+    throw error;
+  }
+}
 
 function suite(label: string, url?: string) {
   describe(label, () => {
@@ -146,22 +171,22 @@ function suite(label: string, url?: string) {
       expect(await search("ada@x.test")).toHaveLength(1);
 
       // `'' or 1=1` would have returned every row.
-      expect(await search({ text: `'' or 1=1`, binders: [] })).toHaveLength(0);
+      expect(await matched(search({ text: `'' or 1=1`, binders: [] }))).toBe(0);
 
       // ...and this one returned the password column out of a statement that
       // selects only `email`.
-      const leak = await search({
+      const leak = search({
         text: `'' union select "password" from "User"`,
         binders: [],
       });
-      expect(leak).toHaveLength(0);
+      expect(await matched(leak)).toBe(0);
 
       // A structural clone of a real fragment is the same attack without the
       // hand-written text: shape cannot tell it apart, membership can.
       const real = sql`x`;
       expect(
-        await search({ text: real.text, binders: [...real.binders] }),
-      ).toHaveLength(0);
+        await matched(search({ text: real.text, binders: [...real.binders] })),
+      ).toBe(0);
 
       // The table is intact and the honest query still works, so the guard is
       // not simply refusing everything.
@@ -169,13 +194,13 @@ function suite(label: string, url?: string) {
     });
 
     test("a forged fragment inside join binds too", async () => {
-      const rows = await DB.query(
+      const rows = DB.query(
         sql`select "email" from "User" where "email" in (${join([
           { text: `'' or 1=1`, binders: [] },
         ])})`,
       );
 
-      expect(rows).toHaveLength(0);
+      expect(await matched(rows)).toBe(0);
     });
 
     test("a value that looks like SQL is data, not SQL", async () => {

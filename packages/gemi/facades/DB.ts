@@ -10,6 +10,7 @@ import {
   currentConnectionName,
   currentSettings,
   currentTransaction,
+  noteFailedStatement,
   runOnConnection,
   runWithSettings,
   type SessionSettingValue,
@@ -179,10 +180,12 @@ export class ConnectionQueries {
   // caller won the compare-and-swap and 0 means it lost, and an API that
   // discarded it could not express that at all.
   //
-  // **Where the number comes from.** Bun puts it on `count`, and leaves
-  // `affectedRows` null — measured on both dialects rather than read from a
-  // changelog, for `update`, `delete`, `insert`, a statement matching nothing,
-  // and one with `returning`.
+  // **Where the number comes from.** Bun puts it on `count` — measured on both
+  // dialects rather than read from a changelog, for `update`, `delete`,
+  // `insert`, a statement matching nothing, and one with `returning`, on Bun
+  // 1.3 and 1.4. `affectedRows` is not used: it was null on both dialects up to
+  // Bun 1.4.3, and from 1.4.4 it carries the same number (and 0 for a
+  // `select`).
   //
   // `result.count` on what is otherwise an *array* reads like a bug, so: Bun
   // returns an array with `count`, `command` and `lastInsertRowid` hung off it,
@@ -373,7 +376,11 @@ export class ConnectionQueries {
         { slowTransactionThreshold: db.config.slowTransactionThreshold, connection: name },
       );
     }
-    return (handle ?? db.sql).unsafe(text, values);
+    if (handle === undefined) return db.sql.unsafe(text, values);
+    return handle.unsafe(text, values).catch((error: unknown) => {
+      noteFailedStatement(handle);
+      throw error;
+    });
   }
 
   /**

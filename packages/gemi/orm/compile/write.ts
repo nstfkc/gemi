@@ -55,7 +55,9 @@ import { assertListDialect, compileWhere } from "./where";
  *
  * `count` has since been measured on Postgres too, and it agrees: same property,
  * same value, `affectedRows` null on both, across `update`, `delete`, `insert`,
- * a statement matching nothing and one carrying `returning`. That does not
+ * a statement matching nothing and one carrying `returning`. (Bun 1.4.4 fills
+ * `affectedRows` in as well, with the same number; `count` holds on every
+ * version, and `app/models/bun-sql.test.ts` pins it.) That does not
  * change the decision here — `RETURNING` is still exact and still asks the
  * driver for nothing — but it is what lets `DB.execute` report a *raw* write's
  * rowcount, where the statement is the caller's and there is no `RETURNING` to

@@ -9,6 +9,7 @@ import {
   currentConnectionName,
   currentTransaction,
   deferUntilCommit,
+  noteFailedStatement,
   isSystemScope,
   ormContext,
   runAsSystem,
@@ -229,8 +230,33 @@ describe("the ambient transaction scope", () => {
         afterCommit: [],
         commitDependsOn: [],
         appliedSettings: new Map(),
+        statementFailed: { value: false },
       });
     });
+  });
+
+  // On Postgres a swallowed failure aborts the transaction, and Bun before
+  // 1.4.3 resolved `begin` over the COMMIT that rolled back. The `select 1`
+  // is what fails there; here it is enough that it is asked, and only then.
+  test("a failed statement on the handle is checked for before commit", async () => {
+    const pool = fakePool("a");
+
+    await withTransaction(pool, async (tx) => {
+      await tx.unsafe("insert ok");
+    });
+    expect(pool.log).toEqual(["insert ok"]);
+
+    await withTransaction(pool, async (tx) => {
+      noteFailedStatement(tx);
+    });
+    expect(pool.log).toEqual(["insert ok", "select 1"]);
+
+    // A handle that is not the open transaction's records nothing.
+    const other = fakePool("b");
+    await withTransaction(pool, async () => {
+      noteFailedStatement(other.handle);
+    });
+    expect(pool.log).toEqual(["insert ok", "select 1"]);
   });
 });
 

@@ -454,11 +454,22 @@ function suite(label: string, url?: string) {
       // nobody adopts it from the two rows that work.
       expect((await insert("to_jsonb($1)", 42)).kind).toBe("number");
       expect((await insert("to_jsonb($1)", true)).kind).toBe("boolean");
-      for (const value of [{ a: 1 }, [1, 2], "42", null]) {
+      for (const value of [{ a: 1 }, [1, 2], "42"]) {
         await expect(insert("to_jsonb($1)", value)).rejects.toThrow(
           /polymorphic type/,
         );
       }
+      // `null` depends on the Bun version and on what ran before it. Up to Bun
+      // 1.4.3 every combination of NULL parameters was prepared as a statement
+      // of its own, so the untyped NULL failed like the shapes above. From
+      // 1.4.4 a NULL reuses the statement the `true` above prepared, and binds
+      // as a typed SQL NULL, so `to_jsonb` returns SQL NULL. Neither is the JSON
+      // `null` a fix would need, which is the claim pinned here.
+      const stored = await insert("to_jsonb($1)", null).catch((error: Error) => {
+        expect(error.message).toMatch(/polymorphic type/);
+        return undefined;
+      });
+      if (stored !== undefined) expect(stored.kind).toBeNull();
 
       await raw.unsafe(`DROP TABLE IF EXISTS "JsonProbe"`);
     });

@@ -481,8 +481,9 @@ export class SqliteDialect implements SqlDialect {
   // complaint on *both* dialects, and on Postgres it lands correctly in a
   // `jsonb` column — an object bound into one comes back as the object. So
   // refusing them here would break the legitimate case to catch the mistaken
-  // one. On SQLite the same value binds to something no row matches, silently;
-  // stringify it yourself if the column is JSON.
+  // one. On SQLite the same value bound to something no row matches, silently,
+  // up to Bun 1.3; from Bun 1.4.0 the driver refuses it (`Binding expected
+  // string, TypedArray, …`). Stringify it yourself if the column is JSON.
   //
   // Guessing from the value is the other tempting fix and is worse: the
   // compiler only JSON-encodes because a field says `Json`, and encoding on
