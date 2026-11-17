@@ -1,4 +1,5 @@
 import type { ProviderRetryInfo } from "../AgentProvider";
+import type { AgentError, AgentErrorCode, ToolArgumentsTooLong } from "../types";
 import {
   httpErrorDetail,
   normalizeProviderError,
@@ -77,6 +78,11 @@ export type RequestOptions = {
  * and they stop once `patienceMs` has passed since the call started (the
  * last wait is cut to what is left of it). Only before the first content
  * event: nothing the model said is ever asked for twice.
+ *
+ * `on` (#1291) narrows which failures are waited out: a list of
+ * `AgentErrorCode`s, or a function of the normalized error and
+ * `ProviderRetryFailure`. Only retryable failures are ever asked, and the
+ * quick retries are not affected. Default: every retryable failure.
  */
 export type ProviderRetryPolicy = {
   /** The total time, from the call's start, retryable failures are waited out for. */
@@ -85,7 +91,43 @@ export type ProviderRetryPolicy = {
   initialWaitMs?: number;
   /** The longest single wait, `Retry-After` included. Default 60 000. */
   maxWaitMs?: number;
+  /** Which failures the patient retries apply to. Default: every retryable one. */
+  on?: readonly AgentErrorCode[] | ((error: AgentError, failure: ProviderRetryFailure) => boolean);
 };
+
+/**
+ * What `ProviderRetryPolicy.on` is told besides the normalized error.
+ *
+ * - `status`: the HTTP status of the failed response, when there was one.
+ * - `timedOut`: the attempt was cut by `timeoutMs`, `streamIdleTimeoutMs` or
+ *   `streamMaxDurationMs`.
+ * - `toolArgumentsTooLong`: the attempt was cut at `maxToolArgumentChars`.
+ */
+export type ProviderRetryFailure = {
+  status?: number;
+  timedOut: boolean;
+  toolArgumentsTooLong?: ToolArgumentsTooLong;
+};
+
+/**
+ * Whether the policy's patient retries apply to this failure (#1291). A
+ * function that throws counts as no: the call fails with its error rather
+ * than waiting on a rule that could not answer.
+ */
+export function patienceApplies(
+  policy: ProviderRetryPolicy,
+  error: AgentError,
+  failure: ProviderRetryFailure,
+): boolean {
+  const on = policy.on;
+  if (on === undefined) return true;
+  if (typeof on !== "function") return on.includes(error.code);
+  try {
+    return on(error, failure) === true;
+  } catch {
+    return false;
+  }
+}
 
 export const DEFAULT_PATIENT_INITIAL_WAIT_MS = 4_000;
 export const DEFAULT_PATIENT_MAX_WAIT_MS = 60_000;
@@ -99,10 +141,13 @@ export function assertRetryPolicy(policy: ProviderRetryPolicy | undefined): void
     !policy ||
     !ok(policy.patienceMs, 0) ||
     (policy.initialWaitMs !== undefined && !ok(policy.initialWaitMs, 1)) ||
-    (policy.maxWaitMs !== undefined && !ok(policy.maxWaitMs, 1))
+    (policy.maxWaitMs !== undefined && !ok(policy.maxWaitMs, 1)) ||
+    (policy.on !== undefined &&
+      typeof policy.on !== "function" &&
+      !(Array.isArray(policy.on) && policy.on.every((code) => typeof code === "string")))
   ) {
     throw new Error(
-      `The provider's retry policy ${JSON.stringify(policy)} is not usable: patienceMs has to be a number of milliseconds (0 or more), and initialWaitMs and maxWaitMs above 0.`,
+      `The provider's retry policy ${JSON.stringify(policy)} is not usable: patienceMs has to be a number of milliseconds (0 or more), initialWaitMs and maxWaitMs above 0, and on a list of error codes or a function.`,
     );
   }
 }
@@ -284,10 +329,14 @@ export async function requestWithRetry(
 
   // Past `maxRetries`, only a patience budget asks again (#1258): the delay
   // for the attempt after `attempt`, or `undefined` to give up.
-  const patient = (attempt: number, retryAfter: number | undefined) =>
-    policy
-      ? patientDelayMs(policy, attempt - maxRetries, retryAfter, now() - startedAt, random)
-      : undefined;
+  const patient = (attempt: number, retryAfter: number | undefined, error: unknown, timedOut: boolean) => {
+    if (!policy) return undefined;
+    const { status } = httpErrorDetail(error);
+    if (!patienceApplies(policy, normalizeProviderError(error), { ...(status ? { status } : {}), timedOut })) {
+      return undefined;
+    }
+    return patientDelayMs(policy, attempt - maxRetries, retryAfter, now() - startedAt, random);
+  };
 
   for (let attempt = 0; ; attempt++) {
     options.signal?.throwIfAborted();
@@ -319,7 +368,9 @@ export async function requestWithRetry(
       // left" — it is "another attempt is the wrong thing to do". See
       // `RequestOptions.retryTimeouts`.
       if (timedOut && options.retryTimeouts === false) throw lastError;
-      const delay = attempt < maxRetries ? backoffDelayMs(attempt, random) : patient(attempt, undefined);
+      const delay = attempt < maxRetries
+          ? backoffDelayMs(attempt, random)
+          : patient(attempt, undefined, lastError, timedOut);
       if (delay === undefined) throw lastError;
       await wait(delay, attempt, lastError, timedOut);
       continue;
@@ -356,7 +407,7 @@ export async function requestWithRetry(
       (response.status === 429 ? normalizeProviderError(error).retryAfter : undefined);
     const delay =
       attempt >= maxRetries
-        ? patient(attempt, retryAfter)
+        ? patient(attempt, retryAfter, error, false)
         : retryAfter === undefined
           ? backoffDelayMs(attempt, random)
           : Math.min(retryAfter, MAX_DELAY_MS);

@@ -1,3 +1,22 @@
+# Unreleased
+
+## Cut-call retries say they were cut, and `retry.on` (#1291)
+
+**New API (minor version).** Follow-up to #1258 and #1259.
+
+- **`ProviderRetryInfo.toolArgumentsTooLong`**: a `retry` event (`onProviderRetry`) for an attempt cut at `maxToolArgumentChars` carries the cut call, `{ tool, toolCallId, limit, chars }`, the same object the final error has. No need to match the error message to spot a cut.
+- **`onToolArgumentsTooLong: { toolError: n }` no longer retries a cut first.** While the budget lasts, the provider ends the call with the cut at once (no quick retries, no patient ones), and the cut goes straight back to the model. Past the budget, cuts are retried as before. This is passed to providers as the new `ProviderStreamParams.retryToolArgumentsTooLong: false`.
+- **`retry.on`** on the provider's patience policy: `AgentErrorCode[]` or `(error, { status?, timedOut, toolArgumentsTooLong? }) => boolean`, which failures the patient retries apply to. The quick retries are unchanged. Default: every retryable failure, as before. New type: `ProviderRetryFailure`.
+
+```ts
+AzureOpenAIProvider.model("gpt-5.4", { retry: { patienceMs: 60_000, on: ["rate_limited"] } });
+```
+
+What to check:
+
+- Agents with `onToolArgumentsTooLong: { toolError }` see a cut reach the model one model call sooner; the `maxRetries` attempts it used to spend on it are gone.
+- Apps that matched the cut error's message on `retry` events, or kept their own patience loop to wait out only some failures, can use these instead.
+
 # 0.210.0
 
 ## Request timeouts for queries and mutations, and `isReconnecting` (#1273)

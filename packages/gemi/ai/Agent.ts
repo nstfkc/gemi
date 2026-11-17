@@ -1574,7 +1574,9 @@ export interface CreateAgentParams<
    * in a run: the call gets an `invalid_tool_input` error result that tells
    * the model to split the work over smaller calls, its cut arguments are
    * replaced by `{}`, the step's other finished calls run, and the run goes
-   * on. The cut after the `n`th fails the run as `"fail"` does.
+   * on. The cut after the `n`th fails the run as `"fail"` does. While the
+   * budget lasts, the provider does not ask a cut call again first (no quick
+   * or patient retries, #1291): asked the same, it comes out as long again.
    */
   onToolArgumentsTooLong?: "fail" | { toolError: number };
   /**
@@ -4493,6 +4495,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       reasoning: request.reasoning,
       maxOutputTokens: request.maxOutputTokens,
       temperature: this.config.temperature,
+      // While a cut call can go back to the model, asking the provider the
+      // same again only cuts it again (#1291).
+      ...(this.cutCalls < this.config.cutCallsToModel ? { retryToolArgumentsTooLong: false } : {}),
       signal,
     });
 

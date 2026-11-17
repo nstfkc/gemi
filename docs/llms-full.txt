@@ -8736,6 +8736,23 @@ const azure = AzureOpenAIProvider.model("gpt-5.4", {
 - The run's `maxRunDurationMs` and `stop()` still end it, during a wait too.
 - Without `retry`, nothing changes. The same option is on `AnthropicProvider` and the Foundry providers.
 
+To wait out only some failures, add `on`. It takes a list of error codes, or a function of the normalized error and `{ status?, timedOut, toolArgumentsTooLong? }` (`ProviderRetryFailure`). It narrows the patient retries only: the quick retries stay as they are, a failure that isn't retryable is never waited out, and a function that throws counts as no. The default is every retryable failure.
+
+```typescript
+// Wait out a rate limit, a timeout or an unreachable provider for up to 3 minutes.
+const builder = AzureOpenAIProvider.model("gpt-5.4", { retry: { patienceMs: 3 * 60_000 } });
+
+// Wait out only a rate limit, for up to a minute: a call that times out fails at once.
+const chat = AzureOpenAIProvider.model("gpt-5.4", {
+  retry: { patienceMs: 60_000, on: ["rate_limited"] },
+});
+
+// Or decide from the failure.
+const careful = AzureOpenAIProvider.model("gpt-5.4", {
+  retry: { patienceMs: 60_000, on: (error, { timedOut, toolArgumentsTooLong }) => !timedOut && !toolArgumentsTooLong },
+});
+```
+
 ### Watching retries
 
 Each retry is visible outside the provider (#1192). Before the backoff wait, the provider stream carries a `retry` event, and the run turns it into an `onProviderRetry` call on the server and a `retry` frame for the client. Use it to log every attempt with the run's context, or to tell the user the call is being asked again instead of showing an unexplained pause.
@@ -8750,7 +8767,7 @@ const run = agent.stream({
 });
 ```
 
-- `attempt` is the attempt that failed, from 1, and `delayMs` the wait before the next one. `maxRetries` is the provider's. `error` is the normalized error, with the HTTP `status` and `requestId` of the response it came from when there was one. `phase` is `"request"` (no response, or an error status) or `"stream"` (the body broke before its first content event); request attempts are counted per stream attempt. `timedOut` says whether `timeoutMs`, `streamIdleTimeoutMs` or `streamMaxDurationMs` cut it. `elapsedMs` runs from the call's first attempt.
+- `attempt` is the attempt that failed, from 1, and `delayMs` the wait before the next one. `maxRetries` is the provider's. `error` is the normalized error, with the HTTP `status` and `requestId` of the response it came from when there was one. `phase` is `"request"` (no response, or an error status) or `"stream"` (the body broke before its first content event); request attempts are counted per stream attempt. `timedOut` says whether `timeoutMs`, `streamIdleTimeoutMs` or `streamMaxDurationMs` cut it. `elapsedMs` runs from the call's first attempt. `toolArgumentsTooLong` is set when the attempt was cut at `maxToolArgumentChars`: the same `{ tool, toolCallId, limit, chars }` the run's error has once the retries are spent (see [When a tool call is cut](#when-a-tool-call-is-cut)).
 - `runId`, `agent` and `step` (the run's model call, from 1) are added by the run. The hook is handed down to sub-runs started with `ctx.runAgent`, which report their own `runId` and `agent`.
 - The hook is not awaited, and one that throws or rejects is logged and ignored, so it cannot slow down or fail the call.
 - `AgentController` has the same hook: `onProviderRetry(info, ctx)`, as a method or in `defineAgentHooks`.
@@ -8779,7 +8796,7 @@ The defaults are long on purpose. A reasoning model at a high effort can think f
 
 #### When a tool call is cut
 
-A call cut at `maxToolArgumentChars` is asked again under `maxRetries`, like the other limits. When those run out, the run fails with a `provider_error` that says which call was cut: `result().error.toolArgumentsTooLong` is `{ tool, toolCallId, limit, chars }`, and `result({ throwOnError: true })` rejects with a `ToolArgumentsTooLongError` (an `AgentRunError` with the same four fields):
+A call cut at `maxToolArgumentChars` is asked again under `maxRetries`, like the other limits (and under a `retry` policy, unless its `on` leaves cuts out). Each of those retries says the call was cut: its `retry` event has `toolArgumentsTooLong`. When the retries run out, the run fails with a `provider_error` that says which call was cut: `result().error.toolArgumentsTooLong` is `{ tool, toolCallId, limit, chars }`, and `result({ throwOnError: true })` rejects with a `ToolArgumentsTooLongError` (an `AgentRunError` with the same four fields):
 
 ```typescript
 import { ToolArgumentsTooLongError } from "gemi/ai";
@@ -8799,7 +8816,7 @@ To let the model recover instead, set `onToolArgumentsTooLong` on the agent:
 Agent.create({ name: "writer", provider, tools, onToolArgumentsTooLong: { toolError: 2 } });
 ```
 
-With `{ toolError: n }`, the cut call gets an `invalid_tool_input` error result telling the model to split the work over smaller calls, its cut arguments are replaced by `{}`, the step's other finished calls run, and the run goes on. That happens up to `n` times in a run; the next cut fails the run as above. The default, `"fail"`, fails at the first.
+With `{ toolError: n }`, the cut call gets an `invalid_tool_input` error result telling the model to split the work over smaller calls, its cut arguments are replaced by `{}`, the step's other finished calls run, and the run goes on. That happens up to `n` times in a run; the next cut fails the run as above. While those `n` last, the provider does not ask a cut call again first (no quick or patient retries): asked the same, it comes out as long again, so the cut goes to the model at once. The agent tells the provider with `ProviderStreamParams.retryToolArgumentsTooLong: false`; a custom provider that retries can read it too. The default, `"fail"`, fails at the first.
 
 `streamIdleTimeoutMs` does not cover the wait for the response headers; `timeoutMs` does. They are separate on purpose. Some vendors send the headers only once the model starts (Azure does), so that wait includes queueing and prefill, which grows with the prompt and can take tens of seconds on a long thread. Folding it into a short idle limit would cut those slow-but-healthy first responses on every long thread. To bound it, lower `timeoutMs` as well.
 

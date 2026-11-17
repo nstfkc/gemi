@@ -125,6 +125,14 @@ export interface ProviderStreamParams {
   reasoning?: ReasoningEffort;
   temperature?: number;
   maxOutputTokens?: number;
+  /**
+   * `false`: a call cut at `maxToolArgumentChars` is not asked again (no quick
+   * retries, no patient ones, #1291), and the stream ends with its error at
+   * once. Set by `Agent` while its `onToolArgumentsTooLong: { toolError }`
+   * budget lasts, since asking the same again comes out as long again. Unset:
+   * a cut is retried like any other retryable failure.
+   */
+  retryToolArgumentsTooLong?: boolean;
   signal?: AbortSignal;
 }
 
@@ -266,6 +274,9 @@ export type ProviderEvent =
  *   `streamMaxDurationMs`.
  * - `delayMs`: how long the provider waits before the next attempt.
  * - `elapsedMs`: since the call's first attempt started.
+ * - `toolArgumentsTooLong`: set when the attempt was cut at
+ *   `maxToolArgumentChars` (#1291), the same object the `error` event carries
+ *   once the retries are spent (#1259). `phase` is then `"stream"`.
  */
 export type ProviderRetryInfo = {
   attempt: number;
@@ -282,6 +293,7 @@ export type ProviderRetryInfo = {
    * after this wait. Absent without one.
    */
   remainingMs?: number;
+  toolArgumentsTooLong?: ToolArgumentsTooLong;
 };
 
 export type ProviderStream = AsyncIterable<ProviderEvent>;
@@ -293,7 +305,7 @@ export type ProviderStream = AsyncIterable<ProviderEvent>;
  * that resolution lives in one place and what happens when it does not.
  */
 export type { AnthropicConfig, AzureConfig, FoundryConfig, ProviderConfig } from "./providers/endpoints";
-export type { ProviderRetryPolicy } from "./providers/http";
+export type { ProviderRetryFailure, ProviderRetryPolicy } from "./providers/http";
 
 export abstract class AgentProvider {
   abstract readonly model: string;
@@ -395,6 +407,7 @@ export class OpenAIProvider extends AgentProvider {
     });
     return streamResponses(this.endpoint(), body, {
       signal: params.signal,
+      retryToolArgumentsTooLong: params.retryToolArgumentsTooLong,
       // The request carries the schema whenever the agent declared one, so the
       // parser has to read the answer as one too — a model that ignored the
       // parameter answers 400, not prose.
@@ -503,6 +516,7 @@ export class AnthropicProvider extends AgentProvider {
       let yielded = false;
       for await (const event of streamResponses(this.endpointFor(body), body, {
         signal: params.signal,
+        retryToolArgumentsTooLong: params.retryToolArgumentsTooLong,
         structuredOutput: Boolean(params.output),
         parse: parseMessagesStream,
       })) {
@@ -673,6 +687,7 @@ export class AzureOpenAIProvider extends AgentProvider {
     });
     return streamResponses(this.endpoint(), body, {
       signal: params.signal,
+      retryToolArgumentsTooLong: params.retryToolArgumentsTooLong,
       // The request carries the schema whenever the agent declared one, so the
       // parser has to read the answer as one too — a model that ignored the
       // parameter answers 400, not prose.
