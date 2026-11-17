@@ -61,6 +61,7 @@
     "bin/migrate",
     "bin/orm",
     "bin/ai-client",
+    "bin/http-client",
     "auth",
     "config",
     "internal",

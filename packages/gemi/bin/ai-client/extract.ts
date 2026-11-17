@@ -148,7 +148,7 @@ export function extractAgent(
   };
 }
 
-function compilerOptions(ts: typeof TS, file: string): TS.CompilerOptions {
+export function compilerOptions(ts: typeof TS, file: string): TS.CompilerOptions {
   const configPath = ts.findConfigFile(path.dirname(file), ts.sys.fileExists);
   let options: TS.CompilerOptions = {
     target: ts.ScriptTarget.ESNext,
@@ -175,7 +175,7 @@ function compilerOptions(ts: typeof TS, file: string): TS.CompilerOptions {
   };
 }
 
-function exportedType(
+export function exportedType(
   ts: typeof TS,
   checker: TS.TypeChecker,
   sourceFile: TS.SourceFile,
@@ -195,7 +195,7 @@ function exportedType(
 }
 
 /** An import specifier from `from` to `to`, extension dropped. */
-function specifier(from: string, to: string): string {
+export function specifier(from: string, to: string): string {
   const relative = path
     .relative(path.dirname(from), to)
     .split(path.sep)
@@ -230,7 +230,7 @@ function isFrameworkJsonValue(type: TS.Type): boolean {
  * a warning naming where it was, so a generated client never silently claims
  * to know a type it does not.
  */
-class TypeMapper {
+export class TypeMapper {
   types: NamedType[] = [];
   warnings: string[] = [];
   private names = new Set<string>([
@@ -244,7 +244,7 @@ class TypeMapper {
   private inProgress = new Set<TS.Type>();
 
   constructor(
-    private ts: typeof TS,
+    protected ts: typeof TS,
     readonly checker: TS.TypeChecker,
   ) {}
 
@@ -412,7 +412,7 @@ class TypeMapper {
    * before `build` runs so members named inside it cannot claim it first, and
    * the type is listed before its members so a reader meets it first.
    */
-  private named(name: string, build: (unique: string) => NamedType): TypeRef {
+  protected named(name: string, build: (unique: string) => NamedType): TypeRef {
     let unique = name;
     for (let n = 2; this.names.has(unique); n++) unique = `${name}${n}`;
     this.names.add(unique);

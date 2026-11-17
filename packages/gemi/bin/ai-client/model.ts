@@ -9,9 +9,10 @@
  * vocabulary in both.
  */
 
+/** Optional literal constraints are emitted only by HTTP extraction. AI output is unchanged. */
 export type TypeRef =
-  | { kind: "string" }
-  | { kind: "number" }
+  | { kind: "string"; literal?: string }
+  | { kind: "number"; literal?: number }
   | { kind: "boolean" }
   /** Anything the generator does not map: `unknown`, `any`, and the shapes it
    *  warns about. The client keeps it as a raw JSON value. */
