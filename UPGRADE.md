@@ -1,4 +1,4 @@
-# Unreleased
+# 0.214.0
 
 ## Bun 1.4.4, and a swallowed failure rejects `Model.transaction` on Postgres (#1295)
 
