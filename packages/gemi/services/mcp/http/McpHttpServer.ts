@@ -11,6 +11,7 @@ import {
   McpCallRefusedError,
   McpToolError,
   type McpCaller,
+  type McpImageContent,
   type McpRegistry,
   type McpRemotePrincipal,
   type McpToolDescriptor,
@@ -833,11 +834,13 @@ export class McpHttpServer {
     }
 
     const progress = progressSink(call);
+    const images: McpImageContent[] = [];
     let value: unknown;
     try {
       value = await this.registry.execute(caller, name, args, undefined, {
         approved: audit.approved,
         signal: call.signal,
+        images: (image) => images.push(image),
         ...(progress ? { progress } : {}),
       });
     } catch (error) {
@@ -864,8 +867,11 @@ export class McpHttpServer {
     const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
     const structured =
       tool.outputSchema && (call.era.modern || isObject(value)) ? { structuredContent: value } : {};
+    // The images a native tool showed follow its text (#1293). A tool that
+    // answers nothing but images is answered with them alone.
+    const content = [...(images.length > 0 && value === null ? [] : [{ type: "text", text }]), ...images];
     audit.outcome = "ok";
-    return this.toolResult(call, { content: [{ type: "text", text }], ...structured, isError: false });
+    return this.toolResult(call, { content, ...structured, isError: false });
   }
 
   private toolResult(call: Call, result: Record<string, unknown>) {

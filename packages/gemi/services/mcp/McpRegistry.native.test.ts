@@ -529,12 +529,49 @@ describe("for a remote caller", () => {
       asRemote((caller, registry) => registry.execute(caller, "misc", {}, undefined, { approved: true }));
     behave = (ctx) => ctx.attachments.put(new Blob(["x"]));
     await expect(run()).rejects.toThrow(/remote MCP client, which has no attachment store/);
+    behave = (ctx) => ctx.attachments.put(new Blob(["x"], { type: "application/pdf" }), { showModel: true });
+    await expect(run()).rejects.toThrow(/shown images only, and this is "application\/pdf"/);
     behave = (ctx) => ctx.runAgent({} as any);
     await expect(run()).rejects.toThrow(/no agent run/);
     behave = async (ctx) => ctx.jobs.track(Promise.resolve(1));
     await expect(run()).rejects.toThrow(/threadId|conversation/);
     behave = async (ctx) => ({ context: ctx.context, turn: ctx.turn, body: ctx.body, depth: ctx.depth });
     expect(await run()).toEqual({ context: { via: "remote" }, turn: { attachments: [] }, body: {}, depth: 0 });
+  });
+
+  test("an image put with showModel reaches the images sink, in the order asked (#1293)", async () => {
+    const images: unknown[] = [];
+    const run = () =>
+      asRemote((caller, registry) =>
+        registry.execute(caller, "misc", {}, undefined, { approved: true, images: (image) => images.push(image) }),
+      );
+    behave = async (ctx) => {
+      let release!: () => void;
+      const late = new Promise<ArrayBuffer>((resolve) => (release = () => resolve(new TextEncoder().encode("a").buffer)));
+      const slow = new Blob(["a"], { type: "image/png" });
+      slow.arrayBuffer = () => late;
+      const first = ctx.attachments.put(slow, { showModel: true });
+      const second = await ctx.attachments.put(new Blob(["b"]), { showModel: true, mimeType: "image/jpeg" });
+      release();
+      const record = await first;
+      expect(record).toMatchObject({ mimeType: "image/png", size: 1, destination: "provider" });
+      expect(record.id).toMatch(/^gemi_att_/);
+      await expect(ctx.attachments.get(record.id)).rejects.toThrow(/no attachment store/);
+      return { shown: [record.id, second.id].length };
+    };
+    expect(await run()).toEqual({ shown: 2 });
+    expect(images).toEqual([
+      { type: "image", data: Buffer.from("a").toString("base64"), mimeType: "image/png" },
+      { type: "image", data: Buffer.from("b").toString("base64"), mimeType: "image/jpeg" },
+    ]);
+
+    images.length = 0;
+    behave = async (ctx) => {
+      await ctx.attachments.put(new Blob(["c"], { type: "image/png" }), { showModel: true });
+      throw new ToolError("Nothing to see.");
+    };
+    await expect(run()).rejects.toThrow("Nothing to see.");
+    expect(images).toEqual([]);
   });
 
   test("the tool's timeout and the client's cancel stop waiting for it", async () => {

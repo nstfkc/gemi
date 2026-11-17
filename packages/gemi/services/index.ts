@@ -123,6 +123,7 @@ export {
   type McpCaller,
   type McpCallContext,
   type McpExecuteOptions,
+  type McpImageContent,
   type McpRegistryOptions,
   type McpRemoteFileOptions,
   type McpRemotePrincipal,
