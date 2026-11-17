@@ -37,15 +37,22 @@ concurrency:
 
 jobs:
   check:
-    name: sqlite
+    name: sqlite (bun ${{ matrix.bun }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The database jobs (this one, `postgres` and `queue-databases`) run on
+        # both: 1.3.14, the version `publish.yml` builds with, and 1.4.4, which
+        # reworked Bun.SQL and bun:sqlite. Apps using gemi run on either.
+        bun: ["1.3.14", "1.4.4"]
     steps:
       - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
-          # Pinned, and pinned to the same version `publish.yml` builds the
-          # package with — so what CI proves is what ships, rather than two
+          # Pinned, and 1.3.14 is pinned to the same version `publish.yml` builds
+          # the package with — so what CI proves is what ships, rather than two
           # runtimes that happen to agree today.
           #
           # It was `latest`, which is how 1.4.0 arrived on 2026-08-21 and turned
@@ -60,10 +67,11 @@ jobs:
           # repo is actually developed against.
           #
           # **Moving this is a deliberate act.** Raise it and run the suite
-          # rather than letting a runtime release do it on a Saturday; the two
-          # `raw-sql.test.ts` assertions are the known thing to fix when this
-          # goes to 1.4.
-          bun-version: 1.3.14
+          # rather than letting a runtime release do it on a Saturday. The two
+          # `raw-sql.test.ts` assertions now accept the refused binding, and
+          # `app/models/bun-sql.test.ts` pins what gemi relies on from the
+          # driver on both versions.
+          bun-version: ${{ matrix.bun }}
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -329,8 +337,12 @@ jobs:
   # `@prisma/client` is generated for one provider at a time, and the harness
   # refuses to run the dialect it was not generated for rather than skipping.
   postgres:
-    name: postgres
+    name: postgres (bun ${{ matrix.bun }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: ["1.3.14", "1.4.4"]
 
     services:
       postgres:
@@ -362,8 +374,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          # Same version as the sqlite job and `publish.yml`; see the note there.
-          bun-version: 1.3.14
+          # The same two versions as the sqlite job; see the note there.
+          bun-version: ${{ matrix.bun }}
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -481,8 +493,12 @@ jobs:
   # Prisma nor the template, and it needs a MySQL server that job does not
   # have. `-t` keeps the SQLite half, which `sqlite` already runs, out of it.
   queue-databases:
-    name: queue-databases
+    name: queue-databases (bun ${{ matrix.bun }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: ["1.3.14", "1.4.4"]
 
     services:
       postgres:
@@ -517,8 +533,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          # Same version as the sqlite job and `publish.yml`; see the note there.
-          bun-version: 1.3.14
+          # The same two versions as the sqlite job; see the note there.
+          bun-version: ${{ matrix.bun }}
 
       - name: Install
         run: bun install --frozen-lockfile

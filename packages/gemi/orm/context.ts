@@ -105,6 +105,20 @@ export interface OrmScope {
    */
   commitDependsOn?: Promise<unknown>[];
   /**
+   * Set when a statement the ORM or `DB` ran on `tx` failed. Shared by the
+   * outermost transaction and its savepoints, like `afterCommit`.
+   *
+   * On Postgres a failed statement aborts the transaction, and a caller that
+   * catches the error and returns normally used to get a resolved
+   * `Model.transaction` whose `COMMIT` had quietly been a rollback: nothing
+   * written, and the after-commit work ran anyway. Bun 1.4.3 and later reject
+   * that `COMMIT` with `ERR_POSTGRES_COMMIT_ROLLED_BACK`; earlier versions
+   * resolve. So when this is set, `withTransaction` asks the transaction one
+   * `select 1` before it commits, which fails on an aborted transaction on
+   * every Bun version, and costs nothing on the path where nothing failed.
+   */
+  statementFailed?: { value: boolean };
+  /**
    * Models whose soft-delete scope (`static $softDeletes`) is lifted or
    * inverted for this async subtree, by name — set only by
    * `Model.withTrashed(fn)` / `Model.onlyTrashed(fn)`.
@@ -340,6 +354,17 @@ export function afterCommit(
   } catch (error) {
     report(error);
     return Promise.resolve();
+  }
+}
+
+/**
+ * Record that a statement run on `handle` failed, when `handle` is the open
+ * transaction's. See `OrmScope.statementFailed`. @internal
+ */
+export function noteFailedStatement(handle: unknown): void {
+  const store = ormContext.getStore();
+  if (store?.tx !== undefined && store.tx === handle && store.statementFailed) {
+    store.statementFailed.value = true;
   }
 }
 
@@ -812,6 +837,7 @@ export function withTransaction<T>(
   const deferred: AfterCommitCallback[] = [];
   const dependencies: Promise<unknown>[] = [];
   const applied = new Map<string, string>();
+  const statementFailed = { value: false };
 
   // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
   // `.finally` alone would not: it is only attached once `begin` has returned a
@@ -848,6 +874,7 @@ export function withTransaction<T>(
               afterCommit: deferred,
               commitDependsOn: dependencies,
               appliedSettings: applied,
+              statementFailed,
             },
             async () => {
               if (!options?.deferSettings) {
@@ -855,6 +882,10 @@ export function withTransaction<T>(
               }
               const result = await fn(tx);
               await awaitDependencies(dependencies, 0);
+              // Throws "current transaction is aborted" when a failed statement
+              // was swallowed on Postgres, so `begin` rolls back and rejects
+              // instead of resolving over a `COMMIT` that rolled back.
+              if (statementFailed.value) await tx.unsafe("select 1");
               return result;
             },
           ),

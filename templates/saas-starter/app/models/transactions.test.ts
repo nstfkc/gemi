@@ -8,6 +8,7 @@ import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import {
   Model,
+  afterCommit,
   clearPlanCache,
   currentTransaction,
   planCacheStats,
@@ -503,13 +504,48 @@ function suite(label: string, url?: string) {
       if (url) {
         // Postgres: the statement after the caught failure cannot run —
         // "current transaction is aborted, commands ignored until end of
-        // transaction block". Asserted as `true` rather than "not false", so
-        // this cannot pass by the transaction failing some other way.
-        expect(first).toBe(true);
+        // transaction block" — and the transaction itself rejects rather than
+        // resolving over a COMMIT that was a rollback. Bun 1.4.3 and later
+        // reject that COMMIT on their own; gemi checks before it commits, so
+        // this holds on earlier versions too.
+        expect(first).toBe("transaction-lost");
         expect(await userCount()).toBe(0);
       } else {
         // SQLite: carried on, and both rows are there.
         expect(first).toBe(false);
+        expect(await userCount()).toBe(1);
+      }
+    });
+
+    /**
+     * The same swallowed failure, from the caller's side: on Postgres the
+     * transaction rejects and its after-commit work never runs, because nothing
+     * was committed. Up to Bun 1.4.2 `begin` resolved here and the callback ran
+     * for rows that were not there; gemi's check before COMMIT is what makes
+     * the answer the same on every Bun version.
+     */
+    test("a swallowed failure on Postgres rejects the transaction", async () => {
+      let ran = false;
+      const outcome = await Model.transaction(async () => {
+        await User.create({ data: { email: "swallowed@x.test" } });
+        void afterCommit(() => {
+          ran = true;
+        });
+        try {
+          await User.create({ data: { email: "swallowed@x.test" } });
+        } catch {
+          // Swallowed.
+        }
+        return "resolved";
+      }).catch((error: Error) => error.message);
+
+      if (url) {
+        expect(outcome).toMatch(/current transaction is aborted/);
+        expect(ran).toBe(false);
+        expect(await userCount()).toBe(0);
+      } else {
+        expect(outcome).toBe("resolved");
+        expect(ran).toBe(true);
         expect(await userCount()).toBe(1);
       }
     });

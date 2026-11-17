@@ -8,6 +8,7 @@ import {
   currentSettings,
   currentTransaction,
   isSystemScope,
+  noteFailedStatement,
   runAsSystem,
   runWithTrashed,
   trashedMode,
@@ -1808,6 +1809,7 @@ async function execute(
   try {
     return await conn.unsafe(text, values);
   } catch (error) {
+    noteFailedStatement(conn);
     const violation = dialect.constraintViolation(error);
     if (!violation) throw error;
 
