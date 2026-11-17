@@ -135,10 +135,25 @@ export class AppMcpRouter extends McpRouter<RPC> {
 - The `routes` key is the tool's name. The input and output schemas, `requiresApproval`, `timeoutMs` and `async` come from the tool. The meta can set `description` (overrides the tool's), `tags`, `title`, `annotations` (no verb defaults: only what you write) and `requiresApproval: true`. `false` on a tool that requires approval fails the boot. A tool whose `requiresApproval` is a function keeps deciding per call, for an agent in this server and for a remote client; the meta's `true` makes it ask every time instead (see [AI Tool Approvals](./ai-tool-approvals.md#through-the-mcp-registry)).
 - The tool must be a server tool with a fixed `inputSchema`. A client tool, or one whose schema is resolved per run, fails the boot.
 - **For the app's agents** (`toAgentTools`), the tool runs with the run's own `ToolContext`, as if the agent held it directly: its yields are `tool-progress`, `ctx.jobs` starts background jobs, and a `ToolError` reaches the model.
-- **For a remote client**, the tool is listed and callable only when the meta has `remote`, and only for scopes that reach it. `requiresApproval` asks through the same elicitation as a route. The tool runs with a `ToolContext` built for the call: `context` is what `remote.context(call)` answers, `body` is `{}`, `runId` is fresh, there is no `threadId`, and `signal` aborts when the client cancels or the tool's `timeoutMs` passes. `ctx.generate` works. `ctx.attachments`, `generateImage`, `editImage`, `runAgent` and `jobs` throw a sentence saying a remote call has none, because there is no run, thread or attachment store behind it.
+- **For a remote client**, the tool is listed and callable only when the meta has `remote`, and only for scopes that reach it. `requiresApproval` asks through the same elicitation as a route. The tool runs with a `ToolContext` built for the call: `context` is what `remote.context(call)` answers, `body` is `{}`, `runId` is fresh, there is no `threadId`, and `signal` aborts when the client cancels or the tool's `timeoutMs` passes. `ctx.generate` works. `ctx.attachments.put(blob, { showModel: true })` works for an image (see below). The rest of `ctx.attachments`, `generateImage`, `editImage`, `runAgent` and `jobs` throw a sentence saying a remote call has none, because there is no run, thread or attachment store behind it.
 - Yields become `notifications/progress`. A yield with a numeric `progress` is sent as it is, a string as the message, and anything else as one step. `remote.progress(value, n)` maps each yield yourself (answer `undefined` to skip one).
 - **A native tool is its own authorization.** A route tool goes through the route's middleware, but a native tool runs its own code, so it can do whatever that code does. Before you add `remote`, make sure the tool (or `remote.context`) checks what the caller may do. `call.caller.principal` holds the credential's user and scopes. A route the tool composes through `registry.execute(call.caller, ...)` is still dispatched through that route's middleware and held to the caller's scopes.
 - A `ToolError` is an error result the model reads. Any other throw is logged and answered "failed on the server". When the tool has an `outputSchema`, its answer is parsed with it and sent as `structuredContent`.
+- **Images.** An image the tool shows the model with `ctx.attachments.put(blob, { showModel: true })` reaches a remote client as MCP image content (`{ type: "image", data, mimeType }`, base64), after the answer's text and in the order the tool put them. So one tool serves both audiences: an agent in this server sees the image through its run, a remote client sees it in the tool result. A tool that answers nothing (`undefined`) and shows images is answered with the images alone. `structuredContent` is unchanged. Remotely, the type (`mimeType`, else `blob.type`) must be `image/*`, other types throw a `ToolError`. A `put` without `showModel` still throws, and the record a remote `put` answers names no stored bytes, so `get`, `read` and `file` of its id throw. The images are only sent when the tool succeeds.
+
+```ts
+const look = AgentTool.create({
+  name: "look",
+  description: "Screenshots a page.",
+  inputSchema: s.object({ path: s.string() }),
+  async execute({ path }, ctx) {
+    const png = await screenshot(path); // a Blob
+    await ctx.attachments.put(png, { name: "page.png", mimeType: "image/png", showModel: true });
+    return `A screenshot of ${path}.`;
+  },
+});
+// remote call → content: [{ type: "text", text: "A screenshot of /about." }, { type: "image", data: "iVBOR…", mimeType: "image/png" }]
+```
 - `mcpCallOf(ctx)` answers the call (caller, request, tool, input) inside a native tool called through the registry. It answers `undefined` when the agent holds the tool directly, or when the run was not started inside a request.
 
 ## Remote access

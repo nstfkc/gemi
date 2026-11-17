@@ -2,7 +2,7 @@ import type { AnyAgentTool, ToolApproval, ToolApprovalContext, ToolContext } fro
 import { generateWithin, type GenerateParams } from "../../ai/generate";
 import { isJobHandle, toolJobs } from "../../ai/jobs/AgentJob";
 import { noToolMemory } from "../../ai/memory/runMemory";
-import type { ToolAttachments } from "../../ai/store/Attachments";
+import type { Attachment, PutAttachmentParams, ToolAttachments } from "../../ai/store/Attachments";
 import { openMeter } from "../../ai/usageMeter";
 import type { User } from "../../auth/types";
 import type { ProgressSink, ProgressUpdate } from "../../http/modelOriginated";
@@ -148,7 +148,18 @@ export type McpExecuteOptions = {
   signal?: AbortSignal;
   /** Receives the route's `req.reportProgress` reports. */
   progress?: ProgressSink;
+  /**
+   * Receives the images a remote call of a native tool showed the model
+   * (#1293): each `ctx.attachments.put(blob, { showModel: true })` it made, as
+   * MCP image content, in the order it asked, once the tool has succeeded.
+   * The remote transport sends them after the result's text. Without it they
+   * are dropped. Local calls show the model through the run, and ignore it.
+   */
+  images?: (image: McpImageContent) => void;
 };
+
+/** MCP's image content: base64 `data` and its `mimeType`, as a tool result carries it. */
+export type McpImageContent = { type: "image"; data: string; mimeType: string };
 
 /**
  * One tool call, as the app's hooks see it: who is calling, the request their
@@ -1058,7 +1069,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     }
     if (typeof context !== "object" || context === null) return true;
     const signal = options.signal ?? new AbortController().signal;
-    return asksApproval(plan, parsed.value, approvalContext(remoteToolContext(plan, context, signal)));
+    return asksApproval(plan, parsed.value, approvalContext(remoteToolContext(plan, context, signal, [])));
   }
 
   /**
@@ -1198,7 +1209,8 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
         : signals.length === 1
           ? signals[0]
           : AbortSignal.any(signals);
-    const remoteCtx = remoteToolContext(plan, context, signal);
+    const shown: Promise<McpImageContent>[] = [];
+    const remoteCtx = remoteToolContext(plan, context, signal, shown);
     if (
       !options.approved &&
       conditionalApproval(plan) &&
@@ -1237,6 +1249,12 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
     if (isJobHandle(output)) {
       throw failed("answered a job handle, and a remote call has no background jobs.");
     }
+    let images: McpImageContent[];
+    try {
+      images = await Promise.all(shown);
+    } catch (error) {
+      throw failed(`could not read an image it showed: ${error}`);
+    }
     let value = output;
     if (plan.descriptor.outputSchema) {
       const checked = plan.descriptor.outputSchema.safeParse(value);
@@ -1245,6 +1263,7 @@ export class McpRegistry<R extends McpRouter<any> = McpRouter<any>> {
       }
       value = checked.value;
     }
+    for (const image of images) options.images?.(image);
     if (value === undefined) return null;
     if (typeof value === "string") {
       return value.length > MAX_RESULT_BODY
@@ -1641,6 +1660,7 @@ function remoteToolContext(
   plan: NativePlan,
   context: ToolContext["context"],
   signal: AbortSignal,
+  shown: Promise<McpImageContent>[],
 ): ToolContext {
   const name = plan.descriptor.name;
   const runId = `mcp_${crypto.randomUUID()}`;
@@ -1651,8 +1671,38 @@ function remoteToolContext(
       { retryable: false },
     );
   };
+  // No store behind a remote call: a `put` that shows the model an image is
+  // the one that means something to the client, which gets the image as MCP
+  // image content beside the result (#1293). Its record names no stored
+  // bytes, so `get`, `read` and `file` of it throw like any other id.
+  const put = async (blob: Blob, params: PutAttachmentParams = {}): Promise<Attachment> => {
+    if (!params.showModel) return none("attachment store")();
+    const mimeType = params.mimeType || blob.type;
+    if (!/^image\//i.test(mimeType)) {
+      throw new ToolError(
+        `"${name}" was called by a remote MCP client, which is shown images only, and this is ${mimeType ? `"${mimeType}"` : "a blob with no type"}.`,
+        { retryable: false },
+      );
+    }
+    // Taken before the bytes are read, so the images keep the order the tool
+    // asked in when it puts several at once.
+    const image = blob
+      .arrayBuffer()
+      .then((bytes) => ({ type: "image" as const, data: Buffer.from(bytes).toString("base64"), mimeType }));
+    image.catch(() => {});
+    shown.push(image);
+    return {
+      id: `gemi_att_${crypto.randomUUID()}`,
+      scopeKey: `mcp:${runId}`,
+      name: params.name ?? (blob instanceof File ? blob.name : "image"),
+      mimeType,
+      size: blob.size,
+      createdAt: new Date().toISOString(),
+      destination: "provider",
+    };
+  };
   const attachments: ToolAttachments = {
-    put: none("attachment store"),
+    put,
     get: none("attachment store"),
     read: none("attachment store"),
     file: none("attachment store"),

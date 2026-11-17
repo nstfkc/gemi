@@ -33,6 +33,7 @@ const KEYS: Record<string, { user: any; id: string; scopes: string[] }> = {
   "tk_mcp_alice": { user: ALICE, id: "key_a", scopes: ["site:read", "site:write"] },
   "tk_mcp_reader": { user: BOB, id: "key_b", scopes: ["site:read"] },
   "tk_mcp_drawer": { user: ALICE, id: "key_d", scopes: ["site:draw"] },
+  "tk_mcp_looker": { user: ALICE, id: "key_l", scopes: ["site:look"] },
   "tk_mcp_admin": { user: ALICE, id: "key_admin", scopes: ["admin", "site:write"] },
 };
 
@@ -102,9 +103,25 @@ const draw = AgentTool.create({
   },
 });
 
+/** A PNG's first bytes: enough to tell base64 of the blob from anything else. */
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const look = AgentTool.create({
+  name: "look",
+  description: "Screenshots the page",
+  inputSchema: s.object({ say: s.boolean() }),
+  async execute(input, ctx) {
+    await Promise.all([
+      ctx.attachments.put(new Blob([PNG], { type: "image/png" }), { showModel: true }),
+      ctx.attachments.put(new Blob([PNG]), { showModel: true, mimeType: "image/webp" }),
+    ]);
+    return input.say ? "Two screenshots of /about." : undefined;
+  },
+});
+
 class Mcp extends McpRouter<CreateRPC<Api>> {
   scopes = {
     "site:draw": { description: "Draw", names: ["draw"] },
+    "site:look": { description: "Look", names: ["look"] },
     "site:read": { description: "Read your site", tags: ["read"] },
     "site:write": { description: "Edit your site", tags: ["write"] },
     admin: { description: "Admin", tags: ["admin"] },
@@ -136,6 +153,7 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
     draw: this.fromTool(draw, {
       remote: { context: ({ caller }) => ({ userId: caller.req.ctx().user.id }) as any },
     }),
+    look: this.fromTool(look, { remote: { context: () => ({}) as any } }),
   };
 }
 
@@ -621,6 +639,24 @@ describe("a modern client (2026-07-28)", () => {
     expect(messages[1].params).toEqual({ progressToken: "p2", progress: 2, total: 2, message: "Done" });
     expect(messages[2].result.structuredContent).toEqual({ built: "Home", by: ALICE.id });
     expect(messages[2].result.isError).toBe(false);
+  });
+
+  test("the images a native tool shows the model follow its text as image content (#1293)", async () => {
+    const png = Buffer.from(PNG).toString("base64");
+    const images = [
+      { type: "image", data: png, mimeType: "image/png" },
+      { type: "image", data: png, mimeType: "image/webp" },
+    ];
+    const said = await (
+      await modern("tools/call", { name: "look", arguments: { say: true } }, { key: "tk_mcp_looker" })
+    ).json();
+    expect(said.result.isError).toBe(false);
+    expect(said.result.content).toEqual([{ type: "text", text: "Two screenshots of /about." }, ...images]);
+
+    const alone = await (
+      await modern("tools/call", { name: "look", arguments: { say: false } }, { key: "tk_mcp_looker" })
+    ).json();
+    expect(alone.result.content).toEqual(images);
   });
 
   test("a native tool without remote is not there for a remote client", async () => {
