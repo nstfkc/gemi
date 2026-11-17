@@ -1,7 +1,7 @@
 import path from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 import type * as TS from "typescript";
-import { loadTypeScript } from "../ai-client/extract";
+import { compilerOptions, loadTypeScript } from "../ai-client/extract";
 import type { TypeRef } from "../ai-client/model";
 import { extractHttpApi } from "./extract";
 import type { HttpApiModel } from "./model";
@@ -12,7 +12,7 @@ let ts: typeof TS;
 let api: HttpApiModel;
 const read = (exportName = "default") => extractHttpApi(ts, { file, exportName }, { cwd });
 const route = (key: string) => api.routes.find((route) => route.key === key)!;
-function properties(ref: TypeRef) {
+function properties(ref: TypeRef | { kind: "none" }) {
   if (ref.kind !== "named") throw new Error(`Expected named type, got ${ref.kind}`);
   const type = api.types.find((type) => type.name === ref.name)!;
   if (type.kind !== "object") throw new Error("Expected object");
@@ -25,15 +25,37 @@ beforeAll(async () => {
 }, 60_000);
 
 describe("type-only HTTP extraction", () => {
+  test("fixture has no TypeScript errors", () => {
+    const absolute = path.join(cwd, file);
+    const program = ts.createProgram({
+      rootNames: [absolute],
+      options: compilerOptions(ts, absolute),
+    });
+    const source = program.getSourceFile(absolute)!;
+    expect(
+      program
+        .getSemanticDiagnostics(source)
+        .map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+    ).toEqual([]);
+  }, 60_000);
   test("reads a throwing module and preserves source and sorted RPC keys", () => {
     expect(api.source).toBe(`${file}#default`);
     const keys = api.routes.map((route) => route.key);
     expect(keys).toEqual([...keys].sort());
     expect(keys).toEqual([
       "DELETE:/resources/:id",
+      "GET:/controller",
+      "GET:/errors",
+      "GET:/files/:path*",
+      "GET:/maybe-empty",
       "GET:/maybe-undefined",
       "GET:/maybe-void",
+      "GET:/mismatch/:noteId",
       "GET:/nested/ping",
+      "GET:/notes-list",
+      "GET:/notes/list",
+      "GET:/null",
+      "GET:/raw-response",
       "GET:/resources",
       "GET:/resources/:id",
       "GET:/search/:org/:cursor?",
@@ -43,6 +65,7 @@ describe("type-only HTTP extraction", () => {
       "POST:/download",
       "POST:/notes",
       "POST:/resources",
+      "POST:/upload",
       "POST:/void",
       "PUT:/resources/:id",
     ]);
@@ -51,8 +74,8 @@ describe("type-only HTTP extraction", () => {
     const search = route("GET:/search/:org/:cursor?");
     expect(search.input.location).toBe("query");
     expect(search.pathParameters).toEqual([
-      { name: "org", optional: false },
-      { name: "cursor", optional: true },
+      { name: "org", optional: false, catchAll: false },
+      { name: "cursor", optional: true, catchAll: false },
     ]);
     expect(properties(search.params)).toEqual([
       { key: "org", optional: false, type: { kind: "string" } },
@@ -119,6 +142,52 @@ describe("type-only HTTP extraction", () => {
     ]) {
       expect(api.warnings.some((warning) => warning.includes(where))).toBe(true);
     }
+  });
+  test("catch-all names and empty response status survive extraction", () => {
+    expect(route("GET:/files/:path*").pathParameters).toEqual([
+      { name: "path", optional: false, catchAll: true },
+    ]);
+    expect(route("DELETE:/resources/:id").response).toEqual({ kind: "void" });
+    expect(route("GET:/null").response).toEqual({ kind: "null" });
+    expect(route("GET:/maybe-empty").response).toEqual({ kind: "json" });
+    expect(api.warnings.some((w) => w.includes("GET:/maybe-empty response"))).toBe(true);
+    expect(properties(route("GET:/raw-response").response as TypeRef)).toEqual([
+      { key: "id", optional: false, type: { kind: "string" } },
+    ]);
+    expect(api.warnings.some((w) => w.includes("DELETE:/resources/:id response"))).toBe(false);
+  });
+  test("normalizes absent input and diagnoses params and type collisions", () => {
+    for (const key of ["GET:/nested/ping", "GET:/files/:path*", "GET:/null"]) {
+      expect(route(key).input.type).toEqual({ kind: "none" });
+    }
+    expect(route("POST:/notes").params).toEqual({ kind: "none" });
+    expect(api.warnings.some((w) => w.includes("GET:/mismatch/:noteId params"))).toBe(true);
+    expect(
+      api.warnings.some((w) => w.includes("HTTP type name collision: GETNotesListResponse")),
+    ).toBe(true);
+  });
+  test("preserves single and multiple error literals and covers controller/File inputs", () => {
+    expect(properties(route("POST:/notes").error).find((p) => p.key === "kind")?.type).toEqual({
+      kind: "string",
+      literal: "gone",
+    });
+    expect(properties(route("POST:/notes").error).find((p) => p.key === "status")?.type).toEqual({
+      kind: "number",
+      literal: 410,
+    });
+    const ref = route("GET:/errors").error;
+    if (ref.kind !== "named") throw new Error("Expected union");
+    const union = api.types.find((t) => t.name === ref.name)!;
+    if (union.kind !== "union") throw new Error("Expected union");
+    expect(union.variants.map((v) => v.value).sort()).toEqual(["conflict", "gone"]);
+    for (const variant of union.variants) {
+      expect(properties(variant.type).find((p) => p.key === "kind")?.type).toEqual({
+        kind: "string",
+        literal: variant.value,
+      });
+    }
+    expect(properties(route("GET:/controller").input.type)[0]?.key).toBe("page");
+    expect(api.warnings.some((w) => w.includes("POST:/upload input.file"))).toBe(true);
   });
   test("repeated extraction is byte-identical", () => {
     expect(JSON.stringify(read())).toBe(JSON.stringify(api));

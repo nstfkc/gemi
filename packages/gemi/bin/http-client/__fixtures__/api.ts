@@ -47,8 +47,28 @@ export class Api extends Base {
       ) => [{ id: "1", title: "Hello" }],
     ),
     "/notes": this.post(async (req: HttpRequest<{ title: string; text?: string | null }>) => {
-      if (req.params) return HttpResponse.error(410, { kind: "gone", message: "Expired" });
+      if ((await req.input()).get("title") === "")
+        return HttpResponse.error(410, { kind: "gone", message: "Expired" });
       return HttpResponse.json({ id: "1" }, { status: 201 });
+    }),
+    "/files/:path*": this.get((_req: HttpRequest<{}, { path: string[] }>) => "ok"),
+    "/null": this.get(() => null),
+    "/maybe-empty": this.get((_req: HttpRequest<{ empty: boolean }>) => {
+      if (Math.random() > 0.5) return HttpResponse.noContent();
+      return HttpResponse.json({ id: "1" });
+    }),
+    "/raw-response": this.get(() => {
+      if (Math.random() > 0.5) return new Response("raw");
+      return { id: "1" };
+    }),
+    "/mismatch/:noteId": this.get((_req: HttpRequest<{}, { id: string }>) => "ok"),
+    "/notes-list": this.get(() => ({ id: "1" })),
+    "/notes/list": this.get(() => ({ id: "2" })),
+    "/controller": this.get(Notes, "list"),
+    "/upload": this.post((_req: HttpRequest<{ file: File }>) => "ok"),
+    "/errors": this.get(async (req: HttpRequest<{ conflict: boolean }>) => {
+      if ((await req.input()).get("conflict")) return HttpResponse.error(409, { kind: "conflict" });
+      return HttpResponse.error(410, { kind: "gone" });
     }),
     "/nested": Nested,
     "/resources/:id": this.resource(Notes),

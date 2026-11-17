@@ -30,7 +30,7 @@ import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { withheldFromUpstream } from "./requestDomain";
 
-type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
  * A route as the client's RPC map records it. `Error` is the route's typed
@@ -834,6 +834,24 @@ type RouteParser<
  */
 export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
   [E in RouteParser<T["routes"], Prefix> as E["key"]]: RouteValue<E["route"]>;
+};
+
+/** Internal extraction companion: retain raw outputs before ResponseData erases status. */
+type RawRouteOutput<R> =
+  R extends ControllerRouteHandler<any, infer C, infer N>
+    ? C extends new () => infer I
+      ? N extends keyof I
+        ? I[N] extends (...args: any[]) => infer O
+          ? Awaited<O>
+          : never
+        : never
+      : never
+    : R extends RouteHandler<any, any, infer O, any>
+      ? Awaited<O>
+      : never;
+
+export type CreateRawHttpOutputs<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
+  [E in RouteParser<T["routes"], Prefix> as E["key"]]: RawRouteOutput<E["route"]>;
 };
 
 /** A path's `get` in a verb map, when it is a stream or file route. */

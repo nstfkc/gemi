@@ -244,7 +244,7 @@ export class TypeMapper {
   private inProgress = new Set<TS.Type>();
 
   constructor(
-    private ts: typeof TS,
+    protected ts: typeof TS,
     readonly checker: TS.TypeChecker,
   ) {}
 
@@ -412,7 +412,7 @@ export class TypeMapper {
    * before `build` runs so members named inside it cannot claim it first, and
    * the type is listed before its members so a reader meets it first.
    */
-  private named(name: string, build: (unique: string) => NamedType): TypeRef {
+  protected named(name: string, build: (unique: string) => NamedType): TypeRef {
     let unique = name;
     for (let n = 2; this.names.has(unique); n++) unique = `${name}${n}`;
     this.names.add(unique);
