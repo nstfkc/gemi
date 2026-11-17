@@ -34,8 +34,10 @@ Tuples, recursive types and other unsupported shapes retain the mapper's warning
 Unknown/any response types are deliberately raw JSON. The HTTP mapper retains
 individual string, number and boolean literals as a `literal` value alongside the
 primitive kind, including error status/kind, without changing AI generator
-output. HTTP unions can use either a string or a boolean tag. Renderers must
-honor these literal constraints. Type-name collisions
+output. For a union of objects, one shared field must have distinct values
+that are all strings or all booleans. Otherwise the extractor warns and keeps
+raw JSON.
+Renderers must honor these literal constraints. Type-name collisions
 produce warnings; final namespace/function naming remains deferred. Typed errors
 describe `CreateRPC`'s client error body, including its status, not the raw envelope.
 `CreateRPC` itself erases some wire information (for example response headers,

@@ -64,6 +64,9 @@ export class Api extends Base {
     "/mismatch/:noteId": this.get((_req: HttpRequest<{}, { id: string }>) => "ok"),
     "/notes-list": this.get(() => ({ id: "1" })),
     "/notes/list": this.get(() => ({ id: "2" })),
+    "/mixed-tags": this.get(() =>
+      Math.random() > 0.5 ? { tag: "saved" as const } : { tag: true as const },
+    ),
     "/result": this.get((_req: HttpRequest<{ flag?: false | null; enabled: boolean }>) =>
       Math.random() > 0.5
         ? { ok: true as const, data: "saved" }

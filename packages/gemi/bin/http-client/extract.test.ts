@@ -51,6 +51,7 @@ describe("type-only HTTP extraction", () => {
       "GET:/maybe-undefined",
       "GET:/maybe-void",
       "GET:/mismatch/:noteId",
+      "GET:/mixed-tags",
       "GET:/nested/ping",
       "GET:/notes-list",
       "GET:/notes/list",
@@ -189,6 +190,12 @@ describe("type-only HTTP extraction", () => {
     }
     expect(properties(route("GET:/controller").input.type)[0]?.key).toBe("page");
     expect(api.warnings.some((w) => w.includes("POST:/upload input.file"))).toBe(true);
+  });
+  test("falls back to raw JSON when a tag mixes string and boolean values", () => {
+    expect(route("GET:/mixed-tags").response).toEqual({ kind: "json" });
+    expect(api.warnings).toContainEqual(
+      expect.stringMatching(/^GET:\/mixed-tags response: .*one literal member.*raw JSON/),
+    );
   });
   test("preserves boolean tags, nullable literals and unrestricted booleans", () => {
     const result = route("GET:/result");

@@ -218,6 +218,9 @@ export function extractHttpApi(
 /** Keep AI output unchanged. Its mapper drops void from unions; HTTP cannot
  * claim a definite response body when some branches return nothing. */
 class HttpTypeMapper extends TypeMapper<boolean> {
+  protected override readonly unsupportedUnionReason =
+    "a union whose variants cannot be distinguished by one literal member of a single type";
+
   protected override named(name: string, build: (unique: string) => NamedType<boolean>): TypeRef {
     return super.named(name, (unique) => {
       if (unique !== name)

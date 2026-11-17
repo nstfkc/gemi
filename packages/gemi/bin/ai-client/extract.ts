@@ -269,6 +269,9 @@ export class TypeMapper<ExtraTag extends boolean = never> {
     return this.unsupported(type, where, "a type with no JSON shape");
   }
 
+  protected readonly unsupportedUnionReason: string =
+    "a union that is not told apart by one string member";
+
   private union(type: TS.UnionType, name: string, where: string): TypeRef {
     const { ts } = this;
     // `JsonValue` — what `s.json()` infers to — is a union of every JSON shape,
@@ -327,7 +330,7 @@ export class TypeMapper<ExtraTag extends boolean = never> {
         })),
       );
     }
-    return this.unsupported(type, where, "a union that is not told apart by one string member");
+    return this.unsupported(type, where, this.unsupportedUnionReason);
   }
 
   /** The key every member has as a distinct literal, if one does. */
@@ -338,7 +341,12 @@ export class TypeMapper<ExtraTag extends boolean = never> {
       .map((property) => property.getName());
     return keys.find((key) => {
       const values = members.map((member) => this.literalAt(member, key));
-      return values.every((value) => value !== undefined) && new Set(values).size === values.length;
+      const first = values[0];
+      return (
+        first !== undefined &&
+        values.every((value) => typeof value === typeof first) &&
+        new Set(values).size === values.length
+      );
     });
   }
 
