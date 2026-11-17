@@ -1,3 +1,17 @@
+# Unreleased
+
+## Bun 1.4.4, and a swallowed failure rejects `Model.transaction` on Postgres (#1295)
+
+**Behaviour change (minor version).** gemi is tested on Bun 1.3.14 and 1.4.4.
+
+- On Postgres, a statement that fails inside `Model.transaction` (or `DB.transaction`) aborts the transaction. Code that catches the error and returns normally used to get a resolved transaction on Bun 1.4.2 and earlier, even though its `COMMIT` had been a rollback: nothing was written, and `afterCommit` work still ran. The transaction now rejects ("current transaction is aborted…") on every Bun version. Bun 1.4.3 and later already rejected here, with `ERR_POSTGRES_COMMIT_ROLLED_BACK`.
+- Wrapping the statement that may fail in a nested `Model.transaction` (a savepoint) still recovers, as before.
+
+What to check:
+
+- Postgres code that catches an ORM or `DB` error inside a transaction and keeps going. It was losing its writes before; now it fails. Put the statement that may fail in a nested `Model.transaction`.
+- On Bun 1.4.4, a raw `DB.query` that binds a `Date` to a *text* parameter on Postgres stores ISO 8601 (it was `Date#toString()`), and on SQLite Bun refuses a plain object as a parameter (since 1.4.0). ORM writes are unchanged.
+
 # 0.212.0
 
 ## Cut-call retries say they were cut, and `retry.on` (#1291)
