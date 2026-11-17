@@ -13,7 +13,7 @@
 export type TypeRef =
   | { kind: "string"; literal?: string }
   | { kind: "number"; literal?: number }
-  | { kind: "boolean" }
+  | { kind: "boolean"; literal?: boolean }
   /** Anything the generator does not map: `unknown`, `any`, and the shapes it
    *  warns about. The client keeps it as a raw JSON value. */
   | { kind: "json" }
@@ -38,18 +38,18 @@ export type Property = {
   optional: boolean;
 };
 
-export type NamedType =
+export type NamedType<ExtraTag extends boolean = never> =
   | { kind: "object"; name: string; properties: Property[] }
   /** A union of string literals. */
   | { kind: "enum"; name: string; values: string[] }
-  /** A union of objects told apart by one string-literal member. */
+  /** A union of objects told apart by one literal member. */
   | {
       kind: "union";
       name: string;
       discriminant: string;
       /** A variant is a named type, or `json` when it could not be mapped —
        *  a recursive one, say. */
-      variants: { value: string; type: TypeRef }[];
+      variants: { value: string | ExtraTag; type: TypeRef }[];
     };
 
 export type ToolModel = {

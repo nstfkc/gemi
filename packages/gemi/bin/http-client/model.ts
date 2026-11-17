@@ -20,6 +20,6 @@ export type HttpRouteModel = {
 export type HttpApiModel = {
   source: string;
   routes: HttpRouteModel[];
-  types: NamedType[];
+  types: NamedType<boolean>[];
   warnings: string[];
 };
