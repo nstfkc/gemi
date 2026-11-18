@@ -14,7 +14,9 @@ What to check:
 
 ## Preserve boolean tags and diagnose missing HTTP route outputs (#1297)
 
-- Boolean tags are kept, and a missing HTTP route output is reported with a diagnostic instead of failing silently.
+- HTTP types keep literal `true` / `false` (also nullable and optional), so a response like `{ ok: true, data } | { ok: false, error }` is modelled as a tagged union on `ok`.
+- A web RPC route missing from the raw-output map is named in a warning and falls back to raw JSON.
+- Apps on an older router that exposes only the web RPC types are extracted again, with a warning when a null response is ambiguous.
 
 # 0.215.0
 
