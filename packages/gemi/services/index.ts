@@ -419,6 +419,33 @@ export type {
 export { OAuthConnectionProvider } from "../auth/connections/OAuthConnectionProvider";
 export { InstagramConnectionProvider } from "../auth/connections/InstagramConnectionProvider";
 export type { InstagramConnectionProviderConfig } from "../auth/connections/InstagramConnectionProvider";
+export {
+  FacebookConnectionProvider,
+  FacebookPage,
+  FACEBOOK_DEFAULT_SCOPES,
+} from "../auth/connections/FacebookConnectionProvider";
+export type {
+  FacebookConnectionProviderConfig,
+  FacebookPageSummary,
+  FacebookProfile,
+} from "../auth/connections/FacebookConnectionProvider";
+export {
+  LinkedInConnectionProvider,
+  LINKEDIN_DEFAULT_SCOPES,
+  LINKEDIN_ORGANIZATION_SCOPES,
+} from "../auth/connections/LinkedInConnectionProvider";
+export type {
+  LinkedInConnectionProviderConfig,
+  LinkedInOrganization,
+  LinkedInProfile,
+} from "../auth/connections/LinkedInConnectionProvider";
+export { TikTokConnectionProvider, TIKTOK_DEFAULT_SCOPES } from "../auth/connections/TikTokConnectionProvider";
+export type { TikTokConnectionProviderConfig, TikTokProfile } from "../auth/connections/TikTokConnectionProvider";
+export { YouTubeConnectionProvider, YOUTUBE_DEFAULT_SCOPES } from "../auth/connections/YouTubeConnectionProvider";
+export type { YouTubeConnectionProviderConfig, YouTubeProfile } from "../auth/connections/YouTubeConnectionProvider";
+export { XConnectionProvider, X_DEFAULT_SCOPES } from "../auth/connections/XConnectionProvider";
+export type { XConnectionProviderConfig, XProfile } from "../auth/connections/XConnectionProvider";
+export type { ConnectedAccountProfile, SocialConnectionProviderConfig } from "../auth/connections/social";
 export { Instagram, InstagramPublisher, InstagramPublishError, INSTAGRAM_LIMITS } from "../auth/connections/InstagramPublisher";
 export type {
   InstagramCarouselItem,

@@ -11,7 +11,8 @@ export type OAuthConnectionErrorCode =
   | "revoke_failed"
   | "revoke_unsupported"
   | "forbidden_url"
-  | "missing_account_id";
+  | "missing_account_id"
+  | "request_failed";
 
 export class OAuthConnectionError extends Error {
   readonly status?: number;

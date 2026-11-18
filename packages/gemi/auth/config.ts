@@ -215,7 +215,10 @@ export interface ConnectedArgs {
   /**
    * What the provider said about the account while connecting, when its
    * connection provider reports it (`InstagramConnectionProvider`: `id`,
-   * `user_id`, `username`, `name`, `account_type`, `profile_picture_url`).
+   * `user_id`, `username`, `name`, `account_type`, `profile_picture_url`;
+   * the Facebook, LinkedIn, TikTok, YouTube and X providers: a
+   * `ConnectedAccountProfile` with `id`, `name`, `username`, `avatarUrl` and
+   * the platform's extras, such as `FacebookProfile` or `LinkedInProfile`).
    * Not stored by gemi: keep what you need. `null` otherwise.
    */
   profile: Record<string, unknown> | null;

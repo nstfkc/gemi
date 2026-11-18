@@ -1,3 +1,17 @@
+# Unreleased
+
+## Connection providers for publishing: Facebook Pages, LinkedIn, TikTok, YouTube, X (#1299)
+
+**New API (minor version).** See [Social connections](docs/social-connections.md).
+
+- `FacebookConnectionProvider` (with `pages(connection)` and `FacebookPage`), `LinkedInConnectionProvider` (with `organizations(connection)`), `TikTokConnectionProvider`, `YouTubeConnectionProvider` and `XConnectionProvider`, exported from `gemi/services`. Each reads the account at connect time and hands `onConnected` a typed profile (`ConnectedAccountProfile`: `id`, `name`, `username`, `avatarUrl`), also readable later with `provider.profile(connection)`.
+- `OAuthConnectionProvider` options `clientIdParam` (default `"client_id"`) and `revokeTokenHint` (default `"refresh_token"`, the behaviour so far).
+- New `OAuthConnectionErrorCode`: `"request_failed"`.
+
+What to check:
+
+- A token endpoint that answers **HTTP 200 with an OAuth `error`** (and no token) is now reported with `status: 400` instead of `200`, so a refused refresh marks the connection `needs_reconnect` as a 400 would. Code that matched `status === 200` on `exchange_failed` / `refresh_failed` should match the `providerError` instead.
+
 # 0.214.0
 
 ## Bun 1.4.4, and a swallowed failure rejects `Model.transaction` on Postgres (#1295)

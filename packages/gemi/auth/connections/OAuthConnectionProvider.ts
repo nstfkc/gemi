@@ -25,6 +25,20 @@ export interface OAuthConnectionProviderConfig {
   revokeUrl?: string;
   clientId: string;
   clientSecret: string;
+  /**
+   * The name of the parameter that carries `clientId` on the authorization
+   * URL and in token, refresh and revocation requests sent with
+   * `clientAuth: "body"`. Default `"client_id"` (RFC 6749); TikTok calls it
+   * `"client_key"`.
+   */
+  clientIdParam?: string;
+  /**
+   * Which token `connection.revoke()` sends to `revokeUrl`. Default
+   * `"refresh_token"` when the connection has one (revoking it ends the whole
+   * grant), else the access token. `"access_token"` always sends the access
+   * token, for a provider whose revocation endpoint takes only that (TikTok).
+   */
+  revokeTokenHint?: "refresh_token" | "access_token";
   /** The scopes to request. */
   scopes: string[];
   /** How `scopes` are joined on the authorization URL. Default `" "` (RFC 6749). */
@@ -203,6 +217,8 @@ export class OAuthConnectionProvider {
       refreshLeewaySeconds: 60,
       multiple: false,
       tokenPlacement: "header",
+      clientIdParam: "client_id",
+      revokeTokenHint: "refresh_token",
       ...config,
       refreshGrantType: config.refreshGrantType ?? "refresh_token",
     };
@@ -224,7 +240,7 @@ export class OAuthConnectionProvider {
     const params: Record<string, string> = {
       ...this.config.authorizationParams,
       response_type: "code",
-      client_id: this.config.clientId,
+      [this.config.clientIdParam]: this.config.clientId,
       redirect_uri: args.redirectUri,
       scope: this.config.scopes.join(this.config.scopeSeparator),
       state: args.state,
@@ -304,7 +320,7 @@ export class OAuthConnectionProvider {
       const credentials = `${encodeURIComponent(this.config.clientId)}:${encodeURIComponent(this.config.clientSecret)}`;
       headers.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
     } else {
-      body.set("client_id", this.config.clientId);
+      body.set(this.config.clientIdParam, this.config.clientId);
       body.set("client_secret", this.config.clientSecret);
     }
     return { method: "POST", headers, body: body.toString(), redirect: "error" };
@@ -327,11 +343,14 @@ export class OAuthConnectionProvider {
     if (!response.ok || typeof payload.access_token !== "string" || payload.access_token === "") {
       // Only the provider's error code, never the body: it can echo the grant.
       const code = typeof payload.error === "string" && /^[a-z0-9_]{1,64}$/.test(payload.error) ? payload.error : undefined;
+      // Some providers (TikTok) answer a refusal with a 200 that carries an
+      // RFC 6749 error: it is a refusal all the same, so it reads as a 400.
+      const status = response.ok && code ? 400 : response.status;
       throw new OAuthConnectionError(
         failure,
         `The token endpoint refused the ${previous.phase === "exchange" ? "code" : "refresh token"} ` +
           `(HTTP ${response.status}${code ? `, ${code}` : ""}).`,
-        { status: response.status, providerError: code },
+        { status, providerError: code },
       );
     }
 
