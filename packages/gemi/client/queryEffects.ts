@@ -222,8 +222,13 @@ export function reloadQuery(
   if (cfg.debug) {
     console.log("Reloading query for", variantKey);
   }
-  const data = resource.getVariant(variantKey, cfg.staleTime).data;
-  resource.mutate(variantKey, () => data);
+  // `getVariant` starts the request, or joins the one on the wire. With no
+  // data cached yet — e.g. a `suspense: false` reader whose first request
+  // (started silently during render, so no store entry) is still in flight —
+  // that request's answer serves this reload, and there is nothing to keep.
+  const state = resource.getVariant(variantKey, cfg.staleTime);
+  if (!state?.hasData) return;
+  resource.mutate(variantKey, () => state.data);
 }
 
 /** Subscribe to Vite's `http-reload` event. Returns the cleanup. */
