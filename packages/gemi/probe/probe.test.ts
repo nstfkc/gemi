@@ -210,6 +210,56 @@ function findChrome(): string | null {
 const chrome = findChrome();
 
 /**
+ * The port Chrome's DevTools listens on, from the "DevTools listening on
+ * ws://127.0.0.1:<port>/..." line it prints to stderr once it is ready.
+ *
+ * Waiting on that line, not polling for `DevToolsActivePort` a fixed number of
+ * times: a cold Chrome in CI, started while the rest of the suite runs in
+ * parallel, routinely takes 8 to 10 s to come up, and a 10 s poll lost that
+ * race now and then (an ENOENT on the port file). The deadline is a backstop
+ * for a Chrome that hangs; a Chrome that exits says why.
+ */
+async function devToolsPort(child: Bun.Subprocess<"ignore", "ignore", "pipe">) {
+  const deadline = 45_000;
+  const reader = child.stderr.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  const found = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        throw new Error(
+          `Chrome exited (${await child.exited}) before DevTools listened:\n${output}`,
+        );
+      }
+      output += decoder.decode(value, { stream: true });
+      const match = output.match(/DevTools listening on ws:\/\/[^/]+:(\d+)\//);
+      if (match) return match[1]!;
+    }
+  })();
+  // Settled either way: after a timeout, `found` may still reject once Chrome is killed.
+  found.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Chrome did not listen within ${deadline} ms:\n${output}`)),
+      deadline,
+    );
+  });
+  try {
+    return await Promise.race([found, timeout]);
+  } finally {
+    clearTimeout(timer);
+    // Keep draining stderr, so a chatty Chrome never blocks on a full pipe.
+    void (async () => {
+      try {
+        while (!(await reader.read()).done);
+      } catch {}
+    })();
+  }
+}
+
+/**
  * A real headless Chrome, driven over CDP with nothing but a WebSocket: a page
  * whose `evaluate` is `Runtime.evaluate`, as puppeteer's is.
  */
@@ -226,7 +276,7 @@ async function openChrome(executable: string) {
       "--remote-debugging-port=0",
       "about:blank",
     ],
-    { stdout: "ignore", stderr: "ignore" },
+    { stdout: "ignore", stderr: "pipe" },
   );
   const close = async () => {
     child.kill();
@@ -234,9 +284,7 @@ async function openChrome(executable: string) {
     await rm(profile, { recursive: true, force: true });
   };
   try {
-    const portFile = join(profile, "DevToolsActivePort");
-    for (let tries = 0; tries < 100 && !existsSync(portFile); tries++) await Bun.sleep(100);
-    const [port] = (await Bun.file(portFile).text()).split("\n");
+    const port = await devToolsPort(child);
     const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as {
       type: string;
       webSocketDebuggerUrl: string;
@@ -310,5 +358,5 @@ describe.skipIf(!chrome)("in a real headless Chrome", () => {
     } finally {
       await browser.close();
     }
-  }, 30_000);
+  }, 60_000);
 });
