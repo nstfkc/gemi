@@ -104,6 +104,7 @@ import type {
   FinishReason,
   NestedRun,
   PendingToolCall,
+  ProviderErrorDetail,
   ToolApprovalRecord,
   ToolArgumentsTooLong,
   ToolCallPart,
@@ -2203,7 +2204,9 @@ export type NestedContext = {
  * The same `code`, `message` and `retryable` as the `error` frame the run put
  * on its stream, plus what only the server should have: the HTTP `status` and
  * the provider's `requestId` when the failure was a response from the
- * provider. Neither is ever written to a frame. A frame is built from this
+ * provider, and the provider's own error `providerType`, `providerCode` and
+ * `providerParam` when its error body had them (#1302, see
+ * `ProviderErrorDetail`). None of them is ever written to a frame. A frame is built from this
  * through one method (`redact`), which copies the `AgentError` fields by name,
  * so a field added here stays server-side unless someone puts it there on
  * purpose, and redacts the message (#446, see `redactError`).
@@ -2212,17 +2215,14 @@ export type NestedContext = {
  * 'temperature' ..."), which is what a log needs and why this is kept off the
  * wire in any form richer than the frame already is.
  */
-export type AgentRunFailure = AgentError & {
-  /** The provider's HTTP status, when the failure was a non-2xx response. */
-  status?: number;
+export type AgentRunFailure = AgentError &
+  ProviderErrorDetail & {
   /**
    * The limit a `usage_limit` failure reached (#1124): `"run"` or the
    * scope's key, which of `tokens`, `steps` and `toolCalls`, the limit and
    * what had been used. Server-side only, like `status`.
    */
   usageLimit?: UsageLimitHit;
-  /** The provider's request id (`x-request-id`), when it sent one. */
-  requestId?: string;
   /**
    * The tool call the provider cut at `maxToolArgumentChars` (#1259), when
    * that is why the run failed. Server-side only, like `status`. See
@@ -2282,6 +2282,10 @@ export class AgentRunError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
   readonly requestId?: string;
+  /** The provider's own error `type`, `code` and `param` (#1302). */
+  readonly providerType?: string;
+  readonly providerCode?: string;
+  readonly providerParam?: string;
   readonly toolCallId?: string;
   readonly runId: string;
   readonly result: AgentRunResult<ToolShapes, unknown>;
@@ -2302,6 +2306,9 @@ export class AgentRunError extends Error {
     this.retryable = result.error.retryable;
     this.status = result.error.status;
     this.requestId = result.error.requestId;
+    this.providerType = result.error.providerType;
+    this.providerCode = result.error.providerCode;
+    this.providerParam = result.error.providerParam;
     this.toolCallId = result.error.toolCallId;
     this.runId = result.runId;
     this.result = result;
@@ -3252,7 +3259,7 @@ type StepOutcome = {
   error?: AgentError;
   /** The HTTP response behind `error`, when the provider reported one, and
    *  the cut call when it was `maxToolArgumentChars` (#1259). */
-  detail?: { status?: number; requestId?: string; toolArgumentsTooLong?: ToolArgumentsTooLong };
+  detail?: ProviderErrorDetail & { toolArgumentsTooLong?: ToolArgumentsTooLong };
 };
 
 /**
@@ -4136,9 +4143,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private fail(
     error: AgentError,
-    detail: {
-      status?: number;
-      requestId?: string;
+    detail: ProviderErrorDetail & {
       usageLimit?: UsageLimitHit;
       toolArgumentsTooLong?: ToolArgumentsTooLong;
     } = {},
@@ -7242,7 +7247,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private markFileRejected(
     fileId: string,
     reason: string,
-    detail: { status?: number; requestId?: string },
+    detail: ProviderErrorDetail,
   ): void {
     for (const original of this.history) {
       const hit = original.content.some(

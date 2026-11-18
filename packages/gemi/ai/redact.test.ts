@@ -6,7 +6,8 @@ vi.mock("../facades/Log", () => ({ Log: { error: logged.error } }));
 import { HttpRequest } from "../http/HttpRequest";
 import { Agent, AgentTool } from "./Agent";
 import { AgentController, MemoryLiveRuns } from "./AgentController";
-import { OpenAIProvider, type ProviderEvent } from "./AgentProvider";
+import { AnthropicProvider, OpenAIProvider, type ProviderEvent } from "./AgentProvider";
+import type { AgentRunFailure } from "./Agent";
 import { fakeProvider } from "./providers/fakeProvider";
 import { redactError, ToolError, type ErrorRedactionInfo } from "./redact";
 import { s } from "./Schema";
@@ -396,6 +397,55 @@ describe("AgentController", () => {
     expect(body).toContain('"nested":{"toolCallId":"c1"');
     expect(seenByHook).toHaveLength(1);
     expect(seenByHook[0]).toMatchObject({ code: "provider_error", message: SECRET });
+  });
+
+  /**
+   * #1302: an Anthropic 400 reaches `onError` with its `invalid_request_error`
+   * beside the status and request id, so "the request is wrong" reads apart
+   * from "the key is wrong" without parsing the message. The client is told
+   * none of it.
+   */
+  test("onError gets the provider's error type, and the frame does not", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "This key needs an anthropic-workspace-id header.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json", "request-id": "req_ws" } },
+        ),
+    ) as unknown as typeof fetch;
+    const seenByHook: AgentRunFailure[] = [];
+
+    class Chat extends AgentController {
+      agent = Agent.create({
+        name: "a",
+        provider: AnthropicProvider.model("claude-opus-5-5", { apiKey: "k", maxRetries: 0 }),
+      });
+      liveRuns = new MemoryLiveRuns();
+      protected onError(error: AgentRunFailure) {
+        seenByHook.push(error);
+      }
+    }
+
+    const response = await new Chat().stream(request());
+    const body = await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(seenByHook).toHaveLength(1);
+    expect(seenByHook[0]).toMatchObject({
+      code: "provider_error",
+      status: 400,
+      requestId: "req_ws",
+      providerType: "invalid_request_error",
+    });
+    expect(body).not.toContain("invalid_request_error");
+    expect(body).not.toContain("providerType");
+    expect(body).not.toContain("req_ws");
   });
 });
 

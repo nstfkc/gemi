@@ -1,5 +1,6 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { FinishReason, Usage } from "../types";
+import { streamErrorDetail } from "./errors";
 
 /**
  * The Responses SSE stream to `ProviderEvent`.
@@ -349,7 +350,7 @@ export async function* parseResponsesStream(
       case "error": {
         finished = true;
         const raw = payload.response?.error ?? payload.error ?? payload;
-        yield { type: "error", error: normalizeStreamError(raw) };
+        yield { type: "error", error: normalizeStreamError(raw), ...streamErrorDetail(raw) };
         yield ended("error", toUsage(payload.response?.usage));
         break;
       }

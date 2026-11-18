@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  httpErrorDetail,
   normalizeProviderError,
   ProviderHttpError,
   ProviderTimeoutError,
@@ -205,5 +206,86 @@ describe("normalizeProviderError()", () => {
       message: "nope",
       retryable: false,
     });
+  });
+});
+
+/**
+ * #1302: the provider's own error `type`, `code` and `param` are kept beside
+ * the status and request id, so a log can say `invalid_request_error` without
+ * reading the message.
+ */
+describe("httpErrorDetail()", () => {
+  test("an Anthropic error body gives its type", () => {
+    const error = new ProviderHttpError(
+      400,
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: "anthropic-workspace-id is required" },
+      },
+      "req_1",
+    );
+    expect(httpErrorDetail(error)).toEqual({
+      status: 400,
+      requestId: "req_1",
+      providerType: "invalid_request_error",
+    });
+    // The normalized error itself is unchanged: gemi's code only.
+    expect(normalizeProviderError(error)).toEqual({
+      code: "provider_error",
+      message: "anthropic-workspace-id is required",
+      retryable: false,
+    });
+  });
+
+  test("an OpenAI error body gives its type, code and param", () => {
+    const error = new ProviderHttpError(
+      400,
+      openaiError({ message: "Unsupported parameter", code: "unsupported_parameter", param: "temperature" }),
+    );
+    expect(httpErrorDetail(error)).toEqual({
+      status: 400,
+      providerType: "invalid_request_error",
+      providerCode: "unsupported_parameter",
+      providerParam: "temperature",
+    });
+  });
+
+  test("Azure's content filter gives the inner code, not content_filter", () => {
+    const error = new ProviderHttpError(400, {
+      error: {
+        message: "The response was filtered",
+        code: "content_filter",
+        innererror: { code: "ResponsibleAIPolicyViolation" },
+      },
+    });
+    expect(httpErrorDetail(error)).toEqual({
+      status: 400,
+      providerCode: "ResponsibleAIPolicyViolation",
+    });
+  });
+
+  test("fields already on the object win, and nothing that is not a string is kept", () => {
+    expect(
+      httpErrorDetail({
+        status: 500,
+        providerType: "overloaded_error",
+        providerCode: 42,
+        body: { error: { type: "api_error", code: "x", message: "m" } },
+      }),
+    ).toEqual({ status: 500, providerType: "overloaded_error", providerCode: "x" });
+  });
+
+  test("a failure that was not a response has none", () => {
+    expect(httpErrorDetail(new TypeError("fetch failed"))).toEqual({});
+    expect(httpErrorDetail(new ProviderHttpError(502, "<html>bad gateway</html>"))).toEqual({
+      status: 502,
+    });
+    // An error event's `error` is gemi's own, not a provider body.
+    expect(
+      httpErrorDetail({
+        type: "error",
+        error: { code: "provider_error", message: "m", retryable: false },
+      }),
+    ).toEqual({});
   });
 });

@@ -15,7 +15,7 @@ import {
   RunAborted,
 } from "./runtime";
 import type { Infer, Schema } from "./Schema";
-import type { AgentError, AgentMessage, FinishReason, Usage } from "./types";
+import type { AgentError, AgentMessage, FinishReason, ProviderErrorDetail, Usage } from "./types";
 import { recordUsage } from "./usageMeter";
 
 /**
@@ -488,7 +488,7 @@ async function callModel<O extends Schema<any>>(
   let error: AgentError | undefined;
   // The HTTP status and request id of a failed provider response, as an agent
   // run records them on `result().error` (#656). Server-side only.
-  let detail: { status?: number; requestId?: string } = {};
+  let detail: ProviderErrorDetail = {};
   let outputText = "";
   // Only with `onPartial`: a call without it parses nothing until the end.
   const partial = params.onPartial ? new PartialJsonParser() : undefined;

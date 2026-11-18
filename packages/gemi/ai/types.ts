@@ -196,6 +196,30 @@ export type ToolArgumentsTooLong = {
   chars: number;
 };
 
+/**
+ * What the provider said about a failed call, beside gemi's own `AgentError`
+ * (#1302): the HTTP `status` and `requestId` of its response, and its own
+ * error `type`, `code` and `param` from the error body when it sent them.
+ * For Anthropic `providerType` is `authentication_error`,
+ * `invalid_request_error`, `overloaded_error` and so on; for OpenAI and Azure
+ * `providerType` and `providerCode` are the body's `type` and `code` (Azure's
+ * `innererror.code` when it has one). Server-side detail, on
+ * `AgentRunFailure`, `onError` and `onProviderRetry`; never written to a
+ * client frame.
+ */
+export type ProviderErrorDetail = {
+  /** The provider's HTTP status, when the failure was a non-2xx response. */
+  status?: number;
+  /** The provider's request id (`x-request-id`), when it sent one. */
+  requestId?: string;
+  /** The error body's `type`. */
+  providerType?: string;
+  /** The error body's `code`. */
+  providerCode?: string;
+  /** The error body's `param`: the request field it objected to. */
+  providerParam?: string;
+};
+
 export type AgentError = {
   code: AgentErrorCode;
   message: string;

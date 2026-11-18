@@ -11,6 +11,7 @@ import type {
   AgentContext,
   AgentProviderRetry,
   AgentRun,
+  AgentRunFailure,
   AgentRunResult,
   AgentToolShapes,
   AnyAgent,
@@ -870,7 +871,7 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
   ) => void | Promise<void>;
   onAwaitingInput?: (pending: PendingToolCall[], ctx: AgentHookContext) => void | Promise<void>;
   redactError?: (error: AgentError, info: ErrorRedactionInfo, ctx: AgentHookContext) => AgentError;
-  onError?: (error: AgentError, ctx: AgentHookContext) => void | Promise<void>;
+  onError?: (error: AgentRunFailure, ctx: AgentHookContext) => void | Promise<void>;
   onProviderRetry?: (info: AgentProviderRetry, ctx: AgentHookContext) => void | Promise<void>;
   onStreamComplete?: (
     result: AgentRunResult<any, any>,
@@ -3422,10 +3423,11 @@ export abstract class AgentController<
 
   /**
    * A failure on the run's stream, unredacted: the provider's own message,
-   * and the HTTP `status` and `requestId` when there were any. The client was
-   * sent `redactError`'s copy.
+   * and the HTTP `status` and `requestId` and the provider's error
+   * `providerType`, `providerCode` and `providerParam` (#1302) when there were
+   * any. The client was sent `redactError`'s copy.
    */
-  protected onError(error: AgentError, ctx: AgentHookContext): void | Promise<void> {
+  protected onError(error: AgentRunFailure, ctx: AgentHookContext): void | Promise<void> {
     return this.hooks?.onError?.(error, ctx);
   }
 

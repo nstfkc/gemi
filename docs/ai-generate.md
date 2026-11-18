@@ -24,7 +24,7 @@ Inside a tool, call `ctx.generate` instead. It is the same function bound to the
 `generate` does not throw for a bad answer. It resolves to a result discriminated on `ok`:
 
 - `ok: true` has `output`, the answer typed by the schema (or by `validate`, below).
-- `ok: false` has `error` (`code`, `message`, `retryable`, and the provider's `status` and `requestId` when it answered with an error).
+- `ok: false` has `error` (`code`, `message`, `retryable`, and the provider's `status` and `requestId` when it answered with an error, plus its own error `providerType`, `providerCode` and `providerParam` when its error body had them).
 - Both have `messages` (the transcript, ending with the model's reply), `usage` (billed whether or not the answer passed), `finishReason`, `attempts` (how many calls were made) and `attemptLog` (each call's outcome, duration and usage).
 
 `error.code` is `invalid_output` when the answer did not match the schema, was cut off at `maxOutputTokens` or never came; `timeout` or `aborted` when `signal` (or `timeoutMs`) stopped it; otherwise the provider's code (`rate_limited`, `content_filtered`, `provider_error`, …).

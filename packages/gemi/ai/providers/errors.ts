@@ -1,4 +1,4 @@
-import type { AgentError, ToolArgumentsTooLong } from "../types";
+import type { AgentError, ProviderErrorDetail, ToolArgumentsTooLong } from "../types";
 
 /**
  * A non-2xx response, carried as an exception so the retry loop and
@@ -114,20 +114,61 @@ function errorBody(body: unknown): OpenAIErrorBody | null {
 }
 
 /**
- * The HTTP status and request id of a provider failure, read off what was
- * thrown — server-side detail for `AgentRunResult.error`, never for a frame.
+ * The HTTP status, request id and error body detail of a provider failure,
+ * read off what was thrown or off an `error` event — server-side detail for
+ * `AgentRunResult.error`, never for a frame.
  *
  * By shape rather than by `instanceof ProviderHttpError`, so a custom provider
  * whose SDK throws its own error class with a `status` gets the same detail.
  * A `status` outside 100–599 is not an HTTP status and is ignored.
+ *
+ * `providerType`, `providerCode` and `providerParam` (#1302) are taken as set
+ * on the object (an `error` event carries them that way), and otherwise read
+ * from a `body` in the provider's error shape, as `ProviderHttpError` has.
  */
-export function httpErrorDetail(error: unknown): { status?: number; requestId?: string } {
+export function httpErrorDetail(error: unknown): ProviderErrorDetail {
   if (!error || typeof error !== "object") return {};
-  const { status, requestId } = error as { status?: unknown; requestId?: unknown };
+  const e = error as {
+    status?: unknown;
+    requestId?: unknown;
+    providerType?: unknown;
+    providerCode?: unknown;
+    providerParam?: unknown;
+    body?: unknown;
+  };
+  const { status, requestId } = e;
+  const body = streamErrorDetail(e.body);
+  const providerType = nonEmpty(e.providerType) ?? body.providerType;
+  const providerCode = nonEmpty(e.providerCode) ?? body.providerCode;
+  const providerParam = nonEmpty(e.providerParam) ?? body.providerParam;
   return {
     ...(typeof status === "number" && status >= 100 && status <= 599 ? { status } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    ...(providerType ? { providerType } : {}),
+    ...(providerCode ? { providerCode } : {}),
+    ...(providerParam ? { providerParam } : {}),
   };
+}
+
+/**
+ * The `type`, `code` and `param` of a provider's error object: a response
+ * body, or one it streamed (Anthropic's `error` frame, the Responses API's
+ * `response.failed`), for the `error` event that reports it.
+ */
+export function streamErrorDetail(raw: unknown): ProviderErrorDetail {
+  const body = errorBody(raw);
+  const providerType = nonEmpty(body?.type);
+  const providerCode = nonEmpty(body?.code);
+  const providerParam = nonEmpty(body?.param);
+  return {
+    ...(providerType ? { providerType } : {}),
+    ...(providerCode ? { providerCode } : {}),
+    ...(providerParam ? { providerParam } : {}),
+  };
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }
 
 /**
