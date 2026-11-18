@@ -1355,8 +1355,11 @@ provider's API on their behalf. gemi keeps the tokens encrypted, refreshes them,
 only on the provider's API.
 
 Register providers under `connections`, keyed by the name used in the URLs and in code.
-`OAuthConnectionProvider` is exported from `gemi/services`, and so is
-`InstagramConnectionProvider`, a ready-made one for Instagram (see [Instagram](./instagram.md)):
+`OAuthConnectionProvider` is exported from `gemi/services`, and so are ready-made ones:
+`InstagramConnectionProvider` (see [Instagram](./instagram.md)), and
+`FacebookConnectionProvider`, `LinkedInConnectionProvider`, `TikTokConnectionProvider`,
+`YouTubeConnectionProvider` and `XConnectionProvider` for publishing (see
+[Social connections](./social-connections.md)):
 
 ```typescript
 import { defineAuthConfig, OAuthConnectionProvider } from "gemi/services";
@@ -1386,7 +1389,9 @@ export default defineAuthConfig({
 | `refreshUrl` | `tokenUrl` | Where refresh tokens are spent, for a provider with a refresh endpoint of its own (Figma's `https://api.figma.com/v1/oauth/refresh`). https only. |
 | `refreshGrantType` | `"refresh_token"` | The `grant_type` sent with a refresh. `false` leaves it out, for a refresh endpoint that documents only `refresh_token` (Figma's). |
 | `revokeUrl` | none | The RFC 7009 revocation endpoint, for `revoke()`. |
+| `revokeTokenHint` | `"refresh_token"` | Which token `revoke()` sends: the refresh token when the connection has one (it ends the whole grant), else the access token. `"access_token"` always sends the access token (TikTok). |
 | `clientId`, `clientSecret` | (required) | The app's credentials at the provider. |
+| `clientIdParam` | `"client_id"` | The parameter that carries `clientId` on the authorization URL and, with `clientAuth: "body"`, in token, refresh and revocation requests. TikTok's is `"client_key"`. |
 | `scopes` | (required) | The scopes to request. |
 | `scopeSeparator` | `" "` | How the scopes are joined on the authorization URL. Some providers want `","`. |
 | `clientAuth` | `"body"` | How the client authenticates to the token, refresh and revocation endpoints: `"body"` sends `client_id`/`client_secret` as form fields, `"basic"` as HTTP Basic credentials (Figma). |

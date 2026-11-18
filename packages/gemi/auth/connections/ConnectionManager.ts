@@ -418,6 +418,18 @@ export class ProviderConnection {
   }
 
   /**
+   * `fetch` with a token this connection handed out for something it manages
+   * (a Facebook Page's token): to `apiBaseUrl`'s origin only, through
+   * `Connections.fake` when faked, redirects followed as `fetch` does. No
+   * refresh and no retry: the token is not the connection's own.
+   *
+   * @internal
+   */
+  async fetchWithToken(token: string, input: string | URL, init: RequestInit = {}): Promise<Response> {
+    return (await this.send(this.resolveUrl(input), init, token)).response;
+  }
+
+  /**
    * A valid access token, refreshed first if it is about to expire — for an
    * SDK that wants the token itself. Prefer `fetch`, which also retries a 401.
    */
@@ -441,7 +453,7 @@ export class ProviderConnection {
   async revoke(): Promise<void> {
     if (!this.manager.faked) {
       const provider = this.manager.provider(this.provider);
-      if (this.record.refreshToken !== null) {
+      if (this.record.refreshToken !== null && provider.config.revokeTokenHint !== "access_token") {
         await provider.revoke(this.record.refreshToken, "refresh_token");
       } else {
         await provider.revoke(this.record.accessToken, "access_token");

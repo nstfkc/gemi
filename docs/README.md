@@ -72,6 +72,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Auth
 - **[Authentication](./authentication.md)** — `app/config/auth.ts`, the user provider, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
+- **[Social connections](./social-connections.md)** — connection providers for publishing: `FacebookConnectionProvider` (Facebook Login for Business, long-lived user token, `pages()` with a Page token each), `LinkedInConnectionProvider` (OpenID + `w_member_social`, organization scopes, `organizations()`), `TikTokConnectionProvider` (Login Kit v2, `video.publish`/`video.upload`), `YouTubeConnectionProvider` (`youtube.upload`, offline access) and `XConnectionProvider` (PKCE, `tweet.write`, `media.write`); env names, redirect URIs, refresh and revoke per platform, typed profiles.
 - **[Instagram](./instagram.md)** — "Sign in with Instagram" and "Connect Instagram": `InstagramOAuthProvider`, `InstagramConnectionProvider` (long-lived tokens, renewal, several accounts), publishing with `Instagram.for(connection)`, and Meta's signed deauthorize/data-deletion requests.
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
