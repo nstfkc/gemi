@@ -1,3 +1,21 @@
+# 0.216.0
+
+## Provider error type and code on the server-side run failure (#1302)
+
+**New API (minor version).** See [AI providers](docs/ai-providers.md).
+
+- New exported type `ProviderErrorDetail` (`status`, `requestId`, `providerType`, `providerCode`, `providerParam`). The last three come from the provider error body's `type`, `code` and `param` (Azure: `innererror.code` wins).
+- These fields now ride on every server-side failure: `AgentRunFailure` (`result().error`), `AgentController.onError`, `onProviderRetry`, `AgentRunError`, `generate()` errors, `ErrorRedactionInfo.failure` and `fallbackOn`'s `failure`, including streamed Anthropic `error` frames and OpenAI/Azure `error` / `response.failed` events.
+- `AgentController.onError` is now typed `AgentRunFailure`; overrides declaring `AgentError` still compile.
+
+What to check:
+
+- Nothing on the client changes: `normalizeProviderError()` and the stream's error frame keep their shape, and the new fields never reach a client.
+
+## Preserve boolean tags and diagnose missing HTTP route outputs (#1297)
+
+- Boolean tags are kept, and a missing HTTP route output is reported with a diagnostic instead of failing silently.
+
 # 0.215.0
 
 ## Connection providers for publishing: Facebook Pages, LinkedIn, TikTok, YouTube, X (#1299)
