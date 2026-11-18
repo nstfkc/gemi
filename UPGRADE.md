@@ -1,4 +1,4 @@
-# Unreleased
+# 0.215.0
 
 ## Connection providers for publishing: Facebook Pages, LinkedIn, TikTok, YouTube, X (#1299)
 
