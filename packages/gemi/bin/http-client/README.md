@@ -50,12 +50,16 @@ Run the focused and AI output regression tests from `packages/gemi`:
 bun --bun x vitest run bin/http-client/extract.test.ts bin/ai-client/generate.test.ts
 ```
 
-The internal HTTP model renderers generate Swift and Kotlin object types. A
-`PATCH /notes/:id` fixture exercises path parameters, a JSON body, a success
-response and a route-specific error. Its fixed error kind and status are
-single-value native types. The test targets compile callers of these models
-and check their JSON encoding and decoding. Route methods and tagged-union
-rendering are follow-ups.
+The internal renderers generate Swift and Kotlin objects, string enums and
+unions tagged by a string or boolean. A raw JSON field uses `JSONValue` in
+Swift and `JsonElement` in Kotlin. If a union variant has no named native
+model, the whole union uses the raw JSON type.
+
+The checked-in notes fixture covers a PATCH and a POST, including two typed
+errors, a boolean-tagged response, and optional and nullable fields. Required
+singleton fields have constructor defaults and are always encoded. The native
+tests check the JSON on the wire, including explicit nulls and omitted optional
+fields. Networking and generated route methods remain follow-ups.
 
 From `packages/gemi`, run
 `bun --bun x vitest run bin/http-client/render.test.ts` to check both generated

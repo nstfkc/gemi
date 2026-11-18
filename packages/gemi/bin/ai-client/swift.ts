@@ -74,7 +74,7 @@ export function renderSwift(agent: AgentModel): string {
         const value = view.failable
           ? `${view.typed(tool)}(${argument}).map(${view.name}.${escape(tool.case)}) ?? .unknown(${argument})`
           : `.${tool.case}(${typed}(${argument}))`;
-        emit(`    case ${JSON.stringify(tool.name)}: ${value}`);
+        emit(`    case ${swiftString(tool.name)}: ${value}`);
       }
       emit(`    default: .unknown(${argument})`);
       emit("    }");
@@ -89,6 +89,15 @@ export function renderSwift(agent: AgentModel): string {
 
   emit("}");
   return `${lines.join("\n")}\n`;
+}
+
+/** Swift escapes control characters as Unicode scalars and cannot represent a lone surrogate. */
+export function swiftString(value: string): string {
+  if (/[\uD800-\uDFFF]/u.test(value))
+    throw new Error("A Swift string cannot contain a lone surrogate");
+  return JSON.stringify(value).replace(/\\\\|\\u([0-9a-f]{4})|\\b|\\f/g, (s, hex) =>
+    hex ? `\\u{${hex}}` : s === "\\b" ? "\\u{8}" : s === "\\f" ? "\\u{c}" : s,
+  );
 }
 
 function swiftType(type: TypeRef): string {
@@ -125,7 +134,11 @@ function renderType(type: NamedType): string[] {
   }
 }
 
-export function renderStruct(name: string, properties: Property[]): string[] {
+export function renderStruct(
+  name: string,
+  properties: Property[],
+  literalDefaults?: ReadonlyMap<string, string>,
+): string[] {
   const names = uniqueIdentifiers(properties.map((property) => property.key));
   const fields = properties.map((property, index) => {
     const base = swiftType(property.type);
@@ -137,10 +150,10 @@ export function renderStruct(name: string, properties: Property[]): string[] {
   for (const field of fields) lines.push(`  public var ${escape(field.name)}: ${field.swiftType}`);
 
   if (fields.length > 0) lines.push("");
-  const parameters = fields.map(
-    (field) =>
-      `${escape(field.name)}: ${field.swiftType}${field.swiftType.endsWith("?") ? " = nil" : ""}`,
-  );
+  const parameters = fields.map((field) => {
+    const fallback = field.swiftType.endsWith("?") ? "nil" : literalDefaults?.get(field.swiftType);
+    return `${escape(field.name)}: ${field.swiftType}${fallback ? ` = ${fallback}` : ""}`;
+  });
   if (parameters.length === 0) {
     lines.push("  public init() {}");
   } else {
@@ -170,7 +183,7 @@ export function renderStruct(name: string, properties: Property[]): string[] {
       lines.push(
         field.name === field.key
           ? `    case ${escape(field.name)}`
-          : `    case ${escape(field.name)} = ${JSON.stringify(field.key)}`,
+          : `    case ${escape(field.name)} = ${swiftString(field.key)}`,
       );
     }
     lines.push("  }");
@@ -191,7 +204,7 @@ export function renderStruct(name: string, properties: Property[]): string[] {
   return lines;
 }
 
-function renderEnum(name: string, values: string[]): string[] {
+export function renderEnum(name: string, values: string[]): string[] {
   const names = caseIdentifiers(values);
   const lines = [`public enum ${name}: String, Codable, Hashable, Sendable, CaseIterable {`];
   values.forEach((value, index) => {
@@ -199,42 +212,45 @@ function renderEnum(name: string, values: string[]): string[] {
     lines.push(
       identifier === value
         ? `  case ${escape(identifier)}`
-        : `  case ${escape(identifier)} = ${JSON.stringify(value)}`,
+        : `  case ${escape(identifier)} = ${swiftString(value)}`,
     );
   });
   lines.push("}");
   return lines;
 }
 
-function renderUnion(
+export function renderUnion(
   name: string,
   discriminant: string,
-  variants: { value: string; type: TypeRef }[],
+  variants: { value: string | boolean; type: TypeRef }[],
 ): string[] {
-  const names = caseIdentifiers(variants.map((variant) => variant.value));
+  const names = caseIdentifiers(variants.map((variant) => String(variant.value)));
   const lines = [`public enum ${name}: Codable, Hashable, Sendable {`];
   variants.forEach((variant, index) =>
     lines.push(`  case ${escape(names[index]!)}(${swiftType(variant.type)})`),
   );
   lines.push("");
   lines.push("  private enum Discriminant: String, CodingKey {");
-  lines.push(`    case key = ${JSON.stringify(discriminant)}`);
+  lines.push(`    case key = ${swiftString(discriminant)}`);
   lines.push("  }");
   lines.push("");
   lines.push("  public init(from decoder: Decoder) throws {");
   lines.push("    let container = try decoder.container(keyedBy: Discriminant.self)");
-  lines.push("    let value = try container.decode(String.self, forKey: .key)");
+  const tagType = typeof variants[0]?.value === "boolean" ? "Bool" : "String";
+  lines.push(`    let value = try container.decode(${tagType}.self, forKey: .key)`);
   lines.push("    switch value {");
   variants.forEach((variant, index) => {
     lines.push(
-      `    case ${JSON.stringify(variant.value)}: self = .${names[index]}(try ${swiftType(variant.type)}(from: decoder))`,
+      `    case ${typeof variant.value === "boolean" ? variant.value : swiftString(variant.value)}: self = .${names[index]}(try ${swiftType(variant.type)}(from: decoder))`,
     );
   });
-  lines.push("    default:");
-  lines.push("      throw DecodingError.dataCorruptedError(");
-  lines.push(
-    `        forKey: .key, in: container, debugDescription: "Unknown ${discriminant} \\"\\(value)\\"")`,
-  );
+  if (tagType === "String" || variants.length < 2) {
+    lines.push("    default:");
+    lines.push("      throw DecodingError.dataCorruptedError(");
+    lines.push(
+      `        forKey: .key, in: container, debugDescription: "Unknown ${swiftString(discriminant).slice(1, -1)} \\"\\(value)\\"")`,
+    );
+  }
   lines.push("    }");
   lines.push("  }");
   lines.push("");
@@ -258,6 +274,10 @@ function caseNames(toolNames: string[]): string[] {
  *  keeps the wire's spelling. */
 function caseIdentifiers(texts: string[], taken = new Set<string>()): string[] {
   return uniqueIdentifiers(texts.map(camelCase), taken);
+}
+
+export function swiftLiteralCase(value: string | number | boolean): string {
+  return escape(caseIdentifiers([String(value)])[0]!);
 }
 
 /** Swift identifiers for JSON names. A property keeps its key when the key is
