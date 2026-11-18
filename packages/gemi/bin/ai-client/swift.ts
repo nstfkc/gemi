@@ -125,7 +125,7 @@ function renderType(type: NamedType): string[] {
   }
 }
 
-function renderStruct(name: string, properties: Property[]): string[] {
+export function renderStruct(name: string, properties: Property[]): string[] {
   const names = uniqueIdentifiers(properties.map((property) => property.key));
   const fields = properties.map((property, index) => {
     const base = swiftType(property.type);

@@ -191,7 +191,7 @@ function kotlinType(type: TypeRef, spell: Spell = (name) => name): string {
  * would start a template — and `$ref`, `$type` are ordinary JSON keys — and
  * Kotlin has no `\f`.
  */
-function kotlinString(value: string): string {
+export function kotlinString(value: string): string {
   return JSON.stringify(value).replace(/\\\\|\\f|\$/g, (match) =>
     match === "$" ? "\\$" : match === "\\f" ? "\\u000C" : match,
   );
@@ -208,7 +208,7 @@ function renderType(type: NamedType, parent: string | undefined): string[] {
   }
 }
 
-function renderClass(name: string, properties: Property[], parent: string | undefined): string[] {
+export function renderClass(name: string, properties: Property[], parent: string | undefined): string[] {
   const implemented = parent ? ` : ${parent}` : "";
   if (properties.length === 0) {
     return ["@Serializable", `public data object ${name}${implemented}`];

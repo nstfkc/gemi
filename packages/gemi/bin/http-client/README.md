@@ -4,7 +4,7 @@
 instance through an in-memory TypeScript probe using that router's own
 `CreateRPC` and its raw-output companion (which preserves status before body
 projection). It never imports or executes application modules. The model is
-internal, with no public CLI or Swift/Kotlin output yet (part 1 of #1280).
+internal, with no public CLI.
 
 Routes are sorted by their exact RPC key before types are named. GET input is
 query data; the other supported verbs carry body input. Path parameter syntax
@@ -16,7 +16,7 @@ to `none`; arbitrary `any` and nonempty inputs remain JSON/type shapes. Nested,
 group and resource paths are resolved by `CreateRPC`, not duplicated here.
 Agent and voice entries are excluded. `CreateFileRPC` file/stream routes are
 explicitly deferred, as are uploads, authentication, transport, built-in auth
-routes, native rendering and stale-build enforcement.
+routes and app-level stale-build enforcement.
 
 The shared AI `TypeMapper` is reused without changing its output. This is not a
 complete HTTP wire schema: Date and bigint currently become raw JSON with
@@ -49,3 +49,14 @@ Run the focused and AI output regression tests from `packages/gemi`:
 ```sh
 bun --bun x vitest run bin/http-client/extract.test.ts bin/ai-client/generate.test.ts
 ```
+
+The internal HTTP model renderers generate Swift and Kotlin object types. A
+`PATCH /notes/:id` fixture exercises path parameters, a JSON body, a success
+response and a route-specific error. Its fixed error kind and status are
+single-value native types. The test targets compile callers of these models
+and check their JSON encoding and decoding. Route methods and tagged-union
+rendering are follow-ups.
+
+From `packages/gemi`, run
+`bun --bun x vitest run bin/http-client/render.test.ts` to check both generated
+files against the route. Set `GEMI_UPDATE_FIXTURES=1` to regenerate them.
