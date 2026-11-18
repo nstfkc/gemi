@@ -162,6 +162,10 @@ describe("a provider that answers 400", () => {
       retryable: false,
       status: 400,
       requestId: "req_abc123",
+      // The body's own detail (#1302), for a log that wants more than 400.
+      providerType: "invalid_request_error",
+      providerCode: "unsupported_parameter",
+      providerParam: "temperature",
     });
     expect(logged.error).toHaveBeenCalledTimes(1);
     expect(logged.error.mock.calls[0]![0]).toContain("(provider_error 400)");
@@ -178,6 +182,8 @@ describe("a provider that answers 400", () => {
     expect(error).toBeInstanceOf(AgentRunError);
     expect((error as AgentRunError).status).toBe(400);
     expect((error as AgentRunError).requestId).toBe("req_abc123");
+    expect((error as AgentRunError).providerType).toBe("invalid_request_error");
+    expect((error as AgentRunError).providerCode).toBe("unsupported_parameter");
   });
 
   test("a status thrown by a custom provider reaches the result too", async () => {
@@ -238,6 +244,8 @@ describe("the client's copy of a failure", () => {
     expect(Object.keys(error.error).sort()).toEqual(["code", "message", "retryable"]);
     expect(JSON.stringify(frames)).not.toContain("req_abc123");
     expect(JSON.stringify(frames)).not.toContain('"status"');
+    expect(JSON.stringify(frames)).not.toContain("invalid_request_error");
+    expect(JSON.stringify(frames)).not.toContain("unsupported_parameter");
   });
 });
 

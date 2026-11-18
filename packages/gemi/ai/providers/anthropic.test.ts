@@ -168,7 +168,11 @@ describe("parseMessagesStream()", () => {
   test("an overloaded_error frame is a retryable error", async () => {
     const events = await parse(fixture("anthropic-error-overloaded.sse"));
     expect(events).toEqual([
-      { type: "error", error: { code: "provider_error", message: "Overloaded", retryable: true } },
+      {
+        type: "error",
+        error: { code: "provider_error", message: "Overloaded", retryable: true },
+        providerType: "overloaded_error",
+      },
       expect.objectContaining({ type: "finish", reason: "error", model: "claude-opus-5-5" }),
     ]);
   });
@@ -645,6 +649,26 @@ describe("AnthropicProvider", () => {
     expect(events.filter((e) => e.type === "error")).toEqual([]);
     // The dropped attempt's usage is billed too, and lands on the finish.
     expect(events.at(-1)).toMatchObject({ type: "finish", usage: { inputTokens: 50 } });
+  });
+
+  test("a 400 keeps Anthropic's error type on the error event (#1302)", async () => {
+    const { fetchImpl } = server([json(400, fixture("anthropic-error-invalid-request.json"))]);
+    const events = await drain(new TestAnthropic("claude-opus-5-5", fetchImpl));
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: { code: "provider_error", retryable: false },
+      status: 400,
+      providerType: "invalid_request_error",
+    });
+  });
+
+  test("a retried 529 says it was an overloaded_error", async () => {
+    const { fetchImpl } = server([
+      json(529, fixture("anthropic-error-overloaded.json")),
+      sse(fixture("anthropic-text.sse")),
+    ]);
+    const events = await drain(new TestAnthropic("claude-opus-5-5", fetchImpl));
+    expect(events[0]).toMatchObject({ type: "retry", status: 529, providerType: "overloaded_error" });
   });
 
   test("a prompt that is too long fails once, not maxRetries times", async () => {

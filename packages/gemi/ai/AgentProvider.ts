@@ -32,7 +32,14 @@ import { RealtimeClient, DEFAULT_REALTIME_TIMEOUT_MS } from "./providers/realtim
 import { isContentEvent } from "./runtime";
 import { buildResponsesRequest } from "./providers/request";
 import type { JSONSchema } from "./Schema";
-import type { AgentError, AgentMessage, FinishReason, ToolArgumentsTooLong, Usage } from "./types";
+import type {
+  AgentError,
+  AgentMessage,
+  FinishReason,
+  ProviderErrorDetail,
+  ToolArgumentsTooLong,
+  Usage,
+} from "./types";
 
 /**
  * A provider makes one model call. It does not run the tool loop.
@@ -226,9 +233,11 @@ export type ProviderEvent =
   | { type: "finish"; reason: FinishReason; usage: Usage; model?: string }
   /**
    * `status` and `requestId` describe the HTTP response the error came from,
-   * when there was one. They are for the server's record of the run
+   * when there was one, and `providerType`, `providerCode` and
+   * `providerParam` the provider's own error body (#1302), whether it came on
+   * a response or in the stream. They are for the server's record of the run
    * (`AgentRunResult.error`) and are never written to a client frame; leave
-   * them out for an error that was not a response.
+   * out what the provider did not say.
    */
   /**
    * The provider refused a stored file (`fileId` is the provider's id) and the
@@ -239,7 +248,7 @@ export type ProviderEvent =
    * the provider's, for the log. A provider that never retries need not send
    * this; `Agent` treats its absence as nothing having been rejected.
    */
-  | { type: "file-rejected"; fileId: string; message: string; status?: number; requestId?: string }
+  | ({ type: "file-rejected"; fileId: string; message: string } & ProviderErrorDetail)
   /**
    * An attempt failed and the provider is about to ask again (#1192), sent
    * before the backoff wait, so it arrives while the call is still waiting
@@ -249,14 +258,12 @@ export type ProviderEvent =
    * send it.
    */
   | ({ type: "retry" } & ProviderRetryInfo)
-  | {
+  | ({
       type: "error";
       error: AgentError;
-      status?: number;
-      requestId?: string;
       /** Set when the call was cut at `maxToolArgumentChars` (#1259). */
       toolArgumentsTooLong?: ToolArgumentsTooLong;
-    };
+    } & ProviderErrorDetail);
 
 /**
  * One failed attempt of a provider call that is about to be asked again.
@@ -266,7 +273,8 @@ export type ProviderEvent =
  *   except for the patient retries of a provider `retry` policy (#1258),
  *   which come after them and carry `remainingMs`.
  * - `error`: the failure, normalized; `status` and `requestId` describe the
- *   HTTP response it came from, when there was one.
+ *   HTTP response it came from, when there was one, and `providerType`,
+ *   `providerCode` and `providerParam` the provider's error body (#1302).
  * - `phase`: `"request"` when no response arrived (or an error status did),
  *   `"stream"` when the response started and its body broke before the first
  *   content event.
@@ -278,12 +286,10 @@ export type ProviderEvent =
  *   `maxToolArgumentChars` (#1291), the same object the `error` event carries
  *   once the retries are spent (#1259). `phase` is then `"stream"`.
  */
-export type ProviderRetryInfo = {
+export type ProviderRetryInfo = ProviderErrorDetail & {
   attempt: number;
   maxRetries: number;
   error: AgentError;
-  status?: number;
-  requestId?: string;
   phase: "request" | "stream";
   timedOut: boolean;
   delayMs: number;

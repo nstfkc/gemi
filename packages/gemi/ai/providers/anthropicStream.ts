@@ -1,5 +1,6 @@
 import type { ProviderEvent } from "../AgentProvider";
 import type { AgentError, FinishReason, Usage } from "../types";
+import { streamErrorDetail } from "./errors";
 import { emptyUsage, sseMessages } from "./stream";
 
 /**
@@ -180,7 +181,8 @@ export async function* parseMessagesStream(
 
       case "error": {
         finished = true;
-        yield { type: "error", error: anthropicStreamError(payload.error ?? payload) };
+        const raw = payload.error ?? payload;
+        yield { type: "error", error: anthropicStreamError(raw), ...streamErrorDetail(raw) };
         yield ended("error");
         break;
       }

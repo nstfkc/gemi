@@ -1,4 +1,4 @@
-import type { AgentError, AgentErrorCode } from "./types";
+import type { AgentError, AgentErrorCode, ProviderErrorDetail } from "./types";
 
 /**
  * A tool failure whose message is meant to be read: by the model, which can
@@ -30,14 +30,15 @@ export class ToolError extends Error {
  *
  * - `run`: the run's own failure, on its `error` frame. `failure` is what
  *   `result().error` returns: the provider's own message, its HTTP status and
- *   request id.
+ *   request id, and its error `providerType` / `providerCode` /
+ *   `providerParam` (#1302).
  * - `tool`: a tool threw. `cause` is what it threw; the result the model and
  *   the client read is the redacted one.
  */
 export type ErrorRedactionInfo =
   | {
       source: "run";
-      failure: AgentError & { status?: number; requestId?: string };
+      failure: AgentError & ProviderErrorDetail;
     }
   | {
       source: "tool";

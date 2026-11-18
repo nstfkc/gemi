@@ -15,7 +15,7 @@ import {
 } from "./CircuitStore";
 import { httpErrorDetail } from "./providers/errors";
 import { addUsage, emptyUsage, isContentEvent } from "./runtime";
-import type { AgentError, Usage } from "./types";
+import type { AgentError, ProviderErrorDetail, Usage } from "./types";
 
 /**
  * An ordered chain of providers (#666): the primary, then the fallbacks.
@@ -70,14 +70,14 @@ export type FallbackEntry = {
   circuitKey?: string;
 };
 
-/** What `fallbackOn` is told besides the normalized error. */
-export type FallbackFailure = {
+/**
+ * What `fallbackOn` is told besides the normalized error, with the provider's
+ * own error `providerType` / `providerCode` / `providerParam` (#1302).
+ */
+export type FallbackFailure = ProviderErrorDetail & {
   /** The leg's position in the chain this provider was built with (after `from()`). */
   index: number;
   model: string;
-  /** The HTTP status of the failed response, when there was one. */
-  status?: number;
-  requestId?: string;
   /** True when the leg produced nothing within its `timeoutMs`. */
   timedOut: boolean;
 };
@@ -321,7 +321,7 @@ export class FallbackProvider extends AgentProvider {
       let finished = false;
       let usage: Usage | undefined;
       let responseModel: string | undefined;
-      let failure: { error: AgentError; status?: number; requestId?: string } | undefined;
+      let failure: ({ error: AgentError } & ProviderErrorDetail) | undefined;
       let timedOut = false;
       let iterator: AsyncIterator<ProviderEvent> | undefined;
       let done = false;
@@ -399,11 +399,7 @@ export class FallbackProvider extends AgentProvider {
           }
 
           if (event.type === "error") {
-            failure = {
-              error: event.error,
-              ...(event.status !== undefined ? { status: event.status } : {}),
-              ...(event.requestId !== undefined ? { requestId: event.requestId } : {}),
-            };
+            failure = { error: event.error, ...httpErrorDetail(event) };
           } else if (event.type === "finish") {
             usage = addUsage(usage ?? emptyUsage(), event.usage);
             if (event.reason === "error" && !failure) {
@@ -502,8 +498,7 @@ export class FallbackProvider extends AgentProvider {
           index,
           model,
           timedOut,
-          ...(failure.status !== undefined ? { status: failure.status } : {}),
-          ...(failure.requestId !== undefined ? { requestId: failure.requestId } : {}),
+          ...httpErrorDetail(failure),
         });
 
       // A leg's failure counts against it only when the chain moves on from
@@ -540,8 +535,7 @@ export class FallbackProvider extends AgentProvider {
         yield {
           type: "error",
           error: failure.error,
-          ...(failure.status !== undefined ? { status: failure.status } : {}),
-          ...(failure.requestId !== undefined ? { requestId: failure.requestId } : {}),
+          ...httpErrorDetail(failure),
         };
       }
       yield closing({

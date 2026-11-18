@@ -80,6 +80,7 @@ export type {
   ToolApprovalRecord,
   ToolDenial,
   ToolArgumentsTooLong,
+  ProviderErrorDetail,
   ToolResultPart,
   ToolSearchRecord,
   JsonToolShapes,

@@ -276,6 +276,7 @@ describe("parseResponsesStream()", () => {
       {
         type: "error",
         error: { code: "rate_limited", message: "Slow down.", retryable: true },
+        providerCode: "rate_limit_exceeded",
       },
       { type: "finish", reason: "error", usage: expect.anything() },
     ]);

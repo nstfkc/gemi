@@ -15,7 +15,7 @@ import {
   type SentFile,
 } from "./fileRejection";
 import { addUsage, isContentEvent } from "../runtime";
-import type { AgentError, ToolArgumentsTooLong, Usage } from "../types";
+import type { AgentError, ProviderErrorDetail, ToolArgumentsTooLong, Usage } from "../types";
 import {
   backoffDelayMs,
   boundedBody,
@@ -351,7 +351,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     }
     if (committed) return;
 
-    let detail: { status?: number; requestId?: string } = {};
+    let detail: ProviderErrorDetail = {};
     for (const event of held) if (event.type === "error") detail = httpErrorDetail(event);
     // Past `maxRetries`, a patience budget asks again too (#1258), for the
     // failures its `on` names (#1291). A cut call the caller sends back to the

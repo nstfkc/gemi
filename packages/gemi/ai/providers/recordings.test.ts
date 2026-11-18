@@ -431,6 +431,10 @@ describe("the recorded failures", () => {
             message: expect.stringContaining("context window"),
             retryable: false,
           },
+          // The body's own words, for the server's record (#1302).
+          providerType: "invalid_request_error",
+          providerCode: "context_length_exceeded",
+          providerParam: "input",
         },
         {
           type: "finish",
