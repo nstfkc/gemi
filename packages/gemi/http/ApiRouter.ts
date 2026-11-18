@@ -851,7 +851,11 @@ type RawRouteOutput<R> =
       : never;
 
 export type CreateRawHttpOutputs<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
-  [E in RouteParser<T["routes"], Prefix> as E["key"]]: RawRouteOutput<E["route"]>;
+  // Only claim entries this projection handles. A missing key is distinguishable
+  // from a known handler whose return type is genuinely never.
+  [E in RouteParser<T["routes"], Prefix> as E["route"] extends RouteHandler<any, any, any, any>
+    ? E["key"]
+    : never]: RawRouteOutput<E["route"]>;
 };
 
 /** A path's `get` in a verb map, when it is a stream or file route. */

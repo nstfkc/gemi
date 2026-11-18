@@ -9,7 +9,8 @@ internal, with no public CLI or Swift/Kotlin output yet (part 1 of #1280).
 Routes are sorted by their exact RPC key before types are named. GET input is
 query data; the other supported verbs carry body input. Path parameter syntax
 is recorded separately from the declared `HttpRequest` params type, including
-optional and catch-all segments. Declared key mismatches emit warnings. Empty
+optional and catch-all segments. Declared key mismatches emit warnings when
+params have a fixed set of keys. Empty
 objects, default `Record<string, never>` and unknown request shapes normalize
 to `none`; arbitrary `any` and nonempty inputs remain JSON/type shapes. Nested,
 group and resource paths are resolved by `CreateRPC`, not duplicated here.
@@ -23,15 +24,22 @@ location-specific warnings (Date needs a future ISO-8601 mapping; bigint needs
 a serialization policy). A top-level void/undefined response is explicitly
 `void`; a 204 response is also `void`, while a plain 200 JSON null response is
 `null`. Response unions containing void/undefined are diagnosed and kept as raw
-JSON. Tuples,
-recursive types and other unsupported shapes retain the mapper's warnings.
+JSON. With older gemi installations the extractor uses the app's web RPC
+types and warns when a top-level null could also mean a 204. A null-only
+response then falls back to raw JSON, and nullable unions keep their web type.
+When a web RPC route is missing from the raw-output map, the
+extractor warns and keeps raw JSON. Routes that only throw or return typed
+errors keep their `never` success type.
+Tuples, recursive types and other unsupported shapes retain the mapper's warnings.
 Unknown/any response types are deliberately raw JSON. The HTTP mapper retains
-individual string and number literals as a `literal` value alongside the
+individual string, number and boolean literals as a `literal` value alongside the
 primitive kind, including error status/kind, without changing AI generator
-output. Renderers must honor these literal constraints. Type-name collisions
+output. For a union of objects, one shared field must have distinct values
+that are all strings or all booleans. Otherwise the extractor warns and keeps
+raw JSON.
+Renderers must honor these literal constraints. Type-name collisions
 produce warnings; final namespace/function naming remains deferred. Typed errors
-describe
-`CreateRPC`'s client error body, including its status, not the raw envelope.
+describe `CreateRPC`'s client error body, including its status, not the raw envelope.
 `CreateRPC` itself erases some wire information (for example response headers,
 success statuses and raw Response branches alongside typed data). This model
 cannot recover that information or validate runtime serialization.

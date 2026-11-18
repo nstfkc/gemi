@@ -50,19 +50,36 @@ export function extractHttpApi(
   }
 
   const probe = path.join(path.dirname(file), `__gemi_http_client_${process.pid}.ts`);
+  const routerModule = checker.getSymbolAtLocation(first.getSourceFile(apiRouterFile)!)!;
+  const hasRawOutputs = checker
+    .getExportsOfModule(routerModule)
+    .some((symbol) => symbol.name === "CreateRawHttpOutputs");
+  const routerSpecifier = JSON.stringify(specifier(probe, apiRouterFile));
   const source = [
-    `import type { ApiRouterHandler, CreateRPC, CreateRawHttpOutputs, HttpMethod } from ${JSON.stringify(specifier(probe, apiRouterFile))};`,
-    `import type { HttpResponse, ResponseData } from ${JSON.stringify(specifier(probe, path.join(path.dirname(apiRouterFile), "HttpResponse.ts")))};`,
+    `import type { ApiRouterHandler, CreateRPC } from ${routerSpecifier};`,
     `import type * as routerModule from ${JSON.stringify(specifier(probe, file))};`,
     `type Export = (typeof routerModule)[${JSON.stringify(reference.exportName)}];`,
     `type Router = ${type.getConstructSignatures().length ? "InstanceType<Export>" : "Export"};`,
-    `type EmptyToVoid<O> = O extends HttpResponse<any, 204> ? void : O;`,
-    `type Body<O> = Awaited<ResponseData<EmptyToVoid<O>>>;`,
     `type RPC = CreateRPC<Router>;`,
-    `type Raw = CreateRawHttpOutputs<Router>;`,
-    `type Shape<T, O> = T extends ApiRouterHandler<infer I, any, infer P, infer E> ? { input: I; response: Body<O>; params: P; error: E } : never;`,
+    ...(hasRawOutputs
+      ? [
+          `import type { CreateRawHttpOutputs, HttpMethod } from ${routerSpecifier};`,
+          `import type { HttpResponse, ResponseData } from ${JSON.stringify(specifier(probe, path.join(path.dirname(apiRouterFile), "HttpResponse.ts")))};`,
+          `type EmptyToVoid<O> = O extends HttpResponse<any, 204> ? void : O;`,
+          `type Raw = CreateRawHttpOutputs<Router>;`,
+          `type HasOutput<K> = K extends keyof Raw ? true : false;`,
+          `type Body<K, _O> = K extends keyof Raw ? [Raw[K]] extends [never] ? never : Awaited<ResponseData<EmptyToVoid<Raw[K]>>> : never;`,
+        ]
+      : [
+          // Older installations expose the same RPC keys, but only the web client's success type.
+          `import type { RouteHandlers } from ${routerSpecifier};`,
+          `type HttpMethod = Uppercase<keyof RouteHandlers>;`,
+          `type HasOutput<_K> = true;`,
+          `type Body<_K, O> = Awaited<O>;`,
+        ]),
+    `type Shape<K extends keyof RPC> = RPC[K] extends ApiRouterHandler<infer I, infer O, infer P, infer E> ? { input: I; response: Body<K, O>; hasOutput: HasOutput<K>; params: P; error: E } : never;`,
     // Agent/voice entries are path-only keys, not METHOD:/path entries.
-    `export type Routes = { [K in keyof RPC as K extends \`\${HttpMethod}:\${string}\` ? K : never]: Shape<RPC[K], K extends keyof Raw ? Raw[K] : never> };`,
+    `export type Routes = { [K in keyof RPC as K extends \`\${HttpMethod}:\${string}\` ? K : never]: Shape<K> };`,
   ].join("\n");
   const host = ts.createCompilerHost(options);
   const { getSourceFile, fileExists, readFile } = host;
@@ -127,6 +144,15 @@ export function extractHttpApi(
       };
       const base = pascalCase(key);
       const response = member("response");
+      const missingRawOutput = secondChecker.isTypeAssignableTo(
+        member("hasOutput"),
+        secondChecker.getFalseType(),
+      );
+      if (missingRawOutput) {
+        mapper.warnings.push(
+          `${key} response: CreateRPC has a route but no raw output was found; kept as raw JSON.`,
+        );
+      }
       const pathParameters = routePath
         .split("/")
         .filter((part) => part.startsWith(":"))
@@ -136,7 +162,7 @@ export function extractHttpApi(
           catchAll: part.endsWith("*"),
         }));
       const params = member("params");
-      if (!noInput(params)) {
+      if (!noInput(params) && !(params.flags & ts.TypeFlags.Any) && !params.getStringIndexType()) {
         const declared = secondChecker
           .getPropertiesOfType(params)
           .map((p) => p.name)
@@ -146,6 +172,16 @@ export function extractHttpApi(
           mapper.warnings.push(
             `${key} params: declared keys (${declared.join(", ")}) differ from path parameters (${actual.join(", ")}).`,
           );
+      }
+      // CreateRPC alone represents a 204 as null. Preserve the declared type for nullable
+      // unions, but tell callers when the app's types cannot distinguish the two wire shapes.
+      if (
+        !hasRawOutputs &&
+        (response.isUnion() ? response.types : [response]).some((t) => t.flags & ts.TypeFlags.Null)
+      ) {
+        mapper.warnings.push(
+          `${key} response: this version of gemi cannot distinguish a 204 from JSON null.`,
+        );
       }
       return {
         key,
@@ -161,11 +197,12 @@ export function extractHttpApi(
             ? { kind: "none" }
             : mapper.map(member("input"), `${base}Input`, `${key} input`),
         },
-        response:
-          response.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)
+        response: missingRawOutput
+          ? { kind: "json" }
+          : response.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)
             ? { kind: "void" }
             : response.flags & ts.TypeFlags.Null
-              ? { kind: "null" }
+              ? { kind: hasRawOutputs ? "null" : "json" }
               : mapper.map(response, `${base}Response`, `${key} response`),
         error: mapper.map(member("error"), `${base}Error`, `${key} error`),
       };
@@ -180,8 +217,11 @@ export function extractHttpApi(
 
 /** Keep AI output unchanged. Its mapper drops void from unions; HTTP cannot
  * claim a definite response body when some branches return nothing. */
-class HttpTypeMapper extends TypeMapper {
-  protected override named(name: string, build: (unique: string) => NamedType): TypeRef {
+class HttpTypeMapper extends TypeMapper<boolean> {
+  protected override readonly unsupportedUnionReason =
+    "a union whose variants cannot be distinguished by one literal member of a single type";
+
+  protected override named(name: string, build: (unique: string) => NamedType<boolean>): TypeRef {
     return super.named(name, (unique) => {
       if (unique !== name)
         this.warnings.push(`HTTP type name collision: ${name} renamed to ${unique}.`);
@@ -189,8 +229,17 @@ class HttpTypeMapper extends TypeMapper {
     });
   }
 
+  protected override discriminantValue(type: TS.Type): string | boolean | undefined {
+    if (type.flags & this.ts.TypeFlags.BooleanLiteral) {
+      return this.checker.isTypeAssignableTo(type, this.checker.getTrueType());
+    }
+    return super.discriminantValue(type);
+  }
+
   override map(type: TS.Type, name: string, where: string): TypeRef {
-    if (type.isStringLiteral()) return { kind: "string", literal: type.value };
+    const tag = this.discriminantValue(type);
+    if (typeof tag === "boolean") return { kind: "boolean", literal: tag };
+    if (typeof tag === "string") return { kind: "string", literal: tag };
     if (type.isNumberLiteral()) return { kind: "number", literal: type.value };
 
     if (
