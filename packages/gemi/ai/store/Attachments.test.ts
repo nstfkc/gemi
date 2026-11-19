@@ -266,3 +266,60 @@ describe("MemoryAttachmentStore.find", () => {
     expect(await store.find(acme, "gemi_att_never")).toBeNull();
   });
 });
+
+describe("short-lived attachments (#1307)", () => {
+  test("delete is scoped: another scope's id is left alone", async () => {
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    await seed(store, storage, acme, { id: "gemi_att_a" });
+    await store.delete(initech, "gemi_att_a");
+    expect(await store.find(acme, "gemi_att_a")).not.toBeNull();
+    await store.delete(acme, "gemi_att_a");
+    expect(await store.find(acme, "gemi_att_a")).toBeNull();
+  });
+
+  test("expired lists records past expiresAt across scopes, up to the limit", async () => {
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    const kept = new ScopedAttachments(store, storage, acme);
+    const short = (scope: AttachmentScope, ttlMs: number) =>
+      new ScopedAttachments(store, storage, scope).withLifetime({
+        next: () => ({ expiresAt: new Date(1_000 + ttlMs).toISOString() }),
+      });
+    await kept.put(new Blob(["k"]), { name: "kept.txt" });
+    const a = await short(acme, 10).put(new Blob(["a"]), { name: "a.txt" });
+    const b = await short(initech, 20).put(new Blob(["b"]), { name: "b.txt" });
+    await short(acme, 5_000).put(new Blob(["c"]), { name: "c.txt" });
+
+    expect((await store.expired(new Date(1_020), 10)).map((row) => row.id).sort()).toEqual(
+      [a.id, b.id].sort(),
+    );
+    expect(await store.expired(new Date(1_020), 1)).toHaveLength(1);
+    expect(await store.expired(new Date(1_000), 10)).toEqual([]);
+  });
+
+  test("withLifetime stamps each put and reports it; reads are unchanged", async () => {
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    const made: Attachment[] = [];
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const scoped = new ScopedAttachments(store, storage, acme).withLifetime({
+      next: () => ({ expiresAt, deleteAfterTurn: true }),
+      onPut: (attachment) => made.push(attachment),
+    });
+    const record = await scoped.put(new Blob(["x"], { type: "text/plain" }), { name: "x.txt" });
+    expect(record).toMatchObject({ expiresAt, deleteAfterTurn: true });
+    expect(made).toEqual([record]);
+    expect(await (await scoped.file(record.id)).text()).toBe("x");
+  });
+
+  test("an attachment past expiresAt no longer resolves", async () => {
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    const scoped = new ScopedAttachments(store, storage, acme).withLifetime({
+      next: () => ({ expiresAt: new Date(Date.now() - 1).toISOString() }),
+    });
+    const record = await scoped.put(new Blob(["x"]), { name: "x.txt" });
+    await expect(scoped.get(record.id)).rejects.toBeInstanceOf(AttachmentNotFoundError);
+  });
+});

@@ -62,6 +62,7 @@ describe("App.staticFiles (#1015)", () => {
     expect(await app.staticFiles(new Request("http://localhost/robots.txt"))).toEqual({
       publicFiles: true,
       assetRoutes: false,
+      assetCors: false,
     });
   });
 
@@ -70,15 +71,18 @@ describe("App.staticFiles (#1015)", () => {
     expect(await app.staticFiles(new Request("http://acme.example.test/robots.txt"))).toEqual({
       publicFiles: false,
       assetRoutes: true,
+      assetCors: false,
     });
     expect(await app.staticFiles(new Request("http://example.test/robots.txt"))).toEqual({
       publicFiles: true,
       assetRoutes: false,
+      assetCors: false,
     });
     // A host no group serves gets the root's.
     expect(await app.staticFiles(new Request("http://elsewhere.test/robots.txt"))).toEqual({
       publicFiles: true,
       assetRoutes: false,
+      assetCors: false,
     });
   });
 
@@ -95,6 +99,17 @@ describe("App.staticFiles (#1015)", () => {
       },
     });
     expect((await app.staticFiles(new Request("http://admin.example.test/robots.txt"))).publicFiles).toBe(false);
+  });
+
+  test("assetCors answers per group (#1311)", async () => {
+    const app = new App({
+      kernel: kernel({
+        root: "example.test",
+        groups: [{ subdomain: "embed", view: { rootRouter: RootViews, assetCors: true } }],
+      }),
+    });
+    expect((await app.staticFiles(new Request("http://embed.example.test/assets/a.js"))).assetCors).toBe(true);
+    expect((await app.staticFiles(new Request("http://example.test/assets/a.js"))).assetCors).toBe(false);
   });
 
   test("the host is resolved once for both the policy and the route", async () => {

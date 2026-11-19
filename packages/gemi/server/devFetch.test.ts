@@ -204,6 +204,16 @@ describe("the React Refresh preamble", () => {
     expect(source).not.toContain("localhost");
   });
 
+  // #1311: a view in a sandboxed frame loads these as CORS module requests
+  // from `Origin: null`. They are fixed snippets, so any origin may read them.
+  test.each(["/refresh.js", DEV_ENTRY_PATH])("%s allows any origin, without credentials", async (path) => {
+    const res = await devFetch(
+      new Request(`http://localhost:5173${path}`, { headers: { ...THROUGH_FRONT_DOOR, origin: "null" } }),
+    );
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+  });
+
   test("installs everything plugin-react's transform checks for", () => {
     expect(REFRESH_PREAMBLE_SOURCE).toContain("RefreshRuntime.injectIntoGlobalHook(window)");
     expect(REFRESH_PREAMBLE_SOURCE).toContain("window.$RefreshReg$ =");

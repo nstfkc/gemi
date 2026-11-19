@@ -9,15 +9,20 @@ import { MemoryQueueDriver } from "../MemoryQueueDriver";
 import { QueueManager } from "../QueueManager";
 import { QueueServiceProvider } from "../QueueServiceProvider";
 import { toMilliseconds } from "./duration";
-import { type Step, StepFailedError } from "./Step";
+import { resetEachWarnings, type Step, StepFailedError } from "./Step";
+import { ItemSource } from "./ItemSource";
 import { Workflow, type WorkflowClass } from "./Workflow";
 import { workflowContract } from "./workflowContract";
 import { WORKFLOW_TICK_JOB } from "./WorkflowStore";
 
-workflowContract("MemoryQueueDriver", async () => {
-  const driver = new MemoryQueueDriver();
-  return { driver: () => driver, dispose: async () => {} };
-});
+workflowContract(
+  "MemoryQueueDriver",
+  async () => {
+    const driver = new MemoryQueueDriver();
+    return { driver: () => driver, dispose: async () => {} };
+  },
+  { concurrentWorkers: true, largeCount: 20_000 },
+);
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -59,6 +64,10 @@ describe("Workflow", () => {
     const { inApp } = await booted([Checkout]);
 
     const id = await inApp(() => Checkout.start("cart-1", 42));
+    await until(async () => (await inApp(() => Workflow.find(id)))?.status === "waiting");
+    expect(await inApp(() => Workflow.pause(id))).toBe(true);
+    expect((await inApp(() => Workflow.find(id)))?.status).toBe("paused");
+    expect(await inApp(() => Workflow.resume(id))).toBe(true);
     await until(async () => (await inApp(() => Workflow.find(id)))?.status === "waiting");
     expect(await inApp(() => Checkout.signal(id, "paid", { ok: true }))).toBe(true);
     await until(async () => (await inApp(() => Workflow.find(id)))?.status === "completed");
@@ -365,5 +374,105 @@ describe("toMilliseconds", () => {
     expect(toMilliseconds("1w")).toBe(604_800_000);
     expect(() => toMilliseconds(-1)).toThrow();
     expect(() => toMilliseconds("soon" as never)).toThrow("not a duration");
+  });
+});
+
+describe("step.each on a queue that keeps nothing across restarts", () => {
+  test("warns once in production, and not in development", async () => {
+    resetEachWarnings();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    class List extends Workflow {
+      static name = "List";
+      async run(step: Step) {
+        return step.each("items", { count: 2, item: (index) => index }, () => {});
+      }
+    }
+    const { queue } = await booted([List]);
+    queue.start();
+
+    const first = await queue.workflows.start(List, []);
+    await until(async () => (await queue.workflows.find(first))?.status === "completed");
+    expect(warn).not.toHaveBeenCalled();
+
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const ids = [await queue.workflows.start(List, []), await queue.workflows.start(List, [])];
+      for (const id of ids) {
+        await until(async () => (await queue.workflows.find(id))?.status === "completed");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      await queue.drain(1_000);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("memory driver");
+  });
+});
+
+describe("Workflow.stream", () => {
+  test("an SSE response of the workflow's updates, from a cursor", async () => {
+    class Waits extends Workflow {
+      static name = "Waits";
+      async run(step: Step, secret: string) {
+        await step.waitFor("go");
+        return secret;
+      }
+    }
+    const { queue, inApp } = await booted([Waits]);
+    queue.start();
+    try {
+      const id = await inApp(() => Waits.start("hidden"));
+      await until(async () => (await queue.workflows.find(id))?.status === "waiting");
+      await sleep(300);
+      expect(await inApp(() => Workflow.channel(id))).toBe(`gemi:workflow:${id}`);
+      const cursor = await inApp(() => Workflow.cursor(id));
+      const abort = new AbortController();
+      const response = inApp(() =>
+        Workflow.stream(new Request("http://app.test/progress", { signal: abort.signal }), id, {
+          cursor,
+        }),
+      );
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      await inApp(() => Workflow.signal(id, "go"));
+
+      const reader = response.body!.getReader();
+      let text = "";
+      while (!text.includes('"status":"completed"')) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += new TextDecoder().decode(value);
+      }
+      abort.abort();
+      const updates = text
+        .split("\n\n")
+        .map((frame) => frame.split("\n").find((line) => line.startsWith("data: ")))
+        .filter((line): line is string => line !== undefined)
+        .map((line) => JSON.parse(line.slice(6)))
+        .filter((message) => message.type === "change")
+        .map((message) => message.data);
+      expect(updates.at(-1)).toMatchObject({ id, status: "completed", progress: 1 });
+      // Never the arguments or the result.
+      expect(text).not.toContain("hidden");
+    } finally {
+      await queue.drain(1_000);
+      await queue.workflows.close();
+    }
+  });
+});
+
+describe("ItemSource", () => {
+  test("write, read, readRange, delete and prune through the facade", async () => {
+    const { inApp } = await booted([]);
+    async function* rows() {
+      for (let i = 0; i < 3; i++) yield { sku: `s${i}` };
+    }
+    expect(await inApp(() => ItemSource.write("csv:1", rows()))).toEqual({ id: "csv:1", count: 3 });
+    expect(await inApp(() => ItemSource.read("csv:1", 1))).toEqual({ sku: "s1" });
+    expect(await inApp(() => ItemSource.read("csv:1", 9))).toBeUndefined();
+    expect(await inApp(() => ItemSource.readRange("csv:1", 1, 3))).toEqual([{ sku: "s1" }, { sku: "s2" }]);
+    expect(await inApp(() => ItemSource.delete("csv:1"))).toBe(3);
+    await inApp(() => ItemSource.write("csv:2", [1, 2]));
+    await sleep(5);
+    expect(await inApp(() => ItemSource.prune(0))).toBe(2);
   });
 });

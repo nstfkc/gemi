@@ -191,6 +191,27 @@ export interface ViewRouteConfig {
   assetRoutes?: boolean;
 
   /**
+   * Sends `Access-Control-Allow-Origin: *` with the build's files under
+   * `/assets` on these views' hosts (#1311), so a page in another origin can
+   * load them as module scripts and fonts. Needed when a view is embedded in a
+   * sandboxed frame (`sandbox="allow-scripts"` without `allow-same-origin`, or
+   * a document sent with `Content-Security-Policy: sandbox`): the frame's
+   * origin is opaque, so its module scripts and `import()`s are cross-origin
+   * CORS requests with `Origin: null`, and an island never hydrates without
+   * the header. It also lets a page on another origin load chunks served from
+   * this one.
+   *
+   * Only the build output: never a route, a view's document or data, or a
+   * file copied out of `public/` to the root. No
+   * `Access-Control-Allow-Credentials` is sent, so no cookie-bearing read is
+   * allowed. Off by default because it makes the client bundle readable by
+   * script on any website, which matters for an app on a private network. A
+   * `route.domains` group inherits the root's value or sets its own, so only
+   * the hosts that are embedded need it. Default: `false`.
+   */
+  assetCors?: boolean;
+
+  /**
    * Whether browsers and Google Search may translate these views (#1087).
    * `<Head />` renders `<meta name="google" content="notranslate">` unless
    * this is `true`. Meant for a `route.domains` group of public content (a
@@ -494,6 +515,7 @@ export function viewRouteConfigDefaults(): Omit<
     theme: {},
     publicFiles: true,
     assetRoutes: false,
+    assetCors: false,
     onNotFound: () => {},
     onRequestStart: () => {},
     onRequestEnd: () => {},

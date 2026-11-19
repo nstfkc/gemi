@@ -1,3 +1,154 @@
+# 0.222.1
+
+## `worker = true` jobs run again (#1318)
+
+**Fix (patch version).** See [Worker-thread jobs](docs/jobs-and-queues.md#worker-thread-jobs--worker--true).
+
+A `worker = true` job used to hang: its thread imported `app/bootstrap.ts` (`dist/server/bootstrap.mjs` in production), which no template has and no build emitted, and a thread that failed to load never settled the job. Now:
+
+- The thread boots from `app/kernel/Kernel.ts` when the app has no `app/bootstrap.ts`. An app that has one keeps using it, and `gemi build` now emits `dist/server/bootstrap.mjs` from it.
+- A thread that fails to load or throws outside the job fails the attempt, and the thread is ended after every job.
+- `run` gets its arguments spread (`run(a, b)`), as on the main thread. It used to get them as one array (`run([a, b])`).
+- `QueueManager.dispatchJob(name, args)` throws for a name nothing is registered under, instead of returning `undefined`.
+
+What to check:
+
+- **Breaking for every app with `worker = true` jobs, even though this is a patch release.** `run` now gets its arguments spread, as on the main thread. Before, it got the whole argument list as one array, so a worker job that ran (through an app's own `app/bootstrap.ts`) had to unpack it. Rewrite such a job to take its arguments as declared:
+
+  ```ts
+  // Dispatched as ResizeImage.dispatch(imageId, 800)
+
+  // Before 0.222.1: the thread passed the list as one array.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(args: [string, number]) {
+      const [imageId, width] = args;
+    }
+  }
+
+  // From 0.222.1: spread, like every other job.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(imageId: string, width: number) {}
+  }
+  ```
+
+  Jobs without `worker = true` are not affected. Queued listeners with `worker = true` accept both shapes and need nothing.
+
+# 0.222.0
+
+## Pause, resume, and control over `step.each` (#1309)
+
+**New API (minor version).** See [Pausing](docs/workflows.md#pausing) and [`step.each`](docs/workflows.md#stepeachkey-options-fn-long-lists-item-by-item).
+
+- `Workflow.pause(id)` and `Workflow.resume(id)`. A new workflow status, `paused`: no new step starts, a `step.each` lets its items in flight finish, and the workflow holds no queue slot until it is resumed. It can still be cancelled.
+- `step.each` options:
+  - `throttle: { key, limit, window }` (or a list): at most `limit` items start per window, across processes, in the queue's lock store.
+  - `transaction: true`: each item runs in an ORM transaction that also records its end (database driver on Postgres or MySQL; elsewhere it runs without one and warns once).
+  - `chunk: n`: `fn` gets up to `n` inputs at once and a `ChunkContext` (`items`, `skip(position, reason, data?)`, `release`).
+  - `maxFailures: n | { ratio, after? }`: fails the step, with a `StepFailedError` whose new `summary` field holds the summary.
+- `ctx.release(delayMs)` on `ItemContext`: puts the item back without using an attempt, and holds the step for that long.
+- New types: `ChunkContext`, `EachThrottle`. `WorkflowStore` gains an optional `transaction(fn)` and an `UpdateOptions.joinTransaction`, for custom stores.
+
+What to check:
+
+- **Code that switches over `WorkflowRunStatus`** (or `useWorkflow`'s `status`): there is a new value, `paused`. It is not final: `workflowEnded("paused")` is `false`.
+- **`throttle` on the database driver** counts in the `gemi_locks` table, as job throttles do: create it (the `GemiLock` model, or the lock store's `createTable()`) if the app has not yet.
+# 0.221.0
+
+## CORS for api routes and island assets in sandboxed frames (#913, #1311)
+
+**New API (minor version).** See [Routing: CORS for API routes](docs/routing.md#cors-for-api-routes) and [Static views: embedding in a sandboxed frame](docs/static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+
+- `.cors(policy)` on an api route (`this.get/post/...`, `this.file`, `this.stream`, `this.proxy`) and `cors = policy` on an `ApiRouter` (covering its routes and the routers it mounts, `this.agent()` included). `CorsPolicy` is `{ origins: "*" | origin | origin[], methods?, headers?, exposeHeaders?, credentials?, maxAge? }`, exported from `gemi/http`. With one, gemi answers the route's preflight itself (before any middleware) and puts the CORS headers on every response it sends, middleware refusals included. `false` turns an inherited policy off. Opt-in only: nothing changes for a route without a policy.
+- `Origin: null` (a sandboxed frame) is admitted by `"*"` or `"null"` in a list, and never gets `Access-Control-Allow-Credentials`. `credentials: true` with `"*"` or `"null"` is refused when the routes are built. Authenticate such callers with a signed token in a header or the body.
+- `route.view.assetCors` (and a `route.domains` group's `view.assetCors`), default `false`: `true` sends the build's `/assets/*` files (and asset-fallback files) with `Access-Control-Allow-Origin: *` on those hosts, so islands hydrate in a sandboxed frame. `App.staticFiles()` answers `assetCors` too.
+- In `gemi dev`, `/refresh.js` and the dev entry are always sent with `Access-Control-Allow-Origin: *`.
+
+What to check:
+
+- `CorsMiddleware` no longer sends `Access-Control-Allow-Credentials` to `Origin: null`, even under an explicit `"null"` key. If you relied on that, move the caller to a token.
+- A test that compares `app.staticFiles(req)` with `toEqual` now sees an `assetCors` key.
+
+## Expiring agent threads (#1312)
+
+**New API (minor version).** See [AI Thread Store: expiring threads](docs/ai-thread-store.md#expiring-threads).
+
+- `new DatabaseAgentStore(connection, { ttlMs, slidingTtl? })`: threads expire `ttlMs` after creation (or after their last append with `slidingTtl: true`). `createThread({ ttlMs })` sets one thread's (`null` keeps it), and `createThread({ expiresAt })` a fixed time. An expired thread is `null` from `loadThread` and `getThread` (the controller answers 404), left out of `listThreads`, and refused by `appendMessages`.
+- `store.sweepExpired({ now?, limit? })` deletes expired threads with their messages and summaries and answers `{ deleted }`. Run it from a `CronJob` next to `sweepAttachments()`.
+- `MemoryAgentStore` takes the same `createThread({ ttlMs, expiresAt })`, drops an expired thread as soon as it is read, has `sweepExpired()`, and gains `slidingTtl` (default `true`, as before).
+- New exported types `CreateThreadParams` and `ThreadSweepResult`. `AgentStore.createThread` takes `CreateThreadParams`. `AgentThreadRecord.expiresAt` is set on a store with `ttlMs`.
+
+What to check:
+
+- **Only if you set `ttlMs` on a `DatabaseAgentStore`:** add `expiresAt BigInt? @map("expires_at")`, `ttlMs BigInt? @map("ttl_ms")` and `@@index([expiresAt])` to `GemiAgentThread` and migrate, or call `store.addExpiryColumns()` (`createTable()` does). A store without `ttlMs` never reads these columns. Threads created before have no expiry.
+- A custom `AgentStore` still compiles. It can ignore the new `createThread` fields or refuse them.
+- `MemoryAgentStore` now treats a thread as expired at exactly `ttlMs` after its last read or write, instead of one millisecond later.
+
+# 0.220.0
+
+## Item sources: `step.source` and `ItemSource` (#1309)
+
+**New API (minor version).** See [Item sources](docs/workflows.md#item-sources-stepsource-and-itemsource).
+
+- `step.source(key, fn, options?)` writes the list `fn` returns (an array, or any iterable or async iterable) to an item source once, 500 items per insert, and returns `SourceRef<T>` (`{ id, count }`). It is deleted with the workflow when it is pruned.
+- `step.each(key, { source, ... }, fn)` takes a source in place of `count` and `item`, and reads it a window at a time.
+- `ItemSource.write(id, items)`, `read(id, index)`, `readRange(id, from, to)`, `delete(id)` and `prune(olderThan)` in `gemi/services`, for lists written outside a workflow, such as an upload parsed in its request. Each item is JSON, at most 64 KB (`ITEM_SOURCE_ITEM_LIMIT`).
+- New types: `SourceRef`, `ItemSourceInput`, `StepEachInput`. `StepEachOptions` is now `StepEachInput & { … }`: `{ count, item }` or `{ source }`.
+
+What to check:
+
+- **Database queue driver, only if you use item sources:** add the `GemiWorkflowSource` model from [the workflow tables](docs/workflows.md#the-workflow-tables) and migrate (or call `driver.createTable()`). A driver on another jobs table uses `<table>_workflow_sources`, or the new `workflowSourceTable` option. `prune` skips the table while it does not exist.
+
+# 0.219.0
+
+## Following a workflow: `Workflow.stream` and `useWorkflow` (#1309)
+
+**New API (minor version).** See [Following a workflow](docs/workflows.md#following-a-workflow-workflowstream-and-useworkflow).
+
+- Every change to a workflow is published to the change feed channel `gemi:workflow:<id>` (`Workflow.channel(id)`): a `WorkflowUpdate` (the `Workflow.find` status without `args` and `result`), at most one per workflow every 250 ms, the last change always included.
+- `Workflow.stream(req, id, options?)` (SSE), `Workflow.cursor(id)` and `Workflow.subscribe(id, { signal? })` on the server; `useWorkflow(route, { params }, { initial?, cursor?, enabled?, pauseWhenHidden?, onReset? })` in `gemi/client`, returning `{ workflow, status, error }`.
+- New exports: `WorkflowUpdate` (both), `workflowEnded` (`gemi/services`), `UseWorkflowConfig`, `WorkflowStepStatus` and `EachProgress` (`gemi/client`). `WorkflowStatus` is now `WorkflowUpdate & { args, result }`: the same fields as before.
+
+What to check:
+
+- Workflows now write to the application's change feed. On the feed's database driver that is one row per publish (at most four a second per running workflow), pruned like any other change; nothing else changes.
+
+# 0.218.0
+
+## `step.each`: long lists in a workflow, item by item (#1309)
+
+**New API (minor version).** See [Workflows: `step.each`](docs/workflows.md#stepeachkey-options-fn-long-lists-item-by-item).
+
+- `step.each(key, { count, item(index), key?, concurrency?, attempts?, backoff?, timeout?, tickBudget?, progress? }, fn)` works through `count` items: `item(index)` produces each input when its turn comes (the list is never held in memory), and `fn(input, ctx)` handles it. It returns an `EachSummary` (`total`, `done`, `succeeded`, `skipped`, `failed`, the first 100 `problems`, `moreProblems`).
+- The step keeps a cursor plus a row per item that is in flight, waiting for a retry, failed or skipped; an item that succeeded leaves no row. Items retry on their own without holding up the list, an item out of attempts is recorded as `failed` without failing the step, and `ctx.skip(reason, data?)` records a skip. A tick works for at most `tickBudget` (30 s) and the next tick goes on from the cursor; after a crash or deploy only the items that were in flight run again, as their next attempt. `ctx.idempotencyKey` is `<workflow id>:<step key>:<item key>`.
+- `Workflow.find(id)`: a `step.each` step has `status: "iterating"` while it runs, plus `progress` and `items: { total, done, succeeded, skipped, failed }`; the workflow's `progress` is the step's share done (`progress: false` turns that off). `Workflow.items(id, key, { status?, after?, limit? })` pages through the failed and skipped items.
+- New types: `StepEachOptions`, `ItemContext`, `EachSummary`, `EachProgress`, `EachProblem`, `ItemRecord`, `ItemRunStatus`. `StepRunStatus` gains `"iterating"`.
+- On the memory queue driver `step.each` works, and warns once in production that nothing survives a restart.
+
+What to check:
+
+- **Database queue driver, only if you use `step.each`:** add the `GemiWorkflowItem` model from [the workflow tables](docs/workflows.md#the-workflow-tables) and migrate (or call `driver.createTable()`). Until it exists, `step.each` fails with an error that names the table; nothing else needs it, and `prune` skips it. A driver on another jobs table uses `<table>_workflow_items`, or the new `workflowItemTable` option.
+- A custom `WorkflowStore` keeps working; it supports `step.each` once it implements `listItems` and the `items` parts of `update` (the snapshot's `items`, the change's `items`).
+
+# 0.217.0
+
+## Short-lived attachments, and deleting provider files (#1307, #1165)
+
+**New API (minor version).** See [Short-lived attachments](docs/ai-controller-hooks.md#short-lived-attachments) and [AI providers](docs/ai-providers.md#deleting-an-uploaded-file).
+
+- `AgentController.attachmentRetention(req, { route, threadId, body })` (also a hook) answers `"turn"`, `{ ttlMs }` or `null` (the default, which keeps everything as before). `"turn"` deletes a turn's uploads and the files its tools made, from `Storage` and from the provider, once the turn has completed. `{ ttlMs }` stops them resolving after that time.
+- `AgentController.sweepAttachments({ now?, limit? })` deletes expired attachments and short-lived provider-only uploads, for a cron. `turnAttachmentMaxAgeMs` (one hour) is how long a `"turn"` upload waits for its turn.
+- `AgentProvider.deleteFile?(fileId)`, implemented by `OpenAIProvider`, `AzureOpenAIProvider`, `AnthropicProvider` and `FallbackProvider` (first leg). A 404 counts as deleted.
+- Optional store methods: `AttachmentStore.delete` / `expired`, `FileOwners.delete` / `expired`, `AttachmentStorage.delete`. The in-memory defaults implement them. `Attachment` and `FileOwnerRecord` gain `expiresAt` and `deleteAfterTurn`. `ScopedAttachments.withLifetime()` is new, and `ScopedAttachments.get` treats an attachment past `expiresAt` as not found.
+
+What to check:
+
+- Nothing changes unless a controller answers `attachmentRetention`. If yours does and uses custom stores, implement the store methods above, or the deletions are reported as failures through `reportHookFailure`.
+- A class that `implements AgentProvider` (rather than extending it) still compiles: `deleteFile` is optional.
+
 # 0.216.0
 
 ## Provider error type and code on the server-side run failure (#1302)

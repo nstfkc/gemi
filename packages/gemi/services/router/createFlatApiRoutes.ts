@@ -10,6 +10,7 @@ import {
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
 import type { RouteBodyLimitDefault } from "../../http/bodyLimit";
+import { normalizeCorsPolicy, type NormalizedCorsPolicy } from "../../http/corsPolicy";
 
 type ApiRouteExec = any;
 export type FlatApiRoutes = Record<
@@ -24,6 +25,9 @@ export type FlatApiRoutes = Record<
       source?: RouteSource;
       // The route's own default body limit, in place of the app-wide one.
       bodyLimitDefault?: RouteBodyLimitDefault;
+      // The route's CORS policy (#913): its own `.cors()`, else the nearest
+      // enclosing router's `cors`. Absent when neither sets one.
+      cors?: NormalizedCorsPolicy;
     }
   >
 >;
@@ -92,8 +96,15 @@ export function createFlatApiRoutes(
   routes: ApiRoutes,
   rootPath = "",
   rootMiddleware: RouterMiddleware[] | string[] = [],
+  rootCors?: NormalizedCorsPolicy,
 ) {
   const flatApiRoutes: FlatApiRoutes = {};
+
+  // A route's `.cors()` (or `false`) wins over the enclosing router's.
+  const corsOf = (handler: { corsPolicy?: NormalizedCorsPolicy | false }) => {
+    const policy = handler.corsPolicy === undefined ? rootCors : handler.corsPolicy;
+    return policy || undefined;
+  };
 
   function addRoute(
     path: string,
@@ -102,6 +113,7 @@ export function createFlatApiRoutes(
     middleware: RouterMiddleware[] | string[],
     source?: RouteSource,
     bodyLimitDefault?: RouteBodyLimitDefault,
+    cors?: NormalizedCorsPolicy,
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
@@ -116,6 +128,7 @@ export function createFlatApiRoutes(
       middleware: [...rootMiddleware, ...middleware],
       ...(source ? { source } : {}),
       ...(bodyLimitDefault ? { bodyLimitDefault } : {}),
+      ...(cors ? { cors } : {}),
     };
     flatApiRoutes[finalPath].OPTIONS = {
       exec: () => {
@@ -131,7 +144,15 @@ export function createFlatApiRoutes(
     if (isProxyHandler(option)) {
       const proxyHandler = option;
       for (const method of ["GET", "POST", "PUT", "DELETE"]) {
-        addRoute(path, method, proxyHandler.run.bind(proxyHandler), proxyHandler.middlewares);
+        addRoute(
+          path,
+          method,
+          proxyHandler.run.bind(proxyHandler),
+          proxyHandler.middlewares,
+          undefined,
+          undefined,
+          corsOf(proxyHandler),
+        );
       }
       continue;
     }
@@ -141,6 +162,7 @@ export function createFlatApiRoutes(
       const method = routeHandler.method;
       const middleware = routeHandler.middlewares;
       const exec = routeHandler.run.bind(routeHandler);
+      const cors = corsOf(routeHandler);
       addRoute(
         path,
         method,
@@ -148,12 +170,13 @@ export function createFlatApiRoutes(
         middleware,
         routeHandler.source,
         routeHandler.__internal_bodyLimitDefault,
+        cors,
       );
       // A stream route also answers HEAD, so a client can read the size and
       // Accept-Ranges without pulling the body. It runs the same handler, so
       // it has the same source.
       if (isStreamHandler(option)) {
-        addRoute(path, "HEAD", exec, middleware, routeHandler.source);
+        addRoute(path, "HEAD", exec, middleware, routeHandler.source, undefined, cors);
       }
     }
 
@@ -165,6 +188,7 @@ export function createFlatApiRoutes(
         const routeHandler = handler as RouteHandler<any, any, any, any>;
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
+        const cors = corsOf(routeHandler);
         addRoute(
           path,
           method,
@@ -172,11 +196,12 @@ export function createFlatApiRoutes(
           middleware,
           routeHandler.source,
           routeHandler.__internal_bodyLimitDefault,
+          cors,
         );
         // `get: this.stream(...)` answers HEAD too, as a stream route on its
         // own path does. An explicit `head` key is not part of the map.
         if (method === "get" && isStreamHandler(routeHandler)) {
-          addRoute(path, "HEAD", exec, middleware, routeHandler.source);
+          addRoute(path, "HEAD", exec, middleware, routeHandler.source, undefined, cors);
         }
       }
     }
@@ -187,10 +212,23 @@ export function createFlatApiRoutes(
       // first, then its own, then the route's: the list is concatenated the
       // way view routers' are, and `MiddlewareRegistry` resolves it (a later
       // entry of the same alias replaces its params, a `-alias` removes it).
-      const routes = createFlatApiRoutes(router.routes, `${rootPath}${path}`, [
-        ...rootMiddleware,
-        ...router.middlewares,
-      ] as RouterMiddleware[] | string[]);
+      // A router's own `cors` (or `false`) replaces the enclosing one.
+      const where = `the router at "${rootPath}${path}"`;
+      if (router.cors === true) {
+        throw new Error(`CORS policy on ${where}: \`cors = true\` is not a policy; write one such as { origins: "*" }.`);
+      }
+      const routerCors =
+        router.cors === undefined
+          ? rootCors
+          : router.cors === false
+            ? undefined
+            : normalizeCorsPolicy(router.cors, where);
+      const routes = createFlatApiRoutes(
+        router.routes,
+        `${rootPath}${path}`,
+        [...rootMiddleware, ...router.middlewares] as RouterMiddleware[] | string[],
+        routerCors,
+      );
       // Merged per method rather than replaced: two routers mounted under
       // groups that share a prefix (`"/(builds)"` and `"/(edits)"`) can each
       // answer a different method on the same path.
@@ -209,12 +247,20 @@ export function createFlatApiRoutes(
         if (!lastSegment.startsWith(":")) {
           throw new Error("Resource route must end with a dynamic segment");
         }
-        addRoute(rest.reverse().join("/"), method, exec, middleware, routeHandler.source);
+        addRoute(
+          rest.reverse().join("/"),
+          method,
+          exec,
+          middleware,
+          routeHandler.source,
+          undefined,
+          corsOf(routeHandler),
+        );
       }
       for (const [method, routeHandler] of Object.entries(second)) {
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
-        addRoute(path, method, exec, middleware, routeHandler.source);
+        addRoute(path, method, exec, middleware, routeHandler.source, undefined, corsOf(routeHandler));
       }
     }
   }

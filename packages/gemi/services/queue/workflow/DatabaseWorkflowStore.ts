@@ -1,11 +1,15 @@
 import type { SQL, TransactionSQL } from "bun";
 
 import type { Dialect } from "../../../database/dialect";
-import { commitDependsOn } from "../../../orm/context";
+import { commitDependsOn, withTransaction } from "../../../orm/context";
 import type { EnqueueBatch, EnqueueJob } from "../QueueDriver";
 import {
   type AcquireResult,
+  type ItemChange,
+  type ItemRecord,
+  type ItemRunStatus,
   type StepRecord,
+  type UpdateOptions,
   type StepRunStatus,
   WORKFLOW_TICK_JOB,
   type WorkflowChange,
@@ -63,14 +67,29 @@ const ENDED: WorkflowRunStatus[] = ["completed", "failed", "cancelled"];
 export class DatabaseWorkflowStore implements WorkflowStore {
   readonly table: string;
   readonly stepTable: string;
+  /** The items of `step.each`; only touched by workflows that use it. */
+  readonly itemTable: string;
+  /** Item sources (`ItemSource`, `step.source`); only touched by what uses them. */
+  readonly sourceTable: string;
 
   constructor(
     private readonly db: DatabaseQueueInternals,
-    options: { table: string; stepTable: string },
+    options: { table: string; stepTable: string; itemTable: string; sourceTable: string },
   ) {
     this.table = options.table;
     this.stepTable = options.stepTable;
+    this.itemTable = options.itemTable;
+    this.sourceTable = options.sourceTable;
+    // As `joinsTransaction`: only a named connection the ORM can recognise
+    // its transaction on, and never SQLite (see `DatabaseQueueDriver.transaction`).
+    const connection = db.connection;
+    if (db.dialect !== "sqlite" && connection !== undefined) {
+      this.transaction = (fn) => withTransaction(db.sql, () => fn(), { connection });
+    }
   }
+
+  /** See `WorkflowStore.transaction`: Postgres and MySQL on a named connection. */
+  transaction?: <T>(fn: () => Promise<T>) => Promise<T>;
 
   joinsTransaction(): boolean {
     return this.db.transaction() !== undefined;
@@ -160,10 +179,10 @@ export class DatabaseWorkflowStore implements WorkflowStore {
 
   update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean },
+    options: UpdateOptions,
     decide: (snapshot: WorkflowSnapshot) => WorkflowChange<T>,
   ): Promise<T | undefined> {
-    return this.db.atomically(async (q) => {
+    const body = async (q: SQL) => {
       const workflow = await this.lock(q, id);
       if (!workflow) return undefined;
       if (options.owner !== undefined && workflow.lockedBy !== options.owner) {
@@ -171,7 +190,11 @@ export class DatabaseWorkflowStore implements WorkflowStore {
       }
       const step = options.key === undefined ? null : await this.stepOf(q, id, options.key);
       const steps = options.allSteps ? await this.stepsOf(q, id) : [];
-      const change = decide({ workflow, step, steps, now: Date.now() });
+      const items =
+        options.items === undefined
+          ? []
+          : await this.itemsOf(q, id, options.items, ["running", "retrying"], -1, null);
+      const change = decide({ workflow, step, steps, items, now: Date.now() });
 
       if (change.step) {
         const exists =
@@ -180,6 +203,7 @@ export class DatabaseWorkflowStore implements WorkflowStore {
             : (await this.stepOf(q, id, change.step.key)) !== null;
         await this.writeStep(q, change.step, exists);
       }
+      if (change.items) await this.writeItems(q, id, change.items);
       if (change.batch) await this.db.insertBatch(q, change.batch);
       for (const batchId of change.cancelBatches ?? []) await this.db.cancelBatch(q, batchId);
 
@@ -210,12 +234,30 @@ export class DatabaseWorkflowStore implements WorkflowStore {
       if (change.tick) await tick(change.tick.delayMs);
       if (unlock && workflow.retick) await tick(0);
       return change.result;
-    });
+    };
+    const tx = options.joinTransaction ? this.db.transaction() : undefined;
+    return tx ? body(tx) : this.db.atomically(body);
+  }
+
+  async listItems(
+    workflowId: string,
+    step: string,
+    options: { statuses: ItemRunStatus[]; after?: number; limit: number },
+  ): Promise<ItemRecord[]> {
+    await this.db.configure();
+    return this.itemsOf(
+      this.db.sql,
+      workflowId,
+      step,
+      options.statuses,
+      options.after ?? -1,
+      options.limit,
+    );
   }
 
   async prune(olderThanMs: number): Promise<number> {
-    return this.db.atomically(async (q) => {
-      const ended = q`status IN (${ENDED.map((s) => q`${s}`).reduce((a, b) => q`${a}, ${b}`)})`;
+    const pruned = await this.db.atomically(async (q) => {
+      const ended = this.endedClause(q);
       const cutoff = q`${this.db.now(q)} - ${this.db.ms(q, olderThanMs)}`;
       await q`
         DELETE FROM ${this.steps(q)}
@@ -228,6 +270,180 @@ export class DatabaseWorkflowStore implements WorkflowStore {
       `;
       return affected(result);
     });
+    // The items of workflows that are gone, on its own: an app that never
+    // used `step.each` has no items table, and a failed statement inside the
+    // transaction above would abort it on Postgres.
+    try {
+      const q = this.db.sql;
+      await q`
+        DELETE FROM ${this.items(q)}
+        WHERE NOT EXISTS (
+          SELECT 1 FROM ${this.workflows(q)} w WHERE w.id = ${this.items(q)}.workflow_id
+        )
+      `;
+    } catch (error) {
+      if (!isMissingSchema(error)) throw error;
+    }
+    try {
+      const q = this.db.sql;
+      await q`
+        DELETE FROM ${this.sources(q)}
+        WHERE workflow_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM ${this.workflows(q)} w WHERE w.id = ${this.sources(q)}.workflow_id
+        )
+      `;
+    } catch (error) {
+      if (!isMissingSchema(error)) throw error;
+    }
+    return pruned;
+  }
+
+  async writeSource(
+    sourceId: string,
+    workflowId: string | null,
+    rows: Array<{ index: number; payload: string }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.db.configure();
+    const q = this.db.sql;
+    for (let i = 0; i < rows.length; i += 500) {
+      const now = this.db.now(q);
+      const values = rows
+        .slice(i, i + 500)
+        .map((row) => q`(${sourceId}, ${row.index}, ${workflowId}, ${row.payload}, ${now})`);
+      await explainMissingSources(
+        q`
+          INSERT INTO ${this.sources(q)} (source_id, idx, workflow_id, payload, created_at)
+          VALUES ${values.reduce((a, b) => q`${a}, ${b}`)}
+        `,
+        this.sourceTable,
+      );
+    }
+  }
+
+  async readSource(
+    sourceId: string,
+    from: number,
+    to: number,
+  ): Promise<Array<{ index: number; payload: string }>> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const rows = (await explainMissingSources(
+      q`
+        SELECT idx, payload FROM ${this.sources(q)}
+        WHERE source_id = ${sourceId} AND idx >= ${from} AND idx < ${to}
+        ORDER BY idx
+      `,
+      this.sourceTable,
+    )) as Row[];
+    return rows.map((row) => ({ index: Number(row.idx), payload: String(row.payload) }));
+  }
+
+  async deleteSource(sourceId: string): Promise<number> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const result = await explainMissingSources(
+      q`DELETE FROM ${this.sources(q)} WHERE source_id = ${sourceId}`,
+      this.sourceTable,
+    );
+    return affected(result);
+  }
+
+  async pruneSources(olderThanMs: number): Promise<number> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const result = await explainMissingSources(
+      q`
+        DELETE FROM ${this.sources(q)}
+        WHERE workflow_id IS NULL
+          AND created_at <= ${this.db.now(q)} - ${this.db.ms(q, olderThanMs)}
+      `,
+      this.sourceTable,
+    );
+    return affected(result);
+  }
+
+  private endedClause(q: SQL) {
+    return q`status IN (${ENDED.map((s) => q`${s}`).reduce((a, b) => q`${a}, ${b}`)})`;
+  }
+
+  private async writeItems(q: SQL, workflowId: string, change: ItemChange) {
+    const db = this.db;
+    const step = change.step;
+    const indexes = change.delete ?? [];
+    for (let i = 0; i < indexes.length; i += 500) {
+      const chunk = indexes.slice(i, i + 500).map((index) => q`${index}`);
+      await explainMissingItems(
+        q`
+          DELETE FROM ${this.items(q)}
+          WHERE workflow_id = ${workflowId} AND step_key = ${step}
+            AND idx IN (${chunk.reduce((a, b) => q`${a}, ${b}`)})
+        `,
+        this.itemTable,
+      );
+    }
+    const inserts = change.insert ?? [];
+    for (let i = 0; i < inserts.length; i += 200) {
+      const now = db.now(q);
+      const values = inserts.slice(i, i + 200).map(
+        (item) => q`(
+          ${workflowId}, ${step}, ${item.index}, ${item.key}, ${item.status}, ${item.attempt},
+          ${item.error}, ${item.output}, ${db.timeOrNull(q, item.wakeAt)},
+          ${db.timeOrNull(q, item.startedAt)}, ${db.timeOrNull(q, item.finishedAt)}, ${now}, ${now}
+        )`,
+      );
+      await explainMissingItems(
+        q`
+          INSERT INTO ${this.items(q)}
+            (workflow_id, step_key, idx, item_key, status, attempt, error, output, wake_at,
+             started_at, finished_at, created_at, updated_at)
+          VALUES ${values.reduce((a, b) => q`${a}, ${b}`)}
+        `,
+        this.itemTable,
+      );
+    }
+    for (const item of change.update ?? []) {
+      await explainMissingItems(
+        q`
+          UPDATE ${this.items(q)}
+          SET item_key = ${item.key}, status = ${item.status}, attempt = ${item.attempt},
+              error = ${item.error}, output = ${item.output},
+              wake_at = ${db.timeOrNull(q, item.wakeAt)},
+              started_at = ${db.timeOrNull(q, item.startedAt)},
+              finished_at = ${db.timeOrNull(q, item.finishedAt)}, updated_at = ${db.now(q)}
+          WHERE workflow_id = ${workflowId} AND step_key = ${step} AND idx = ${item.index}
+        `,
+        this.itemTable,
+      );
+    }
+  }
+
+  private async itemsOf(
+    q: SQL,
+    workflowId: string,
+    step: string,
+    statuses: ItemRunStatus[],
+    after: number,
+    limit: number | null,
+  ): Promise<ItemRecord[]> {
+    const status = statuses.map((s) => q`${s}`).reduce((a, b) => q`${a}, ${b}`);
+    const rows = (await explainMissingItems(
+      limit === null
+        ? q`
+            SELECT * FROM ${this.items(q)}
+            WHERE workflow_id = ${workflowId} AND step_key = ${step}
+              AND status IN (${status}) AND idx > ${after}
+            ORDER BY idx
+          `
+        : q`
+            SELECT * FROM ${this.items(q)}
+            WHERE workflow_id = ${workflowId} AND step_key = ${step}
+              AND status IN (${status}) AND idx > ${after}
+            ORDER BY idx LIMIT ${limit}
+          `,
+      this.itemTable,
+    )) as Row[];
+    return rows.map(itemRecord);
   }
 
   private async writeStep(q: SQL, step: StepRecord, exists: boolean) {
@@ -305,6 +521,14 @@ export class DatabaseWorkflowStore implements WorkflowStore {
     return q.unsafe(this.db.quoted(this.stepTable));
   }
 
+  private items(q: SQL) {
+    return q.unsafe(this.db.quoted(this.itemTable));
+  }
+
+  private sources(q: SQL) {
+    return q.unsafe(this.db.quoted(this.sourceTable));
+  }
+
   /** `key` is a reserved word in MySQL. */
   private keyColumn(q: SQL) {
     return q.unsafe(this.db.quoted("key"));
@@ -355,6 +579,24 @@ function stepRecord(row: Row): StepRecord {
   };
 }
 
+function itemRecord(row: Row): ItemRecord {
+  return {
+    workflowId: String(row.workflow_id),
+    step: String(row.step_key),
+    index: Number(row.idx),
+    key: text(row.item_key),
+    status: String(row.status) as ItemRunStatus,
+    attempt: Number(row.attempt ?? 0),
+    error: text(row.error),
+    output: text(row.output),
+    wakeAt: time(row.wake_at),
+    startedAt: time(row.started_at),
+    finishedAt: time(row.finished_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
 function affected(result: unknown): number {
   const counts = result as { count?: number | null; affectedRows?: number | null };
   return Math.max(Number(counts.count ?? 0), Number(counts.affectedRows ?? 0));
@@ -379,6 +621,38 @@ async function explainMissingSchema<T>(statement: PromiseLike<T>, table: string)
     throw new Error(
       `Workflows need the "${table}" table, and the database says it is missing. ` +
         `Add the GemiWorkflow and GemiWorkflowStep models from the docs ` +
+        `(docs/workflows.md#the-workflow-tables) and migrate, or call the queue ` +
+        `driver's createTable().`,
+      { cause: error },
+    );
+  }
+}
+
+/** As `explainMissingSchema`, for the table only `step.each` needs. */
+async function explainMissingItems<T>(statement: PromiseLike<T>, table: string): Promise<T> {
+  try {
+    return await statement;
+  } catch (error) {
+    if (!isMissingSchema(error)) throw error;
+    throw new Error(
+      `step.each needs the "${table}" table, and the database says it is missing. ` +
+        `Add the GemiWorkflowItem model from the docs ` +
+        `(docs/workflows.md#the-workflow-tables) and migrate, or call the queue ` +
+        `driver's createTable().`,
+      { cause: error },
+    );
+  }
+}
+
+/** As `explainMissingSchema`, for the table only item sources need. */
+async function explainMissingSources<T>(statement: PromiseLike<T>, table: string): Promise<T> {
+  try {
+    return await statement;
+  } catch (error) {
+    if (!isMissingSchema(error)) throw error;
+    throw new Error(
+      `Item sources need the "${table}" table, and the database says it is missing. ` +
+        `Add the GemiWorkflowSource model from the docs ` +
         `(docs/workflows.md#the-workflow-tables) and migrate, or call the queue ` +
         `driver's createTable().`,
       { cause: error },
@@ -478,5 +752,98 @@ export function createWorkflowTableStatements(
     }
 )`,
     `CREATE INDEX IF NOT EXISTS "${table}_status_idx" ON "${table}"("status")`,
+  ];
+}
+
+/**
+ * The items table of `step.each`, as Prisma generates it for the
+ * `GemiWorkflowItem` model in the docs (checked against `prisma migrate diff`
+ * for all three providers), with `IF NOT EXISTS` added.
+ */
+export function createWorkflowItemTableStatements(dialect: Dialect, table: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `CREATE TABLE IF NOT EXISTS \`${table}\` (
+    \`workflow_id\` VARCHAR(191) NOT NULL,
+    \`step_key\` VARCHAR(191) NOT NULL,
+    \`idx\` INTEGER NOT NULL,
+    \`item_key\` VARCHAR(191) NULL,
+    \`status\` VARCHAR(191) NOT NULL,
+    \`attempt\` INTEGER NOT NULL DEFAULT 0,
+    \`error\` LONGTEXT NULL,
+    \`output\` LONGTEXT NULL,
+    \`wake_at\` BIGINT NULL,
+    \`started_at\` BIGINT NULL,
+    \`finished_at\` BIGINT NULL,
+    \`created_at\` BIGINT NOT NULL,
+    \`updated_at\` BIGINT NOT NULL,
+
+    PRIMARY KEY (\`workflow_id\`, \`step_key\`, \`idx\`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    ];
+  }
+  const sqlite = dialect === "sqlite";
+  return [
+    `CREATE TABLE IF NOT EXISTS "${table}" (
+    "workflow_id" TEXT NOT NULL,
+    "step_key" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "item_key" TEXT,
+    "status" TEXT NOT NULL,
+    "attempt" INTEGER NOT NULL DEFAULT 0,
+    "error" TEXT,
+    "output" TEXT,
+    "wake_at" BIGINT,
+    "started_at" BIGINT,
+    "finished_at" BIGINT,
+    "created_at" BIGINT NOT NULL,
+    "updated_at" BIGINT NOT NULL,
+
+    ${
+      sqlite
+        ? `PRIMARY KEY ("workflow_id", "step_key", "idx")`
+        : `CONSTRAINT "${table}_pkey" PRIMARY KEY ("workflow_id","step_key","idx")`
+    }
+)`,
+  ];
+}
+
+/**
+ * The item sources table, as Prisma generates it for the
+ * `GemiWorkflowSource` model in the docs (checked against `prisma migrate
+ * diff` for all three providers), with `IF NOT EXISTS` added. MySQL cannot
+ * say that of an index, so its index is declared inside the table.
+ */
+export function createWorkflowSourceTableStatements(dialect: Dialect, table: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `CREATE TABLE IF NOT EXISTS \`${table}\` (
+    \`source_id\` VARCHAR(191) NOT NULL,
+    \`idx\` INTEGER NOT NULL,
+    \`workflow_id\` VARCHAR(191) NULL,
+    \`payload\` LONGTEXT NOT NULL,
+    \`created_at\` BIGINT NOT NULL,
+
+    INDEX \`${table}_workflow_id_idx\`(\`workflow_id\`),
+    PRIMARY KEY (\`source_id\`, \`idx\`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    ];
+  }
+  const sqlite = dialect === "sqlite";
+  return [
+    `CREATE TABLE IF NOT EXISTS "${table}" (
+    "source_id" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "workflow_id" TEXT,
+    "payload" TEXT NOT NULL,
+    "created_at" BIGINT NOT NULL,
+
+    ${
+      sqlite
+        ? `PRIMARY KEY ("source_id", "idx")`
+        : `CONSTRAINT "${table}_pkey" PRIMARY KEY ("source_id","idx")`
+    }
+)`,
+    `CREATE INDEX IF NOT EXISTS "${table}_workflow_id_idx" ON "${table}"("workflow_id")`,
   ];
 }

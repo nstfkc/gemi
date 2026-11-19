@@ -31,11 +31,14 @@ import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
   type AttachmentDestination,
+  attachmentLifetime,
   attachmentObjectName,
+  type AttachmentRetention,
   type AttachmentScope,
   type AttachmentStorage,
   type AttachmentStore,
   defaultAttachmentStore,
+  deleteAttachment,
   newAttachmentId,
   ScopedAttachments,
 } from "./store/Attachments";
@@ -113,6 +116,28 @@ import type {
  * survives the browser — and, with `/attach`, one whose interrupted turn is
  * still there after a refresh.
  */
+/**
+ * What `AgentStore.createThread` takes. `ttlMs` and `expiresAt` (#1312) are
+ * honoured by `MemoryAgentStore` and by a `DatabaseAgentStore` with `ttlMs`;
+ * a store of the app's own may ignore them, or refuse them.
+ */
+export type CreateThreadParams = {
+  userId?: string | number;
+  /**
+   * This thread's lifetime in place of the store's `ttlMs` (#1312); `null`
+   * keeps it until it is deleted. Slides with the store's `slidingTtl`.
+   */
+  ttlMs?: number | null;
+  /** A fixed expiry, epoch milliseconds or a `Date`, in place of any `ttlMs`. It never slides. */
+  expiresAt?: number | Date;
+};
+
+/** What `sweepExpired` answers. */
+export type ThreadSweepResult = {
+  /** Expired threads deleted, with their messages and summaries. */
+  deleted: number;
+};
+
 export interface AgentStore {
   /**
    * Where a `threadId` comes from. `ApiRouter.agent()` mounts no route for
@@ -123,7 +148,7 @@ export interface AgentStore {
    * the store's ids are the client's by design (`MemoryAgentStore`'s
    * `clientOwnedIds`).
    */
-  createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
+  createThread(params: CreateThreadParams): Promise<{ threadId: string }>;
   /**
    * The history, or `null` for a thread the store does not have.
    *
@@ -200,6 +225,7 @@ export {
   type Attachment,
   type AttachmentDestination,
   AttachmentNotFoundError,
+  type AttachmentRetention,
   type AttachmentScope,
   type AttachmentStorage,
   type AttachmentStore,
@@ -782,6 +808,25 @@ export type AuthorizeRequestParams<Body extends object = Record<string, unknown>
   | { route: "attach" | "stop"; threadId?: string; body?: undefined };
 
 /**
+ * What `AgentController.attachmentRetention` is told (#1307): which route asks
+ * (`upload` for an upload, `stream` for a turn and what its tools store), the
+ * thread when there is one the store knows, and the client's `body` option.
+ */
+export type AttachmentRetentionParams<Body extends object = Record<string, unknown>> = {
+  route: "stream" | "upload";
+  threadId?: string;
+  body: Body;
+};
+
+/** What `AgentController.sweepAttachments` answers. */
+export type AttachmentSweepResult = {
+  /** Attachments and provider-only files deleted. */
+  deleted: number;
+  /** Ones that could not be deleted; each was passed to `reportHookFailure`, and is tried again next sweep. */
+  failed: number;
+};
+
+/**
  * What `AgentController.runTools()` answers for a turn (#1123): tools added to
  * the agent's for this run, and which tools the model is offered. Both are
  * optional; see `AgentStreamParams.tools` and `AgentStreamParams.activeTools`.
@@ -859,6 +904,10 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     extra?: UploadContext<Body>,
   ) => AttachmentDestination | Promise<AttachmentDestination>;
+  attachmentRetention?: (
+    req: HttpRequest<any, any>,
+    params: AttachmentRetentionParams<Body>,
+  ) => AttachmentRetention | null | Promise<AttachmentRetention | null>;
   onMessage?: (message: AgentMessage, ctx: AgentHookContext) => void | Promise<void>;
   onToolCall?: (
     call: { toolCallId: string; name: string; input: unknown },
@@ -1108,6 +1157,14 @@ export abstract class AgentController<
    * different bucket from everything else.
    */
   attachmentStorage: AttachmentStorage = Storage;
+
+  /**
+   * How long an attachment kept for a `"turn"` (`attachmentRetention`) may wait
+   * for its turn (#1307). An upload no turn ever names, or one whose turn never
+   * completed in this process, stops resolving after this and is deleted by
+   * `sweepAttachments`. One hour by default.
+   */
+  turnAttachmentMaxAgeMs = 60 * 60 * 1000;
 
   /**
    * Who uploaded each provider file id (#443). `upload` records the id under
@@ -1979,7 +2036,23 @@ export abstract class AgentController<
       // `register`, and an `await` for the app's `attachmentScope()` — a
       // database read, in any app that has one — is exactly the yield a stop
       // would land in and be missed.
-      const attachments = await this.attachmentsFor(req, threadId, { body: extraBody });
+      const scopedAttachments = await this.attachmentsFor(req, threadId, { body: extraBody });
+      // How long what this turn's tools store lives (#1307). Validated here,
+      // before the run, so a bad answer fails the turn rather than a tool.
+      const retention = await this.attachmentRetention(req, {
+        route: "stream",
+        threadId,
+        body: extraBody,
+      });
+      attachmentLifetime(retention, this.turnAttachmentMaxAgeMs);
+      const made: Attachment[] = [];
+      const attachments =
+        scopedAttachments && retention
+          ? scopedAttachments.withLifetime({
+              next: () => attachmentLifetime(retention, this.turnAttachmentMaxAgeMs)!,
+              onPut: (attachment) => made.push(attachment),
+            })
+          : scopedAttachments;
       // For the same reason as `attachments`: an `await` on the app's code,
       // which has to come before the cancel check below.
       const memoryScopes = (this.agent as AnyAgent).memory
@@ -2146,7 +2219,15 @@ export abstract class AgentController<
       // waits for more than the thread does — the hooks as well — so that
       // `onMessage` still finds the user who sent the message; the thread
       // waits only for the store, so a slow hook is not a slow next turn.
-      const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal, early);
+      // The turn's short-lived attachments are deleted once it has completed
+      // (#1307). Only for a controller that answers `attachmentRetention`, so
+      // every other turn costs no lookups.
+      const turnFiles = turn?.files ?? [];
+      const afterTurn =
+        this.definesRetention() && (turnFiles.length > 0 || retention === "turn")
+          ? () => this.expireTurn({ scoped: scopedAttachments, files: turnFiles, made, owner })
+          : null;
+      const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal, early, afterTurn);
       persisted.set(run, stored);
       if (serverTurns.has(req)) serverTurns.set(req, { run, hooks });
       // Registered now, while the request is certainly open: `waitUntil` is
@@ -2723,6 +2804,162 @@ export abstract class AgentController<
   }
 
   /**
+   * HOW LONG A TURN'S ATTACHMENTS LIVE (#1307). `null`, the default, keeps them
+   * as before. Asked once per upload (`route: "upload"`) for the upload, and
+   * once per turn (`route: "stream"`) for what the turn's tools store
+   * (`ctx.attachments.put`, `ctx.generateImage`, `ctx.editImage`).
+   *
+   * - `"turn"`: deleted, from `attachmentStorage` and from the provider
+   *   (`AgentProvider.deleteFile`), once the turn has completed, after
+   *   `onStreamComplete`. An upload is deleted after the turn that names it in
+   *   `turn.files`; one no turn names stops resolving after
+   *   `turnAttachmentMaxAgeMs` and is deleted by `sweepAttachments`.
+   * - `{ ttlMs }`: kept for that long, then no longer resolves, and is deleted
+   *   by `sweepAttachments`.
+   *
+   * The client has everything the stream sent it by then, so a tool that wants
+   * the person to see an image it made under `"turn"` puts the image in its
+   * output; a page that fetches it by id later needs `{ ttlMs }` instead.
+   *
+   *   protected attachmentRetention() {
+   *     return "turn" as const;
+   *   }
+   *
+   * A turn's deletion failures are passed to `reportHookFailure`, and the
+   * record stays for the sweep to try again. The stores have to be able to
+   * delete: `AttachmentStore.delete`/`expired` and `FileOwners.delete`/
+   * `expired` (the in-memory defaults do).
+   */
+  protected attachmentRetention(
+    req: HttpRequest<any, any>,
+    params: AttachmentRetentionParams<Body>,
+  ): AttachmentRetention | null | Promise<AttachmentRetention | null> {
+    return this.hooks?.attachmentRetention?.(req, params) ?? null;
+  }
+
+  /** Whether this controller answers `attachmentRetention` itself or through `hooks`. */
+  private definesRetention(): boolean {
+    return (
+      this.attachmentRetention !== AgentController.prototype.attachmentRetention ||
+      Boolean(this.hooks?.attachmentRetention)
+    );
+  }
+
+  /**
+   * DELETES EXPIRED ATTACHMENTS (#1307): every attachment whose `expiresAt`
+   * has passed (its stored bytes, its provider file and its record), and every
+   * short-lived provider-only upload. For a `CronJob`'s callback:
+   *
+   *   await new StoreChatController().sweepAttachments();
+   *
+   * Deletes at most `limit` of each (default 500) per call. A failure is passed
+   * to `reportHookFailure` and counted in `failed`; its record stays, so the
+   * next sweep tries again. Throws when `attachments` cannot list or delete
+   * (`AttachmentStore.expired` and `delete`).
+   */
+  async sweepAttachments(
+    options: { now?: Date; limit?: number } = {},
+  ): Promise<AttachmentSweepResult> {
+    const now = options.now ?? new Date();
+    const limit = options.limit ?? 500;
+    if (!this.attachments.expired || !this.attachments.delete) {
+      throw new Error(
+        "sweepAttachments() needs an attachment store with expired() and delete(). Implement both on the controller's `attachments` store.",
+      );
+    }
+    const result: AttachmentSweepResult = { deleted: 0, failed: 0 };
+    const targets = this.deletionTargets();
+    for (const attachment of await this.attachments.expired(now, limit)) {
+      try {
+        await deleteAttachment(attachment, targets);
+        result.deleted++;
+      } catch (err) {
+        result.failed++;
+        this.reportHookFailure(err);
+      }
+    }
+    for (const fileId of (await this.fileOwners.expired?.(now, limit)) ?? []) {
+      try {
+        await this.deleteProviderFile(fileId);
+        result.deleted++;
+      } catch (err) {
+        result.failed++;
+        this.reportHookFailure(err);
+      }
+    }
+    return result;
+  }
+
+  /** Where `deleteAttachment` deletes from, for this controller. */
+  private deletionTargets() {
+    return {
+      store: this.attachments,
+      storage: this.attachmentStorage,
+      provider: this.agent.provider as { deleteFile?(fileId: string): Promise<void> },
+      fileOwners: this.fileOwners,
+    };
+  }
+
+  /** Deletes a provider file and forgets its owner record. */
+  private async deleteProviderFile(fileId: string): Promise<void> {
+    const provider = this.agent.provider as { deleteFile?(fileId: string): Promise<void> };
+    if (!provider.deleteFile) {
+      throw new Error(`Cannot delete provider file ${fileId}: the agent's provider has no deleteFile().`);
+    }
+    await provider.deleteFile(fileId);
+    await this.fileOwners.delete?.(fileId);
+  }
+
+  /**
+   * After a turn (#1307): deletes what its tools stored under `"turn"`
+   * retention (`made`), and every upload the turn named that was kept for a
+   * `"turn"`. An upload is looked up under the turn's own scope, and a
+   * provider-only file only when it was recorded for this caller, so a turn
+   * cannot delete anyone else's file by naming it.
+   */
+  private async expireTurn(turn: {
+    scoped: ScopedAttachments | null;
+    files: readonly { fileId?: string; attachmentId?: string }[];
+    made: readonly Attachment[];
+    owner: string | null;
+  }): Promise<void> {
+    const targets = this.deletionTargets();
+    const deletedIds = new Set<string>();
+    const deletedFiles = new Set<string>();
+    const remove = async (attachment: Attachment) => {
+      if (deletedIds.has(attachment.id)) return;
+      deletedIds.add(attachment.id);
+      if (attachment.fileId) deletedFiles.add(attachment.fileId);
+      try {
+        await deleteAttachment(attachment, targets);
+      } catch (err) {
+        this.reportHookFailure(err);
+      }
+    };
+
+    for (const attachment of turn.made) {
+      if (attachment.deleteAfterTurn) await remove(attachment);
+    }
+    for (const file of turn.files) {
+      if (file.attachmentId && turn.scoped) {
+        const attachment = await turn.scoped.get(file.attachmentId).catch(() => null);
+        if (attachment?.deleteAfterTurn) await remove(attachment);
+      }
+      if (file.fileId && !deletedFiles.has(file.fileId)) {
+        deletedFiles.add(file.fileId);
+        const record = await this.fileOwners.get(file.fileId);
+        if (record?.deleteAfterTurn && record.owner === turn.owner) {
+          try {
+            await this.deleteProviderFile(file.fileId);
+          } catch (err) {
+            this.reportHookFailure(err);
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * WHAT THIS ROUTE ACCEPTS AT ALL: a size ceiling and a list of types (#683).
    * Checked once per upload, after `authorizeRequest` and before anything is
    * stored or sent to the provider, and a file outside them is answered **422**
@@ -3197,6 +3434,10 @@ export abstract class AgentController<
     // Who the provider's copy will belong to (#443): the same key that owns a
     // run this caller starts, so the turn that names the file finds it its own.
     const owner = await this.runOwner(req);
+    // How long this upload lives (#1307), on the provider's copy and on ours.
+    // Asked before anything is kept, so an answer that is not a retention
+    // fails the upload rather than keeping the file for good.
+    let lifetime: ReturnType<typeof attachmentLifetime> = null;
     const recordOwner = (fileId: string) =>
       this.fileOwners.record(fileId, {
         owner,
@@ -3204,6 +3445,7 @@ export abstract class AgentController<
         mimeType,
         size: file.size,
         createdAt: new Date().toISOString(),
+        ...lifetime,
       });
 
     // The app's own rule about this file and its subject (#836), still before
@@ -3222,6 +3464,10 @@ export abstract class AgentController<
     const destination = narrowDestination(policy, form.get("destination"));
 
     const scope = await this.attachmentScope(req, threadId, { body: extraBody });
+    lifetime = attachmentLifetime(
+      await this.attachmentRetention(req, { route: "upload", threadId, body: extraBody }),
+      this.turnAttachmentMaxAgeMs,
+    );
 
     // The app's policy wanted a copy of these bytes and the request has no
     // subject to file them under. Recorded rather than merely warned about,
@@ -3290,6 +3536,7 @@ export abstract class AgentController<
       size: file.size,
       createdAt: new Date().toISOString(),
       destination,
+      ...lifetime,
     };
     await this.attachments.put(scope, record);
 
@@ -3707,7 +3954,12 @@ export abstract class AgentController<
     eventHooks: Promise<void>,
     journal: TurnJournal | null = null,
     early: EarlyTurn = { id: null, notified: Promise.resolve() },
+    afterTurn: (() => Promise<void>) | null = null,
   ): { stored: Promise<void>; hooks: Promise<void> } {
+    // Last, after every hook, on both paths: `onStreamComplete` (or `onError`)
+    // may still read what the turn made.
+    const thenAfterTurn = (hooks: Promise<void>) =>
+      afterTurn ? hooks.then(() => this.safely(afterTurn)) : hooks;
     // Assigned before `stored` settles, on every path, so `hooks` below reads
     // the chain this run actually started.
     let notified: Promise<void> = Promise.resolve();
@@ -3724,15 +3976,17 @@ export abstract class AgentController<
         await journal?.settled();
         // After the turn's own `onMessage`, if the run got that far: the hooks
         // keep their order on every path.
-        notified = early.notified.then(() =>
-          this.safely(() =>
-            this.onError(
-              {
-                code: "unknown",
-                message: err instanceof Error ? err.message : String(err),
-                retryable: false,
-              },
-              ctx,
+        notified = thenAfterTurn(
+          early.notified.then(() =>
+            this.safely(() =>
+              this.onError(
+                {
+                  code: "unknown",
+                  message: err instanceof Error ? err.message : String(err),
+                  retryable: false,
+                },
+                ctx,
+              ),
             ),
           ),
         );
@@ -3755,7 +4009,7 @@ export abstract class AgentController<
         }
       }
 
-      notified = this.notifyRun(result, messages, ctx, early);
+      notified = thenAfterTurn(this.notifyRun(result, messages, ctx, early));
     })();
 
     // The bound starts once the run has settled, not with the run: a long run

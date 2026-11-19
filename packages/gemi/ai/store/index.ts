@@ -3,6 +3,7 @@ export {
   ATTACHMENT_ID_PREFIX,
   type AttachmentDestination,
   attachmentObjectName,
+  type AttachmentRetention,
   AttachmentNotFoundError,
   type AttachmentScope,
   type AttachmentStorage,

@@ -1,14 +1,21 @@
-import { deferUntilCommit } from "../../../orm/context";
+import { afterCommit, deferUntilCommit } from "../../../orm/context";
+import type { ChangeFeedEvent } from "../../change-feed/ChangeFeedDriver";
+import { ChangeFeedManager } from "../../change-feed/ChangeFeedManager";
+import type { ChangeFeedResponse, StreamOptions } from "../../change-feed/stream";
 import { Job } from "../Job";
 import type { QueueManager } from "../QueueManager";
 import {
+  type EachProblem,
   Step,
   WorkflowSuspended,
   decode,
   describe,
+  eachProgressOf,
   encode,
+  problemOf,
 } from "./Step";
 import type { WorkflowClass, WorkflowStatus } from "./Workflow";
+import { type WorkflowUpdate, workflowEnded } from "./wire";
 import {
   WORKFLOW_TICK_JOB,
   type WorkflowChange,
@@ -22,6 +29,15 @@ const ENDED: readonly WorkflowRunStatus[] = ["completed", "failed", "cancelled"]
 
 /** How often a running `step.run` checks whether its workflow was cancelled. */
 const CANCEL_CHECK_MS = 1000;
+
+/** The least time between two publishes of one workflow's channel. */
+const PUBLISH_INTERVAL_MS = 250;
+
+/**
+ * How often `subscribe` re-reads the workflow whatever it hears: a safety net
+ * for a publish that was lost.
+ */
+const RECHECK_MS = 30_000;
 
 type Outcome =
   | { kind: "completed"; result: string | null }
@@ -49,6 +65,10 @@ type Outcome =
 export class WorkflowRuntime {
   private registry: Record<string, WorkflowClass> = {};
   private storeInstance: WorkflowStore | undefined;
+  private ownFeed: ChangeFeedManager | undefined;
+  /** Workflows with a publish scheduled, and when each was last published. */
+  private readonly publishing = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly published = new Map<string, number>();
   private tickClass: (new () => Job) | undefined;
   private readonly reportedNames = new Set<string>();
 
@@ -95,9 +115,157 @@ export class WorkflowRuntime {
             `database drivers do.`,
         );
       }
-      this.storeInstance = store;
+      this.storeInstance = this.publishingStore(store);
     }
     return this.storeInstance;
+  }
+
+  /**
+   * The change feed workflow changes are published to: the application's,
+   * or one of this runtime's own (in memory) without one.
+   */
+  get feed(): ChangeFeedManager {
+    const application = this.queue.boundApplication;
+    if (application?.bound(ChangeFeedManager)) return application.make(ChangeFeedManager);
+    this.ownFeed ??= new ChangeFeedManager();
+    return this.ownFeed;
+  }
+
+  /** The ChangeFeed channel a workflow's changes are published to. */
+  channel(id: string): string {
+    return `gemi:workflow:${id}`;
+  }
+
+  /** What a change publishes: the status without `args` and `result`. */
+  async update(id: string): Promise<WorkflowUpdate | null> {
+    const status = await this.find(id);
+    if (!status) return null;
+    const { args: _args, result: _result, ...update } = status;
+    return update;
+  }
+
+  /**
+   * An SSE response following workflow `id`: each event's `data` is a
+   * `WorkflowUpdate`, for a route that has already decided the caller may
+   * read it.
+   */
+  stream(
+    request: { rawRequest: Request } | Request,
+    id: string,
+    options: StreamOptions = {},
+  ): ChangeFeedResponse<WorkflowUpdate> {
+    return this.feed.stream<WorkflowUpdate>(request, this.channel(id), options);
+  }
+
+  /** A cursor at the workflow's channel head, for a view to hand its client. */
+  cursor(id: string): Promise<string> {
+    return this.feed.cursor(this.channel(id));
+  }
+
+  /**
+   * Follows workflow `id` on the server: yields it as it is now, then each
+   * newer update, and ends after the one that ended it. Yields nothing for
+   * an unknown id.
+   */
+  async *subscribe(
+    id: string,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<WorkflowUpdate, void, undefined> {
+    const subscription = this.feed.subscribe(this.channel(id), { signal: options.signal });
+    try {
+      await subscription.ready();
+      let current = await this.update(id);
+      if (!current) return;
+      yield current;
+      if (workflowEnded(current.status)) return;
+      const events = subscription[Symbol.asyncIterator]();
+      let pending = events.next();
+      for (;;) {
+        const next = await raceTimeout(pending, RECHECK_MS);
+        let update: WorkflowUpdate | null;
+        if (next === "timeout") {
+          update = await this.update(id);
+        } else {
+          if (next.done) return;
+          pending = events.next();
+          update = updateOf(next.value, id) ?? (await this.update(id));
+        }
+        if (!update || update.updatedAt < current.updatedAt) continue;
+        if (JSON.stringify(update) === JSON.stringify(current)) continue;
+        current = update;
+        yield current;
+        if (workflowEnded(current.status)) return;
+      }
+    } finally {
+      subscription.close();
+    }
+  }
+
+  /**
+   * The store, with every change scheduling a publish of the workflow it
+   * changed. Publishes are coalesced: at most one per workflow every
+   * `PUBLISH_INTERVAL_MS`, each carrying the workflow as it is then, so the
+   * last change is always published.
+   */
+  private publishingStore(store: WorkflowStore): WorkflowStore {
+    const changed = (id: string) => void afterCommit(() => this.schedulePublish(id));
+    const wrapped: WorkflowStore = {
+      create: (workflow) =>
+        store.create(workflow).then((value) => {
+          changed(workflow.id);
+          return value;
+        }),
+      find: (id, options) => store.find(id, options),
+      acquire: (id, owner, leaseMs) => store.acquire(id, owner, leaseMs),
+      renew: (id, owner, leaseMs) => store.renew(id, owner, leaseMs),
+      update: (id, options, decide) =>
+        store.update(id, options, decide).then((value) => {
+          changed(id);
+          return value;
+        }),
+    };
+    if (store.joinsTransaction) wrapped.joinsTransaction = () => store.joinsTransaction!();
+    if (store.transaction) wrapped.transaction = (fn) => store.transaction!(fn);
+    if (store.listItems) wrapped.listItems = (...args) => store.listItems!(...args);
+    if (store.prune) wrapped.prune = (olderThanMs) => store.prune!(olderThanMs);
+    if (store.writeSource) {
+      wrapped.writeSource = (...args) => store.writeSource!(...args);
+      wrapped.readSource = (...args) => store.readSource!(...args);
+      wrapped.deleteSource = (...args) => store.deleteSource!(...args);
+      wrapped.pruneSources = (...args) => store.pruneSources!(...args);
+    }
+    return wrapped;
+  }
+
+  private schedulePublish(id: string) {
+    if (this.publishing.has(id)) return;
+    const wait = Math.max(0, (this.published.get(id) ?? 0) + PUBLISH_INTERVAL_MS - Date.now());
+    const timer = setTimeout(() => {
+      this.publishing.delete(id);
+      this.published.set(id, Date.now());
+      void this.publish(id);
+    }, wait);
+    timer.unref?.();
+    this.publishing.set(id, timer);
+  }
+
+  private async publish(id: string) {
+    try {
+      const update = await this.update(id);
+      if (!update) return;
+      if (workflowEnded(update.status)) this.published.delete(id);
+      await this.feed.publish(this.channel(id), update);
+    } catch (error) {
+      console.error(`[gemi] Workflow ${id}: could not publish its change.`, error);
+    }
+  }
+
+  /** Ends this runtime's own feed, if it made one, and drops pending publishes. For tests. */
+  async close(): Promise<void> {
+    for (const timer of this.publishing.values()) clearTimeout(timer);
+    this.publishing.clear();
+    await this.ownFeed?.close();
+    this.ownFeed = undefined;
   }
 
   start(workflow: WorkflowClass, args: unknown[]): Promise<string> {
@@ -193,6 +361,35 @@ export class WorkflowRuntime {
     return cancelled === true;
   }
 
+  async pause(id: string): Promise<boolean> {
+    const paused = await this.store.update(id, {}, ({ workflow }) => {
+      if (
+        ENDED.includes(workflow.status) ||
+        workflow.status === "cancelling" ||
+        workflow.status === "paused"
+      ) {
+        return { result: false };
+      }
+      return { result: true, workflow: { status: "paused" } };
+    });
+    return paused === true;
+  }
+
+  async resume(id: string): Promise<boolean> {
+    const resumed = await this.store.update(id, {}, ({ workflow }) => {
+      if (workflow.status !== "paused") return { result: false };
+      // `wakeAt` forgotten, so the pass schedules its own wake-up: one
+      // scheduled before the pause may have come and gone.
+      return {
+        result: true,
+        workflow: { status: "running", wakeAt: null },
+        tick: { delayMs: 0 },
+      };
+    });
+    if (resumed) this.queue.claimSoon();
+    return resumed === true;
+  }
+
   async find(id: string): Promise<WorkflowStatus | null> {
     const state = await this.store.find(id);
     if (!state) return null;
@@ -222,6 +419,14 @@ export class WorkflowRuntime {
             startedAt: step.startedAt,
             finishedAt: step.finishedAt,
           };
+          const items = eachProgressOf(step.output);
+          if (items) {
+            return {
+              ...status,
+              items,
+              progress: items.total === 0 ? 1 : items.done / items.total,
+            };
+          }
           if (step.batchId === null) return status;
           const batch = await this.queue.driver.findBatch?.(step.batchId);
           return batch ? { ...status, progress: batch.progress } : status;
@@ -230,6 +435,22 @@ export class WorkflowRuntime {
       createdAt: workflow.createdAt,
       updatedAt: workflow.updatedAt,
     };
+  }
+
+  async items(
+    id: string,
+    key: string,
+    options: { status?: "failed" | "skipped"; after?: number; limit?: number } = {},
+  ): Promise<EachProblem[]> {
+    const store = this.store;
+    if (!store.listItems) return [];
+    const limit = Math.max(1, Math.min(1000, Math.floor(options.limit ?? 100)));
+    const rows = await store.listItems(id, key, {
+      statuses: options.status ? [options.status] : ["failed", "skipped"],
+      ...(options.after === undefined ? {} : { after: options.after }),
+      limit,
+    });
+    return rows.map(problemOf);
   }
 
   /** One pass of the workflow `id`, run by its tick job. */
@@ -252,7 +473,8 @@ export class WorkflowRuntime {
           if (!(error instanceof WorkflowLeaseLostError)) throw error;
         });
 
-    if (ENDED.includes(workflow.status)) return letGo();
+    // Paused: the tick ends here, and `resume` queues the next one.
+    if (ENDED.includes(workflow.status) || workflow.status === "paused") return letGo();
 
     const Class = this.registry[workflow.name];
     if (!Class) return this.unknown(workflow, job, letGo);
@@ -297,6 +519,11 @@ export class WorkflowRuntime {
         ),
       scheduled: () => this.queue.claimSoon(),
       cancelCheckMs: CANCEL_CHECK_MS,
+      durable: this.queue.durable,
+      throttle: {
+        hit: (name, limit, windowMs) => this.queue.locks.store.hit(name, limit, windowMs),
+        refund: (name) => this.queue.locks.store.refund(name),
+      },
     });
 
     try {
@@ -378,6 +605,13 @@ export class WorkflowRuntime {
     }
 
     const suspension = step.suspension ?? { status: "waiting" as const, wakes: [] };
+    if (!cancelling && (current.status === "paused" || suspension.status === "paused")) {
+      // Paused: no tick until `resume`. Stopped for a pause that `resume`
+      // has already undone: go on at once.
+      return current.status === "paused"
+        ? { ...change, workflow: { currentStep: step.current ?? current.currentStep } }
+        : { ...change, workflow: { status: "running" }, tick: { delayMs: 0 } };
+    }
     const next: WorkflowChange<undefined> = {
       ...change,
       workflow: {
@@ -486,5 +720,28 @@ function safeDecode(output: string | null): unknown {
     return decode(output);
   } catch {
     return output;
+  }
+}
+
+/** The update a change event carries, when it is one for workflow `id`. */
+function updateOf(event: ChangeFeedEvent, id: string): WorkflowUpdate | null {
+  if (event.type !== "change") return null;
+  const data = event.data as Partial<WorkflowUpdate> | null;
+  if (!data || typeof data !== "object" || data.id !== id || typeof data.updatedAt !== "number") {
+    return null;
+  }
+  return data as WorkflowUpdate;
+}
+
+/** What `promise` resolves to, or `"timeout"` after `ms`. */
+async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }

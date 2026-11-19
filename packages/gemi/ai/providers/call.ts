@@ -2,6 +2,7 @@ import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
 import {
   httpErrorDetail,
+  ProviderHttpError,
   normalizeProviderError,
   ProviderStreamDurationError,
   ProviderStreamIdleError,
@@ -467,4 +468,36 @@ export async function uploadFile(
   const json = (await response.json()) as { id?: string };
   if (!json?.id) throw new Error("The provider accepted the upload but returned no file id.");
   return json.id;
+}
+
+/**
+ * Deletes a file `uploadFile` sent (#1165): `DELETE {base}/files/{id}{query}`,
+ * with the same resolved host, headers and api-version as the upload, so the
+ * URL is built from `filesUrl` rather than worked out again.
+ *
+ * A 404 resolves: the file is already gone (deleted earlier, expired at the
+ * vendor, or a retried delete whose first answer was lost), which is the state
+ * the caller asked for.
+ */
+export async function deleteFile(endpoint: ResponsesEndpoint, fileId: string): Promise<void> {
+  const at = endpoint.filesUrl.indexOf("?");
+  const path = at === -1 ? endpoint.filesUrl : endpoint.filesUrl.slice(0, at);
+  const query = at === -1 ? "" : endpoint.filesUrl.slice(at);
+  try {
+    const response = await requestWithRetry(
+      `${path}/${encodeURIComponent(fileId)}${query}`,
+      { method: "DELETE", headers: await endpoint.headers() },
+      {
+        maxRetries: endpoint.maxRetries,
+        timeoutMs: endpoint.timeoutMs,
+        fetchImpl: endpoint.fetchImpl,
+        ...(endpoint.sleep ? { sleep: endpoint.sleep } : {}),
+        ...(endpoint.random ? { random: endpoint.random } : {}),
+      },
+    );
+    await response.body?.cancel();
+  } catch (error) {
+    if (error instanceof ProviderHttpError && error.status === 404) return;
+    throw error;
+  }
 }

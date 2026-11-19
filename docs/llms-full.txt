@@ -2104,6 +2104,50 @@ routes = {
 };
 ```
 
+### CORS for API routes
+
+An api route answers browsers on other origins only when it says so. Declare a CORS policy on the route with `.cors()`, or on a router with `cors`, which covers every route in it and in the routers it mounts. gemi has no app-wide CORS default.
+
+```typescript
+class WidgetApiRouter extends ApiRouter {
+  cors = { origins: "*", headers: ["content-type", "x-widget-token"] };
+  middlewares = ["widget-token"]; // checks the signed token, see below
+  routes = {
+    "/messages": this.post(WidgetController, "send"),
+    "/chat": this.agent(WidgetChatController),
+    "/admin": this.post(WidgetController, "admin").cors(false), // no CORS here
+  };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/widget": WidgetApiRouter,
+    "/account": this.post(AccountController, "update").cors({
+      origins: ["https://shop.example"],
+      credentials: true,
+    }),
+  };
+}
+```
+
+With a policy:
+
+- gemi answers the route's preflight (`OPTIONS` with `Access-Control-Request-Method`) itself, before any middleware runs, since a preflight carries no credentials. It allows the methods the path answers under the policy (or `methods`), the request headers in `headers` (default `["content-type"]`), and caches for `maxAge` seconds (default 600). A preflight asking for an origin, method or header the policy does not allow gets a `204` without CORS headers, so the browser never sends the request.
+- Every response from the route carries the headers: the handler's, a middleware's refusal (`401`, `413`, `429`), a policy denial and a `404` for a missing record, so the page can read the status. A `500` from an uncaught error is rendered by the server without them.
+- `origins: "*"` answers `Access-Control-Allow-Origin: *`. An exact origin or a list of them (`"https://shop.example"`, scheme, host and port only) echoes the matching one with `Vary: Origin`. `exposeHeaders` lists the response headers the page may read.
+- `credentials: true` sends `Access-Control-Allow-Credentials: true`, so the browser sends cookies and the page may read the answer. It is accepted only with a list of exact origins.
+- A route's `.cors()` replaces its router's policy, a nested router's `cors` replaces its parent's, and `false` turns it off (`.cors(false)`, `cors = false`). Setting it on the root router covers every app route, so prefer the router that groups the routes you mean. A policy that cannot be answered safely (credentials with `"*"` or `"null"`, a URL with a path in `origins`) throws when the routes are built.
+- The route's policy decides its CORS headers: a [`cors` middleware](./middleware.md#cors--corsmiddleware) on the same route cannot add credentials it does not allow.
+- A [global middleware](./middleware.md#global-middleware) runs before the router, preflights included, so one that refuses requests without a credential has to let `OPTIONS` through.
+
+#### `Origin: null` and sandboxed frames
+
+A page in a sandboxed frame (`<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a document sent with `Content-Security-Policy: sandbox`), a `file:` page and some cross-origin redirects send `Origin: null`. `origins: "*"` admits it, and so does `"null"` in a list, which is echoed back as `null`.
+
+Credentials are never allowed for `null`. Any site can put its own page in a sandboxed frame and send `Origin: null`, so a cookie-bearing answer to `null` is an answer to every site. A policy with `credentials: true` cannot list `"null"`, and a request from `null` never gets `Access-Control-Allow-Credentials`. A sandboxed frame usually has no cookies to send anyway: its origin is opaque, so it is third-party to every site.
+
+A widget in such a frame authenticates with a token instead: a short-lived value your server signed (an HMAC of a visitor id and an expiry, or a JWT) and handed to the frame in its URL or by `postMessage`, sent in a header the policy lists (`x-widget-token`, `authorization`) or in the body, and checked by a middleware on the routes. Treat the route as reachable from any site: the token, not the origin, is the access check.
+
 ### Nesting API routers
 
 A route value can be **another `ApiRouter` class**. The key becomes a path prefix for every route inside the nested router:
@@ -2474,6 +2518,7 @@ export default defineRouteConfig({
 | `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.assetCors` | `boolean` (default `false`) | `true`: the build's files under `/assets` are sent with `Access-Control-Allow-Origin: *` on the group's hosts, so the group's views can hydrate in a sandboxed frame. See [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
@@ -2794,13 +2839,18 @@ export default class ShopViewRouter extends ViewRouter {
   build has no file for reaches the routes. A missing `/assets/*.js` (or
   `.mjs`) keeps gemi's [reload stub](./configuration.md) for a chunk of
   another release, so a route there is never reached.
-- Both are view config, so a group inherits the root `view`'s value unless it
+- `assetCors: true` sends the build's files under `/assets` with
+  `Access-Control-Allow-Origin: *` on the group's hosts, for views embedded in
+  a sandboxed frame or loaded from another origin. A route under `/assets`
+  keeps its own headers. See
+  [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+- All three are view config, so a group inherits the root `view`'s value unless it
   sets its own, and a group that brings no `view` serves what the root does.
   A custom domain is served as its `custom.group`.
 - Other paths, `/image/*` for one, were never reserved: a group's routes
   answer them as they answer any path.
 - The host is resolved for a static file request only when some group sets
-  either option differently from the root, and only for a path that needs
+  one of these options differently from the root, and only for a path that needs
   it. The resolution is reused by the route that answers.
 
 ## Development
@@ -3459,6 +3509,10 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
   origins: { "*": { "Access-Control-Allow-Methods": "POST" } },
 }),
 ```
+
+`Origin: null` (a sandboxed frame, a `file:` page) matches a `"null"` key or `"*"`, and never gets `Access-Control-Allow-Credentials`: any site can send it, so credentials for it would be credentials for everyone.
+
+`cors` does not answer preflights: an `OPTIONS` request runs no route middleware. A route called from another origin with a JSON body or a token header needs one, so declare a [CORS policy](./routing.md#cors-for-api-routes) on it (`.cors()`, or `cors` on its router) instead; gemi answers the preflight from it.
 
 `cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
 
@@ -5803,6 +5857,28 @@ lazily stays lazy. Dynamic imports inside `node_modules` (a library's own lazy
 pieces) are left out. It applies to `"eager"` islands only, since a lazy
 island announces nothing up front, and changes nothing in hydrated views or in
 dev.
+
+### Embedding in a sandboxed frame
+
+A static view can run inside a sandboxed frame on another site, as a widget: an `<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a frame inside a document sent with `Content-Security-Policy: sandbox`. The sandbox carries down to nested frames, so the view's own frame has an opaque origin too. The browser then loads the view's islands, their chunks and its fonts as cross-origin CORS requests with `Origin: null`, and without `Access-Control-Allow-Origin` on them the page stays server-rendered only.
+
+Set `assetCors: true` on the views that are embedded, the root `view` or a [`route.domains` group's](./domains.md#static-files-on-a-groups-hosts) `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: "widgets", view: { rootRouter: WidgetViewRouter, assetCors: true } },
+  ],
+},
+```
+
+- On those hosts, `gemi start` sends `Access-Control-Allow-Origin: *` with the build's files under `/assets` (and with files from `GEMI_ASSET_FALLBACK_URL`). Never with a route, a document, view data or a `public/` file, and never with `Access-Control-Allow-Credentials`.
+- It is off by default. The files are public, immutable and carry no credentials, so `*` is safe for a public app, but it lets script on any website read the client bundle, which matters for an app on a private network. Turn it on only for the hosts that are embedded.
+- In `gemi dev`, the scripts gemi serves itself (`/refresh.js`, the dev entry) always allow any origin: they are fixed snippets with nothing of the app in them. Vite serves the rest; allow them with `vite: { server: { cors: true } }` in `gemi.config.ts`.
+- With an [`assetBase`](./configuration.md) on a CDN, the CDN has to send the header.
+- The widget's api calls come from `Origin: null` as well. Give those routes a [CORS policy](./routing.md#cors-for-api-routes) and authenticate them with a signed token, not cookies: see [`Origin: null` and sandboxed frames](./routing.md#origin-null-and-sandboxed-frames).
 
 ### Content Security Policy
 
@@ -8730,6 +8806,18 @@ export const support = Agent.create({ name: "support", instructions: "Be brief."
 
 `provider.capabilities` says what the model supports (`reasoning`, `structuredOutput`, `fileInput`, `parallelToolCalls`, `toolSearch`). The agent drops anything the provider can't do instead of sending a request the vendor would refuse.
 
+### Deleting an uploaded file
+
+`provider.deleteFile(fileId)` deletes a file `provider.upload()` sent, by the id it answered: `DELETE /files/{id}` on the same host, credential and api-version as the upload. A file that is already gone (a 404) counts as deleted. `OpenAIProvider`, `AzureOpenAIProvider` and `AnthropicProvider` implement it, and a `FallbackProvider` deletes from its first leg, where it uploads. `AzureAnthropicProvider` has no Files API and refuses. The method is optional on `AgentProvider`, so a custom provider without it still compiles.
+
+```typescript
+const fileId = await openai.upload(screenshot);
+// ... show it to a judge model once ...
+await openai.deleteFile?.(fileId);
+```
+
+The agent controller calls it for short-lived attachments (see [Short-lived attachments](./ai-controller-hooks.md#short-lived-attachments)).
+
 ### Retries
 
 A call that fails before the vendor starts answering (a network error, a timeout, a 429 that isn't a spent quota, a 408, 409 or 5xx) is sent again up to `maxRetries` times (default 2), with exponential backoff and jitter starting at 0.5 s. A `Retry-After` header is honoured, capped at 20 s.
@@ -9675,9 +9763,12 @@ model GemiAgentThread {
   summaryLockUntil BigInt? @map("summary_lock_until")
   createdAt        BigInt  @map("created_at")
   updatedAt        BigInt  @map("updated_at")
+  expiresAt        BigInt? @map("expires_at")
+  ttlMs            BigInt? @map("ttl_ms")
 
   @@index([userId, updatedAt])
   @@index([scope, userId, updatedAt])
+  @@index([expiresAt])
   @@map("gemi_agent_threads")
 }
 
@@ -9760,6 +9851,50 @@ The setting is local to the transaction, so nothing is left on the pooled connec
 ### Adding scopes to existing tables
 
 Tables created before scopes keep working for the unscoped store. To use `forScope`, add the column: with Prisma, add the `scope` fields and the index from the models above and run `prisma migrate dev`. Without Prisma, `await agentStore.addScopeColumns()` (also run by `createTable()`) adds them to tables that do not have them yet. Threads written before are in no scope: the unscoped store sees them and no scope does, until the app sets their `scope` itself.
+
+### Adding expiry to existing tables
+
+Threads expire only on a store with `ttlMs` (see below), and only that store reads the `expires_at` and `ttl_ms` columns, so tables created before them keep working until you set it. To use it, add the `expiresAt` and `ttlMs` fields and the `@@index([expiresAt])` from the model above and run `prisma migrate dev`. Without Prisma, `await agentStore.addExpiryColumns()` (also run by `createTable()`) adds them. Threads written before have no expiry.
+
+## Expiring threads
+
+Some conversations should only be kept for a short time, such as an anonymous visitor's chat that holds a photo and lasts as long as the visitor's signed token. Give the store a `ttlMs` and its threads expire:
+
+```ts
+export const visitorChats = new DatabaseAgentStore(app(DatabaseManager).connection(), {
+  ttlMs: 60 * 60_000, // an hour from creation
+});
+
+const { threadId } = await visitorChats.createThread({});
+await visitorChats.createThread({ ttlMs: 10 * 60_000 }); // this thread's own
+await visitorChats.createThread({ expiresAt: token.expiresAt }); // a fixed time: epoch ms or a Date
+await visitorChats.createThread({ ttlMs: null }); // kept until deleted
+```
+
+- **An expired thread is gone at once.** `loadThread` and `getThread` answer `null`, so the controller answers 404 and runs no turn on it. `listThreads` leaves it out, and `appendMessages` refuses it. The database's clock decides.
+- **Fixed by default.** The expiry is set when the thread is created. With `slidingTtl: true`, each append moves it to `ttlMs` from then, so the thread lasts as long as someone keeps writing to it. `expiresAt` never slides.
+- **The sweep reclaims the rows.** `sweepExpired({ limit })` deletes up to `limit` (500) expired threads with their messages and summaries, oldest first. Run it from a cron, next to [`sweepAttachments()`](./ai-controller-hooks.md#short-lived-attachments) for the files those threads held:
+
+```ts
+// app/cron/SweepVisitorChats.ts
+import { CronJob } from "gemi/services";
+
+export class SweepVisitorChats extends CronJob {
+  name = "SweepVisitorChats";
+  cron = CronJob.exp("*/10 * * * *");
+
+  async callback() {
+    await visitorChats.sweepExpired();
+    await new VisitorChatController().sweepAttachments();
+  }
+}
+```
+
+- A scoped view (`forScope`) sweeps its own scope. `getThread` and `listThreads` records carry `expiresAt` (`null` for a thread that does not expire).
+- A store without `ttlMs` expires nothing: `createThread({ ttlMs })` throws there, and `sweepExpired()` answers `{ deleted: 0 }`.
+- Expiry removes the thread, not what it led to: agent memories scoped to it and attachments are deleted by their own rules.
+
+`MemoryAgentStore` takes the same `createThread({ ttlMs, expiresAt })` and has `sweepExpired()` too, for tests. Its `ttlMs` (a day by default) slides with every read and write unless `slidingTtl: false`.
 
 ## Listing and deleting threads
 
@@ -11759,7 +11894,7 @@ A hook has the same name, the same arguments and the same return type as the con
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
 | `instructions`, `reasoning`, `skills`, `runTools`, `usageLimits`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` and `usageLimits` get `{ body, context }`; `runTools` answers `{ tools?, activeTools? }` (see [Tools per turn](./ai-agent-context.md#tools-per-turn)), `usageLimits` the run's budgets (see [Usage limits](./ai-usage.md#usage-limits)). |
-| `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
+| `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination`, `attachmentRetention` | Uploads, and how long they and the files tools make are kept (see [Short-lived attachments](#short-lived-attachments)). |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onProviderRetry`, `onStreamComplete` | The run's events. `onProviderRetry` fires for each model-call attempt the provider asks again; see [AI Providers](./ai-providers.md#watching-retries). `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
 
@@ -11807,6 +11942,66 @@ export const siteChatHooks = defineAgentHooks<SiteBody>({
 ```
 
 A hook named in the spread replaces the one with the same name from `chatHooks`. To run both, call the first one from the second (`chatHooks.onMessage?.(message, ctx)`).
+
+## Short-lived attachments
+
+An upload can live in two places: gemi's `Storage` copy (`attachmentId`) and the provider's copy (`fileId`). Files a tool makes with `ctx.attachments.put`, `ctx.generateImage` or `ctx.editImage` are stored the same way. By default all of them are kept. `attachmentRetention` makes them short-lived. It is asked once per upload (`route: "upload"`), and once per turn (`route: "stream"`) for the files that turn's tools make:
+
+```typescript
+export class StoreChatController extends AgentController<typeof storeAgent, StoreBody> {
+  agent = storeAgent;
+
+  protected attachmentRetention() {
+    return "turn" as const; // or { ttlMs: 10 * 60_000 }, or null to keep
+  }
+}
+```
+
+- **`"turn"`**: when the turn has completed (after `onStreamComplete` and `onError`), gemi deletes the stored bytes, the provider file (`provider.deleteFile`) and the record. This covers the uploads the turn names in `turn.files` and the files its tools made. The client already has everything the stream sent it, so a tool that should show the shopper an edited photo puts the image in its output (a `data:` URL). A page that fetches the image by id afterwards needs `{ ttlMs }`. An upload that no turn names stops resolving after `turnAttachmentMaxAgeMs` (one hour by default) and is deleted by the sweep.
+- **`{ ttlMs }`**: the files are kept for that long. After that they no longer resolve (a tool gets `AttachmentNotFoundError`), and `sweepAttachments()` deletes them.
+
+Run the sweep from a cron. It also deletes `"turn"` files whose turn never completed, for example after a restart:
+
+```typescript
+// app/cron/SweepChatAttachments.ts
+import { CronJob } from "gemi/services";
+
+export class SweepChatAttachments extends CronJob {
+  name = "SweepChatAttachments";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    await new StoreChatController().sweepAttachments();
+  }
+}
+```
+
+A store with [expiring threads](./ai-thread-store.md#expiring-threads) sweeps them the same way, with `store.sweepExpired()`.
+
+It answers `{ deleted, failed }`. A deletion that fails, in a turn or in the sweep, goes to `reportHookFailure`, and its record stays so the next sweep tries again. A missing `deleteFile` on the provider or `delete` on storage counts as a failure, because skipping a copy would leave it in place unnoticed.
+
+A turn deletes an upload only when that upload was itself made short-lived. The turn looks the upload up under its own `attachmentScope`, and looks up a provider-only file only when the file was recorded for the same `runOwner`. A turn can't delete a file the app keeps, or one another caller uploaded.
+
+Things to know:
+
+- **Stores.** A custom `AttachmentStore` needs `delete(scope, id)` and `expired(now, limit)`, a `FileOwners` needs `delete(fileId)` and `expired(now, limit)`, and `attachmentStorage` needs `delete`. The in-memory defaults and the `Storage` facade have them. Records gain `expiresAt` and `deleteAfterTurn`.
+- **Threads.** After a `"turn"` deletion, the thread's history still names the files. On the next turn the provider refuses the deleted file id, and the model is told the file can't be read. A chat whose thread shouldn't outlive the turn either runs stateless (no `threadId`, nothing is stored) or deletes the thread in `onStreamComplete` (`DatabaseAgentStore.deleteThread`, see [AI Thread Store](./ai-thread-store.md#listing-and-deleting-threads)).
+- **Paused tools and jobs.** A tool that waits for an approval or an answer runs again on a later turn. Under `"turn"`, the files it stored on the first turn are gone by then. Background jobs (`ctx.jobs`) make their own files, which don't get the turn's retention. Use `{ ttlMs }` for both.
+
+### Anonymous visitors
+
+A visitor who isn't signed in and has no thread has no attachment scope by default. Their upload goes to the provider alone (the answer has `downgraded: "no_scope"` and no `attachmentId`), so a tool can't read the bytes. To let a tool read the photo in the same turn, give the upload a scope from a value the server checks, such as a visitor token the page was rendered with. Send the token in the chat's `body`, so the upload and the turn resolve the same scope:
+
+```typescript
+protected async attachmentScope(req: HttpRequest, threadId?: string, extra?: { body: StoreBody }) {
+  const scope = await super.attachmentScope(req, threadId);
+  if (scope) return scope;
+  const visitor = await verifyVisitorToken(extra?.body.visitor); // the app's own check
+  return visitor ? { key: `visitor:${visitor.id}` } : null;
+}
+```
+
+With `attachmentRetention()` answering `"turn"`, the photo is kept in `Storage` while the turn runs, the tool reads it with `ctx.attachments.file(id)`, and the photo is deleted from both places when the turn completes. Don't build the key from an unchecked body field (see `attachmentScope` in the source for why).
 
 ## Related
 
@@ -21360,6 +21555,15 @@ An attempt whose process died before it finished still counts. With a driver tha
 | `backoff` | `number \| number[]` | `0` | Milliseconds before a retry. An array gives one per retry, its last entry repeating. |
 | `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
 
+### Worker-thread jobs — `worker = true`
+
+A job with `worker = true` runs `run` in a Worker thread of its own, which boots its own copy of the application and is ended after the job. Use it for CPU-bound work you want off the main event loop.
+
+- **The thread boots from `app/kernel/Kernel.ts`**, as `gemi queue:work` does, so the job needs nothing beyond the kernel the server uses. If the app has an `app/bootstrap.ts` that exports `app` (an `App` from `gemi/app`), the thread uses that instead: from source under `gemi dev`, and from `dist/server/bootstrap.mjs` in production, which `gemi build` emits when `app/bootstrap.ts` exists.
+- **`run` gets its arguments spread**, as for any other job.
+- **A thread that cannot load the application**, or a job name the thread's registry doesn't have, fails the attempt with the error. The job then retries and dead-letters like any other.
+- `release`, `fail` and batches are not available, because `run` happens in another thread.
+
 ## Dispatching
 
 Call the static `dispatch` method with exactly the arguments your `run` method takes — the call is fully typed against `run`'s signature.
@@ -21647,7 +21851,7 @@ A deployment that splits web and worker runs the same build with the same config
 - **The driver has to be one every process can reach**, such as `"database"`. With the memory driver a worker is pointless: a dispatch never leaves the process that made it, so a worker never sees a job. `gemi queue:work` refuses to start on the memory driver and exits `1`. A server ignores `GEMI_QUEUE_CLAIM=off` on the memory driver, with a warning at boot, because nothing else could run its jobs.
 - **Each worker claims up to `concurrency` jobs at once**, so total job capacity is workers × `concurrency`. Pick `visibilityTimeout` and `concurrency` for the worker; the web process no longer uses them when it does not claim.
 - **The cron scheduler does not start in a worker**, so adding workers does not add a copy of every cron job. `gemi queue:work` sets `GEMI_NO_SCHEDULE=1` unless the environment already sets it; set `GEMI_NO_SCHEDULE=0` to run the schedule in a worker instead.
-- **`NODE_ENV` is inherited**, as for `gemi run`, not forced to production as for `gemi start`. Set `NODE_ENV=production` in the worker's deployment. A `worker = true` job loads `dist/server/bootstrap.mjs` in production, so the worker needs the same `gemi build` output as the server.
+- **`NODE_ENV` is inherited**, as for `gemi run`, not forced to production as for `gemi start`. Set `NODE_ENV=production` in the worker's deployment. A `worker = true` job's thread boots the application from the same files as the worker (see [Worker-thread jobs](#worker-thread-jobs--worker--true)), so the worker needs the same `gemi build` output and `app/` source as the server.
 
 `SIGTERM` or `SIGINT` drains a worker the way it drains a server (see [Graceful shutdown](./configuration.md#graceful-shutdown)). The worker stops claiming at once and leaves waiting jobs to other workers. It waits up to `GEMI_SHUTDOWN_TIMEOUT` (20 seconds) for the jobs it is running, where a server waits for its requests, and then runs every provider's `shutdown()` within `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` (5 seconds). In that step the queue waits for any job still running and names it. The exit code is `0` if no job was left running and every provider finished in time, and `1` otherwise. `GEMI_SHUTDOWN_DELAY` is not used, because no load balancer routes to a worker. A job cut off by the exit is retried once its lease runs out, as it is for a server.
 
@@ -21962,7 +22166,7 @@ export class ImportSiteWorkflow extends Workflow {
 
 The static `name` is required for the same reason a job's is: workflows are stored under it, and a production build renames classes. Discovery warns about a workflow without one. To list workflows yourself instead of discovering them, set `workflows: [...]` in `app/config/queue.ts` (`workflowsDir` moves the directory).
 
-## Starting, signalling, inspecting, cancelling
+## Starting, signalling, inspecting, pausing, cancelling
 
 ```typescript
 import { Workflow } from "gemi/services";
@@ -21971,15 +22175,17 @@ import { ImportSiteWorkflow } from "@/app/workflows/ImportSiteWorkflow";
 const id = await ImportSiteWorkflow.start(importId); // typed against run's arguments
 await ImportSiteWorkflow.signal(id, "pages-chosen", ["p1", "p3"]); // resumes step.waitFor
 const status = await Workflow.find(id);
+await Workflow.pause(id); // and Workflow.resume(id)
 await Workflow.cancel(id);
 ```
 
 - `start(...args)` records the workflow and its first tick in one write, and resolves to the workflow's id. Inside an ORM transaction it belongs to the transaction, like a [dispatch](./jobs-and-queues.md#dispatching-inside-a-transaction): it is written with the transaction's rows on Postgres and MySQL, held until the commit otherwise, and dropped if the transaction rolls back.
 - `signal(id, key, payload)` delivers `payload` to `step.waitFor(key)` and resolves to `true` if it was taken. It is `false` for an unknown or ended workflow, one being cancelled, and a key that was already signalled. A signal that arrives before the workflow reaches its `waitFor` is kept until it does.
 - `find(id)` resolves to the status below, or `null`.
+- `pause(id)` and `resume(id)` resolve to `true` if they paused a workflow that had not ended, or resumed a paused one. See [Pausing](#pausing).
 - `cancel(id)` resolves to `true` if it cancelled a workflow that had not ended. See [Cancelling](#cancelling).
 
-`signal`, `find` and `cancel` work from `Workflow` or any subclass.
+`signal`, `find`, `pause`, `resume` and `cancel` work from `Workflow` or any subclass.
 
 ## How a workflow runs
 
@@ -22051,6 +22257,171 @@ The step is recorded and the batch dispatched in the same write, so a crash betw
 
 The job class has to be registered with the queue, and [the batch limits](./jobs-and-queues.md#limits) apply: no worker jobs, no unique jobs.
 
+### `step.each(key, options, fn)`: long lists, item by item
+
+Works through a list of `count` items one at a time (or `concurrency` at once) and returns a summary once every item has ended. A **transformer**, `item(index)`, produces the input for each index when its turn comes, so the list is never held in memory, and `fn` handles that input. Use it for imports, a picture generated per item, or a digest sent per user: work where a list is too long to do in one go, where the user wants to see it move, and where load must stay low.
+
+```typescript
+// app/workflows/ImportProductsWorkflow.ts
+import { type Step, Workflow } from "gemi/services";
+
+export class ImportProductsWorkflow extends Workflow {
+  static name = "ImportProductsWorkflow";
+
+  async run(step: Step, importId: string) {
+    const count = await step.run("count", () => ImportRow.count({ where: { importId } }));
+
+    const summary = await step.each(
+      "rows",
+      {
+        count,
+        // The transformer: index → input. Read it from somewhere stable.
+        item: (index) => ImportRow.findFirst({ where: { importId, position: index } }),
+        key: (row) => row!.sku, // the item key, part of ctx.idempotencyKey
+        concurrency: 4,
+        attempts: 3,
+        backoff: [1_000, 10_000],
+      },
+      async (row, ctx) => {
+        if (!row?.name) ctx.skip("no name", { line: row?.line });
+        await createProduct(row!, { idempotencyKey: ctx.idempotencyKey, signal: ctx.signal });
+      },
+    );
+
+    // { total, done, succeeded, skipped, failed, problems, moreProblems }
+    return step.run("report", () => saveReport(importId, summary));
+  }
+}
+```
+
+How it runs:
+
+- **A cursor, not a step per item.** The step row keeps the next index to start and the counts. Each item that is in flight, waiting for a retry, failed or skipped has a row in the items table; an item that succeeded leaves nothing behind. A list of 100,000 items with 20 problems keeps about `concurrency + 20` rows.
+- **Retries per item.** A throw retries the item up to `attempts`, after `backoff`. A retry that waits does not hold up the items after it. An item out of attempts is recorded as `failed` with its error, and the list goes on: `step.each` does not fail because items failed, unless `maxFailures` says so. `ctx.skip(reason, data?)` ends an item as `skipped` (no retry).
+- **Time-boxed ticks.** A tick works through items for at most `tickBudget` (30 seconds), waits for the items in flight, and hands the workflow back to the queue, which runs the next tick from the cursor. A long list never holds a queue slot for long, other work interleaves, and a process that shuts down stops starting items.
+- **Crashes and deploys.** An item whose process died is found in flight by the next tick and runs again as its next attempt; one whose last attempt died is `failed`. Only the items in flight run again, never the ones that ended. Use the [database driver](./jobs-and-queues.md#the-database-driver): on the memory driver nothing survives a restart, and `step.each` warns once in production.
+- **At least once.** As with `step.run`, an item can run twice when its process dies after the work and before the result is stored. `ctx.idempotencyKey` is `<workflow id>:<step key>:<item key>`, the same on every attempt; pass it to anything that must not happen twice (a payment, a generated file stored under that name, an email).
+- **Progress.** While the step runs, the workflow's `progress` is the share of its items that have ended (`progress: false` turns that off), and its entry in `Workflow.find(id).steps` carries `status: "iterating"`, `progress` and `items: { total, done, succeeded, skipped, failed }`.
+
+`item(index)` must return the same input for the same index for as long as the step runs: read from a table, a stored file or a snapshot of ids taken in an earlier `step.run`, not from a query whose order changes as the items are worked on. `count` is stored the first time; a later pass that computes another count goes on with the stored one.
+
+| Option | Description |
+| --- | --- |
+| `count` | How many items, from 0. Required, unless `source` is given. |
+| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required, unless `source` is given. |
+| `source` | A stored list (`step.source`, `ItemSource.write`), in place of `count` and `item`. See [item sources](#item-sources-stepsource-and-itemsource). |
+| `key(input, index)` | The item key, a string of 1 to 191 characters or a number. Default: the index. gemi does not check that keys are unique. |
+| `concurrency` | Items in flight at once, in the process running the tick. Default `1`. |
+| `attempts` | Attempts per item, counting the first. Default `3`. |
+| `backoff` | Milliseconds before each retry, as `step.run`'s. Default `0`. |
+| `timeout` | How long one attempt may take; `ctx.signal` is aborted when it passes. |
+| `tickBudget` | How long one tick works before handing over. Default `"30s"`. |
+| `progress` | Whether the step sets the workflow's `progress`. Default `true`. |
+| `throttle` | `{ key, limit, window }` or a list of them: at most `limit` items start per `window`, across every process sharing the queue's lock store. See [rate limits](#rate-limits-throttle-and-ctxrelease). |
+| `transaction` | `true` runs each item in an ORM transaction that also records its end. See [transactional items](#transactional-items-transaction-and-chunk). |
+| `chunk` | Hands `fn` up to this many items at once. See [transactional items](#transactional-items-transaction-and-chunk). |
+| `maxFailures` | Fails the step once more than this many items failed, or `{ ratio, after? }`: once the share of failed items among those that ended is over `ratio` and at least `after` (default 20) have ended. Default: never. |
+
+`fn` gets the input and an `ItemContext`: `index`, `key`, `attempt`, `idempotencyKey`, `signal` (aborted on `timeout` and on cancel), `skip(reason, data?)` and `release(delayMs)`. Its return value is not kept.
+
+**`maxFailures`.** Past it, the items in flight are stopped, no more start, and the step fails: `step.each` throws a `StepFailedError` whose `summary` is where the items stood, problems included, on this pass and every later one. Catch it in `run` to report, or let the workflow fail.
+
+```typescript
+try {
+  await step.each("rows", { source: rows, maxFailures: { ratio: 0.5, after: 20 } }, importRow);
+} catch (error) {
+  if (!(error instanceof StepFailedError) || !error.summary) throw error;
+  await step.run("report", () => notifyImportFailed(importId, error.summary));
+}
+```
+
+The summary lists the first 100 problems (`{ index, key, status, reason, data?, attempt }`, by index); `moreProblems` says whether there are more. `Workflow.items(id, key, { status?, after?, limit? })` pages through all of them:
+
+```typescript
+const failed = await Workflow.items(workflowId, "rows", { status: "failed", limit: 50 });
+const next = await Workflow.items(workflowId, "rows", { status: "failed", after: failed.at(-1)?.index });
+```
+
+Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got. [Pausing](#pausing) it lets the items in flight finish and starts no more until it is resumed.
+
+#### Rate limits: `throttle` and `ctx.release`
+
+`throttle: { key, limit, window }` counts one hit per item started (a retry too) in the queue's lock store (`gemi_locks` with the database driver), the same fixed windows as a [job's `throttle`](./jobs-and-queues.md#per-key-throttles-and-concurrency--throttle-concurrency), under the same keys: a job and a `step.each` with one key share the budget. An item over the limit waits without using an attempt. A wait that fits in the tick happens in it; a longer one hands the workflow back until the window resets, so no process sleeps on it.
+
+```typescript
+await step.each("pictures", {
+  source: products,
+  concurrency: 4,
+  throttle: { key: `images:${orgId}`, limit: 20, window: "1s" },
+}, async (product, ctx) => {
+  const response = await generatePicture(product, ctx.signal);
+  if (response.status === 429) ctx.release(30_000); // try this item again in 30 s, and hold the rest
+  await storePicture(product.id, response, ctx.idempotencyKey);
+});
+```
+
+`ctx.release(delayMs)` puts the item back to start again after `delayMs` without using an attempt, for a provider that answered "slow down", and holds the whole step for as long: no item starts before then.
+
+#### Transactional items: `transaction` and `chunk`
+
+With `transaction: true`, `fn` runs inside an ORM transaction on the queue's connection (`Model.create`, `DB.query` and the rest join it), and the item's end is the last statement of that transaction. The item's writes and its being done commit together or not at all: a crash, a lost lease, a `timeout`, a cancel or a throw rolls both back, and the item runs again with nothing of the failed attempt left behind. Database writes are then exactly once; calls to other services in `fn` are still at least once, so keep passing `ctx.idempotencyKey`. `ctx.skip` and `ctx.release` roll back too.
+
+It needs the [database driver](./jobs-and-queues.md#the-database-driver) on Postgres or MySQL, on a named connection (as `driver: "database"` builds it). On the memory driver and on SQLite `fn` runs without a transaction, the item is at least once, and gemi warns once. Keep the work in `fn` short: the transaction holds a connection while it runs.
+
+`chunk: n` hands `fn` up to `n` items at once, as an array, with a `ChunkContext`, so their writes go in one statement or, with `transaction`, one transaction per chunk:
+
+```typescript
+await step.each("rows", { source: rows, chunk: 25, transaction: true, key: (row) => row.sku }, async (batch, ctx) => {
+  for (const [position, row] of batch.entries()) {
+    if (!row.name) {
+      ctx.skip(position, "no name");
+      continue;
+    }
+    await Product.create(toProduct(row)); // in the chunk's transaction
+  }
+});
+```
+
+- `ctx.items` has each item's `index`, `key` and `idempotencyKey`, in the order of the inputs. `ctx.skip(position, reason, data?)` ends one item of the chunk as `skipped` and does not throw: the rest of the chunk succeeds.
+- A throw fails the attempt of every item in the chunk; each is retried, or fails, on its own attempts. A retried item may land in a different chunk.
+- `concurrency` counts chunks in flight, and `ctx.attempt` is the highest attempt among the chunk's items.
+
+### Item sources: `step.source` and `ItemSource`
+
+`item(index)` needs somewhere stable to read from. When the list is not already a table (the rows of an uploaded file, a snapshot of ids), keep it in an **item source**: a table of the queue's database that holds a list item by item, written as it is produced and read a window at a time.
+
+Inside a workflow, `step.source(key, fn)` writes the list `fn` returns (an array, or any iterable or async iterable, such as a parser over a stream) once, and `step.each` takes it as its `source` in place of `count` and `item`:
+
+```typescript
+async run(step: Step, importId: string, fileName: string) {
+  const rows = await step.source("rows", async () => parseRows((await Storage.read(fileName)).body));
+
+  return step.each("import", { source: rows, concurrency: 4, key: (row) => row.sku }, async (row, ctx) => {
+    await createProduct(row, ctx.idempotencyKey);
+  });
+}
+```
+
+- Items are written as they come, 500 per insert, so a long list is never held in memory. Each item is JSON, at most 64 KB (`ITEM_SOURCE_ITEM_LIMIT`); store a file's name for anything larger.
+- `step.source` is a step like `step.run` (same `attempts`, `backoff` and `timeout`): its result is the small `{ id, count }`, stored and replayed, and a write that fails part way is written again from the start. Its id is `<workflow id>:<key>`, and the source is deleted with the workflow when it is pruned.
+- `step.each({ source })` reads at least 64 items (or four times `concurrency`) per query, and an item read again for a retry alone.
+
+Outside a workflow, for example in the request that receives an upload, `ItemSource` does the same under an id of your choice:
+
+```typescript
+import { ItemSource } from "gemi/services";
+
+const rows = await ItemSource.write(`upload:${upload.id}`, parseRows(file.stream())); // { id, count }
+await ImportProductsWorkflow.start(upload.id, rows); // run: step.each("import", { source: rows }, …)
+
+await ItemSource.read(rows.id, 0);           // one item, or undefined
+await ItemSource.readRange(rows.id, 0, 20);  // a preview
+await ItemSource.delete(rows.id);            // when done with it
+await ItemSource.prune("7d");                // from a cron: sources of ItemSource.write older than a week
+```
+
+`ItemSource.write` replaces what was under the id. Sources it writes belong to no workflow: delete them, or prune them from a cron.
+
 ### `step.progress(value)`
 
 Sets the workflow's `progress`, from 0 to 1. It is not a step: it writes on every pass that reaches it. A completed workflow's progress is 1.
@@ -22068,6 +22439,56 @@ const [profile, invoices] = await Promise.all([
 
 If one of them suspends the workflow (a sleep, say), the others still finish and store their results in that pass.
 
+## Following a workflow: `Workflow.stream` and `useWorkflow`
+
+Every change to a workflow (a step starting or ending, an item of a `step.each`, a sleep, a signal, the end) is published to its [change feed](./change-feed.md) channel, `gemi:workflow:<id>` (`Workflow.channel(id)`). Publishes are coalesced: at most one per workflow every 250 ms, each carrying the workflow as it is then, so the last change is always published. What is published is a `WorkflowUpdate`: the status `Workflow.find` returns without `args` and `result`, which can hold what a browser must not see.
+
+On the server, `Workflow.subscribe(id, { signal? })` yields the workflow as it is now, then each newer update, and ends after the one that ended it:
+
+```typescript
+for await (const update of Workflow.subscribe(workflowId, { signal })) {
+  console.log(update.status, update.progress);
+}
+```
+
+In the browser, a route answers with `Workflow.stream(req, id)`, an SSE response. Authorise the read first, as for any route:
+
+```typescript
+// app/http/routes/api.ts
+"/imports/:importId/progress": this.get(async (req: HttpRequest<{}, { importId: string }>) => {
+  const record = await ProductImport.findFirst({ where: { id: req.params.importId, userId: (await Auth.user()).id } });
+  if (!record) return new Response(null, { status: 404 });
+  return Workflow.stream(req, record.workflowId);
+}),
+```
+
+The view that renders the page passes the workflow and a cursor along, so the client starts from what the view showed:
+
+```typescript
+const workflow = await Workflow.find(record.workflowId);
+return { workflow, workflowCursor: await Workflow.cursor(record.workflowId) };
+```
+
+```tsx
+import { useWorkflow } from "gemi/client";
+
+const { workflow } = useWorkflow(
+  "/imports/:importId/progress",
+  { params: { importId } },
+  { initial: data.workflow, cursor: data.workflowCursor },
+);
+const rows = workflow?.steps.find((step) => step.key === "rows")?.items;
+// <progress value={workflow?.progress ?? 0} />, `${rows?.done} of ${rows?.total}`
+```
+
+`useWorkflow` keeps the later of two updates (by `updatedAt`), reconnects and resumes from its cursor like [`useSubscription`](./change-feed.md#following-a-route-usesubscription), and disconnects once the workflow has ended. `onReset` is called when it was away longer than the feed keeps changes; the next update brings the whole status again.
+
+The channel goes through the application's change feed, so it reaches every instance that shares it: use the feed's [database driver](./change-feed.md#the-database-driver) when the instance that runs the workflow is not the one serving the stream.
+
+## Pausing
+
+`Workflow.pause(id)` marks the workflow `paused`. No new step starts: a `step.run` in flight finishes and is recorded, a `step.each` lets its items in flight finish and starts no more, and the tick then lets go. A paused workflow holds no queue slot and runs nothing, even past a `step.sleep`; signals and batches that end meanwhile are kept. `Workflow.resume(id)` sets it `running` and queues a tick at once, which goes on where it stopped: a `step.each` from its cursor, a sleep that is over at once. A paused workflow can still be cancelled; `onCancel` runs as usual.
+
 ## Cancelling
 
 `Workflow.cancel(id)` marks the workflow `cancelling` and then:
@@ -22084,12 +22505,12 @@ If one of them suspends the workflow (a sleep, say), the others still finish and
 | Field | Description |
 | --- | --- |
 | `id`, `name`, `args` | The workflow's id, its class's name and the arguments it was started with. |
-| `status` | `running`, `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
+| `status` | `running` (also between the ticks of a `step.each`), `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `paused`, `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
 | `currentStep` | The key of the step it is on, or `null`. |
-| `progress` | 0 to 1: what `step.progress` set, and 1 once completed. |
+| `progress` | 0 to 1: what `step.progress` set, or the share of items a running `step.each` has done, and 1 once completed. |
 | `result` | What `run` returned, once completed. |
 | `error` | Why it failed, or why `onCancel` failed. |
-| `steps` | Every step recorded so far, in the order first reached: `key`, `status`, `attempt`, `error`, `batchId`, `wakeAt`, `startedAt`, `finishedAt`, and for a batch step its `progress`. |
+| `steps` | Every step recorded so far, in the order first reached: `key`, `status`, `attempt`, `error`, `batchId`, `wakeAt`, `startedAt`, `finishedAt`, for a batch step its `progress`, and for a `step.each` its `progress` and `items` (`total`, `done`, `succeeded`, `skipped`, `failed`). |
 | `createdAt`, `updatedAt` | Epoch milliseconds. |
 
 Step outputs are not in the status. Return what a caller needs from `run`.
@@ -22138,11 +22559,46 @@ model GemiWorkflowStep {
 }
 ```
 
-On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, and to `output` and `error` of `GemiWorkflowStep`. Without Prisma, `await driver.createTable()` creates both tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+`step.each` also needs a third table for its item rows, and item sources a fourth. A workflow that uses neither never touches them:
 
-A driver on another jobs table keeps workflows in `<table>_workflows` and `<table>_workflow_steps`, or in the tables named by the `workflowTable` and `workflowStepTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps, for example from a cron job. The memory driver keeps ended workflows for a day.
+```prisma
+model GemiWorkflowItem {
+  workflowId String  @map("workflow_id")
+  stepKey    String  @map("step_key")
+  index      Int     @map("idx")
+  key        String? @map("item_key")
+  status     String
+  attempt    Int     @default(0)
+  error      String?
+  output     String?
+  wakeAt     BigInt? @map("wake_at")
+  startedAt  BigInt? @map("started_at")
+  finishedAt BigInt? @map("finished_at")
+  createdAt  BigInt  @map("created_at")
+  updatedAt  BigInt  @map("updated_at")
 
-A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods.
+  @@id([workflowId, stepKey, index])
+  @@map("gemi_workflow_items")
+}
+
+model GemiWorkflowSource {
+  sourceId   String  @map("source_id")
+  index      Int     @map("idx")
+  workflowId String? @map("workflow_id")
+  payload    String
+  createdAt  BigInt  @map("created_at")
+
+  @@id([sourceId, index])
+  @@index([workflowId])
+  @@map("gemi_workflow_sources")
+}
+```
+
+On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, to `error` and `output` of `GemiWorkflowItem`, and to `payload` of `GemiWorkflowSource`. Without Prisma, `await driver.createTable()` creates all four tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+
+A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps`, `<table>_workflow_items` and `<table>_workflow_sources`, or in the tables named by the `workflowTable`, `workflowStepTable`, `workflowItemTable` and `workflowSourceTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps, items and `step.source` sources, for example from a cron job. The memory driver keeps ended workflows for a day.
+
+A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`, and item sources by implementing `writeSource`, `readSource`, `deleteSource` and `pruneSources`.
 
 ## Limits
 

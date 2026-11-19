@@ -72,7 +72,7 @@ A hook has the same name, the same arguments and the same return type as the con
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
 | `instructions`, `reasoning`, `skills`, `runTools`, `usageLimits`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` and `usageLimits` get `{ body, context }`; `runTools` answers `{ tools?, activeTools? }` (see [Tools per turn](./ai-agent-context.md#tools-per-turn)), `usageLimits` the run's budgets (see [Usage limits](./ai-usage.md#usage-limits)). |
-| `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination` | Uploads. |
+| `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination`, `attachmentRetention` | Uploads, and how long they and the files tools make are kept (see [Short-lived attachments](#short-lived-attachments)). |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onProviderRetry`, `onStreamComplete` | The run's events. `onProviderRetry` fires for each model-call attempt the provider asks again; see [AI Providers](./ai-providers.md#watching-retries). `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
 
@@ -120,6 +120,66 @@ export const siteChatHooks = defineAgentHooks<SiteBody>({
 ```
 
 A hook named in the spread replaces the one with the same name from `chatHooks`. To run both, call the first one from the second (`chatHooks.onMessage?.(message, ctx)`).
+
+## Short-lived attachments
+
+An upload can live in two places: gemi's `Storage` copy (`attachmentId`) and the provider's copy (`fileId`). Files a tool makes with `ctx.attachments.put`, `ctx.generateImage` or `ctx.editImage` are stored the same way. By default all of them are kept. `attachmentRetention` makes them short-lived. It is asked once per upload (`route: "upload"`), and once per turn (`route: "stream"`) for the files that turn's tools make:
+
+```typescript
+export class StoreChatController extends AgentController<typeof storeAgent, StoreBody> {
+  agent = storeAgent;
+
+  protected attachmentRetention() {
+    return "turn" as const; // or { ttlMs: 10 * 60_000 }, or null to keep
+  }
+}
+```
+
+- **`"turn"`**: when the turn has completed (after `onStreamComplete` and `onError`), gemi deletes the stored bytes, the provider file (`provider.deleteFile`) and the record. This covers the uploads the turn names in `turn.files` and the files its tools made. The client already has everything the stream sent it, so a tool that should show the shopper an edited photo puts the image in its output (a `data:` URL). A page that fetches the image by id afterwards needs `{ ttlMs }`. An upload that no turn names stops resolving after `turnAttachmentMaxAgeMs` (one hour by default) and is deleted by the sweep.
+- **`{ ttlMs }`**: the files are kept for that long. After that they no longer resolve (a tool gets `AttachmentNotFoundError`), and `sweepAttachments()` deletes them.
+
+Run the sweep from a cron. It also deletes `"turn"` files whose turn never completed, for example after a restart:
+
+```typescript
+// app/cron/SweepChatAttachments.ts
+import { CronJob } from "gemi/services";
+
+export class SweepChatAttachments extends CronJob {
+  name = "SweepChatAttachments";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    await new StoreChatController().sweepAttachments();
+  }
+}
+```
+
+A store with [expiring threads](./ai-thread-store.md#expiring-threads) sweeps them the same way, with `store.sweepExpired()`.
+
+It answers `{ deleted, failed }`. A deletion that fails, in a turn or in the sweep, goes to `reportHookFailure`, and its record stays so the next sweep tries again. A missing `deleteFile` on the provider or `delete` on storage counts as a failure, because skipping a copy would leave it in place unnoticed.
+
+A turn deletes an upload only when that upload was itself made short-lived. The turn looks the upload up under its own `attachmentScope`, and looks up a provider-only file only when the file was recorded for the same `runOwner`. A turn can't delete a file the app keeps, or one another caller uploaded.
+
+Things to know:
+
+- **Stores.** A custom `AttachmentStore` needs `delete(scope, id)` and `expired(now, limit)`, a `FileOwners` needs `delete(fileId)` and `expired(now, limit)`, and `attachmentStorage` needs `delete`. The in-memory defaults and the `Storage` facade have them. Records gain `expiresAt` and `deleteAfterTurn`.
+- **Threads.** After a `"turn"` deletion, the thread's history still names the files. On the next turn the provider refuses the deleted file id, and the model is told the file can't be read. A chat whose thread shouldn't outlive the turn either runs stateless (no `threadId`, nothing is stored) or deletes the thread in `onStreamComplete` (`DatabaseAgentStore.deleteThread`, see [AI Thread Store](./ai-thread-store.md#listing-and-deleting-threads)).
+- **Paused tools and jobs.** A tool that waits for an approval or an answer runs again on a later turn. Under `"turn"`, the files it stored on the first turn are gone by then. Background jobs (`ctx.jobs`) make their own files, which don't get the turn's retention. Use `{ ttlMs }` for both.
+
+### Anonymous visitors
+
+A visitor who isn't signed in and has no thread has no attachment scope by default. Their upload goes to the provider alone (the answer has `downgraded: "no_scope"` and no `attachmentId`), so a tool can't read the bytes. To let a tool read the photo in the same turn, give the upload a scope from a value the server checks, such as a visitor token the page was rendered with. Send the token in the chat's `body`, so the upload and the turn resolve the same scope:
+
+```typescript
+protected async attachmentScope(req: HttpRequest, threadId?: string, extra?: { body: StoreBody }) {
+  const scope = await super.attachmentScope(req, threadId);
+  if (scope) return scope;
+  const visitor = await verifyVisitorToken(extra?.body.visitor); // the app's own check
+  return visitor ? { key: `visitor:${visitor.id}` } : null;
+}
+```
+
+With `attachmentRetention()` answering `"turn"`, the photo is kept in `Storage` while the turn runs, the tool reads it with `ctx.attachments.file(id)`, and the photo is deleted from both places when the turn completes. Don't build the key from an unchecked body field (see `attachmentScope` in the source for why).
 
 ## Related
 

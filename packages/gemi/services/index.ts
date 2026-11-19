@@ -216,20 +216,38 @@ export {
   type WorkflowClass,
   type WorkflowStatus,
   type WorkflowStepStatus,
+  type WorkflowUpdate,
 } from "./queue/workflow/Workflow";
+export { workflowEnded } from "./queue/workflow/wire";
+export {
+  ItemSource,
+  ITEM_SOURCE_ITEM_LIMIT,
+  type ItemSourceInput,
+  type SourceRef,
+} from "./queue/workflow/ItemSource";
 export {
   Step,
   StepFailedError,
   StepTimeoutError,
   WaitTimeoutError,
   WorkflowCancelledError,
+  type EachProblem,
+  type EachProgress,
+  type EachSummary,
+  type ItemContext,
   type StepBatchOptions,
   type StepContext,
+  type ChunkContext,
+  type EachThrottle,
+  type StepEachInput,
+  type StepEachOptions,
   type StepRunOptions,
   type StepWaitOptions,
 } from "./queue/workflow/Step";
 export type { Duration } from "./queue/workflow/duration";
 export type {
+  ItemRecord,
+  ItemRunStatus,
   StepRecord,
   StepRunStatus,
   WorkflowRecord,

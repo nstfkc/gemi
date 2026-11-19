@@ -1,7 +1,8 @@
 import { app } from "../../../foundation/app";
 import { QueueManager } from "../QueueManager";
-import type { Step } from "./Step";
-import type { StepRunStatus, WorkflowRunStatus } from "./WorkflowStore";
+import type { EachProblem, Step } from "./Step";
+import type { ChangeFeedResponse, StreamOptions } from "../../change-feed/stream";
+import type { WorkflowUpdate } from "./wire";
 
 /** The arguments `start` takes: `run`'s, after `step`. */
 export type WorkflowArgs<T extends Workflow> = Parameters<T["run"]> extends [
@@ -11,43 +12,15 @@ export type WorkflowArgs<T extends Workflow> = Parameters<T["run"]> extends [
   ? Rest
   : never;
 
-/** What `Workflow.find` resolves to. Times are epoch milliseconds. */
-export type WorkflowStatus = {
-  id: string;
-  /** The workflow class's `static name`. */
-  name: string;
-  status: WorkflowRunStatus;
+/** What `Workflow.find` resolves to: the workflow's update, with its arguments and result. */
+export type WorkflowStatus = WorkflowUpdate & {
   /** The `run` arguments after `step`. */
   args: unknown[];
-  /** The key of the step it is on, or `null`. */
-  currentStep: string | null;
-  /** 0 to 1, as `step.progress` last set it; 1 once completed. */
-  progress: number;
   /** What `run` returned, once completed. */
   result: unknown;
-  /** Why it failed; for a cancelled one, why `onCancel` failed. */
-  error: string | null;
-  /** Every step recorded so far, in the order they were first reached. */
-  steps: WorkflowStepStatus[];
-  createdAt: number;
-  updatedAt: number;
 };
 
-export type WorkflowStepStatus = {
-  key: string;
-  status: StepRunStatus;
-  /** Attempts started; `step.run` only. */
-  attempt: number;
-  error: string | null;
-  /** The batch a `step.batch` dispatched. */
-  batchId: string | null;
-  /** The batch's progress, 0 to 1, for a `step.batch`. */
-  progress?: number;
-  /** When a sleep ends, a wait times out, or a retry is due. */
-  wakeAt: number | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-};
+export type { WorkflowStepStatus, WorkflowUpdate } from "./wire";
 
 /**
  * A durable workflow (#846): a `run` method made of steps, which survives
@@ -133,6 +106,55 @@ export class Workflow {
     return app(QueueManager).workflows.signal(id, key, payload);
   }
 
+  /**
+   * The items of the `step.each` under `key` that failed or were skipped
+   * (or only those of `status`), by index, from just after the index
+   * `after`, at most `limit` (default 100, at most 1000). Page through them
+   * by passing the last index as `after`.
+   */
+  static items(
+    id: string,
+    key: string,
+    options: { status?: "failed" | "skipped"; after?: number; limit?: number } = {},
+  ): Promise<EachProblem[]> {
+    return app(QueueManager).workflows.items(id, key, options);
+  }
+
+  /** The ChangeFeed channel a workflow's changes are published to: `gemi:workflow:<id>`. */
+  static channel(id: string): string {
+    return app(QueueManager).workflows.channel(id);
+  }
+
+  /**
+   * An SSE response following workflow `id`, for `useWorkflow`. Each event's
+   * `data` is a `WorkflowUpdate`: the status without `args` and `result`.
+   * Authorise the read first, as for any route. Resumes from
+   * `Last-Event-ID`, or `options.cursor` (`Workflow.cursor(id)`).
+   */
+  static stream(
+    request: { rawRequest: Request } | Request,
+    id: string,
+    options: StreamOptions = {},
+  ): ChangeFeedResponse<WorkflowUpdate> {
+    return app(QueueManager).workflows.stream(request, id, options);
+  }
+
+  /** A cursor at the workflow's channel head, for a view that read it to hand its client. */
+  static cursor(id: string): Promise<string> {
+    return app(QueueManager).workflows.cursor(id);
+  }
+
+  /**
+   * Follows workflow `id` on the server: yields it as it is now, then each
+   * newer update, and ends after the one that ended it.
+   */
+  static subscribe(
+    id: string,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<WorkflowUpdate, void, undefined> {
+    return app(QueueManager).workflows.subscribe(id, options);
+  }
+
   /** The workflow's status, or `null` for an unknown id. */
   static find(id: string): Promise<WorkflowStatus | null> {
     return app(QueueManager).workflows.find(id);
@@ -145,6 +167,23 @@ export class Workflow {
    */
   static cancel(id: string): Promise<boolean> {
     return app(QueueManager).workflows.cancel(id);
+  }
+
+  /**
+   * Pauses a workflow that has not ended, and resolves to whether it did. No
+   * new step starts: a running `step.run` finishes and is recorded, a
+   * `step.each` lets the items in flight finish and takes no more, and the
+   * workflow then waits as `paused`, holding no queue slot, until `resume`.
+   * Signals and batches that arrive meanwhile are kept. It can still be
+   * cancelled.
+   */
+  static pause(id: string): Promise<boolean> {
+    return app(QueueManager).workflows.pause(id);
+  }
+
+  /** Resumes a paused workflow where it stopped, and resolves to whether it was paused. */
+  static resume(id: string): Promise<boolean> {
+    return app(QueueManager).workflows.resume(id);
   }
 }
 

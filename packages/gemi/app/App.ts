@@ -115,10 +115,13 @@ export class App {
   /**
    * How the servers serve static files to `req`'s host (#1015): whether the
    * files copied out of `public/` are served, and whether a miss under
-   * `/assets` reaches the routes. Resolves the host only when a
-   * `route.domains` group sets either differently from the root.
+   * `/assets` reaches the routes, and whether `/assets` files are sent with
+   * `Access-Control-Allow-Origin: *` (#1311). Resolves the host only when a
+   * `route.domains` group sets one of them differently from the root.
    */
-  public async staticFiles(req: Request): Promise<{ publicFiles: boolean; assetRoutes: boolean }> {
+  public async staticFiles(
+    req: Request,
+  ): Promise<{ publicFiles: boolean; assetRoutes: boolean; assetCors?: boolean }> {
     return this.kernel.run.call(this.kernel, () => this.kernel.domains().staticFiles(req));
   }
 

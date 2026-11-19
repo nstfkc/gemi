@@ -4,9 +4,18 @@ import type { BatchStatus } from "../batch";
 import { Job } from "../Job";
 import type { QueueDriver } from "../QueueDriver";
 import { QueueManager } from "../QueueManager";
-import { type Step, StepFailedError, WaitTimeoutError } from "./Step";
+import {
+  type EachSummary,
+  resetEachWarnings,
+  type Step,
+  StepFailedError,
+  WaitTimeoutError,
+} from "./Step";
 import { Workflow, type WorkflowClass } from "./Workflow";
+import { ITEM_SOURCE_ITEM_LIMIT, writeSource } from "./ItemSource";
+import type { WorkflowUpdate } from "./wire";
 import { WORKFLOW_TICK_JOB, WorkflowLeaseLostError } from "./WorkflowStore";
+import { currentTransaction } from "../../../orm/context";
 
 /**
  * What workflows promise on every driver that keeps them, as a suite a
@@ -35,6 +44,8 @@ export function workflowContract(
      * needs to finish its transaction.
      */
     concurrentWorkers?: boolean;
+    /** How many items the "long list" `step.each` test works through. Default 2,000. */
+    largeCount?: number;
   } = { concurrentWorkers: true },
 ) {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,6 +88,7 @@ export function workflowContract(
         });
       } finally {
         await Promise.all(managers.map((manager) => manager.drain(5_000)));
+        await Promise.all(managers.map((manager) => manager.workflows.close()));
         await store.dispose();
       }
     };
@@ -85,7 +97,8 @@ export function workflowContract(
     queue.workflows.find(id).then((found) => found?.status);
 
   // Real ticks through real queues, on databases too: generous.
-  const test = (title: string, fn: () => Promise<void>) => vitestTest(title, fn, 30_000);
+  const test = (title: string, fn: () => Promise<void>, timeout = 30_000) =>
+    vitestTest(title, fn, timeout);
 
   describe(`${name} — workflows`, () => {
     test(
@@ -538,6 +551,801 @@ export function workflowContract(
         expect((await store.acquire("wf-1", "job-d:1", 60_000)).kind).toBe("acquired");
         expect(await store.renew("wf-1", "job-c:1", 60_000)).toBe(false);
         expect(await store.renew("wf-1", "job-d:1", 60_000)).toBe(true);
+      }),
+    );
+  });
+
+
+  describe(`${name} — step.each`, () => {
+    test(
+      "works through every item once, with retries that do not hold up the list",
+      withQueue(async ({ worker }) => {
+        const calls: string[] = [];
+        const keys = new Map<number, string>();
+        let summary: EachSummary | undefined;
+        class Rows extends Workflow {
+          static name = "Rows";
+          async run(step: Step, prefix: string) {
+            const before = await step.run("before", () => "ready");
+            summary = await step.each(
+              "rows",
+              {
+                count: 8,
+                item: (index) => ({ sku: `${prefix}-${index}`, index }),
+                key: (row) => row.sku,
+                attempts: 3,
+                backoff: [40, 0],
+              },
+              async (row, ctx) => {
+                calls.push(`${row.index}:${ctx.attempt}`);
+                keys.set(row.index, ctx.idempotencyKey);
+                expect(ctx.key).toBe(row.sku);
+                if (row.index === 2 && ctx.attempt < 3) throw new Error(`flaky ${ctx.attempt}`);
+                if (row.index === 4) throw new Error("always broken");
+                if (row.index === 6) ctx.skip("no name", { line: 7 });
+              },
+            );
+            return { before, summary };
+          }
+        }
+        const queue = worker([Rows]);
+        const id = await queue.workflows.start(Rows, ["sku"]);
+        await until(async () => (await status(queue, id)) === "completed");
+
+        // Item 2 waited out its backoff while 3, 5 and 7 ran.
+        expect(calls.indexOf("2:2")).toBeGreaterThan(calls.indexOf("3:1"));
+        expect(calls.filter((call) => call.startsWith("2:"))).toEqual(["2:1", "2:2", "2:3"]);
+        expect(calls.filter((call) => call.startsWith("4:"))).toEqual(["4:1", "4:2", "4:3"]);
+        for (const index of [0, 1, 3, 5, 6, 7]) {
+          expect(calls.filter((call) => call.startsWith(`${index}:`))).toEqual([`${index}:1`]);
+        }
+        expect(keys.get(3)).toBe(`${id}:rows:sku-3`);
+        expect(summary).toEqual({
+          total: 8,
+          done: 8,
+          succeeded: 6,
+          skipped: 1,
+          failed: 1,
+          moreProblems: false,
+          problems: [
+            { index: 4, key: "sku-4", status: "failed", reason: "always broken", attempt: 3 },
+            { index: 6, key: "sku-6", status: "skipped", reason: "no name", data: { line: 7 }, attempt: 1 },
+          ],
+        });
+        const found = await queue.workflows.find(id);
+        expect(found!.result).toEqual({ before: "ready", summary });
+        expect(found!.steps.find((step) => step.key === "rows")).toMatchObject({
+          status: "completed",
+          progress: 1,
+          items: { total: 8, done: 8, succeeded: 6, skipped: 1, failed: 1 },
+        });
+        expect(await queue.workflows.items(id, "rows", { status: "failed" })).toEqual([
+          { index: 4, key: "sku-4", status: "failed", reason: "always broken", attempt: 3 },
+        ]);
+        expect((await queue.workflows.items(id, "rows", { after: 4 })).map((p) => p.index)).toEqual([6]);
+      }),
+    );
+
+    test(
+      "a long list keeps rows only for its window and its problems",
+      withQueue(async ({ worker }) => {
+        const count = features.largeCount ?? 2_000;
+        const concurrency = 4;
+        let produced = 0;
+        let handled = 0;
+        let widest = 0;
+        let store: ReturnType<NonNullable<QueueDriver["workflowStore"]>> | undefined;
+        let workflowId = "";
+        class Long extends Workflow {
+          static name = "Long";
+          async run(step: Step) {
+            return step.each(
+              "items",
+              {
+                count,
+                concurrency,
+                attempts: 1,
+                item: (index) => {
+                  produced++;
+                  return index;
+                },
+              },
+              async (index, ctx) => {
+                handled++;
+                if (index % 500 === 0) {
+                  const open = await store!.listItems!(workflowId, "items", {
+                    statuses: ["running", "retrying"],
+                    limit: 10_000,
+                  });
+                  widest = Math.max(widest, open.length);
+                }
+                if (index % 997 === 0) throw new Error(`bad ${ctx.index}`);
+              },
+            );
+          }
+        }
+        const queue = worker([Long]);
+        store = queue.workflows.store;
+        workflowId = await queue.workflows.start(Long, []);
+        await until(async () => (await status(queue, workflowId)) === "completed", 120_000);
+
+        const failures = Math.floor((count - 1) / 997) + 1;
+        expect(produced).toBe(count);
+        expect(handled).toBe(count);
+        expect(widest).toBeLessThanOrEqual(concurrency);
+        const rows = await store.listItems!(workflowId, "items", {
+          statuses: ["running", "retrying", "failed", "skipped"],
+          limit: count,
+        });
+        expect(rows.map((row) => row.index)).toEqual(
+          Array.from({ length: failures }, (_, n) => n * 997),
+        );
+        expect((await queue.workflows.find(workflowId))!.result).toMatchObject({
+          total: count,
+          done: count,
+          succeeded: count - failures,
+          failed: failures,
+        });
+      }),
+      180_000,
+    );
+
+    test(
+      "a tick works for its budget, then the next tick goes on from the cursor",
+      withQueue(async ({ worker }) => {
+        let passes = 0;
+        const seen: number[] = [];
+        class Budgeted extends Workflow {
+          static name = "Budgeted";
+          async run(step: Step) {
+            passes++;
+            return step.each(
+              "slow",
+              { count: 12, item: (index) => index, tickBudget: 40 },
+              async (index) => {
+                seen.push(index);
+                await sleep(15);
+              },
+            );
+          }
+        }
+        const queue = worker([Budgeted]);
+        const id = await queue.workflows.start(Budgeted, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect(seen).toEqual(Array.from({ length: 12 }, (_, n) => n));
+        expect(passes).toBeGreaterThanOrEqual(3);
+      }),
+    );
+
+    test(
+      "progress is readable through find while the list runs",
+      withQueue(async ({ worker }) => {
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        class Gated extends Workflow {
+          static name = "Gated";
+          async run(step: Step) {
+            return step.each("rows", { count: 4, item: (index) => index }, async (index) => {
+              if (index === 2) await gate;
+            });
+          }
+        }
+        const queue = worker([Gated]);
+        const id = await queue.workflows.start(Gated, []);
+        await until(async () => (await queue.workflows.find(id))?.progress === 0.5);
+        const found = await queue.workflows.find(id);
+        expect(found).toMatchObject({ status: "running", currentStep: "rows", progress: 0.5 });
+        expect(found!.steps[0]).toMatchObject({
+          key: "rows",
+          status: "iterating",
+          progress: 0.5,
+          items: { total: 4, done: 2, succeeded: 2, skipped: 0, failed: 0 },
+        });
+        release();
+        await until(async () => (await status(queue, id)) === "completed");
+      }),
+    );
+
+    test(
+      "a tick that dies mid-list is taken over: only the item in flight runs again",
+      withQueue(async ({ worker, driver }) => {
+        const attempts = new Map<number, number[]>();
+        const keys = new Map<number, Set<string>>();
+        let hang: () => void = () => {};
+        const hung = new Promise<void>((resolve) => (hang = resolve));
+        // The owner holding the workflow when item 3 starts stops renewing
+        // its hold: the process that ran it is gone, as far as anyone can tell.
+        let lastOwner: string | undefined;
+        let dead: string | undefined;
+        const patch = (manager: QueueManager) => {
+          const store = manager.workflows.store;
+          const acquire = store.acquire.bind(store);
+          const renew = store.renew.bind(store);
+          store.acquire = async (id, owner, lease) => {
+            const result = await acquire(id, owner, lease);
+            if (result.kind === "acquired") lastOwner = owner;
+            return result;
+          };
+          store.renew = async (id, owner, lease) =>
+            owner === dead ? false : renew(id, owner, lease);
+        };
+        class Crashy extends Workflow {
+          static name = "Crashy";
+          async run(step: Step) {
+            return step.each(
+              "rows",
+              { count: 6, item: (index) => index, key: (index) => `row-${index}` },
+              async (index, ctx) => {
+                attempts.set(index, [...(attempts.get(index) ?? []), ctx.attempt]);
+                keys.set(index, (keys.get(index) ?? new Set()).add(ctx.idempotencyKey));
+                if (index === 3 && ctx.attempt === 1) {
+                  dead = lastOwner;
+                  await hung;
+                }
+              },
+            );
+          }
+        }
+        const config = { visibilityTimeout: 300 };
+        const a = worker([Crashy], [], config);
+        patch(a);
+        const id = await a.workflows.start(Crashy, []);
+        await until(() => dead !== undefined);
+        // A second process, where two clients are two processes.
+        if (features.concurrentWorkers !== false) patch(worker([Crashy], [], config));
+        // Once its lease lapses, the next tick (as a signal or a wake-up
+        // would enqueue) takes the workflow over; one that comes too early is
+        // only marked, so keep sending them until one gets through.
+        const producer = driver();
+        await until(async () => {
+          if ((await status(a, id)) === "completed") return true;
+          await producer.enqueue({ name: WORKFLOW_TICK_JOB, args: JSON.stringify([id]) });
+          await sleep(150);
+          return false;
+        }, 15_000);
+        hang();
+
+        expect(attempts.get(3)).toEqual([1, 2]);
+        expect(keys.get(3)).toEqual(new Set([`${id}:rows:row-3`]));
+        for (const index of [0, 1, 2, 4, 5]) expect(attempts.get(index)).toEqual([1]);
+        expect((await a.workflows.find(id))!.result).toMatchObject({ done: 6, succeeded: 6 });
+        // The dead tick's late result is refused, and changes nothing.
+        await sleep(100);
+        expect((await a.workflows.find(id))!.result).toMatchObject({ done: 6, succeeded: 6 });
+      }),
+    );
+
+    test(
+      "an item whose attempts all died with their process is failed, not run forever",
+      withQueue(async ({ driver, worker }) => {
+        const store = driver().workflowStore!();
+        await store.create({ id: "wf-each", name: "Doomed", args: "[]" });
+        // As a tick that died while item 0 ran its last attempt leaves it.
+        expect((await store.acquire("wf-each", "gone:1", 60_000)).kind).toBe("acquired");
+        await store.update("wf-each", { owner: "gone:1", key: "rows" }, ({ now }) => ({
+          result: undefined,
+          step: {
+            workflowId: "wf-each",
+            key: "rows",
+            status: "iterating",
+            attempt: 0,
+            output: JSON.stringify({ $each: { count: 2, next: 1, succeeded: 0, skipped: 0, failed: 0 } }),
+            error: null,
+            batchId: null,
+            wakeAt: null,
+            startedAt: now,
+            finishedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+          items: {
+            step: "rows",
+            insert: [
+              {
+                workflowId: "wf-each",
+                step: "rows",
+                index: 0,
+                key: null,
+                status: "running",
+                attempt: 2,
+                error: null,
+                output: null,
+                wakeAt: null,
+                startedAt: now,
+                finishedAt: null,
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
+          },
+          unlock: true,
+        }));
+        const ran: number[] = [];
+        class Doomed extends Workflow {
+          static name = "Doomed";
+          async run(step: Step) {
+            return step.each("rows", { count: 2, item: (i) => i, attempts: 2 }, (index) => {
+              ran.push(index);
+            });
+          }
+        }
+        const queue = worker([Doomed]);
+        await until(async () => (await status(queue, "wf-each")) === "completed");
+        expect(ran).toEqual([1]);
+        expect((await queue.workflows.find("wf-each"))!.result).toMatchObject({
+          done: 2,
+          succeeded: 1,
+          failed: 1,
+          problems: [{ index: 0, status: "failed", attempt: 2 }],
+        });
+      }),
+    );
+
+    test(
+      "cancel aborts the items in flight and runs onCancel with the summary so far",
+      withQueue(async ({ worker }) => {
+        let aborted: unknown;
+        const undone: string[] = [];
+        class Cancellable extends Workflow {
+          static name = "Cancellable";
+          async run(step: Step) {
+            await step.each("rows", { count: 5, item: (i) => i }, (index, ctx) =>
+              index < 2
+                ? undefined
+                : new Promise((_, reject) =>
+                    ctx.signal.addEventListener("abort", () => {
+                      aborted = ctx.signal.reason;
+                      reject(ctx.signal.reason);
+                    }),
+                  ),
+            );
+          }
+          async onCancel(step: Step) {
+            await step.run("undo", () => undone.push("undo"));
+          }
+        }
+        const queue = worker([Cancellable]);
+        const id = await queue.workflows.start(Cancellable, []);
+        await until(async () => (await queue.workflows.find(id))?.progress === 0.4);
+        expect(await queue.workflows.cancel(id)).toBe(true);
+        await until(async () => (await status(queue, id)) === "cancelled");
+        expect((aborted as Error)?.name).toBe("WorkflowCancelledError");
+        expect(undone).toEqual(["undo"]);
+        expect((await queue.workflows.find(id))!.steps[0]!.items).toMatchObject({
+          total: 5,
+          done: 2,
+        });
+      }),
+    );
+
+    test(
+      "an empty list completes at once, and a step.each key cannot be reused as another step",
+      withQueue(async ({ worker }) => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        class Empty extends Workflow {
+          static name = "Empty";
+          async run(step: Step, reuse: boolean) {
+            const summary = await step.each("rows", { count: 0, item: (i) => i }, () => {});
+            if (reuse) await step.run("rows", () => 1);
+            return summary;
+          }
+        }
+        const queue = worker([Empty]);
+        const empty = await queue.workflows.start(Empty, [false]);
+        await until(async () => (await status(queue, empty)) === "completed");
+        expect((await queue.workflows.find(empty))!.result).toEqual({
+          total: 0,
+          done: 0,
+          succeeded: 0,
+          skipped: 0,
+          failed: 0,
+          problems: [],
+          moreProblems: false,
+        });
+        const reused = await queue.workflows.start(Empty, [true]);
+        await until(async () => (await status(queue, reused)) === "failed");
+        expect((await queue.workflows.find(reused))!.error).toContain("rows");
+      }),
+    );
+  });
+
+
+  describe(`${name} — workflow updates`, () => {
+    test(
+      "every change is published to the workflow's channel, coalesced, and the last one always",
+      withQueue(async ({ worker }) => {
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        class Streamed extends Workflow {
+          static name = "Streamed";
+          async run(step: Step, secret: string) {
+            await step.each("rows", { count: 40, item: (index) => index }, async (index) => {
+              if (index === 20) await gate;
+            });
+            return secret;
+          }
+        }
+        const queue = worker([Streamed]);
+        const id = await queue.workflows.start(Streamed, ["do not show"]);
+        expect(queue.workflows.channel(id)).toBe(`gemi:workflow:${id}`);
+
+        const seen: WorkflowUpdate[] = [];
+        const following = (async () => {
+          for await (const update of queue.workflows.subscribe(id)) seen.push(update);
+        })();
+        await until(() => seen.some((update) => update.progress === 0.5));
+        release();
+        await following;
+
+        const last = seen.at(-1)!;
+        expect(last).toMatchObject({ id, name: "Streamed", status: "completed", progress: 1 });
+        expect(last.steps[0]).toMatchObject({ key: "rows", status: "completed" });
+        expect(last).not.toHaveProperty("args");
+        expect(last).not.toHaveProperty("result");
+        // Coalesced: far fewer updates than the 80-odd writes, in order.
+        expect(seen.length).toBeLessThan(20);
+        const progress = seen.map((update) => update.progress);
+        expect([...progress].sort((a, b) => a - b)).toEqual(progress);
+        const times = seen.map((update) => update.updatedAt);
+        expect([...times].sort((a, b) => a - b)).toEqual(times);
+
+        // An ended workflow yields once and ends; an unknown one yields nothing.
+        const after: WorkflowUpdate[] = [];
+        for await (const update of queue.workflows.subscribe(id)) after.push(update);
+        expect(after.map((update) => update.status)).toEqual(["completed"]);
+        for await (const update of queue.workflows.subscribe("no-such-workflow")) after.push(update);
+        expect(after).toHaveLength(1);
+      }),
+    );
+  });
+
+
+
+  describe(`${name} — control`, () => {
+    test(
+      "pause lets the items in flight finish and takes no more; resume goes on where it stopped",
+      withQueue(async ({ worker }) => {
+        const handled: number[] = [];
+        class Pausable extends Workflow {
+          static name = "Pausable";
+          async run(step: Step) {
+            const summary = await step.each(
+              "rows",
+              { count: 60, item: (i) => i, concurrency: 2 },
+              async (index) => {
+                await sleep(5);
+                handled.push(index);
+              },
+            );
+            await step.run("after", () => "after");
+            return summary;
+          }
+        }
+        const queue = worker([Pausable]);
+        const id = await queue.workflows.start(Pausable, []);
+        await until(() => handled.length >= 10);
+        expect(await queue.workflows.pause(id)).toBe(true);
+        expect(await queue.workflows.pause(id)).toBe(false);
+        // The items in flight finish, and are recorded.
+        await until(async () => {
+          const found = await queue.workflows.find(id);
+          return found?.status === "paused" && found.steps[0]?.items?.done === handled.length;
+        });
+        await sleep(100);
+        const atPause = handled.length;
+        expect((await queue.workflows.find(id))!.steps[0]!.items!.done).toBe(atPause);
+        expect(atPause).toBeLessThan(60);
+        await sleep(300);
+        expect(handled.length).toBe(atPause);
+        expect(await status(queue, id)).toBe("paused");
+
+        expect(await queue.workflows.resume(id)).toBe(true);
+        expect(await queue.workflows.resume(id)).toBe(false);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect([...handled].sort((a, b) => a - b)).toEqual(Array.from({ length: 60 }, (_, i) => i));
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 60, succeeded: 60 });
+      }),
+    );
+
+    test(
+      "a paused workflow stays paused past its sleep, keeps a signal, and can be cancelled",
+      withQueue(async ({ worker }) => {
+        const ran: string[] = [];
+        class Sleepy extends Workflow {
+          static name = "Sleepy";
+          async run(step: Step) {
+            await step.sleep("nap", 100);
+            const payload = await step.waitFor<string>("go");
+            await step.run("after", () => ran.push(`after:${payload}`));
+          }
+          async onCancel(step: Step) {
+            await step.run("undo", () => ran.push("undo"));
+          }
+        }
+        const queue = worker([Sleepy]);
+        const id = await queue.workflows.start(Sleepy, []);
+        await until(async () => (await status(queue, id)) === "sleeping");
+        expect(await queue.workflows.pause(id)).toBe(true);
+        await queue.workflows.signal(id, "go", "now");
+        await sleep(400);
+        expect(await status(queue, id)).toBe("paused");
+        expect(ran).toEqual([]);
+        expect(await queue.workflows.resume(id)).toBe(true);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect(ran).toEqual(["after:now"]);
+
+        const other = await queue.workflows.start(Sleepy, []);
+        await until(async () => (await status(queue, other)) === "sleeping");
+        await queue.workflows.pause(other);
+        expect(await queue.workflows.cancel(other)).toBe(true);
+        await until(async () => (await status(queue, other)) === "cancelled");
+        expect(ran).toEqual(["after:now", "undo"]);
+        expect(await queue.workflows.resume(other)).toBe(false);
+      }),
+    );
+
+    test(
+      "maxFailures fails the step with its summary, as a count and as a ratio",
+      withQueue(async ({ worker }) => {
+        class Strict extends Workflow {
+          static name = "Strict";
+          async run(step: Step, policy: number | { ratio: number; after?: number }) {
+            try {
+              await step.each(
+                "rows",
+                { count: 100, item: (i) => i, attempts: 1, maxFailures: policy },
+                (index) => {
+                  if (index % 4 === 0) throw new Error(`bad ${index}`);
+                },
+              );
+              return { failed: false };
+            } catch (error) {
+              if (!(error instanceof StepFailedError)) throw error;
+              return { failed: true, message: error.message, summary: error.summary };
+            }
+          }
+        }
+        const queue = worker([Strict]);
+        const counted = await queue.workflows.start(Strict, [3]);
+        await until(async () => (await status(queue, counted)) === "completed");
+        const byCount = (await queue.workflows.find(counted))!.result as {
+          failed: boolean;
+          message: string;
+          summary: EachSummary;
+        };
+        expect(byCount.failed).toBe(true);
+        expect(byCount.message).toContain("more than maxFailures (3)");
+        expect(byCount.summary.failed).toBe(4);
+        expect(byCount.summary.done).toBeLessThan(100);
+        expect(byCount.summary.problems[0]).toMatchObject({ index: 0, status: "failed", reason: "bad 0" });
+        expect((await queue.workflows.find(counted))!.steps[0]!.status).toBe("failed");
+
+        const ratio = await queue.workflows.start(Strict, [{ ratio: 0.2, after: 10 }]);
+        await until(async () => (await status(queue, ratio)) === "completed");
+        const byRatio = (await queue.workflows.find(ratio))!.result as { failed: boolean; summary: EachSummary };
+        expect(byRatio.failed).toBe(true);
+        expect(byRatio.summary.done).toBe(10);
+        expect(byRatio.summary.failed).toBe(3);
+
+        const lenient = await queue.workflows.start(Strict, [{ ratio: 0.3 }]);
+        await until(async () => (await status(queue, lenient)) === "completed");
+        expect((await queue.workflows.find(lenient))!.result).toEqual({ failed: false });
+      }),
+    );
+
+    test(
+      "throttle starts at most limit items per window, and ctx.release holds the step without using an attempt",
+      withQueue(async ({ worker }) => {
+        const starts: number[] = [];
+        const attempts: number[] = [];
+        let released = 0;
+        class Throttled extends Workflow {
+          static name = "Throttled";
+          async run(step: Step, mode: "throttle" | "release") {
+            if (mode === "throttle") {
+              return step.each(
+                "rows",
+                {
+                  count: 12,
+                  item: (i) => i,
+                  concurrency: 12,
+                  throttle: { key: `contract-${Math.random()}`, limit: 4, window: 300 },
+                },
+                () => void starts.push(Date.now()),
+              );
+            }
+            return step.each("rows", { count: 3, item: (i) => i }, (index, ctx) => {
+              if (index === 1) attempts.push(ctx.attempt);
+              if (index === 1 && released++ === 0) ctx.release(150);
+            });
+          }
+        }
+        const queue = worker([Throttled]);
+        // The database driver's lock table, which only locks need.
+        await (queue.locks.store as { createTable?(): Promise<void> }).createTable?.();
+        const id = await queue.workflows.start(Throttled, ["throttle"]);
+        await until(async () => {
+          const found = await queue.workflows.find(id);
+          if (found?.status === "failed") throw new Error(found.error ?? "failed");
+          return found?.status === "completed";
+        });
+        expect(starts).toHaveLength(12);
+        // Three windows of four: the last four start at least two windows in.
+        expect(starts[11]! - starts[0]!).toBeGreaterThanOrEqual(2 * 300 - 50);
+
+        const begun = Date.now();
+        const other = await queue.workflows.start(Throttled, ["release"]);
+        await until(async () => (await status(queue, other)) === "completed");
+        expect(Date.now() - begun).toBeGreaterThanOrEqual(140);
+        expect(attempts).toEqual([1, 1]);
+        expect((await queue.workflows.find(other))!.result).toMatchObject({ succeeded: 3, failed: 0 });
+      }),
+    );
+
+    test(
+      "chunk hands fn the inputs in chunks, retries a chunk together and skips one item of it",
+      withQueue(async ({ worker }) => {
+        const calls: Array<{ inputs: number[]; attempt: number }> = [];
+        class Chunky extends Workflow {
+          static name = "Chunky";
+          async run(step: Step) {
+            return step.each(
+              "rows",
+              { count: 23, item: (i) => i * 10, chunk: 5, key: (input) => `k${input}` },
+              (inputs, ctx) => {
+                calls.push({ inputs, attempt: ctx.attempt });
+                expect(ctx.items.map((item) => item.key)).toEqual(inputs.map((input) => `k${input}`));
+                if (inputs[0] === 50 && ctx.attempt === 1) throw new Error("chunk failed");
+                if (inputs[0] === 0) ctx.skip(1, "no name", { line: 2 });
+              },
+            );
+          }
+        }
+        const queue = worker([Chunky]);
+        const id = await queue.workflows.start(Chunky, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect(calls.map((call) => call.inputs.length)).toEqual([5, 5, 5, 5, 5, 3]);
+        expect(calls.filter((call) => call.inputs[0] === 50).map((call) => call.attempt)).toEqual([1, 2]);
+        expect((await queue.workflows.find(id))!.result).toMatchObject({
+          total: 23,
+          succeeded: 22,
+          skipped: 1,
+          problems: [{ index: 1, key: "k10", status: "skipped", reason: "no name", data: { line: 2 } }],
+        });
+      }),
+    );
+
+    test(
+      "transaction: true runs each item in a transaction where the store has one, and runs it plainly where it has none",
+      withQueue(async ({ worker }) => {
+        resetEachWarnings();
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const seen: boolean[] = [];
+        class Transactional extends Workflow {
+          static name = "Transactional";
+          async run(step: Step) {
+            return step.each("rows", { count: 6, item: (i) => i, transaction: true, concurrency: 2 }, () => {
+              seen.push(currentTransaction() !== undefined);
+            });
+          }
+        }
+        const queue = worker([Transactional]);
+        const id = await queue.workflows.start(Transactional, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ succeeded: 6 });
+        const joins = queue.workflows.store.transaction !== undefined;
+        expect(seen).toEqual(Array(6).fill(joins));
+        expect(warn.mock.calls.some((call) => String(call[0]).includes("without a transaction"))).toBe(!joins);
+      }),
+    );
+  });
+
+  describe(`${name} — item sources`, () => {
+    test(
+      "step.source writes a list once, and step.each works through it a window at a time",
+      withQueue(async ({ worker }) => {
+        let generated = 0;
+        let passes = 0;
+        const handled = new Map<number, string>();
+        let reads = 0;
+        class FromSource extends Workflow {
+          static name = "FromSource";
+          async run(step: Step, total: number) {
+            passes++;
+            const rows = await step.source("rows", async function* () {
+              for (let i = 0; i < total; i++) {
+                generated++;
+                yield { line: i + 1, sku: `sku-${i}` };
+              }
+            });
+            await step.sleep("between", 20);
+            return step.each(
+              "import",
+              { source: rows, concurrency: 3, attempts: 2, key: (row) => row.sku },
+              async (row, ctx) => {
+                if (row.line === 701 && ctx.attempt === 1) throw new Error("once");
+                handled.set(ctx.index, `${row.sku}:${row.line}`);
+              },
+            );
+          }
+        }
+        const queue = worker([FromSource]);
+        const store = queue.workflows.store;
+        const readSource = store.readSource!.bind(store);
+        store.readSource = (...args) => {
+          reads++;
+          return readSource(...args);
+        };
+        const id = await queue.workflows.start(FromSource, [1300]);
+        await until(async () => (await status(queue, id)) === "completed", 60_000);
+
+        expect(passes).toBeGreaterThanOrEqual(2);
+        expect(generated).toBe(1300);
+        expect(handled.size).toBe(1300);
+        expect(handled.get(700)).toBe("sku-700:701");
+        expect(handled.get(1299)).toBe("sku-1299:1300");
+        // 1,300 items in windows of 64, plus the one retry read again alone.
+        expect(reads).toBeLessThanOrEqual(Math.ceil(1300 / 64) + 2);
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 1300, succeeded: 1300 });
+        expect(await store.readSource!(`${id}:rows`, 0, 2)).toEqual([
+          { index: 0, payload: JSON.stringify({ line: 1, sku: "sku-0" }) },
+          { index: 1, payload: JSON.stringify({ line: 2, sku: "sku-1" }) },
+        ]);
+
+        // Pruned with its workflow.
+        await store.prune!(0);
+        expect(await store.readSource!(`${id}:rows`, 0, 10)).toEqual([]);
+      }),
+      60_000,
+    );
+
+    test(
+      "a source written on its own replaces, reads, deletes and prunes",
+      withQueue(async ({ driver }) => {
+        const store = driver().workflowStore!();
+        const first = await writeSource(store, "upload:1", ["a", "b", "c"], null);
+        expect(first).toEqual({ id: "upload:1", count: 3 });
+        // Written again: replaced, not appended.
+        const again = await writeSource(store, "upload:1", (function* () {
+          yield { n: 1 };
+          yield { n: 2 };
+        })(), null);
+        expect(again.count).toBe(2);
+        expect((await store.readSource!("upload:1", 0, 10)).map((row) => JSON.parse(row.payload))).toEqual([
+          { n: 1 },
+          { n: 2 },
+        ]);
+        await expect(
+          writeSource(store, "upload:2", ["x".repeat(ITEM_SOURCE_ITEM_LIMIT + 1)], null),
+        ).rejects.toThrow(/over the/);
+        await expect(writeSource(store, "", [], null)).rejects.toThrow(/1 to 191/);
+
+        await writeSource(store, "upload:3", [1], null);
+        expect(await store.deleteSource!("upload:3")).toBe(1);
+        expect(await store.readSource!("upload:3", 0, 1)).toEqual([]);
+
+        // Prune takes sources of no workflow, older than asked.
+        expect(await store.pruneSources!(60_000)).toBe(0);
+        await sleep(20);
+        expect(await store.pruneSources!(0)).toBeGreaterThanOrEqual(2);
+        expect(await store.readSource!("upload:1", 0, 10)).toEqual([]);
+      }),
+    );
+
+    test(
+      "step.each over an empty source completes at once",
+      withQueue(async ({ worker }) => {
+        class EmptySource extends Workflow {
+          static name = "EmptySource";
+          async run(step: Step) {
+            const rows = await step.source("rows", () => [] as string[]);
+            return step.each("each", { source: rows }, () => {});
+          }
+        }
+        const queue = worker([EmptySource]);
+        const id = await queue.workflows.start(EmptySource, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 0, done: 0 });
       }),
     );
   });

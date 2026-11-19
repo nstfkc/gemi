@@ -520,6 +520,7 @@ export {
   ScopedAttachments,
   defineAgentHooks,
 } from "./AgentController";
+export type { AttachmentRetentionParams, AttachmentSweepResult } from "./AgentController";
 export type {
   VoiceMiddlewareConfig,
   VoiceRoute,
@@ -535,6 +536,8 @@ export type {
   AgentRouteMethod,
   AgentRouteRPC,
   AgentStore,
+  CreateThreadParams,
+  ThreadSweepResult,
   AgentTurn,
   AgentTurnBusyPolicy,
   AgentTurnEvent,
@@ -545,6 +548,7 @@ export type {
   Attachment,
   AttachmentDestination,
   AttachmentLimits,
+  AttachmentRetention,
   AttachmentScope,
   AttachmentStorage,
   AttachmentStore,

@@ -21,6 +21,14 @@ const defaultHeaders: CorsHeaders = {
  * `Access-Control-Allow-Credentials` out (browsers refuse the pair), so it suits
  * a public endpoint that takes no cookies — a form posted from any site.
  *
+ * `Origin: null` (a sandboxed frame, a `file:` page) matches a `"null"` key or
+ * `"*"`, and never gets `Access-Control-Allow-Credentials`.
+ *
+ * It answers no preflight: an `OPTIONS` request runs no middleware. A route
+ * called with a token header or a JSON body from another origin declares a
+ * `CorsPolicy` instead (`.cors()` on the route, `cors` on its router), which
+ * gemi answers the preflight for.
+ *
  * It runs on refusals too (`runsOnRefusal`): a `rate-limit` 429 or a
  * `body-limit` 413 from a middleware listed before it still carries its headers,
  * so the browser sees the status rather than a CORS failure.
@@ -43,7 +51,12 @@ export class CorsMiddleware extends Middleware {
     const origin = req.rawRequest.headers.get("Origin");
     if (origin && this.config.origins[origin]) {
       req.ctx().setHeaders("Access-Control-Allow-Origin", origin);
-      const headers = { ...defaultHeaders, ...this.config.origins[origin] };
+      const headers: Partial<CorsHeaders> = { ...defaultHeaders, ...this.config.origins[origin] };
+      // Any site can send `Origin: null` (a sandboxed frame), so credentials
+      // for it would be credentials for everyone (#913).
+      if (origin === "null") {
+        delete headers["Access-Control-Allow-Credentials"];
+      }
 
       for (const [key, value] of Object.entries(headers)) {
         req.ctx().setHeaders(key, value);
