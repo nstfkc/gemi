@@ -50,6 +50,11 @@ class AppKernel extends Kernel {
         root: "example.test",
         trustProxy: true,
         groups: [
+          // Embedded in sandboxed frames: its build files go to any origin (#1311).
+          {
+            subdomain: "embed",
+            view: { rootRouter: ShopViewRouter, assetRoutes: true, assetCors: true },
+          },
           {
             subdomain: ":shop",
             view: { rootRouter: ShopViewRouter, publicFiles: false, assetRoutes: true },
@@ -120,9 +125,9 @@ afterAll(async () => {
   await rm(projectDir, { recursive: true, force: true });
 });
 
-async function get(host: string, path: string) {
+async function get(host: string, path: string, headers: Record<string, string> = {}) {
   const res = await fetch(`http://localhost:${server.port}${path}`, {
-    headers: { "x-forwarded-host": host },
+    headers: { "x-forwarded-host": host, ...headers },
   });
   return { status: res.status, body: await res.text(), headers: res.headers };
 }
@@ -184,5 +189,43 @@ describe("httpProd: a host that fails to resolve (#1015)", () => {
     const res = await get("broken.test", path);
     expect(res.status).toBe(500);
     expect(res.body).not.toBe("panel robots");
+  });
+});
+
+describe("httpProd: assetCors (#1311)", () => {
+  // A module script in a sandboxed frame is fetched in CORS mode from `null`.
+  const fromSandbox = { origin: "null", "sec-fetch-mode": "cors" };
+
+  test("a build file on an opted-in host allows any origin, without credentials", async () => {
+    const res = await get("embed.example.test", "/assets/client.js", fromSandbox);
+    expect(res.status).toBe(200);
+    expect(res.body).toBe("// client");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+  });
+
+  test("so does the reload stub for a missing chunk", async () => {
+    const res = await get("embed.example.test", "/assets/gone-123.js", fromSandbox);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+  });
+
+  test.each([
+    ["the root host", "example.test"],
+    ["a group sharing the root's views", "admin.example.test"],
+    ["a group that does not opt in", "acme.example.test"],
+  ])("%s sends no CORS header with its build files", async (_, host) => {
+    const res = await get(host, "/assets/client.js", fromSandbox);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  test.each([
+    ["a route under /assets", "/assets/products/42.jpg"],
+    ["a public/ file", "/robots.txt"],
+    ["a view's document", "/"],
+    ["an ordinary route", "/image/a.png"],
+  ])("%s on an opted-in host gets no CORS header", async (_, path) => {
+    const res = await get("embed.example.test", path, fromSandbox);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 });

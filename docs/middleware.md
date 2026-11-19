@@ -230,6 +230,10 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
 }),
 ```
 
+`Origin: null` (a sandboxed frame, a `file:` page) matches a `"null"` key or `"*"`, and never gets `Access-Control-Allow-Credentials`: any site can send it, so credentials for it would be credentials for everyone.
+
+`cors` does not answer preflights: an `OPTIONS` request runs no route middleware. A route called from another origin with a JSON body or a token header needs one, so declare a [CORS policy](./routing.md#cors-for-api-routes) on it (`.cors()`, or `cors` on its router) instead; gemi answers the preflight from it.
+
 `cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
 
 ### `same-site-bounce` → `SameSiteBounceMiddleware`

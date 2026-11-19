@@ -2098,6 +2098,50 @@ routes = {
 };
 ```
 
+### CORS for API routes
+
+An api route answers browsers on other origins only when it says so. Declare a CORS policy on the route with `.cors()`, or on a router with `cors`, which covers every route in it and in the routers it mounts. gemi has no app-wide CORS default.
+
+```typescript
+class WidgetApiRouter extends ApiRouter {
+  cors = { origins: "*", headers: ["content-type", "x-widget-token"] };
+  middlewares = ["widget-token"]; // checks the signed token, see below
+  routes = {
+    "/messages": this.post(WidgetController, "send"),
+    "/chat": this.agent(WidgetChatController),
+    "/admin": this.post(WidgetController, "admin").cors(false), // no CORS here
+  };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/widget": WidgetApiRouter,
+    "/account": this.post(AccountController, "update").cors({
+      origins: ["https://shop.example"],
+      credentials: true,
+    }),
+  };
+}
+```
+
+With a policy:
+
+- gemi answers the route's preflight (`OPTIONS` with `Access-Control-Request-Method`) itself, before any middleware runs, since a preflight carries no credentials. It allows the methods the path answers under the policy (or `methods`), the request headers in `headers` (default `["content-type"]`), and caches for `maxAge` seconds (default 600). A preflight asking for an origin, method or header the policy does not allow gets a `204` without CORS headers, so the browser never sends the request.
+- Every response from the route carries the headers: the handler's, a middleware's refusal (`401`, `413`, `429`), a policy denial and a `404` for a missing record, so the page can read the status. A `500` from an uncaught error is rendered by the server without them.
+- `origins: "*"` answers `Access-Control-Allow-Origin: *`. An exact origin or a list of them (`"https://shop.example"`, scheme, host and port only) echoes the matching one with `Vary: Origin`. `exposeHeaders` lists the response headers the page may read.
+- `credentials: true` sends `Access-Control-Allow-Credentials: true`, so the browser sends cookies and the page may read the answer. It is accepted only with a list of exact origins.
+- A route's `.cors()` replaces its router's policy, a nested router's `cors` replaces its parent's, and `false` turns it off (`.cors(false)`, `cors = false`). Setting it on the root router covers every app route, so prefer the router that groups the routes you mean. A policy that cannot be answered safely (credentials with `"*"` or `"null"`, a URL with a path in `origins`) throws when the routes are built.
+- The route's policy decides its CORS headers: a [`cors` middleware](./middleware.md#cors--corsmiddleware) on the same route cannot add credentials it does not allow.
+- A [global middleware](./middleware.md#global-middleware) runs before the router, preflights included, so one that refuses requests without a credential has to let `OPTIONS` through.
+
+#### `Origin: null` and sandboxed frames
+
+A page in a sandboxed frame (`<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a document sent with `Content-Security-Policy: sandbox`), a `file:` page and some cross-origin redirects send `Origin: null`. `origins: "*"` admits it, and so does `"null"` in a list, which is echoed back as `null`.
+
+Credentials are never allowed for `null`. Any site can put its own page in a sandboxed frame and send `Origin: null`, so a cookie-bearing answer to `null` is an answer to every site. A policy with `credentials: true` cannot list `"null"`, and a request from `null` never gets `Access-Control-Allow-Credentials`. A sandboxed frame usually has no cookies to send anyway: its origin is opaque, so it is third-party to every site.
+
+A widget in such a frame authenticates with a token instead: a short-lived value your server signed (an HMAC of a visitor id and an expiry, or a JWT) and handed to the frame in its URL or by `postMessage`, sent in a header the policy lists (`x-widget-token`, `authorization`) or in the body, and checked by a middleware on the routes. Treat the route as reachable from any site: the token, not the origin, is the access check.
+
 ### Nesting API routers
 
 A route value can be **another `ApiRouter` class**. The key becomes a path prefix for every route inside the nested router:
@@ -2468,6 +2512,7 @@ export default defineRouteConfig({
 | `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.assetCors` | `boolean` (default `false`) | `true`: the build's files under `/assets` are sent with `Access-Control-Allow-Origin: *` on the group's hosts, so the group's views can hydrate in a sandboxed frame. See [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
@@ -2788,13 +2833,18 @@ export default class ShopViewRouter extends ViewRouter {
   build has no file for reaches the routes. A missing `/assets/*.js` (or
   `.mjs`) keeps gemi's [reload stub](./configuration.md) for a chunk of
   another release, so a route there is never reached.
-- Both are view config, so a group inherits the root `view`'s value unless it
+- `assetCors: true` sends the build's files under `/assets` with
+  `Access-Control-Allow-Origin: *` on the group's hosts, for views embedded in
+  a sandboxed frame or loaded from another origin. A route under `/assets`
+  keeps its own headers. See
+  [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+- All three are view config, so a group inherits the root `view`'s value unless it
   sets its own, and a group that brings no `view` serves what the root does.
   A custom domain is served as its `custom.group`.
 - Other paths, `/image/*` for one, were never reserved: a group's routes
   answer them as they answer any path.
 - The host is resolved for a static file request only when some group sets
-  either option differently from the root, and only for a path that needs
+  one of these options differently from the root, and only for a path that needs
   it. The resolution is reused by the route that answers.
 
 ## Development
@@ -3453,6 +3503,10 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
   origins: { "*": { "Access-Control-Allow-Methods": "POST" } },
 }),
 ```
+
+`Origin: null` (a sandboxed frame, a `file:` page) matches a `"null"` key or `"*"`, and never gets `Access-Control-Allow-Credentials`: any site can send it, so credentials for it would be credentials for everyone.
+
+`cors` does not answer preflights: an `OPTIONS` request runs no route middleware. A route called from another origin with a JSON body or a token header needs one, so declare a [CORS policy](./routing.md#cors-for-api-routes) on it (`.cors()`, or `cors` on its router) instead; gemi answers the preflight from it.
 
 `cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
 
@@ -5797,6 +5851,28 @@ lazily stays lazy. Dynamic imports inside `node_modules` (a library's own lazy
 pieces) are left out. It applies to `"eager"` islands only, since a lazy
 island announces nothing up front, and changes nothing in hydrated views or in
 dev.
+
+### Embedding in a sandboxed frame
+
+A static view can run inside a sandboxed frame on another site, as a widget: an `<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a frame inside a document sent with `Content-Security-Policy: sandbox`. The sandbox carries down to nested frames, so the view's own frame has an opaque origin too. The browser then loads the view's islands, their chunks and its fonts as cross-origin CORS requests with `Origin: null`, and without `Access-Control-Allow-Origin` on them the page stays server-rendered only.
+
+Set `assetCors: true` on the views that are embedded, the root `view` or a [`route.domains` group's](./domains.md#static-files-on-a-groups-hosts) `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: "widgets", view: { rootRouter: WidgetViewRouter, assetCors: true } },
+  ],
+},
+```
+
+- On those hosts, `gemi start` sends `Access-Control-Allow-Origin: *` with the build's files under `/assets` (and with files from `GEMI_ASSET_FALLBACK_URL`). Never with a route, a document, view data or a `public/` file, and never with `Access-Control-Allow-Credentials`.
+- It is off by default. The files are public, immutable and carry no credentials, so `*` is safe for a public app, but it lets script on any website read the client bundle, which matters for an app on a private network. Turn it on only for the hosts that are embedded.
+- In `gemi dev`, the scripts gemi serves itself (`/refresh.js`, the dev entry) always allow any origin: they are fixed snippets with nothing of the app in them. Vite serves the rest; allow them with `vite: { server: { cors: true } }` in `gemi.config.ts`.
+- With an [`assetBase`](./configuration.md) on a CDN, the CDN has to send the header.
+- The widget's api calls come from `Origin: null` as well. Give those routes a [CORS policy](./routing.md#cors-for-api-routes) and authenticate them with a signed token, not cookies: see [`Origin: null` and sandboxed frames](./routing.md#origin-null-and-sandboxed-frames).
 
 ### Content Security Policy
 
@@ -9681,9 +9757,12 @@ model GemiAgentThread {
   summaryLockUntil BigInt? @map("summary_lock_until")
   createdAt        BigInt  @map("created_at")
   updatedAt        BigInt  @map("updated_at")
+  expiresAt        BigInt? @map("expires_at")
+  ttlMs            BigInt? @map("ttl_ms")
 
   @@index([userId, updatedAt])
   @@index([scope, userId, updatedAt])
+  @@index([expiresAt])
   @@map("gemi_agent_threads")
 }
 
@@ -9766,6 +9845,50 @@ The setting is local to the transaction, so nothing is left on the pooled connec
 ### Adding scopes to existing tables
 
 Tables created before scopes keep working for the unscoped store. To use `forScope`, add the column: with Prisma, add the `scope` fields and the index from the models above and run `prisma migrate dev`. Without Prisma, `await agentStore.addScopeColumns()` (also run by `createTable()`) adds them to tables that do not have them yet. Threads written before are in no scope: the unscoped store sees them and no scope does, until the app sets their `scope` itself.
+
+### Adding expiry to existing tables
+
+Threads expire only on a store with `ttlMs` (see below), and only that store reads the `expires_at` and `ttl_ms` columns, so tables created before them keep working until you set it. To use it, add the `expiresAt` and `ttlMs` fields and the `@@index([expiresAt])` from the model above and run `prisma migrate dev`. Without Prisma, `await agentStore.addExpiryColumns()` (also run by `createTable()`) adds them. Threads written before have no expiry.
+
+## Expiring threads
+
+Some conversations should only be kept for a short time, such as an anonymous visitor's chat that holds a photo and lasts as long as the visitor's signed token. Give the store a `ttlMs` and its threads expire:
+
+```ts
+export const visitorChats = new DatabaseAgentStore(app(DatabaseManager).connection(), {
+  ttlMs: 60 * 60_000, // an hour from creation
+});
+
+const { threadId } = await visitorChats.createThread({});
+await visitorChats.createThread({ ttlMs: 10 * 60_000 }); // this thread's own
+await visitorChats.createThread({ expiresAt: token.expiresAt }); // a fixed time: epoch ms or a Date
+await visitorChats.createThread({ ttlMs: null }); // kept until deleted
+```
+
+- **An expired thread is gone at once.** `loadThread` and `getThread` answer `null`, so the controller answers 404 and runs no turn on it. `listThreads` leaves it out, and `appendMessages` refuses it. The database's clock decides.
+- **Fixed by default.** The expiry is set when the thread is created. With `slidingTtl: true`, each append moves it to `ttlMs` from then, so the thread lasts as long as someone keeps writing to it. `expiresAt` never slides.
+- **The sweep reclaims the rows.** `sweepExpired({ limit })` deletes up to `limit` (500) expired threads with their messages and summaries, oldest first. Run it from a cron, next to [`sweepAttachments()`](./ai-controller-hooks.md#short-lived-attachments) for the files those threads held:
+
+```ts
+// app/cron/SweepVisitorChats.ts
+import { CronJob } from "gemi/services";
+
+export class SweepVisitorChats extends CronJob {
+  name = "SweepVisitorChats";
+  cron = CronJob.exp("*/10 * * * *");
+
+  async callback() {
+    await visitorChats.sweepExpired();
+    await new VisitorChatController().sweepAttachments();
+  }
+}
+```
+
+- A scoped view (`forScope`) sweeps its own scope. `getThread` and `listThreads` records carry `expiresAt` (`null` for a thread that does not expire).
+- A store without `ttlMs` expires nothing: `createThread({ ttlMs })` throws there, and `sweepExpired()` answers `{ deleted: 0 }`.
+- Expiry removes the thread, not what it led to: agent memories scoped to it and attachments are deleted by their own rules.
+
+`MemoryAgentStore` takes the same `createThread({ ttlMs, expiresAt })` and has `sweepExpired()` too, for tests. Its `ttlMs` (a day by default) slides with every read and write unless `slidingTtl: false`.
 
 ## Listing and deleting threads
 
@@ -11834,8 +11957,20 @@ export class StoreChatController extends AgentController<typeof storeAgent, Stor
 Run the sweep from a cron. It also deletes `"turn"` files whose turn never completed, for example after a restart:
 
 ```typescript
-Cron.everyFiveMinutes(() => new StoreChatController().sweepAttachments());
+// app/cron/SweepChatAttachments.ts
+import { CronJob } from "gemi/services";
+
+export class SweepChatAttachments extends CronJob {
+  name = "SweepChatAttachments";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    await new StoreChatController().sweepAttachments();
+  }
+}
 ```
+
+A store with [expiring threads](./ai-thread-store.md#expiring-threads) sweeps them the same way, with `store.sweepExpired()`.
 
 It answers `{ deleted, failed }`. A deletion that fails, in a turn or in the sweep, goes to `reportHookFailure`, and its record stays so the next sweep tries again. A missing `deleteFile` on the provider or `delete` on storage counts as a failure, because skipping a copy would leave it in place unnoticed.
 

@@ -14,7 +14,11 @@ import { AgentController, MemoryLiveRuns } from "../AgentController";
 import type { ThreadSummary } from "../contextCompaction";
 import { fakeProvider } from "../providers/fakeProvider";
 import type { AgentMessage } from "../types";
-import { createAgentStoreTableStatements, DatabaseAgentStore } from "./DatabaseAgentStore";
+import {
+  createAgentStoreTableStatements,
+  DatabaseAgentStore,
+  type DatabaseAgentStoreOptions,
+} from "./DatabaseAgentStore";
 
 /**
  * The database thread store (#1063), against SQLite always and against
@@ -28,7 +32,7 @@ const MYSQL_URL = process.env.TEST_MYSQL_URL;
 type Database = {
   dialect: Dialect;
   connect(): SQL;
-  store(sql?: SQL, name?: string): DatabaseAgentStore;
+  store(sql?: SQL, name?: string, options?: DatabaseAgentStoreOptions): DatabaseAgentStore;
   dispose(): Promise<void>;
 };
 
@@ -50,8 +54,8 @@ function database(
       return client;
     };
     const first = connect();
-    const store = (sql = first, name?: string) =>
-      new DatabaseAgentStore({ sql, dialect, ...(name ? { name } : {}) }, tables);
+    const store = (sql = first, name?: string, options: DatabaseAgentStoreOptions = {}) =>
+      new DatabaseAgentStore({ sql, dialect, ...(name ? { name } : {}) }, { ...tables, ...options });
     await store().createTable();
     return {
       dialect,
@@ -371,6 +375,172 @@ for (const backend of backends) {
       expect(thread!.map((m) => m.role)).toEqual(["user", "assistant"]);
       expect(thread![1]!.content).toEqual([{ type: "text", text: "hello" }]);
       expect((await store.getThread(threadId))!.title).toBe("hi there");
+    });
+
+    // --- expiring threads (#1312) ----------------------------------------
+
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const rowCount = async (table: string, threadId: string, column = "id") => {
+      const quoted = db.dialect === "mysql" || db.dialect === "mariadb" ? `\`${table}\`` : `"${table}"`;
+      const rows = (await db.connect().unsafe(
+        `SELECT COUNT(*) AS n FROM ${quoted} WHERE ${column} = '${threadId}'`,
+      )) as { n: number | string }[];
+      return Number(rows[0]!.n);
+    };
+
+    test("an expired thread is one the store does not have, until the sweep deletes its rows", async () => {
+      const expiring = db.store(undefined, undefined, { ttlMs: 60_000 });
+      const kept = await expiring.createThread({ userId: 1 });
+      const gone = await expiring.createThread({ userId: 1, ttlMs: 150 });
+      await expiring.appendMessages(gone.threadId, [message("u1", "user", "photo")]);
+      await expiring.saveSummary(gone.threadId, summary("u1"));
+      expect(await expiring.loadThread(gone.threadId)).toHaveLength(1);
+
+      const record = (await expiring.getThread(kept.threadId))!;
+      expect(record.expiresAt).toBeGreaterThanOrEqual(record.createdAt + 59_000);
+      expect(record.expiresAt).toBeLessThanOrEqual(record.createdAt + 61_000);
+
+      await sleep(300);
+      expect(await expiring.loadThread(gone.threadId)).toBeNull();
+      expect(await expiring.getThread(gone.threadId)).toBeNull();
+      expect(await expiring.loadSummaries(gone.threadId)).toEqual([]);
+      expect(await expiring.lockSummary(gone.threadId, "u1", 1000)).toBeNull();
+      await expect(expiring.appendMessages(gone.threadId, [message("u2", "user", "late")])).rejects.toThrow(/does not exist/);
+      expect((await expiring.listThreads({ userId: 1 })).map((t) => t.id)).toEqual([kept.threadId]);
+      // Unreadable, but the rows are there until the sweep.
+      expect(await rowCount(expiring.messagesTable, gone.threadId, "thread_id")).toBe(1);
+
+      expect(await expiring.sweepExpired()).toEqual({ deleted: 1 });
+      expect(await rowCount(expiring.threadsTable, gone.threadId)).toBe(0);
+      expect(await rowCount(expiring.messagesTable, gone.threadId, "thread_id")).toBe(0);
+      expect(await expiring.loadThread(kept.threadId)).toEqual([]);
+      expect(await expiring.sweepExpired()).toEqual({ deleted: 0 });
+    });
+
+    test("a fixed expiry stays put on append; a sliding one moves with it", async () => {
+      const fixed = db.store(undefined, undefined, { ttlMs: 700 });
+      const sliding = db.store(undefined, undefined, { ttlMs: 700, slidingTtl: true });
+      const a = await fixed.createThread({});
+      const b = await sliding.createThread({});
+      await sleep(450);
+      await fixed.appendMessages(a.threadId, [message("u1", "user", "hi")]);
+      await sliding.appendMessages(b.threadId, [message("u1", "user", "hi")]);
+      await sleep(450);
+      // 900 ms after creation, 450 after the append.
+      expect(await fixed.loadThread(a.threadId)).toBeNull();
+      expect(await sliding.loadThread(b.threadId)).toHaveLength(1);
+    });
+
+    test("expiresAt is fixed, ttlMs: null keeps a thread, and now stands in for the clock", async () => {
+      const expiring = db.store(undefined, undefined, { ttlMs: 60_000, slidingTtl: true });
+      const at = Date.now() + 120_000;
+      const dated = await expiring.createThread({ expiresAt: new Date(at) });
+      const forever = await expiring.createThread({ ttlMs: null });
+      const usual = await expiring.createThread({});
+      await expiring.appendMessages(dated.threadId, [message("u1", "user", "x")]);
+      expect((await expiring.getThread(dated.threadId))!.expiresAt).toBe(at);
+      expect((await expiring.getThread(forever.threadId))!.expiresAt).toBeNull();
+
+      expect(await expiring.sweepExpired({ now: Date.now() + 90_000 })).toEqual({ deleted: 1 });
+      expect(await expiring.getThread(usual.threadId)).toBeNull();
+      expect(await expiring.sweepExpired({ now: Date.now() + 10 * 365 * 86_400_000 })).toEqual({ deleted: 1 });
+      expect(await expiring.getThread(dated.threadId)).toBeNull();
+      expect(await expiring.getThread(forever.threadId)).not.toBeNull();
+    });
+
+    test("the sweep takes at most limit threads, and a scope sweeps its own", async () => {
+      const expiring = db.store(undefined, undefined, { ttlMs: 60_000 });
+      const later = Date.now() + 120_000;
+      for (let i = 0; i < 3; i++) await expiring.forScope("a").createThread({});
+      const other = await expiring.forScope("b").createThread({});
+      expect(await expiring.forScope("a").sweepExpired({ now: later, limit: 2 })).toEqual({ deleted: 2 });
+      expect(await expiring.forScope("a").sweepExpired({ now: later })).toEqual({ deleted: 1 });
+      expect(await expiring.forScope("b").getThread(other.threadId)).not.toBeNull();
+      expect(await expiring.sweepExpired({ now: later })).toEqual({ deleted: 1 });
+    });
+
+    test("without ttlMs nothing expires, and a thread's own expiry is refused", async () => {
+      await expect(store.createThread({ ttlMs: 1000 })).rejects.toThrow(/needs a store with `ttlMs`/);
+      await expect(store.createThread({ expiresAt: Date.now() })).rejects.toThrow(/needs a store with `ttlMs`/);
+      const { threadId } = await store.createThread({});
+      expect(await store.sweepExpired({ now: Date.now() + 10 ** 12 })).toEqual({ deleted: 0 });
+      expect(await store.getThread(threadId)).not.toHaveProperty("expiresAt");
+      expect(() => db.store(undefined, undefined, { ttlMs: 0 })).toThrow(/positive/);
+      const expiring = db.store(undefined, undefined, { ttlMs: 1000 });
+      await expect(expiring.createThread({ ttlMs: -5 })).rejects.toThrow(/positive/);
+    });
+
+    test("an AgentController turn on an expired thread is a 404 and runs nothing", async () => {
+      const expiring = db.store(undefined, undefined, { ttlMs: 60_000 });
+      const agent = Agent.create({
+        name: "chat",
+        provider: fakeProvider([
+          { type: "finish", reason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        ]),
+      });
+      class Chat extends AgentController {
+        agent = agent;
+        store = expiring;
+        liveRuns = new MemoryLiveRuns();
+      }
+      const { threadId } = await expiring.createThread({ expiresAt: Date.now() - 1000 });
+      const request = new HttpRequest(
+        new Request("http://localhost/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId, text: "hi" }),
+        }),
+        {},
+        "api",
+        "/chat",
+      );
+      const response = await new Chat().stream(request);
+      expect(response.status).toBe(404);
+      // Nothing was written under the dead id.
+      expect(await rowCount(expiring.messagesTable, threadId, "thread_id")).toBe(0);
+      expect(await new Chat().readThread(threadId)).toBeNull();
+    });
+
+    test("tables made before expiry keep working, and addExpiryColumns brings them up to date", async () => {
+      const quote = (table: string) =>
+        db.dialect === "mysql" || db.dialect === "mariadb" ? `\`${table}\`` : `"${table}"`;
+      const sql = db.connect();
+      const threadsTable = `PreExpiryThreads_${suffix()}`;
+      const messagesTable = `PreExpiryMessages_${suffix()}`;
+      // The tables as they were: the same DDL without the expiry columns and index.
+      for (const statement of createAgentStoreTableStatements(db.dialect, threadsTable, messagesTable)) {
+        if (statement.includes("expires_at_idx\" ON")) continue;
+        await sql.unsafe(
+          statement
+            .split("\n")
+            .filter((line) => !/[`"](expires_at|ttl_ms)[`"]|expires_at_idx/.test(line))
+            .join("\n")
+            .replace(/,(\s*\))/, "$1"),
+        );
+      }
+      try {
+        const legacy = new DatabaseAgentStore({ sql, dialect: db.dialect }, { threadsTable, messagesTable });
+        const old = await legacy.createThread({});
+        await legacy.appendMessages(old.threadId, [message("u1", "user", "before")]);
+        expect(await legacy.loadThread(old.threadId)).toHaveLength(1);
+
+        await legacy.addExpiryColumns();
+        await legacy.addExpiryColumns(); // again: nothing to do
+        const migrated = new DatabaseAgentStore(
+          { sql: db.connect(), dialect: db.dialect },
+          { threadsTable, messagesTable, ttlMs: 60_000 },
+        );
+        const fresh = await migrated.createThread({});
+        await migrated.appendMessages(fresh.threadId, [message("u1", "user", "after")]);
+        expect(await migrated.loadThread(fresh.threadId)).toHaveLength(1);
+        // A thread from before has no expiry.
+        expect((await migrated.getThread(old.threadId))!.expiresAt).toBeNull();
+        expect(await migrated.sweepExpired({ now: Date.now() + 120_000 })).toEqual({ deleted: 1 });
+        expect(await migrated.loadThread(old.threadId)).toHaveLength(1);
+      } finally {
+        await sql.unsafe(`DROP TABLE IF EXISTS ${quote(messagesTable)}`);
+        await sql.unsafe(`DROP TABLE IF EXISTS ${quote(threadsTable)}`);
+      }
     });
 
     // --- scopes (#1177) ----------------------------------------------------
