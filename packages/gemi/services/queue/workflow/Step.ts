@@ -5,6 +5,7 @@ import { type BatchStatus, clampProgress } from "../batch";
 import type { EnqueueBatch } from "../QueueDriver";
 import type { Job } from "../Job";
 import { type Duration, toMilliseconds } from "./duration";
+import { type ItemSourceInput, type SourceRef, sourceReader, writeSource } from "./ItemSource";
 import {
   type ItemChange,
   type ItemRecord,
@@ -83,21 +84,36 @@ export type ItemContext = StepContext & {
   skip(reason: string, data?: unknown): never;
 };
 
-export type StepEachOptions<I> = {
-  /**
-   * How many items there are. Stored when the step first runs; a later pass
-   * that computes another number goes on with the stored one.
-   */
-  count: number;
-  /**
-   * The transformer: produces the input for `index`, from 0 to `count - 1`.
-   * Called once per attempt of that item, and never for the whole list at
-   * once, so the list does not have to fit in memory. It must give the same
-   * input for the same index for as long as the step runs (read it from a
-   * table, a file or a snapshot of ids, not from a query whose order moves).
-   * A throw counts as a failed attempt of the item.
-   */
-  item(index: number): I | Promise<I>;
+/** Where `step.each` takes its items from: a count and a transformer, or a stored source. */
+export type StepEachInput<I> =
+  | {
+      /**
+       * How many items there are. Stored when the step first runs; a later pass
+       * that computes another number goes on with the stored one.
+       */
+      count: number;
+      /**
+       * The transformer: produces the input for `index`, from 0 to `count - 1`.
+       * Called once per attempt of that item, and never for the whole list at
+       * once, so the list does not have to fit in memory. It must give the same
+       * input for the same index for as long as the step runs (read it from a
+       * table, a file or a snapshot of ids, not from a query whose order moves).
+       * A throw counts as a failed attempt of the item.
+       */
+      item(index: number): I | Promise<I>;
+      source?: never;
+    }
+  | {
+      /**
+       * A stored list (`step.source`, `ItemSource.write`): its items, in order,
+       * read a window at a time.
+       */
+      source: SourceRef<I>;
+      count?: never;
+      item?: never;
+    };
+
+export type StepEachOptions<I> = StepEachInput<I> & {
   /**
    * The item's identity, from 1 to 191 characters: the last part of
    * `ctx.idempotencyKey`. Default: the index. gemi does not check that two
@@ -357,6 +373,32 @@ export class Step {
     fn: (input: I, ctx: ItemContext) => unknown,
   ): Promise<EachSummary> {
     return this.track(key, () => this.eachStep(key, options, fn));
+  }
+
+  /**
+   * Writes the list `fn` returns (an array, or any iterable or async
+   * iterable, such as a parser over an uploaded file's stream) to an item
+   * source, once, and returns it for `step.each({ source })`. The items are
+   * written as they come, so a long list is never held in memory, and kept
+   * until the workflow is pruned. A step like `step.run`: a write that fails
+   * part way is written again from the start.
+   *
+   * ```ts
+   * const rows = await step.source("rows", async () => parseRows(await Storage.read(file)));
+   * const summary = await step.each("import", { source: rows, concurrency: 4 }, importRow);
+   * ```
+   */
+  source<T>(
+    key: string,
+    fn: () => ItemSourceInput<T> | Promise<ItemSourceInput<T>>,
+    options: Pick<StepRunOptions, "attempts" | "backoff" | "timeout"> = {},
+  ): Promise<SourceRef<T>> {
+    const id = `${this.workflowId}:${key}`;
+    return this.run(
+      key,
+      async () => writeSource(this.tick.store, id, await fn(), this.workflowId),
+      options,
+    ) as Promise<SourceRef<T>>;
   }
 
   /**
@@ -757,7 +799,11 @@ export class Step {
     options: StepEachOptions<I>,
     fn: (input: I, ctx: ItemContext) => unknown,
   ): Promise<EachSummary> {
-    const count = options.count;
+    const source = options.source;
+    const count = source ? source.count : options.count;
+    if (!source && typeof options.item !== "function") {
+      throw new TypeError(`step.each "${key}" needs either { count, item } or { source }.`);
+    }
     if (!Number.isSafeInteger(count) || count < 0 || count > MAX_EACH_COUNT) {
       throw new TypeError(
         `step.each "${key}" needs a count that is a whole number from 0 to ` +
@@ -771,6 +817,9 @@ export class Step {
       options.tickBudget === undefined ? EACH_TICK_BUDGET_MS : toMilliseconds(options.tickBudget);
     const setsProgress = options.progress !== false;
     const store = this.tick.store;
+    const produce: (index: number) => I | Promise<I> = source
+      ? sourceReader(store, source, Math.max(EACH_SOURCE_WINDOW, concurrency * 4))
+      : options.item!;
     if (!store.listItems) {
       throw new Error(
         `This queue's workflow store does not support step.each. The memory and ` +
@@ -858,7 +907,7 @@ export class Step {
         }
       });
       const work = (async () => {
-        const input = await options.item(row.index);
+        const input = await produce(row.index);
         itemKey = itemKeyOf(options.key ? options.key(input, row.index) : row.index);
         const context: ItemContext = {
           idempotencyKey: `${this.workflowId}:${key}:${itemKey}`,
@@ -1178,6 +1227,8 @@ const EACH_TICK_BUDGET_MS = 30_000;
 const EACH_RETRY_WINDOW = 100;
 /** A retry due sooner than this is waited for in the tick. */
 const EACH_SHORT_WAIT_MS = 1_000;
+/** How many items of a source `step.each` reads at a time, at least. */
+const EACH_SOURCE_WINDOW = 64;
 /** How many problems the summary carries. */
 const EACH_SUMMARY_PROBLEMS = 100;
 

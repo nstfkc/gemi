@@ -220,6 +220,12 @@ export {
 } from "./queue/workflow/Workflow";
 export { workflowEnded } from "./queue/workflow/wire";
 export {
+  ItemSource,
+  ITEM_SOURCE_ITEM_LIMIT,
+  type ItemSourceInput,
+  type SourceRef,
+} from "./queue/workflow/ItemSource";
+export {
   Step,
   StepFailedError,
   StepTimeoutError,
@@ -231,6 +237,7 @@ export {
   type ItemContext,
   type StepBatchOptions,
   type StepContext,
+  type StepEachInput,
   type StepEachOptions,
   type StepRunOptions,
   type StepWaitOptions,

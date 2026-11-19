@@ -252,6 +252,50 @@ routes = {
 };
 ```
 
+### CORS for API routes
+
+An api route answers browsers on other origins only when it says so. Declare a CORS policy on the route with `.cors()`, or on a router with `cors`, which covers every route in it and in the routers it mounts. gemi has no app-wide CORS default.
+
+```typescript
+class WidgetApiRouter extends ApiRouter {
+  cors = { origins: "*", headers: ["content-type", "x-widget-token"] };
+  middlewares = ["widget-token"]; // checks the signed token, see below
+  routes = {
+    "/messages": this.post(WidgetController, "send"),
+    "/chat": this.agent(WidgetChatController),
+    "/admin": this.post(WidgetController, "admin").cors(false), // no CORS here
+  };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/widget": WidgetApiRouter,
+    "/account": this.post(AccountController, "update").cors({
+      origins: ["https://shop.example"],
+      credentials: true,
+    }),
+  };
+}
+```
+
+With a policy:
+
+- gemi answers the route's preflight (`OPTIONS` with `Access-Control-Request-Method`) itself, before any middleware runs, since a preflight carries no credentials. It allows the methods the path answers under the policy (or `methods`), the request headers in `headers` (default `["content-type"]`), and caches for `maxAge` seconds (default 600). A preflight asking for an origin, method or header the policy does not allow gets a `204` without CORS headers, so the browser never sends the request.
+- Every response from the route carries the headers: the handler's, a middleware's refusal (`401`, `413`, `429`), a policy denial and a `404` for a missing record, so the page can read the status. A `500` from an uncaught error is rendered by the server without them.
+- `origins: "*"` answers `Access-Control-Allow-Origin: *`. An exact origin or a list of them (`"https://shop.example"`, scheme, host and port only) echoes the matching one with `Vary: Origin`. `exposeHeaders` lists the response headers the page may read.
+- `credentials: true` sends `Access-Control-Allow-Credentials: true`, so the browser sends cookies and the page may read the answer. It is accepted only with a list of exact origins.
+- A route's `.cors()` replaces its router's policy, a nested router's `cors` replaces its parent's, and `false` turns it off (`.cors(false)`, `cors = false`). Setting it on the root router covers every app route, so prefer the router that groups the routes you mean. A policy that cannot be answered safely (credentials with `"*"` or `"null"`, a URL with a path in `origins`) throws when the routes are built.
+- The route's policy decides its CORS headers: a [`cors` middleware](./middleware.md#cors--corsmiddleware) on the same route cannot add credentials it does not allow.
+- A [global middleware](./middleware.md#global-middleware) runs before the router, preflights included, so one that refuses requests without a credential has to let `OPTIONS` through.
+
+#### `Origin: null` and sandboxed frames
+
+A page in a sandboxed frame (`<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a document sent with `Content-Security-Policy: sandbox`), a `file:` page and some cross-origin redirects send `Origin: null`. `origins: "*"` admits it, and so does `"null"` in a list, which is echoed back as `null`.
+
+Credentials are never allowed for `null`. Any site can put its own page in a sandboxed frame and send `Origin: null`, so a cookie-bearing answer to `null` is an answer to every site. A policy with `credentials: true` cannot list `"null"`, and a request from `null` never gets `Access-Control-Allow-Credentials`. A sandboxed frame usually has no cookies to send anyway: its origin is opaque, so it is third-party to every site.
+
+A widget in such a frame authenticates with a token instead: a short-lived value your server signed (an HMAC of a visitor id and an expiry, or a JWT) and handed to the frame in its URL or by `postMessage`, sent in a header the policy lists (`x-widget-token`, `authorization`) or in the body, and checked by a middleware on the routes. Treat the route as reachable from any site: the token, not the origin, is the access check.
+
 ### Nesting API routers
 
 A route value can be **another `ApiRouter` class**. The key becomes a path prefix for every route inside the nested router:

@@ -2098,6 +2098,50 @@ routes = {
 };
 ```
 
+### CORS for API routes
+
+An api route answers browsers on other origins only when it says so. Declare a CORS policy on the route with `.cors()`, or on a router with `cors`, which covers every route in it and in the routers it mounts. gemi has no app-wide CORS default.
+
+```typescript
+class WidgetApiRouter extends ApiRouter {
+  cors = { origins: "*", headers: ["content-type", "x-widget-token"] };
+  middlewares = ["widget-token"]; // checks the signed token, see below
+  routes = {
+    "/messages": this.post(WidgetController, "send"),
+    "/chat": this.agent(WidgetChatController),
+    "/admin": this.post(WidgetController, "admin").cors(false), // no CORS here
+  };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/widget": WidgetApiRouter,
+    "/account": this.post(AccountController, "update").cors({
+      origins: ["https://shop.example"],
+      credentials: true,
+    }),
+  };
+}
+```
+
+With a policy:
+
+- gemi answers the route's preflight (`OPTIONS` with `Access-Control-Request-Method`) itself, before any middleware runs, since a preflight carries no credentials. It allows the methods the path answers under the policy (or `methods`), the request headers in `headers` (default `["content-type"]`), and caches for `maxAge` seconds (default 600). A preflight asking for an origin, method or header the policy does not allow gets a `204` without CORS headers, so the browser never sends the request.
+- Every response from the route carries the headers: the handler's, a middleware's refusal (`401`, `413`, `429`), a policy denial and a `404` for a missing record, so the page can read the status. A `500` from an uncaught error is rendered by the server without them.
+- `origins: "*"` answers `Access-Control-Allow-Origin: *`. An exact origin or a list of them (`"https://shop.example"`, scheme, host and port only) echoes the matching one with `Vary: Origin`. `exposeHeaders` lists the response headers the page may read.
+- `credentials: true` sends `Access-Control-Allow-Credentials: true`, so the browser sends cookies and the page may read the answer. It is accepted only with a list of exact origins.
+- A route's `.cors()` replaces its router's policy, a nested router's `cors` replaces its parent's, and `false` turns it off (`.cors(false)`, `cors = false`). Setting it on the root router covers every app route, so prefer the router that groups the routes you mean. A policy that cannot be answered safely (credentials with `"*"` or `"null"`, a URL with a path in `origins`) throws when the routes are built.
+- The route's policy decides its CORS headers: a [`cors` middleware](./middleware.md#cors--corsmiddleware) on the same route cannot add credentials it does not allow.
+- A [global middleware](./middleware.md#global-middleware) runs before the router, preflights included, so one that refuses requests without a credential has to let `OPTIONS` through.
+
+#### `Origin: null` and sandboxed frames
+
+A page in a sandboxed frame (`<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a document sent with `Content-Security-Policy: sandbox`), a `file:` page and some cross-origin redirects send `Origin: null`. `origins: "*"` admits it, and so does `"null"` in a list, which is echoed back as `null`.
+
+Credentials are never allowed for `null`. Any site can put its own page in a sandboxed frame and send `Origin: null`, so a cookie-bearing answer to `null` is an answer to every site. A policy with `credentials: true` cannot list `"null"`, and a request from `null` never gets `Access-Control-Allow-Credentials`. A sandboxed frame usually has no cookies to send anyway: its origin is opaque, so it is third-party to every site.
+
+A widget in such a frame authenticates with a token instead: a short-lived value your server signed (an HMAC of a visitor id and an expiry, or a JWT) and handed to the frame in its URL or by `postMessage`, sent in a header the policy lists (`x-widget-token`, `authorization`) or in the body, and checked by a middleware on the routes. Treat the route as reachable from any site: the token, not the origin, is the access check.
+
 ### Nesting API routers
 
 A route value can be **another `ApiRouter` class**. The key becomes a path prefix for every route inside the nested router:
@@ -2468,6 +2512,7 @@ export default defineRouteConfig({
 | `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.assetCors` | `boolean` (default `false`) | `true`: the build's files under `/assets` are sent with `Access-Control-Allow-Origin: *` on the group's hosts, so the group's views can hydrate in a sandboxed frame. See [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
@@ -2788,13 +2833,18 @@ export default class ShopViewRouter extends ViewRouter {
   build has no file for reaches the routes. A missing `/assets/*.js` (or
   `.mjs`) keeps gemi's [reload stub](./configuration.md) for a chunk of
   another release, so a route there is never reached.
-- Both are view config, so a group inherits the root `view`'s value unless it
+- `assetCors: true` sends the build's files under `/assets` with
+  `Access-Control-Allow-Origin: *` on the group's hosts, for views embedded in
+  a sandboxed frame or loaded from another origin. A route under `/assets`
+  keeps its own headers. See
+  [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+- All three are view config, so a group inherits the root `view`'s value unless it
   sets its own, and a group that brings no `view` serves what the root does.
   A custom domain is served as its `custom.group`.
 - Other paths, `/image/*` for one, were never reserved: a group's routes
   answer them as they answer any path.
 - The host is resolved for a static file request only when some group sets
-  either option differently from the root, and only for a path that needs
+  one of these options differently from the root, and only for a path that needs
   it. The resolution is reused by the route that answers.
 
 ## Development
@@ -3453,6 +3503,10 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
   origins: { "*": { "Access-Control-Allow-Methods": "POST" } },
 }),
 ```
+
+`Origin: null` (a sandboxed frame, a `file:` page) matches a `"null"` key or `"*"`, and never gets `Access-Control-Allow-Credentials`: any site can send it, so credentials for it would be credentials for everyone.
+
+`cors` does not answer preflights: an `OPTIONS` request runs no route middleware. A route called from another origin with a JSON body or a token header needs one, so declare a [CORS policy](./routing.md#cors-for-api-routes) on it (`.cors()`, or `cors` on its router) instead; gemi answers the preflight from it.
 
 `cors` also covers refusals. When a middleware before it in the chain refuses the request (a router's `rate-limit` 429, a `body-limit` 413, a `400` for a body that isn't JSON, an `auth` 401), `cors` still runs, and the refusal carries its headers. Without them the browser reports a network error and the page never sees the status. A refusal from the handler, or from a middleware after `cors`, already carried them. An error that becomes the server's `500` does not.
 
@@ -5797,6 +5851,28 @@ lazily stays lazy. Dynamic imports inside `node_modules` (a library's own lazy
 pieces) are left out. It applies to `"eager"` islands only, since a lazy
 island announces nothing up front, and changes nothing in hydrated views or in
 dev.
+
+### Embedding in a sandboxed frame
+
+A static view can run inside a sandboxed frame on another site, as a widget: an `<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a frame inside a document sent with `Content-Security-Policy: sandbox`. The sandbox carries down to nested frames, so the view's own frame has an opaque origin too. The browser then loads the view's islands, their chunks and its fonts as cross-origin CORS requests with `Origin: null`, and without `Access-Control-Allow-Origin` on them the page stays server-rendered only.
+
+Set `assetCors: true` on the views that are embedded, the root `view` or a [`route.domains` group's](./domains.md#static-files-on-a-groups-hosts) `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: "widgets", view: { rootRouter: WidgetViewRouter, assetCors: true } },
+  ],
+},
+```
+
+- On those hosts, `gemi start` sends `Access-Control-Allow-Origin: *` with the build's files under `/assets` (and with files from `GEMI_ASSET_FALLBACK_URL`). Never with a route, a document, view data or a `public/` file, and never with `Access-Control-Allow-Credentials`.
+- It is off by default. The files are public, immutable and carry no credentials, so `*` is safe for a public app, but it lets script on any website read the client bundle, which matters for an app on a private network. Turn it on only for the hosts that are embedded.
+- In `gemi dev`, the scripts gemi serves itself (`/refresh.js`, the dev entry) always allow any origin: they are fixed snippets with nothing of the app in them. Vite serves the rest; allow them with `vite: { server: { cors: true } }` in `gemi.config.ts`.
+- With an [`assetBase`](./configuration.md) on a CDN, the CDN has to send the header.
+- The widget's api calls come from `Origin: null` as well. Give those routes a [CORS policy](./routing.md#cors-for-api-routes) and authenticate them with a signed token, not cookies: see [`Origin: null` and sandboxed frames](./routing.md#origin-null-and-sandboxed-frames).
 
 ### Content Security Policy
 
@@ -22214,8 +22290,9 @@ How it runs:
 
 | Option | Description |
 | --- | --- |
-| `count` | How many items, from 0. Required. |
-| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required. |
+| `count` | How many items, from 0. Required, unless `source` is given. |
+| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required, unless `source` is given. |
+| `source` | A stored list (`step.source`, `ItemSource.write`), in place of `count` and `item`. See [item sources](#item-sources-stepsource-and-itemsource). |
 | `key(input, index)` | The item key, a string of 1 to 191 characters or a number. Default: the index. gemi does not check that keys are unique. |
 | `concurrency` | Items in flight at once, in the process running the tick. Default `1`. |
 | `attempts` | Attempts per item, counting the first. Default `3`. |
@@ -22234,6 +22311,42 @@ const next = await Workflow.items(workflowId, "rows", { status: "failed", after:
 ```
 
 Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got.
+
+### Item sources: `step.source` and `ItemSource`
+
+`item(index)` needs somewhere stable to read from. When the list is not already a table (the rows of an uploaded file, a snapshot of ids), keep it in an **item source**: a table of the queue's database that holds a list item by item, written as it is produced and read a window at a time.
+
+Inside a workflow, `step.source(key, fn)` writes the list `fn` returns (an array, or any iterable or async iterable, such as a parser over a stream) once, and `step.each` takes it as its `source` in place of `count` and `item`:
+
+```typescript
+async run(step: Step, importId: string, fileName: string) {
+  const rows = await step.source("rows", async () => parseRows((await Storage.read(fileName)).body));
+
+  return step.each("import", { source: rows, concurrency: 4, key: (row) => row.sku }, async (row, ctx) => {
+    await createProduct(row, ctx.idempotencyKey);
+  });
+}
+```
+
+- Items are written as they come, 500 per insert, so a long list is never held in memory. Each item is JSON, at most 64 KB (`ITEM_SOURCE_ITEM_LIMIT`); store a file's name for anything larger.
+- `step.source` is a step like `step.run` (same `attempts`, `backoff` and `timeout`): its result is the small `{ id, count }`, stored and replayed, and a write that fails part way is written again from the start. Its id is `<workflow id>:<key>`, and the source is deleted with the workflow when it is pruned.
+- `step.each({ source })` reads at least 64 items (or four times `concurrency`) per query, and an item read again for a retry alone.
+
+Outside a workflow, for example in the request that receives an upload, `ItemSource` does the same under an id of your choice:
+
+```typescript
+import { ItemSource } from "gemi/services";
+
+const rows = await ItemSource.write(`upload:${upload.id}`, parseRows(file.stream())); // { id, count }
+await ImportProductsWorkflow.start(upload.id, rows); // run: step.each("import", { source: rows }, …)
+
+await ItemSource.read(rows.id, 0);           // one item, or undefined
+await ItemSource.readRange(rows.id, 0, 20);  // a preview
+await ItemSource.delete(rows.id);            // when done with it
+await ItemSource.prune("7d");                // from a cron: sources of ItemSource.write older than a week
+```
+
+`ItemSource.write` replaces what was under the id. Sources it writes belong to no workflow: delete them, or prune them from a cron.
 
 ### `step.progress(value)`
 
@@ -22368,7 +22481,7 @@ model GemiWorkflowStep {
 }
 ```
 
-`step.each` also needs a third table for its item rows. A workflow that does not use `step.each` never touches it:
+`step.each` also needs a third table for its item rows, and item sources a fourth. A workflow that uses neither never touches them:
 
 ```prisma
 model GemiWorkflowItem {
@@ -22389,13 +22502,25 @@ model GemiWorkflowItem {
   @@id([workflowId, stepKey, index])
   @@map("gemi_workflow_items")
 }
+
+model GemiWorkflowSource {
+  sourceId   String  @map("source_id")
+  index      Int     @map("idx")
+  workflowId String? @map("workflow_id")
+  payload    String
+  createdAt  BigInt  @map("created_at")
+
+  @@id([sourceId, index])
+  @@index([workflowId])
+  @@map("gemi_workflow_sources")
+}
 ```
 
-On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, and to `error` and `output` of `GemiWorkflowItem`. Without Prisma, `await driver.createTable()` creates all three tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, to `error` and `output` of `GemiWorkflowItem`, and to `payload` of `GemiWorkflowSource`. Without Prisma, `await driver.createTable()` creates all four tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
 
-A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps` and `<table>_workflow_items`, or in the tables named by the `workflowTable`, `workflowStepTable` and `workflowItemTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps and items, for example from a cron job. The memory driver keeps ended workflows for a day.
+A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps`, `<table>_workflow_items` and `<table>_workflow_sources`, or in the tables named by the `workflowTable`, `workflowStepTable`, `workflowItemTable` and `workflowSourceTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps, items and `step.source` sources, for example from a cron job. The memory driver keeps ended workflows for a day.
 
-A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`.
+A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`, and item sources by implementing `writeSource`, `readSource`, `deleteSource` and `pruneSources`.
 
 ## Limits
 

@@ -196,6 +196,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
  * have no production counterpart, but a gate that must hold in dev as well,
  * one that refuses traffic without a header, is only complete if nothing the
  * dev server answers goes around it.
+ *
+ * Sent with `Access-Control-Allow-Origin: *` (#1311): a view in a sandboxed
+ * frame has an opaque origin, so its module scripts are CORS requests with
+ * `Origin: null`. These are fixed framework snippets with nothing of the app
+ * in them, so any origin may read them. The modules Vite serves follow
+ * `vite.server.cors` instead.
  */
 function devScript(req: Request): Response | null {
   const { pathname } = new URL(req.url);
@@ -203,6 +209,7 @@ function devScript(req: Request): Response | null {
     new Response(source, {
       headers: {
         "Content-Type": "application/javascript",
+        "Access-Control-Allow-Origin": "*",
       },
     });
   if (pathname === DEV_ENTRY_PATH) {
