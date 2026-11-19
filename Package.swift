@@ -1,6 +1,6 @@
 // swift-tools-version: 6.0
 
-// The Swift client for gemi agents, `useChat` for iOS.
+// Swift client for Gemi agents and an internal HTTP target for generated-route tests.
 //
 // The manifest is at the repository root because that is the only place
 // SwiftPM looks for one: an app adds this repository's URL and gets the
@@ -16,8 +16,7 @@ let package = Package(
   // a simulator; nothing here is iOS-specific.
   platforms: [.iOS(.v17), .macOS(.v14)],
   products: [
-    .library(name: "GemiChat", targets: ["GemiChat"]),
-    .library(name: "GemiHTTP", targets: ["GemiHTTP"])
+    .library(name: "GemiChat", targets: ["GemiChat"])
   ],
   targets: [
     .target(name: "GemiChat", path: "packages/gemi-swift/Sources/GemiChat"),

@@ -5,7 +5,7 @@ import dev.gemijs.chat.generated.PATCHNotesIdErrorException
 import dev.gemijs.chat.generated.PATCHNotesIdErrorKind
 import dev.gemijs.chat.generated.PATCHNotesIdErrorStatus
 import dev.gemijs.chat.generated.PATCHNotesIdInput
-import dev.gemijs.chat.generated.patchNotes
+import dev.gemijs.chat.generated.patchNotesById
 import dev.gemijs.http.GemiHttpClient
 import dev.gemijs.http.GemiHttpStatusException
 import java.util.concurrent.Executors
@@ -71,22 +71,44 @@ class EndToEndTest {
   }
 
   @Test
+  fun httpClientCookiesAreOptIn() = e2e {
+    val url = "$server/session-test"
+    val client = GemiHttpClient(url)
+    val body = PATCHNotesIdInput("Milk")
+    client.patchNotesById("42", body)
+    assertEquals("none", client.patchNotesById("42", body).title)
+
+    val okHttp = OkHttpClient.Builder().addInterceptor { chain ->
+      chain.proceed(chain.request().newBuilder().header("Cookie", "theme=blue").build())
+    }.build()
+    assertEquals("theme=blue", GemiHttpClient(url, okHttp).patchNotesById("42", body).title)
+  }
+
+  @Test
   fun editNoteCallsTheTypedRoute() = e2e {
     val client = GemiHttpClient("$server/api/")
     for (id in listOf("42", "a/b ?#%é")) {
-      val saved = client.patchNotes(id, PATCHNotesIdInput("Groceries"))
+      val saved = client.patchNotesById(id, PATCHNotesIdInput("Groceries"))
       assertEquals(id, saved.id)
       assertEquals("Groceries", saved.title)
     }
     val rejected = assertFailsWith<PATCHNotesIdErrorException> {
-      client.patchNotes("42", PATCHNotesIdInput(""))
+      client.patchNotesById("42", PATCHNotesIdInput(""))
     }
     assertEquals(PATCHNotesIdErrorKind, rejected.error.kind)
     assertEquals(PATCHNotesIdErrorStatus, rejected.error.status)
-    val unknown = assertFailsWith<GemiHttpStatusException> {
-      GemiHttpClient("$server/missing").patchNotes("42", PATCHNotesIdInput("Milk"))
+    val okHttp = OkHttpClient.Builder().followRedirects(true).build()
+    for ((prefix, status, body) in listOf(
+      Triple("missing", 404, "not found"),
+      Triple("redirect", 307, "redirect"),
+      Triple("unexpected", 422, """{"error":{"kind":"other"}}"""),
+    )) {
+      val unknown = assertFailsWith<GemiHttpStatusException> {
+        GemiHttpClient("$server/$prefix", okHttp).patchNotesById("42", PATCHNotesIdInput("Milk"))
+      }
+      assertEquals(status, unknown.status)
+      assertEquals(body, unknown.body)
     }
-    assertEquals(404, unknown.status)
   }
 
   @Test

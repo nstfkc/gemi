@@ -2,6 +2,7 @@
 package dev.gemijs.chat.generated
 
 import dev.gemijs.http.GemiHttpClient
+import dev.gemijs.http.GemiHttpException
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Required
@@ -103,9 +104,9 @@ public data class POSTNotesErrorGone(
   @Required public val status: POSTNotesErrorGoneStatus = POSTNotesErrorGoneStatus,
 ) : POSTNotesError
 
-public class PATCHNotesIdErrorException(public val error: PATCHNotesIdError) : Exception("HTTP 422")
+public class PATCHNotesIdErrorException(public val error: PATCHNotesIdError) : GemiHttpException(422)
 
-public suspend fun GemiHttpClient.patchNotes(id: String, body: PATCHNotesIdInput): PATCHNotesIdResponse =
+public suspend fun GemiHttpClient.patchNotesById(id: String, body: PATCHNotesIdInput): PATCHNotesIdResponse =
   patch(listOf("notes", id), body, PATCHNotesIdInput.serializer(), PATCHNotesIdResponse.serializer(),
         PATCHNotesIdError.serializer(), 422, ::PATCHNotesIdErrorException)
 

@@ -212,11 +212,12 @@ export function renderHttpKotlin(api: HttpApiModel, packageName: string, patchKe
     const call = patchCall(api, patchKey);
     const segments = [...call.segments.map(kotlinString), "id"].join(", ");
     imports.add("dev.gemijs.http.GemiHttpClient");
+    imports.add("dev.gemijs.http.GemiHttpException");
     const taken = new Set([...types, ...literals].map((type) => type.name));
     let exception = call.error + "Exception";
     for (let i = 2; taken.has(exception); i++) exception = call.error + "Exception" + i;
     declarations.push([
-      `public class ${exception}(public val error: ${call.error}) : Exception("HTTP ${call.status}")`,
+      `public class ${exception}(public val error: ${call.error}) : GemiHttpException(${call.status})`,
       "",
       `public suspend fun GemiHttpClient.${call.name}(id: String, body: ${call.body}): ${call.output} =`,
       `  patch(listOf(${segments}), body, ${call.body}.serializer(), ${call.output}.serializer(),`,

@@ -20,7 +20,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 
 /** Supply the API base URL, including its /api prefix. */
-public class GemiHttpClient(baseUrl: String) {
+public class GemiHttpClient(baseUrl: String, okHttp: OkHttpClient = defaultClient) {
+  private val client = okHttp.newBuilder()
+    .retryOnConnectionFailure(false)
+    .followRedirects(false)
+    .build()
   private val base = baseUrl.toHttpUrl()
   private val json = Json { ignoreUnknownKeys = true }
 
@@ -55,12 +59,14 @@ public class GemiHttpClient(baseUrl: String) {
   }
 
   private companion object {
-    val client = OkHttpClient.Builder().retryOnConnectionFailure(false).followRedirects(false).build()
+    val defaultClient = OkHttpClient()
   }
 }
 
-public class GemiHttpStatusException(public val status: Int, public val body: String) :
-  IOException("HTTP $status")
+/** A refusal received from the server. Transport failures retain their IOException type. */
+public open class GemiHttpException(public val status: Int) : RuntimeException("HTTP $status")
+
+public class GemiHttpStatusException(status: Int, public val body: String) : GemiHttpException(status)
 
 private suspend fun Call.readResponse(): Pair<Int, String> = suspendCancellableCoroutine { continuation ->
   continuation.invokeOnCancellation { cancel() }

@@ -64,6 +64,8 @@ test("a union with a raw variant preserves the complete JSON payload", () => {
 test("PATCH calls follow the selected path and reject unsupported selections", () => {
   const route = { ...api.routes[0]!, key: "PATCH:/v2/books/:id", path: "/v2/books/:id" };
   const moved = { ...api, routes: [route] };
+  expect(renderHttpSwift(moved, route.key)).toContain("func patchV2BooksById(");
+  expect(renderHttpKotlin(moved, kotlinPackage, route.key)).toContain("fun GemiHttpClient.patchV2BooksById(");
   expect(renderHttpSwift(moved, route.key)).toContain('segments: ["v2", "books", id]');
   expect(renderHttpKotlin(moved, kotlinPackage, route.key)).toContain('listOf("v2", "books", id)');
   expect(() => renderHttpSwift(moved, patchKey)).toThrow("missing route");

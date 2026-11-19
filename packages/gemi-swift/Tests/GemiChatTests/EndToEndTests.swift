@@ -32,26 +32,49 @@ struct EndToEndTests {
     return try #require(JSONValue.parse(data)?["threadId"]?.stringValue)
   }
 
+  @Test func httpClientCookiesAreOptIn() async throws {
+    let url = server!.appendingPathComponent("session-test")
+    let client = GemiHTTPClient(baseURL: url)
+    let body = PATCHNotesIdInput(title: "Milk")
+    _ = try await client.patchNotesById(id: "42", body: body)
+    let second = try await client.patchNotesById(id: "42", body: body)
+    #expect(second.title == "none")
+
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+    let optedIn = GemiHTTPClient(baseURL: url, session: session)
+    _ = try await optedIn.patchNotesById(id: "42", body: body)
+    let third = try await optedIn.patchNotesById(id: "42", body: body)
+    #expect(third.title == "theme=blue")
+  }
+
   @Test func editNoteCallsTheTypedRoute() async throws {
     let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
     for id in ["42", "a/b ?#%é"] {
-      let saved = try await client.patchNotes(id: id, body: .init(title: "Groceries"))
+      let saved = try await client.patchNotesById(id: id, body: .init(title: "Groceries"))
       #expect(saved.id == id)
       #expect(saved.title == "Groceries")
     }
     do {
-      _ = try await client.patchNotes(id: "42", body: .init(title: ""))
+      _ = try await client.patchNotesById(id: "42", body: .init(title: ""))
       Issue.record("Expected an empty title to be rejected")
     } catch let rejected as PATCHNotesIdError {
       #expect(rejected.kind == .emptyTitle)
       #expect(rejected.status == ._422)
     }
-    let missing = GemiHTTPClient(baseURL: server!.appendingPathComponent("missing"))
-    do {
-      _ = try await missing.patchNotes(id: "42", body: .init(title: "Milk"))
-      Issue.record("Expected an unknown endpoint to fail")
-    } catch let unknown as GemiHTTPStatusError {
-      #expect(unknown.status == 404)
+    for (prefix, status, body) in [
+      ("missing", 404, "not found"),
+      ("redirect", 307, "redirect"),
+      ("unexpected", 422, #"{"error":{"kind":"other"}}"#),
+    ] {
+      let other = GemiHTTPClient(baseURL: server!.appendingPathComponent(prefix))
+      do {
+        _ = try await other.patchNotesById(id: "42", body: .init(title: "Milk"))
+        Issue.record("Expected HTTP \(status)")
+      } catch let unknown as GemiHTTPStatusError {
+        #expect(unknown.status == status)
+        #expect(unknown.body == Data(body.utf8))
+      }
     }
   }
 

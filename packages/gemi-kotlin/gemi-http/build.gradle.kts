@@ -13,5 +13,5 @@ kotlin {
 dependencies {
   api(libs.serialization.json)
   implementation(libs.coroutines.core)
-  implementation(libs.okhttp)
+  api(libs.okhttp)
 }

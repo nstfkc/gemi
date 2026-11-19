@@ -215,7 +215,7 @@ public struct POSTNotesErrorGone: Codable, Hashable, Sendable {
 extension PATCHNotesIdError: Error {}
 
 extension GemiHTTPClient {
-  public func patchNotes(id: String, body: PATCHNotesIdInput) async throws -> PATCHNotesIdResponse {
+  public func patchNotesById(id: String, body: PATCHNotesIdInput) async throws -> PATCHNotesIdResponse {
     try await patch(segments: ["notes", id], body: body, response: PATCHNotesIdResponse.self,
                     rejection: PATCHNotesIdError.self, status: 422)
   }

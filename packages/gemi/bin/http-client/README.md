@@ -65,11 +65,21 @@ Pass a route key as the last argument to either internal renderer to emit one
 callable PATCH alongside the models. The first supported shape has static path
 segments, a trailing string `:id`, JSON object input and output, and one object
 error with a literal HTTP status. An unsupported selection fails generation.
-For the notes fixture the call is `client.patchNotes(id: "42", body: .init(title: "Milk"))`
-in Swift (with `try await`) or `client.patchNotes("42", PATCHNotesIdInput("Milk"))`
+For the notes fixture the call is `client.patchNotesById(id: "42", body: .init(title: "Milk"))`
+in Swift (with `try await`) or `client.patchNotesById("42", PATCHNotesIdInput("Milk"))`
 in a Kotlin coroutine. Initialize the client with the API base URL including
-`/api`. Swift callers import `GemiHTTP`; Kotlin callers use `dev.gemijs.http.GemiHttpClient`
+`/api`. The Swift test target imports the internal `GemiHTTP` target. Kotlin callers use `dev.gemijs.http.GemiHttpClient`
 and import the generated extension.
+
+For this internal slice the method name includes the verb, static segments,
+and trailing parameter (`patchNotesById`). A collection-level PATCH can use
+`patchNotes` later. Models retain the extractor's route-key names, and the
+Kotlin rejection adds `Exception` to the generated error type. The Swift
+target stays internal while the public API for #1280 is being designed.
+
+Both clients default to cookie-free sessions. To supply cookies or customize
+networking, inject a configured URLSession or OkHttpClient. Kotlin server
+refusals share `GemiHttpException` and transport failures use `IOException`.
 
 The request sends the ID as one path segment. A successful reply decodes to
 `PATCHNotesIdResponse`. On HTTP 422, the client decodes the envelope's `error`

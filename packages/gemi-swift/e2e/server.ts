@@ -26,6 +26,7 @@ import type {
 } from "../../gemi/ai/AgentProvider";
 import { s } from "../../gemi/ai/Schema";
 import type { AgentMessage } from "../../gemi/ai/types";
+import { ApiRouteDispatcher } from "../../gemi/services/router/ApiRouteDispatcher";
 import NotesApi from "../../gemi/bin/http-client/__fixtures__/notes";
 import { HttpRequest } from "../../gemi/http/HttpRequest";
 
@@ -139,6 +140,7 @@ class E2EController extends AgentController<typeof e2eAgent> {
   store = store;
 }
 
+const notesDispatcher = new ApiRouteDispatcher({ rootRouter: NotesApi });
 const editNote = new NotesApi().routes["/notes/:id"];
 
 const server = Bun.serve({
@@ -149,13 +151,24 @@ const server = Bun.serve({
     const request = new HttpRequest(raw, {}, "api", url.pathname.replace(/^\/api/, ""));
     const controller = new E2EController();
     try {
-      const note = /^\/api\/notes\/([^/]+)$/.exec(url.pathname);
-      if (note && raw.method === editNote.method) {
-        const req = new HttpRequest(raw, { id: decodeURIComponent(note[1]!) }, "api", "/notes/:id");
-        const result = await editNote.run(req);
-        return result.toResponse(new Headers(), []);
+      if (url.pathname.startsWith("/api/notes/")) {
+        const { path, params } = notesDispatcher.getRouteHandlerAndParams(raw);
+        if (path === "/notes/:id" && raw.method === editNote.method) {
+          const result = await editNote.run(new HttpRequest(raw, params, "api", path));
+          return result.toResponse(new Headers(), []);
+        }
+        return new Response("not found", { status: 404 });
       }
       switch (url.pathname) {
+        case "/session-test/notes/42":
+          return Response.json(
+            { id: "42", title: raw.headers.get("Cookie") ?? "none" },
+            { headers: { "Set-Cookie": "theme=blue; Path=/session-test" } },
+          );
+        case "/redirect/notes/42":
+          return new Response("redirect", { status: 307, headers: { Location: "/api/notes/42" } });
+        case "/unexpected/notes/42":
+          return Response.json({ error: { kind: "other" } }, { status: 422 });
         case "/api/support":
           return await controller.stream(request);
         case "/api/support/attach":

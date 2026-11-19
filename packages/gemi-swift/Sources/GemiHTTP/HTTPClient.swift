@@ -5,9 +5,16 @@ public struct GemiHTTPClient: Sendable {
   private let baseURL: URL
   private let session: URLSession
 
-  public init(baseURL: URL, session: URLSession = .shared) {
+  private static let defaultSession: URLSession = {
+    let config = URLSessionConfiguration.ephemeral
+    config.httpCookieStorage = nil
+    config.httpShouldSetCookies = false
+    return URLSession(configuration: config)
+  }()
+
+  public init(baseURL: URL, session: URLSession? = nil) {
     self.baseURL = baseURL
-    self.session = session
+    self.session = session ?? Self.defaultSession
   }
 
   public func patch<Body: Encodable, Output: Decodable, Failure: Decodable & Error>(

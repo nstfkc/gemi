@@ -34,7 +34,7 @@ export function patchCall(api: HttpApiModel, key: string) {
   }
 
   return {
-    name: "patch" + pascalCase(segments.join(" ")),
+    name: "patch" + pascalCase(segments.join(" ")) + "ById",
     segments,
     body: body.name,
     output: output.name,
