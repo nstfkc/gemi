@@ -1,4 +1,4 @@
-# 0.220.0
+# 0.221.0
 
 ## CORS for api routes and island assets in sandboxed frames (#913, #1311)
 
@@ -13,6 +13,21 @@ What to check:
 
 - `CorsMiddleware` no longer sends `Access-Control-Allow-Credentials` to `Origin: null`, even under an explicit `"null"` key. If you relied on that, move the caller to a token.
 - A test that compares `app.staticFiles(req)` with `toEqual` now sees an `assetCors` key.
+
+# 0.220.0
+
+## Item sources: `step.source` and `ItemSource` (#1309)
+
+**New API (minor version).** See [Item sources](docs/workflows.md#item-sources-stepsource-and-itemsource).
+
+- `step.source(key, fn, options?)` writes the list `fn` returns (an array, or any iterable or async iterable) to an item source once, 500 items per insert, and returns `SourceRef<T>` (`{ id, count }`). It is deleted with the workflow when it is pruned.
+- `step.each(key, { source, ... }, fn)` takes a source in place of `count` and `item`, and reads it a window at a time.
+- `ItemSource.write(id, items)`, `read(id, index)`, `readRange(id, from, to)`, `delete(id)` and `prune(olderThan)` in `gemi/services`, for lists written outside a workflow, such as an upload parsed in its request. Each item is JSON, at most 64 KB (`ITEM_SOURCE_ITEM_LIMIT`).
+- New types: `SourceRef`, `ItemSourceInput`, `StepEachInput`. `StepEachOptions` is now `StepEachInput & { … }`: `{ count, item }` or `{ source }`.
+
+What to check:
+
+- **Database queue driver, only if you use item sources:** add the `GemiWorkflowSource` model from [the workflow tables](docs/workflows.md#the-workflow-tables) and migrate (or call `driver.createTable()`). A driver on another jobs table uses `<table>_workflow_sources`, or the new `workflowSourceTable` option. `prune` skips the table while it does not exist.
 
 # 0.219.0
 

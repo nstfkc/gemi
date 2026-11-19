@@ -33,6 +33,11 @@ export class MemoryWorkflowStore implements WorkflowStore {
   private steps = new Map<string, Map<string, StepRecord>>();
   /** Item rows of `step.each`, by workflow, then step key. */
   private items = new Map<string, Map<string, ItemRows>>();
+  /** Item sources, by id. */
+  private sources = new Map<
+    string,
+    { workflowId: string | null; createdAt: number; rows: Map<number, string> }
+  >();
 
   constructor(private readonly queue: MemoryQueueWrites) {}
 
@@ -174,7 +179,61 @@ export class MemoryWorkflowStore implements WorkflowStore {
         this.workflows.delete(id);
         this.steps.delete(id);
         this.items.delete(id);
+        for (const [sourceId, source] of this.sources) {
+          if (source.workflowId === id) this.sources.delete(sourceId);
+        }
         count++;
+      }
+    }
+    return count;
+  }
+
+  async writeSource(
+    sourceId: string,
+    workflowId: string | null,
+    rows: Array<{ index: number; payload: string }>,
+  ): Promise<void> {
+    let source = this.sources.get(sourceId);
+    if (!source) {
+      source = { workflowId, createdAt: Date.now(), rows: new Map() };
+      this.sources.set(sourceId, source);
+    }
+    for (const row of rows) {
+      if (source.rows.has(row.index)) {
+        throw new Error(`Item source "${sourceId}" already has an item at index ${row.index}.`);
+      }
+      source.rows.set(row.index, row.payload);
+    }
+  }
+
+  async readSource(
+    sourceId: string,
+    from: number,
+    to: number,
+  ): Promise<Array<{ index: number; payload: string }>> {
+    const rows = this.sources.get(sourceId)?.rows;
+    const found: Array<{ index: number; payload: string }> = [];
+    if (!rows) return found;
+    for (let index = Math.max(0, from); index < to; index++) {
+      const payload = rows.get(index);
+      if (payload !== undefined) found.push({ index, payload });
+    }
+    return found;
+  }
+
+  async deleteSource(sourceId: string): Promise<number> {
+    const count = this.sources.get(sourceId)?.rows.size ?? 0;
+    this.sources.delete(sourceId);
+    return count;
+  }
+
+  async pruneSources(olderThanMs: number): Promise<number> {
+    const cutoff = Date.now() - olderThanMs;
+    let count = 0;
+    for (const [sourceId, source] of this.sources) {
+      if (source.workflowId === null && source.createdAt <= cutoff) {
+        count += source.rows.size;
+        this.sources.delete(sourceId);
       }
     }
     return count;

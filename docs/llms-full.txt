@@ -22231,8 +22231,9 @@ How it runs:
 
 | Option | Description |
 | --- | --- |
-| `count` | How many items, from 0. Required. |
-| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required. |
+| `count` | How many items, from 0. Required, unless `source` is given. |
+| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required, unless `source` is given. |
+| `source` | A stored list (`step.source`, `ItemSource.write`), in place of `count` and `item`. See [item sources](#item-sources-stepsource-and-itemsource). |
 | `key(input, index)` | The item key, a string of 1 to 191 characters or a number. Default: the index. gemi does not check that keys are unique. |
 | `concurrency` | Items in flight at once, in the process running the tick. Default `1`. |
 | `attempts` | Attempts per item, counting the first. Default `3`. |
@@ -22251,6 +22252,42 @@ const next = await Workflow.items(workflowId, "rows", { status: "failed", after:
 ```
 
 Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got.
+
+### Item sources: `step.source` and `ItemSource`
+
+`item(index)` needs somewhere stable to read from. When the list is not already a table (the rows of an uploaded file, a snapshot of ids), keep it in an **item source**: a table of the queue's database that holds a list item by item, written as it is produced and read a window at a time.
+
+Inside a workflow, `step.source(key, fn)` writes the list `fn` returns (an array, or any iterable or async iterable, such as a parser over a stream) once, and `step.each` takes it as its `source` in place of `count` and `item`:
+
+```typescript
+async run(step: Step, importId: string, fileName: string) {
+  const rows = await step.source("rows", async () => parseRows((await Storage.read(fileName)).body));
+
+  return step.each("import", { source: rows, concurrency: 4, key: (row) => row.sku }, async (row, ctx) => {
+    await createProduct(row, ctx.idempotencyKey);
+  });
+}
+```
+
+- Items are written as they come, 500 per insert, so a long list is never held in memory. Each item is JSON, at most 64 KB (`ITEM_SOURCE_ITEM_LIMIT`); store a file's name for anything larger.
+- `step.source` is a step like `step.run` (same `attempts`, `backoff` and `timeout`): its result is the small `{ id, count }`, stored and replayed, and a write that fails part way is written again from the start. Its id is `<workflow id>:<key>`, and the source is deleted with the workflow when it is pruned.
+- `step.each({ source })` reads at least 64 items (or four times `concurrency`) per query, and an item read again for a retry alone.
+
+Outside a workflow, for example in the request that receives an upload, `ItemSource` does the same under an id of your choice:
+
+```typescript
+import { ItemSource } from "gemi/services";
+
+const rows = await ItemSource.write(`upload:${upload.id}`, parseRows(file.stream())); // { id, count }
+await ImportProductsWorkflow.start(upload.id, rows); // run: step.each("import", { source: rows }, …)
+
+await ItemSource.read(rows.id, 0);           // one item, or undefined
+await ItemSource.readRange(rows.id, 0, 20);  // a preview
+await ItemSource.delete(rows.id);            // when done with it
+await ItemSource.prune("7d");                // from a cron: sources of ItemSource.write older than a week
+```
+
+`ItemSource.write` replaces what was under the id. Sources it writes belong to no workflow: delete them, or prune them from a cron.
 
 ### `step.progress(value)`
 
@@ -22385,7 +22422,7 @@ model GemiWorkflowStep {
 }
 ```
 
-`step.each` also needs a third table for its item rows. A workflow that does not use `step.each` never touches it:
+`step.each` also needs a third table for its item rows, and item sources a fourth. A workflow that uses neither never touches them:
 
 ```prisma
 model GemiWorkflowItem {
@@ -22406,13 +22443,25 @@ model GemiWorkflowItem {
   @@id([workflowId, stepKey, index])
   @@map("gemi_workflow_items")
 }
+
+model GemiWorkflowSource {
+  sourceId   String  @map("source_id")
+  index      Int     @map("idx")
+  workflowId String? @map("workflow_id")
+  payload    String
+  createdAt  BigInt  @map("created_at")
+
+  @@id([sourceId, index])
+  @@index([workflowId])
+  @@map("gemi_workflow_sources")
+}
 ```
 
-On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, and to `error` and `output` of `GemiWorkflowItem`. Without Prisma, `await driver.createTable()` creates all three tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, to `error` and `output` of `GemiWorkflowItem`, and to `payload` of `GemiWorkflowSource`. Without Prisma, `await driver.createTable()` creates all four tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
 
-A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps` and `<table>_workflow_items`, or in the tables named by the `workflowTable`, `workflowStepTable` and `workflowItemTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps and items, for example from a cron job. The memory driver keeps ended workflows for a day.
+A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps`, `<table>_workflow_items` and `<table>_workflow_sources`, or in the tables named by the `workflowTable`, `workflowStepTable`, `workflowItemTable` and `workflowSourceTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps, items and `step.source` sources, for example from a cron job. The memory driver keeps ended workflows for a day.
 
-A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`.
+A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`, and item sources by implementing `writeSource`, `readSource`, `deleteSource` and `pruneSources`.
 
 ## Limits
 
