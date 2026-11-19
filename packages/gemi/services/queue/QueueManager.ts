@@ -1496,16 +1496,22 @@ export class QueueManager {
 
     const locks = this.locks;
     const counted: string[] = [];
-    for (const throttle of throttles) {
-      const name = `gemi:throttle:${throttle.key}`;
-      const hit = await locks.store.hit(name, throttle.limit, throttle.window);
-      if (!hit.allowed) {
-        await Promise.all(counted.map((counted) => locks.store.refund(counted)));
-        await free();
-        await driver.release(claimed, { retryInMs: Math.max(1, hit.resetInMs) });
-        return undefined;
+    try {
+      for (const throttle of throttles) {
+        const name = `gemi:throttle:${throttle.key}`;
+        const hit = await locks.store.hit(name, throttle.limit, throttle.window);
+        if (!hit.allowed) {
+          await Promise.all(counted.map((counted) => locks.store.refund(counted)));
+          await free();
+          await driver.release(claimed, { retryInMs: Math.max(1, hit.resetInMs) });
+          return undefined;
+        }
+        counted.push(name);
       }
-      counted.push(name);
+    } catch (error) {
+      // The slots were taken for a run that is not going to happen.
+      await free().catch(() => {});
+      throw error;
     }
 
     return {
