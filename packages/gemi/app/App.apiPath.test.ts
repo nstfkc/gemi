@@ -23,6 +23,8 @@ class RootApiRouter extends ApiRouter {
       route: "/users/:id",
       id: req.params.id,
     })),
+    "/archive/:rest*": this.get(() => ({})),
+    "/optional/:id?": this.get(() => ({})),
     "/files/api": this.get(() => ({ route: "/files/api" })),
   };
 }
@@ -104,6 +106,22 @@ describe("App.fetch routes by the /api segment", () => {
 
 describe("ApiRouteDispatcher.getRouteHandlerAndParams", () => {
   const dispatcher = () => new ApiRouteDispatcher({ rootRouter: RootApiRouter });
+
+  test("decodes path values once after matching the route", async () => {
+    const id = "a/b ?#é %2F";
+    const response = await app.fetch(new Request("http://gemi.dev/api/users/" + encodeURIComponent(id)));
+    expect(await response.json()).toEqual({ route: "/users/:id", id });
+
+    const match = (path: string) => dispatcher().getRouteHandlerAndParams(new Request("http://gemi.dev" + path));
+    expect(match("/api/archive/a%20b/c").params.rest).toBe("a b/c");
+    expect(match("/api/optional").params.id).toBeUndefined();
+  });
+
+  test("a malformed parameter gets the dispatcher's normal 404", async () => {
+    const response = await app.fetch(new Request("http://gemi.dev/api/users/%E0%A4%A"));
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.kind).toBe("not_found");
+  });
 
   test("strips only the leading /api", () => {
     const match = (pathname: string) =>

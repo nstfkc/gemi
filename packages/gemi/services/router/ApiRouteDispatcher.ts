@@ -21,6 +21,7 @@ import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
 import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
+import { decodePathParams } from "../../utils/apiUrl";
 import { apiPath } from "./apiPath";
 import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse } from "./policyDenied";
@@ -374,9 +375,12 @@ export class ApiRouteDispatcher {
     for (const [_path] of Object.entries(this.flatRoutes)) {
       try {
         const pattern = new URLPattern({ pathname: _path });
-        if (pattern.test({ pathname: routePath })) {
+        const match = pattern.exec({ pathname: routePath });
+        if (match) {
+          const decoded = decodePathParams(match.pathname.groups);
+          if (!decoded) break;
           path = _path;
-          params = pattern.exec({ pathname: routePath })?.pathname.groups!;
+          params = decoded;
           break;
         }
       } catch (err) {

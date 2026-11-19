@@ -677,8 +677,8 @@ describe("an agent calling the app's routes", () => {
   test("an input path param is encoded into one segment", async () => {
     const { result } = await runTool(alice, "rename-product", { id: "a/b c", name: "Kettle" });
 
-    expect(result).toMatchObject({ status: "ok", output: { id: "a%2Fb%20c", name: "Kettle" } });
-    expect(handled).toEqual([{ route: "rename", user: 1, params: { id: "a%2Fb%20c" } }]);
+    expect(result).toMatchObject({ status: "ok", output: { id: "a/b c", name: "Kettle" } });
+    expect(handled).toEqual([{ route: "rename", user: 1, params: { id: "a/b c" } }]);
   });
 
   test("a dot segment from the model is refused rather than walked", async () => {
@@ -1098,7 +1098,7 @@ describe("params the model names in its own terms (#767)", () => {
   test("the resolved id is encoded into one segment, like a model-supplied one", async () => {
     const { result } = await run("outline", { page: "/a/b" });
 
-    expect(result).toMatchObject({ status: "ok", output: { pageId: "a%2Fb" } });
+    expect(result).toMatchObject({ status: "ok", output: { pageId: "a/b" } });
   });
 
   test("the default key is the param's name", async () => {
