@@ -223,13 +223,20 @@ export {
   StepTimeoutError,
   WaitTimeoutError,
   WorkflowCancelledError,
+  type EachProblem,
+  type EachProgress,
+  type EachSummary,
+  type ItemContext,
   type StepBatchOptions,
   type StepContext,
+  type StepEachOptions,
   type StepRunOptions,
   type StepWaitOptions,
 } from "./queue/workflow/Step";
 export type { Duration } from "./queue/workflow/duration";
 export type {
+  ItemRecord,
+  ItemRunStatus,
   StepRecord,
   StepRunStatus,
   WorkflowRecord,

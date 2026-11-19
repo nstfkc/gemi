@@ -137,6 +137,77 @@ The step is recorded and the batch dispatched in the same write, so a crash betw
 
 The job class has to be registered with the queue, and [the batch limits](./jobs-and-queues.md#limits) apply: no worker jobs, no unique jobs.
 
+### `step.each(key, options, fn)`: long lists, item by item
+
+Works through a list of `count` items one at a time (or `concurrency` at once) and returns a summary once every item has ended. A **transformer**, `item(index)`, produces the input for each index when its turn comes, so the list is never held in memory, and `fn` handles that input. Use it for imports, a picture generated per item, or a digest sent per user: work where a list is too long to do in one go, where the user wants to see it move, and where load must stay low.
+
+```typescript
+// app/workflows/ImportProductsWorkflow.ts
+import { type Step, Workflow } from "gemi/services";
+
+export class ImportProductsWorkflow extends Workflow {
+  static name = "ImportProductsWorkflow";
+
+  async run(step: Step, importId: string) {
+    const count = await step.run("count", () => ImportRow.count({ where: { importId } }));
+
+    const summary = await step.each(
+      "rows",
+      {
+        count,
+        // The transformer: index → input. Read it from somewhere stable.
+        item: (index) => ImportRow.findFirst({ where: { importId, position: index } }),
+        key: (row) => row!.sku, // the item key, part of ctx.idempotencyKey
+        concurrency: 4,
+        attempts: 3,
+        backoff: [1_000, 10_000],
+      },
+      async (row, ctx) => {
+        if (!row?.name) ctx.skip("no name", { line: row?.line });
+        await createProduct(row!, { idempotencyKey: ctx.idempotencyKey, signal: ctx.signal });
+      },
+    );
+
+    // { total, done, succeeded, skipped, failed, problems, moreProblems }
+    return step.run("report", () => saveReport(importId, summary));
+  }
+}
+```
+
+How it runs:
+
+- **A cursor, not a step per item.** The step row keeps the next index to start and the counts. Each item that is in flight, waiting for a retry, failed or skipped has a row in the items table; an item that succeeded leaves nothing behind. A list of 100,000 items with 20 problems keeps about `concurrency + 20` rows.
+- **Retries per item.** A throw retries the item up to `attempts`, after `backoff`. A retry that waits does not hold up the items after it. An item out of attempts is recorded as `failed` with its error, and the list goes on: `step.each` does not fail because items failed. `ctx.skip(reason, data?)` ends an item as `skipped` (no retry).
+- **Time-boxed ticks.** A tick works through items for at most `tickBudget` (30 seconds), waits for the items in flight, and hands the workflow back to the queue, which runs the next tick from the cursor. A long list never holds a queue slot for long, other work interleaves, and a process that shuts down stops starting items.
+- **Crashes and deploys.** An item whose process died is found in flight by the next tick and runs again as its next attempt; one whose last attempt died is `failed`. Only the items in flight run again, never the ones that ended. Use the [database driver](./jobs-and-queues.md#the-database-driver): on the memory driver nothing survives a restart, and `step.each` warns once in production.
+- **At least once.** As with `step.run`, an item can run twice when its process dies after the work and before the result is stored. `ctx.idempotencyKey` is `<workflow id>:<step key>:<item key>`, the same on every attempt; pass it to anything that must not happen twice (a payment, a generated file stored under that name, an email).
+- **Progress.** While the step runs, the workflow's `progress` is the share of its items that have ended (`progress: false` turns that off), and its entry in `Workflow.find(id).steps` carries `status: "iterating"`, `progress` and `items: { total, done, succeeded, skipped, failed }`.
+
+`item(index)` must return the same input for the same index for as long as the step runs: read from a table, a stored file or a snapshot of ids taken in an earlier `step.run`, not from a query whose order changes as the items are worked on. `count` is stored the first time; a later pass that computes another count goes on with the stored one.
+
+| Option | Description |
+| --- | --- |
+| `count` | How many items, from 0. Required. |
+| `item(index)` | Produces the input for `index`, sync or async. A throw counts as a failed attempt. Required. |
+| `key(input, index)` | The item key, a string of 1 to 191 characters or a number. Default: the index. gemi does not check that keys are unique. |
+| `concurrency` | Items in flight at once, in the process running the tick. Default `1`. |
+| `attempts` | Attempts per item, counting the first. Default `3`. |
+| `backoff` | Milliseconds before each retry, as `step.run`'s. Default `0`. |
+| `timeout` | How long one attempt may take; `ctx.signal` is aborted when it passes. |
+| `tickBudget` | How long one tick works before handing over. Default `"30s"`. |
+| `progress` | Whether the step sets the workflow's `progress`. Default `true`. |
+
+`fn` gets the input and an `ItemContext`: `index`, `key`, `attempt`, `idempotencyKey`, `signal` (aborted on `timeout` and on cancel) and `skip(reason, data?)`. Its return value is not kept.
+
+The summary lists the first 100 problems (`{ index, key, status, reason, data?, attempt }`, by index); `moreProblems` says whether there are more. `Workflow.items(id, key, { status?, after?, limit? })` pages through all of them:
+
+```typescript
+const failed = await Workflow.items(workflowId, "rows", { status: "failed", limit: 50 });
+const next = await Workflow.items(workflowId, "rows", { status: "failed", after: failed.at(-1)?.index });
+```
+
+Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got.
+
 ### `step.progress(value)`
 
 Sets the workflow's `progress`, from 0 to 1. It is not a step: it writes on every pass that reaches it. A completed workflow's progress is 1.
@@ -170,12 +241,12 @@ If one of them suspends the workflow (a sleep, say), the others still finish and
 | Field | Description |
 | --- | --- |
 | `id`, `name`, `args` | The workflow's id, its class's name and the arguments it was started with. |
-| `status` | `running`, `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
+| `status` | `running` (also between the ticks of a `step.each`), `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
 | `currentStep` | The key of the step it is on, or `null`. |
-| `progress` | 0 to 1: what `step.progress` set, and 1 once completed. |
+| `progress` | 0 to 1: what `step.progress` set, or the share of items a running `step.each` has done, and 1 once completed. |
 | `result` | What `run` returned, once completed. |
 | `error` | Why it failed, or why `onCancel` failed. |
-| `steps` | Every step recorded so far, in the order first reached: `key`, `status`, `attempt`, `error`, `batchId`, `wakeAt`, `startedAt`, `finishedAt`, and for a batch step its `progress`. |
+| `steps` | Every step recorded so far, in the order first reached: `key`, `status`, `attempt`, `error`, `batchId`, `wakeAt`, `startedAt`, `finishedAt`, for a batch step its `progress`, and for a `step.each` its `progress` and `items` (`total`, `done`, `succeeded`, `skipped`, `failed`). |
 | `createdAt`, `updatedAt` | Epoch milliseconds. |
 
 Step outputs are not in the status. Return what a caller needs from `run`.
@@ -224,11 +295,34 @@ model GemiWorkflowStep {
 }
 ```
 
-On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, and to `output` and `error` of `GemiWorkflowStep`. Without Prisma, `await driver.createTable()` creates both tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+`step.each` also needs a third table for its item rows. A workflow that does not use `step.each` never touches it:
 
-A driver on another jobs table keeps workflows in `<table>_workflows` and `<table>_workflow_steps`, or in the tables named by the `workflowTable` and `workflowStepTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps, for example from a cron job. The memory driver keeps ended workflows for a day.
+```prisma
+model GemiWorkflowItem {
+  workflowId String  @map("workflow_id")
+  stepKey    String  @map("step_key")
+  index      Int     @map("idx")
+  key        String? @map("item_key")
+  status     String
+  attempt    Int     @default(0)
+  error      String?
+  output     String?
+  wakeAt     BigInt? @map("wake_at")
+  startedAt  BigInt? @map("started_at")
+  finishedAt BigInt? @map("finished_at")
+  createdAt  BigInt  @map("created_at")
+  updatedAt  BigInt  @map("updated_at")
 
-A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods.
+  @@id([workflowId, stepKey, index])
+  @@map("gemi_workflow_items")
+}
+```
+
+On MySQL, add `@db.LongText` to `args`, `result` and `error` of `GemiWorkflow`, to `output` and `error` of `GemiWorkflowStep`, and to `error` and `output` of `GemiWorkflowItem`. Without Prisma, `await driver.createTable()` creates all three tables (`IF NOT EXISTS`). Until they exist, everything else works and `start` rejects with an error that names what is missing.
+
+A driver on another jobs table keeps workflows in `<table>_workflows`, `<table>_workflow_steps` and `<table>_workflow_items`, or in the tables named by the `workflowTable`, `workflowStepTable` and `workflowItemTable` options. Ended workflows are kept until `driver.workflowStore().prune(olderThanMs)` deletes them with their steps and items, for example from a cron job. The memory driver keeps ended workflows for a day.
+
+A custom queue driver supports workflows by implementing `workflowStore()` (see `WorkflowStore`) and the batch methods; its store supports `step.each` by implementing `listItems` and the `items` parts of `update`.
 
 ## Limits
 

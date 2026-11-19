@@ -1,6 +1,6 @@
 import { app } from "../../../foundation/app";
 import { QueueManager } from "../QueueManager";
-import type { Step } from "./Step";
+import type { EachProblem, EachProgress, Step } from "./Step";
 import type { StepRunStatus, WorkflowRunStatus } from "./WorkflowStore";
 
 /** The arguments `start` takes: `run`'s, after `step`. */
@@ -41,8 +41,13 @@ export type WorkflowStepStatus = {
   error: string | null;
   /** The batch a `step.batch` dispatched. */
   batchId: string | null;
-  /** The batch's progress, 0 to 1, for a `step.batch`. */
+  /**
+   * 0 to 1: the batch's progress for a `step.batch`, or the share of items
+   * that have ended for a `step.each`.
+   */
   progress?: number;
+  /** How far a `step.each` is. */
+  items?: EachProgress;
   /** When a sleep ends, a wait times out, or a retry is due. */
   wakeAt: number | null;
   startedAt: number | null;
@@ -131,6 +136,20 @@ export class Workflow {
    */
   static signal(id: string, key: string, payload?: unknown): Promise<boolean> {
     return app(QueueManager).workflows.signal(id, key, payload);
+  }
+
+  /**
+   * The items of the `step.each` under `key` that failed or were skipped
+   * (or only those of `status`), by index, from just after the index
+   * `after`, at most `limit` (default 100, at most 1000). Page through them
+   * by passing the last index as `after`.
+   */
+  static items(
+    id: string,
+    key: string,
+    options: { status?: "failed" | "skipped"; after?: number; limit?: number } = {},
+  ): Promise<EachProblem[]> {
+    return app(QueueManager).workflows.items(id, key, options);
   }
 
   /** The workflow's status, or `null` for an unknown id. */

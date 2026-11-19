@@ -2,7 +2,7 @@ import { describe, expectTypeOf, test } from "vitest";
 
 import type { BatchStatus } from "../batch";
 import { Job } from "../Job";
-import type { Step } from "./Step";
+import type { EachProblem, EachSummary, ItemContext, Step } from "./Step";
 import { Workflow, type WorkflowStatus } from "./Workflow";
 
 class BuildPage extends Job {
@@ -25,6 +25,24 @@ class ImportSite extends Workflow {
     expectTypeOf(batch).toEqualTypeOf<BatchStatus>();
     // @ts-expect-error the tuple is BuildPage's run arguments
     await step.batch("bad", BuildPage, [[importId, "x"]]);
+    const summary = await step.each(
+      "rows",
+      {
+        count: pages.length,
+        item: async (index) => ({ sku: pages[index]!, index }),
+        key: (row) => row.sku,
+        concurrency: 2,
+        timeout: "30s",
+      },
+      async (row, ctx) => {
+        expectTypeOf(row).toEqualTypeOf<{ sku: string; index: number }>();
+        expectTypeOf(ctx).toEqualTypeOf<ItemContext>();
+        if (!row.sku) ctx.skip("no sku");
+      },
+    );
+    expectTypeOf(summary).toEqualTypeOf<EachSummary>();
+    // @ts-expect-error a key is a string or a number
+    await step.each("bad-key", { count: 1, item: () => 1, key: () => ({}) }, () => {});
     await step.sleep("settle", "30s");
     // @ts-expect-error not a duration
     await step.sleep("never", "soon");
@@ -45,5 +63,8 @@ describe("Workflow", () => {
     expectTypeOf(Workflow.find("id")).toEqualTypeOf<Promise<WorkflowStatus | null>>();
     expectTypeOf(ImportSite.signal("id", "chosen", ["a"])).toEqualTypeOf<Promise<boolean>>();
     expectTypeOf(Workflow.cancel("id")).toEqualTypeOf<Promise<boolean>>();
+    expectTypeOf(Workflow.items("id", "rows", { status: "failed" })).toEqualTypeOf<
+      Promise<EachProblem[]>
+    >();
   });
 });

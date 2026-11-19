@@ -1,6 +1,8 @@
 import type { EnqueueBatch, EnqueueJob } from "../QueueDriver";
 import {
   type AcquireResult,
+  type ItemRecord,
+  type ItemRunStatus,
   type StepRecord,
   WORKFLOW_TICK_JOB,
   type WorkflowChange,
@@ -29,6 +31,8 @@ const FINISHED_WORKFLOW_TTL = 24 * 60 * 60_000;
 export class MemoryWorkflowStore implements WorkflowStore {
   private workflows = new Map<string, WorkflowRecord>();
   private steps = new Map<string, Map<string, StepRecord>>();
+  /** Item rows of `step.each`, by workflow, then step key. */
+  private items = new Map<string, Map<string, ItemRows>>();
 
   constructor(private readonly queue: MemoryQueueWrites) {}
 
@@ -94,11 +98,12 @@ export class MemoryWorkflowStore implements WorkflowStore {
 
   async update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean },
+    options: { owner?: string; key?: string; allSteps?: boolean; items?: string },
     decide: (snapshot: {
       workflow: WorkflowRecord;
       step: StepRecord | null;
       steps: StepRecord[];
+      items: ItemRecord[];
       now: number;
     }) => WorkflowChange<T>,
   ): Promise<T | undefined> {
@@ -114,6 +119,10 @@ export class MemoryWorkflowStore implements WorkflowStore {
       workflow: { ...workflow },
       step: current ? { ...current } : null,
       steps: options.allSteps ? this.stepsOf(id) : [],
+      items:
+        options.items === undefined
+          ? []
+          : this.itemsOf(id, options.items, ["running", "retrying"], -1, Infinity),
       now,
     });
 
@@ -121,6 +130,24 @@ export class MemoryWorkflowStore implements WorkflowStore {
       const previous = steps.get(change.step.key);
       // A Map keeps insertion order, so a step keeps its first-recorded place.
       steps.set(change.step.key, { ...change.step, createdAt: previous?.createdAt ?? now, updatedAt: now });
+    }
+    if (change.items) {
+      const rows = this.rowsOf(id, change.items.step);
+      for (const index of change.items.delete ?? []) {
+        rows.all.delete(index);
+        rows.open.delete(index);
+      }
+      for (const item of [...(change.items.insert ?? []), ...(change.items.update ?? [])]) {
+        const previous = rows.all.get(item.index);
+        rows.all.set(item.index, {
+          ...item,
+          step: change.items.step,
+          createdAt: previous?.createdAt ?? now,
+          updatedAt: now,
+        });
+        if (item.status === "running" || item.status === "retrying") rows.open.add(item.index);
+        else rows.open.delete(item.index);
+      }
     }
     if (change.batch) this.queue.enqueueBatch(change.batch);
     for (const batchId of change.cancelBatches ?? []) this.queue.cancelBatch(batchId);
@@ -146,10 +173,49 @@ export class MemoryWorkflowStore implements WorkflowStore {
       if (ended && workflow.updatedAt <= cutoff) {
         this.workflows.delete(id);
         this.steps.delete(id);
+        this.items.delete(id);
         count++;
       }
     }
     return count;
+  }
+
+  async listItems(
+    workflowId: string,
+    step: string,
+    options: { statuses: ItemRunStatus[]; after?: number; limit: number },
+  ): Promise<ItemRecord[]> {
+    return this.itemsOf(workflowId, step, options.statuses, options.after ?? -1, options.limit);
+  }
+
+  private itemsOf(
+    id: string,
+    step: string,
+    statuses: ItemRunStatus[],
+    after: number,
+    limit: number,
+  ): ItemRecord[] {
+    const rows = this.items.get(id)?.get(step);
+    if (!rows) return [];
+    const open = statuses.every((status) => status === "running" || status === "retrying");
+    const indexes = open ? [...rows.open] : [...rows.all.keys()];
+    const found: ItemRecord[] = [];
+    for (const index of indexes.sort((a, b) => a - b)) {
+      if (index <= after) continue;
+      const item = rows.all.get(index)!;
+      if (!statuses.includes(item.status)) continue;
+      found.push({ ...item });
+      if (found.length >= limit) break;
+    }
+    return found;
+  }
+
+  private rowsOf(id: string, step: string): ItemRows {
+    let steps = this.items.get(id);
+    if (!steps) this.items.set(id, (steps = new Map()));
+    let rows = steps.get(step);
+    if (!rows) steps.set(step, (rows = { all: new Map(), open: new Set() }));
+    return rows;
   }
 
   private stepsOf(id: string): StepRecord[] {
@@ -164,3 +230,6 @@ export class MemoryWorkflowStore implements WorkflowStore {
     });
   }
 }
+
+/** One `step.each`'s rows, and which of them are in flight or retrying. */
+type ItemRows = { all: Map<number, ItemRecord>; open: Set<number> };

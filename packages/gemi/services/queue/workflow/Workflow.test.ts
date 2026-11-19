@@ -9,15 +9,19 @@ import { MemoryQueueDriver } from "../MemoryQueueDriver";
 import { QueueManager } from "../QueueManager";
 import { QueueServiceProvider } from "../QueueServiceProvider";
 import { toMilliseconds } from "./duration";
-import { type Step, StepFailedError } from "./Step";
+import { resetEachWarnings, type Step, StepFailedError } from "./Step";
 import { Workflow, type WorkflowClass } from "./Workflow";
 import { workflowContract } from "./workflowContract";
 import { WORKFLOW_TICK_JOB } from "./WorkflowStore";
 
-workflowContract("MemoryQueueDriver", async () => {
-  const driver = new MemoryQueueDriver();
-  return { driver: () => driver, dispose: async () => {} };
-});
+workflowContract(
+  "MemoryQueueDriver",
+  async () => {
+    const driver = new MemoryQueueDriver();
+    return { driver: () => driver, dispose: async () => {} };
+  },
+  { concurrentWorkers: true, largeCount: 20_000 },
+);
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -365,5 +369,37 @@ describe("toMilliseconds", () => {
     expect(toMilliseconds("1w")).toBe(604_800_000);
     expect(() => toMilliseconds(-1)).toThrow();
     expect(() => toMilliseconds("soon" as never)).toThrow("not a duration");
+  });
+});
+
+describe("step.each on a queue that keeps nothing across restarts", () => {
+  test("warns once in production, and not in development", async () => {
+    resetEachWarnings();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    class List extends Workflow {
+      static name = "List";
+      async run(step: Step) {
+        return step.each("items", { count: 2, item: (index) => index }, () => {});
+      }
+    }
+    const { queue } = await booted([List]);
+    queue.start();
+
+    const first = await queue.workflows.start(List, []);
+    await until(async () => (await queue.workflows.find(first))?.status === "completed");
+    expect(warn).not.toHaveBeenCalled();
+
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const ids = [await queue.workflows.start(List, []), await queue.workflows.start(List, [])];
+      for (const id of ids) {
+        await until(async () => (await queue.workflows.find(id))?.status === "completed");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      await queue.drain(1_000);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("memory driver");
   });
 });

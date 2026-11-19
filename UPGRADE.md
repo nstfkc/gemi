@@ -1,3 +1,20 @@
+# 0.218.0
+
+## `step.each`: long lists in a workflow, item by item (#1309)
+
+**New API (minor version).** See [Workflows: `step.each`](docs/workflows.md#stepeachkey-options-fn-long-lists-item-by-item).
+
+- `step.each(key, { count, item(index), key?, concurrency?, attempts?, backoff?, timeout?, tickBudget?, progress? }, fn)` works through `count` items: `item(index)` produces each input when its turn comes (the list is never held in memory), and `fn(input, ctx)` handles it. It returns an `EachSummary` (`total`, `done`, `succeeded`, `skipped`, `failed`, the first 100 `problems`, `moreProblems`).
+- The step keeps a cursor plus a row per item that is in flight, waiting for a retry, failed or skipped; an item that succeeded leaves no row. Items retry on their own without holding up the list, an item out of attempts is recorded as `failed` without failing the step, and `ctx.skip(reason, data?)` records a skip. A tick works for at most `tickBudget` (30 s) and the next tick goes on from the cursor; after a crash or deploy only the items that were in flight run again, as their next attempt. `ctx.idempotencyKey` is `<workflow id>:<step key>:<item key>`.
+- `Workflow.find(id)`: a `step.each` step has `status: "iterating"` while it runs, plus `progress` and `items: { total, done, succeeded, skipped, failed }`; the workflow's `progress` is the step's share done (`progress: false` turns that off). `Workflow.items(id, key, { status?, after?, limit? })` pages through the failed and skipped items.
+- New types: `StepEachOptions`, `ItemContext`, `EachSummary`, `EachProgress`, `EachProblem`, `ItemRecord`, `ItemRunStatus`. `StepRunStatus` gains `"iterating"`.
+- On the memory queue driver `step.each` works, and warns once in production that nothing survives a restart.
+
+What to check:
+
+- **Database queue driver, only if you use `step.each`:** add the `GemiWorkflowItem` model from [the workflow tables](docs/workflows.md#the-workflow-tables) and migrate (or call `driver.createTable()`). Until it exists, `step.each` fails with an error that names the table; nothing else needs it, and `prune` skips it. A driver on another jobs table uses `<table>_workflow_items`, or the new `workflowItemTable` option.
+- A custom `WorkflowStore` keeps working; it supports `step.each` once it implements `listItems` and the `items` parts of `update` (the snapshot's `items`, the change's `items`).
+
 # 0.217.0
 
 ## Short-lived attachments, and deleting provider files (#1307, #1165)

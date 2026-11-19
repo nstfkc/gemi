@@ -45,7 +45,8 @@ export type WorkflowRunStatus =
 
 /**
  * Where one step stands. `signalled` is a signal that arrived before its
- * `step.waitFor`, kept until the workflow gets there.
+ * `step.waitFor`, kept until the workflow gets there. `iterating` is a
+ * `step.each` that has items left.
  */
 export type StepRunStatus =
   | "running"
@@ -56,7 +57,8 @@ export type StepRunStatus =
   | "waiting"
   | "signalled"
   | "timed_out"
-  | "batching";
+  | "batching"
+  | "iterating";
 
 /** A workflow's row. Times are epoch milliseconds. */
 export type WorkflowRecord = {
@@ -104,6 +106,53 @@ export type StepRecord = {
   updatedAt: number;
 };
 
+/**
+ * Where one item of a `step.each` stands. Only items that are in flight or
+ * had a problem have a row: one that succeeded is deleted, so a long list
+ * keeps rows for its problems and its window, not for every item.
+ *
+ * - `running`: an attempt was started. Found at the start of a tick, it is an
+ *   attempt whose process died, and the item runs again.
+ * - `retrying`: an attempt failed; the next one is due at `wakeAt`.
+ * - `failed`: out of attempts. `skipped`: the step function called `ctx.skip`.
+ */
+export type ItemRunStatus = "running" | "retrying" | "failed" | "skipped";
+
+/** An item's row, unique per workflow, step key and index. */
+export type ItemRecord = {
+  workflowId: string;
+  /** The key of the `step.each` it belongs to. */
+  step: string;
+  /** Its index in the list, from 0. */
+  index: number;
+  /** The item key `key(input)` gave, once known; `null` before. */
+  key: string | null;
+  status: ItemRunStatus;
+  /** Attempts started, counting from 1. */
+  attempt: number;
+  /** The error's message, or the reason given to `ctx.skip`. */
+  error: string | null;
+  /** The `data` given to `ctx.skip`, as JSON. */
+  output: string | null;
+  /** When the next attempt of a `retrying` item is due. */
+  wakeAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** The item rows a change writes, all of one `step.each`. */
+export type ItemChange = {
+  step: string;
+  /** Rows that do not exist yet. */
+  insert?: ItemRecord[];
+  /** Rows that exist, replaced whole. */
+  update?: ItemRecord[];
+  /** Indexes whose rows are deleted. */
+  delete?: number[];
+};
+
 /** A workflow and its steps, in the order the steps were first recorded. */
 export type WorkflowState = { workflow: WorkflowRecord; steps: StepRecord[] };
 
@@ -120,6 +169,11 @@ export type WorkflowSnapshot = {
   step: StepRecord | null;
   /** Every step, when `allSteps` was asked for; otherwise empty. */
   steps: StepRecord[];
+  /**
+   * The `running` and `retrying` item rows of the step `items` names, by
+   * index; otherwise empty.
+   */
+  items: ItemRecord[];
   /** This process's clock, for the wake-up times the runtime computes. */
   now: number;
 };
@@ -136,6 +190,8 @@ export type WorkflowChange<T> = {
   >;
   /** The step's new row: inserted, or replacing the one under its key. */
   step?: StepRecord;
+  /** Item rows of a `step.each` to insert, replace or delete. */
+  items?: ItemChange;
   /** A batch to dispatch, as `QueueDriver.enqueueBatch` would. */
   batch?: EnqueueBatch;
   /** Batches to cancel, as `QueueDriver.cancelBatch` would. */
@@ -205,13 +261,25 @@ export interface WorkflowStore {
    */
   update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean },
+    options: { owner?: string; key?: string; allSteps?: boolean; items?: string },
     decide: (snapshot: WorkflowSnapshot) => WorkflowChange<T>,
   ): Promise<T | undefined>;
 
   /**
+   * The item rows of one `step.each` whose status is one of `statuses`, by
+   * index, from just after `after`, at most `limit`. A store that has it
+   * supports `step.each`: it also reads `items` in `update` and writes a
+   * change's `items`.
+   */
+  listItems?(
+    workflowId: string,
+    step: string,
+    options: { statuses: ItemRunStatus[]; after?: number; limit: number },
+  ): Promise<ItemRecord[]>;
+
+  /**
    * Deletes workflows that ended (completed, failed or cancelled) more than
-   * `olderThanMs` ago, with their steps, and resolves to how many.
+   * `olderThanMs` ago, with their steps and items, and resolves to how many.
    */
   prune?(olderThanMs: number): Promise<number>;
 }
