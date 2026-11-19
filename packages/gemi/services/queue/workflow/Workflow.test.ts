@@ -10,6 +10,7 @@ import { QueueManager } from "../QueueManager";
 import { QueueServiceProvider } from "../QueueServiceProvider";
 import { toMilliseconds } from "./duration";
 import { resetEachWarnings, type Step, StepFailedError } from "./Step";
+import { ItemSource } from "./ItemSource";
 import { Workflow, type WorkflowClass } from "./Workflow";
 import { workflowContract } from "./workflowContract";
 import { WORKFLOW_TICK_JOB } from "./WorkflowStore";
@@ -452,5 +453,22 @@ describe("Workflow.stream", () => {
       await queue.drain(1_000);
       await queue.workflows.close();
     }
+  });
+});
+
+describe("ItemSource", () => {
+  test("write, read, readRange, delete and prune through the facade", async () => {
+    const { inApp } = await booted([]);
+    async function* rows() {
+      for (let i = 0; i < 3; i++) yield { sku: `s${i}` };
+    }
+    expect(await inApp(() => ItemSource.write("csv:1", rows()))).toEqual({ id: "csv:1", count: 3 });
+    expect(await inApp(() => ItemSource.read("csv:1", 1))).toEqual({ sku: "s1" });
+    expect(await inApp(() => ItemSource.read("csv:1", 9))).toBeUndefined();
+    expect(await inApp(() => ItemSource.readRange("csv:1", 1, 3))).toEqual([{ sku: "s1" }, { sku: "s2" }]);
+    expect(await inApp(() => ItemSource.delete("csv:1"))).toBe(3);
+    await inApp(() => ItemSource.write("csv:2", [1, 2]));
+    await sleep(5);
+    expect(await inApp(() => ItemSource.prune(0))).toBe(2);
   });
 });

@@ -68,14 +68,17 @@ export class DatabaseWorkflowStore implements WorkflowStore {
   readonly stepTable: string;
   /** The items of `step.each`; only touched by workflows that use it. */
   readonly itemTable: string;
+  /** Item sources (`ItemSource`, `step.source`); only touched by what uses them. */
+  readonly sourceTable: string;
 
   constructor(
     private readonly db: DatabaseQueueInternals,
-    options: { table: string; stepTable: string; itemTable: string },
+    options: { table: string; stepTable: string; itemTable: string; sourceTable: string },
   ) {
     this.table = options.table;
     this.stepTable = options.stepTable;
     this.itemTable = options.itemTable;
+    this.sourceTable = options.sourceTable;
   }
 
   joinsTransaction(): boolean {
@@ -269,7 +272,83 @@ export class DatabaseWorkflowStore implements WorkflowStore {
     } catch (error) {
       if (!isMissingSchema(error)) throw error;
     }
+    try {
+      const q = this.db.sql;
+      await q`
+        DELETE FROM ${this.sources(q)}
+        WHERE workflow_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM ${this.workflows(q)} w WHERE w.id = ${this.sources(q)}.workflow_id
+        )
+      `;
+    } catch (error) {
+      if (!isMissingSchema(error)) throw error;
+    }
     return pruned;
+  }
+
+  async writeSource(
+    sourceId: string,
+    workflowId: string | null,
+    rows: Array<{ index: number; payload: string }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.db.configure();
+    const q = this.db.sql;
+    for (let i = 0; i < rows.length; i += 500) {
+      const now = this.db.now(q);
+      const values = rows
+        .slice(i, i + 500)
+        .map((row) => q`(${sourceId}, ${row.index}, ${workflowId}, ${row.payload}, ${now})`);
+      await explainMissingSources(
+        q`
+          INSERT INTO ${this.sources(q)} (source_id, idx, workflow_id, payload, created_at)
+          VALUES ${values.reduce((a, b) => q`${a}, ${b}`)}
+        `,
+        this.sourceTable,
+      );
+    }
+  }
+
+  async readSource(
+    sourceId: string,
+    from: number,
+    to: number,
+  ): Promise<Array<{ index: number; payload: string }>> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const rows = (await explainMissingSources(
+      q`
+        SELECT idx, payload FROM ${this.sources(q)}
+        WHERE source_id = ${sourceId} AND idx >= ${from} AND idx < ${to}
+        ORDER BY idx
+      `,
+      this.sourceTable,
+    )) as Row[];
+    return rows.map((row) => ({ index: Number(row.idx), payload: String(row.payload) }));
+  }
+
+  async deleteSource(sourceId: string): Promise<number> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const result = await explainMissingSources(
+      q`DELETE FROM ${this.sources(q)} WHERE source_id = ${sourceId}`,
+      this.sourceTable,
+    );
+    return affected(result);
+  }
+
+  async pruneSources(olderThanMs: number): Promise<number> {
+    await this.db.configure();
+    const q = this.db.sql;
+    const result = await explainMissingSources(
+      q`
+        DELETE FROM ${this.sources(q)}
+        WHERE workflow_id IS NULL
+          AND created_at <= ${this.db.now(q)} - ${this.db.ms(q, olderThanMs)}
+      `,
+      this.sourceTable,
+    );
+    return affected(result);
   }
 
   private endedClause(q: SQL) {
@@ -434,6 +513,10 @@ export class DatabaseWorkflowStore implements WorkflowStore {
     return q.unsafe(this.db.quoted(this.itemTable));
   }
 
+  private sources(q: SQL) {
+    return q.unsafe(this.db.quoted(this.sourceTable));
+  }
+
   /** `key` is a reserved word in MySQL. */
   private keyColumn(q: SQL) {
     return q.unsafe(this.db.quoted("key"));
@@ -542,6 +625,22 @@ async function explainMissingItems<T>(statement: PromiseLike<T>, table: string):
     throw new Error(
       `step.each needs the "${table}" table, and the database says it is missing. ` +
         `Add the GemiWorkflowItem model from the docs ` +
+        `(docs/workflows.md#the-workflow-tables) and migrate, or call the queue ` +
+        `driver's createTable().`,
+      { cause: error },
+    );
+  }
+}
+
+/** As `explainMissingSchema`, for the table only item sources need. */
+async function explainMissingSources<T>(statement: PromiseLike<T>, table: string): Promise<T> {
+  try {
+    return await statement;
+  } catch (error) {
+    if (!isMissingSchema(error)) throw error;
+    throw new Error(
+      `Item sources need the "${table}" table, and the database says it is missing. ` +
+        `Add the GemiWorkflowSource model from the docs ` +
         `(docs/workflows.md#the-workflow-tables) and migrate, or call the queue ` +
         `driver's createTable().`,
       { cause: error },
@@ -694,5 +793,45 @@ export function createWorkflowItemTableStatements(dialect: Dialect, table: strin
         : `CONSTRAINT "${table}_pkey" PRIMARY KEY ("workflow_id","step_key","idx")`
     }
 )`,
+  ];
+}
+
+/**
+ * The item sources table, as Prisma generates it for the
+ * `GemiWorkflowSource` model in the docs (checked against `prisma migrate
+ * diff` for all three providers), with `IF NOT EXISTS` added. MySQL cannot
+ * say that of an index, so its index is declared inside the table.
+ */
+export function createWorkflowSourceTableStatements(dialect: Dialect, table: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `CREATE TABLE IF NOT EXISTS \`${table}\` (
+    \`source_id\` VARCHAR(191) NOT NULL,
+    \`idx\` INTEGER NOT NULL,
+    \`workflow_id\` VARCHAR(191) NULL,
+    \`payload\` LONGTEXT NOT NULL,
+    \`created_at\` BIGINT NOT NULL,
+
+    INDEX \`${table}_workflow_id_idx\`(\`workflow_id\`),
+    PRIMARY KEY (\`source_id\`, \`idx\`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    ];
+  }
+  const sqlite = dialect === "sqlite";
+  return [
+    `CREATE TABLE IF NOT EXISTS "${table}" (
+    "source_id" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "workflow_id" TEXT,
+    "payload" TEXT NOT NULL,
+    "created_at" BIGINT NOT NULL,
+
+    ${
+      sqlite
+        ? `PRIMARY KEY ("source_id", "idx")`
+        : `CONSTRAINT "${table}_pkey" PRIMARY KEY ("source_id","idx")`
+    }
+)`,
+    `CREATE INDEX IF NOT EXISTS "${table}_workflow_id_idx" ON "${table}"("workflow_id")`,
   ];
 }

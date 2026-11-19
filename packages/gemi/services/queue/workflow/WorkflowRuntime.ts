@@ -227,6 +227,12 @@ export class WorkflowRuntime {
     if (store.joinsTransaction) wrapped.joinsTransaction = () => store.joinsTransaction!();
     if (store.listItems) wrapped.listItems = (...args) => store.listItems!(...args);
     if (store.prune) wrapped.prune = (olderThanMs) => store.prune!(olderThanMs);
+    if (store.writeSource) {
+      wrapped.writeSource = (...args) => store.writeSource!(...args);
+      wrapped.readSource = (...args) => store.readSource!(...args);
+      wrapped.deleteSource = (...args) => store.deleteSource!(...args);
+      wrapped.pruneSources = (...args) => store.pruneSources!(...args);
+    }
     return wrapped;
   }
 

@@ -6,6 +6,7 @@ import type { QueueDriver } from "../QueueDriver";
 import { QueueManager } from "../QueueManager";
 import { type EachSummary, type Step, StepFailedError, WaitTimeoutError } from "./Step";
 import { Workflow, type WorkflowClass } from "./Workflow";
+import { ITEM_SOURCE_ITEM_LIMIT, writeSource } from "./ItemSource";
 import type { WorkflowUpdate } from "./wire";
 import { WORKFLOW_TICK_JOB, WorkflowLeaseLostError } from "./WorkflowStore";
 
@@ -987,6 +988,117 @@ export function workflowContract(
         expect(after.map((update) => update.status)).toEqual(["completed"]);
         for await (const update of queue.workflows.subscribe("no-such-workflow")) after.push(update);
         expect(after).toHaveLength(1);
+      }),
+    );
+  });
+
+
+  describe(`${name} — item sources`, () => {
+    test(
+      "step.source writes a list once, and step.each works through it a window at a time",
+      withQueue(async ({ worker }) => {
+        let generated = 0;
+        let passes = 0;
+        const handled = new Map<number, string>();
+        let reads = 0;
+        class FromSource extends Workflow {
+          static name = "FromSource";
+          async run(step: Step, total: number) {
+            passes++;
+            const rows = await step.source("rows", async function* () {
+              for (let i = 0; i < total; i++) {
+                generated++;
+                yield { line: i + 1, sku: `sku-${i}` };
+              }
+            });
+            await step.sleep("between", 20);
+            return step.each(
+              "import",
+              { source: rows, concurrency: 3, attempts: 2, key: (row) => row.sku },
+              async (row, ctx) => {
+                if (row.line === 701 && ctx.attempt === 1) throw new Error("once");
+                handled.set(ctx.index, `${row.sku}:${row.line}`);
+              },
+            );
+          }
+        }
+        const queue = worker([FromSource]);
+        const store = queue.workflows.store;
+        const readSource = store.readSource!.bind(store);
+        store.readSource = (...args) => {
+          reads++;
+          return readSource(...args);
+        };
+        const id = await queue.workflows.start(FromSource, [1300]);
+        await until(async () => (await status(queue, id)) === "completed", 60_000);
+
+        expect(passes).toBeGreaterThanOrEqual(2);
+        expect(generated).toBe(1300);
+        expect(handled.size).toBe(1300);
+        expect(handled.get(700)).toBe("sku-700:701");
+        expect(handled.get(1299)).toBe("sku-1299:1300");
+        // 1,300 items in windows of 64, plus the one retry read again alone.
+        expect(reads).toBeLessThanOrEqual(Math.ceil(1300 / 64) + 2);
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 1300, succeeded: 1300 });
+        expect(await store.readSource!(`${id}:rows`, 0, 2)).toEqual([
+          { index: 0, payload: JSON.stringify({ line: 1, sku: "sku-0" }) },
+          { index: 1, payload: JSON.stringify({ line: 2, sku: "sku-1" }) },
+        ]);
+
+        // Pruned with its workflow.
+        await store.prune!(0);
+        expect(await store.readSource!(`${id}:rows`, 0, 10)).toEqual([]);
+      }),
+      60_000,
+    );
+
+    test(
+      "a source written on its own replaces, reads, deletes and prunes",
+      withQueue(async ({ driver }) => {
+        const store = driver().workflowStore!();
+        const first = await writeSource(store, "upload:1", ["a", "b", "c"], null);
+        expect(first).toEqual({ id: "upload:1", count: 3 });
+        // Written again: replaced, not appended.
+        const again = await writeSource(store, "upload:1", (function* () {
+          yield { n: 1 };
+          yield { n: 2 };
+        })(), null);
+        expect(again.count).toBe(2);
+        expect((await store.readSource!("upload:1", 0, 10)).map((row) => JSON.parse(row.payload))).toEqual([
+          { n: 1 },
+          { n: 2 },
+        ]);
+        await expect(
+          writeSource(store, "upload:2", ["x".repeat(ITEM_SOURCE_ITEM_LIMIT + 1)], null),
+        ).rejects.toThrow(/over the/);
+        await expect(writeSource(store, "", [], null)).rejects.toThrow(/1 to 191/);
+
+        await writeSource(store, "upload:3", [1], null);
+        expect(await store.deleteSource!("upload:3")).toBe(1);
+        expect(await store.readSource!("upload:3", 0, 1)).toEqual([]);
+
+        // Prune takes sources of no workflow, older than asked.
+        expect(await store.pruneSources!(60_000)).toBe(0);
+        await sleep(20);
+        expect(await store.pruneSources!(0)).toBeGreaterThanOrEqual(2);
+        expect(await store.readSource!("upload:1", 0, 10)).toEqual([]);
+      }),
+    );
+
+    test(
+      "step.each over an empty source completes at once",
+      withQueue(async ({ worker }) => {
+        class EmptySource extends Workflow {
+          static name = "EmptySource";
+          async run(step: Step) {
+            const rows = await step.source("rows", () => [] as string[]);
+            return step.each("each", { source: rows }, () => {});
+          }
+        }
+        const queue = worker([EmptySource]);
+        const id = await queue.workflows.start(EmptySource, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 0, done: 0 });
       }),
     );
   });
